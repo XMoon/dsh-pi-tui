@@ -15,7 +15,7 @@
  */
 
 import { isAmbientContext, contextFormOf } from '../../domain/transcript/context-semantics.ts'
-import type { TranscriptMessage } from '../../transcript.ts'
+import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 import { isSurfacedContext } from '../../domain/transcript/semantics.ts'
 
 /** The presentation role one surfaced Context row takes. */

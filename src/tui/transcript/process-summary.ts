@@ -17,7 +17,8 @@
  * @module @xmoon76/dsh-pi-tui/tui/transcript/process-summary
  */
 
-import { isPostTurnReplayEvidence, type TranscriptMessage, type TranscriptToolMessage } from '../../transcript.ts'
+import { isPostTurnReplayEvidence } from '../../domain/transcript/semantics.ts'
+import type { TranscriptMessage, TranscriptToolMessage } from '../../domain/transcript/types.ts'
 import { isSurfacedInteractionToolName } from '../../domain/transcript/semantics.ts'
 
 /**

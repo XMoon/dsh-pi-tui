@@ -223,6 +223,14 @@ const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
   'theme.ts',
   'icons.ts',
   'renderer-registry.ts',
+  // TS7: the core consumes the canonical `domain/transcript/**` owners
+  // directly. The semantic root facade and the three retired semantic roots
+  // must never be re-entered (a forwarding shim at a retired path would be
+  // silently legal otherwise).
+  'transcript.ts',
+  'transcript-semantics.ts',
+  'context-presentation.ts',
+  'transcript-window.ts',
 ])
 
 /**

@@ -22,7 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/transcript/reveal
  */
 
-import type { TranscriptMessage } from '../../transcript.ts'
+import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 import type { ContextCluster } from './context-structure.ts'
 import type { TranscriptContainerOwner, TranscriptContainerPath } from './container-owner.ts'
 import type { TranscriptWorkSpan } from './structure.ts'

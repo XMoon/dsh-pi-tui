@@ -21,9 +21,8 @@ import {
   assistantCommittedBeforeSteer,
   assistantLatestStepOf,
   assistantStepOf,
-  type TurnActivity,
-  type TranscriptMessage,
-} from '../../transcript.ts'
+} from '../../domain/transcript/folder.ts'
+import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import { isNoticeContext } from './context-structure.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './structure.ts'

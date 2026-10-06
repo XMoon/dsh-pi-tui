@@ -1151,6 +1151,12 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     // NON-core directory is still mechanics.
     ['../../tui/transcript-legacy/x.ts', 'tui/transcript-legacy/x.ts'],
     ['../../renderer-registry.ts', 'renderer-registry.ts'],
+    // TS7: the core reads the canonical `domain/transcript/**` owners directly;
+    // the stable facade and the three retired semantic roots are never inputs.
+    ['../../transcript.ts', 'transcript.ts'],
+    ['../../transcript-semantics.ts', 'transcript-semantics.ts'],
+    ['../../context-presentation.ts', 'context-presentation.ts'],
+    ['../../transcript-window.ts', 'transcript-window.ts'],
   ]
   for (const [specifier, target] of forbidden) {
     const valueImport = findViolations([
@@ -1199,13 +1205,12 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     [],
     'a bare external tui/* dynamic specifier must not be read as src/tui/** by app-imports-tui',
   )
-  // Positive controls: the TS6 transitional semantic roots, the pure
-  // application-facing policy and every intra-core module stay open.
+  // Positive controls: the canonical domain owner the core migrated to, the
+  // pure application-facing policy and every intra-core module stay open.
   const allowed = [
-    // Transitional semantic roots the core consumes until TS7 re-homes them.
-    ['tui/transcript/x.ts', '../../transcript.ts', 'transcript.ts', 'export const x = 1\n'],
-    ['tui/transcript/x.ts', '../../transcript-semantics.ts', 'transcript-semantics.ts', 'export const x = 1\n'],
-    ['tui/transcript/x.ts', '../../context-presentation.ts', 'context-presentation.ts', 'export const x = 1\n'],
+    // TS7: the canonical semantic owner is the core's only transcript input.
+    ['tui/transcript/x.ts', '../../domain/transcript/types.ts', 'domain/transcript/types.ts', 'export const x = 1\n'],
+    ['tui/transcript/x.ts', '../../domain/transcript/semantics.ts', 'domain/transcript/semantics.ts', 'export const x = 1\n'],
     // Shared transitional policy with a real pure consumer.
     ['tui/transcript/x.ts', '../../display-preset.ts', 'display-preset.ts', 'export const x = 1\n'],
     // Sibling core modules are the point of the directory.
