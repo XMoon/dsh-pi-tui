@@ -1,8 +1,8 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { PRODUCTION_SOURCE_EXTENSIONS } from './owner-modules.ts'
+import { productionFilesUnder } from './owner-modules.ts'
 
 /**
  * The application composition surface (A5, extended by TS2).
@@ -36,18 +36,22 @@ const COMPOSITION_ROOTS = ['src/index.ts', 'src/app/bootstrap.ts'] as const
 const BOOTSTRAP_ZONE = 'src/app/bootstrap'
 
 /**
- * The composition-surface files, in composition order: the package entry
- * first, the facade second, then every bootstrap helper sorted
- * deterministically. The helper list is read from disk, so a newly extracted
- * helper joins the surface automatically — it cannot escape the ownership
- * locks by not being listed.
+ * The composition-surface files under one repository root, in composition order:
+ * the package entry first, the facade second, then every bootstrap helper sorted
+ * deterministically.
+ *
+ * The helper list is read from disk by the SHARED recursive enumerator, so a
+ * newly extracted helper — at ANY depth under `src/app/bootstrap/` — joins the
+ * surface automatically and cannot escape the ownership locks by not being
+ * listed or by living in a nested directory (TS2 §7/§18).
  */
+export function compositionFilesUnder(root: string): string[] {
+  return [...COMPOSITION_ROOTS, ...productionFilesUnder(root, BOOTSTRAP_ZONE)]
+}
+
+/** {@link compositionFilesUnder} bound to this repository root. */
 export function compositionFiles(): string[] {
-  const helpers = readdirSync(join(ROOT, BOOTSTRAP_ZONE), { withFileTypes: true })
-    .filter(entry => entry.isFile() && PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension)))
-    .map(entry => `${BOOTSTRAP_ZONE}/${entry.name}`)
-    .sort()
-  return [...COMPOSITION_ROOTS, ...helpers]
+  return compositionFilesUnder(ROOT)
 }
 
 /** Read one composition-surface file. Throws when it is not part of the surface. */
@@ -57,22 +61,32 @@ export function compositionFile(rel: string): string {
 }
 
 /**
- * The composition-surface contents: `[rel, source]` for every file, in
- * composition order. Every file is REQUIRED (A5a review P2): an ownership lock
- * must fail — not silently shrink its scope — if the composition root
- * disappears or is renamed.
+ * The composition-surface contents under one repository root: `[rel, source]`
+ * for every file, in composition order. Every file is REQUIRED (A5a review P2):
+ * an ownership lock must fail — not silently shrink its scope — if the
+ * composition root disappears or is renamed.
  */
-export function compositionSources(): Array<{ rel: string; source: string }> {
-  return compositionFiles().map((rel) => {
-    const path = join(ROOT, rel)
+export function compositionSourcesUnder(root: string): Array<{ rel: string; source: string }> {
+  return compositionFilesUnder(root).map((rel) => {
+    const path = join(root, rel)
     if (!existsSync(path)) throw new Error(`the composition surface requires ${rel}`)
     return { rel, source: readFileSync(path, 'utf8') }
   })
 }
 
+/** {@link compositionSourcesUnder} bound to this repository root. */
+export function compositionSources(): Array<{ rel: string; source: string }> {
+  return compositionSourcesUnder(ROOT)
+}
+
+/** One root's composition-surface contents joined with file banners, for order and count locks. */
+export function compositionSourceUnder(root: string): string {
+  return compositionSourcesUnder(root).map(({ rel, source }) => `// >>> ${rel}\n${source}`).join('\n')
+}
+
 /** The composition-surface contents joined with file banners, for order and count locks. */
 export function compositionSource(): string {
-  return compositionSources().map(({ rel, source }) => `// >>> ${rel}\n${source}`).join('\n')
+  return compositionSourceUnder(ROOT)
 }
 
 /** Total occurrences of one literal across the composition surface. */

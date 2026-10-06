@@ -98,7 +98,7 @@ import type { RemoteApplicationOverride, RemoteTransportLifetime } from '../app/
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
-import { installApplicationEventWiring } from './bootstrap/event-wiring.ts'
+import { installRuntimeEventWiring, installSessionEventWiring } from './bootstrap/event-wiring.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
@@ -2721,7 +2721,12 @@ export function applyRunnerWithRuntime(
     // delegation into the surface-owned routing methods. The Direct-only
     // durable/runtime channels and the capability-optional refresh
     // subscriptions keep their existing branch split.
-    installApplicationEventWiring({ ctx, direct: remoteSources === undefined, surface })
+    // FROZEN STARTUP ORDER: the registration is TWO phases because the baseline
+    // interleaved them with the Direct live-assistant-stream acquire — phase 1
+    // (`session/event`) here, phase 2 (the other five) AFTER the stream install
+    // and its abort binding. A throwing stream install must therefore leave
+    // exactly the listeners the baseline had installed.
+    installSessionEventWiring({ ctx, direct: remoteSources === undefined, surface })
     // Session v2 live assistant streams: the TRANSIENT plane
     // (`agent/assistant-stream` frames mapped through the neutral port).
     // Live model output never rides the durable log; the runner routes the
@@ -2748,6 +2753,11 @@ export function applyRunnerWithRuntime(
       assistantStreamBaselineFor = assistantStreamHandle.baselineFor
       lifecycleController.signal.addEventListener('abort', assistantStreamHandle, { once: true })
     }
+    // Phase 2 of the frozen startup order (see the phase-1 comment above): the
+    // remaining five application-level Host subscriptions are installed AFTER
+    // the Direct assistant-stream acquire and its abort binding, exactly where
+    // the baseline registered them.
+    installRuntimeEventWiring({ ctx, direct: remoteSources === undefined, surface })
     // The credential event wiring is the config port's (migration M1.9):
     // reference- and record-updated both change the same surface. The
     // subscription is DISPOSED on teardown — a remount/HMR must never

@@ -111,6 +111,27 @@ function spanOf(source: string, from: string, to: string): string {
   return source.slice(start, end)
 }
 
+/** The ONE `createTaskSource({...})` call site's argument object (TS2 §9). */
+function taskSourceInjection(source: string): string {
+  return spanOf(source, 'const taskSource = createTaskSource({', 'surface.attachTasks({')
+}
+
+/**
+ * Assert the Task fence's ownership-core injection at its EXACT site: the
+ * composition root must hand `createTaskSource` the ownership-core session id
+ * and generation as LAZY reads. A whole-composition-surface `includes` cannot
+ * stand in for this (seven other legitimate core reads in the facade satisfy
+ * it), which is why the mutation test below must fail for a wrong-source or
+ * constant injection.
+ */
+function assertTaskFenceInjection(source: string): void {
+  const call = taskSourceInjection(source)
+  assert.ok(call.includes('currentSessionId: () => ownership.currentSessionId(),'),
+    'the Task fence key must take its session id from the ownership core')
+  assert.ok(call.includes('generation: () => ownership.generation(),'),
+    'the Task fence key must take its generation from the ownership core')
+}
+
 test('currentness identity comes from the ownership core, never from the Direct attachment', () => {
   // fork navigation fence (bound runtime) + admission identity (runner)
   const forkFence = spanOf(sessionRuntimeSource, 'const isNavigationCurrent = ', 'const parkForkOwner = ')
@@ -130,10 +151,17 @@ test('currentness identity comes from the ownership core, never from the Direct 
 
   // Task Browser jobs fence: the branch composition moved to the bootstrap
   // composition zone (`src/app/bootstrap/task-source.ts`, TS2 §9), so the key
-  // lock reads the owner that now builds it — the composition root derives
-  // nothing itself and injects the ownership-core reads. The A5b-6 retention
-  // policy (the retained snapshot + the same-session fence) is Task-Center-owned
-  // and reads both at CALL time (locked in test/a5b-bootstrap-closure.test.ts).
+  // lock reads the owner that now builds it AND the exact injection site that
+  // feeds it. The A5b-6 retention policy (the retained snapshot + the
+  // same-session fence) is Task-Center-owned and reads both at CALL time
+  // (locked in test/a5b-bootstrap-closure.test.ts).
+  //
+  // The injection lock is scoped to the ONE `createTaskSource({...})` argument
+  // object on purpose: a whole-composition-surface `includes` is satisfied by
+  // ANY of the other legitimate core reads in the facade (there are seven), so a
+  // wrong-source (`agentNow()?.session.id`) or constant (`() => 0`) injection at
+  // THIS site would keep the locks green — the exact weakening this test guards
+  // against (mutation-verified below).
   const taskSourceSource = readFileSync(new URL('../src/app/bootstrap/task-source.ts', import.meta.url), 'utf8')
   const jobFence = spanOf(taskSourceSource, 'const taskReadKey = (): string | undefined => {', 'return { taskRead }')
   assert.ok(jobFence.includes('const sessionId = currentSessionId()'),
@@ -144,8 +172,9 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the SAME injected ownership read is forwarded to the owner-side jobs read')
   assert.ok(!jobFence.includes('agentNow('),
     'the Task read composition must not resolve the session id from the Direct attachment')
-  assert.ok(indexSource.includes('currentSessionId: () => ownership.currentSessionId()'),
-    'the composition root injects the ownership-core session id')
+  assertTaskFenceInjection(indexSource)
+  assert.ok(indexSource.includes('taskRead: taskSource.taskRead,'),
+    'the surface must receive the branch-composed Task read itself, never a second composition')
   assert.ok(!indexSource.includes('readJobs'),
     'the root must not provide the jobs-read retention policy (moved to the surface owner)')
 
@@ -201,6 +230,38 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the switch no-op must not compare against a Direct-attachment snapshot')
   assert.ok(indexSource.includes('ownership.currentSessionId()'),
     'the runner resolves the current session id through the core')
+})
+
+test('the Task fence injection lock rejects a wrong-source or constant injection (mutation)', () => {
+  // The lock above is only worth its invariant if a WRONG injection at the exact
+  // `createTaskSource({...})` site fails it. Both mutations change only that
+  // argument object: the session id falls back to the Direct attachment (which
+  // the Remote branch does not have) and the generation becomes a constant
+  // (which voids the same-session ownership-rollover key). Everything else —
+  // including the seven other legitimate `ownership.currentSessionId()` reads
+  // and the whole-key builder in `task-source.ts` — stays byte-identical, so an
+  // unscoped lock would keep passing.
+  assertTaskFenceInjection(indexSource)
+  const call = taskSourceInjection(indexSource)
+
+  const wrongSource = indexSource.replace(
+    call,
+    call.replace(
+      'currentSessionId: () => ownership.currentSessionId(),',
+      'currentSessionId: () => agentNow()?.session.id,',
+    ),
+  )
+  assert.notEqual(wrongSource, indexSource, 'the mutation fixture must actually rewrite the injection site')
+  assert.throws(() => assertTaskFenceInjection(wrongSource),
+    'a Direct-attachment session id injection must fail the Task fence injection lock')
+
+  const constantGeneration = indexSource.replace(
+    call,
+    call.replace('generation: () => ownership.generation(),', 'generation: () => 0,'),
+  )
+  assert.notEqual(constantGeneration, indexSource, 'the mutation fixture must actually rewrite the injection site')
+  assert.throws(() => assertTaskFenceInjection(constantGeneration),
+    'a constant generation injection must fail the Task fence injection lock')
 })
 
 test('no sessionId→Agent lookup reconstructs currentness in the runner', () => {

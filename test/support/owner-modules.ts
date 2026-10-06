@@ -69,16 +69,41 @@ export interface OwnerModule {
 const BOOTSTRAP_ZONE = 'src/app/bootstrap'
 
 /**
+ * Every production source file under `root`/`dir`, RECURSIVELY, as
+ * `root`-relative POSIX paths, deterministically sorted; `node_modules`/`dist`
+ * are skipped.
+ *
+ * The zone scans must walk the WHOLE subtree: a one-level `readdir` would let a
+ * NESTED `src/app/bootstrap/**` helper escape the composition/owner surface
+ * locks while the architecture gate (which treats the directory as the zone)
+ * still accepts it (TS2 §7/§18/§20).
+ */
+export function productionFilesUnder(root: string, dir: string): string[] {
+  const out: string[] = []
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === 'dist') continue
+        walk(path)
+      } else if (PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
+        out.push(relative(root, path).split('\\').join('/'))
+      }
+    }
+  }
+  walk(join(root, dir))
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+/**
  * Every `src/app/bootstrap/**` composition helper, sorted deterministically. The
- * zone is directory-defined (plan §7), so a new helper joins the aggregate owner
- * surface automatically instead of escaping its bag/single-owner locks.
+ * zone is directory-defined (plan §7), so a new helper — at ANY depth — joins the
+ * aggregate owner surface automatically instead of escaping its bag/single-owner
+ * locks.
  */
 function bootstrapHelperModules(): OwnerModule[] {
-  return readdirSync(join(ROOT, BOOTSTRAP_ZONE), { withFileTypes: true })
-    .filter(entry => entry.isFile() && PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension)))
-    .map(entry => entry.name)
-    .sort()
-    .map(name => ({ rel: `${BOOTSTRAP_ZONE}/${name}`, role: 'composition' as const }))
+  return productionFilesUnder(ROOT, BOOTSTRAP_ZONE)
+    .map(rel => ({ rel, role: 'composition' as const }))
 }
 
 /** The explicit A5b owner-module set, in composition order. */
@@ -208,20 +233,7 @@ export function unwrapExpression(
  * (TS1/TS2: the production gate already scanned `.tsx`).
  */
 export function productionSourcesUnder(root: string): Array<{ rel: string; source: string }> {
-  const out: Array<{ rel: string; source: string }> = []
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === 'dist') continue
-        walk(path)
-      } else if (PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
-        out.push({ rel: relative(root, path).split('\\').join('/'), source: readFileSync(path, 'utf8') })
-      }
-    }
-  }
-  walk(join(root, 'src'))
-  return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+  return productionFilesUnder(root, 'src').map(rel => ({ rel, source: readFileSync(join(root, rel), 'utf8') }))
 }
 
 /** {@link productionSourcesUnder} bound to this repository root. */

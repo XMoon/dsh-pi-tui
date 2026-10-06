@@ -20,6 +20,8 @@ import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
+import { PRODUCTION_SOURCE_EXTENSIONS, productionScriptKind } from './support/owner-modules.ts'
+
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
 /** The runner composition source (A5-2 moved the runner body from the
@@ -54,14 +56,17 @@ function lifecycleRootBlock(sourceFile: ts.SourceFile): ts.Block {
   return root.body as ts.Block
 }
 
-/** Recursively list every `.ts` file under a directory. */
+/** Recursively list every production source file under a directory. The
+ * extension set is the SAME four the architecture gate and the whole-tree
+ * owner scans use (`.ts`/`.tsx`/`.mts`/`.cts`), so a `.tsx` production module
+ * cannot escape these AST audits (TS2 §19). */
 function listSourceFiles(dir: string): string[] {
   const files: string[] = []
   for (const entry of readdirSync(dir)) {
     const path = join(dir, entry)
     if (statSync(path).isDirectory()) {
       files.push(...listSourceFiles(path))
-    } else if (entry.endsWith('.ts')) {
+    } else if (PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.endsWith(extension))) {
       files.push(path)
     }
   }
@@ -194,7 +199,7 @@ test('no keybinding settings watch callback crosses the config port (migration b
   for (const path of listSourceFiles(srcDir)) {
     const file = relative(srcDir, path)
     const source = readFileSync(path, 'utf8')
-    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, productionScriptKind(file))
     // Simple alias bindings of the settings object: name → declaration.
     // Parenthesized initializers (`const s = (settings)`) are unwrapped.
     // Round 33: alias collection is a FIXED POINT — a chain

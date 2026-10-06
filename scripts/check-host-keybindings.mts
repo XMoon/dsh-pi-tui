@@ -23,38 +23,40 @@
  * @module @xmoon76/dsh-pi-tui/check-host-keybindings
  */
 
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { listSourceFilesUnder } from './application-architecture-gate.mjs'
 
 /** The scanned host business files. */
 const SCANNED_FILES = ['src/tui-app.ts']
 
 /**
  * The command-layer user-facing string files: the stable facade plus EVERY
- * `src/tui/commands/**` domain module. The directory scan is deterministic
- * (sorted) so a future command module is covered automatically instead of
- * silently escaping the chord-label gate (TS1 §22).
+ * `src/tui/commands/**` domain module, recursively, over the same four
+ * production extensions (TS1 §22 zone = the whole subtree). The shared
+ * enumeration is deterministic (sorted) so a future command module is covered
+ * automatically instead of silently escaping the chord-label gate.
  */
 const COMMAND_STRING_FILES = [
   'src/commands.ts',
-  ...readdirSync(join(process.cwd(), 'src/tui/commands'))
-    .filter(name => name.endsWith('.ts'))
-    .sort()
-    .map(name => `src/tui/commands/${name}`),
+  ...listSourceFilesUnder(join(process.cwd(), 'src/tui/commands')).map(rel => `src/tui/commands/${rel}`),
 ]
 
 /**
- * The application composition zone's user-facing strings: the facade plus EVERY
- * `src/app/bootstrap/**` helper (TS2 §21). The directory scan is deterministic
- * (sorted) so a user-facing string that moves into a new composition helper
- * stays covered instead of silently escaping the chord-label gate.
+ * The application composition zone's user-facing strings (TS2 §21): the facade
+ * plus EVERY source file RECURSIVELY under `src/app/bootstrap/` — the whole
+ * `src/app/bootstrap/**` zone, over the same four production extensions the
+ * architecture gate scans. The shared recursive enumeration is deterministic
+ * (sorted), so a user-facing string (or a hard-coded chord) that lands in a
+ * NESTED composition helper stays covered instead of silently escaping the
+ * chord-label gate.
  */
+const BOOTSTRAP_ZONE = 'src/app/bootstrap'
+
 const BOOTSTRAP_STRING_FILES = [
-  'src/app/bootstrap.ts',
-  ...readdirSync(join(process.cwd(), 'src/app/bootstrap'))
-    .filter(name => name.endsWith('.ts'))
-    .sort()
-    .map(name => `src/app/bootstrap/${name}`),
+  `${BOOTSTRAP_ZONE}.ts`,
+  ...listSourceFilesUnder(join(process.cwd(), BOOTSTRAP_ZONE)).map(rel => `${BOOTSTRAP_ZONE}/${rel}`),
 ]
 
 /** The user-facing string files (hard-coded chord labels must not
