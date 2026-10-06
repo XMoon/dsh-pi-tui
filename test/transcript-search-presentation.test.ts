@@ -18,7 +18,7 @@ import {
   selectRenderedSearchScrollRange,
   type RenderedSearchSelector,
   type SearchSourceRegion,
-} from '../src/search-presentation.ts'
+} from '../src/tui/components/transcript/search-presentation.ts'
 import { color, darkColors, setTheme } from '../src/theme.ts'
 
 /** The exact-current style for one run: bold + explicit themed fg/bg (never the

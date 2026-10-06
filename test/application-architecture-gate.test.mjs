@@ -93,7 +93,9 @@ test('presentation/adjacent modules importing Direct wiring are rejected (enumer
     'transcript.ts',
     'present.ts',
     'icons.ts',
-    'search-presentation.ts',
+    // TS6 moved the rendered-search mechanics under the PiTui component tree;
+    // the rule is enumeration-free, so the sample follows the real owner.
+    'tui/components/transcript/search-presentation.ts',
     'file-completion/presentation.ts',
     'components/media/file-attachment.ts',
     'footer/status-line.ts',

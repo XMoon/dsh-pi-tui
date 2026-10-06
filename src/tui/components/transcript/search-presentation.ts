@@ -8,7 +8,7 @@
  *
  * This module is presentation-only: it never changes row counts or visible
  * width, and it never touches the message component's own render cache.
- * @module @xmoon76/dsh-pi-tui/search-presentation
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/search-presentation
  */
 
 import {
@@ -19,7 +19,7 @@ import {
   type AltScreenSearchSegment,
   type Component,
 } from '@xmoon76/pi-tui'
-import { color } from './theme.ts'
+import { color } from '../../../theme.ts'
 
 /** The weak highlight of a visible non-current occurrence — the native
  * fullscreen search default. */

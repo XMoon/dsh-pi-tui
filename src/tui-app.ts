@@ -213,7 +213,7 @@ import {
   type RenderedSearchScrollRange,
   type RenderedSearchSelector,
   type SearchSourceRegion,
-} from './search-presentation.ts'
+} from './tui/components/transcript/search-presentation.ts'
 import {
   workflowCountsText,
   workflowPhasePresentations,
