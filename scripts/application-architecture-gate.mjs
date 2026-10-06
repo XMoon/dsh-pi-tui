@@ -150,10 +150,21 @@ export const REMOTE_DYNAMIC_IMPORT_TARGET = 'app/remote/runtime.ts'
 export const ARCHITECTURE_ALLOWLIST = ['legacy-settings-migration.ts:runtime/direct/tui-settings-direct.ts']
 
 /**
+ * True when `srcRel` belongs to the ONE application composition zone (TS2):
+ * the facade (`src/app/bootstrap.ts`) and its cohesive wiring-only helper
+ * modules (`src/app/bootstrap/**`). The zone is defined by DIRECTORY, not by
+ * an allowlist of helper files, so a new extraction cannot escape the zone
+ * rules by picking a new file name.
+ */
+export function isBootstrapCompositionFile(srcRel) {
+  return srcRel === 'app/bootstrap.ts' || srcRel.startsWith('app/bootstrap/')
+}
+
+/**
  * True when `srcRel` may import Direct wiring: the composition root
- * (`src/index.ts`), the composition owner (`src/app/bootstrap.ts`), the
- * Direct application zone itself (`src/app/direct/**`), and the semantic
- * runtime (`src/runtime/**`).
+ * (`src/index.ts`), the composition zone (`src/app/bootstrap.ts` +
+ * `src/app/bootstrap/**`), the Direct application zone itself
+ * (`src/app/direct/**`), and the semantic runtime (`src/runtime/**`).
  *
  * Every other module — including the non-Direct application owners
  * (`app/session`, `app/submission`, `app/command`, `app/surface`) and the whole
@@ -165,7 +176,7 @@ export const ARCHITECTURE_ALLOWLIST = ['legacy-settings-migration.ts:runtime/dir
  */
 export function isDirectCompositionFile(srcRel) {
   return srcRel === 'index.ts'
-    || srcRel === 'app/bootstrap.ts'
+    || isBootstrapCompositionFile(srcRel)
     || srcRel.startsWith('app/direct/')
     || srcRel.startsWith('runtime/')
 }
@@ -204,10 +215,17 @@ export const ARCHITECTURE_RULES = [
     forbids: (resolved) => resolved.startsWith('app/direct/') || resolved.startsWith('runtime/direct/'),
   },
   {
+    // TS2: the forbidden target is the WHOLE composition zone, not one path.
+    // A helper module that owns wiring is still composition, so an application
+    // owner importing `app/bootstrap/lifecycle.ts` inverts the dependency
+    // exactly like importing the facade. Bootstrap helpers may import sibling
+    // helpers (they are inside the zone).
     id: 'owner-imports-bootstrap',
-    message: 'application owners must not import src/app/bootstrap.ts (index -> bootstrap -> owners)',
-    applies: (srcRel) => srcRel !== 'index.ts' && srcRel !== 'app/bootstrap.ts',
-    forbids: (resolved) => resolved === 'app/bootstrap.ts',
+    message:
+      'application owners must not import the src/app/bootstrap.ts facade or the src/app/bootstrap/** '
+      + 'composition-helper zone (index -> bootstrap -> owners)',
+    applies: (srcRel) => srcRel !== 'index.ts' && !isBootstrapCompositionFile(srcRel),
+    forbids: (resolved) => isBootstrapCompositionFile(resolved),
   },
   {
     // TS1 broadens the v1 command-layer rule to the whole long-lived TUI layer
@@ -668,6 +686,7 @@ function main() {
     console.log(`  rule ${STARTUP_REMOTE_COMPOSITION_RULE.id}`)
     console.log('  rule remote-dynamic-import-owner')
     console.log('  rule surface-constructs-direct-adapter')
+    console.log('  composition zone: app/bootstrap.ts + app/bootstrap/**')
     const baseline = readSourceRootBaseline()
     console.log(`  source-root baseline: ${baseline.stable.length} stable + ${baseline.legacy.length} legacy root module(s)`)
     return
