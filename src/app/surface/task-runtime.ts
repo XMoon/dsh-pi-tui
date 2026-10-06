@@ -25,7 +25,7 @@
 
 import { buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, workflowMemberViewerTarget, type TaskBrowserJobInput, type TaskBrowserRow } from '../../tasks-browser.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from '../../task-browser-runtime.ts'
-import type { TaskBrowserViewState, TaskPanelItem } from '../../task-panel.ts'
+import type { TaskPanelItem, TaskScope } from '../../task-presentation.ts'
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows, type QuestionAttentionRow } from '../../task-center-attention.ts'
 import type { TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
 import type { Diag } from '../../diag.ts'
@@ -141,6 +141,28 @@ export interface TaskQuestionAttention {
   publish(): void
   /** Reopen the SAME controller entry for one attention row (false = stale). */
   reopen(sessionId: string, callId: string): boolean
+}
+
+/**
+ * The presentation state carried from Quick Tasks into the full Task Center
+ * (and back out through `getViewState()`).
+ *
+ * The lifecycle owner is this runtime — it stores `quickTaskState` and
+ * `restoreState` — so the type lives here and the TUI panel consumes it as a
+ * TYPE only (TS4 plan §13/§14). The row model (`TaskPanelItem`, `TaskScope`)
+ * stays presentation-owned in `task-presentation.ts`, and the concrete
+ * `TaskBrowserPanel` stays TUI-owned.
+ */
+export interface TaskBrowserViewState {
+  readonly mode: 'quick' | 'full'
+  readonly openedFrom: 'quick' | 'command'
+  readonly scope: TaskScope
+  readonly typeFilter: string | null
+  readonly searchMode: boolean
+  readonly searchQuery: string
+  readonly selectedId: string | null
+  readonly expandedIds: ReadonlySet<string>
+  readonly collapsedIds: ReadonlySet<string>
 }
 
 /** The narrow inputs of the Task Center owner; one cohesive lifetime. */

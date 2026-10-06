@@ -111,7 +111,7 @@ import {
 import { color } from '../../theme.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
 import type { TaskBrowserDatasetScope } from '../../task-browser-runtime.ts'
-import type { TaskBrowserViewState } from '../../task-panel.ts'
+import type { TaskBrowserViewState } from './task-runtime.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { ImageLoader } from '../../image/loader.ts'
@@ -158,7 +158,7 @@ export type { AgentLifecycleStatus } from './notification-runtime.ts'
 export type { OptionCapability, SurfaceExtensionService, SurfaceSeamDeps } from './extension-runtime.ts'
 export type { PluginManagerAttachDeps, SurfacePluginManager } from './plugin-manager-runtime.ts'
 export type { SurfaceInteractionDeps } from './interaction-runtime.ts'
-export type { TaskSurfaceDeps, TaskSurfaceJobs, TaskSurfaceRead, TaskSurfaceSource } from './task-runtime.ts'
+export type { TaskBrowserViewState, TaskSurfaceDeps, TaskSurfaceJobs, TaskSurfaceRead, TaskSurfaceSource } from './task-runtime.ts'
 export type {
   RoutedSessionEvent,
   SurfaceEventRoutingSource,

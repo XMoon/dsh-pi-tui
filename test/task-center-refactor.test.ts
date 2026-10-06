@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { TaskBrowserPanel, type TaskPanelItem } from '../src/task-panel.ts'
+import { TaskBrowserPanel } from '../src/tui/panels/task-panel.ts'
+import type { TaskPanelItem } from '../src/task-presentation.ts'
 
 const job = (value: string, status = 'running'): TaskPanelItem => ({
   value,
