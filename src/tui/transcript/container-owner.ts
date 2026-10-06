@@ -12,10 +12,10 @@
  * This file holds pure vocabulary/equality helpers only. Mutable TuiApp
  * disclosure state stays in `tui-app.ts`, and the canonical segmentation stays
  * in `transcript-projection.ts`.
- * @module @xmoon76/dsh-pi-tui/transcript-disclosure
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/container-owner
  */
 
-import type { TranscriptMessage } from './transcript.ts'
+import type { TranscriptMessage } from '../../transcript.ts'
 
 /**
  * One semantic container that can own a disclosure on the current surface.

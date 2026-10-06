@@ -11,8 +11,8 @@ import {
   sameTranscriptContainerOwner,
   sameTranscriptContainerPath,
   type TranscriptContainerOwner,
-} from '../src/transcript-disclosure.ts'
-import { projectTranscriptStructure, workByMemberOf } from '../src/transcript-projection.ts'
+} from '../src/tui/transcript/container-owner.ts'
+import { projectTranscriptStructure, workByMemberOf } from '../src/tui/transcript/structure.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
 const thinking = (turn: number, text = 'reasoning'): TranscriptMessage => ({ kind: 'thinking', turn, text, running: true })

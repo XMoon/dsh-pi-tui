@@ -30,7 +30,7 @@ import { RemotePresentationReader } from '../src/runtime/remote/presentation-rea
 import {
   projectPresentationSnapshot,
   RemotePresentationReadShadow,
-} from '../src/runtime/remote/presentation-read-shadow.ts'
+} from './support/presentation-read-shadow.ts'
 
 const PACKAGE_IDS = {
   connection: '@deepseek-ai/dsh-client-connection',

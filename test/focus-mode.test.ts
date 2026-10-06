@@ -13,7 +13,7 @@ import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
 import { projectCompact } from '../src/compact-projection.ts'
-import { isTranscriptWorkMember, projectTranscriptStructure } from '../src/transcript-projection.ts'
+import { isTranscriptWorkMember, projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
   FOCUS_MODE_PROMPT,

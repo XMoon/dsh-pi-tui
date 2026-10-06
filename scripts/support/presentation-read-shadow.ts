@@ -2,28 +2,28 @@
  * Generation-fenced Direct-vs-Remote parity for transcript and display-preset
  * presentation. It reuses the existing TUI folds at a fresh observation point;
  * it does not implement Client history, reconnect, or Assistant settlement.
- * @module @xmoon76/dsh-pi-tui/runtime/remote/presentation-read-shadow
+ * @module @xmoon76/dsh-pi-tui/scripts/support/presentation-read-shadow
  */
 
-import { projectFocus, type FocusProjectedBlock } from '../../focus-activity.ts'
-import { projectCompact } from '../../compact-projection.ts'
-import type { TranscriptContainerPath } from '../../transcript-disclosure.ts'
-import type { DisplayPreset } from '../../display-preset.ts'
-import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../transcript-window.ts'
+import { projectFocus, type FocusProjectedBlock } from '../../src/focus-activity.ts'
+import { projectCompact } from '../../src/compact-projection.ts'
+import type { TranscriptContainerPath } from '../../src/tui/transcript/container-owner.ts'
+import type { DisplayPreset } from '../../src/display-preset.ts'
+import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../src/transcript-window.ts'
 import {
   TranscriptFolder,
   type TranscriptMessage,
   type TurnActivity,
-} from '../../transcript.ts'
+} from '../../src/transcript.ts'
 import type {
   PresentationDurableEvent,
   PresentationReadSnapshot,
   PresentationReader,
-} from '../presentation-read-port.ts'
+} from '../../src/runtime/presentation-read-port.ts'
 import type {
   RemoteConnectionGeneration,
   RemoteConnectionGenerationSource,
-} from './session-reader-remote.ts'
+} from '../../src/runtime/remote/session-reader-remote.ts'
 
 /** Comparable facts in one presentation read observation. */
 export type PresentationReadMismatchField =

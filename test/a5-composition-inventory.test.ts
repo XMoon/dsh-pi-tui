@@ -201,21 +201,21 @@ test('A5: every single-owner construction has exactly its expected count across 
 
 /**
  * Literals that legitimately occur once OUTSIDE the A5b single-owner rows, each
- * pinned to its exact production file. These are two documented facts, not
- * escapes:
+ * pinned to its exact production file. These are documented facts, not escapes:
  *
  * - `app/session/runtime.ts` DECLARES the `bindSessionRuntime(` factory that the
- *   composition root calls — the declaration is not a second construction;
- * - `runtime/remote/presentation-read-shadow.ts` folds a throwaway transcript
- *   window for the Direct/Remote parity oracle — a detached observation, not a
- *   live transcript owner.
+ *   composition root calls — the declaration is not a second construction.
  *
  * The whole-tree guard pins each to that exact file, so a construction added
  * anywhere (including inside these files) still fails the count.
+ *
+ * TS6 removed the other entry: the Direct/Remote presentation parity oracle's
+ * throwaway `new TranscriptWindowController(` left production `src/**` for
+ * `scripts/support/presentation-read-shadow.ts`, so it is no longer a
+ * production construction site at all.
  */
 const WHOLE_TREE_NON_OWNER_SITES: Readonly<Record<string, readonly string[]>> = {
   'bindSessionRuntime(': ['src/app/session/runtime.ts'],
-  'new TranscriptWindowController(': ['src/runtime/remote/presentation-read-shadow.ts'],
 }
 
 test('A5: no production file outside the pinned owners holds a single-owner construction', () => {
@@ -268,16 +268,6 @@ test('A5: no production file outside the pinned owners holds a single-owner cons
  * `(surface.start as ...)(...)`, ...) so a parenthesized / cast / non-null call
  * cannot hide a composition-root construction from the guard below.
  */
-/**
- * Legitimate construction sites OUTSIDE the owner rows above. The detached
- * Direct/Remote presentation parity oracle builds its own transcript window (it
- * must not import the surface owner), so it is pinned explicitly here — the
- * alias-aware guard stays an EXACT whole-tree match rather than a subset.
- */
-const WHOLE_TREE_EXTRA_SITES: Readonly<Record<string, readonly string[]>> = {
-  TranscriptWindowController: ['src/runtime/remote/presentation-read-shadow.ts'],
-}
-
 /** The identifier a single-owner site calls or constructs. */
 function siteName(site: string): string {
   return site.replace(/^new /u, '').replace(/[(<{].*$/u, '')
@@ -305,11 +295,6 @@ test('A5: every single-owner construction is alias-aware unique across productio
     const name = siteName(site)
     const owners = expected.get(name) ?? []
     if (!owners.includes(ownerRel)) owners.push(ownerRel)
-    expected.set(name, owners)
-  }
-  for (const [name, extra] of Object.entries(WHOLE_TREE_EXTRA_SITES)) {
-    const owners = expected.get(name) ?? []
-    for (const rel of extra) if (!owners.includes(rel)) owners.push(rel)
     expected.set(name, owners)
   }
   for (const [name, owners] of expected) {

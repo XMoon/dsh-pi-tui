@@ -4,7 +4,7 @@ import {
   RemotePresentationReadShadow,
   projectPresentationSnapshot,
   type PresentationReadShadowOutcome,
-} from '../src/runtime/remote/presentation-read-shadow.ts'
+} from '../scripts/support/presentation-read-shadow.ts'
 import { DirectPresentationReader } from '../src/runtime/direct/presentation-read-direct.ts'
 import { TranscriptWindowController } from '../src/transcript-window.ts'
 import {

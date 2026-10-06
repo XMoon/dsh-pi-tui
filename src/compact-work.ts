@@ -26,7 +26,7 @@
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
-import type { TranscriptWorkSpan } from './transcript-projection.ts'
+import type { TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import {
   addCompactActionStats,
   compactActionSlotLine,

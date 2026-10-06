@@ -107,8 +107,6 @@
     "thinking-preview.ts",
     "token-usage.ts",
     "tool-presentation-client.ts",
-    "transcript-disclosure.ts",
-    "transcript-projection.ts",
     "transcript-render-profile.ts",
     "transcript-semantics.ts",
     "transcript-window.ts",
