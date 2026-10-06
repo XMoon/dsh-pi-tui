@@ -13,10 +13,10 @@
  * title or any future dynamic text can never inject an arbitrary
  * terminal sequence. The v1 copy is a fixed string, which is the safest
  * payload of all.
- * @module @xmoon76/dsh-pi-tui/terminal-notifier
+ * @module @xmoon76/dsh-pi-tui/tui/notification/terminal-notifier
  */
 
-import type { NotificationMethod } from './settings.ts'
+import type { NotificationMethod } from '../../domain/notification/settings.ts'
 
 /** The writer seam: tests inject a recorder, the runner passes
  * `process.stdout`. */

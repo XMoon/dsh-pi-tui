@@ -25,25 +25,44 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/notification-runtime
  */
 
-import { CompletionNotificationController } from '../../notification/controller.ts'
-import { parseNotificationMethod, parseNotificationMode } from '../../notification/settings.ts'
-import {
-  DISABLE_FOCUS_REPORTING,
-  ENABLE_FOCUS_REPORTING,
-  FOCUS_IN_SEQUENCE,
-  FOCUS_OUT_SEQUENCE,
-  TerminalFocusTracker,
-} from '../../notification/terminal-focus.ts'
-import { TerminalNotifier, type TerminalNotifierWriter } from '../../notification/terminal-notifier.ts'
+import { CompletionNotificationController } from '../../domain/notification/controller.ts'
+import { parseNotificationMethod, parseNotificationMode, type NotificationMethod } from '../../domain/notification/settings.ts'
+import type { TerminalFocusState } from '../../domain/notification/types.ts'
 
 /** One completion status fact (the controller's parameter type). */
 export type AgentLifecycleStatus = Parameters<CompletionNotificationController['onAgentStatus']>[1]
 
+/**
+ * The structural terminal presentation this owner consumes (TS5 §14.3). The
+ * composition zone selects the concrete `tui/notification/**` implementation
+ * and injects it, so this application module declares the port it needs and
+ * never imports a terminal module.
+ */
+export interface TerminalNotificationPresentation {
+  /** Feed one terminal focus report (CSI ? 1004, already classified). */
+  handleFocusReport(focused: boolean): void
+  /** Any REAL input proves the terminal is focused (a missed FOCUS_IN must
+   *  never leave the tracker believing the terminal is unfocused). */
+  markFocused(): void
+  /** The current neutral focus state the completion policy reads. */
+  focusState(): TerminalFocusState
+  /** Emit one completion notification through the guarded writer. */
+  notify(method: NotificationMethod, title: string, body: string): void
+  /** Enable focus reporting at mount (CSI ? 1004 h). */
+  enableFocusReporting(): void
+  /** Disable focus reporting on every exit path (idempotent). */
+  disableFocusReporting(): void
+}
+
 /** The notification presentation inputs; one cohesive lifetime. */
 export interface NotificationRuntimeOptions {
-  /** The guarded terminal sink shared with the runner's fatal-path focus
-   *  disable (the sink is stateless; both writers emit the same sequences). */
-  readonly notificationWriter: TerminalNotifierWriter
+  /**
+   * The concrete terminal presentation (TS5 §14.3): the composition zone
+   * selects it, so this application owner never imports a `tui/**` module. It
+   * owns the focus tracker, the focus-reporting mode writes and the OSC/bell
+   * notifier.
+   */
+  readonly presentation: TerminalNotificationPresentation
   /** The persisted notification settings at startup (parsed by this owner). */
   readonly notificationMode: string | undefined
   readonly notificationMethod: string | undefined
@@ -79,17 +98,12 @@ export function createNotificationRuntime(options: NotificationRuntimeOptions): 
   // terminal output and settings parsing stay separate modules, never a blob.
   // The controller consumes the AUTHORITATIVE `agent/status` runtime fact (same
   // live main agent, observed running -> idle) — never `turn/end`, timers or
-  // debounces. The sink wrapper contains synchronous throws so a notification
-  // failure can never crash the TUI.
-  const terminalNotifier = new TerminalNotifier(options.notificationWriter)
-  const completionController = new CompletionNotificationController((method, title, body) => {
-    try {
-      terminalNotifier.notify(method, title, body)
-    } catch {
-      // A notification failure is Client-local UX: never crash the TUI.
-    }
-  })
-  const terminalFocusTracker = new TerminalFocusTracker()
+  // debounces. The presentation contains its own writer failures so a
+  // notification failure can never crash the TUI.
+  const presentation = options.presentation
+  const completionController = new CompletionNotificationController(
+    (method, title, body) => presentation.notify(method, title, body),
+  )
   completionController.setMode(parseNotificationMode(options.notificationMode))
   completionController.setMethod(parseNotificationMethod(options.notificationMethod))
 
@@ -107,31 +121,18 @@ export function createNotificationRuntime(options: NotificationRuntimeOptions): 
       completionController.setMethod(parseNotificationMethod(method))
     },
     handleTerminalFocus(focused) {
-      terminalFocusTracker.handleFocusReport(focused ? FOCUS_IN_SEQUENCE : FOCUS_OUT_SEQUENCE)
-      completionController.setFocus(terminalFocusTracker.state)
+      presentation.handleFocusReport(focused)
+      completionController.setFocus(presentation.focusState())
     },
     noteUserInput() {
-      terminalFocusTracker.markFocused()
-      completionController.setFocus(terminalFocusTracker.state)
+      presentation.markFocused()
+      completionController.setFocus(presentation.focusState())
     },
     enableFocusReporting() {
-      // The guarded writer swallows a broken-stream error; a synchronous throw
-      // is contained so a dead stdout can never fail the TUI mount.
-      try {
-        options.notificationWriter.write(ENABLE_FOCUS_REPORTING)
-      } catch {
-        // A broken stdout degrades the notification capability silently.
-      }
+      presentation.enableFocusReporting()
     },
     disableFocusReporting() {
-      // Disable terminal focus reporting on every exit path so the mode can
-      // never leak into the shell; idempotent (a startup failure that never
-      // enabled it writes a harmless no-op).
-      try {
-        options.notificationWriter.write(DISABLE_FOCUS_REPORTING)
-      } catch {
-        // The stream may already be gone during teardown; best effort.
-      }
+      presentation.disableFocusReporting()
     },
   }
 }

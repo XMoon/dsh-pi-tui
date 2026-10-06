@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
-import { guardedStreamWriter, resolveAutoMethod, sanitizeOscPayload, TerminalNotifier } from '../src/notification/terminal-notifier.ts'
+import { guardedStreamWriter, resolveAutoMethod, sanitizeOscPayload, TerminalNotifier } from '../src/tui/notification/terminal-notifier.ts'
 
 /** A writer that records every sequence. */
 function recordingWriter(): { written: string[]; write(sequence: string): void } {

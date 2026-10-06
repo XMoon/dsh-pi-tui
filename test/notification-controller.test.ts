@@ -9,9 +9,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CompletionNotificationController, NOTIFICATION_BODY, NOTIFICATION_TITLE } from '../src/notification/controller.ts'
-import { parseNotificationMethod, parseNotificationMode } from '../src/notification/settings.ts'
-import type { NotificationMethod } from '../src/notification/settings.ts'
+import { CompletionNotificationController, NOTIFICATION_BODY, NOTIFICATION_TITLE } from '../src/domain/notification/controller.ts'
+import { parseNotificationMethod, parseNotificationMode } from '../src/domain/notification/settings.ts'
+import type { NotificationMethod } from '../src/domain/notification/settings.ts'
 
 // ── settings parsing (plan §4.2) ────────────────────────────────────────
 

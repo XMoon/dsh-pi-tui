@@ -266,10 +266,22 @@ test('M3-6 PR3: one final-dispose cleanup failure cannot skip later cleanup or t
  * runner case `runner-remote-shutdown` L6-D; the sibling TuiApp final-dispose
  * case above pins the TuiApp-owned batch continuation without a claim.
  */
+/** The null terminal notification presentation (the terminal sequences are
+ *  asserted by the notification suites; these fixtures exercise the surface
+ *  aggregate without a real terminal). */
+const nullPresentation = {
+  handleFocusReport: () => {},
+  markFocused: () => {},
+  focusState: () => 'focused' as const,
+  notify: () => {},
+  enableFocusReporting: () => {},
+  disableFocusReporting: () => {},
+}
+
 test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge detach', () => {
   const surface = createSurfaceRuntime({
     tuiVersion: '0.0.0-test',
-    notificationWriter: { write: () => {} },
+    notificationPresentation: nullPresentation,
     notificationMode: undefined,
     notificationMethod: undefined,
     createPluginManagerPanel,

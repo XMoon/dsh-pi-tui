@@ -23,11 +23,11 @@
  * The controller is pure state + a sink: the runner wires the sink to
  * the TerminalNotifier (with the current method) and feeds focus
  * reports, settings and live-agent identity changes in.
- * @module @xmoon76/dsh-pi-tui/notification-controller
+ * @module @xmoon76/dsh-pi-tui/domain/notification/controller
  */
 
 import type { NotificationMode, NotificationMethod } from './settings.ts'
-import type { TerminalFocusState } from './terminal-focus.ts'
+import type { TerminalFocusState } from './types.ts'
 
 /** The agent lifecycle status the controller consumes. Structurally the
  * DSH public `AgentStatus` ('idle' | 'running') — declared locally so

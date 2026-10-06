@@ -68,7 +68,8 @@ import { createClientToolPresenter } from '../tool-presentation-client.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../communication-policy.ts'
 import { parseGitAttributionMode, type GitAttributionState } from '../git-attribution.ts'
 import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
-import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
+import { guardedStreamWriter } from '../tui/notification/terminal-notifier.ts'
+import { createTerminalNotificationPresentation } from '../tui/notification/runtime.ts'
 import { sessionStatsFactsOf } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/derive-plan.ts'
@@ -204,6 +205,10 @@ export function applyRunnerWithRuntime(
   // into the shell. The guarded writer swallows broken-stream async
   // errors; every use is additionally wrapped for synchronous throws.
   const notificationWriter = guardedStreamWriter(process.stdout)
+  // The composition zone selects the concrete terminal notification
+  // presentation (TS5 §14.3); the application surface consumes the structural
+  // port and keeps the completion lifecycle.
+  const notificationPresentation = createTerminalNotificationPresentation({ writer: notificationWriter })
   // A process-wide guarded stderr writer for user-visible warnings: the
   // error listener swallows async stream errors (EPIPE when the terminal
   // closed — a plain try/catch around write() cannot see those), and every
@@ -441,7 +446,7 @@ export function applyRunnerWithRuntime(
     // commit seams reset the completion owner during startup, before the mount.
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
-      notificationWriter,
+      notificationPresentation,
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
       // TS4 §10: the composition zone selects the CONCRETE Plugin Manager panel
