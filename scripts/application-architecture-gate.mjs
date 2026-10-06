@@ -195,22 +195,18 @@ export function isRemoteComposition(resolved, specifier) {
 
 /**
  * The concrete renderer / TuiApp / chrome owners the backend-neutral transcript
- * presentation core must never reach: a `tui/transcript/**` module that needs
- * one of these has a renderer-specific helper that belongs under
- * `tui/components/**` (or stays in TuiApp), and the helper must be split instead
- * of widening this list into an allowlist.
+ * presentation core must never reach. The forbidden TUI surface is the WHOLE
+ * `src/tui/**` layer MINUS the core's own `tui/transcript/**` subtree — an
+ * enumeration would silently miss each newly extracted mechanics directory
+ * (it already missed `tui/keybindings/**` and `tui/commands/**`), and the rule's
+ * contract is "never depend on another concrete TUI mechanics module". A core
+ * module that needs something from `src/tui/**` else has a renderer-specific
+ * helper that belongs under `tui/components/**` (or stays in TuiApp) and must be
+ * split, never allowlisted.
  */
-const TRANSCRIPT_CORE_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
+const TRANSCRIPT_CORE_OWN_SUBTREE = 'tui/transcript/'
 
-const TRANSCRIPT_CORE_FORBIDDEN_TARGET_PREFIXES = [
-  'tui/components/',
-  'tui/panels/',
-  'tui/pickers/',
-  'tui/interaction/',
-  'tui/footer/',
-  'tui/notification/',
-  'tui/plugin-manager/',
-]
+const TRANSCRIPT_CORE_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
 
 const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
   'tui-app.ts',
@@ -229,8 +225,11 @@ const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
  */
 export function isTranscriptRendererMechanics(resolved, specifier) {
   if (TRANSCRIPT_CORE_FORBIDDEN_PACKAGES.some(pkg => specifier === pkg || specifier.startsWith(`${pkg}/`))) return true
-  return TRANSCRIPT_CORE_FORBIDDEN_TARGET_PREFIXES.some(prefix => resolved.startsWith(prefix))
-    || TRANSCRIPT_CORE_FORBIDDEN_TARGETS.has(resolved)
+  // Any other TUI-layer owner (components, panels, pickers, interaction,
+  // keybindings, commands, footer, notification, plugin-manager, …) is
+  // mechanics; only the core's own subtree is part of the core.
+  if (resolved.startsWith('tui/') && !resolved.startsWith(TRANSCRIPT_CORE_OWN_SUBTREE)) return true
+  return TRANSCRIPT_CORE_FORBIDDEN_TARGETS.has(resolved)
 }
 
 /**

@@ -1121,10 +1121,11 @@ test('TS5 ownership boundaries are non-vacuous (app/domain/runtime -> tui locks)
 
 test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () => {
   // `src/tui/transcript/**` is consumed by the concrete renderer mechanics, so
-  // the direction `PiTui mechanics -> tui/transcript` is the only legal one. Each
-  // negative below names a distinct renderer-mechanics family the core must stay
-  // blind to; the positive controls are anchored by those negatives, so "allowed"
-  // cannot pass vacuously.
+  // the direction `PiTui mechanics -> tui/transcript` is the only legal one:
+  // EVERY other `src/tui/**` owner is mechanics, not just the enumerated ones.
+  // Each negative below names a distinct renderer-mechanics family the core must
+  // stay blind to; the positive controls are anchored by those negatives, so
+  // "allowed" cannot pass vacuously.
   const forbidden = [
     ['@xmoon76/pi-tui', '@xmoon76/pi-tui'],
     ['@xmoon76/pi-tui/dist/index.mjs', '@xmoon76/pi-tui/dist/index.mjs'],
@@ -1134,12 +1135,19 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     ['../panels/x.ts', 'tui/panels/x.ts'],
     ['../pickers/x.ts', 'tui/pickers/x.ts'],
     ['../interaction/x.ts', 'tui/interaction/x.ts'],
+    // The two owners an enumeration-based rule missed: the whole-layer contract
+    // must not depend on remembering every extracted mechanics directory.
+    ['../keybindings/manager.ts', 'tui/keybindings/manager.ts'],
+    ['../commands/status.ts', 'tui/commands/status.ts'],
     ['../footer/x.ts', 'tui/footer/x.ts'],
     ['../notification/x.ts', 'tui/notification/x.ts'],
     ['../plugin-manager/x.ts', 'tui/plugin-manager/x.ts'],
     ['../../tui-app.ts', 'tui-app.ts'],
     ['../../theme.ts', 'theme.ts'],
     ['../../icons.ts', 'icons.ts'],
+    // The allowance is the core SUBTREE, not a name prefix: a similarly-named
+    // NON-core directory is still mechanics.
+    ['../../tui/transcript-legacy/x.ts', 'tui/transcript-legacy/x.ts'],
     ['../../renderer-registry.ts', 'renderer-registry.ts'],
   ]
   for (const [specifier, target] of forbidden) {
@@ -1166,6 +1174,13 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
   ])
   assert.equal(dynamicRelative.length, 1, 'a relative renderer-mechanics dynamic import must be rejected')
   assert.equal(dynamicRelative[0].rule, 'tui-transcript-imports-renderer-mechanics')
+  // The whole-layer rule holds on the dynamic path too.
+  const dynamicTuiOwner = findViolations([
+    entry('tui/transcript/x.ts', "const m = await import('../keybindings/manager.ts')\n"),
+    entry('tui/keybindings/manager.ts', 'export const m = 1\n'),
+  ])
+  assert.equal(dynamicTuiOwner.length, 1, 'a relative TUI-mechanics dynamic import must be rejected')
+  assert.equal(dynamicTuiOwner[0].rule, 'tui-transcript-imports-renderer-mechanics')
   const dynamicPackage = findViolations([
     entry('tui/transcript/x.ts', "const m = await import('@xmoon76/pi-tui')\n"),
   ])
@@ -1193,6 +1208,9 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     ['tui/transcript/x.ts', '../../display-preset.ts', 'display-preset.ts', 'export const x = 1\n'],
     // Sibling core modules are the point of the directory.
     ['tui/transcript/x.ts', './structure.ts', 'tui/transcript/structure.ts', 'export const x = 1\n'],
+    // …and the allowance is the CORE SUBTREE, not one flat directory: a nested
+    // core module keeps reaching its siblings.
+    ['tui/transcript/nested/x.ts', '../structure.ts', 'tui/transcript/structure.ts', 'export const x = 1\n'],
     // The reverse direction is the contract: PiTui mechanics consume the core.
     ['tui/components/transcript/x.ts', '../../transcript/structure.ts', 'tui/transcript/structure.ts', 'export const x = 1\n'],
   ]
