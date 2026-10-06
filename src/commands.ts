@@ -136,6 +136,8 @@ import {
   type HumanSkillCatalog,
   type HumanSkillSummary,
 } from './skill-catalog.ts'
+import { registerExitCommand, registerHelpCommand } from './commands/utility.ts'
+import { registerPluginsCommand, registerTasksCommand } from './commands/tasks.ts'
 
 /** Shorten a session id for read-only display rows, capped at 28 characters. */
 function displaySessionId(id: string): string {
@@ -357,6 +359,26 @@ export interface CommandRegistryLike {
   register(definition: CommandDefinition): () => void
   list(agent?: unknown): readonly CommandDescriptor[]
 }
+
+/** The single registration seam handed to the command-domain modules
+ * (`src/commands/*.ts`): the coordinator owns provenance, catalog state and
+ * disposal; a domain registrar only supplies definitions. */
+export type RegisterOne = (definition: CommandDefinition) => void
+
+/** One TUI command definition plus its aliases: an alias is another NAME of
+ * the same logical command, registered through the same seam. */
+export interface TuiCommandSpec {
+  name: string
+  description: string
+  aliases?: readonly string[]
+  input?: { hint: string }
+  handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>
+  aliasHandlers?: Record<string, (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>>
+  aliasDescriptions?: Record<string, string>
+}
+
+/** Register one {@link TuiCommandSpec} plus its aliases (coordinator primitive). */
+export type RegisterTuiCommand = (spec: TuiCommandSpec) => void
 
 /** One default-intent operation's ownership record: the id is the settle
  *  authority (an older operation settling must never clear or restore a
@@ -2204,15 +2226,7 @@ export function registerTuiCommands(
    * @param spec - the primary command; `aliases` register with the shared
    *   handler unless `aliasHandlers` overrides one.
    */
-  const registerTuiCommand = (spec: {
-    name: string
-    description: string
-    aliases?: readonly string[]
-    input?: { hint: string }
-    handler: (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>
-    aliasHandlers?: Record<string, (invocation: CommandInvocation) => CommandResult | Promise<CommandResult>>
-    aliasDescriptions?: Record<string, string>
-  }): void => {
+  const registerTuiCommand: RegisterTuiCommand = (spec): void => {
     registerOne({
       name: spec.name,
       description: spec.description,
@@ -2230,23 +2244,13 @@ export function registerTuiCommands(
     }
   }
 
-  // Shared by /exit and its /quit alias. The exit orchestration lives in
-  // the runner (createExitController): latch once, idempotent surface
-  // cleanup, resume hint, appExit (the Direct owned-session retirement runs
-  // inside the appExit disposal). Handlers never stop the app or flush
-  // themselves — that kept /exit diverging from Ctrl+C/Ctrl+D and could
-  // hang a stopped UI forever.
-  const exitHandler = (): { kind: 'success' } => {
-    runner.requestExit()
-    return { kind: 'success' }
-  }
-
-  registerTuiCommand({
-    name: 'exit',
-    description: 'Quit the terminal UI (flush and exit)',
-    aliases: ['quit'],
-    handler: exitHandler,
-  })
+  // ── Built-in command registration order (FROZEN) ─────────────────────────
+  // Domain definitions live in `src/commands/*.ts`; this coordinator owns the
+  // single registration/catalog state machine and calls each registrar at its
+  // exact historical position. Do not reorder by module grouping: the
+  // synchronous `commands/change` effects and the Direct compatibility mirror
+  // depend on the sequence.
+  registerExitCommand({ runner, registerTuiCommand })
 
   registerOne({
     name: 'settings',
@@ -4711,32 +4715,11 @@ export function registerTuiCommands(
     }),
   })
 
-  registerTuiCommand({
-    name: 'tasks',
-    description: 'Open the full Task Center for this session (scope, type, search, and tree controls)',
-    aliases: ['subagents'],
-    handler: async () => {
-      // The merged browser: jobs + subagents in one searchable list, with
-      // row-level confirmed Stop on capable rows — the full surface behind
-      // `/tasks` (runner.openTasksBrowser). Completed jobs and finished
-      // one-shot children are reachable exactly through this path.
-      await runner.requireLiveSessionScope()
-      runner.openTasksBrowser()
-      return { kind: 'success' }
-    },
-  })
+  registerTasksCommand({ runner, registerTuiCommand })
 
   // `/plugins` (P1-A): the canonical sessionless entry into the shared
-  // profile-wide Plugin Manager surface. It never creates or switches a
-  // Session; the runner facade owns the controller/panel.
-  registerTuiCommand({
-    name: 'plugins',
-    description: 'Inspect and manage DSH plugins and TUI extensions for this profile',
-    handler: () => {
-      runner.openPluginManager()
-      return { kind: 'success' }
-    },
-  })
+  // profile-wide Plugin Manager surface (see `src/commands/tasks.ts`).
+  registerPluginsCommand({ runner, registerTuiCommand })
 
   // `/permission` is NOT registered here: dsh-permission-presets in the
   // base layer already registers it (text form: `/permission` shows the
@@ -5685,50 +5668,7 @@ export function registerTuiCommands(
     },
   })
 
-  registerOne({
-    name: 'help',
-    description: 'Show keybindings and available commands',
-    handler: () => {
-      // M4: the key labels come from the EFFECTIVE keymap (plan §18) — a
-      // user remap updates /help automatically; the UI never hard-codes a
-      // physical shortcut.
-      const keybindings = app.keybindingsManager()
-      const keysLabel = (action: AppKeybindingId): string => {
-        // The full effective label: ALL direct keys AND ALL leader
-        // sequences (a mixed `['ctrl+z', '<leader>h']` shows
-        // `Ctrl+Z / Leader H`; a disabled action advertises nothing) —
-        // review finding: keysFor() alone dropped the leader bindings.
-        const label = keybindings.keysLabelFor(action)
-        return label === '' ? '—' : label
-      }
-      const rows: SettingItem[] = [        { id: 'k-enter', label: keysLabel('app.input.submit'), description: 'Submit the draft; while the agent is busy, delivery follows the "Submit while busy" preference (skill commands steer too, UI commands run locally)', currentValue: '' },
-        { id: 'k-queue', label: keysLabel('app.input.submitAccelerated'), description: 'Submit with the OPPOSITE of the "Submit while busy" behavior (the web accelerated-submit chord)', currentValue: '' },
-        { id: 'k-exit', label: keysLabel('app.exit.request'), description: 'Quit the TUI (flushes the session)', currentValue: '' },
-        { id: 'k-cancel', label: keysLabel('app.agent.interrupt'), description: 'Cancel the active turn / tool / shell command (one interrupt while the agent is busy; press the interrupt action twice while idle — with an empty editor it opens the rewind picker)', currentValue: '' },
-        { id: 'k-fold', label: keysLabel('app.transcript.toggleExpand'), description: `Expand/collapse recent transcript detail; in regular Focus it reveals the recent Thought detail; in fullscreen Focus it controls the Thought-root bulk (per-card detail stays mouse-owned). Thinking detail is separate: ${keysLabel('app.transcript.toggleThinking')}`, currentValue: '' },
-        { id: 'k-todo', label: keysLabel('app.todo.toggle'), description: 'Toggle the todo panel', currentValue: '' },
-        { id: 'k-think', label: keysLabel('app.transcript.toggleThinking'), description: 'Expand/collapse thinking detail (detail level — blocks stay visible)', currentValue: '' },
-        { id: 'k-steer', label: keysLabel('app.input.steer'), description: 'Steer the running turn with the draft', currentValue: '' },
-        { id: 'k-editor', label: keysLabel('app.editor.external'), description: 'Edit the draft in $VISUAL/$EDITOR', currentValue: '' },
-
-        { id: 'k-search', label: keysLabel('app.transcript.search'), description: `Search the transcript (${keysLabel('app.transcript.search.next')}/${keysLabel('app.transcript.search.previous')} jump, ${keysLabel('app.transcript.search.close')} closes)`, currentValue: '' },
-
-        { id: 'k-tab', label: 'Tab', description: 'Autocomplete slash commands and file paths', currentValue: '' },
-        { id: 'k-hist', label: '↑/↓', description: 'Recall input history on an empty line', currentValue: '' },
-        { id: 'k-bang', label: '! cmd', description: 'Host user-shell execution is available only when the backend provides it; ! submits the completed command and its output to the Session, !! keeps the result presentation-only', currentValue: '' },
-        { id: 'sep-help', label: color.border('─'.repeat(34)), currentValue: '' },
-        ...runner.listScopedCommands()
-          .map(command => ({
-            id: `cmd-${command.name}`,
-            label: `/${command.name}`,
-            description: command.description,
-            currentValue: '',
-          })),
-      ]
-      app.openSettings(rows, () => {}, () => {})
-      return { kind: 'success' }
-    },
-  })
+  registerHelpCommand({ runner, registerOne })
 
   // M4: the keybinding command. Bare /keybindings opens the action-first
   // Keyboard Shortcuts Editor; conflicts/reload/reset remain read-only or
