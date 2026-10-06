@@ -5013,13 +5013,15 @@ architecture, adds no writer-held error taxonomy, and takes over no lease.
   prefix is treated as proof and the D2.2 broad classifier is deliberately NOT
   used.
 - **A true indeterminate typed `/preset <id>` no longer leaves retry-ready
-  intent** (`src/commands.ts`): the indeterminate branch records
+  intent** (`src/tui/commands/models.ts` since the TS1 command decomposition):
+  the indeterminate branch records
   `recordCommandDraftDisposition(commandId, 'suppressed')` before returning the
   existing no-auto-retry error, so the outer command settlement consumes the
   command instead of restoring it. A KNOWN rejection — including
   `session/writer-held` — keeps its draft restoration.
 - **`/title <name>` keeps its production write semantics and now surfaces BOTH
-  of its non-committed settlements** (`src/commands.ts`): the `rejected` branch
+  of its non-committed settlements** (`src/tui/commands/sessions.ts` since the
+  TS1 command decomposition): the `rejected` branch
   (`session/writer-held` included) emits the same inline `app.notify(...)` the
   `/preset` and `/model` handlers already use, and the true-`indeterminate`
   branch emits its own no-retry notice beside the `suppressed` draft

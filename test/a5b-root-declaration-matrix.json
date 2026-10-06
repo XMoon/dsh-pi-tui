@@ -72,8 +72,8 @@
       "tests": [
         "application-runtime-selection.test.ts",
         "busy-enter.test.ts",
-        "direct-command-origin.test.ts",
-        "export-command.test.ts"
+        "command-catalog.test.ts",
+        "direct-command-origin.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
@@ -1062,9 +1062,9 @@
       "head": "let handle: SessionHandle | undefined",
       "tests": [
         "a2-ownership-cutover.test.ts",
+        "a3-command-identity.test.ts",
         "advanced-cordis-lifecycle.test.ts",
-        "advanced-input.test.ts",
-        "advanced-interactive.test.ts"
+        "advanced-input.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:process-cordis-prerequisite",
       "owner": "bootstrap",
@@ -2174,10 +2174,10 @@
       "hostDependency": true,
       "head": "const artifacts = createArtifactSaveOwner<Agent>({",
       "tests": [
+        "a3-writer-admission.test.ts",
         "a5b-bootstrap-closure.test.ts",
         "advanced-input.test.ts",
-        "context-row.test.ts",
-        "focus-mode.test.ts"
+        "context-row.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:owner-construction-or-bind",
       "owner": "bootstrap",
@@ -2251,7 +2251,7 @@
         "action-tool-card.test.ts",
         "application-runtime-selection.test.ts",
         "busy-enter.test.ts",
-        "preset.test.ts"
+        "command-catalog.test.ts"
       ],
       "classification": "KEEP_BOOTSTRAP:host-service-resolution",
       "owner": "bootstrap",
