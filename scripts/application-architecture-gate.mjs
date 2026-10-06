@@ -88,13 +88,18 @@
  *   8. (TS1) `src/runtime/**` must not import `src/tui/**`: the semantic/adaptor
  *      layer never depends on terminal presentation.
  *   9. (TS7) `src/domain/transcript/**` — the ONE transport/UI-neutral
- *      transcript semantic/lifecycle authority — must not import TUI/renderer
- *      mechanics, application currentness, the Direct/Remote adapters, PiTui,
- *      Tern, or the `src/transcript.ts` compatibility facade. The direction is
- *      `PiTui mechanics -> tui/transcript -> domain/transcript`, and a domain
- *      module needing a renderer/application fact means the fact was
+ *      transcript semantic/lifecycle authority — is CLOSED-WORLD: only its own
+ *      siblings, the frozen transitional pure root VALUE helpers and two
+ *      TYPE-ONLY compatibility edges (`icons.ts`, `runtime/assistant-stream-port.ts`)
+ *      are admitted; every other relative `src/**` edge (TUI/renderer mechanics,
+ *      application currentness, the Direct/Remote adapters, `commands.ts`,
+ *      `display-preset.ts`, the `src/transcript.ts` facade, …) fails by default,
+ *      including literal dynamic spellings and value imports that would ride on a
+ *      type-only allowance. Bare packages keep the PiTui/Tern/Remote package-face
+ *      rule. The direction is `PiTui mechanics -> tui/transcript -> domain/transcript`,
+ *      and a domain module needing a renderer/application fact means the fact was
  *      misclassified and must be split, never allowlisted. `app/remote/**` and
- *      `runtime/remote/**` keep their more specific Remote owning rule.
+ *      `runtime/remote/**` are covered by this rule for the subtree.
  *
  * Root source placement (plan §20.3): `scripts/source-root-baseline.json` is a
  * shrinking ledger of the ROOT production modules. A new root module
@@ -253,41 +258,67 @@ export function isTranscriptRendererMechanics(resolved, specifier) {
 const DOMAIN_TRANSCRIPT_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
 
 /**
- * The concrete owners the transcript semantic/lifecycle domain must stay blind
- * to. `src/theme.ts` is presentation chrome; `src/icons.ts` is deliberately NOT
- * here because the domain carries the existing type-only `IconSemantic`
- * compatibility field (TS7 plan §9.3), and the residual pure root helpers
- * (`src/context.ts`, `src/token-usage.ts`, `src/present.ts`,
- * `src/content-block-presentation.ts`, `src/failure-presentation.ts`) are the
- * documented transitional TS8 edges. The neutral structural port
- * `src/runtime/assistant-stream-port.ts` stays open by contract (plan §18).
+ * The TS7 closed-world allow-set of transitional ROOT edges the
+ * `domain/transcript/**` authority may still consume as VALUES: deterministic
+ * pure helpers with no TUI/renderer/lifecycle state, owned by TS8 for their
+ * final placement (plan §34.1). Every other relative `src/**` edge fails.
  */
-const DOMAIN_TRANSCRIPT_FORBIDDEN_TARGETS = new Set([
-  'transcript.ts',
-  'tui-app.ts',
-  'renderer-registry.ts',
-  'theme.ts',
+const DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES = new Set([
+  'context.ts',
+  'content-block-presentation.ts',
+  'failure-presentation.ts',
+  'present.ts',
+  'token-usage.ts',
 ])
 
 /**
- * True when a `domain/transcript/**` import reaches a renderer/backend owner.
- * This is the TS7 sublayer contract: it re-states the generic
- * `tui/**`/`app/**`/Direct/Remote edges AND closes the gaps those generic rules
- * cannot see — PiTui/Tern, the concrete chrome owners and the `src/transcript.ts`
- * facade — including every literal-dynamic spelling. The four generic rules
- * exclude this subtree from their `applies` (see
- * `isDomainTranscriptSubtree`), so every violation has exactly one owning rule
- * id while the dynamic escape hatch stays closed.
+ * The transitional root edges allowed ONLY as TYPE-ONLY imports: `icons.ts`
+ * because the domain carries the existing `IconSemantic` compatibility field
+ * (plan §9.3) and the neutral structural live port (plan §18) whose data
+ * vocabulary is transport-neutral. A VALUE import of either would pull concrete
+ * icon/palette or live-ingress mechanics into the semantic authority, so the
+ * closed-world contract admits the type spelling and nothing else.
+ */
+const DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES = new Set([
+  'icons.ts',
+  'runtime/assistant-stream-port.ts',
+])
+
+/**
+ * The TS7 sublayer contract for `domain/transcript/**`, expressed CLOSED-WORLD:
+ * every relative edge must be either
+ *   - a `domain/transcript/**` sibling, or
+ *   - one of {@link DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES}, or
+ *   - a TYPE-ONLY import of one of {@link DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES}.
+ * Anything else (`tui/**`, `app/**`, `runtime/direct|remote/**`, `commands.ts`,
+ * `display-preset.ts`, `search-overlay.ts`, `transcript.ts`, `theme.ts`,
+ * `tui-app.ts`/`renderer-registry.ts`, any other root/legacy module, …) FAILS by
+ * default, so a future escape hatch must be added deliberately instead of being
+ * missed by a forbidden list.
+ *
+ * Bare package specifiers keep the long-lived package-face contract: the vendored
+ * PiTui fork, the Tern SDK and experimental Remote composition faces are
+ * forbidden; official DSH semantic packages stay allowed (the client-boundary
+ * gate owns Host-service coupling).
+ *
+ * The four generic `domain-imports-*` / Direct rules exclude this subtree from
+ * their `applies` (see {@link isDomainTranscriptSubtree}), so this rule is the
+ * single owner of its static AND literal-dynamic edges.
  * @param {string} resolved canonicalized target (or bare specifier)
  * @param {string} specifier the raw import specifier
+ * @param {{ typeOnly?: boolean }} [meta] the edge kind (defaults to a value edge)
+ * @returns {boolean} true when the edge violates the contract
  */
-export function isDomainTranscriptBackendMechanics(resolved, specifier) {
+export function isDomainTranscriptBackendMechanics(resolved, specifier, meta = {}) {
   if (DOMAIN_TRANSCRIPT_FORBIDDEN_PACKAGES.some(pkg => specifier === pkg || specifier.startsWith(`${pkg}/`))) return true
-  if (resolved.startsWith('tui/')) return true
-  if (resolved.startsWith('app/')) return true
-  if (resolved.startsWith('runtime/direct/')) return true
   if (isRemoteComposition(resolved, specifier)) return true
-  return DOMAIN_TRANSCRIPT_FORBIDDEN_TARGETS.has(resolved)
+  // A bare specifier is an npm package/subpath, never a `src/**` owner: the
+  // package-face rules above are the whole contract for it.
+  if (!specifier.startsWith('.')) return false
+  if (resolved.startsWith('domain/transcript/')) return false
+  if (DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES.has(resolved)) return false
+  if (meta.typeOnly === true && DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES.has(resolved)) return false
+  return true
 }
 
 /** The TS7 transcript semantic-authority subtree, owned by the specific
@@ -463,17 +494,20 @@ export const ARCHITECTURE_RULES = [
     // transport- and UI-neutral by contract: the direction is
     // `PiTui mechanics -> tui/transcript -> domain/transcript`, so a domain
     // module reaching a renderer/backend owner means the fact was misclassified
-    // and must be split, never allowlisted. The generic `domain-imports-*` and
-    // Direct rules exclude this subtree from their `applies`, so this rule is
-    // the single owner of its static AND literal-dynamic edges (the pattern the
-    // Remote rule already uses for `app/remote/**`).
+    // and must be split, never allowlisted. The rule is CLOSED-WORLD (see
+    // `isDomainTranscriptBackendMechanics`): only domain siblings, the frozen
+    // transitional pure root VALUE helpers and the two TYPE-ONLY compatibility
+    // edges are admitted, so TS8 can only shrink the set. It also carries the
+    // type-only discriminator, so a value import can never ride along on a
+    // type-only allowance.
     id: 'domain-transcript-imports-backend-mechanics',
     message:
-      'src/domain/transcript/** is the transport/UI-neutral transcript semantic authority: it must not import TUI/renderer '
-      + 'mechanics, application currentness, the Direct/Remote adapters, PiTui, Tern or the src/transcript.ts facade '
-      + '(split the fact into tui/components/** instead of allowlisting it)',
+      'src/domain/transcript/** is the transport/UI-neutral transcript semantic authority: it may import only its domain '
+      + 'siblings, the frozen transitional pure root helpers (value: context/content-block-presentation/failure-presentation/'
+      + 'present/token-usage; type-only: icons/assistant-stream-port) and official DSH semantic packages — every other edge '
+      + '(tui/**, app/**, runtime/direct|remote, commands.ts, display-preset.ts, transcript.ts, PiTui, Tern, …) must be split instead',
     applies: (srcRel) => isDomainTranscriptSubtree(srcRel),
-    forbids: (resolved, specifier) => isDomainTranscriptBackendMechanics(resolved, specifier),
+    forbids: (resolved, specifier, meta) => isDomainTranscriptBackendMechanics(resolved, specifier, meta),
     checksValueDynamicImport: true,
     checksBareDynamicImport: true,
   },
@@ -867,7 +901,11 @@ export function findViolations(entries, options = {}) {
         : staticImportCandidates(relative).find(candidate => known.has(candidate)) ?? relative
       for (const rule of ARCHITECTURE_RULES) {
         if (!rule.applies(rel)) continue
-        if (!rule.forbids(target, specifier)) continue
+        // The edge kind travels with the resolved target so a rule can draw a
+        // type-only line (e.g. the TS7 domain's `icons.ts` /
+        // `assistant-stream-port.ts` allowances) instead of allowlisting the
+        // target wholesale for value imports too.
+        if (!rule.forbids(target, specifier, { typeOnly })) continue
         // An allowlist entry excuses ONLY a type-only import of that target.
         if (typeOnly && allowlist.has(`${rel}:${target}`)) continue
         violations.push({ file: rel, line, rule: rule.id, detail: `${rule.message} (${specifier})` })
