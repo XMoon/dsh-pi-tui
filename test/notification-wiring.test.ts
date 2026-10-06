@@ -115,8 +115,15 @@ test('focus reporting is enabled at mount and disabled on EVERY exit path', () =
     'the surface disables focus reporting exactly once (the constant use + import)')
   assert.equal(indexSource.split('notificationWriter.write(ENABLE_FOCUS_REPORTING)').length - 1, 0,
     'the runner no longer enables focus reporting itself')
-  assert.equal(indexSource.split('notificationWriter.write(DISABLE_FOCUS_REPORTING)').length - 1, 1,
+  // TS2 §11 moved the terminal-total fatal catch into the bootstrap composition
+  // zone (`app/bootstrap/lifecycle.ts`); it keeps exactly ONE runner-side
+  // disable of focus reporting. The write goes through the INJECTED guarded
+  // writer, and that seam's wiring is asserted too — so "some writeOutput call
+  // exists" can never stand in for the real guarded write.
+  assert.equal(indexSource.split('writeOutput(DISABLE_FOCUS_REPORTING)').length - 1, 1,
     'the fatal catch keeps the one runner-side disable')
+  assert.equal(indexSource.split('writeOutput: (text) => { notificationWriter.write(text) }').length - 1, 1,
+    'the fatal catch writes through the runner guarded notification writer')
   // The normal cleanup disables BEFORE the app dies (first teardown
   // step, before any throwable operation).
   const cleanupStart = indexSource.indexOf('const disposeSurface = (): void => {')
@@ -128,7 +135,7 @@ test('focus reporting is enabled at mount and disabled on EVERY exit path', () =
   // The startup-failure catch disables too (the body may have thrown
   // AFTER the mount enabled the mode).
   const fatalCatch = indexSource.slice(indexSource.indexOf('Terminal-total final catch'))
-  assert.ok(fatalCatch.includes('notificationWriter.write(DISABLE_FOCUS_REPORTING)'),
+  assert.ok(fatalCatch.includes('writeOutput(DISABLE_FOCUS_REPORTING)'),
     'the fatal catch must disable focus reporting')
 })
 
