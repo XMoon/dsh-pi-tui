@@ -187,19 +187,36 @@ test('application owners importing the bootstrap composition zone are rejected (
   // legal case therefore lists ONLY the target stub(s) it needs, and a paired
   // owner-importer negative proves the very same edge+target is really being
   // judged (so "allowed" can never mean "the rule never ran").
+  //
+  // Both halves are additionally CANONICALIZED against the known stub before the
+  // assertion runs: a target/prefix pair that resolves somewhere else (e.g. the
+  // facade row once generated `../bootstrap/lifecycle.ts`, which resolves to
+  // `bootstrap/lifecycle.ts` rather than the intended `app/bootstrap/lifecycle.ts`)
+  // fails LOUDLY here instead of silently re-asserting nothing.
   const legalCompositionEdges = [
     { file: 'index.ts', target: 'app/bootstrap', known: ['app/bootstrap.ts'], ownerTarget: '../bootstrap' },
     // `app/bootstrap.ts` -> `app/bootstrap/lifecycle.ts` (the facade consumes helpers).
-    { file: 'app/bootstrap.ts', target: 'bootstrap/lifecycle', known: ['app/bootstrap/lifecycle.ts'], ownerTarget: '../bootstrap/lifecycle' },
+    { file: 'app/bootstrap.ts', target: 'app/bootstrap/lifecycle', known: ['app/bootstrap/lifecycle.ts'], ownerTarget: '../bootstrap/lifecycle' },
     // sibling helper -> helper.
     { file: 'app/bootstrap/runtime-selection.ts', target: 'app/bootstrap/lifecycle', known: ['app/bootstrap/lifecycle.ts'], ownerTarget: '../bootstrap/lifecycle' },
   ]
   const ownerImporter = 'app/surface/runtime.ts'
+  const resolvesToStub = (importer, specifier, stub) =>
+    staticImportCandidates(resolveRelativeImport(importer, specifier)).includes(stub)
   for (const { file, target, known, ownerTarget } of legalCompositionEdges) {
     const depth = file.split('/').length - 1
     const prefix = depth === 0 ? './' : '../'.repeat(depth)
     assert.equal(known.includes(file), false, `${file} must not also be a scanned stub (it would overwrite its own imports)`)
+    assert.equal(known.length, 1, 'each legal case pairs with exactly ONE known stub')
     const knownEntries = known.map(rel => entry(rel, 'export const stub = 1\n'))
+    assert.ok(
+      resolvesToStub(file, `${prefix}${target}.ts`, known[0]),
+      `${file} -> ${prefix}${target}.ts must canonically resolve to the known stub ${known[0]}`,
+    )
+    assert.ok(
+      resolvesToStub(ownerImporter, `${ownerTarget}.ts`, known[0]),
+      `${ownerImporter} -> ${ownerTarget}.ts must target the SAME stub ${known[0]}`,
+    )
     for (const ext of spellings) {
       const specifier = `${prefix}${target}${ext}`
       assert.deepEqual(
