@@ -23,8 +23,9 @@
  * supported production source extensions are scanned (`.ts`, `.tsx`, `.mts`,
  * `.cts`, including their `.d.*` declaration forms), so neither the dependency
  * rules nor the root ledger can be bypassed by choosing `.tsx`; static edges
- * resolve both explicit `.ts` specifiers and the NodeNext emitted extensions
- * (`.js` -> `.ts`/`.d.ts`, `.mjs` -> `.mts`/`.d.mts`, `.cjs` -> `.cts`/`.d.cts`). Out of
+ * resolve both explicit `.ts`/`.tsx` specifiers and the NodeNext emitted
+ * extensions (`.js` -> `.ts`/`.tsx`/`.d.ts`, `.jsx` -> `.tsx`/`.ts`/`.d.ts`,
+ * `.mjs` -> `.mts`/`.d.mts`, `.cjs` -> `.cts`/`.d.cts`). Out of
  * scope BY DESIGN: the VALUE dynamic `import('...')` call (the
  * sanctioned lazy backend-loading seam — see the migration doc §Startup),
  * CommonJS `require('...')` calls (this tree is ESM), and path aliases (the
@@ -248,16 +249,30 @@ export function resolveRelativeImport(srcRel, specifier) {
 }
 
 /**
+ * The TypeScript parser kind for one production source path. `.tsx` must be
+ * parsed as TSX, otherwise a legal JSX tree hides its `import('...')` TYPE
+ * queries and the dependency rules can be bypassed by the file extension. The
+ * `.ts`/`.mts`/`.cts` grammar (generics, angle-bracket assertions) is unchanged.
+ * @param {string} rel src-relative path (or a synthetic name; default `module.ts`)
+ * @returns {import('typescript').ScriptKind}
+ */
+export function scriptKindOf(rel = 'module.ts') {
+  return rel.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+}
+
+/**
  * Extract every STATIC import/export-from/import-equals specifier AND every
  * `import('...')` TYPE query (`type T = import('...').T` / `typeof import(...)`)
  * with its 1-based line number and whether it is TYPE-ONLY, via the TypeScript
- * parser. Comments and multi-line `from` clauses are handled correctly; a VALUE
- * dynamic `import('...')` call is intentionally not a static edge.
+ * parser (the file kind follows `rel`, so `.tsx` JSX is parsed as TSX). Comments
+ * and multi-line `from` clauses are handled correctly; a VALUE dynamic
+ * `import('...')` call is intentionally not a static edge.
  * @param {string} source file contents
+ * @param {string} [rel] src-relative path (drives the parser kind)
  * @returns {Array<{ specifier: string, line: number, typeOnly: boolean }>}
  */
-export function parseImportSpecifiers(source) {
-  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS)
+export function parseImportSpecifiers(source, rel = 'module.ts') {
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, false, scriptKindOf(rel))
   const out = []
   const lineOf = (node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1
   const importTypeArgument = (node) => {
@@ -301,10 +316,11 @@ export function parseImportSpecifiers(source) {
  * imports, export-from clauses, and `import('...')` TYPE queries are not
  * reported here.
  * @param {string} source file contents
+ * @param {string} [rel] src-relative path (drives the parser kind; `.tsx` => TSX)
  * @returns {Array<{ specifier: string, line: number }>}
  */
-export function parseValueDynamicImports(source) {
-  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS)
+export function parseValueDynamicImports(source, rel = 'module.ts') {
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, false, scriptKindOf(rel))
   const out = []
   const visit = (node) => {
     if (
@@ -340,7 +356,7 @@ export function findRemoteDynamicImportViolations(entries) {
   const violations = []
   const sanctionedEdges = []
   for (const { rel, source } of entries) {
-    for (const { specifier, line } of parseValueDynamicImports(source)) {
+    for (const { specifier, line } of parseValueDynamicImports(source, rel)) {
       const resolved = resolveRelativeImport(rel, specifier)
       if (resolved === undefined) continue
       const target = staticImportCandidates(resolved).find(candidate => known.has(candidate)) ?? resolved
@@ -375,9 +391,11 @@ export function findRemoteDynamicImportViolations(entries) {
  * never match, and parenthesized / `as`-cast / non-null constructor references
  * are unwrapped). Alias or factory indirection cannot be resolved statically and
  * is out of scope.
+ * @param {string} source file contents
+ * @param {string} [rel] src-relative path (drives the parser kind; `.tsx` => TSX)
  */
-export function findDirectAdapterConstructions(source) {
-  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS)
+export function findDirectAdapterConstructions(source, rel = 'module.ts') {
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, false, scriptKindOf(rel))
   const out = []
   const unwrap = (expr) => {
     let current = expr
@@ -437,9 +455,17 @@ export function collectSourceEntries(dir = SRC) {
  */
 export function staticImportCandidates(resolved) {
   if (resolved.endsWith('.ts') || resolved.endsWith('.tsx') || resolved.endsWith('.mts') || resolved.endsWith('.cts')) return [resolved]
+  // TypeScript NodeNext emitted-extension substitution, verified against
+  // `ts.resolveModuleName`:
+  //   `.js`  -> `.ts`, `.tsx`, `.d.ts`
+  //   `.jsx` -> `.tsx`, `.ts`, `.d.ts`
   if (resolved.endsWith('.js')) {
     const stem = resolved.slice(0, -3)
-    return [`${stem}.ts`, `${stem}.d.ts`, resolved]
+    return [`${stem}.ts`, `${stem}.tsx`, `${stem}.d.ts`, resolved]
+  }
+  if (resolved.endsWith('.jsx')) {
+    const stem = resolved.slice(0, -4)
+    return [`${stem}.tsx`, `${stem}.ts`, `${stem}.d.ts`, resolved]
   }
   if (resolved.endsWith('.mjs')) {
     const stem = resolved.slice(0, -4)
@@ -475,7 +501,7 @@ export function buildStaticEdges(entries) {
   const edges = new Map()
   for (const { rel, source } of entries) {
     const targets = new Set()
-    for (const { specifier } of parseImportSpecifiers(source)) {
+    for (const { specifier } of parseImportSpecifiers(source, rel)) {
       const resolved = resolveRelativeImport(rel, specifier)
       if (resolved === undefined) continue
       const hit = staticImportCandidates(resolved).find(candidate => known.has(candidate))
@@ -513,7 +539,7 @@ export function findViolations(entries, options = {}) {
   const imports = new Map()
   const sourceByRel = new Map()
   for (const { rel, source } of entries) {
-    imports.set(rel, parseImportSpecifiers(source))
+    imports.set(rel, parseImportSpecifiers(source, rel))
     sourceByRel.set(rel, source)
   }
   const known = new Set(entries.map(entry => entry.rel))
@@ -539,7 +565,7 @@ export function findViolations(entries, options = {}) {
       }
     }
     if (rel.startsWith('app/surface/')) {
-      for (const { name, line } of findDirectAdapterConstructions(sourceByRel.get(rel))) {
+      for (const { name, line } of findDirectAdapterConstructions(sourceByRel.get(rel), rel)) {
         if (DIRECT_APPLICATION_EXCEPTIONS.has(name)) continue
         violations.push({
           file: rel,
