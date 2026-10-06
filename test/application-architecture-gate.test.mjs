@@ -1225,6 +1225,86 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
   }
 })
 
+test('the transcript semantic domain rejects backend/renderer mechanics (TS7)', () => {
+  // `src/domain/transcript/**` is the ONE transport/UI-neutral transcript
+  // semantic/lifecycle authority. The direction is
+  // `PiTui mechanics -> tui/transcript -> domain/transcript`, so every
+  // renderer/application/transport owner below must be rejected — statically,
+  // type-only and through a literal dynamic import — by this ONE owning rule:
+  // the generic `domain-imports-*` / Direct rules exclude the subtree from
+  // their `applies` (the same single-owner carve-out the Remote rule uses).
+  const forbidden = [
+    ['../../tui/transcript/structure.ts', 'tui/transcript/structure.ts'],
+    ['../../tui/components/transcript/context-row.ts', 'tui/components/transcript/context-row.ts'],
+    ['../../app/surface/runtime.ts', 'app/surface/runtime.ts'],
+    ['../../app/remote/runtime.ts', 'app/remote/runtime.ts'],
+    ['../../runtime/direct/backend-direct.ts', 'runtime/direct/backend-direct.ts'],
+    ['../../runtime/remote/session-reader-remote.ts', 'runtime/remote/session-reader-remote.ts'],
+    ['@xmoon76/pi-tui', '@xmoon76/pi-tui'],
+    ['@stencil-hq/tern', '@stencil-hq/tern'],
+    ['../../tui-app.ts', 'tui-app.ts'],
+    ['../../renderer-registry.ts', 'renderer-registry.ts'],
+    ['../../theme.ts', 'theme.ts'],
+    ['../../transcript.ts', 'transcript.ts'],
+  ]
+  for (const [specifier, target] of forbidden) {
+    const valueImport = findViolations([
+      entry('domain/transcript/x.ts', `import { x } from '${specifier}'\n`),
+      entry(target, 'export const x = 1\n'),
+    ])
+    assert.deepEqual(
+      valueImport.map(v => v.rule),
+      ['domain-transcript-imports-backend-mechanics'],
+      `domain/transcript/x.ts -> ${specifier} must be rejected exactly once by the TS7 rule`,
+    )
+    const typeImport = findViolations([
+      entry('domain/transcript/x.ts', `import type { X } from '${specifier}'\n`),
+      entry(target, 'export type X = 1\n'),
+    ])
+    assert.deepEqual(
+      typeImport.map(v => v.rule),
+      ['domain-transcript-imports-backend-mechanics'],
+      `domain/transcript/x.ts -> ${specifier} (type-only) must be rejected too`,
+    )
+  }
+  // The literal dynamic spellings reach the same modules: a relative renderer
+  // target and a bare package specifier both fail (the generic rules do not opt
+  // into dynamic parsing, so only this rule can close that escape hatch).
+  const dynamicRelative = findViolations([
+    entry('domain/transcript/x.ts', "const m = await import('../../tui/components/transcript/context-row.ts')\n"),
+    entry('tui/components/transcript/context-row.ts', 'export const m = 1\n'),
+  ])
+  assert.deepEqual(dynamicRelative.map(v => v.rule), ['domain-transcript-imports-backend-mechanics'])
+  const dynamicPackage = findViolations([
+    entry('domain/transcript/x.ts', "const m = await import('@xmoon76/pi-tui')\n"),
+  ])
+  assert.equal(dynamicPackage.length, 1, 'a bare renderer-package dynamic import must be rejected')
+  assert.equal(dynamicPackage[0].rule, 'domain-transcript-imports-backend-mechanics')
+  // Positive controls: the domain's own siblings, the neutral structural live
+  // port, the carried pure root compatibility helpers and the correct
+  // `tui/transcript -> domain/transcript` direction stay open.
+  const allowed = [
+    ['domain/transcript/x.ts', './types.ts', 'domain/transcript/types.ts', 'export const x = 1\n'],
+    ['domain/transcript/x.ts', './search.ts', 'domain/transcript/search.ts', 'export const x = 1\n'],
+    [
+      'domain/transcript/x.ts',
+      '../../runtime/assistant-stream-port.ts',
+      'runtime/assistant-stream-port.ts',
+      'export const x = 1\n',
+    ],
+    ['domain/transcript/x.ts', '../../token-usage.ts', 'token-usage.ts', 'export const x = 1\n'],
+    ['domain/transcript/x.ts', '../../icons.ts', 'icons.ts', 'export type IconSemantic = 1\n'],
+    ['tui/transcript/x.ts', '../../domain/transcript/types.ts', 'domain/transcript/types.ts', 'export const x = 1\n'],
+  ]
+  for (const [file, specifier, target, source] of allowed) {
+    assert.deepEqual(
+      findViolations([entry(file, `import { x } from '${specifier}'\n`), entry(target, source)]),
+      [],
+      `${file} -> ${specifier} must stay allowed`,
+    )
+  }
+})
+
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
   const specs = parseValueDynamicImports(
     [

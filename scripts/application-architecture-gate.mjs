@@ -87,6 +87,14 @@
  *      that introduces each later zone.
  *   8. (TS1) `src/runtime/**` must not import `src/tui/**`: the semantic/adaptor
  *      layer never depends on terminal presentation.
+ *   9. (TS7) `src/domain/transcript/**` — the ONE transport/UI-neutral
+ *      transcript semantic/lifecycle authority — must not import TUI/renderer
+ *      mechanics, application currentness, the Direct/Remote adapters, PiTui,
+ *      Tern, or the `src/transcript.ts` compatibility facade. The direction is
+ *      `PiTui mechanics -> tui/transcript -> domain/transcript`, and a domain
+ *      module needing a renderer/application fact means the fact was
+ *      misclassified and must be split, never allowlisted. `app/remote/**` and
+ *      `runtime/remote/**` keep their more specific Remote owning rule.
  *
  * Root source placement (plan §20.3): `scripts/source-root-baseline.json` is a
  * shrinking ledger of the ROOT production modules. A new root module
@@ -234,6 +242,54 @@ export function isTranscriptRendererMechanics(resolved, specifier) {
   return TRANSCRIPT_CORE_FORBIDDEN_TARGETS.has(resolved)
 }
 
+const DOMAIN_TRANSCRIPT_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
+
+/**
+ * The concrete owners the transcript semantic/lifecycle domain must stay blind
+ * to. `src/theme.ts` is presentation chrome; `src/icons.ts` is deliberately NOT
+ * here because the domain carries the existing type-only `IconSemantic`
+ * compatibility field (TS7 plan §9.3), and the residual pure root helpers
+ * (`src/context.ts`, `src/token-usage.ts`, `src/present.ts`,
+ * `src/content-block-presentation.ts`, `src/failure-presentation.ts`) are the
+ * documented transitional TS8 edges. The neutral structural port
+ * `src/runtime/assistant-stream-port.ts` stays open by contract (plan §18).
+ */
+const DOMAIN_TRANSCRIPT_FORBIDDEN_TARGETS = new Set([
+  'transcript.ts',
+  'tui-app.ts',
+  'renderer-registry.ts',
+  'theme.ts',
+])
+
+/**
+ * True when a `domain/transcript/**` import reaches a renderer/backend owner.
+ * This is the TS7 sublayer contract: it re-states the generic
+ * `tui/**`/`app/**`/Direct/Remote edges AND closes the gaps those generic rules
+ * cannot see — PiTui/Tern, the concrete chrome owners and the `src/transcript.ts`
+ * facade — including every literal-dynamic spelling. The four generic rules
+ * exclude this subtree from their `applies` (see
+ * `isDomainTranscriptSubtree`), so every violation has exactly one owning rule
+ * id while the dynamic escape hatch stays closed.
+ * @param {string} resolved canonicalized target (or bare specifier)
+ * @param {string} specifier the raw import specifier
+ */
+export function isDomainTranscriptBackendMechanics(resolved, specifier) {
+  if (DOMAIN_TRANSCRIPT_FORBIDDEN_PACKAGES.some(pkg => specifier === pkg || specifier.startsWith(`${pkg}/`))) return true
+  if (resolved.startsWith('tui/')) return true
+  if (resolved.startsWith('app/')) return true
+  if (resolved.startsWith('runtime/direct/')) return true
+  if (isRemoteComposition(resolved, specifier)) return true
+  return DOMAIN_TRANSCRIPT_FORBIDDEN_TARGETS.has(resolved)
+}
+
+/** The TS7 transcript semantic-authority subtree, owned by the specific
+ * `domain-transcript-imports-backend-mechanics` rule instead of the generic
+ * `domain-imports-*` / Direct rules (the same single-owner carve-out the Remote
+ * rule uses for `app/remote/**`). */
+export function isDomainTranscriptSubtree(srcRel) {
+  return srcRel.startsWith('domain/transcript/')
+}
+
 /**
  * The per-file static dependency-direction rules. `applies` decides whether the
  * rule governs the importing file; `forbids` decides whether the import target
@@ -261,21 +317,23 @@ export const ARCHITECTURE_RULES = [
     // duplicate Direct rule is added here.
     id: 'domain-imports-app',
     message: 'src/domain/** must not import src/app/** (the neutral domain layer never depends on application ownership)',
-    applies: (srcRel) => srcRel.startsWith('domain/'),
-    // `app/remote/**` is reported by the more specific Remote rule below, so
-    // each violation has exactly one owning rule id.
+    // `domain/transcript/**` is owned by the TS7 rule below (single owner for
+    // its static AND literal-dynamic edges); `app/remote/**` outside that
+    // subtree is reported by the more specific Remote rule, so each violation
+    // has exactly one owning rule id.
+    applies: (srcRel) => srcRel.startsWith('domain/') && !isDomainTranscriptSubtree(srcRel),
     forbids: (resolved) => resolved.startsWith('app/') && !resolved.startsWith('app/remote/'),
   },
   {
     id: 'domain-imports-tui',
     message: 'src/domain/** must not import src/tui/** (the neutral domain layer never depends on terminal presentation)',
-    applies: (srcRel) => srcRel.startsWith('domain/'),
+    applies: (srcRel) => srcRel.startsWith('domain/') && !isDomainTranscriptSubtree(srcRel),
     forbids: (resolved) => resolved.startsWith('tui/'),
   },
   {
     id: 'domain-imports-remote-composition',
     message: 'src/domain/** must not import experimental Remote composition (domain primitives stay transport-neutral)',
-    applies: (srcRel) => srcRel.startsWith('domain/'),
+    applies: (srcRel) => srcRel.startsWith('domain/') && !isDomainTranscriptSubtree(srcRel),
     forbids: (resolved, specifier) => isRemoteComposition(resolved, specifier),
   },
   {
@@ -283,7 +341,7 @@ export const ARCHITECTURE_RULES = [
     message:
       'only src/index.ts, src/app/bootstrap.ts, src/app/direct/** and src/runtime/** may import '
       + 'src/app/direct/** or src/runtime/direct/** (non-Direct app owners and presentation consume ports/Backend/callbacks)',
-    applies: (srcRel) => !isDirectCompositionFile(srcRel),
+    applies: (srcRel) => !isDirectCompositionFile(srcRel) && !isDomainTranscriptSubtree(srcRel),
     forbids: (resolved) => resolved.startsWith('app/direct/') || resolved.startsWith('runtime/direct/'),
   },
   {
@@ -387,6 +445,27 @@ export const ARCHITECTURE_RULES = [
     // package specifier. `checksBareDynamicImport` is therefore opted into here
     // and NOWHERE else: the older rules keep their exact baseline scope, where a
     // non-relative dynamic specifier was never resolved into a target.
+    checksValueDynamicImport: true,
+    checksBareDynamicImport: true,
+  },
+  {
+    // TS7: `src/domain/transcript/**` is the ONE transcript semantic/lifecycle
+    // authority (the fold, classification, Context form/provenance, Workflow
+    // projection, search corpus, grouping and window semantics). It is
+    // transport- and UI-neutral by contract: the direction is
+    // `PiTui mechanics -> tui/transcript -> domain/transcript`, so a domain
+    // module reaching a renderer/backend owner means the fact was misclassified
+    // and must be split, never allowlisted. The generic `domain-imports-*` and
+    // Direct rules exclude this subtree from their `applies`, so this rule is
+    // the single owner of its static AND literal-dynamic edges (the pattern the
+    // Remote rule already uses for `app/remote/**`).
+    id: 'domain-transcript-imports-backend-mechanics',
+    message:
+      'src/domain/transcript/** is the transport/UI-neutral transcript semantic authority: it must not import TUI/renderer '
+      + 'mechanics, application currentness, the Direct/Remote adapters, PiTui, Tern or the src/transcript.ts facade '
+      + '(split the fact into tui/components/** instead of allowlisting it)',
+    applies: (srcRel) => isDomainTranscriptSubtree(srcRel),
+    forbids: (resolved, specifier) => isDomainTranscriptBackendMechanics(resolved, specifier),
     checksValueDynamicImport: true,
     checksBareDynamicImport: true,
   },
