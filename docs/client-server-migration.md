@@ -107,7 +107,8 @@ locality/reconnect/teardown axis on that same experimental wire path.
 
 ```text
 Baseline
-  dsh-pi-tui: M3-6 PR4 branch HEAD (final PR4 commit; see the PR)
+  dsh-pi-tui: reviewed implementation snapshot `8d201d16` (the branch tip and
+              the PR record the later docs-only closure metadata)
   DSH qualification: exact 0.2.0-rc.2
   production backend: Direct
   experimental backend: in-process official wire
