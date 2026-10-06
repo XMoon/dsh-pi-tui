@@ -295,6 +295,16 @@ export const ARCHITECTURE_RULES = [
       + 'semantic contracts / injected factories; the composition zone selects concrete TUI implementations)',
     applies: (srcRel) => srcRel.startsWith('app/') && !isBootstrapCompositionFile(srcRel),
     forbids: (resolved) => resolved.startsWith('tui/'),
+    // A literal VALUE dynamic import (`await import('.../tui/...')`) reaches the
+    // same concrete module as a static one, and `parseImportSpecifiers()` (the
+    // list every other rule consumes) does not see it — it is parsed by
+    // `parseValueDynamicImports()`. Without this flag the lock would have an
+    // escape hatch. Only rules that opt in are evaluated against dynamic
+    // imports, because the sanctioned Remote lazy edge
+    // (`runtime/backend-loader.ts` -> `app/remote/runtime.ts`) must stay a
+    // dynamic, runtime-selected edge and would be re-classified by the generic
+    // runtime/app rules if they were applied to dynamic imports wholesale.
+    checksValueDynamicImport: true,
   },
   {
     // TS1 broadens the v1 command-layer rule to the whole long-lived TUI layer
@@ -663,6 +673,21 @@ export function findViolations(entries, options = {}) {
         if (!rule.forbids(target, specifier)) continue
         // An allowlist entry excuses ONLY a type-only import of that target.
         if (typeOnly && allowlist.has(`${rel}:${target}`)) continue
+        violations.push({ file: rel, line, rule: rule.id, detail: `${rule.message} (${specifier})` })
+      }
+    }
+    // A literal VALUE dynamic import never reaches `parseImportSpecifiers()`, so
+    // a rule that only consumes that list would be bypassed by
+    // `await import('.../tui/...')`. Rules that opt in are evaluated against
+    // `parseValueDynamicImports()` too, with the same canonicalized target.
+    for (const rule of ARCHITECTURE_RULES) {
+      if (rule.checksValueDynamicImport !== true) continue
+      if (!rule.applies(rel)) continue
+      for (const { specifier, line } of parseValueDynamicImports(sourceByRel.get(rel), rel)) {
+        const dynamicRelative = resolveRelativeImport(rel, specifier)
+        if (dynamicRelative === undefined) continue
+        const target = staticImportCandidates(dynamicRelative).find(candidate => known.has(candidate)) ?? dynamicRelative
+        if (!rule.forbids(target, specifier)) continue
         violations.push({ file: rel, line, rule: rule.id, detail: `${rule.message} (${specifier})` })
       }
     }

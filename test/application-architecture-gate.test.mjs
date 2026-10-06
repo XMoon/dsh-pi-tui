@@ -994,6 +994,32 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
       `${file} -> ${specifier} must stay allowed`,
     )
   }
+  // A literal VALUE dynamic import reaches the same concrete module and must not
+  // escape the lock: it is parsed by `parseValueDynamicImports()`, which no other
+  // rule consumes, so `app-imports-tui` opts into it explicitly.
+  const dynamic = findViolations([
+    entry('app/surface/plugin-manager-runtime.ts', "const { PluginManagerPanel } = await import('../../tui/plugin-manager/panel.ts')\n"),
+    entry('tui/plugin-manager/panel.ts', 'export const PluginManagerPanel = 1\n'),
+  ])
+  assert.equal(dynamic.length, 1, 'app owner -> tui/** value dynamic import must be rejected')
+  assert.equal(dynamic[0].rule, 'app-imports-tui')
+  assert.equal(dynamic[0].line, 1)
+  // …while the composition zone keeps its dynamic selection freedom.
+  assert.deepEqual(
+    findViolations([
+      entry('app/bootstrap.ts', "const { createPluginManagerPanel } = await import('../tui/plugin-manager/panel.ts')\n"),
+      entry('tui/plugin-manager/panel.ts', 'export const createPluginManagerPanel = 1\n'),
+    ]),
+    [],
+    'the bootstrap composition zone may also dynamically import tui/**',
+  )
+  // The sanctioned Remote lazy edge stays governed ONLY by its own rule: the
+  // generic runtime/app rules must not be applied to dynamic imports wholesale.
+  const remoteEdge = findViolations([
+    entry('runtime/backend-loader.ts', "const backend = await import('../app/remote/runtime.ts')\n"),
+    entry('app/remote/runtime.ts', 'export const backend = 1\n'),
+  ])
+  assert.deepEqual(remoteEdge, [], 'the sanctioned Remote dynamic edge is not re-classified')
 })
 
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
