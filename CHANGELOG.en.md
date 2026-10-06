@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tern terminal compatibility: the pane's working directory now follows the
+  current Session (OSC 7), re-reported after startup, a session switch, a
+  fullscreen round-trip and an `$EDITOR` round-trip. A Direct session without
+  an official cwd falls back to the launch directory; a DSH Remote backend
+  publishes nothing (a Host cwd is never leaked into the Client terminal).
+
 - Tern terminal compatibility: the Agent's running state now drives the
   terminal's native progress indicator (OSC 9;4), and completion
   notifications use Tern's native OSC 9 toast under `Auto`. Every time the

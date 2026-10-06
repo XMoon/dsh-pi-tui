@@ -1065,6 +1065,7 @@ export function applyRunnerWithRuntime(
         setGoalText: (text) => status.setGoal(text),
         refresh: () => status.refresh(),
         refreshTerminalTitle: () => status.refreshTerminalTitle(),
+        refreshTerminalCwd: () => status.refreshTerminalCwd(),
         updateWelcomeCard: () => status.updateWelcomeCard(),
         scheduleInitialMeasurement: (sessionId) => status.scheduleInitialMeasurement(sessionId),
       },
@@ -2307,8 +2308,10 @@ export function applyRunnerWithRuntime(
     // immediately in a fresh window (the per-session reseed replaces it
     // when the first session is born).
     history.activateBootRecall()
-    // Fresh/deferred startup title: no session yet — cwd identity only.
+    // Fresh/deferred startup title: no session yet — cwd identity only. The
+    // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
     status.refreshTerminalTitle()
+    status.refreshTerminalCwd()
     surface.attachEventRouting({
       isCleanedUp: () => cleanedUp,
       isAttachedSession: (session) => {
@@ -2669,6 +2672,7 @@ export function applyRunnerWithRuntime(
       app.setWelcomeIdle(true)
       status.refresh()
       status.refreshTerminalTitle()
+      status.refreshTerminalCwd()
     }
     // Command registration is sessionless: it must run on BOTH startup
     // surfaces (resume path registers inside initLiveSession; the deferred

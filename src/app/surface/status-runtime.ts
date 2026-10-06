@@ -202,6 +202,13 @@ export interface StatusRuntime {
   sessionCwd(): string
   /** Derive + write the terminal window title. */
   refreshTerminalTitle(): void
+  /**
+   * Derive + forward the terminal-LOCAL cwd (OSC 7, plan §4.3): the eligible
+   * Direct Session header cwd, else the Direct launch cwd. A Remote Host cwd
+   * is never forwarded — the pane belongs to the Client machine. The TUI owns
+   * the actual terminal write.
+   */
+  refreshTerminalCwd(): void
   /** The cheap footer/status refresh (never measures context). */
   refresh(): void
   /**
@@ -399,6 +406,36 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       cwd: sessionCwdFact(),
     })
     setTerminalTitle(title)
+  }
+
+  /**
+   * The terminal-LOCAL cwd fact (plan §4.3): what the TUI may publish through
+   * OSC 7. `sessionCwdFact()` is the display/execution fact and
+   * `sessionCwd()` adds a Client-local execution fallback; NEITHER is
+   * automatically terminal metadata, because Tern may use the pane cwd for
+   * local pane/split behavior. Therefore:
+   *
+   * - Direct live Session → the official Session header cwd;
+   * - Direct sessionless surface → the Client launch cwd (the process really
+   *   runs there);
+   * - DSH Remote backend → `undefined`, fail closed: the Host cwd is a
+   *   DIFFERENT machine from the terminal that owns the pane, and no
+   *   co-location is proven.
+   *
+   * A live header WITHOUT a cwd falls back to the launch cwd on the Direct
+   * branch (the pane still sits on this machine), which is why this fact is
+   * not `sessionCwdFact()`.
+   */
+  const terminalCwdFact = (): string | undefined => {
+    if (deps.remote !== undefined) return undefined
+    const agent = deps.liveAgent()
+    return agent?.session.header.cwd ?? deps.clientCwd
+  }
+
+  /** Forward the terminal-local cwd to the mounted TUI (it owns the write and
+   *  the terminal-ownership lifecycle; see TuiApp.setTerminalCwd). */
+  const refreshTerminalCwd = (): void => {
+    deps.surface.app.setTerminalCwd(terminalCwdFact())
   }
 
   /** The footer model label: the live selection (with effort) when one exists,
@@ -971,6 +1008,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     updateWelcomeCard,
     sessionCwd,
     refreshTerminalTitle,
+    refreshTerminalCwd,
     refresh: refreshStatusCheap,
     cyclePermission,
     markContextDirty,

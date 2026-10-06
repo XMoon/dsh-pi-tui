@@ -143,7 +143,7 @@ function harness(): Harness {
       planActive: () => false,
     },
     status: {
-      setGoalText: () => {}, refresh: () => {}, refreshTerminalTitle: () => {},
+      setGoalText: () => {}, refresh: () => {}, refreshTerminalTitle: () => {}, refreshTerminalCwd: () => {},
       updateWelcomeCard: () => {}, scheduleInitialMeasurement: () => {},
     },
     history: { rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {} },
