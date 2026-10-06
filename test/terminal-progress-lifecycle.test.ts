@@ -100,6 +100,51 @@ test('a plain stop/start round-trip restores a still-running progress state', ()
   }
 })
 
+test('a stopped TuiApp folds the desired progress without writing the terminal', () => {
+  const { app, progress } = mountApp()
+  try {
+    app.stop()
+    app.setTerminalProgress(true)
+    assert.deepEqual(progress, [], 'a stopped surface never writes physical progress')
+    app.start()
+    assert.deepEqual(progress, [true], 'the restart projects the folded desired state exactly once')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a $EDITOR-suspended TuiApp folds status changes and projects once on resume', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const progress: boolean[] = []
+  vt.setProgress = (active: boolean) => { progress.push(active) }
+  let release!: (text: string) => void
+  const gate = new Promise<string>(resolve => { release = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: () => gate,
+    runOwned: () => {},
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setTerminalProgress(true)
+    // The suspend runs synchronously before the first await: $EDITOR now owns
+    // the terminal for the whole time this promise is pending.
+    const pending = app.launchExternalEditor()
+    assert.deepEqual(progress, [true], 'the suspend itself writes no progress')
+    // The Agent keeps reporting while $EDITOR is open: idle -> running again.
+    app.setTerminalProgress(false)
+    app.setTerminalProgress(true)
+    assert.deepEqual(progress, [true], 'a suspended terminal never receives progress bytes')
+    release('edited')
+    await pending
+    assert.deepEqual(progress, [true, true], 'the resume projects the latest desired state exactly once')
+  } finally {
+    app.dispose()
+  }
+})
+
 test('an external-editor suspend/resume restores a still-running progress state', async () => {
   const vt = new VirtualTerminal(80, 24)
   const progress: boolean[] = []

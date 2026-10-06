@@ -2232,6 +2232,16 @@ export class TuiApp {
    * value.
    */
   private terminalProgressActive = false
+  /**
+   * Whether the shared ProcessTerminal is currently OWNED for presentation by
+   * this TuiApp (started, not suspended/stopped). A suspended screen must
+   * never receive terminal control bytes: while `$EDITOR` — or any other
+   * process — owns the PTY, a progress write and its 1 s keepalive would
+   * interleave with that process's output. `setTerminalProgress` therefore
+   * only folds the desired state while this is false; every screen (re)start
+   * re-asserts it.
+   */
+  private terminalPresentationActive = false
   /** Re-vendor lifecycle follow-up P3: whether this surface currently
    * holds the process's single live-TUI slot (claimed at the first
    * successful start, released only by the FINAL dispose — never by
@@ -3666,7 +3676,7 @@ export class TuiApp {
     }
     // A stop() before this start (a plain stop/start round-trip) cleared the
     // physical progress indicator; re-assert the desired state (plan §7).
-    this.restoreTerminalProgress()
+    this.enterTerminalPresentation()
   }
 
   /**
@@ -3735,6 +3745,9 @@ export class TuiApp {
     // The stopped screen cannot paint: a latched profiler window would
     // otherwise bill the $EDITOR dwell time to the next post-resume frame.
     this.resetScrollProfileFrame()
+    // The PTY is about to belong to $EDITOR: fold the desired progress state
+    // only — never write (or keepalive) into the editor's terminal.
+    this.leaveTerminalPresentation()
     if (this.fullscreen !== undefined) {
       this.fullscreen.stop({ preserveScreen: true })
     } else {
@@ -3760,7 +3773,7 @@ export class TuiApp {
     }
     // The suspend stopped the active screen (clearing OSC 9;4 + its
     // keepalive): restore a still-desired busy state (plan §7/§12.7).
-    this.restoreTerminalProgress()
+    this.enterTerminalPresentation()
   }
 
   /** Leave raw mode and stop rendering. The process live-TUI slot is
@@ -3770,6 +3783,9 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * process-tui-slot.ts). */
   stop(): void {
+    // From here on this TuiApp no longer owns the terminal for presentation:
+    // a status arriving while stopped must only fold the desired state.
+    this.leaveTerminalPresentation()
     // M3-6 PR3: the stop is ONE ordered non-truncating batch — a throwing
     // teardown step (a scheme disposer, a screen stop) must never skip the
     // later independent resources. The ordinary stop() still does NOT release
@@ -3814,11 +3830,38 @@ export class TuiApp {
    * deduped (repeated `agent/status=running` must not churn the indicator),
    * and a synchronous terminal-write failure is contained (plan §16 — a
    * broken stdout must never crash the TUI).
+   *
+   * While the TuiApp does NOT own the terminal (stopped, or suspended for the
+   * external editor) the desired state is still folded — a
+   * running → idle → running sequence inside the $EDITOR round-trip is
+   * correct — but nothing is written; the next screen start re-asserts it.
    */
   setTerminalProgress(active: boolean): void {
     if (this.terminalProgressActive === active) return
     this.terminalProgressActive = active
+    if (!this.terminalPresentationActive) return
     this.writeTerminalProgress(active)
+  }
+
+  /**
+   * Claim terminal presentation ownership for progress projection. Called
+   * immediately after EVERY TuiApp-owned screen start (plan §7):
+   * `ProcessTerminal.stop()` cleared the physical indicator, so a still
+   * desired busy state is re-asserted here.
+   */
+  private enterTerminalPresentation(): void {
+    this.terminalPresentationActive = true
+    this.restoreTerminalProgress()
+  }
+
+  /**
+   * Relinquish terminal presentation ownership BEFORE any screen stops. From
+   * here on `setTerminalProgress` only folds the desired state, so a stopped
+   * or `$EDITOR`-suspended terminal never receives progress bytes; the
+   * terminal's own `stop()` owns the physical clear.
+   */
+  private leaveTerminalPresentation(): void {
+    this.terminalPresentationActive = false
   }
 
   /**
@@ -5745,6 +5788,9 @@ export class TuiApp {
       // did not consume.
       alt.addInputListener((data) => this.routeInput(data))
       alt.installViewportListener()
+      // The screen swap stops the terminal between the two starts: progress
+      // must not be written until the new screen owns it again (plan §7).
+      this.leaveTerminalPresentation()
       this.tui.stop()
       // The new alt's first paint is scheduled asynchronously: drop the
       // PREVIOUS alt instance's last-painted snapshot (and any in-flight
@@ -5753,7 +5799,7 @@ export class TuiApp {
       alt.start()
       // The main screen's stop cleared the physical progress indicator;
       // re-assert the desired state on the new alt screen (plan §7).
-      this.restoreTerminalProgress()
+      this.enterTerminalPresentation()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
       // shortcuts, but the editor never receives text or Enter). M9: focus
@@ -5764,6 +5810,7 @@ export class TuiApp {
       // arrive THERE, so re-register the fan-out on both screens.
       this.refreshSchemeRegistrations()
     } else {
+      this.leaveTerminalPresentation()
       this.fullscreen?.stop()
       this.fullscreen = undefined
       this.fullscreenScroll = undefined
@@ -5772,7 +5819,7 @@ export class TuiApp {
       this.tui.start()
       // The alt screen's stop cleared the physical progress indicator;
       // re-assert the desired state on the main screen (plan §7).
-      this.restoreTerminalProgress()
+      this.enterTerminalPresentation()
       // The alt screen's stop disables focus reporting (?1004l rides the
       // mouse-disable sequence). The main screen keeps needing focus
       // events (the host's completion-notification tracker observes
