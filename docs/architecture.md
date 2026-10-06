@@ -229,12 +229,28 @@ the cross-sub-owner disposal ordering. The independent surface lifetimes live in
 own application-level owners next to it:
 
 ```text
-app/surface/notification-runtime.ts      completion notification + terminal focus tracking
+app/surface/notification-runtime.ts      completion notification lifecycle + completion-owner/
+                                         status/focus-policy coordination (the terminal facts come
+                                         from the injected structural presentation)
 app/surface/extension-runtime.ts         extension surface host + attach/detach lifetime
 app/surface/plugin-manager-runtime.ts    SurfaceRuntime <-> PluginManagerController glue
 app/surface/task-runtime.ts              Task Center + Job viewer state machine
 app/surface/interaction-runtime.ts       approval/question surface attachment
 app/surface/event-routing.ts             application-level presentation event routing
+```
+
+The notification split (TS5 §14) keeps the application status/current-agent authority here and
+the terminal implementation in the TUI layer:
+
+```text
+domain/notification/**    mode/method policy + the neutral completion state machine + focus state
+app/surface/notification-runtime.ts
+                          the authoritative agent/status lifecycle, the completion-owner fence
+                          and the mode/method + focus-policy orchestration
+        ↓ injected structural port (`TerminalNotificationPresentation`)
+tui/notification/**       the focus tracker, the OSC/bell notifier, the focus-reporting
+                          `CSI ? 1004` writes and the concrete terminal presentation; selected
+                          by `app/bootstrap.ts` and handed to `createSurfaceRuntime()`
 ```
 
 Each is constructed exactly once from `createSurfaceRuntime()`; no bootstrap code
