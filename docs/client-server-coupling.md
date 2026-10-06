@@ -405,7 +405,6 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/runtime/presentation-read-port.ts` | (none) | Structural D1.3 presentation read contract; keeps durable history and live inputs as separate detached planes, plus window flags and open state, without a TUI or transport object. |
 | `src/runtime/direct/presentation-read-direct.ts` | (none) | Direct D1.3 presentation reference adapter over existing Session event snapshots and assistant stream baseline; no duplicate history or stream tracker. |
 | `src/runtime/remote/presentation-read-remote.ts` | (none) | Experimental D1.3 adapter over official `SessionBinding.eventSource`, `SessionFace` snapshots, and `loadOlder()` only; it preserves source order within each plane and protects detached payloads. |
-| `src/runtime/remote/presentation-read-shadow.ts` | (none) | Experimental D1.3 semantic comparator; compares bounded durable/live ranges and rebuilds fresh Transcript, window, and Focus projections with lifecycle fences. |
 | `src/runtime/direct/session-writer-direct.ts` | `sessionTitle`, `fileUploads` | The Direct `SessionWriter` adapter (D2.1) — identity-based (sessionId) semantic operations over the live Agent resolver and the `ctx.sessionTitle` service: explicit-mode ordinary prompts, dsh-web-style FIFO per-occurrence `updateQueue({ kind: 'steer' })` calls, official text-only/non-whitespace edit validation (with malformed structural blocks treated as non-text), edit/remove/steer queue mutations, user `rpcId` file-upload retirement after remove, user cancel with pending inbox preserved, normalized rename, and title refresh. Ordinary session verbs retain their caller-authorized resolver; queue occurrence verbs may use the separately fenced exact live continuable-child viewer resolver. Steer orchestration, barriers and revalidation stay in the runner. Baseline entry retained from the M1.4 relocation and updated for the converged contract. |
 | `src/runtime/remote/session-writer-remote.ts` | (none) | Experimental M2/D2.2 `SessionWriter` adapter over the official `ClientSessions.binding(id).session` `SessionFace`. Identity-addressed writes only, and never a Client-global selection verb. alpha.2 made `binding()` borrow-only, so each write borrows the existing generation and pins it with a temporary `tuiOperation` reference for the whole operation (never materializing a cold Session); a replaced live binding fails the dispatch closed. The official `beginSubmission`→identified-`prompt` echo lifecycle, occurrence-level `updateQueue`, `cancel`, normalized `rename`, and an explicit `unsupported` title refresh. A Connection generation captured before dispatch fences the binding too; a `RemoteResult` failure is classified rejected/cancelled/indeterminate without a Remote-only taxonomy, and `session/writer-held` settles `rejected` with preserved `details` and actionable holder guidance. It resolves the prepared submission through a migration-local serializer seam and has no Host imports or production wiring. |
 | `src/runtime/remote/write-failure.ts` | (none) | Experimental M2/D2.2 settlement classifier: maps an official `RemoteResult` failure (or an assembly throw) onto the shared `WriteOutcome` vocabulary. Domain and `gateway/bad-request` codes are proven refusals; universal carrier codes stay `cancelled`/`indeterminate`. Host-free and transport-free. |
@@ -443,6 +442,17 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/sessions.ts` | `import:dsh-session` | Type-only session types. |
 | `src/stats.ts` | `import:dsh-session` | Type-only. |
 | `src/transcript.ts` | `import:dsh-session` | Type-only; transcript folding must consume the client session event/window, not transport (plan §20). |
+
+TS6 reclassified the former `src/runtime/remote/presentation-read-shadow.ts`
+row: the D1.3 Direct-vs-Remote presentation comparator is qualification
+oracle/tooling, not a runtime product adapter. It compares the SAME semantic
+projections the product renders, so once those projections moved into the
+backend-neutral `src/tui/transcript/**` core, keeping the comparator under
+`src/runtime/**` would have required a `runtime/** -> tui/**` allowlist. It now
+lives at `scripts/support/presentation-read-shadow.ts` (consumed by
+`scripts/dsh-remote-presentation-parity-smoke.mjs` and
+`test/remote-presentation-shadow.test.ts`) and no production `src/**` module
+imports it. Remote product architecture is unchanged.
 
 ### CLIENT_LOCAL (no Host coupling — keep it that way)
 

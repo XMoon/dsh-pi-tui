@@ -19,12 +19,12 @@
  * pass (O(n)); wrappers are freshly allocated each call, but their
  * `owner`/`members` always reference the original `TranscriptMessage`
  * objects, so presentation caches can compare owner + member identity/order.
- * @module @xmoon76/dsh-pi-tui/transcript-projection
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/structure
  */
 
-import { clusterAdjacentAmbientContext, type ContextCluster } from './context-presentation.ts'
-import { classifyTranscriptMessage, isSurfacedInteractionTool } from './transcript-semantics.ts'
-import { isPostTurnReplayEvidence, type TranscriptMessage } from './transcript.ts'
+import { clusterAdjacentAmbientContext, type ContextCluster } from '../../context-presentation.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool } from '../../transcript-semantics.ts'
+import { isPostTurnReplayEvidence, type TranscriptMessage } from '../../transcript.ts'
 
 /**
  * One presentation-only contiguous Process run. `members` preserve raw

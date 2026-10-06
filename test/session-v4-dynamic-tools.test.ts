@@ -44,7 +44,7 @@ import {
   TranscriptFolder,
   type TranscriptMessage,
 } from '../src/transcript.ts'
-import { projectTranscriptStructure } from '../src/transcript-projection.ts'
+import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

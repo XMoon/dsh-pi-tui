@@ -12,8 +12,8 @@
  */
 
 import type { ContextCluster } from './context-presentation.ts'
-import { projectTranscriptStructure, type TranscriptWorkSpan } from './transcript-projection.ts'
-import type { TranscriptContainerPath } from './transcript-disclosure.ts'
+import { projectTranscriptStructure, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
+import type { TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import type { TranscriptMessage } from './transcript.ts'
 
 /**

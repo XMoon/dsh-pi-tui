@@ -22,7 +22,7 @@ import {
   projectTranscriptStructure,
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
-} from '../src/transcript-projection.ts'
+} from '../src/tui/transcript/structure.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
