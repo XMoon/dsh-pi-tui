@@ -92,6 +92,29 @@ export {
   UserBubbleComponent,
   transcriptContentWidth,
 } from './tui/components/transcript-leaves.ts'
+import {
+  ApprovalDialogSurface,
+  approvalOverlayGeometry,
+  capWrappedToHeight,
+  capWrappedToMarker,
+  type ApprovalOutcome,
+  type ApprovalOverlayGeometry,
+  type ApprovalPromptRequest,
+} from './tui/panels/approval-dialog.ts'
+// The approval presentation contract stays importable from this facade (TS4
+// plan §26); the approval LIFECYCLE stays in TuiApp for TS5.
+export {
+  approvalOverlayGeometry,
+  capWrappedToHeight,
+  type ApprovalOutcome,
+  type ApprovalOverlayGeometry,
+  type ApprovalPromptRequest,
+} from './tui/panels/approval-dialog.ts'
+import {
+  OUTPUT_VIEWER_MAX_HEIGHT,
+  OUTPUT_VIEWER_WIDTH,
+  OutputViewerPanel,
+} from './tui/panels/output-viewer-panel.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
 import {
@@ -806,268 +829,6 @@ function pendingUserStatusText(row: PendingUserRow, running: boolean): string {
 }
 
 
-/**
- * Longest prefix of `text` whose WRAPPED height fits `budget` rows at
- * `width`, with an ellipsis marking a cut — the approval dialog's height
- * budget must count wrapped rows, not raw lines, because a single long
- * line can wrap across many display rows. Wrapped height is monotonic in
- * the prefix length, so a binary search bounds the wrap calls. The
- * ellipsis reserves its own row when truncating (a full last row would
- * otherwise push it onto a new row and overflow the budget).
- * @param text - the candidate text ('' yields '').
- * @param width - the wrap width.
- * @param budget - the row budget; 0 or negative yields '…' for non-empty.
- * @returns the fitted text and whether it was truncated.
- */
-export function capWrappedToHeight(text: string, width: number, budget: number): { text: string; truncated: boolean } {
-  if (text === '') return { text: '', truncated: false }
-  // No row budgeted: nothing can render — the caller skips the child
-  // (a single '…' row would overflow the budget it was promised).
-  if (budget <= 0) return { text: '', truncated: true }
-  const fits = (candidate: string, rows: number): boolean => wrapTextWithAnsi(candidate, width).length <= rows
-  if (fits(text, budget)) return { text, truncated: false }
-  // A single row: width-crop the text so the leading part stays readable
-  // (a bare '…' row would lose everything).
-  if (budget === 1) return { text: truncateToWidth(text, width, '…'), truncated: true }
-  // More rows: the longest prefix fitting `budget - 1` rows, with the
-  // ellipsis appended to the cut (it joins the last row when it has room,
-  // or wraps to the reserved final row — never overflows the budget).
-  const target = budget - 1
-  let low = 0
-  let high = text.length
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2)
-    if (fits(text.slice(0, mid), target)) low = mid
-    else high = mid - 1
-  }
-  return { text: `${text.slice(0, low)}…`, truncated: true }
-}
-
-/**
- * Fit `text` into `budget` wrapped rows for the approval dialog, ending with
- * a dimmed `... N more` marker row when the content is cut. The marker rides
- * INSIDE the budget (content rows cap at budget−1, the marker itself is
- * width-cropped so it can never wrap), so a section can never silently
- * overflow the dialog's maxHeight — same marker semantics as the
- * question flow's `appendWrappedBudgeted`. A single-row budget keeps
- * the old width-cropped ellipsis (a bare marker row would waste the row).
- * @returns the display text (rows joined with '\n') and the hidden row count.
- */
-function capWrappedToMarker(text: string, width: number, budget: number): { text: string; hidden: number } {
-  if (text === '' || budget <= 0) return { text: '', hidden: 0 }
-  const total = wrapTextWithAnsi(text, width).length
-  if (total <= budget) return { text, hidden: 0 }
-  if (budget === 1) return { text: truncateToWidth(text, width, '…'), hidden: total - 1 }
-  // The longest prefix fitting budget−1 rows; the marker takes the last row.
-  const target = budget - 1
-  let low = 0
-  let high = text.length
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2)
-    if (wrapTextWithAnsi(text.slice(0, mid), width).length <= target) low = mid
-    else high = mid - 1
-  }
-  const hidden = total - target
-  const marker = truncateToWidth(color.textDim(`... ${hidden} more line${hidden > 1 ? 's' : ''}`), width, '…')
-  return {
-    text: `${text.slice(0, low)}\n${marker}`,
-    hidden,
-  }
-}
-
-/**
- * The state-free approval content surface. It rebuilds from the original
- * request when the live width/height budget changes, while keeping the
- * pending promise and modal handle untouched.
- */
-class ApprovalDialogSurface implements Component {
-  private readonly request: ApprovalPromptRequest
-  private readonly geometryOf: () => ApprovalOverlayGeometry
-  private readonly build: (request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry) => Component
-  private cached: Component | undefined
-  private cacheKey = ''
-
-  constructor(
-    request: ApprovalPromptRequest,
-    geometryOf: () => ApprovalOverlayGeometry,
-    build: (request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry) => Component,
-  ) {
-    this.request = request
-    this.geometryOf = geometryOf
-    this.build = build
-  }
-
-  invalidate(): void {
-    this.cached?.invalidate?.()
-    this.cached = undefined
-    this.cacheKey = ''
-  }
-
-  render(width: number): string[] {
-    const geometry = this.geometryOf()
-    const contentWidth = Math.max(1, Math.floor(width))
-    const key = `${geometry.maxHeight}:${contentWidth}`
-    if (this.cached === undefined || this.cacheKey !== key) {
-      this.cached?.dispose?.()
-      this.cached = this.build(this.request, {
-        ...geometry,
-        contentWidth: Math.min(geometry.contentWidth, contentWidth),
-      })
-      this.cacheKey = key
-    }
-    return this.cached.render(contentWidth)
-  }
-
-  dispose(): void {
-    this.cached?.dispose?.()
-    this.cached = undefined
-  }
-}
-
-/** The job-output viewer overlay width (cells) and max height (rows); the
- * responsive shell and the fork overlay share these so the body row budget
- * always matches the physically granted box. */
-const OUTPUT_VIEWER_WIDTH = 88
-const OUTPUT_VIEWER_MAX_HEIGHT = 24
-/** The chrome rows around the viewer body: one blank separator above and
- * one below (the hint row itself is counted separately). */
-const OUTPUT_VIEWER_SEPARATOR_ROWS = 2
-// Supported-height floor (documented, not a fallback): the bordered viewer
-// needs one row above and one below its content, so the action-hint contract
-// holds while the terminal grants at least TWO rows (top border + the hint).
-// A ONE-row terminal cannot render any bordered-overlay content at all — the
-// fork keeps only the first `maxHeight` lines and the frame's top border is
-// always first. The panel still degrades to the hint alone (never overflows).
-
-/**
- * The live job-output viewer: a title line, a refreshable body, and a
- * fixed BOTTOM action hint. The hint is panel chrome (never appended to
- * the body string). The fork keeps only the FIRST `maxHeight` rendered
- * lines (`overlayLines.slice(0, maxHeight)`), dropping the tail, so the
- * layout reserves the hint and title BEFORE the body: on a long body or a
- * short terminal the body shrinks (to zero) rather than the hint vanishing.
- * The chrome also has a HORIZONTAL priority: the close/back verb outranks
- * Stop, so a wrapped `S stop · Esc back` degrades to `Esc back` instead of
- * leaving the first wrapped line (all Stop) on screen.
- */
-class OutputViewerPanel implements Component {
-  private readonly title: Text
-  private readonly body: Text
-  private readonly hint: Text
-  /** The close-only hint used when the full hint does not fit one row. */
-  private readonly hintFallback: Text
-  /** The granted CONTENT row budget (set by the responsive shell: the
-   * overlay's clamped max height minus its top/bottom border rows). */
-  private maxRows = OUTPUT_VIEWER_MAX_HEIGHT - 2
-  /** Key routing installed by openOutputViewer (Esc closes, the stop
-   * semantic stops). */
-  handleInput?: (data: string) => void
-  /** The refresh interval. The PANEL owns it (X007 ownership): final
-   * teardown (overlay disposeOnHide → FocusForwardingFrame.dispose →
-   * this.dispose) clears it even when the caller never invokes the
-   * closer — a ref'd interval must not outlive the surface. */
-  private timer: NodeJS.Timeout | undefined
-  private refresh: (() => string) | undefined
-  private liveHint: (() => { hint: string; fallback: string }) | undefined
-  private requestRender: (() => void) | undefined
-  /** Latched by dispose(): an in-flight tick must not render. */
-  private disposed = false
-
-  constructor(title: string, initial: string, hint: string, hintFallback: string) {
-    this.title = new Text(title, 0, 0)
-    this.body = new Text(initial, 0, 0)
-    this.hint = new Text(hint, 0, 0)
-    this.hintFallback = new Text(hintFallback, 0, 0)
-  }
-
-  invalidate(): void {
-    this.title.invalidate()
-    this.body.invalidate()
-    this.hint.invalidate()
-    this.hintFallback.invalidate()
-  }
-
-  /** Replace the output body (the caller refreshes it on a timer). */
-  setBody(text: string): void {
-    this.body.setText(text)
-    this.body.invalidate()
-  }
-
-  /** Adopt the granted overlay row budget (resize-aware). */
-  setMaxRows(maxRows: number): void {
-    this.maxRows = Math.max(1, Math.floor(maxRows))
-  }
-
-  /** Start the refresh timer (openOutputViewer wires the live callbacks).
-   * The interval is unref'd so a viewer left open never blocks process
-   * exit by itself, and owned by THIS panel so the dispose chain stops
-   * it exactly once. The optional `liveHint` re-evaluates BOTH hint forms
-   * on every tick, so a stop capability that expires while the viewer is
-   * open updates the chrome with the body. */
-  startRefreshing(
-    refresh: () => string,
-    requestRender: () => void,
-    intervalMs: number,
-    liveHint?: () => { hint: string; fallback: string },
-  ): void {
-    this.refresh = refresh
-    this.requestRender = requestRender
-    this.liveHint = liveHint
-    this.timer = setInterval(() => {
-      if (this.disposed) return
-      this.body.setText(this.refresh!())
-      this.body.invalidate()
-      if (this.liveHint !== undefined) {
-        const next = this.liveHint()
-        this.hint.setText(next.hint)
-        this.hint.invalidate()
-        this.hintFallback.setText(next.fallback)
-        this.hintFallback.invalidate()
-      }
-      this.requestRender!()
-    }, intervalMs)
-    this.timer.unref()
-  }
-
-  /** Stop the refresh timer (the overlay is closing / the surface dies). */
-  dispose(): void {
-    this.disposed = true
-    if (this.timer !== undefined) {
-      clearInterval(this.timer)
-      this.timer = undefined
-    }
-  }
-
-  render(width: number): string[] {
-    const maxRows = Math.max(1, this.maxRows)
-    // HORIZONTAL priority: the close/back verb must survive even when the
-    // combined hint word-wraps (a wrapped first line could be all Stop).
-    const fullHintLines = this.hint.render(width)
-    const hintLines = fullHintLines.length > 1 ? this.hintFallback.render(width) : fullHintLines
-    // VERTICAL priority: the (chosen) hint is mandatory chrome, then the
-    // title, then the separators, then the body. The body absorbs the
-    // remainder (0 rows on a genuinely short box). Output length is <=
-    // maxRows in every branch, so the fork's first-`maxHeight`-lines clip can
-    // never reach the bottom hint.
-    const hint = hintLines.slice(0, maxRows)
-    let remaining = maxRows - hint.length
-    const titleLines = this.title.render(width)
-    const title = titleLines.slice(0, remaining)
-    remaining -= title.length
-    const bodyLines = this.body.render(width)
-    if (remaining <= 0) return [...title, ...hint]
-    if (remaining === 1) return [...title, ...bodyLines.slice(0, 1), ...hint]
-    if (remaining === 2) return [...title, '', ...bodyLines.slice(0, 1), ...hint]
-    return [
-      ...title,
-      '',
-      ...bodyLines.slice(0, remaining - OUTPUT_VIEWER_SEPARATOR_ROWS),
-      '',
-      ...hint,
-    ]
-  }
-}
-
 /** M1: parse the legacy model label (`provider/model @effort`) into the
  * structured composition model. `''` and the `no model` placeholder map
  * to undefined (no model fact). */
@@ -1413,38 +1174,6 @@ export type TuiAppEvents = TuiAppEventsBase & (
     }
   | { openExternalEditor?: undefined; runOwned?: OwnedRunner }
 )
-
-/** What an approval prompt shows; mirrors the approval/request payload. */
-export interface ApprovalPromptRequest {
-  /** The tool asking for permission. */
-  toolName: string
-  /** The asker's human-readable reason, when one exists. */
-  reason?: string
-  /** Aborting withdraws the prompt and settles `cancelled`. */
-  signal?: AbortSignal
-  /** The tool call's arguments (paired via the request's callId), when known. */
-  arguments?: string
-  /** A destructive command matched a danger pattern; render a warning. */
-  danger?: boolean
-}
-
-/** Closed approval outcomes the user can produce at the prompt. */
-export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled'
-
-/** The live geometry budget for the approval overlay. */
-export interface ApprovalOverlayGeometry {
-  width: number
-  maxHeight: number
-  contentWidth: number
-}
-
-/** Derive approval geometry from the CURRENT terminal dimensions. */
-export function approvalOverlayGeometry(columns: number, rows: number): ApprovalOverlayGeometry {
-  const width = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 1
-  const height = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 1
-  const maxHeight = Math.max(1, Math.min(height, 16, Math.max(8, height - 2)))
-  return { width, maxHeight, contentWidth: Math.max(1, width - 8) }
-}
 
 /** One todo entry as logged by todo/write; statuses and text verbatim. */
 export interface TodoItem {
