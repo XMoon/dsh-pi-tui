@@ -142,7 +142,7 @@ import { StatusStore as StatusStoreImpl } from './domain/status/store.ts'
 import { FooterComposer, mergeCommandSurface } from './footer/composer.ts'
 import { createBuiltinFooterRegistry } from './footer/builtin-items.ts'
 import { resolveFooterInstruction } from './footer/instruction.ts'
-import { layoutForPreset } from './footer/presets.ts'
+import { layoutForPreset } from './domain/footer/presets.ts'
 import { FooterConfiguratorModel } from './footer/configurator-model.ts'
 import { FooterConfiguratorPanel } from './footer/configurator.ts'
 import { FooterCustomItemCatalog } from './footer/custom-items.ts'
@@ -16435,7 +16435,7 @@ export class TuiApp {
 
   /** PR C: detached custom definitions for an unsaved configurator draft or
    * a settings write. */
-  getFooterCustomItems(): import('./footer/custom-items.ts').FooterCustomItemSettings[] {
+  getFooterCustomItems(): import('./domain/footer/custom-items.ts').FooterCustomItemSettings[] {
     return this.footerCustomItems.snapshot()
   }
 
@@ -17807,7 +17807,7 @@ export class TuiApp {
     registry: FooterItemRegistry
     /** A layered composer for an unsaved custom-definition draft. */
     composer?: FooterComposer
-    onSave: (layout: FooterLayoutV1, customItems?: readonly import('./footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
+    onSave: (layout: FooterLayoutV1, customItems?: readonly import('./domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
     onCancel: () => void
   }): () => void {
     let handle: OverlayHandle | undefined

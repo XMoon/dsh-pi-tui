@@ -28,8 +28,8 @@
  */
 
 import type { AuthorizationTarget } from '../authorization.ts'
-import type { FooterCommandConfig } from '../footer/command-runner.ts'
-import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
+import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
+import type { FooterCustomItemsParseResult } from '../domain/footer/custom-items.ts'
 
 /** The TUI settings document (theme/iconStyle/footer/footerLayout/
  * footerCustomItems/fullscreen/busyEnter/localShellSandbox/homeEndKeys/
@@ -66,7 +66,7 @@ export interface TuiSettingsDoc {
    * review's P2 — the same migration contract as the raw `keybindings`
    * pass-through above; the value is re-validated by
    * footer/command-trust on every read, so the field rides VERBATIM). */
-  footerCommand?: import('../footer/command-trust.ts').FooterCommandSettings
+  footerCommand?: import('../domain/footer/command-trust.ts').FooterCommandSettings
   fullscreen: string
   busyEnter: string
   localShellSandbox: string

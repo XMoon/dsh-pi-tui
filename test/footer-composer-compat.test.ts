@@ -16,7 +16,7 @@ import { wrapTextWithAnsi, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui
 import { color } from '../src/theme.ts'
 import { FooterComposer, mergeCommandSurface } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from '../src/footer/types.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 

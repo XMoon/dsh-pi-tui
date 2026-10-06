@@ -10,7 +10,7 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { FooterComposer, renderSpans } from '../src/footer/composer.ts'
-import { isFooterLayout, parseFooterLayout } from '../src/footer/layout.ts'
+import { isFooterLayout, parseFooterLayout } from '../src/domain/footer/layout.ts'
 import type { FooterItemRef } from '../src/footer/types.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 

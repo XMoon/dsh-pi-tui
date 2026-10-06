@@ -2,10 +2,10 @@
  * The builtin footer presets (plan §10): `default` composes the status
  * row plus a stats row, `compact` drops the stats row. The legacy `full`
  * name maps to `default`.
- * @module @xmoon76/dsh-pi-tui/footer/presets
+ * @module @xmoon76/dsh-pi-tui/domain/footer/presets
  */
 
-import type { FooterItemRef, FooterLayoutV1 } from './types.ts'
+import type { FooterItemRef, FooterLayoutV1 } from './layout.ts'
 
 /** Build the compact preset's status-row placements, in order. The
  * view-scope item leads: it renders nothing on the main subject and the

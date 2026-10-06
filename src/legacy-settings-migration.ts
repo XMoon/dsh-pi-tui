@@ -36,8 +36,8 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse } from 'yaml'
 import { resolveDisplayPreset, type PersistedDisplayInput } from './display-preset.ts'
-import { parseFooterCommandConfig } from './footer/command-trust.ts'
-import { isFooterLayout, parseFooterLayout } from './footer/layout.ts'
+import { parseFooterCommandConfig } from './domain/footer/command-trust.ts'
+import { isFooterLayout, parseFooterLayout } from './domain/footer/layout.ts'
 
 /** The normalized, schema-clean footerCommand value for a legacy raw field:
  * the runtime parser's CANONICAL output (fail-soft repairs applied) wrapped

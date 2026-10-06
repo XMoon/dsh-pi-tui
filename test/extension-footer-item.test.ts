@@ -231,7 +231,7 @@ test('the configurator lists extension items in the Available section and can ad
 
     // Open the configurator: the extension item appears in Available.
     const { FooterConfiguratorModel } = await import('../src/footer/configurator-model.ts')
-    const { DEFAULT_FOOTER_LAYOUT } = await import('../src/footer/presets.ts')
+    const { DEFAULT_FOOTER_LAYOUT } = await import('../src/domain/footer/presets.ts')
     const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
     app.openFooterConfigurator({
       model,

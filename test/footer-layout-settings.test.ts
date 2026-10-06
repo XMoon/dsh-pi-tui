@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { initialStatusSnapshot } from '../src/domain/status/snapshot.ts'
 import { FooterComposer } from '../src/footer/composer.ts'

@@ -4,10 +4,10 @@
  * the StatusSnapshot — the SAME safe projection the footer consumes — so
  * it carries NO secrets, NO credentials, NO raw prompts, NO tool
  * arguments, NO environment dumps, NO session events.
- * @module @xmoon76/dsh-pi-tui/footer/command-protocol
+ * @module @xmoon76/dsh-pi-tui/domain/footer/command-protocol
  */
 
-import type { StatusSnapshot } from '../domain/status/types.ts'
+import type { StatusSnapshot } from '../status/types.ts'
 
 /** The V1 stdin payload. */
 export interface FooterCommandInputV1 {

@@ -13,16 +13,10 @@ import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
-import { buildCommandInput } from './command-protocol.ts'
+import { buildCommandInput } from '../domain/footer/command-protocol.ts'
 import type { StatusSnapshot } from '../domain/status/types.ts'
+import { MAX_COMMAND_TIMEOUT_MS, type FooterCommandConfig } from '../domain/footer/command-config.ts'
 
-/** The validated command config (bounds per plan §17.3). */
-export interface FooterCommandConfig {
-  readonly command: string
-  readonly timeoutMs: number
-  readonly refreshIntervalMs: number
-  readonly maxRows: number
-}
 
 /** The runner's options. */
 export interface FooterCommandRunnerOptions {
@@ -44,12 +38,6 @@ export interface FooterCommandRunnerOptions {
 
 /** The stdout cap (plan §17.9). */
 export const MAX_COMMAND_OUTPUT_BYTES = 16 * 1024
-/** The default hard timeout (plan §17.3). */
-export const DEFAULT_COMMAND_TIMEOUT_MS = 300
-/** The timeout ceiling. */
-export const MAX_COMMAND_TIMEOUT_MS = 1000
-/** The minimum refresh interval (plan §17.7). */
-export const MIN_COMMAND_REFRESH_MS = 1000
 /** The grace between SIGTERM and SIGKILL when terminating a command: a
  * TERM-resistant child (e.g. `trap "" TERM`) must not leak as a detached
  * orphan — the escalation is the hard kill that actually reclaims it. */

@@ -10,14 +10,14 @@ import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { FooterComposer } from '../src/footer/composer.ts'
+import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
 import {
   DEFAULT_CUSTOM_COMMAND_REFRESH_MS,
-  FooterCustomItemCatalog,
   effectiveCustomCommandRefreshMs,
   effectiveCustomCommandTimeoutMs,
   parseFooterCustomItem,
   parseFooterCustomItems,
-} from '../src/footer/custom-items.ts'
+} from '../src/domain/footer/custom-items.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { FooterItemRegistry } from '../src/footer/item-registry.ts'
 import { FooterConfiguratorModel, itemMenuFor } from '../src/footer/configurator-model.ts'
