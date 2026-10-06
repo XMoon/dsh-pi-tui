@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { projectCompact } from '../src/compact-projection.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
 import { clusterAdjacentAmbientContext } from '../src/tui/transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../src/tui/transcript/context-summary.ts'
 import { contextProvenance } from '../src/context.ts'

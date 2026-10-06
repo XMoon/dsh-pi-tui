@@ -19,7 +19,7 @@ import {
   isRelayContext,
 } from '../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../src/context.ts'
-import { projectCompact } from '../src/compact-projection.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'

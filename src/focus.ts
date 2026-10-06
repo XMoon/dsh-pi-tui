@@ -4,7 +4,7 @@
  * Focus Mode is a presentation + behavioral-policy feature: the session log
  * stays lossless and the TUI only PROJECTS turn-intermediate activity into a
  * live Thought block. This module reads the shared DisplayState for the
- * Focus behavioral policy; the projection itself lives in focus-activity.ts
+ * Focus behavioral policy; the projection itself lives in tui/transcript/focus-projection.ts
  * and the TUI surface in tui-app.ts.
  *
  * The prompt section is installed once per composed agent through

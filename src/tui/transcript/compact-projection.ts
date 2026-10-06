@@ -8,13 +8,13 @@
  * no operable cluster owner) with its members revealed on expansion. Search
  * forces exactly the owning span/cluster open while content refresh keeps the
  * collapsed header in place.
- * @module @xmoon76/dsh-pi-tui/compact-projection
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/compact-projection
  */
 
-import type { ContextCluster } from './tui/transcript/context-structure.ts'
-import { projectTranscriptStructure, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
-import type { TranscriptContainerPath } from './tui/transcript/container-owner.ts'
-import type { TranscriptMessage } from './transcript.ts'
+import type { ContextCluster } from './context-structure.ts'
+import { projectTranscriptStructure, type TranscriptWorkSpan } from './structure.ts'
+import type { TranscriptContainerPath } from './container-owner.ts'
+import type { TranscriptMessage } from '../../transcript.ts'
 
 /**
  * The Compact Work span is the canonical {@link TranscriptWorkSpan}. The alias
