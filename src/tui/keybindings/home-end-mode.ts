@@ -26,7 +26,7 @@
  * the resolved bindings must become default + navigation preset +
  * explicit user overrides (the preset must never clobber an explicit
  * user binding).
- * @module @xmoon76/dsh-pi-tui/home-end-keys
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/home-end-mode
  */
 
 import { getKeybindings } from '@xmoon76/pi-tui'

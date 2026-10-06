@@ -29,7 +29,7 @@
  * - the same key may legally map to different actions in disjoint scopes;
  * - a conflict is: same key AND overlapping scope AND same effective
  *   priority — never a bare "declared twice" check.
- * @module @xmoon76/dsh-pi-tui/keybindings/types
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/types
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'

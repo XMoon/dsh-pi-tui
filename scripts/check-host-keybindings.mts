@@ -25,24 +25,20 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { listSourceFilesUnder } from './application-architecture-gate.mjs'
 
-/** The scanned host business files. */
-const SCANNED_FILES = ['src/tui-app.ts']
-
-/**
- * The TUI user-facing string files (TS4 §44): EVERY production source file
- * recursively under `src/tui/**` — commands, components, panels, pickers and
- * plugin-manager — over the same four production extensions the architecture
- * gate scans. TS4 moved substantial user-facing strings out of the root panel
- * and picker modules into this tree, so the command-only coverage of TS1 is
- * replaced by full TUI coverage: a user-facing string (or a hard-coded chord)
- * that lands in a moved panel/picker/leaf stays covered instead of silently
- * escaping the chord-label gate. The shared enumeration is deterministic
- * (sorted) and already subsumes `src/tui/commands/**`, which is NOT re-added.
- */
-const TUI_STRING_FILES = listSourceFilesUnder(join(process.cwd(), 'src/tui')).map(rel => `src/tui/${rel}`)
+/** The scanned host business files: the facade remainder plus the interaction
+ * owners that moved out of it in TS5. The set follows the OWNER — a new
+ * host-business chord inside `src/tui/interaction/**` must still fail — while
+ * focused components (their own fixed keys) stay governed by the component
+ * contract and are deliberately NOT scanned wholesale. The InputRouter's
+ * precedence fallbacks are likewise not host business shortcuts. */
+export const HOST_INTERACTION_FILES = [
+  'src/tui-app.ts',
+  'src/tui/interaction/approval-runtime.ts',
+]
 
 /**
  * The application composition zone's user-facing strings (TS2 §21): the facade
@@ -54,31 +50,6 @@ const TUI_STRING_FILES = listSourceFilesUnder(join(process.cwd(), 'src/tui')).ma
  * chord-label gate.
  */
 const BOOTSTRAP_ZONE = 'src/app/bootstrap'
-
-const BOOTSTRAP_STRING_FILES = [
-  `${BOOTSTRAP_ZONE}.ts`,
-  ...listSourceFilesUnder(join(process.cwd(), BOOTSTRAP_ZONE)).map(rel => `${BOOTSTRAP_ZONE}/${rel}`),
-]
-
-/** The user-facing string files (hard-coded chord labels must not
- * resurface in anything the user sees). */
-const SCANNED_STRING_FILES = [
-  'src/index.ts',
-  ...BOOTSTRAP_STRING_FILES,
-  'src/commands.ts',
-  ...TUI_STRING_FILES,
-  'src/tui-app.ts',
-  'src/local-shell-card.ts',
-  'src/footer/instruction.ts',
-  // The action TABLE's descriptions are USER-FACING (they render in
-  // /keybindings and /help) — a hard-coded chord label there lies after a
-  // remap, exactly like any other user-facing string (review finding).
-  // The `defaultKeys` arrays are the machine-readable source of truth and
-  // are EXCLUDED by the line-based check below (the pattern only fires on
-  // lines whose quoted string contains a chord label OUTSIDE a
-  // matchesKey/defaultKeys context).
-  'src/keybindings/definitions.ts',
-]
 
 /** The chord pattern: a matchesKey call with a ctrl/alt/shift modifier. */
 const CHORD_PATTERN = /matchesKey\(\s*data\s*,\s*'(?:ctrl|alt|shift)\+/
@@ -103,10 +74,11 @@ const ALLOWLIST = [
   "if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {",
   // The continuable viewer's Enter submit (the CHILD is the target).
   "} else if (matchesKey(data, 'enter') && !matchesKey(data, 'shift+enter')) {",
-  // The approval dialog's own keys (a capturing overlay component).
-  "else if (matchesKey(data, 'ctrl+c')) this.settleApproval(pending, 'cancelled')",
+  // The approval runtime's own keys (a capturing-overlay component contract,
+  // TS5 §8.3 moved them out of the facade with their owner).
+  "else if (matchesKey(data, 'ctrl+c')) this.settle(pending, 'cancelled')",
   // The SAME approval-overlay seam reached through the modal-inspection
-  // precedence check (`approvalOwnsFixedKey`, which must beat a conflicting
+  // precedence check (`ownsFixedKey`, which must beat a conflicting
   // inspection remap). Its `y`/`n`/`escape` checks carry no chord and are not
   // scanned; the bare continuation is the overlay's own Ctrl+C.
   "|| matchesKey(data, 'ctrl+c')",
@@ -134,24 +106,43 @@ const STRING_ALLOWLIST = [
   // Dynamic exit-confirmation labels are intentionally not allowlisted.
 ]
 
-let failures = 0
-for (const file of SCANNED_FILES) {
-  const path = join(process.cwd(), file)
-  const lines = readFileSync(path, 'utf8').split('\n')
+/** One detected violation (a host chord or a hard-coded label). */
+export interface KeybindingViolation {
+  readonly file: string
+  readonly line: number
+  readonly text: string
+  readonly kind: 'host-chord' | 'string-label'
+}
+
+/**
+ * The host-business chord violations in one source file: a `matchesKey` call
+ * with a ctrl/alt/shift modifier that is not one of the sanctioned seams. This
+ * is the part-A scan; it is NOT applied to focused components' fixed keys.
+ * @param file - the src-relative path (for reporting).
+ * @param source - the file contents.
+ */
+export function findHostChordViolations(file: string, source: string): KeybindingViolation[] {
+  const out: KeybindingViolation[] = []
+  const lines = source.split('\n')
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!
     if (!CHORD_PATTERN.test(line)) continue
     if (ALLOWLIST.includes(line.trim())) continue
-    failures += 1
-    console.error(`check-host-keybindings: ${file}:${index + 1}: physical host shortcut — route through the keymap instead:\n  ${line.trim()}`)
+    out.push({ file, line: index + 1, text: line.trim(), kind: 'host-chord' })
   }
+  return out
 }
 
-// User-facing string literals: a hard-coded chord label lies as soon as
-// the user remaps it (the label must come from keyHint/keysFor).
-for (const file of SCANNED_STRING_FILES) {
-  const path = join(process.cwd(), file)
-  const lines = readFileSync(path, 'utf8').split('\n')
+/**
+ * The hard-coded user-facing chord-label violations in one source file. This is
+ * the part-B scan: a chord label inside a quoted string literal lies as soon as
+ * the user remaps it (the label must come from keyHint/keysFor).
+ * @param file - the src-relative path (for reporting).
+ * @param source - the file contents.
+ */
+export function findStringLabelViolations(file: string, source: string): KeybindingViolation[] {
+  const out: KeybindingViolation[] = []
+  const lines = source.split('\n')
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!
     // Skip comment-only lines (comments are covered by the convention in
@@ -169,13 +160,72 @@ for (const file of SCANNED_STRING_FILES) {
     const stripped = line.replace(/matchesKey\(\s*data\s*,\s*'[^']*'\)/g, '')
     if (!STRING_CHORD_PATTERN.test(stripped)) continue
     if (STRING_ALLOWLIST.some(label => line.includes(label))) continue
-    failures += 1
-    console.error(`check-host-keybindings: ${file}:${index + 1}: hard-coded key label in a user-facing string — use keyHint()/keysFor() instead:\n  ${trimmed}`)
+    out.push({ file, line: index + 1, text: trimmed, kind: 'string-label' })
   }
+  return out
 }
 
-if (failures > 0) {
-  console.error(`check-host-keybindings: ${failures} physical host shortcut(s) found (see docs/keybinding-architecture.md)`)
-  process.exit(1)
+/**
+ * The checked user-facing string files for one repository root.
+ *
+ * The TUI scan is recursive over `src/tui/**` (TS4 §44): a user-facing string
+ * (or a hard-coded chord) that lands in a moved panel/picker/leaf stays covered
+ * instead of silently escaping the chord-label gate. `src/tui/commands/**` is
+ * subsumed and NOT re-added.
+ *
+ * TS5 moved `src/keybindings/**` under this tree. The keybinding AUTHORITY
+ * modules' literals are the canonical KeyId grammar, the key-label map and the
+ * pi-tui binding presets — the source of truth a rendered label must FOLLOW,
+ * not copy that can lie after a remap — so they stay out of the string scan,
+ * exactly as they were before the move. The action TABLE
+ * (`tui/keybindings/definitions.ts`) renders user-facing descriptions and
+ * therefore stays IN, re-added explicitly.
+ */
+export function scannedStringFiles(root: string = process.cwd()): string[] {
+  const tui = listSourceFilesUnder(join(root, 'src/tui'))
+    .filter(rel => !rel.startsWith('keybindings/') || rel === 'keybindings/definitions.ts')
+    .map(rel => `src/tui/${rel}`)
+  const bootstrap = [
+    `${BOOTSTRAP_ZONE}.ts`,
+    ...listSourceFilesUnder(join(root, BOOTSTRAP_ZONE)).map(rel => `${BOOTSTRAP_ZONE}/${rel}`),
+  ]
+  return [
+    'src/index.ts',
+    ...bootstrap,
+    'src/commands.ts',
+    ...tui,
+    'src/tui-app.ts',
+    'src/local-shell-card.ts',
+    'src/footer/instruction.ts',
+  ]
 }
-console.log('check-host-keybindings: ok')
+
+/** Scan one repository root for every host-keybinding violation. */
+export function scanHostKeybindingViolations(root: string = process.cwd()): KeybindingViolation[] {
+  const out: KeybindingViolation[] = []
+  for (const file of HOST_INTERACTION_FILES) {
+    out.push(...findHostChordViolations(file, readFileSync(join(root, file), 'utf8')))
+  }
+  for (const file of scannedStringFiles(root)) {
+    out.push(...findStringLabelViolations(file, readFileSync(join(root, file), 'utf8')))
+  }
+  return out
+}
+
+function main(): void {
+  const violations = scanHostKeybindingViolations()
+  for (const v of violations) {
+    if (v.kind === 'host-chord') {
+      console.error(`check-host-keybindings: ${v.file}:${v.line}: physical host shortcut — route through the keymap instead:\n  ${v.text}`)
+    } else {
+      console.error(`check-host-keybindings: ${v.file}:${v.line}: hard-coded key label in a user-facing string — use keyHint()/keysFor() instead:\n  ${v.text}`)
+    }
+  }
+  if (violations.length > 0) {
+    console.error(`check-host-keybindings: ${violations.length} violation(s) found (see docs/keybinding-architecture.md)`)
+    process.exit(1)
+  }
+  console.log('check-host-keybindings: ok')
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) main()

@@ -11,7 +11,7 @@
  * Scope semantics (plan §4): the static context contract used for conflict
  * detection and diagnostics. The resolver additionally honors per-rule
  * predicates (e.g. the empty-editor ↓ affordance).
- * @module @xmoon76/dsh-pi-tui/keybindings/definitions
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/definitions
  */
 
 import type { AppKeybindingDefinition, AppKeybindingId } from './types.ts'

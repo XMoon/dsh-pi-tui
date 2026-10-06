@@ -7,8 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { LeaderStateMachine } from '../src/keybindings/leader.ts'
-import type { LeaderBinding, LeaderConfig } from '../src/keybindings/types.ts'
+import { LeaderStateMachine } from '../src/tui/keybindings/leader.ts'
+import type { LeaderBinding, LeaderConfig } from '../src/tui/keybindings/types.ts'
 
 const CONFIG: LeaderConfig = { key: 'ctrl+x', timeoutMs: 1000 }
 const BINDINGS: readonly LeaderBinding[] = [

@@ -24,9 +24,9 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { matchesKey } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
-import { deriveKeybindingContext } from '../src/keybindings/context.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
+import { deriveKeybindingContext } from '../src/tui/keybindings/context.ts'
 import { InputRouter } from '../src/tui/interaction/input-router.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -826,8 +826,8 @@ test('5.11 a reserved key ALIAS (esc/return) is rejected at registration', async
 })
 
 test('5.12 canonical named keys still display as PageUp/PageDown', async () => {
-  const { formatKeyId, formatKeyList } = await import('../src/keybindings/hints.ts')
-  const { canonicalizeKeyId } = await import('../src/keybindings/key-identity.ts')
+  const { formatKeyId, formatKeyList } = await import('../src/tui/keybindings/hints.ts')
+  const { canonicalizeKeyId } = await import('../src/tui/keybindings/key-identity.ts')
   assert.equal(canonicalizeKeyId('pageUp' as never), 'pageup')
   assert.equal(canonicalizeKeyId('pageDown' as never), 'pagedown')
   // The DISPLAY of the canonical form must be the proper label (a
@@ -854,7 +854,7 @@ test('5.12 canonical named keys still display as PageUp/PageDown', async () => {
 // ── uppercase aliases + leader legacy collisions + LF submit (round-7) ────
 
 test('5.13 uppercase aliases canonicalize to the same key (ESC/escape, RETURN/enter)', async () => {
-  const { canonicalizeKeyId } = await import('../src/keybindings/key-identity.ts')
+  const { canonicalizeKeyId } = await import('../src/tui/keybindings/key-identity.ts')
   assert.equal(canonicalizeKeyId('ESC' as never), 'escape')
   assert.equal(canonicalizeKeyId('RETURN' as never), 'enter')
   assert.equal(canonicalizeKeyId('CTRL+RETURN' as never), 'ctrl+enter')
@@ -1448,7 +1448,7 @@ test('7.6 the registry REJECTS legacy C0 alias keys (ctrl+i / ctrl+h / ctrl+_ / 
   assert.equal(registry.snapshot().bindings.length, 0)
   // The canonical identity of the registered key is one shared policy:
   // the config parser and the registry reject the SAME key ids.
-  const { isTerminalAmbiguousKeyId, TERMINAL_AMBIGUOUS_KEY_IDS } = await import('../src/keybindings/config.ts')
+  const { isTerminalAmbiguousKeyId, TERMINAL_AMBIGUOUS_KEY_IDS } = await import('../src/tui/keybindings/config.ts')
   assert.ok(isTerminalAmbiguousKeyId('ctrl+i' as never))
   assert.ok(isTerminalAmbiguousKeyId('ctrl+h' as never))
   assert.ok(isTerminalAmbiguousKeyId('ctrl+_' as never))

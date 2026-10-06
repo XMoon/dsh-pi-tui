@@ -14,7 +14,7 @@
  *
  * KEYS ARE NOT HARD-CODED IN THE RUNNER: host shortcuts are semantic actions (app.*)
  * resolved through the user-orchestrable keymap; the single source of truth
- * for default keys is src/keybindings/definitions.ts and the effective map
+ * for default keys is src/tui/keybindings/definitions.ts and the effective map
  * is inspectable at runtime with `/keybindings`. User-FACING strings derive
  * key labels through the keymap's keyHint(); key
  * names in comments are shorthand for the default binding and must never be

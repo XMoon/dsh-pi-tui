@@ -15,7 +15,7 @@ import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/present.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { iconFor } from '../src/icons.ts'

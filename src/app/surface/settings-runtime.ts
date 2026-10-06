@@ -30,8 +30,6 @@ import { FooterCommandRunner } from '../../footer/command-runner.ts'
 import { activeFooterItemIds, executableCommandItemIds, FooterDynamicItemRuntime } from '../../footer/dynamic-item-runtime.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../footer/layout.ts'
 import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../footer/custom-items.ts'
-import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../../home-end-keys.ts'
-import { parseUserKeybindings } from '../../keybindings/config.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from '../../theme-source.ts'
 import { wheelScrollLinesOf } from '../../wheel-scroll.ts'
 import type { Diag } from '../../diag.ts'
@@ -171,10 +169,6 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   // overrides, and the plugin contributions — all fail-soft (a bad entry
   // is a diagnostic, never a startup failure; plan §16/§17).
   
-  let keybindings: ReturnType<TuiApp['keybindingsManager']> | undefined
-  const keybindingsManager = (): ReturnType<TuiApp['keybindingsManager']> =>
-    (keybindings ??= deps.surface.app.keybindingsManager())
-
   const applyUserKeybindings = (): void => {
     // Fail-soft reload (review finding): a transient settings read
     // error must never abort the startup application — the failure is
@@ -184,11 +178,14 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     // startup-eager callback — the footerCommandRunner TDZ was exactly
     // this) leaves the NEW keymap active. The diagnostic must not claim
     // a last-known-good rollback that did not happen; /keybindings
-    // reload re-applies from the document either way.
+    // reload re-applies from the document either way. The TUI owns the
+    // parse/apply semantics (TS5 §12); the diagnostics ride the same sink
+    // order as before the move.
     try {
-      const parsed = parseUserKeybindings(deps.tuiSettings?.get().keybindings)
-      for (const message of parsed.diagnostics) deps.diag.warn('keybindings', { message })
-      keybindingsManager().setUserConfiguration(parsed)
+      deps.surface.app.applyUserKeybindings(
+        deps.tuiSettings?.get().keybindings,
+        (message) => deps.diag.warn('keybindings', { message }),
+      )
     } catch (error: unknown) {
       deps.diag.warn('keybindings', { error: String(error), message: 'keybindings startup apply failed — the error may come from the post-rebuild UI invalidation, so the keymap may already be rebuilt; /keybindings reload re-applies it' })
     }
@@ -516,7 +513,9 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * step must precede the first fullscreen entry.
    */
   const applyBootDisplay = (): void => {
-  applyHomeEndKeyMode(homeEndKeysModeOf(deps.tuiSettings?.get().homeEndKeys))
+  // The Home/End preset is TUI-owned (TS5 §12): the application owner hands
+  // the persisted raw value to the mounted surface.
+  deps.surface.app.setHomeEndMode(deps.tuiSettings?.get().homeEndKeys)
   // The wheel step is a constructor-time alt-screen option: hand the
   // preference to the app BEFORE the first fullscreen entry, or the
   // first alt screen would still scroll 1 line per wheel event (the
@@ -589,7 +588,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   /** The env-driven safe-keybindings mode (the policy lives with the settings). */
   const applySafeKeybindingsMode = (): void => {
     if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS !== '1') return
-    keybindingsManager().setSafeMode(true)
+    deps.surface.app.setSafeKeybindingsMode(true)
     deps.diag.info('keybindings', { safeMode: true })
   }
   const requestFooterCommandRefresh = (): void => { footerCommandRunner?.requestRefresh() }

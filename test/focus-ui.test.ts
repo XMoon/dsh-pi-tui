@@ -21,7 +21,7 @@ import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assi
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/display-preset.ts'
 import type { ToolPresenter } from '../src/present.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 

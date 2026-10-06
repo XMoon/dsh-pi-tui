@@ -78,7 +78,7 @@ export interface Config {
   /** Fullscreen mouse-wheel step ('1' | '2' | '3' | '5' | '8'). */
   readonly wheelScrollLines: Volatile<string>
   /** The user keybinding overrides as a whole-value RAW field. The
-   * keybindings parser (src/keybindings/config.ts) is the only
+   * keybindings parser (src/tui/keybindings/config.ts) is the only
    * validation/parsing authority — the keybinding business schema
    * deliberately stays out of the plugin Config. */
   readonly keybindings: Volatile<unknown>

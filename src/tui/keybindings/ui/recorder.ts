@@ -1,11 +1,11 @@
 /** A focused raw-input recorder for one semantic keybinding. */
 
 import { isKeyRelease, isKeyRepeat, matchesKey, parseKey, truncateToWidth, type Component } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from '../keybindings/key-identity.ts'
-import { isEditorSubmitPreSubmitKey, isPhysicalEscapeAction, isTerminalAmbiguousKeyId } from '../keybindings/config.ts'
+import { canonicalizeKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from '../key-identity.ts'
+import { isEditorSubmitPreSubmitKey, isPhysicalEscapeAction, isTerminalAmbiguousKeyId } from '../config.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import type { AppKeybindingId } from '../keybindings/types.ts'
-import { color } from '../theme.ts'
+import type { AppKeybindingId } from '../types.ts'
+import { color } from '../../../theme.ts'
 
 export type KeyRecorderPurpose = 'direct' | 'leader-completion' | 'leader-key'
 

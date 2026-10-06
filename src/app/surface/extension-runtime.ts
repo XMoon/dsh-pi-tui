@@ -26,7 +26,6 @@ import { Text } from '@xmoon76/pi-tui'
 import type { PiTuiExtensionService } from '../../extensions.ts'
 import { SurfaceHost } from '../../extension/internal/surface-host.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
-import { normalizedKeyToKeyId } from '../../keybindings/manager.ts'
 import type { KeybindingRegistry } from '../../keybinding-registry.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { TuiApp, TuiAppOptions } from '../../tui-app.ts'
@@ -138,11 +137,10 @@ export function createExtensionRuntime(options: ExtensionRuntimeOptions): Extens
     const registry = extensionService?.keybindings
     if (registry === undefined) return
     const snapshot = registry.snapshot()
-    mounted().keybindingsManager().setPluginRules(snapshot.bindings.map(binding => ({
-      id: binding.id,
-      action: binding.action,
-      key: normalizedKeyToKeyId(binding.key),
-    })))
+    // The TUI key authority normalizes the public chord identity into the
+    // fork's KeyId grammar (TS5 §12); app/surface never imports the keybinding
+    // implementation.
+    mounted().setPluginKeybindingRules(snapshot.bindings)
   }
 
   return {

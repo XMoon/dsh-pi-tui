@@ -7,8 +7,8 @@ import { matchesKey, truncateToWidth, visibleWidth, type Component, type Focusab
 import { Input } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { color } from '../theme.ts'
-import { formatKeyId } from '../keybindings/hints.ts'
+import { color } from '../../../theme.ts'
+import { formatKeyId } from '../hints.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
 import {
   formatEditorBindings,

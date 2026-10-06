@@ -7,10 +7,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveKeybindingContext } from '../src/keybindings/context.ts'
-import { EffectiveKeymap } from '../src/keybindings/effective-keymap.ts'
-import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
-import type { KeybindingContext } from '../src/keybindings/types.ts'
+import { deriveKeybindingContext } from '../src/tui/keybindings/context.ts'
+import { EffectiveKeymap } from '../src/tui/keybindings/effective-keymap.ts'
+import { APP_KEYBINDINGS } from '../src/tui/keybindings/definitions.ts'
+import type { KeybindingContext } from '../src/tui/keybindings/types.ts'
 
 function keymap(options: Omit<ConstructorParameters<typeof EffectiveKeymap>[0], 'definitions'> = {}): EffectiveKeymap {
   return new EffectiveKeymap({

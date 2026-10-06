@@ -3,7 +3,7 @@
  * itself lives in types.ts; this module adds the pure derivation helper so
  * components and tests build a context from a narrow state view without
  * reaching into TuiApp.
- * @module @xmoon76/dsh-pi-tui/keybindings/context
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/context
  */
 
 import type { KeybindingContext } from './types.ts'

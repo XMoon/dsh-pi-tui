@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is

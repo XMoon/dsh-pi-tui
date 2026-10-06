@@ -40,9 +40,9 @@
 
 import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId, isEditorOwnedKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from './keybindings/key-identity.ts'
-import { isTerminalAmbiguousKeyId } from './keybindings/config.ts'
-import { PROTECTED_HOST_ACTIONS } from './keybindings/definitions.ts'
+import { canonicalizeKeyId, isEditorOwnedKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from './tui/keybindings/key-identity.ts'
+import { isTerminalAmbiguousKeyId } from './tui/keybindings/config.ts'
+import { PROTECTED_HOST_ACTIONS } from './tui/keybindings/definitions.ts'
 
 export { PROTECTED_HOST_ACTIONS }
 
@@ -91,7 +91,7 @@ interface BindingRecord {
  * registration compatibility guard). This inventory is NOT the runtime
  * source of truth: the InputRouter's runtime reservation is ACTION-driven
  * (hostResolves — a key is reserved only while an ACTIVE host action
- * binds it), and the user-orchestrable keymap (src/keybindings/
+ * binds it), and the user-orchestrable keymap (src/tui/keybindings/
  * definitions.ts) owns the effective keys. This list exists ONLY to
  * reject plugin registrations on the host's DEFAULT lifecycle keys
  * (default keyboard exit confirmation, Ctrl+S steer-all, Ctrl+F search,

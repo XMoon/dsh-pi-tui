@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import type { PendingUserRow } from '../src/tui-app.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
