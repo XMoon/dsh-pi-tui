@@ -61,8 +61,9 @@ Every production module belongs to exactly one owner layer:
 
 Root modules are limited to the documented facades/compatibility islands
 (`src/index.ts`, `src/startup.ts`, `src/commands.ts`, `src/tui-app.ts`,
-`src/transcript.ts`); an ordinary new `src/*.ts` feature/helper is forbidden and
-mechanically rejected (see "Source placement and the root ledger").
+`src/transcript.ts`); an ordinary new root feature/helper
+(`src/*.ts`/`*.tsx`/`*.mts`/`*.cts`) is forbidden and mechanically rejected (see
+"Source placement and the root ledger").
 
 A domain may appear in multiple layers when the responsibilities differ:
 
@@ -131,8 +132,8 @@ legacy
   grandfathered historical root modules awaiting TS4–TS8 owner migration
 ```
 
-The architecture gate fails when a current `src/*.ts|.mts|.cts` module is in
-neither list (a new unclassified root module), when a `legacy` entry no longer
+The architecture gate fails when a current `src/*.ts|.tsx|.mts|.cts` module is
+in neither list (a new unclassified root module), when a `legacy` entry no longer
 exists (stale entry — remove it in the same PR that moved/deleted the file), when
 a `stable` entry no longer exists, when an entry is duplicated, or when the schema
 is unknown. The gate never auto-writes or auto-accepts a baseline entry. During
@@ -254,9 +255,11 @@ app/remote/** dynamic imports     -> any owner/target other than the ONE sanctio
 src/app/surface/**                -> new Direct<...>(...) semantic adapters
 ```
 
-It also enforces the root ledger (`scripts/source-root-baseline.json`): a new
-unclassified root module, a stale `legacy` entry, a missing `stable` facade, a
-duplicate entry or an unknown schema fails the gate.
+It also enforces the root ledger (`scripts/source-root-baseline.json`) over every
+`src/*.ts|.tsx|.mts|.cts` module: a new unclassified root module, a stale `legacy`
+entry, a missing `stable` facade, a duplicate entry or an unknown schema fails the
+gate. `.tsx` is deliberately in scope, so the TUI-layer dependency rules cannot be
+bypassed by the file extension either.
 
 Its rule unit tests live in `test/application-architecture-gate.test.mjs`.
 

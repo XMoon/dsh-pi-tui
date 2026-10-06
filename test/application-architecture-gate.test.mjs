@@ -275,12 +275,14 @@ test('staticImportCandidates covers NodeNext emitted extensions', () => {
   assert.deepEqual(staticImportCandidates('runtime/x.d.mts'), ['runtime/x.d.mts'])
   assert.deepEqual(staticImportCandidates('runtime/x'), [
     'runtime/x.ts',
+    'runtime/x.tsx',
     'runtime/x.mts',
     'runtime/x.cts',
     'runtime/x.d.ts',
     'runtime/x.d.mts',
     'runtime/x.d.cts',
     'runtime/x/index.ts',
+    'runtime/x/index.tsx',
     'runtime/x/index.d.ts',
   ])
 })
@@ -426,12 +428,23 @@ test('collectSourceEntries walks a tree and reports src-relative paths', (t) => 
   const life = testLifecycle(t)
   const dir = life.tempDir('pre-m3-arch-')
   mkdirSync(join(dir, 'app', 'session'), { recursive: true })
+  mkdirSync(join(dir, 'tui', 'panels'), { recursive: true })
   writeFileSync(join(dir, 'app', 'session', 'runtime.ts'), 'export const x = 1\n')
   writeFileSync(join(dir, 'top.ts'), 'export const y = 2\n')
   writeFileSync(join(dir, 'decl.d.mts'), 'export const d: number\n')
   writeFileSync(join(dir, 'legacy.cts'), 'export const c = 1\n')
+  // `.tsx` is part of the scanned production population (never a gate bypass).
+  writeFileSync(join(dir, 'panel.tsx'), 'export const p = 1\n')
+  writeFileSync(join(dir, 'tui', 'panels', 'card.tsx'), 'export const card = 1\n')
   const entries = collectSourceEntries(dir)
-  assert.deepEqual(entries.map(e => e.rel), ['app/session/runtime.ts', 'decl.d.mts', 'legacy.cts', 'top.ts'])
+  assert.deepEqual(entries.map(e => e.rel), [
+    'app/session/runtime.ts',
+    'decl.d.mts',
+    'legacy.cts',
+    'panel.tsx',
+    'top.ts',
+    'tui/panels/card.tsx',
+  ])
 })
 
 test('zone predicates match the plan boundaries', () => {
@@ -704,6 +717,8 @@ test('the TUI layer must not import experimental Remote composition (TS1)', () =
   // consumes semantic/application-facing contracts only.
   const tuiFiles = [
     'tui/foo.ts',
+    // `.tsx` is covered by the same dependency rules — never a bypass.
+    'tui/panels/example.tsx',
     'tui/commands/settings.ts',
     'tui/commands/sessions.ts',
     'tui/commands/models.ts',
@@ -786,6 +801,10 @@ test('the source-root baseline accepts the exact captured tree and fails closed 
     findSourceRootViolations(baseline, [...current, 'new-feature.ts']).join('\n'),
     /new unclassified root production module: src\/new-feature\.ts/,
     'a new on-disk root module must FAIL')
+  assert.match(
+    findSourceRootViolations(baseline, [...current, 'new-feature.tsx']).join('\n'),
+    /new unclassified root production module: src\/new-feature\.tsx/,
+    'a new on-disk .tsx root module must FAIL too (the ledger is not .tsx-bypassable)')
   assert.match(
     mutated({ legacy: [...baseline.legacy, 'moved-away.ts'] }).join('\n'),
     /stale baseline entry: src\/moved-away\.ts/,

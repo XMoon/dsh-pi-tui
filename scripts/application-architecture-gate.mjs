@@ -20,10 +20,11 @@
  * '...'`, `export ... from '...'`, `import x = require('...')`, and
  * `import('...')` TYPE queries (`type T = import('...').T` / `typeof
  * import(...)`) — a type-only dependency is still a static dependency. All
- * supported TypeScript source extensions are scanned (`.ts`, `.mts`, `.cts`,
- * including their `.d.*` declaration forms), and static edges resolve both
- * explicit `.ts` specifiers and the NodeNext emitted extensions (`.js` ->
- * `.ts`/`.d.ts`, `.mjs` -> `.mts`/`.d.mts`, `.cjs` -> `.cts`/`.d.cts`). Out of
+ * supported production source extensions are scanned (`.ts`, `.tsx`, `.mts`,
+ * `.cts`, including their `.d.*` declaration forms), so neither the dependency
+ * rules nor the root ledger can be bypassed by choosing `.tsx`; static edges
+ * resolve both explicit `.ts` specifiers and the NodeNext emitted extensions
+ * (`.js` -> `.ts`/`.d.ts`, `.mjs` -> `.mts`/`.d.mts`, `.cjs` -> `.cts`/`.d.cts`). Out of
  * scope BY DESIGN: the VALUE dynamic `import('...')` call (the
  * sanctioned lazy backend-loading seam — see the migration doc §Startup),
  * CommonJS `require('...')` calls (this tree is ESM), and path aliases (the
@@ -82,7 +83,8 @@
  *      layer never depends on terminal presentation.
  *
  * Root source placement (plan §20.3): `scripts/source-root-baseline.json` is a
- * shrinking ledger of the ROOT production modules. A new `src/*.ts` module must
+ * shrinking ledger of the ROOT production modules. A new root module
+ * (`src/*.ts|.tsx|.mts|.cts`) must
  * belong to a canonical layer (`app`/`runtime`/`domain`/`client`/`tui`/
  * `extension`) instead; a `legacy` entry that no longer exists, a missing
  * `stable` facade, a duplicate entry, or an unknown schema fails closed. The
@@ -106,6 +108,14 @@ import ts from 'typescript'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = join(ROOT, 'src')
+
+/**
+ * Every production source extension the gate scans: `.ts` (including `.d.ts`),
+ * `.tsx`, `.mts` and `.cts`. `.tsx` is included deliberately — the root ledger
+ * and the TUI-layer dependency rules must not be bypassable by adding a `.tsx`
+ * module, and TS4+ presentation work may legitimately use it.
+ */
+export const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts']
 
 /**
  * Direct application owners that are deliberately NOT Backend adapters and may
@@ -404,7 +414,7 @@ export function collectSourceEntries(dir = SRC) {
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === 'dist') continue
         walk(p)
-      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.mts') || entry.name.endsWith('.cts')) {
+      } else if (SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
         out.push({
           rel: relative(dir, p).split('\\').join('/'),
           source: readFileSync(p, 'utf8'),
@@ -426,7 +436,7 @@ export function collectSourceEntries(dir = SRC) {
  * @returns {string[]}
  */
 export function staticImportCandidates(resolved) {
-  if (resolved.endsWith('.ts') || resolved.endsWith('.mts') || resolved.endsWith('.cts')) return [resolved]
+  if (resolved.endsWith('.ts') || resolved.endsWith('.tsx') || resolved.endsWith('.mts') || resolved.endsWith('.cts')) return [resolved]
   if (resolved.endsWith('.js')) {
     const stem = resolved.slice(0, -3)
     return [`${stem}.ts`, `${stem}.d.ts`, resolved]
@@ -441,12 +451,14 @@ export function staticImportCandidates(resolved) {
   }
   return [
     `${resolved}.ts`,
+    `${resolved}.tsx`,
     `${resolved}.mts`,
     `${resolved}.cts`,
     `${resolved}.d.ts`,
     `${resolved}.d.mts`,
     `${resolved}.d.cts`,
     `${resolved}/index.ts`,
+    `${resolved}/index.tsx`,
     `${resolved}/index.d.ts`,
   ]
 }
@@ -578,10 +590,10 @@ export function readSourceRootBaseline(path = SOURCE_ROOT_BASELINE_PATH) {
   return { version: raw.version, stable: raw.stable, legacy: raw.legacy }
 }
 
-/** Every ROOT production module (`src/*.ts|.mts|.cts`), sorted, directories excluded. */
+/** Every ROOT production module (`src/*.ts|.tsx|.mts|.cts`), sorted, directories excluded. */
 export function listSourceRootFiles(dir = SRC) {
   return readdirSync(dir, { withFileTypes: true })
-    .filter(entry => entry.isFile() && /\.(?:ts|mts|cts)$/u.test(entry.name))
+    .filter(entry => entry.isFile() && SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension)))
     .map(entry => entry.name)
     .sort()
 }
