@@ -184,8 +184,8 @@ test('the TUI plugin-manager source never touches profile/process internals', ()
   // rc.2 owns run/process recovery internally (plan §14.3): the TUI must never
   // read the run registry, a process group, or the profile lockfile.
   for (const file of [
-    '../src/plugin-manager/controller.ts',
-    '../src/plugin-manager/host-registry.ts',
+    '../src/app/plugin-manager/controller.ts',
+    '../src/app/plugin-manager/host-registry.ts',
     '../src/runtime/plugin-manager-port.ts',
     '../src/runtime/direct/plugin-manager-direct.ts',
   ]) {

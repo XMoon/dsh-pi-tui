@@ -9,10 +9,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SELF_BUNDLE } from '../src/plugin-manager/classify.ts'
-import { PluginManagerController } from '../src/plugin-manager/controller.ts'
+import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
+import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { createDiag } from '../src/diag.ts'
-import { PLUGIN_ACTION, bundleValue, entryValue } from '../src/plugin-manager/model.ts'
+import { PLUGIN_ACTION, bundleValue, entryValue } from '../src/app/plugin-manager/model.ts'
 import type {
   PluginChangeFact,
   PluginInstallEvent,

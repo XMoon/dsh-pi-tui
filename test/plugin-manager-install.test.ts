@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PluginManagerController } from '../src/plugin-manager/controller.ts'
+import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { PluginManagerPanel } from '../src/plugin-manager/panel.ts'
 import { createDiag } from '../src/diag.ts'
 import type {

@@ -9,7 +9,7 @@
  * surface-safety layer, which NARROWS effective actions (never forges Host
  * fields).
  *
- * @module @xmoon76/dsh-pi-tui/plugin-manager/model
+ * @module @xmoon76/dsh-pi-tui/app/plugin-manager/model
  */
 
 import type {
@@ -22,7 +22,7 @@ import type {
   PluginReadOnlyReason,
   PluginRegistriesFact,
   PluginRowFact,
-} from '../runtime/plugin-manager-port.ts'
+} from '../../runtime/plugin-manager-port.ts'
 import type { PluginPackageClassification, PluginPresentationRole } from './classify.ts'
 import { SELF_BUNDLE } from './classify.ts'
 import type { TuiExtensionFacts } from './classify.ts'

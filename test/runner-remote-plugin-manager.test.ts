@@ -284,7 +284,7 @@ test('L6 (M3-6 PR1): the REAL runner controller consumes the SELECTED Client ser
   // the evidence below is the model's genuine consumption, never an extra
   // test-side source call. A controller wired to the wrong service (or no
   // observations at all) cannot pass the assertions below.
-  const { PluginManagerController } = await import('../src/plugin-manager/controller.ts')
+  const { PluginManagerController } = await import('../src/app/plugin-manager/controller.ts')
   type Observation = { owner: string; contributionKinds: readonly string[]; contributionCount: number }
   type BuildModel = (this: { observationSource?: () => readonly Observation[] }, snapshot: never) => unknown
   const prototype = PluginManagerController.prototype as unknown as Record<string, BuildModel>
