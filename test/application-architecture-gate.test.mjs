@@ -180,22 +180,38 @@ test('application owners importing the bootstrap composition zone are rejected (
   // imports the FACADE, the facade imports helpers, and helpers import sibling
   // helpers. The facade<->helper reverse edge and the entry->helper edge are
   // separate contracts asserted right below.
-  const allowed = [
-    { file: 'index.ts', target: 'app/bootstrap' },
-    { file: 'app/bootstrap.ts', target: 'app/bootstrap/lifecycle' },
-    { file: 'app/bootstrap.ts', target: 'app/bootstrap' },
-    { file: 'app/bootstrap/runtime-selection.ts', target: 'app/bootstrap/lifecycle' },
+  //
+  // CRITICAL fixture shape: `findViolations` keys imports by `rel`, so an
+  // importer that ALSO appears in the scanned stub set has its own imports
+  // overwritten by the stub and the positive control would assert NOTHING. Each
+  // legal case therefore lists ONLY the target stub(s) it needs, and a paired
+  // owner-importer negative proves the very same edge+target is really being
+  // judged (so "allowed" can never mean "the rule never ran").
+  const legalCompositionEdges = [
+    { file: 'index.ts', target: 'app/bootstrap', known: ['app/bootstrap.ts'], ownerTarget: '../bootstrap' },
+    // `app/bootstrap.ts` -> `app/bootstrap/lifecycle.ts` (the facade consumes helpers).
+    { file: 'app/bootstrap.ts', target: 'bootstrap/lifecycle', known: ['app/bootstrap/lifecycle.ts'], ownerTarget: '../bootstrap/lifecycle' },
+    // sibling helper -> helper.
+    { file: 'app/bootstrap/runtime-selection.ts', target: 'app/bootstrap/lifecycle', known: ['app/bootstrap/lifecycle.ts'], ownerTarget: '../bootstrap/lifecycle' },
   ]
-  for (const { file, target } of allowed) {
+  const ownerImporter = 'app/surface/runtime.ts'
+  for (const { file, target, known, ownerTarget } of legalCompositionEdges) {
     const depth = file.split('/').length - 1
     const prefix = depth === 0 ? './' : '../'.repeat(depth)
+    assert.equal(known.includes(file), false, `${file} must not also be a scanned stub (it would overwrite its own imports)`)
+    const knownEntries = known.map(rel => entry(rel, 'export const stub = 1\n'))
     for (const ext of spellings) {
       const specifier = `${prefix}${target}${ext}`
       assert.deepEqual(
-        findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), ...scanned]),
+        findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), ...knownEntries]),
         [],
         `${file} must stay allowed to import ${specifier}`,
       )
+      // Paired negative on the SAME target: an owner importer is rejected.
+      const ownerSpecifier = `${ownerTarget}${ext}`
+      const ownerViolations = findViolations([entry(ownerImporter, `import { x } from '${ownerSpecifier}'\n`), ...knownEntries])
+      assert.equal(ownerViolations.length, 1, `${ownerImporter} -> ${ownerSpecifier} must be rejected`)
+      assert.equal(ownerViolations[0].rule, 'owner-imports-bootstrap')
     }
   }
   // Contract 1 (plan §7.2/§54): the package entry must go through the FACADE —
