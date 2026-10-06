@@ -24,7 +24,7 @@ its architecture interface (`matchesKey(data, 'ctrl+o')` scattered across
 so a future user override only touches the keymap, never a business
 handler.
 
-## The modules (`src/keybindings/`)
+## The modules (`src/tui/keybindings/`)
 
 | Module | Role |
 |---|---|
@@ -42,7 +42,7 @@ handler.
 
 ## The input ladder (what must not be broken)
 
-The `InputRouter` (input-router.ts) keeps its protocol/capture/focus
+The `InputRouter` (`src/tui/interaction/input-router.ts`) keeps its protocol/capture/focus
 precedence — the keymap is consulted ONLY when the ladder allows
 keybinding resolution. The plan is explicit: **do not delete the
 InputRouter**. The host ladder in `handleInputCore` is:
@@ -176,7 +176,7 @@ configurable action first (plan §3.3).
 The `tui-app` plugin's profile-owned Config, field `keybindings` — a
 whole-value volatile raw field since DSH 0.1.7 (the retired `dsh-pi-tui`
 settings namespace is only a legacy-migration input). The parser in
-`src/keybindings/config.ts` remains the only validation authority:
+`src/tui/keybindings/config.ts` remains the only validation authority:
 
 ```yaml
 keybindings:
@@ -308,10 +308,12 @@ the user's live bindings:
   keys). Every other mention is shorthand for the default binding and
   must not be relied on as the live binding.
 - **The static gate** also rejects hard-coded chord labels in
-  user-facing string literals (`src/index.ts`, `src/commands.ts` plus every
-  `src/tui/commands/**` module, `src/tui-app.ts`), with a documented allowlist
-  for fork editor-level
-  keys (Ctrl+Home/End).
+  user-facing string literals (`src/index.ts`, `src/commands.ts`, every
+  `src/tui/**` module including `src/tui/keybindings/definitions.ts`, and
+  `src/tui-app.ts`), with a documented allowlist for fork editor-level
+  keys (Ctrl+Home/End). Its host-interaction chord scan follows the owner: the
+  TuiApp facade remainder plus `src/tui/interaction/approval-runtime.ts`, while
+  focused components keep their own fixed keys.
 
 ## Revision history and convergence
 
@@ -332,7 +334,7 @@ current code implements:
 
 **Canonical physical identity.** `esc`/`escape`, `return`/`enter` and
 modifier order collapse to ONE key identity at every rule entry point
-(`src/keybindings/key-identity.ts`) — aliases can never bypass conflict,
+(`src/tui/keybindings/key-identity.ts`) — aliases can never bypass conflict,
 leader collision or dedup.
 
 **Single effective rule model.** The keymap compiles `declared` rules,

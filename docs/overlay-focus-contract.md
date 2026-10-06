@@ -10,9 +10,12 @@ as a **regression checklist** when you touch `/model`, add a modal, change a
 plugin UI tier, or work on the fullscreen lifecycle — it exists so the next
 change does not have to rediscover the same hard-won edge cases.
 
-Implementation: `src/overlay-broker.ts` (logical authority), `src/tui-app.ts`
-(host mount / seats / fullscreen), `packages/pi-tui/src/tui.ts` (physical focus
-transaction, divergence **X056** — see `packages/pi-tui/DIVERGENCES.md`).
+Implementation: `src/tui/interaction/overlay-broker.ts` (logical authority),
+`src/tui/interaction/approval-runtime.ts` (the approval modal lifecycle),
+`src/tui/interaction/editor-seat*.ts` (the editor seat) and `src/tui-app.ts`
+(host mount / seats / fullscreen coordination, TS5 keeps it the composition
+facade), `packages/pi-tui/src/tui.ts` (physical focus transaction, divergence
+**X056** — see `packages/pi-tui/DIVERGENCES.md`).
 
 ## 1. Authority map
 
