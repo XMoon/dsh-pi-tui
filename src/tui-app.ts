@@ -62,6 +62,7 @@ import {
   type SearchablePickerTruncatePrimaryContext,
 } from './tui/pickers/searchable-picker.ts'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
+import { isTernTerminal, ternCwdSequence } from './tui/terminal/tern.ts'
 import { runSyncDisposalSteps } from './disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
 // The generic overlay frame now lives in the TUI component layer; the stable
@@ -1550,6 +1551,17 @@ export interface TuiAppOptions {
   /** Working-indicator frame interval in ms; injectable so tests stay fast. */
   workingIntervalMs?: number
   /**
+   * Whether the injected terminal is Tern (`TERM_PROGRAM=tern`). A terminal
+   * IDENTITY FACT read once by the process entry point
+   * ({@link startProcessTui}) — `src/tui/terminal/tern.ts` owns the single
+   * detection rule. Tern is the only terminal that receives the OSC 7 cwd
+   * projection and the OSC 9;4 paused (`waiting_input`) refinement; every
+   * other terminal — and every direct `new TuiApp(...)` construction — keeps
+   * the plain boolean progress behavior. Defaults to false so headless
+   * surfaces stay deterministic regardless of the developer's own terminal.
+   */
+  ternTerminal?: boolean
+  /**
    * The structural icon palette (emoji | symbols | minimal), read once at
    * startup from the persisted settings. Runtime switches go through
    * {@link TuiApp.setIconStyle} — renderers NEVER deep-read a settings
@@ -2242,6 +2254,21 @@ export class TuiApp {
    * re-asserts it.
    */
   private terminalPresentationActive = false
+  /**
+   * Tern terminal identity (plan §3.1), read once from the injected option.
+   * Tern is the only terminal that receives the OSC 7 cwd projection; a
+   * non-Tern surface never writes it.
+   */
+  private readonly ternTerminal: boolean
+  /**
+   * The DESIRED terminal-local cwd (OSC 7 — plan §4.4). Presentation state
+   * only, never a second workspace/cwd authority: the status owner chooses
+   * the eligible terminal-local fact, and this field only remembers what the
+   * TUI must (re)assert. `undefined` means "unknown" — there is no truthful
+   * OSC 7 sequence for it, so nothing is written and no Client cwd or `/` is
+   * ever substituted.
+   */
+  private terminalCwdDesired: string | undefined
   /** Re-vendor lifecycle follow-up P3: whether this surface currently
    * holds the process's single live-TUI slot (claimed at the first
    * successful start, released only by the FINAL dispose — never by
@@ -3177,6 +3204,7 @@ export class TuiApp {
     this.events = events
     this.displayState = options.displayState ?? { preset: 'full' }
     this.iconStyle = options.iconStyle ?? 'emoji'
+    this.ternTerminal = options.ternTerminal === true
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
@@ -3823,6 +3851,54 @@ export class TuiApp {
   }
 
   /**
+   * Project the terminal-LOCAL Session cwd onto the Tern pane as OSC 7 (plan
+   * §4.3/§4.4). The status owner chooses the eligible fact (Direct Session
+   * header cwd, else the Direct launch cwd; never a Remote Host cwd) and
+   * passes `undefined` when it is unknown — this method is presentation state
+   * only and never invents a substitute cwd.
+   *
+   * Non-Tern terminals are a no-op. A repeated cwd is deduped; an equal
+   * `undefined` is inert. While the TuiApp does NOT own the terminal
+   * (stopped, or suspended for the external editor) only the desired cwd is
+   * folded — nothing is written — and the next screen start re-asserts it.
+   */
+  setTerminalCwd(cwd: string | undefined): void {
+    if (!this.ternTerminal) return
+    if (this.terminalCwdDesired === cwd) return
+    this.terminalCwdDesired = cwd
+    if (!this.terminalPresentationActive) return
+    this.writeTerminalCwd(cwd)
+  }
+
+  /**
+   * Write one OSC 7 cwd sequence through the injected terminal. An unknown or
+   * unusable cwd emits nothing (`ternCwdSequence` rejects it), and a
+   * synchronous terminal-write failure is contained like the progress write.
+   */
+  private writeTerminalCwd(cwd: string | undefined): void {
+    if (cwd === undefined) return
+    const sequence = ternCwdSequence(cwd)
+    if (sequence === undefined) return
+    try {
+      this.terminal.write(sequence)
+    } catch {
+      // Terminal presentation only: the semantic session lifecycle continues.
+    }
+  }
+
+  /**
+   * Re-assert the DESIRED cwd after a TuiApp-owned screen (re)start (plan
+   * §4.6). OSC 7 has no "clear" value and the pane must keep following the
+   * committed Session across a fullscreen swap, an `$EDITOR` round-trip and a
+   * plain stop()/start(): every enter re-asserts the latest known cwd exactly
+   * once.
+   */
+  private restoreTerminalCwd(): void {
+    if (this.terminalCwdDesired === undefined) return
+    this.writeTerminalCwd(this.terminalCwdDesired)
+  }
+
+  /**
    * Project the authoritative main-Agent running state onto the terminal's
    * native progress indicator (plan §6/§8). The terminal protocol — OSC 9;4
    * plus its keepalive — stays owned by the injected `Terminal`; this method
@@ -3844,8 +3920,8 @@ export class TuiApp {
   }
 
   /**
-   * Claim terminal presentation ownership for progress projection. Called
-   * immediately after EVERY TuiApp-owned screen start (plan §7).
+   * Claim terminal presentation ownership for the cwd/progress projections.
+   * Called immediately after EVERY TuiApp-owned screen start (plan §4.6/§7).
    *
    * EVERY acquisition asserts the current DESIRED state — not just the first
    * one. The progress indicator is terminal-side state that outlives an
@@ -3860,6 +3936,7 @@ export class TuiApp {
    */
   private enterTerminalPresentation(): void {
     this.terminalPresentationActive = true
+    this.restoreTerminalCwd()
     this.writeTerminalProgress(this.terminalProgressActive)
   }
 
@@ -18834,10 +18911,16 @@ import { color } from './theme.ts'
 
 /**
  * Start the TUI on the process terminal (raw-mode stdin/stdout). The runner
- * passes the presentation bridge and workspace root through the options.
+ * passes the presentation bridge and workspace root through the options. This
+ * is the process ENTRY POINT, so it is also where the terminal identity fact
+ * is read: `TERM_PROGRAM=tern` enables the Tern cwd/progress projections (a
+ * direct `new TuiApp(...)` keeps them off for deterministic headless tests).
  */
 export function startProcessTui(events: TuiAppEvents, options: TuiAppOptions = {}): TuiApp {
-  const app = new TuiApp(new ProcessTerminal(), events, options)
+  const app = new TuiApp(new ProcessTerminal(), events, {
+    ...options,
+    ternTerminal: options.ternTerminal ?? isTernTerminal(),
+  })
   app.start()
   return app
 }
