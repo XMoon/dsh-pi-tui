@@ -485,11 +485,6 @@ test('TypeScript import() type queries are static dependencies and are zone-chec
   assert.equal(violations.length, 1)
   assert.equal(violations[0].rule, 'direct-import-outside-composition')
   assert.deepEqual(parseImportSpecifiers("type U = typeof import('./y.ts')\n"), [{ specifier: './y.ts', line: 1, typeOnly: true }])
-  // Sibling of the value-dynamic literal completion: the no-substitution template
-  // spelling is the SAME module reference in a type position, and a `${…}`
-  // substitution stays out of a static gate's scope.
-  assert.deepEqual(parseImportSpecifiers('type V = import(`./v.ts`).V\n'), [{ specifier: './v.ts', line: 1, typeOnly: true }])
-  assert.deepEqual(parseImportSpecifiers('type W = typeof import(`./w/${name}.ts`)\n'), [])
 })
 
 test('the AST scanners are file-kind aware: a legal .tsx JSX tree is not a bypass (TS1)', () => {
@@ -606,12 +601,11 @@ test('parseImportSpecifiers covers the static ESM forms, type-only flags, and ig
       "import type { f } from './f.ts'",
       "export type { g } from './g.ts'",
       "import { type h } from './h.ts'",
-      "type i = import(`./i.ts`).I",
     ].join('\n'),
   )
-  assert.deepEqual(specs.map(s => s.specifier), ['./a.ts', './b.ts', './d.ts', './e.ts', './f.ts', './g.ts', './h.ts', './i.ts'])
-  assert.deepEqual(specs.map(s => s.line), [3, 4, 6, 7, 8, 9, 10, 11])
-  assert.deepEqual(specs.map(s => s.typeOnly), [false, false, false, false, true, true, true, true])
+  assert.deepEqual(specs.map(s => s.specifier), ['./a.ts', './b.ts', './d.ts', './e.ts', './f.ts', './g.ts', './h.ts'])
+  assert.deepEqual(specs.map(s => s.line), [3, 4, 6, 7, 8, 9, 10])
+  assert.deepEqual(specs.map(s => s.typeOnly), [false, false, false, false, true, true, true])
 })
 
 test('parseImportSpecifiers detects a from-clause split across lines', () => {
@@ -1018,6 +1012,23 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
   ])
   assert.equal(dynamicTemplate.length, 1, 'app owner -> tui/** template-literal dynamic import must be rejected')
   assert.equal(dynamicTemplate[0].rule, 'app-imports-tui')
+  // Transparent expression wrappers do not change WHICH module is referenced, so
+  // each spelling must be classified like the bare literal (a parenthesized
+  // argument is plain JS and type-checks; the casts are ordinary TS).
+  for (const [label, argument] of [
+    ['parenthesized', "('../../tui/plugin-manager/panel.ts')"],
+    ['as-cast', "'../../tui/plugin-manager/panel.ts' as string"],
+    ['satisfies', "'../../tui/plugin-manager/panel.ts' satisfies string"],
+    ['angle-bracket assertion', "<string>'../../tui/plugin-manager/panel.ts'"],
+    ['non-null', "'../../tui/plugin-manager/panel.ts'!"],
+  ]) {
+    const wrapped = findViolations([
+      entry('app/surface/plugin-manager-runtime.ts', `const p = await import(${argument})\n`),
+      entry('tui/plugin-manager/panel.ts', 'export const PluginManagerPanel = 1\n'),
+    ])
+    assert.equal(wrapped.length, 1, `app owner -> tui/** ${label} dynamic import must be rejected`)
+    assert.equal(wrapped[0].rule, 'app-imports-tui')
+  }
   // A `${…}` substitution is genuinely dynamic and stays outside the static model.
   assert.deepEqual(
     findViolations([
@@ -1059,6 +1070,13 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
   ])
   assert.equal(remoteEdgeTemplate.length, 1, 'only the loader owner may dynamically import the Remote composition root')
   assert.equal(remoteEdgeTemplate[0].rule, 'remote-dynamic-import-owner')
+  // …and the parenthesized spelling reaches that rule too.
+  const remoteEdgeWrapped = findViolations([
+    entry('app/remote/not-the-loader.ts', "const backend = await import(('./runtime.ts'))\n"),
+    entry('app/remote/runtime.ts', 'export const backend = 1\n'),
+  ])
+  assert.equal(remoteEdgeWrapped.length, 1, 'a wrapped argument must not bypass the Remote lazy-boundary rule')
+  assert.equal(remoteEdgeWrapped[0].rule, 'remote-dynamic-import-owner')
 })
 
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
@@ -1075,11 +1093,26 @@ test('parseValueDynamicImports reports only value import() calls with literal sp
       'const f = await import(`./f.ts`)',
       // …while a substitution is a genuinely dynamic expression and stays out.
       'const g = await import(`./g/${name}.ts`)',
+      // Transparent wrappers do not change WHICH module is referenced: the
+      // parenthesized form is plain JS, the casts are ordinary TS, and all of
+      // them type-check. Each must be classified like the bare literal.
+      "const h = await import(('./h.ts'))",
+      "const i = await import('./i.ts' as string)",
+      "const j = await import('./j.ts' satisfies string)",
+      "const k = await import(<string>'./k.ts')",
+      "const l = await import('./l.ts'!)",
+      // A concatenation is genuinely dynamic and stays out.
+      "const m = await import('./m.ts' + '')",
     ].join('\n'),
   )
   assert.deepEqual(specs, [
     { specifier: './a.ts', line: 1 },
     { specifier: './f.ts', line: 6 },
+    { specifier: './h.ts', line: 8 },
+    { specifier: './i.ts', line: 9 },
+    { specifier: './j.ts', line: 10 },
+    { specifier: './k.ts', line: 11 },
+    { specifier: './l.ts', line: 12 },
   ])
 })
 

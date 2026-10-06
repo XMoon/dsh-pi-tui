@@ -25,11 +25,16 @@
  * rules nor the root ledger can be bypassed by choosing `.tsx`; static edges
  * resolve both explicit `.ts`/`.tsx` specifiers and the NodeNext emitted
  * extensions (`.js` -> `.ts`/`.tsx`/`.d.ts`, `.jsx` -> `.tsx`/`.ts`/`.d.ts`,
- * `.mjs` -> `.mts`/`.d.mts`, `.cjs` -> `.cts`/`.d.cts`). Out of
- * scope BY DESIGN: the VALUE dynamic `import('...')` call (the
- * sanctioned lazy backend-loading seam — see the migration doc §Startup),
- * CommonJS `require('...')` calls (this tree is ESM), and path aliases (the
- * tsconfigs define no `paths`).
+ * `.mjs` -> `.mts`/`.d.mts`, `.cjs` -> `.cts`/`.d.cts`). A VALUE dynamic
+ * `import('...')` call IS parsed (`parseValueDynamicImports`, transparent
+ * wrappers unwrapped) and governs the sanctioned lazy backend-loading seam: the
+ * Remote lazy-boundary rule admits exactly one such edge, and any rule that
+ * opts in with `checksValueDynamicImport` is evaluated against the rest (today
+ * the TS4 `app-imports-tui` lock). The generic rule list stays static-only on
+ * purpose so that sanctioned seam is not re-classified. Still out of scope: a
+ * non-literal dynamic argument or one containing a `${…}` substitution (a
+ * genuinely dynamic expression), CommonJS `require('...')` calls (this tree is
+ * ESM), and path aliases (the tsconfigs define no `paths`).
  *
  * Rules enforced:
  *   1. `src/runtime/**` must not import `src/app/**`.
@@ -358,12 +363,54 @@ export function scriptKindOf(rel = 'module.ts') {
 }
 
 /**
+ * Strip the transparent expression wrappers that do not change WHICH node an
+ * expression refers to: parentheses, `as`/`satisfies` casts, the `<T>`
+ * assertion and the non-null `!` operator. Every consumer must classify the
+ * referenced node, not its spelling — otherwise each wrapper is an equivalent
+ * spelling that silently escapes the rule:
+ *
+ * ```text
+ * await import('...')                  plain
+ * await import(('...'))                parenthesized (plain JS)
+ * await import('...' as string)        as-cast
+ * await import('...' satisfies string) satisfies
+ * await import(<string>'...')          angle-bracket assertion
+ * await import('...'!)                 non-null
+ * ```
+ *
+ * A `${…}` substitution, string concatenation and a non-identifier argument are
+ * genuinely dynamic values and stay outside a static dependency gate's scope.
+ * @param {import('typescript').Expression} expr the candidate expression
+ * @returns {import('typescript').Expression} the innermost wrapped expression
+ */
+function unwrapExpression(expr) {
+  let current = expr
+  while (
+    ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isNonNullExpression(current)
+    || ts.isSatisfiesExpression(current)
+  ) {
+    current = current.expression
+  }
+  return current
+}
+
+/**
  * Extract every STATIC import/export-from/import-equals specifier AND every
  * `import('...')` TYPE query (`type T = import('...').T` / `typeof import(...)`)
  * with its 1-based line number and whether it is TYPE-ONLY, via the TypeScript
  * parser (the file kind follows `rel`, so `.tsx` JSX is parsed as TSX). Comments
  * and multi-line `from` clauses are handled correctly; a VALUE dynamic
  * `import('...')` call is intentionally not a static edge.
+ *
+ * The module-specifier positions handled here are restricted by the language
+ * grammar to a string literal token (`import`/`export … from`),
+ * a string literal type (`import('...').T` / `typeof import('...')`) or a
+ * `require('...')` string argument, so no wrapper can appear in them: both
+ * `import(('./a.ts')).T` and `import x = require(('./a.ts'))` are
+ * `TS1141 String literal expected` and cannot compile.
  * @param {string} source file contents
  * @param {string} [rel] src-relative path (drives the parser kind)
  * @returns {Array<{ specifier: string, line: number, typeOnly: boolean }>}
@@ -374,13 +421,12 @@ export function parseImportSpecifiers(source, rel = 'module.ts') {
   const lineOf = (node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1
   const importTypeArgument = (node) => {
     const arg = node.argument
-    if (arg === undefined || !ts.isLiteralTypeNode(arg)) return undefined
-    // Sibling of the `parseValueDynamicImports` literal classification: a
-    // no-substitution template literal in a type position
-    // (`type T = import(`./x.ts`).T`) parses as a LiteralTypeNode wrapping a
-    // NoSubstitutionTemplateLiteral, so `ts.isStringLiteral()` alone would miss
-    // the statically equivalent spelling there too.
-    if (!ts.isStringLiteral(arg.literal) && !ts.isNoSubstitutionTemplateLiteral(arg.literal)) return undefined
+    // The type argument is grammar-restricted to a string literal TYPE: the
+    // template-literal and parenthesized spellings are `TS1141 String literal
+    // expected` and cannot compile, so no wrapper/literal-kind leniency belongs
+    // here (unlike the VALUE dynamic import argument, which is an ordinary
+    // expression position and is unwrapped by `unwrapExpression`).
+    if (arg === undefined || !ts.isLiteralTypeNode(arg) || !ts.isStringLiteral(arg.literal)) return undefined
     return arg.literal.text
   }
   /** True when an import declaration binds/types only (no default value binding). */
@@ -437,7 +483,7 @@ export function parseValueDynamicImports(source, rel = 'module.ts') {
       && node.expression.kind === ts.SyntaxKind.ImportKeyword
       && node.arguments.length > 0
     ) {
-      const argument = node.arguments[0]
+      const argument = unwrapExpression(node.arguments[0])
       if (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument)) {
         out.push({ specifier: argument.text, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 })
       }
@@ -506,22 +552,9 @@ export function findRemoteDynamicImportViolations(entries) {
 export function findDirectAdapterConstructions(source, rel = 'module.ts') {
   const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, false, scriptKindOf(rel))
   const out = []
-  const unwrap = (expr) => {
-    let current = expr
-    while (
-      ts.isParenthesizedExpression(current)
-      || ts.isAsExpression(current)
-      || ts.isTypeAssertionExpression(current)
-      || ts.isNonNullExpression(current)
-      || ts.isSatisfiesExpression(current)
-    ) {
-      current = current.expression
-    }
-    return current
-  }
   const visit = (node) => {
     if (ts.isNewExpression(node)) {
-      const expr = unwrap(node.expression)
+      const expr = unwrapExpression(node.expression)
       if (ts.isIdentifier(expr) && /^Direct[A-Za-z0-9_]*$/u.test(expr.text)) {
         out.push({ name: expr.text, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 })
       }
