@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { FOCUS_MODE_PROMPT, installFocusPrompt } from '../src/focus.ts'
-import { StatusStore } from '../src/status/store.ts'
+import { StatusStore } from '../src/domain/status/store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
   displayPolicyFor,

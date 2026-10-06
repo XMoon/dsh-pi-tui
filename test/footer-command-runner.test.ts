@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { FooterCommandRunner, KILL_GRACE_MS, type FooterCommandConfig } from '../src/footer/command-runner.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 

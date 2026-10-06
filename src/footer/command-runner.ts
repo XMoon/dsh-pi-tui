@@ -14,7 +14,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import { buildCommandInput } from './command-protocol.ts'
-import type { StatusSnapshot } from '../status/types.ts'
+import type { StatusSnapshot } from '../domain/status/types.ts'
 
 /** The validated command config (bounds per plan §17.3). */
 export interface FooterCommandConfig {

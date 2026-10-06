@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { renderSpans } from '../src/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 import type { FooterItemRef } from '../src/footer/types.ts'
 
 const registry = createBuiltinFooterRegistry()

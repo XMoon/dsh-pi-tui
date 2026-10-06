@@ -146,7 +146,7 @@ test('a plugin registers a configurable footer item; the composer renders it und
     // And the composer honours it: at a width that cannot hold 8 cells,
     // the item is DROPPED (never truncated below its minWidth).
     const { FooterComposer } = await import('../src/footer/composer.ts')
-    const { emptyStatusSnapshot } = await import('../src/status/types.ts')
+    const { emptyStatusSnapshot } = await import('../src/domain/status/types.ts')
     const composer = new FooterComposer(app.getFooterItemRegistry())
     const narrow = composer.render({
       snapshot: emptyStatusSnapshot(),

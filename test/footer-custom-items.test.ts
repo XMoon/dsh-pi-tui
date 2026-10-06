@@ -22,7 +22,7 @@ import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
 import { FooterItemRegistry } from '../src/footer/item-registry.ts'
 import { FooterConfiguratorModel, itemMenuFor } from '../src/footer/configurator-model.ts'
 import type { FooterItemDefinition } from '../src/footer/types.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 

@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildCommandInput } from '../src/footer/command-protocol.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }

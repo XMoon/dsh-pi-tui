@@ -55,7 +55,7 @@ import { projectTranscriptStructure, type TranscriptStructureBlock, type Transcr
 import type { TranscriptContainerPath } from './transcript-disclosure.ts'
 import { displayFailureText } from './failure-presentation.ts'
 import { focusTiming, type FocusTimingStore } from './focus-timing.ts'
-import type { RunPhase } from './status/types.ts'
+import type { RunPhase } from './domain/status/types.ts'
 
 /**
  * The Focus-facing names of the SHARED compact process-preview authority

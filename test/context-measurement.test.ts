@@ -23,13 +23,13 @@ import {
   ContextMeasurementCoordinator,
   deferInitialContextMeasure,
   type ContextMeasureReason,
-} from '../src/status/context-measurement.ts'
+} from '../src/domain/status/context-measurement.ts'
 import { compositionFile } from './support/composition-surface.ts'
 import { ownerFile, ownerSource } from './support/owner-modules.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
-import { StatusStore } from '../src/status/store.ts'
-import { usageFromStats } from '../src/status/derive-usage.ts'
-import { plainSectionEqual } from '../src/status/equal.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
+import { StatusStore } from '../src/domain/status/store.ts'
+import { usageFromStats } from '../src/domain/status/derive-usage.ts'
+import { plainSectionEqual } from '../src/domain/status/equal.ts'
 import type { SessionStats } from '../src/stats.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

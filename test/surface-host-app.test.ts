@@ -676,7 +676,7 @@ test('runner permission projection clears on service/agent absence (runner-level
   // deriveRunnerPermission: a missing permission service OR a missing
   // live agent must yield EXPLICIT undefined (never the stale value) —
   // that explicit undefined is what clears the extension snapshot.
-  const { deriveRunnerPermission } = await import('../src/status/derive-permission.ts')
+  const { deriveRunnerPermission } = await import('../src/domain/status/derive-permission.ts')
   // Alpha.4: `permission.current(session)` reads the session's own knob
   // state — the service surface is session-oriented, never an event list.
   const agent = { session: { id: 'session-a' } }

@@ -31,7 +31,7 @@
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
-import type { StatusSnapshot } from '../status/types.ts'
+import type { StatusSnapshot } from '../domain/status/types.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import type {
   FooterDensity,

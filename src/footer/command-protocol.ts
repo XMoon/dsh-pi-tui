@@ -7,7 +7,7 @@
  * @module @xmoon76/dsh-pi-tui/footer/command-protocol
  */
 
-import type { StatusSnapshot } from '../status/types.ts'
+import type { StatusSnapshot } from '../domain/status/types.ts'
 
 /** The V1 stdin payload. */
 export interface FooterCommandInputV1 {

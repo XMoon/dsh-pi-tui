@@ -14,7 +14,7 @@
  */
 
 import type { TodoItem, TuiApp } from '../../src/tui-app.ts'
-import type { UsageStatus } from '../../src/status/types.ts'
+import type { UsageStatus } from '../../src/domain/status/types.ts'
 
 /** The child facts one TuiApp-level suite declares for the viewed subject. */
 export interface ChildDisplaySubject {

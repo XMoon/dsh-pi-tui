@@ -854,6 +854,46 @@ test('the test-support production scan mirrors the gate extension set and parser
   assert.notEqual(scriptKindOf('a.tsx'), scriptKindOf('a.ts'), 'a .tsx module must not parse as plain TS')
 })
 
+test('the domain layer is transport/UI-neutral and the app/plugin owners stay off Direct implementations (TS3)', () => {
+  // TS3 §24/§42/§67. Each case lists the EXACT rule ids that must fire (most
+  // have exactly one owner rule; a runtime module reaching a bootstrap helper is
+  // an inversion of two independent rules).
+  const cases = [
+    ['src/domain/status/foo.ts', '../../app/surface/runtime.ts', ['domain-imports-app']],
+    ['src/domain/status/foo.ts', '../../tui/commands/status.ts', ['domain-imports-tui']],
+    ['src/domain/status/foo.ts', '../../app/remote/runtime.ts', ['domain-imports-remote-composition']],
+    ['src/domain/status/foo.ts', '../../runtime/remote/session-reader-remote.ts', ['domain-imports-remote-composition']],
+    ['app/plugin-manager/controller.ts', '../../runtime/direct/plugin-manager-direct.ts', ['direct-import-outside-composition']],
+    ['app/session/foo.ts', '../bootstrap/lifecycle.ts', ['owner-imports-bootstrap']],
+    ['app/surface/foo.ts', '../bootstrap/event-wiring.ts', ['owner-imports-bootstrap']],
+    // A runtime module reaching a bootstrap helper is BOTH a runtime->app
+    // inversion and a composition-zone inversion: two independent rules answer
+    // two different questions, so both are reported.
+    ['runtime/foo.ts', '../app/bootstrap/runtime-selection.ts', ['runtime-imports-app', 'owner-imports-bootstrap']],
+  ]
+  for (const [file, specifier, rules] of cases) {
+    const violations = findViolations([entry(file, `import { x } from '${specifier}'\n`)])
+    assert.deepEqual([...violations.map(v => v.rule)].sort(), [...rules].sort(),
+      `${file} -> ${specifier} must fail as ${rules.join(' + ')} only`)
+  }
+  // Positive controls: the sanctioned edges stay open.
+  const allowed = [
+    // The bootstrap composition zone may construct Direct adapters.
+    ['app/bootstrap/task-source.ts', '../../runtime/direct/task-read-direct.ts'],
+    // The Plugin Manager APPLICATION owner consumes its semantic port.
+    ['app/plugin-manager/controller.ts', '../../runtime/plugin-manager-port.ts'],
+    // The neutral domain layer may consume neutral runtime port contracts.
+    ['src/domain/status/foo.ts', '../../runtime/session-reader-port.ts'],
+  ]
+  for (const [file, specifier] of allowed) {
+    assert.deepEqual(
+      findViolations([entry(file, `import { x } from '${specifier}'\n`)]),
+      [],
+      `${file} -> ${specifier} must stay allowed`,
+    )
+  }
+})
+
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
   const specs = parseValueDynamicImports(
     [

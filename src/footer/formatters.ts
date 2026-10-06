@@ -7,7 +7,7 @@
  */
 
 import { formatTokens } from '../token-usage.ts'
-import type { UsageStatus } from '../status/types.ts'
+import type { UsageStatus } from '../domain/status/types.ts'
 
 /** Whether cwd uses Windows path syntax rather than a POSIX filename with
  * a literal backslash. Drive paths and UNC paths are unambiguous; every other
