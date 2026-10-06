@@ -45,3 +45,16 @@ test('exactly one production TranscriptFolder class declaration exists', () => {
     .map(path => path.slice(SRC.length))
   assert.deepEqual(declaring, ['domain/transcript/folder.ts'])
 })
+
+test('the post-turn replay provenance is marked only by the ONE fold authority', () => {
+  // `markPostTurnReplayEvidence` is fold-internal authority: only the fold can
+  // know a row materialized after its owning turn's `turn/end`. The weak sidecar
+  // lives in `semantics.ts` (a sibling module) purely to keep the grouping
+  // eligibility authority importable without a folder <-> grouping value cycle,
+  // so this locks the "only the fold writes it" claim that used to be a comment.
+  const MARKER_CALL = /(?<!function )\bmarkPostTurnReplayEvidence\s*\(/u
+  const callers = productionSources(SRC)
+    .filter(path => MARKER_CALL.test(readFileSync(path, 'utf8')))
+    .map(path => path.slice(SRC.length))
+  assert.deepEqual(callers, ['domain/transcript/folder.ts'])
+})
