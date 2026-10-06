@@ -163,15 +163,27 @@ export class NoticeContextRow implements Component {
 export class RelayContextRow implements Component {
   private readonly options: ContextRowOptions
   private readonly geometry: LongMessageDisclosureGeometry
+  /** Last-width cache of the FINAL rows (perf: a steady frame must not re-wrap
+   * and re-color the whole body). It is disposable derived presentation state:
+   * message text, disclosure state, theme, sender identity and component
+   * lifetime stay owned by `options` and the outer component cache, never by
+   * this cache. Only the newest width is retained (no width-history growth). */
+  private cachedWidth: number | undefined
+  private cachedRows: string[] | undefined
 
   constructor(options: ContextRowOptions & { geometry: LongMessageDisclosureGeometry }) {
     this.options = options
     this.geometry = options.geometry
   }
 
-  invalidate(): void {}
+  /** Drop the cached rows so a theme/global invalidation re-renders them. */
+  invalidate(): void {
+    this.cachedWidth = undefined
+    this.cachedRows = undefined
+  }
 
   render(width: number): string[] {
+    if (this.cachedRows !== undefined && this.cachedWidth === width) return this.cachedRows
     const { message, expanded, expandHint, iconStyle } = this.options
     const sender = message.contextPresentation?.senderSessionId
     const icon = iconPrefix(message.icon ?? 'context-generic', iconStyle)
@@ -188,6 +200,8 @@ export class RelayContextRow implements Component {
     const collapsed = window.markerRow !== undefined
     const rows = [headerRow(`${icon}${title}${collapsed ? expandAffordance(expandHint) : ''}`, width)]
     rows.push(...window.rows)
+    this.cachedWidth = width
+    this.cachedRows = rows
     return rows
   }
 }

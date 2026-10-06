@@ -307,3 +307,73 @@ suspend, `stop()`, `dispose()`). It is a diagnostic switch, disabled by
 default, and deliberately separate from `DSH_TUI_RENDER_PROFILE` (transcript
 presentation commits). The probe/benchmark lives in the perf report
 referenced above.
+
+## Relay Context row render cache + transcript boundary fast-path (2026-10-06)
+
+> Measured 2026-10-06 · baseline `next @ e2a2712e43c7eb77da9f1864b7bc3f93b75b52c3` ·
+> same machine, Node v24.20.0 · headless xterm 160x45 · real exported session corpus
+> (`~/.dsh/sessions/--home-xmoon-project-dsh-pi-tui--/…/session.v4.jsonl.zstd`, 499 messages in the
+> bounded 20-turn window, ~1.66 MB of message text, 8 Context rows of which 5 are `relay`) ·
+> warm fullscreen page-scroll frames (alternating `PageDown`/`PageUp`, 20 frames per preset, after
+> two settling paints). Timing is observational; the cache and semantic tests are the CI gate.
+>
+> Local measurement probes (untracked, not part of the product):
+> `temp/tern/frame-cost-probe.mts` — per-frame CPU/wall inside `TuiAltScreen.doRender`;
+> `temp/tern/frame-profile-probe.mts` — per-class render attribution.
+> All probe-side prototype hooks are disabled for every figure below.
+>
+> ```sh
+> node --import tsx/esm temp/tern/frame-cost-probe.mts
+> for p in compact focus full; do PRESET=$p node --import tsx/esm temp/tern/frame-profile-probe.mts; done
+> ```
+> Figures are **frame CPU** p50 / p95 (`frameCpuMs`, measured inside `TuiAltScreen.doRender`),
+> not wall time (20 warm frames per preset).
+
+### A → B → C record
+
+```text
+A = clean next @ e2a2712e43c7eb77da9f1864b7bc3f93b75b52c3
+B = Commit 1 (Relay render cache)
+C = Commit 2 (transcript boundary fast-path) = the final HEAD
+```
+
+Measurement provenance — the exact snapshots the probes ran against:
+
+| stage | measured snapshot | note |
+|---|---|---|
+| A | `e2a2712e` | clean next (remote) |
+| B | `f6d84413` | local measurement commit — not retained as a remote ref |
+| C | `e9e2c8e9` | local measurement commit — not retained as a remote ref |
+
+The delivered commits keep byte-identical `src` trees — `src` tree
+`21c6cb893a4cc34607eb404a857f020014c5bbc5` for Commit 1 and
+`eedea39409b84a1c38525eef3a368468a53403ab` for Commit 2 (verify with
+`git rev-parse <delivered-commit>:src`); only tests and this document changed after the measurement, so
+the figures transfer to the delivered commits. The delivered commit ids — which change on every
+rebase/amend — are pinned in the PR body.
+
+| metric | A baseline | B after Commit 1 | C after Commit 2 | A→B |
+|---|---:|---:|---:|---:|
+| compact frame CPU p50 | 97.47 ms | 17.74 ms | — | −79.73 ms (−82%) |
+| focus frame CPU p50 | 85.41 ms | 7.81 ms | — | −77.60 ms (−91%) |
+| full frame CPU p50 | 92.85 ms | 11.73 ms | — | −81.12 ms (−87%) |
+| compact frame CPU p95 | 150.51 ms | 32.62 ms | — | −117.89 ms |
+| focus frame CPU p95 | 98.11 ms | 18.60 ms | — | −79.51 ms |
+| full frame CPU p95 | 121.26 ms | 16.48 ms | — | −104.78 ms |
+| `RelayContextRow` attributed ms/frame (compact) | 81.25 ms | 0.00 ms | — | −81.25 ms |
+| `RelayContextRow` attributed ms/frame (focus) | 84.21 ms | 0.00 ms | — | −84.21 ms |
+| `RelayContextRow` attributed ms/frame (full) | 68.23 ms | 0.01 ms | — | −68.22 ms |
+| `RelayContextRow` render calls/frame | 5 | 5 | 5 | 0 |
+| boundary no-op capture + remeasure per event | 82.24 ms | 2.60 ms | — | −79.64 ms |
+
+The C column and the boundary ordering record land with Commit 2.
+
+### Commit 1 — `RelayContextRow` renders once per width
+
+`RelayContextRow.render()` wrapped, colored and disclosure-sliced the whole relay body on every
+paint. The row now keeps a last-width cache of the FINAL rows (one entry; `invalidate()` clears it),
+so a steady frame at an unchanged width returns them without re-wrapping.
+
+The remaining compact frame cost (16–18 ms) is the collapsed Work card plus the still-uncached
+`NoticeContextRow` and the row-map/geometry work; the focus/full frames are back at the 8–12 ms class
+this document recorded on 2026-09-21.

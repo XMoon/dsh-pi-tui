@@ -279,3 +279,61 @@ test('a genuine blank relay body line survives the artifact cleanup', () => {
   assert.equal(body.length, 3, `content / blank / content:\n${body.join('|')}`)
   assert.equal(body[1]!.trim(), '', 'the blank line is preserved')
 })
+
+// --- Relay render cache (perf #2) -------------------------------------------
+//
+// The relay body is wrapped/colored/disclosed at RENDER time, on every paint.
+// A steady frame must reuse the final rows for the width it already rendered;
+// these tests pin that cache contract without any wall-clock assertion.
+
+/** A relay body long enough to enter the shared long-message window at the
+ * widths these tests render. */
+function longRelayBody(): string {
+  return Array.from({ length: 40 }, (_, index) => `line ${index}`).join(' ')
+}
+
+function longRelayRow(expanded: boolean): RelayContextRow {
+  return new RelayContextRow({
+    message: relayRow(longRelayBody()), expanded, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    geometry: { thresholdRows: 3, headRows: 2, tailRows: 2 },
+  })
+}
+
+test('a repeated same-width relay render returns the cached final rows', () => {
+  const row = longRelayRow(false)
+  const first = row.render(60)
+  const second = row.render(60)
+  assert.strictEqual(second, first, 'a steady frame must not re-wrap and re-color the relay body')
+})
+
+test('a relay width change recomputes the final rows at the new width', () => {
+  const row = longRelayRow(false)
+  const wide = row.render(60)
+  const narrow = row.render(24)
+  assert.notStrictEqual(narrow, wide, 'a width change must recompute')
+  assert.notDeepEqual(narrow, wide, 'the recomputed rows reflect the new width')
+  for (const line of narrow) assert.ok(visibleWidth(line) <= 24, `narrow width contract:\n${JSON.stringify(visible(line))}`)
+  assert.ok(narrow.some(line => visible(line).includes('…')), 'the recomputed rows keep the disclosure marker')
+  assert.ok(narrow.some(line => visible(line).includes('line 0')), 'the recomputed rows keep the head')
+})
+
+test('invalidate() drops the cached rows and re-renders identical content', () => {
+  const row = longRelayRow(false)
+  const before = row.render(60)
+  row.invalidate()
+  const after = row.render(60)
+  assert.deepEqual(after, before, 'invalidation must not change the rendered semantics')
+  assert.notStrictEqual(after, before, 'invalidation must force a fresh render')
+})
+
+test('the relay cache is per instance and per width: no cross-instance or global reuse', () => {
+  const collapsed = longRelayRow(false)
+  const expanded = longRelayRow(true)
+  const collapsedRows = collapsed.render(60)
+  const expandedRows = expanded.render(60)
+  assert.ok(expandedRows.length > collapsedRows.length, 'the disclosure owner still decides collapsed vs expanded')
+  assert.strictEqual(collapsed.render(60), collapsedRows, 'the collapsed instance keeps its own cached rows')
+  assert.strictEqual(expanded.render(60), expandedRows, 'the expanded instance keeps its own cached rows')
+  assert.notStrictEqual(expanded.render(60), collapsed.render(60), 'the two instances never share rows')
+  assert.notStrictEqual(longRelayRow(false).render(60), collapsedRows, 'a new instance renders fresh rows (no global cache)')
+})
