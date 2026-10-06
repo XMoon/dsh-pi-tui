@@ -6,6 +6,14 @@
  * hard-coded chord labels (a remap would make the string lie — key labels
  * must come from the keymap's keyHint/keysFor).
  *
+ * The user-facing string scan enumerates EVERY production module under
+ * `src/tui/**` recursively and exempts only individual POSITIONS: the
+ * keybinding authority's machine-readable key vocabulary (the KeyId grammar
+ * tables, the canonical label map, the pi-tui binding presets, the shared
+ * terminal-ambiguous inventory) and the diagnostics that NAME a fixed key.
+ * A rendered label can never match those rows, and every row fails closed —
+ * editing the line drops its exemption.
+ *
  * Allowlist (focused-component / protocol seams — the plan's sanctioned
  * exceptions):
  * - the read-only subagent viewer guard (Esc + Ctrl+O pass through);
@@ -104,6 +112,45 @@ const STRING_ALLOWLIST = [
   // The default Ctrl+D editor-ownership branch is semantic routing, not UI copy.
   "key === 'ctrl+d'",
   // Dynamic exit-confirmation labels are intentionally not allowlisted.
+  //
+  // --- TS5 §18.1: POSITION-level exceptions inside the keybinding authority
+  // (now under `src/tui/keybindings/**`, which the scan enumerates recursively
+  // like every other TUI module). Each row is ONE exact line of machine-readable
+  // key vocabulary or a fixed-key diagnostic — never a rendered label — and each
+  // fails closed: editing the line drops its exemption and the gate re-flags it.
+  //
+  // (1) The canonical KeyId GRAMMAR tables in `key-identity.ts` (the machine key
+  // inventories the resolver/decoder switch on). Nine rows cover the twelve
+  // flagged lines: two pairs are byte-identical table lines.
+  "'up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f'",
+  "'alt+left', 'ctrl+left', 'alt+b', 'alt+right', 'ctrl+right', 'alt+f'",
+  "'home', 'ctrl+home', 'ctrl+a', 'end', 'ctrl+end', 'ctrl+e'",
+  "'pageUp', 'ctrl+pageUp', 'pageDown', 'ctrl+pageDown'",
+  "'ctrl+]', 'ctrl+alt+]'",
+  "'backspace', 'shift+backspace', 'delete', 'shift+delete', 'ctrl+d'",
+  "'ctrl+w', 'alt+backspace', 'alt+d', 'alt+delete'",
+  "'ctrl+u', 'ctrl+k', 'ctrl+y', 'alt+y', 'ctrl+-'",
+  "'shift+enter', 'ctrl+j', 'enter', 'tab', 'escape', 'ctrl+c'",
+  // (2) The shared terminal-ambiguous key INVENTORY `config.ts` canonicalizes
+  // (`TERMINAL_AMBIGUOUS_KEY_IDS`): machine tokens, never rendered.
+  "['ctrl+[', 'ctrl+j', 'ctrl+m', 'ctrl+i', 'ctrl+h', 'ctrl+_', 'ctrl+-', 'ctrl+backspace']",
+  // (3) The KeyId → human label map (`hints.ts`): the label AUTHORITY itself —
+  // it is what `keyHint()` renders, so its own spellings cannot be a stale copy.
+  "'ctrl+[': 'Ctrl+['",
+  // (4) The pi-tui viewport binding PRESETS (`home-end-mode.ts`): machine
+  // binding values, not rendered copy.
+  "'tui.altScreen.top': mode === 'input'",
+  "'tui.altScreen.bottom': mode === 'input'",
+  // (5) Semantic pre-submit comparisons over a FIXED editor key (not host
+  // routing): the parser's and the recorder's `shift+enter` guards.
+  "canonicalEntry === 'shift+enter'",
+  "key === 'shift+enter'",
+  // (6) User-facing diagnostics that NAME fixed terminal/editor keys (the same
+  // sanctioned category as the approval dialog's `[esc/ctrl+c] cancel` row): the
+  // copy explains a fixed key rather than rendering a (remappable) binding label.
+  "cannot bind Shift+Enter — it is the editor newline key",
+  "collides with a fixed key on legacy terminals",
+  "Shift+Enter is reserved for inserting a newline.",
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */
@@ -168,22 +215,17 @@ export function findStringLabelViolations(file: string, source: string): Keybind
 /**
  * The checked user-facing string files for one repository root.
  *
- * The TUI scan is recursive over `src/tui/**` (TS4 §44): a user-facing string
- * (or a hard-coded chord) that lands in a moved panel/picker/leaf stays covered
- * instead of silently escaping the chord-label gate. `src/tui/commands/**` is
- * subsumed and NOT re-added.
- *
- * TS5 moved `src/keybindings/**` under this tree. The keybinding AUTHORITY
- * modules' literals are the canonical KeyId grammar, the key-label map and the
- * pi-tui binding presets — the source of truth a rendered label must FOLLOW,
- * not copy that can lie after a remap — so they stay out of the string scan,
- * exactly as they were before the move. The action TABLE
- * (`tui/keybindings/definitions.ts`) renders user-facing descriptions and
- * therefore stays IN, re-added explicitly.
+ * The TUI scan is RECURSIVE over `src/tui/**` (TS4 §44, extended by TS5 §18.1 to
+ * the whole tree, including every module TS5 moved under it): a user-facing
+ * string (or a hard-coded chord) that lands in a moved panel/picker/leaf/
+ * interaction/keybinding/footer/notification module stays covered instead of
+ * silently escaping the chord-label gate. `src/tui/commands/**` is subsumed and
+ * NOT re-added, and there is NO file- or subtree-level exemption: the machine
+ * vocabulary and the fixed-key diagnostics inside the keybinding authority are
+ * exempted POSITION by POSITION in `STRING_ALLOWLIST`.
  */
 export function scannedStringFiles(root: string = process.cwd()): string[] {
   const tui = listSourceFilesUnder(join(root, 'src/tui'))
-    .filter(rel => !rel.startsWith('keybindings/') || rel === 'keybindings/definitions.ts')
     .map(rel => `src/tui/${rel}`)
   const bootstrap = [
     `${BOOTSTRAP_ZONE}.ts`,

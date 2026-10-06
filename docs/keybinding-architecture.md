@@ -308,12 +308,18 @@ the user's live bindings:
   keys). Every other mention is shorthand for the default binding and
   must not be relied on as the live binding.
 - **The static gate** also rejects hard-coded chord labels in
-  user-facing string literals (`src/index.ts`, `src/commands.ts`, every
-  `src/tui/**` module including `src/tui/keybindings/definitions.ts`, and
-  `src/tui-app.ts`), with a documented allowlist for fork editor-level
-  keys (Ctrl+Home/End). Its host-interaction chord scan follows the owner: the
-  TuiApp facade remainder plus `src/tui/interaction/approval-runtime.ts`, while
-  focused components keep their own fixed keys.
+  user-facing string literals. The scan enumerates EVERY production module
+  under `src/tui/**` recursively (`src/tui/keybindings/**` included, TS5
+  §18.1), plus `src/index.ts`, `src/commands.ts` and `src/tui-app.ts`, and
+  exempts only individual POSITIONS with a documented rationale: fork
+  editor-level keys (Ctrl+Home/End), the keybinding authority's
+  machine-readable vocabulary (the canonical KeyId grammar tables, the
+  KeyId→label map, the pi-tui binding presets, the shared terminal-ambiguous
+  key inventory) and the diagnostics that NAME a fixed key. Every exemption
+  fails closed — editing the line drops it and the gate re-flags the line.
+  Its host-interaction chord scan follows the owner: the TuiApp facade
+  remainder plus `src/tui/interaction/approval-runtime.ts`, while focused
+  components keep their own fixed keys.
 
 ## Revision history and convergence
 
