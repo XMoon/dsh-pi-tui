@@ -18,7 +18,7 @@ import {
   projectModelDirectory,
   type ModelApplyOutcome,
   type ModelPickerCurrent,
-} from '../src/model-picker.ts'
+} from '../src/tui/pickers/model-picker.ts'
 import type { ModelDirectoryDto, ModelDirectoryModelDto, ModelSelectionDto } from '../src/runtime/catalog-port.ts'
 import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'

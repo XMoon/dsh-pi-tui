@@ -5,7 +5,7 @@
  * pinned upstream baseline; this component owns search, groups, dynamic
  * setItems(), the canonical filter query, PageUp/PageDown, the responsive
  * row budget, and search-Input focus forwarding.
- * @module @xmoon76/dsh-pi-tui/searchable-picker
+ * @module @xmoon76/dsh-pi-tui/tui/pickers/searchable-picker
  */
 
 import {
@@ -21,7 +21,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { singlePhysicalLine } from './presentation-lines.ts'
+import { singlePhysicalLine } from '../../presentation-lines.ts'
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32
 const PRIMARY_COLUMN_GAP = 2
