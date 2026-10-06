@@ -92,12 +92,16 @@ export function sanitizeOscPayload(text: string): string {
  * verified OSC 9 implementations): iTerm2 / WezTerm / Ghostty / Warp
  * / Kitty are recognized — by `TERM_PROGRAM`, by their `TERM` aliases
  * (`xterm-ghostty`, `xterm-kitty`), or by the Kitty window-id env
- * marker. Terminals WITHOUT a confirmed OSC 9 implementation (Apple
- * Terminal, Alacritty, GNOME/Konsole/VTE, VS Code, Windows Terminal,
- * …) deliberately fall through: VTE-based terminals get the
- * notify-send OSC 777 form, everything unknown falls back to `bell`.
- * `auto` is conservative on purpose — unknown means bell, never a
- * guessed OSC 9 (users can always pin `method=osc9` explicitly). */
+ * marker. Tern is recognized by `TERM_PROGRAM=tern`: its OSC 9 toast
+ * is LOCALLY VERIFIED (a real Tern 0.5.0 Remote pane rendered both the
+ * OSC 9 completion toast and the OSC 9;4 progress indicator), so it is
+ * part of the verified whitelist rather than a guessed entry.
+ * Terminals WITHOUT a confirmed OSC 9 implementation (Apple Terminal,
+ * Alacritty, GNOME/Konsole/VTE, VS Code, Windows Terminal, …)
+ * deliberately fall through: VTE-based terminals get the notify-send
+ * OSC 777 form, everything unknown falls back to `bell`. `auto` is
+ * conservative on purpose — unknown means bell, never a guessed OSC 9
+ * (users can always pin `method=osc9` explicitly). */
 export function resolveAutoMethod(env: NodeJS.ProcessEnv = process.env): NotificationMethod {
   const program = (env.TERM_PROGRAM ?? '').toLowerCase()
   const term = (env.TERM ?? '').toLowerCase()
@@ -106,6 +110,7 @@ export function resolveAutoMethod(env: NodeJS.ProcessEnv = process.env): Notific
     || program === 'wezterm'
     || program === 'ghostty'
     || program === 'warpterminal'
+    || program === 'tern'
     || term === 'xterm-ghostty'
     || term === 'xterm-kitty'
     || env.KITTY_WINDOW_ID !== undefined
