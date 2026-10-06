@@ -5,13 +5,13 @@
  * consumers. The composer consumes
  * ONLY the StatusSnapshot plus a small host-owned surface context (editor
  * emptiness, extension chrome text) — never business state.
- * @module @xmoon76/dsh-pi-tui/footer
+ * @module @xmoon76/dsh-pi-tui/tui/footer/presentation-types
  */
 
-import type { StatusSnapshot } from '../domain/status/types.ts'
-import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../domain/footer/layout.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
+import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../../domain/footer/layout.ts'
 
-export type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from '../domain/footer/layout.ts'
+export type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from '../../domain/footer/layout.ts'
 
 /** One styled run of footer text. */
 export interface FooterSpan {

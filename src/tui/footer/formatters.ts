@@ -3,11 +3,11 @@
  * status facts. The StatusSnapshot never carries preformatted strings —
  * every presentation lives here, so a custom layout can pick a finite
  * formatter per item.
- * @module @xmoon76/dsh-pi-tui/footer/formatters
+ * @module @xmoon76/dsh-pi-tui/tui/footer/formatters
  */
 
-import { formatTokens } from '../token-usage.ts'
-import type { UsageStatus } from '../domain/status/types.ts'
+import { formatTokens } from '../../token-usage.ts'
+import type { UsageStatus } from '../../domain/status/types.ts'
 
 /** Whether cwd uses Windows path syntax rather than a POSIX filename with
  * a literal backslash. Drive paths and UNC paths are unambiguous; every other

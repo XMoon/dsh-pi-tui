@@ -7,10 +7,10 @@
  * physical line from the footer's global budget and appends AFTER the
  * layout rows — it never replaces (or shares a "line-2 slot" with) a
  * user row, and it always survives the height budget.
- * @module @xmoon76/dsh-pi-tui/footer/instruction
+ * @module @xmoon76/dsh-pi-tui/tui/footer/instruction
  */
 
-import type { FooterSpan } from './types.ts'
+import type { FooterSpan } from './presentation-types.ts'
 
 /** One Host instruction. */
 export interface FooterInstruction {

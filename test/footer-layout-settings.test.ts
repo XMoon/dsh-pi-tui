@@ -11,8 +11,8 @@ import { TuiApp } from '../src/tui-app.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { initialStatusSnapshot } from '../src/domain/status/snapshot.ts'
-import { FooterComposer } from '../src/footer/composer.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
+import { FooterComposer } from '../src/tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */

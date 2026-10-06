@@ -196,7 +196,9 @@ export function scannedStringFiles(root: string = process.cwd()): string[] {
     ...tui,
     'src/tui-app.ts',
     'src/local-shell-card.ts',
-    'src/footer/instruction.ts',
+    // TS5 moved the footer's user-facing instruction text under `src/tui/**`,
+    // which `TUI_STRING_FILES` already enumerates recursively, so the explicit
+    // old footer path is retired.
   ]
 }
 

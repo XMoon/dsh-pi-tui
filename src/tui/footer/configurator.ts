@@ -29,7 +29,7 @@
  * All key matches go through the project's matchesKey vocabulary (legacy
  * AND Kitty CSI-u / modifyOtherKeys encodings — no raw sequence compares),
  * so CSI-u terminals keep every key working. No fork changes.
- * @module @xmoon76/dsh-pi-tui/footer/configurator
+ * @module @xmoon76/dsh-pi-tui/tui/footer/configurator
  */
 
 import {
@@ -42,8 +42,8 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { color } from '../theme.ts'
-import type { StatusSnapshot } from '../domain/status/types.ts'
+import { color } from '../../theme.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
 import {
@@ -58,10 +58,10 @@ import {
   toneChoicesFor,
 } from './configurator-model.ts'
 import type { FooterConfiguratorModel } from './configurator-model.ts'
-import { effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs } from '../domain/footer/custom-items.ts'
-import { MAX_ITEMS_PER_ROW, stripControlChars } from '../domain/footer/layout.ts'
+import { effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs } from '../../domain/footer/custom-items.ts'
+import { MAX_ITEMS_PER_ROW, stripControlChars } from '../../domain/footer/layout.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
-import type { FooterItemRef, FooterLayoutV1, FooterTone } from './types.ts'
+import type { FooterItemRef, FooterLayoutV1, FooterTone } from './presentation-types.ts'
 
 /** The configurator panel's options. */
 export interface FooterConfiguratorOptions {
@@ -85,7 +85,7 @@ export interface FooterConfiguratorOptions {
    * the integration layer has already notified, and the panel stays open
    * with the draft intact. A sync `void` return is tolerated (instant
    * success) for callers without a settings backend. */
-  readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('../domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
+  readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('../../domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
   readonly onCancel: () => void
 }
 
@@ -133,7 +133,7 @@ export class FooterConfiguratorPanel implements Component {
   private readonly extensionFooterText: () => string
   private readonly maxVisible: () => number
   private readonly requestRender: () => void
-  private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('../domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
+  private readonly onSave: (layout: FooterLayoutV1, customItems?: readonly import('../../domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
   private readonly onCancel: () => void
   /** The body scrollport's top offset (stable across renders — the cursor
    * scrolls the body minimally; the fixed shell never moves). */

@@ -9,8 +9,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { FooterConfiguratorModel, flatPositionOf } from '../src/footer/configurator-model.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
+import { FooterConfiguratorModel, flatPositionOf } from '../src/tui/footer/configurator-model.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 
 const registry = createBuiltinFooterRegistry()
@@ -637,7 +637,7 @@ test('preset resets and the 1..2 row bound still work alongside the pages', () =
 
 /* ─── PR E: explicit save flow + unsaved-exit guard ──────────────────── */
 
-import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
+import { FooterCustomItemCatalog } from '../src/tui/footer/custom-item-catalog.ts'
 
 /** A model over a one-row layout that PLACES one custom definition, with
  * a fresh registry (the model wires the draft catalog into it). */

@@ -3,10 +3,10 @@
  * semantic footer items. Items are pure render callbacks over the
  * StatusSnapshot (+ the host-owned surface context); the registry is
  * deterministic (id-keyed) and rejects duplicate ids.
- * @module @xmoon76/dsh-pi-tui/footer/item-registry
+ * @module @xmoon76/dsh-pi-tui/tui/footer/item-registry
  */
 
-import type { FooterItemDefinition } from './types.ts'
+import type { FooterItemDefinition } from './presentation-types.ts'
 
 const USER_ITEM_PREFIX = 'user:'
 

@@ -26,12 +26,12 @@
  * The composer consumes ONLY the StatusSnapshot + the host-owned surface
  * context (task-browser availability — the exact ↓ routing gate — and the
  * extension chrome text) — never business state (plan §2.2).
- * @module @xmoon76/dsh-pi-tui/footer/composer
+ * @module @xmoon76/dsh-pi-tui/tui/footer/composer
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
-import { color } from '../theme.ts'
-import type { StatusSnapshot } from '../domain/status/types.ts'
+import { color } from '../../theme.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import type {
   FooterDensity,
@@ -43,8 +43,8 @@ import type {
   FooterSegment,
   FooterSpan,
   FooterTone,
-} from './types.ts'
-import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from './types.ts'
+} from './presentation-types.ts'
+import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from './presentation-types.ts'
 
 /** The Host instruction surface's render contract (plan §19). */
 export interface FooterInstructionLike {

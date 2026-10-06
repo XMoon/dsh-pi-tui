@@ -11,10 +11,10 @@
  * renders ONLY the cached value committed by the async
  * FooterDynamicItemRuntime (PR D §8.2) — the render path is cache-only by
  * construction.
- * @module @xmoon76/dsh-pi-tui/footer/custom-items
+ * @module @xmoon76/dsh-pi-tui/tui/footer/custom-item-catalog
  */
 
-import type { FooterItemDefinition, FooterTone } from './types.ts'
+import type { FooterItemDefinition, FooterTone } from './presentation-types.ts'
 import {
   customItemId,
   customItemName,
@@ -23,7 +23,7 @@ import {
   type FooterCustomCommandItemSettings,
   type FooterCustomItemSettings,
   type FooterCustomTextItemSettings,
-} from '../domain/footer/custom-items.ts'
+} from '../../domain/footer/custom-items.ts'
 import type { FooterItemExternalSource } from './item-registry.ts'
 
 /** Compile one validated custom definition into the ordinary footer item

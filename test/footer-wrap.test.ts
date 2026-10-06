@@ -21,7 +21,7 @@ import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import { FOOTER_MAX_PHYSICAL_LINES } from '../src/footer/types.ts'
+import { FOOTER_MAX_PHYSICAL_LINES } from '../src/tui/footer/presentation-types.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file

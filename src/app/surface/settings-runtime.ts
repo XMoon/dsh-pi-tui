@@ -26,8 +26,6 @@ import { runSyncDisposalSteps } from '../../disposal.ts'
 import { serializeTuiSettingsMutation } from '../../runtime/config-port.ts'
 import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult } from '../../display-preset.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { FooterCommandRunner } from '../../footer/command-runner.ts'
-import { FooterDynamicItemRuntime } from '../../footer/dynamic-item-runtime.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
 import { normalizePersistedTheme, resolveThemeSelection } from '../../theme-source.ts'
@@ -143,26 +141,12 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   // subscription are A4-6 surface-owned (`surface.attachTasks` +
   // `surface.disposeJobEvents` / `disposeJobObservation` / `disposeTaskBrowser`);
   // the runner no longer holds their slots.
-  // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
-  // guards: cleanup releases them, and — unlike the slots above —
-  // `onTerminalResize` (handed to the surface mount below) READS
-  // footerCommandRunner during startup itself: the first surface-geometry
-  // sync fires it (lastCommandWidth starts at 0), and a keybinding
-  // rebuild's invalidate → requestRender is reachable before the footer
-  // settings block runs. Declaring at the footer block left the read in
-  // the temporal dead zone — a ReferenceError swallowed by the keybinding
-  // apply's fail-soft catch and misreported as a keybindings failure
-  // (guarded by the startup-eager-callback audit in test/rules.test.ts).
-  
-  let footerCommandRunner: FooterCommandRunner | undefined
-
-  let footerCommandUnsubscribe: (() => void) | undefined
-
-  // PR D: the custom command item runtime (one runner per ACTIVE layout
-  // command item). Hoisted with the whole-footer slots for the same TDZ
-  // guards; cleanup disposes it so no child/timer survives a remount.
-  
-  let footerDynamicItemRuntime: FooterDynamicItemRuntime | undefined
+  // M5/TS5: the footer command RESOURCES (the whole-footer runner, its status
+  // subscription and the per-item runners) are owned by the TUI footer runtime
+  // (`tui/footer/runtime.ts`); this owner drives them through the narrow
+  // mounted-surface capabilities. The TuiApp field exists from construction, so
+  // the startup-eager `onTerminalResize` read can never hit a temporal dead
+  // zone (the former reason these slots were hoisted here).
 
   // M3: the user-orchestrable keybinding manager (the app built it with
   // the builtin defaults). Apply safe mode, the persisted user
@@ -209,17 +193,8 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   
   let footerCommandItemWarningShown = false
 
-  // footerCommandRunner / footerCommandUnsubscribe are hoisted ABOVE
-  // cleanup (TDZ guard — the startup-eager onTerminalResize callback
-  // reads the runner before this block can run); only the warning
-  // latch lives here.
-  
   const disableFooterCommand = (): void => {
-    footerCommandUnsubscribe?.()
-    footerCommandUnsubscribe = undefined
-    footerCommandRunner?.dispose()
-    footerCommandRunner = undefined
-    deps.surface.app.setFooterCommandRows(undefined)
+    deps.surface.app.disableFooterCommand()
   }
 
   const busyEnter = (): string | undefined => deps.tuiSettings?.get().busyEnter
@@ -260,22 +235,9 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     const syncDynamicCommandItems = (authorizedIds: ReadonlySet<string>): void => {
       const trustedCommands = customResult.items
         .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
-      if (footerDynamicItemRuntime === undefined) {
-        footerDynamicItemRuntime = new FooterDynamicItemRuntime({
-          snapshot: () => deps.surface.status.snapshot(),
-          width: () => deps.surface.app.getTerminalWidth(),
-          height: () => deps.surface.app.getTerminalHeight(),
-          signal: deps.signal,
-          onValue: (id, value) => deps.surface.app.setFooterCommandItemValue(id, value),
-          onNotifyOnce: (message) => deps.surface.app.notify(message, 'error'),
-        })
-      }
-      const executableIds = executableCommandItemIds(
-        trustedCommands,
-        authorizedIds,
-        deps.surface.app.getEffectiveFooterLayout(),
-      )
-      footerDynamicItemRuntime.sync(trustedCommands, executableIds)
+      // The TUI runtime reconciles the per-item runners against the trusted
+      // definitions, the USER-authorized ids and the CURRENT effective layout.
+      deps.surface.app.syncFooterCommandItems(trustedCommands, authorizedIds, deps.signal)
       if (!footerCommandItemWarningShown) {
         const mergedCommands = parseFooterCustomItems(doc.footerCustomItems).items
           .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
@@ -346,29 +308,12 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
         syncDynamicCommandItems(authorizedIds)
         return
       }
-      if (footerCommandRunner === undefined) {
-        footerCommandRunner = new FooterCommandRunner({
-          config,
-          snapshot: () => deps.surface.status.snapshot(),
-          width: () => deps.surface.app.getTerminalWidth(),
-          height: () => deps.surface.app.getTerminalHeight(),
-          onOutput: (rows) => deps.surface.app.setFooterCommandRows(rows),
-          onNotifyOnce: (message) => deps.surface.app.notify(message, 'error'),
-          signal: deps.signal,
-        })
-        // Status changes refresh the command (coalesced to its interval).
-        footerCommandUnsubscribe = deps.surface.status.subscribe(() => footerCommandRunner?.requestRefresh())
-      } else {
-        footerCommandRunner.setConfig(config)
-      }
-      // The native layout stays untouched while command mode is armed:
-      // a failed command (undefined rows) falls back to the user's OWN
+      // The TUI runtime arms (or re-arms) the whole-footer runner, wires its
+      // status subscription and suspends the per-item runners it covers. The
+      // native layout stays untouched while command mode is armed: a failed
+      // command (undefined rows) falls back to the user's OWN
       // default/compact/custom layout, never the builtin default.
-      footerCommandRunner.requestRefresh()
-      // The whole-footer command surface covers the native items:
-      // per-item command runners must not keep spawning in the
-      // background (plan §7.2 — suspend/dispose).
-      footerDynamicItemRuntime?.sync([], new Set<string>())
+      deps.surface.app.applyFooterCommandConfig(config, deps.signal)
       return
     }
     disableFooterCommand()
@@ -591,7 +536,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     deps.surface.app.setSafeKeybindingsMode(true)
     deps.diag.info('keybindings', { safeMode: true })
   }
-  const requestFooterCommandRefresh = (): void => { footerCommandRunner?.requestRefresh() }
+  const requestFooterCommandRefresh = (): void => { deps.surface.app.requestFooterCommandRefresh() }
   /**
    * Release the footer command runner + per-item runtime. The lifecycle abort
    * already disposes an armed runner through its own abort listener; the
@@ -601,18 +546,11 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * unsubscribe/runner disposal cannot strand its siblings (M3-6 PR3).
    */
   const disposeFooterCommand = (): void => {
-    const unsubscribe = footerCommandUnsubscribe
-    const runner = footerCommandRunner
-    const dynamic = footerDynamicItemRuntime
-    footerCommandUnsubscribe = undefined
-    footerCommandRunner = undefined
-    footerDynamicItemRuntime = undefined
+    // The TUI footer runtime retires its own slots before their callbacks run
+    // (the whole-footer runner, its status subscription and every per-item
+    // runner), so no child/timer/abort listener survives.
     runSyncDisposalSteps('footer command disposal', [
-      () => unsubscribe?.(),
-      () => runner?.dispose(),
-      // PR D: release every per-item command runner (children, timers,
-      // abort listeners) before the app dies.
-      () => dynamic?.dispose(),
+      () => deps.surface.app.disposeFooterCommand(),
     ])
   }
 
