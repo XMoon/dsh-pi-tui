@@ -15,7 +15,7 @@ import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
 import { foldTranscript, groupConsecutiveReads, PTC_MAX_DEPTH, renderTranscriptMarkdown, subCallDisplayStatus, TranscriptFolder, windowMessages, workflowPhaseKey, type TranscriptMessage } from '../src/transcript.ts'
 import { projectFocus } from '../src/tui/transcript/focus-projection.ts'
 import { computeStats, StatsFolder } from '../src/stats.ts'
-import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import type { AssistantLiveChunk, AssistantLiveContentBlock, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
 /** Build a minimal event envelope for tests. The type parameter is widened

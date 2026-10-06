@@ -6,7 +6,7 @@ import {
   type PresentationReadShadowOutcome,
 } from '../scripts/support/presentation-read-shadow.ts'
 import { DirectPresentationReader } from '../src/runtime/direct/presentation-read-direct.ts'
-import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import {
   RemotePresentationReader,
   type RemotePresentationBinding,

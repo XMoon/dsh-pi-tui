@@ -9,7 +9,7 @@ import { projectFocus, type FocusProjectedBlock } from '../../src/tui/transcript
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
 import type { TranscriptContainerPath } from '../../src/tui/transcript/container-owner.ts'
 import type { DisplayPreset } from '../../src/display-preset.ts'
-import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../src/transcript-window.ts'
+import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../src/domain/transcript/window.ts'
 import {
   TranscriptFolder,
   type TranscriptMessage,

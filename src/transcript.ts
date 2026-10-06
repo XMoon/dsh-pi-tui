@@ -76,6 +76,9 @@ import {
   resolveSearchSource,
   transcriptSearchCorpus,
 } from './domain/transcript/search.ts'
+import { isGroupableRead } from './domain/transcript/grouping.ts'
+import { windowMessages } from './domain/transcript/window.ts'
+import type { TranscriptWindow } from './domain/transcript/window.ts'
 import type {
   TranscriptSearchCorpusSpan,
   TranscriptSearchMatch,
@@ -103,6 +106,13 @@ export type {
   TranscriptSearchMatch,
   TranscriptSearchSource,
 } from './domain/transcript/search.ts'
+export {
+  groupConsecutiveReads,
+  isGroupableRead,
+  recentTurnThreshold,
+} from './domain/transcript/grouping.ts'
+export { windowMessages } from './domain/transcript/window.ts'
+export type { TranscriptWindow } from './domain/transcript/window.ts'
 export { PTC_MAX_DEPTH, THINKING_TAIL_CAP, TURN_END_REASON_KINDS } from './domain/transcript/types.ts'
 export type {
   AssistantDisplayBlock,
@@ -226,18 +236,6 @@ function bumpAssistantPresentationRevision(message: Extract<TranscriptMessage, {
 
 
 
-
-/** A bounded transcript projection plus navigation facts. */
-export interface TranscriptWindow {
-  /** The materialized messages for the selected turn range. */
-  messages: TranscriptMessage[]
-  /** First/last actual turns in the selected range (summary rows excluded). */
-  firstTurn?: number
-  lastTurn?: number
-  /** Whether another turn page exists on either side of this projection. */
-  hasOlder: boolean
-  hasNewer: boolean
-}
 
 /** Text of a message's content blocks, joined; empty when there is no text. */
 export function textOf(blocks: readonly ContentBlock[]): string {
@@ -688,140 +686,6 @@ function assistantEntryHasInterruptionEvidence(entry: Extract<TranscriptMessage,
   return entry.displayBlocks === undefined
     ? assistantBlocksHaveInterruptionEvidence(assistantEntryBlocks(entry))
     : assistantDisplayBlocksHaveInterruptionEvidence(entry.displayBlocks)
-}
-
-/**
- * The turn threshold at or above which entries count as "recent": the
- * `recentTurns` most recent distinct turns among the given message kinds.
- * Shared by the display window (all kinds), the markdown view, and the
- * Ctrl+O expansion boundary (foldable kinds only).
- * @param messages - the folded transcript.
- * @param recentTurns - how many most-recent turns survive; <= 0 keeps nothing.
- * @param kinds - kinds whose turns count; undefined counts every kind.
- * @returns the oldest recent turn number; 0 when everything is recent;
- *   `Infinity` when nothing is (every entry folds).
- */
-export function recentTurnThreshold(
-  messages: readonly TranscriptMessage[],
-  recentTurns: number,
-  kinds?: readonly TranscriptMessage['kind'][],
-): number {
-  if (recentTurns <= 0) return Number.POSITIVE_INFINITY
-  const turns = new Set<number>()
-  for (const message of messages) {
-    if (message.kind === 'summary' || !('turn' in message)) continue
-    if (kinds === undefined || kinds.includes(message.kind)) turns.add(message.turn)
-  }
-  const sorted = [...turns].sort((a, b) => b - a)
-  if (sorted.length <= recentTurns) return 0
-  return sorted[recentTurns - 1] ?? 0
-}
-
-/**
- * Collapse turns older than the display window into one leading summary
- * entry with aggregate counts. Entries at/after the boundary survive; the
- * result is a fresh array when anything collapses.
- * @param messages - the folded transcript.
- * @param maxTurns - window size in turns; entries of older turns collapse.
- * @param endTurn - window end turn (newest when absent), see {@link FoldOptions}.
- * @returns the windowed transcript.
- */
-export function windowMessages(messages: readonly TranscriptMessage[], maxTurns: number, endTurn?: number): TranscriptMessage[] {
-  if (maxTurns <= 0) return [...messages]
-  if (endTurn !== undefined) {
-    // Anchored window (transcript search): keep exactly the maxTurns distinct
-    // turns ENDING at endTurn and collapse the older turns above them; turns
-    // newer than the anchor are hidden (the search jumped back in history).
-    const turns = new Set<number>()
-    for (const message of messages) {
-      if ('turn' in message) turns.add(message.turn)
-    }
-    const sorted = [...turns].sort((a, b) => b - a)
-    const anchor = sorted.indexOf(endTurn)
-    if (anchor === -1) return windowMessages(messages, maxTurns)
-    const windowTurns = new Set(sorted.slice(anchor, anchor + maxTurns))
-    const kept = messages.filter(message => !('turn' in message) || windowTurns.has(message.turn))
-    const newerTurns = new Set(sorted.slice(0, anchor))
-    const oldTurns = new Set(sorted.slice(anchor + maxTurns))
-    if (newerTurns.size === 0 && oldTurns.size === 0) return kept
-    const parts: string[] = []
-    if (newerTurns.size > 0) parts.push(`${newerTurns.size} newer turn${newerTurns.size === 1 ? '' : 's'}`)
-    if (oldTurns.size > 0) parts.push(`${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`)
-    kept.unshift({ kind: 'summary', text: `… ${parts.join(' · ')} — window ${maxTurns} turns` })
-    return kept
-  }
-  const boundary = recentTurnThreshold(messages, maxTurns)
-  if (boundary === 0) return [...messages]
-  const oldTurns = new Set<number>()
-  const kept: TranscriptMessage[] = []
-  let oldTools = 0
-  let oldCount = 0
-  for (const message of messages) {
-    if ('turn' in message && message.turn < boundary) {
-      oldCount += 1
-      if (message.kind === 'tool') oldTools += 1
-      oldTurns.add(message.turn)
-      continue
-    }
-    kept.push(message)
-  }
-  if (oldCount === 0) return [...messages]
-  const turnsText = `${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`
-  const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`
-  kept.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` })
-  return kept
-}
-
-/**
- * Whether one row may join a consecutive-read group: a settled-ok `read`
- * card that is NOT post-turn replay evidence. This is the ONE grouping
- * eligibility authority — the stateful folder (`TranscriptFolder.groupable`)
- * and the exported mirror (`groupConsecutiveReads`) both delegate here, so a
- * replay row can never be laundered into an aggregate through a synthesized
- * group card (which is a fresh object the replay sidecar does not cover).
- */
-export function isGroupableRead(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'tool' }> {
-  return message.kind === 'tool' && message.name === 'read' && message.status === 'ok'
-    && !isPostTurnReplayEvidence(message)
-}
-
-/**
- * Merge consecutive completed `read` tool cards into one card ("N files").
- * A single read stays untouched; groups break on any other kind or status,
- * on post-turn replay evidence, AND on a turn boundary — a group never
- * crosses turns, so every Activity span's own facts (count, timing) stay
- * attributable to the turn that renders the card (post-F6 plan
- * §10.2/§12.11).
- * @param messages - the folded transcript.
- * @returns a new list with grouped read cards (same object references).
- */
-export function groupConsecutiveReads(messages: readonly TranscriptMessage[]): TranscriptMessage[] {
-  const out: TranscriptMessage[] = []
-  let group: Extract<TranscriptMessage, { kind: 'tool' }> | undefined
-  let count = 0
-  for (const message of messages) {
-    const groupable = isGroupableRead(message)
-      && (group === undefined || group.turn === message.turn)
-    if (groupable) {
-      if (group !== undefined) {
-        count += 1
-        group.args = `${count} files`
-        group.result = group.result === '' ? message.result : `${group.result}\n\n${message.result}`
-        // The mirror carries the same genuine-call cardinality as the
-        // folder's makeReadGroup card: a merged group is still that many
-        // model tool calls (a plain card is one by definition).
-        group.callCount = (group.callCount ?? 1) + (message.callCount ?? 1)
-        continue
-      }
-      group = { ...message }
-      count = 1
-      out.push(group)
-      continue
-    }
-    group = undefined
-    out.push(message)
-  }
-  return out
 }
 
 /**
