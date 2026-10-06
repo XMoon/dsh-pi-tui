@@ -14,16 +14,18 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   compactActionPresentation,
   compactActionSignature,
-  compactActionStatParts,
-  compactActionStatsOf,
   compactActionSlotLine,
-  compactActionSourceOf,
   compactPreparingSummary,
   compactSlotLine,
   compactThinkSlotLine,
-  latestCompactAction,
   type CompactActionPresentation,
-} from '../src/compact-process-preview.ts'
+} from '../src/tui/components/transcript/compact-process-preview.ts'
+import {
+  compactActionStatParts,
+  compactActionStatsOf,
+  compactActionSourceOf,
+  latestCompactAction,
+} from '../src/tui/transcript/process-summary.ts'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import { focusCollapsedBody } from '../src/focus-activity.ts'

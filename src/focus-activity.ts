@@ -34,20 +34,22 @@ import { formatTokens } from './token-usage.ts'
 import { iconFor, type IconSemantic, type IconStyle } from './icons.ts'
 import {
   COMPACT_SLOT_LABEL_WIDTH,
-  addCompactActionStats,
   compactActionSlotLine,
-  compactActionSourceOf,
-  compactActionStatParts,
   compactSlotLine,
   compactThinkSlotLine,
+  type CompactActionPresentation,
+} from './tui/components/transcript/compact-process-preview.ts'
+import {
+  addCompactActionStats,
+  compactActionSourceOf,
+  compactActionStatParts,
   formatCompactDuration,
   latestCompactAction,
   newCompactActionStats,
-  type CompactActionPresentation,
   type CompactActionSource,
   type CompactActionStats,
   type CompactActionStatsAccumulator,
-} from './compact-process-preview.ts'
+} from './tui/transcript/process-summary.ts'
 import { assistantBlocksVisibleNow, assistantCommittedBeforeSteer, assistantLatestStepOf, assistantStepOf, type TurnActivity, type TranscriptMessage } from './transcript.ts'
 import { isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
 import { isNoticeContext } from './tui/transcript/context-structure.ts'
@@ -59,13 +61,13 @@ import type { RunPhase } from './domain/status/types.ts'
 
 /**
  * The Focus-facing names of the SHARED compact process-preview authority
- * (`compact-process-preview.ts`, post-F6 plan §7): the slot geometry, the
+ * (`tui/components/transcript/compact-process-preview.ts`, post-F6 plan §7): the
  * Preparing summary and the duration format have exactly one
  * implementation served to Focus and Activity alike — these aliases keep
  * the historical Focus import surface stable.
  */
-export { compactPreparingSummary as focusPreparingSummary } from './compact-process-preview.ts'
-export type { CompactPreparingPreview as FocusPreparingPreview } from './compact-process-preview.ts'
+export { compactPreparingSummary as focusPreparingSummary } from './tui/components/transcript/compact-process-preview.ts'
+export type { CompactPreparingPreview as FocusPreparingPreview } from './tui/components/transcript/compact-process-preview.ts'
 
 /** Human duration from millis: seconds under a minute, `m s` above (the
  * elapsed TURN time — plan §14.2: the user waited the whole turn). The

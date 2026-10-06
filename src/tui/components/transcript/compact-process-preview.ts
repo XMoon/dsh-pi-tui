@@ -1,55 +1,31 @@
 /**
- * The shared compact process-preview authority (post-F6 plan §7): the ONE
- * place the compact Think / Action / Preparing slot lines are formatted,
- * served to BOTH Focus (`focus-activity.ts`) and Compact/Activity
- * (`compact-work.ts`). Extracting it ends the drift that already happened
- * while the same geometry lived in Focus only.
+ * PiTui compact process-preview mechanics: the physical Think / Action /
+ * Preparing slot lines, the presenter bridge and the component cache
+ * signatures.
  *
- * Scope boundary (plan §7.2): this module owns ONLY the truly shared slot
- * presentation — label geometry, reasoning-line selection, the Action slot
- * (status prefix + presenter-first tool display + active-sub-call suffix +
- * width degradation, or the pure synthetic labels), the Preparing summary
- * text and the elapsed duration format. Focus-only turn/header/error/message
- * logic and Compact-only span aggregation stay in their owners.
- *
- * Action vocabulary (post-F6 presentation-convergence addendum v2 §4/§5): the collapsed
- * process presentation is `Think:` + `Action:`. `Action` is PRESENTATION
- * ONLY — the latest meaningful non-Thinking TURN-OWNED Process evidence
- * (genuine Tool, Preparing, Retry, and explicit orphan-result diagnostics)
- * selected purely by chronology. A COMMAND row is
- * deliberately NOT an Action: it is a turn-less `control`-class row, so it
- * renders as its own transcript card outside the Action/Work aggregates and
- * never changes Tool statistics.
+ * Focus (`tui/components/transcript/focus-activity.ts`) and Activity
+ * (`tui/components/transcript/compact-work.ts`) render the SAME geometry
+ * through this ONE module, so the two surfaces cannot drift. The
+ * renderer-neutral half of the former shared authority — the Action source
+ * classifier, the chronology winner and the action-stats cardinality — lives
+ * in `tui/transcript/process-summary.ts`; this module only turns those facts
+ * into one physical terminal row and into bounded cache keys.
  *
  * Every returned string is exactly ONE physical terminal row: embedded line
  * breaks never escape a slot (the fullscreen row hit-map depends on that).
- * @module @xmoon76/dsh-pi-tui/compact-process-preview
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/compact-process-preview
  */
 
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { focusToolDisplay, toolTitle, type ToolPresenter } from './present.ts'
-import { thinkingPreviewTail } from './thinking-preview.ts'
-import { activeSubCallsOf, isPostTurnReplayEvidence, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from './transcript.ts'
-import { isSurfacedInteractionToolName } from './transcript-semantics.ts'
+import { focusToolDisplay, toolTitle, type ToolPresenter } from '../../../present.ts'
+import { thinkingPreviewTail } from '../../../thinking-preview.ts'
+import { activeSubCallsOf, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from '../../../transcript.ts'
+import type { CompactActionSource, CompactActionStats } from '../../transcript/process-summary.ts'
 
 /** The fixed label column width of the collapsed body slots: the widest
  * label (`Message: `) — every slot's text starts at the same column
  * (aligned by visible width). */
 export const COMPACT_SLOT_LABEL_WIDTH = 9
-
-/**
- * Human elapsed duration from millis: seconds under a minute, `m s` above.
- * The Focus turn timer and the Activity wall-span timer share one format so
- * the same label never means two shapes.
- */
-export function formatCompactDuration(ms: number | undefined): string | undefined {
-  if (ms === undefined) return undefined
-  const total = Math.max(0, Math.floor(ms / 1000))
-  if (total < 60) return `${total}s`
-  const minutes = Math.floor(total / 60)
-  const seconds = total % 60
-  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`
-}
 
 /** Collapse arbitrary slot text to ONE physical terminal row: CR/LF
  * sequences (LF, CRLF, lone CR) are normalized to the FIRST line. The
@@ -205,74 +181,6 @@ export function compactPreparingSummary(
   return ordered.length === 1 ? `Preparing ${known}…` : `Preparing ${known} +${ordered.length - 1}`
 }
 
-// ── Shared collapsed-Action authority (addendum v2) ─────────────────────
-
-/**
- * The presentation-only source of one collapsed `Action:` slot (addendum v2
- * §7): WHICH durable Process row the slot summarizes. `Action` is
- * pure presentation — this union never enters persistence/wire state and
- * never becomes a transcript semantic class. A live Preparing run is NOT a
- * source kind: it stays the ephemeral override the callers already render
- * through {@link compactPreparingSummary}.
- */
-export type CompactActionSource =
-  | { readonly kind: 'tool'; readonly message: TranscriptToolMessage }
-  | { readonly kind: 'retry'; readonly message: Extract<TranscriptMessage, { kind: 'system' }> }
-  | { readonly kind: 'orphan-tool-result'; readonly message: TranscriptToolMessage }
-
-/**
- * Classify one transcript row as a collapsed-Action candidate
- * (presentation-convergence addendum v2 §8). The decision is source-driven
- * ONLY (kind + provenance + explicit call cardinality + the existing
- * surfaced-interaction predicate):
- *
- * - genuine `tool/call` (`origin` absent, `callCount > 0`) → `tool`;
- * - orphan result (`origin` absent, explicit `callCount === 0`) →
- *   `orphan-tool-result`;
- * - `origin: 'llm-retry'` system row → `retry`;
- * - surfaced-interaction tools (`ask_user_question` / `exit_plan_mode`)
- *   return `undefined` — their active/settled panel is the interaction
- *   owner and must never be duplicated as an Action (addendum v2 §5);
- * - a COMMAND row is a turn-less control-plane node (`kind: 'command'`,
- *   never `kind: 'tool'`), so it never reaches the tool branch below and is
- *   never an Action candidate;
- * - Thinking / Conversation / Context / Control / Workflow / Compaction /
- *   attention rows return `undefined`.
- */
-export function compactActionSourceOf(message: TranscriptMessage): CompactActionSource | undefined {
-  // Post-turn replay evidence is transcript/diagnostic evidence only: it
-  // never counts as an action and never owns the collapsed Action slot
-  // (the fold's late-replay fence, shared with Work membership and read
-  // grouping).
-  if (isPostTurnReplayEvidence(message)) return undefined
-  if (message.kind === 'system') {
-    return message.origin === 'llm-retry' ? { kind: 'retry', message } : undefined
-  }
-  if (message.kind !== 'tool' || isSurfacedInteractionToolName(message.name)) return undefined
-  if (message.origin !== undefined) return undefined
-  return (message.callCount ?? 1) > 0 ? { kind: 'tool', message } : { kind: 'orphan-tool-result', message }
-}
-
-/**
- * The latest eligible Action candidate in canonical chronology
- * (presentation-convergence addendum v2 §6/§9): ONE forward pass, the last
- * existing candidate wins — never a per-type score or a "Tool always beats
- * Retry" rule. Callers must pass only rows the collapsed surface
- * actually HIDES (Focus: the rows hidden under the collapsed Thought root;
- * Activity: the span's own members), so the slot never duplicates a row
- * already visible outside. This helper is presentation-only.
- */
-export function latestCompactAction(
-  messages: readonly TranscriptMessage[],
-): CompactActionSource | undefined {
-  let candidate: CompactActionSource | undefined
-  for (const message of messages) {
-    const source = compactActionSourceOf(message)
-    if (source !== undefined) candidate = source
-  }
-  return candidate
-}
-
 /** The presenter-bridge options shared by the Action presentation and the
  * existing presenter-first tool display. */
 export interface CompactActionPresentationOptions {
@@ -401,100 +309,6 @@ export function compactActionSignature(presentation: CompactActionPresentation |
     presentation.rootName ?? '',
     (presentation.activeSubCalls ?? []).map(call => `${call.name}:${call.count}`).join('|'),
   ].join('\u0000')
-}
-
-// ── Shared Action statistics (presentation-convergence addendum v2 §13) ──
-
-/** The presentation-only action aggregate both headers render: the TOTAL
- * counted action occurrences and the per-subtype counts (`read`, `bash`,
- * `subagent`, `retry`). Presentation-only —
- * never stored on `TurnActivity` or persisted (addendum v2 §17). */
-export interface CompactActionStats {
-  readonly total: number
-  readonly types: ReadonlyMap<string, number>
-}
-
-/** The mutable accumulator {@link compactActionStatsOf} and the Activity
- * member walk share; exported so `summarizeWorkSpan` can fold the SAME
- * cardinality authority into its existing single pass (addendum v2 §23). */
-export interface CompactActionStatsAccumulator {
-  total: number
-  types: Map<string, number>
-}
-
-/** Start one empty accumulator. */
-export function newCompactActionStats(): CompactActionStatsAccumulator {
-  return { total: 0, types: new Map() }
-}
-
-/** Fold ONE Action source into an accumulator using the shared action
- * cardinality rules (addendum v2 §14): a genuine tool contributes its
- * `callCount`; a subagent and a retry occurrence
- * contribute one each; an orphan result is diagnostic evidence and
- * contributes NOTHING. Preparing and surfaced interactions never reach
- * here (they are not `CompactActionSource`s). */
-export function addCompactActionStats(
-  stats: CompactActionStatsAccumulator,
-  source: CompactActionSource,
-): void {
-  switch (source.kind) {
-    case 'tool': {
-      const calls = source.message.callCount ?? 1
-      stats.total += calls
-      stats.types.set(source.message.name, (stats.types.get(source.message.name) ?? 0) + calls)
-      break
-    }
-    case 'retry':
-      stats.total += 1
-      stats.types.set('retry', (stats.types.get('retry') ?? 0) + 1)
-      break
-    case 'orphan-tool-result':
-      break
-  }
-}
-
-/**
- * Aggregate the Action stats of one message sequence through the shared
- * classifier + cardinality rules (addendum v2 §13/§14). This is the plan's
- * named neutral aggregator and the direct expression of the shared
- * cardinality contract — the test matrix consumes it as the counting oracle.
- * Production deliberately does NOT call it: Focus folds the WHOLE turn in
- * one turn-keyed pre-pass (`focusActionStatsByTurn`) and Activity folds its
- * span in `summarizeWorkSpan`'s existing single member walk (addendum v2
- * §23/§63 — no second scan). The scope decision (WHICH rows) always belongs
- * to the caller.
- */
-export function compactActionStatsOf(messages: readonly TranscriptMessage[]): CompactActionStats {
-  const stats = newCompactActionStats()
-  for (const message of messages) {
-    const source = compactActionSourceOf(message)
-    if (source !== undefined) addCompactActionStats(stats, source)
-  }
-  return stats
-}
-
-/** The max action-subtype names the header stats show before the `+N` tail
- * (addendum v2 §15 — the Focus rule, now shared). */
-export const COMPACT_ACTION_SUMMARY_MAX_TYPES = 3
-
-/**
- * The header stat parts (`7 actions`, `read ×3`, …, `+1`): types sorted
- * count-desc / name-asc, capped at {@link COMPACT_ACTION_SUMMARY_MAX_TYPES},
- * with a `+N` remainder counting the OTHER action SUBTYPES (not
- * occurrences). Focus and Activity share this ONE formatter (addendum v2
- * §12/§15); an empty aggregate yields no parts (never a fake `0 actions`).
- */
-export function compactActionStatParts(stats: CompactActionStats): string[] {
-  if (stats.total <= 0) return []
-  const parts = [`${stats.total} action${stats.total === 1 ? '' : 's'}`]
-  const types = [...stats.types.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-  for (const [name, count] of types.slice(0, COMPACT_ACTION_SUMMARY_MAX_TYPES)) {
-    parts.push(`${name} ×${count}`)
-  }
-  if (types.length > COMPACT_ACTION_SUMMARY_MAX_TYPES) {
-    parts.push(`+${types.length - COMPACT_ACTION_SUMMARY_MAX_TYPES}`)
-  }
-  return parts
 }
 
 /** The bounded cache signature of one Action stats aggregate: the totals

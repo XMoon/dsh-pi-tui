@@ -35,7 +35,8 @@ import {
   projectFocus,
   type FocusProjectedBlock,
 } from '../src/focus-activity.ts'
-import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionPresentation, compactActionSourceOf, compactActionStatParts, type CompactActionPresentation, type CompactActionStats } from '../src/compact-process-preview.ts'
+import { compactActionPresentation, type CompactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'
+import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionSourceOf, compactActionStatParts, type CompactActionStats } from '../src/tui/transcript/process-summary.ts'
 
 /** One action-stats literal for header fixtures. */
 function actionStatsOf(total: number, types: Record<string, number> = {}): CompactActionStats {
