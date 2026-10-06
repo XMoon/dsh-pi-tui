@@ -147,7 +147,7 @@ same document as `busyEnter`). The persisted key keeps its historical name
 (`localShellSandbox`); its meaning is the **Host user-shell execution
 policy**, never an execution locality.
 
-- `/settings` row (in `src/commands.ts`'s settings panel, next to
+- `/settings` row (in `src/tui/commands/settings.ts`'s settings panel, next to
   `busy-enter`):
 
   ```text
@@ -186,7 +186,7 @@ default matches every reference implementation.
 - `src/runtime/direct/host-user-shell-direct.ts` — the Direct Host adapter:
   policy selection (`bypass` spawn / `sandbox` via the dsh shell executor),
   fail-closed when the sandbox policy is unavailable.
-- `src/commands.ts` — the settings row + onChange persistence.
+- `src/tui/commands/settings.ts` — the settings row + onChange persistence.
 - `src/commands.ts` `TuiSettingsLike` — extend the document shape.
 
 **Tests**

@@ -308,8 +308,9 @@ the user's live bindings:
   keys). Every other mention is shorthand for the default binding and
   must not be relied on as the live binding.
 - **The static gate** also rejects hard-coded chord labels in
-  user-facing string literals (`src/index.ts`, `src/commands.ts`,
-  `src/tui-app.ts`), with a documented allowlist for fork editor-level
+  user-facing string literals (`src/index.ts`, `src/commands.ts` plus every
+  `src/tui/commands/**` module, `src/tui-app.ts`), with a documented allowlist
+  for fork editor-level
   keys (Ctrl+Home/End).
 
 ## Revision history and convergence

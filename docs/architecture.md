@@ -32,16 +32,18 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/runtime/direct/**` | Direct semantic adapters |
 | `src/runtime/remote/**` | Remote semantic adapters |
 | `src/tui-app.ts` | current TUI root facade + remaining legacy presentation/interaction implementation |
-| `src/commands.ts` | current built-in command definition monolith; TS1 convergence target |
+| `src/tui/commands/**` | Client-local built-in slash command definitions (TS1 domain modules) |
+| `src/commands.ts` | stable command facade + registration/catalog coordinator |
 | `src/transcript.ts` | ONE transcript semantic authority; TS7 modularization target |
 | `src/extension/**` | extension service/Client-local extension ownership |
 | `src/keybindings/**` | keybinding definitions/dispatch machinery |
 | `src/footer/**` | footer composition/configuration |
 | focused domain dirs (`image/`, `attachment/`, `plugin-manager/`, `status/`, `notification/`, …) | keep domain ownership |
 
-`src/tui-app.ts`, `src/commands.ts` and `src/transcript.ts` are still the large
-owners of their domains. That size is structural debt, not an invitation to move
-their semantics into a new layer.
+`src/tui-app.ts` and `src/transcript.ts` are still the large owners of their
+domains. That size is structural debt, not an invitation to move their semantics
+into a new layer. `src/commands.ts` is already a facade/coordinator: the built-in
+definitions live in `src/tui/commands/**`.
 
 ## Dependency direction
 
@@ -71,6 +73,20 @@ application owners never import bootstrap
 Remote is reached through one sanctioned lazy boundary
 Direct remains the production/default backend
 ```
+
+The command layer follows the same direction:
+
+```text
+src/commands.ts / src/tui/commands/**
+  never import Direct/Remote implementation zones;
+  consume semantic/application-facing contracts only
+```
+
+`src/tui/**` is the Client terminal presentation layer: `src/tui-app.ts` plus
+the extracted presentation owners (`src/tui/commands/**` today; components,
+interaction and transcript view owners in TS4–TS6). It is not an application or
+Host layer — application lifecycle/orchestration stays in `src/app/**`.
+
 
 ## Composition root
 
@@ -156,6 +172,7 @@ parses the TypeScript AST and rejects:
 src/runtime/**                    -> src/app/**
 non-composition modules           -> src/app/direct/** or src/runtime/direct/**
 owners / presentation / TUI       -> src/app/bootstrap.ts
+commands.ts / tui/commands/**     -> experimental Remote composition
 the src/startup.ts static graph   -> experimental Remote composition
 app/remote/** dynamic imports     -> any owner/target other than the ONE sanctioned edge
 src/app/surface/**                -> new Direct<...>(...) semantic adapters
@@ -183,8 +200,8 @@ oversized and multi-owner. The Post-M3 TypeScript convergence train works
 through them in ownership-first order:
 
 ```text
-TS1  commands.ts domain decomposition
-TS2  app/bootstrap.ts composition-root decomposition
+TS1  commands.ts domain decomposition                       DONE
+TS2  app/bootstrap.ts composition-root decomposition        next
 TS3  app/surface/runtime.ts surface-owner decomposition
 TS4–TS6  TuiApp leaf / interaction / transcript-view extraction
 TS7  transcript.ts internal modularization (ONE TranscriptFolder authority)

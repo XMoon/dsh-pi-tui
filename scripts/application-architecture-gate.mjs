@@ -70,6 +70,13 @@
  *      importing `app/remote/**` fails, and so does a second dynamic target
  *      under the owner. Dynamic imports outside the Remote composition
  *      boundary stay out of scope.
+ *   7. (TS1) `src/commands.ts` and `src/tui/commands/**` — the built-in TUI
+ *      command definitions — must not import experimental Remote composition
+ *      (`runtime/remote/**`, `app/remote/**`, or a Remote package face): the
+ *      command layer consumes semantic/application-facing contracts only. The
+ *      existing rules already forbid Direct implementation imports and
+ *      `app/bootstrap.ts` there, so this is the first LONG-LIVED command-zone
+ *      rule; it is extended by the PR that introduces each later zone.
  *
  * Existing historical exceptions, when a phase proves one, are recorded in
  * {@link ARCHITECTURE_ALLOWLIST} (file + resolved target, TYPE-ONLY only); new
@@ -174,6 +181,14 @@ export const ARCHITECTURE_RULES = [
     message: 'application owners must not import src/app/bootstrap.ts (index -> bootstrap -> owners)',
     applies: (srcRel) => srcRel !== 'index.ts' && srcRel !== 'app/bootstrap.ts',
     forbids: (resolved) => resolved === 'app/bootstrap.ts',
+  },
+  {
+    id: 'commands-imports-remote-composition',
+    message:
+      'src/commands.ts and src/tui/commands/** must not import experimental Remote composition '
+      + '(the built-in command definitions consume semantic/application-facing contracts only)',
+    applies: (srcRel) => srcRel === 'commands.ts' || srcRel.startsWith('tui/commands/'),
+    forbids: (resolved, specifier) => isRemoteComposition(resolved, specifier),
   },
 ]
 

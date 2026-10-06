@@ -1492,3 +1492,54 @@ test('capability-truthful discovery copy is registered for the conditional comma
   assert.match(bang.description ?? '', /!! keeps the result presentation-only/)
   app.stop()
 })
+
+test('the built-in command decomposition preserves the exact primary set and registration order', () => {
+  // TS1 moved the definitions into `src/tui/commands/**`: this lock proves the
+  // decomposition neither lost nor added a command and kept the raw
+  // registration sequence (including each alias at its own position), which
+  // the synchronous `commands/change` effects depend on.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  registerTuiCommands(stubRunner(ctx, app, { agent: undefined }))
+  // The six existing aliases: an alias is another NAME of the same logical
+  // command, registered immediately after its primary.
+  const ALIASES = new Set(['quit', 'statusline', 'resume', 'subagents', 'image', 'rename'])
+  // The 27 built-in primaries, in their frozen registration order.
+  assert.deepEqual(
+    services.registered.filter(name => !ALIASES.has(name)),
+    [
+      'exit', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
+      'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'export',
+      'transcript', 'fork', 'rewind', 'status', 'login', 'logout', 'help', 'keybindings',
+    ],
+  )
+  // The raw sequence: every alias registers immediately after its primary.
+  assert.deepEqual(services.registered, [
+    'exit', 'quit',
+    'settings',
+    'footer', 'statusline',
+    'display', 'focus',
+    'sessions', 'resume',
+    'skill', 'reload',
+    'model',
+    'new',
+    'tasks', 'subagents',
+    'plugins',
+    'yolo', 'preset',
+    'search',
+    'title', 'rename',
+    'copy', 'attach', 'image', 'export', 'transcript',
+    'fork', 'rewind',
+    'status',
+    'login', 'logout',
+    'help',
+    'keybindings',
+  ])
+  app.stop()
+})
