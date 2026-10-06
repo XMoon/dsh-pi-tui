@@ -65,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tern terminal compatibility: the Agent's running state now drives the
+  terminal's native progress indicator (OSC 9;4), and completion
+  notifications use Tern's native OSC 9 toast under `Auto`.
+
 - The fullscreen long user message bubble is now one local disclosure
   surface: a single click anywhere on a collapsed bubble (head text, marker,
   or tail text) expands that message, and a single click anywhere on an

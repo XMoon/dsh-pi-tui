@@ -471,6 +471,20 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     return app
   }
 
+  /**
+   * The main-Agent pane-progress latch (plan §8.2): remembers the last
+   * already-authorized main-Agent presentation state and projects it onto the
+   * mounted app. Presentation state only — never a second Agent lifecycle
+   * authority. It exists so an `agent/status` observed BEFORE the mount is not
+   * lost; the routing layer above decides which statuses are eligible.
+   */
+  let mainAgentProgressActive = false
+  const setMainAgentProgress = (active: boolean): void => {
+    if (mainAgentProgressActive === active) return
+    mainAgentProgressActive = active
+    app?.setTerminalProgress(active)
+  }
+
   // The approval/question presentation owner (TS3 §35) holds the ONE
   // `QuestionSurfaceController` plus its attention subscription. The attention
   // publication stays a PRESENTATION-only refresh: the count goes to the app
@@ -517,6 +531,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     refreshAgentRuntimeOnly: () => task.refreshAgentRuntimeOnly(),
     hasTaskChild: (childId) => task.hasTask(childId),
     feedCompletionStatus: (agentId, status) => notification.onAgentStatus(agentId, status),
+    setMainAgentProgress: (active) => setMainAgentProgress(active),
     refreshPendingInput: () => refreshPendingInput(),
     schedulePaint: () => schedulePaint(),
     paintNow: () => paintNow(),
@@ -1146,6 +1161,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     status,
     openingJournal,
     setCompletionOwner(identity) {
+      // Every completion-owner commit/reset drops the previous owner's pane
+      // progress BEFORE the controller resets (plan §9): a newly committed
+      // owner must prove `running` through its own authoritative
+      // `agent/status`, never inherit the old owner's busy state.
+      setMainAgentProgress(false)
       notification.setCompletionOwner(identity)
     },
     onAgentStatus(agentId, status) {
@@ -1265,6 +1285,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // The TUI is about to mount: the app takes over the terminal now, and
       // the same instance is what dispose() releases.
       app = startProcessTui(events, buildOptions(deps))
+      // A main-Agent `agent/status` observed BEFORE the mount (plan §8.2):
+      // project the latched desired state once the concrete surface exists. A
+      // latched `false` needs no write (no progress was ever shown).
+      if (mainAgentProgressActive) app.setTerminalProgress(true)
     },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original
@@ -1283,6 +1307,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // surface detach. The process slot is NOT released here — TuiApp remains
       // its sole owner.
       runSyncDisposalSteps('surface runtime disposal', [
+        // Plan §10: retire the pane-progress hint BEFORE the mounted app dies.
+        // ProcessTerminal.stop() in app.dispose() clears the physical
+        // indicator independently — this is the surface-side semantic reset.
+        () => setMainAgentProgress(false),
         // The question attachment first (its answer lookup is cleared before the
         // app dies), then the mounted app, then the extension surface resources
         // in the runner's original cleanup order.

@@ -234,6 +234,12 @@ export interface EventRoutingDeps<Event extends RoutedSessionEvent> {
   readonly hasTaskChild: (childId: string) => boolean
   /** The ONLY completion-controller status feed (the `agent/status` main branch). */
   readonly feedCompletionStatus: (agentId: string, status: AgentLifecycleStatus) => void
+  /**
+   * The main-Agent pane-progress projection (plan §8.1): a narrow boolean
+   * presentation hint, called ONLY for the current main Agent. The routing
+   * emits no terminal bytes and never learns which terminal consumes it.
+   */
+  readonly setMainAgentProgress: (active: boolean) => void
   /** The surface pending-input presentation refresh. */
   readonly refreshPendingInput: () => void
   readonly schedulePaint: () => void
@@ -530,6 +536,12 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // in the CACHED catalog refresh the task surface — the MAIN agent's own
     // per-turn flips (and any stale post-switch event) do not re-list it.
     if (currentAgentId !== undefined && agentId === currentAgentId) {
+      // The main Agent's own running/idle is ALSO the pane-progress fact
+      // (plan §8.1): project it BEFORE the completion feed, so a settled
+      // transition clears the busy state before the controller may emit its
+      // toast — never "busy + Turn complete" for the same transition. The
+      // child/stale branch below never calls this.
+      options.setMainAgentProgress(status === 'running')
       options.feedCompletionStatus(agentId, status)
       queueMicrotask(() => options.refreshPendingInput())
       return
