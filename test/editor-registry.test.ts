@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../src/editor-registry.ts'
-import { EditorSeatHolder } from '../src/editor-seat-holder.ts'
+import { EditorSeatHolder } from '../src/tui/interaction/editor-seat-holder.ts'
 import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
 
@@ -65,7 +65,7 @@ function seatHostAdapter(overrides: Partial<{
   cursor: number
   setText: (text: string) => void
   setCursor: (offset: number) => void
-}> = {}): import('../src/editor-seat-holder.ts').HostEditorAdapter {
+}> = {}): import('../src/tui/interaction/editor-seat-holder.ts').HostEditorAdapter {
   let text = overrides.text ?? ''
   let cursor = overrides.cursor ?? 0
   const component = new Text('host', 0, 0)

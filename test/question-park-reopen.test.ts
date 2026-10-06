@@ -22,7 +22,7 @@ import type {
   UserQuestionProvider,
 } from '../src/runtime/interaction-port.ts'
 import type { TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../src/tui-app.ts'
-import type { QuestionFlowDraft } from '../src/question.ts'
+import type { QuestionFlowDraft } from '../src/tui/interaction/question.ts'
 import type { Diag } from '../src/diag.ts'
 
 const SILENT_DIAG: Diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }

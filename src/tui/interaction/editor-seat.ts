@@ -16,7 +16,7 @@
  * current occupant — the EditorSeatHolder owns the replacement editor and
  * its compiled component, the question flow state owns the QuestionFrame.
  * mount/detach ≠ dispose; only handoff / final teardown dispose.
- * @module @xmoon76/dsh-pi-tui/editor-seat
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/editor-seat
  */
 
 import { Container, type Component } from '@xmoon76/pi-tui'

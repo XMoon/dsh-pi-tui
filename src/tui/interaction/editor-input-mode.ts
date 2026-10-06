@@ -8,7 +8,7 @@
  *
  * This module is deliberately pure and dependency-free: every transition
  * and codec rule is testable without a terminal.
- * @module @xmoon76/dsh-pi-tui/editor-input-mode
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/editor-input-mode
  */
 
 /** The three editor input modes. */

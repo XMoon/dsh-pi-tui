@@ -12,7 +12,7 @@ import { afterEach, test } from 'node:test'
 import { AdvancedInputRegistry } from '../src/extension/internal/advanced-input.ts'
 import { normalizeInputEvent } from '../src/extension/internal/input-events.ts'
 import type { AdvancedInputEvent, AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
-import type { SaveLocationDeps } from '../src/save-location.ts'
+import type { SaveLocationDeps } from '../src/tui/interaction/save-location.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file

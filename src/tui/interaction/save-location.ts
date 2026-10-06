@@ -17,7 +17,7 @@
  * confirmation state (Yes replaces, No returns to directory selection). The
  * prompt is pure component: the app layer owns the promise/abort plumbing,
  * the seat swap, and input routing while the prompt is active.
- * @module @xmoon76/dsh-pi-tui/save-location
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/save-location
  */
 
 import {
@@ -29,9 +29,9 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { componentKeymap } from './keybindings/component-keymap.ts'
-import { color } from './theme.ts'
-import type { DirectoryCompletionItem } from './file-completion/directory-completion.ts'
+import { componentKeymap } from '../../keybindings/component-keymap.ts'
+import { color } from '../../theme.ts'
+import type { DirectoryCompletionItem } from '../../file-completion/directory-completion.ts'
 
 /** What the Save Location prompt asks for. */
 export interface SaveLocationRequest {

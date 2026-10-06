@@ -19,8 +19,8 @@ import { afterEach, test } from 'node:test'
 import type { Component } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { liveTuiCountForTest } from '../src/process-tui-slot.ts'
-import type { SaveLocationDeps } from '../src/save-location.ts'
-import { SaveLocationPrompt } from '../src/save-location.ts'
+import type { SaveLocationDeps } from '../src/tui/interaction/save-location.ts'
+import { SaveLocationPrompt } from '../src/tui/interaction/save-location.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()

@@ -194,8 +194,13 @@ import { CompactTextPreview } from './compact-text-preview.ts'
 import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
-import { QuestionFlow, type QuestionFlowDraft } from './question.ts'
-import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './save-location.ts'
+import { QuestionFlow, type QuestionFlowDraft } from './tui/interaction/question.ts'
+import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
+// The interaction owners' app-facing structural types stay reachable through
+// this root facade: `app/**` owners consume the stable contract here rather
+// than importing the concrete `src/tui/interaction/**` modules (TS5 §15).
+export type { QuestionFlowDraft } from './tui/interaction/question.ts'
+export type { SaveLocationResult } from './tui/interaction/save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
@@ -241,7 +246,7 @@ import { submitAckLabel, type SubmitPendingDetail } from './submit-ack.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
-import { InputRouter } from './input-router.ts'
+import { InputRouter } from './tui/interaction/input-router.ts'
 import { AppActionDispatcher, type AppActionHost } from './keybindings/action-dispatcher.ts'
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { deriveKeybindingContext } from './keybindings/context.ts'
@@ -259,11 +264,11 @@ import {
 } from './local-shell-card.ts'
 import { formatBytes } from './bounded-output.ts'
 import type { RendererRegistry } from './renderer-registry.ts'
-import { OverlayBroker } from './overlay-broker.ts'
-import { EditorSeatMount } from './editor-seat.ts'
-import { EditorSeatHolder } from './editor-seat-holder.ts'
-import { TuiEditor } from './tui-editor.ts'
-import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
+import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
+import { EditorSeatMount } from './tui/interaction/editor-seat.ts'
+import { EditorSeatHolder } from './tui/interaction/editor-seat-holder.ts'
+import { TuiEditor } from './tui/interaction/tui-editor.ts'
+import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
 import type { EditorRegistry } from './editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
@@ -2344,7 +2349,7 @@ export class TuiApp {
   /** The press-time question gesture (mouse parity): the release click
    * validates it before acting — a question advance / repaint between
    * press and release must never transfer the click. */
-  private questionPressGesture: import('./question.ts').QuestionMouseGesture | undefined
+  private questionPressGesture: import('./tui/interaction/question.ts').QuestionMouseGesture | undefined
   /** The Question-owned inspection press gesture. Kept separate from the
    * normal fullscreen gesture so a Question cannot leak a background press
    * into the normal click ladder after it settles. */
@@ -12610,7 +12615,7 @@ export class TuiApp {
   /** M9: the host default editor adapted to the seat surface. The fork's
    * cursor is `{line, col}`; the seat uses a flat OFFSET (line lengths
    * summed + col), so plugin editors and the host agree on one shape. */
-  private hostEditorAdapter(): import('./editor-seat-holder.ts').HostEditorAdapter {
+  private hostEditorAdapter(): import('./tui/interaction/editor-seat-holder.ts').HostEditorAdapter {
     // Capture the editor so object-literal getters keep the right `this`.
     const editor = this.editor
     return {
@@ -12760,7 +12765,7 @@ export class TuiApp {
    * M9: the CURRENT seat editor (all host editor access routes through
    * this — plan §14: business code stops scattering this.editor.*).
    */
-  private seatEditor(): import('./editor-seat-holder.ts').SeatEditor {
+  private seatEditor(): import('./tui/interaction/editor-seat-holder.ts').SeatEditor {
     return this.editorSeatHolder.currentEditor()
   }
 
@@ -12862,7 +12867,7 @@ export class TuiApp {
   }
 
   /** M9 test hook: the CURRENT seat occupant (component rendering probe). */
-  seatEditorForTest(): import('./editor-seat-holder.ts').SeatEditor {
+  seatEditorForTest(): import('./tui/interaction/editor-seat-holder.ts').SeatEditor {
     return this.seatEditor()
   }
 

@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { setKittyProtocolActive } from '@xmoon76/pi-tui'
-import { QuestionFlow, type QuestionFlowQuestion } from '../src/question.ts'
+import { QuestionFlow, type QuestionFlowQuestion } from '../src/tui/interaction/question.ts'
 
 const BUDGETS = [8, 12, 22, 24]
 const WIDTHS = [50, 100]
