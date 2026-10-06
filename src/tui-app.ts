@@ -194,8 +194,8 @@ import { CompactTextPreview } from './compact-text-preview.ts'
 import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
-import { QuestionFlow, type QuestionFlowDraft } from './tui/interaction/question.ts'
-import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
+import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
+import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
 // The interaction owners' app-facing structural types stay reachable through
 // this root facade: `app/**` owners consume the stable contract here rather
 // than importing the concrete `src/tui/interaction/**` modules (TS5 §15).
@@ -655,96 +655,6 @@ function preview(text: string, lines: number): string {
   // surrogate pair / ZWJ emoji in the middle. The overflow marker rides in
   // the ellipsis slot (it is the same '…' the rest-marker would add).
   return truncateToWidth(first, rest === '' ? 120 : 119, rest)
-}
-
-/**
- * Frame for the question flow in the EDITOR SEAT: it re-derives the flow's
- * row budget from the terminal height on EVERY render (60% cap, 8..24
- * content rows — the flow's render output IS its height in the seat layout,
- * nothing clips it), so an active resize or a queued flow presented later
- * always budgets against the current terminal. It also forwards focus to the
- * flow so its free-text Input keeps the hardware cursor (a plain Frame would
- * swallow the focus flag).
- */
-class QuestionFrame extends Frame implements Focusable {
-  private readonly flow: QuestionFlow
-  private readonly heightOf: () => number
-  /** Rendered height of the last frame (fullscreen click hit-testing). */
-  private lastRows = 0
-  /** Terminal height the last render used (click staleness guard). */
-  private lastTermRows = 0
-
-  constructor(flow: QuestionFlow, heightOf: () => number) {
-    super(flow, true)
-    this.flow = flow
-    this.heightOf = heightOf
-  }
-
-  render(width: number): string[] {
-    const rows = Math.max(1, this.heightOf())
-    this.lastTermRows = rows
-    this.lastTermColumns = width
-    // The 60% cap is the DEFAULT (keeps the transcript visible); an explicit
-    // body expand ('e' or a click on the scroll marker) grows the frame
-    // toward 80% — the user asked for the room, and the flow's budget math
-    // is proven for every budget up to MAX_BUDGET.
-    const expanded = this.flow.isBodyExpanded()
-    const frameRows = expanded
-      ? Math.max(10, Math.min(40, Math.floor(rows * 0.8)))
-      : Math.max(10, Math.min(26, Math.floor(rows * 0.6)))
-    this.flow.setMaxRows(frameRows - 2)
-    const out = super.render(width)
-    this.lastRows = out.length
-    return out
-  }
-
-  /** The frame's height from the last render (0 before the first one). */
-  get rows(): number {
-    return this.lastRows
-  }
-
-  /** The terminal height the last render used. */
-  get termRows(): number {
-    return this.lastTermRows
-  }
-
-  /** The terminal width the last render used (a resize changes wrapping and
-   * the flow's hit map, so clicks must wait for a fresh render too). */
-  get termColumns(): number {
-    return this.lastTermColumns
-  }
-
-  get focused(): boolean {
-    return this.flow.focused
-  }
-
-  set focused(value: boolean) {
-    this.flow.focused = value
-  }
-
-  private lastTermColumns = 0
-}
-
-/**
- * Frame for the Save Location prompt in the EDITOR SEAT: forwards focus to
- * the prompt so its directory Input keeps the hardware cursor (a plain Frame
- * would swallow the focus flag — the same contract as QuestionFrame).
- */
-class SaveLocationFrame extends Frame implements Focusable {
-  private readonly prompt: SaveLocationPrompt
-
-  constructor(prompt: SaveLocationPrompt) {
-    super(prompt, true)
-    this.prompt = prompt
-  }
-
-  get focused(): boolean {
-    return this.prompt.focused
-  }
-
-  set focused(value: boolean) {
-    this.prompt.focused = value
-  }
 }
 
 
