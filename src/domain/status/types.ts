@@ -8,7 +8,7 @@
  * behavior rule; State = the current state; `Mode` survives only where
  * upstream or the existing surface already names it (Sandbox Mode / Plan
  * Mode / Focus Mode). There is deliberately NO generic `mode` field.
- * @module @xmoon76/dsh-pi-tui/status
+ * @module @xmoon76/dsh-pi-tui/domain/status
  */
 
 import type { DisplayPreset } from '../../display-preset.ts'

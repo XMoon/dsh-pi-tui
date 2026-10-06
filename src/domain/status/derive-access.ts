@@ -12,7 +12,7 @@
  * Every seam is session-oriented (alpha.4): no event-log array crosses
  * this boundary, so the module stays free of Host type imports (the
  * boundary gate) while the official services own their own folds.
- * @module @xmoon76/dsh-pi-tui/status/derive-access
+ * @module @xmoon76/dsh-pi-tui/domain/status/derive-access
  */
 
 import type { AccessStatus } from './types.ts'

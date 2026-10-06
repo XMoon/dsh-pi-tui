@@ -2,8 +2,8 @@
 
 > Status: CURRENT — Post-M3 architecture authority
 >
-> Audited baseline: `next @ 3c896e018d8abf2b33b469bba53d45bd2033a5ab`
-> (`M3 DONE / M4 NOT STARTED`, package `@xmoon76/dsh-pi-tui@0.5.1`, TS1 branch).
+> Audited baseline: `next @ 460e968e76afdef6df5274c7acafe896f20eea78`
+> (`M3 DONE / M4 NOT STARTED`, package `@xmoon76/dsh-pi-tui@0.5.1`, TS2+TS3 branch).
 >
 > Later commits may move or split modules and rename internal owners; the
 > ownership zones, the canonical layers and the dependency direction below are
@@ -22,16 +22,19 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | Zone | Owner role |
 |---|---|
 | `src/index.ts` | public/package facade; delegates application startup |
-| `src/app/bootstrap.ts` | application composition root; connects owners, lifecycle, services |
+| `src/app/bootstrap.ts` | application composition facade; connects owners, lifecycle, services |
+| `src/app/bootstrap/**` | cohesive composition-only wiring helpers (one responsibility each) |
 | `src/app/session/**` | Session application ownership/currentness/orchestration |
 | `src/app/submission/**` | prompt/user-shell application orchestration |
 | `src/app/command/**` | application command authority/catalog/execution |
 | `src/app/surface/**` | mounted surface/application presentation ownership |
+| `src/app/plugin-manager/**` | Plugin Manager application state/policy/controller/model ownership |
 | `src/app/direct/**` | Direct-only application composition/owners |
 | `src/app/remote/**` | experimental Remote composition/Client application ownership |
 | `src/runtime/**` | transport-neutral semantic ports/contracts |
 | `src/runtime/direct/**` | Direct semantic adapters |
 | `src/runtime/remote/**` | Remote semantic adapters |
+| `src/domain/status/**` | transport/UI-neutral status model, derivations and store |
 | `src/tui-app.ts` | current TUI root facade + remaining legacy presentation/interaction implementation |
 | `src/tui/commands/**` | Client-local built-in slash command definitions (TS1 domain modules) |
 | `src/commands.ts` | stable command facade + registration/catalog coordinator |
@@ -39,7 +42,8 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/extension/**` | extension service/Client-local extension ownership |
 | `src/keybindings/**` | keybinding definitions/dispatch machinery |
 | `src/footer/**` | footer composition/configuration |
-| focused domain dirs (`image/`, `attachment/`, `plugin-manager/`, `status/`, `notification/`, …) | keep domain ownership |
+| `src/plugin-manager/panel.ts` | the one historically-rooted TUI panel, deliberately pending TS4 |
+| remaining historical feature dirs (`image/`, `attachment/`, `notification/`, `file-completion/`, `keybinding-ui/`, `components/`, …) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` and `src/transcript.ts` are still the large owners of their
 domains. That size is structural debt, not an invitation to move their semantics
@@ -70,14 +74,26 @@ A domain may appear in multiple layers when the responsibilities differ:
 ```text
 src/app/command/**   application command authority / lifecycle / execution
 src/tui/commands/**  terminal slash-command definition / presentation
+
+src/app/plugin-manager/**   Plugin Manager application state/policy/controller
+src/plugin-manager/panel.ts concrete terminal panel (TS4 -> src/tui/plugin-manager/**)
+
+src/app/surface/**    application surface owner coordinating the mounted surface
+src/domain/status/**  the transport/UI-neutral status primitives it coordinates
 ```
+
+`src/app/bootstrap.ts` and `src/app/bootstrap/**` form ONE composition zone, not
+a presentation or domain layer: they may resolve/construct/connect owners, and
+each helper must stay a cohesive composition responsibility. A helper that grows a
+business reducer, a state machine or a presentation algorithm belongs in an owner
+layer instead.
 
 ## Dependency direction
 
 ```text
 src/index.ts
   ↓
-src/app/bootstrap.ts
+src/app/bootstrap.ts + src/app/bootstrap/**
   ↓
 src/app/** owners
   ↓
@@ -97,7 +113,8 @@ The load-bearing rules:
 ```text
 src/runtime/** never imports src/app/**
 src/runtime/** never imports src/tui/**
-application owners never import bootstrap
+application owners never import the bootstrap composition zone (facade or helper)
+src/domain/** never imports src/app/**, src/tui/** or experimental Remote composition
 Remote is reached through one sanctioned lazy boundary
 Direct remains the production/default backend
 ```
@@ -107,7 +124,7 @@ The TUI layer follows the same direction:
 ```text
 src/tui/**
   does not import Direct/Remote implementation/composition
-  does not import app/bootstrap
+  does not import the app/bootstrap composition zone
   consumes semantic/application-facing contracts
 ```
 
@@ -142,8 +159,8 @@ ordinary new root module is never allowed.
 
 ## Existing directory convergence
 
-The historical feature directories are normalized stage by stage; none of them
-moves in TS1. Their intended owners:
+The historical feature directories are normalized stage by stage. Their intended
+owners:
 
 | Directory | Target owner | Stage |
 |---|---|---|
@@ -152,25 +169,53 @@ moves in TS1. Their intended owners:
 | `keybindings/` | `tui/keybindings/` | TS5 |
 | `footer/` | `domain/footer/` + `tui/footer/` | TS5 |
 | `notification/` | `domain/notification/` + `tui/notification/` | TS5 |
-| `plugin-manager/` | `app/plugin-manager/` + `tui/plugin-manager/` | TS3/TS4 |
-| `status/` | `domain/status/` | TS3 |
+| `plugin-manager/` | `app/plugin-manager/` (DONE) + `tui/plugin-manager/**` for `panel.ts` | TS3 DONE / TS4 panel move |
+| `status/` | `domain/status/` (DONE — `src/status/` is absent) | TS3 DONE |
 | `image/` | `client/media/image/` | TS8 |
 | `attachment/` | `client/media/attachment/` | TS8 |
 | `file-completion/` | `domain/` + `tui/` + `runtime/direct/` | TS8 |
 
-The implementation stays where it is until its assigned stage; this table records
-the intended owner, not completed work.
+The remaining directories stay where they are until their assigned stage; each row
+records the intended owner. A row marked DONE has no compatibility forwarding
+directory left behind.
 
-## Composition root
+## Composition zone
 
-`src/app/bootstrap.ts` may resolve, construct and connect owners, and wires the
-lifecycle, Host services and the mounted surface.
+`src/app/bootstrap.ts` is the composition FACADE and `src/app/bootstrap/**` holds
+its cohesive wiring-only helpers. Together they may resolve, construct and connect
+owners, and wire the lifecycle, Host services and the mounted surface.
+
+The facade keeps `applyRunner` / `applyRunnerWithRuntime`, the Cordis/process
+prerequisites, Host service resolution, owner construction and connection, mount and
+start ordering, and the top-level lifecycle (including the terminal-total fatal
+catch). Helpers may select adapters (including Direct ones — the whole zone is inside
+the Direct composition allowance) but never read Host services of their own.
 
 It must not become a business reducer or a durable domain-state owner: business
 decisions and durable state belong to the application owners (`app/session`,
-`app/submission`, `app/command`, `app/surface`, `app/direct`, `app/remote`) and
-the semantic runtime ports they consume. Resolving a Host service in order to
-construct an owner is composition; owning that service's semantics is not.
+`app/submission`, `app/command`, `app/surface`, `app/plugin-manager`, `app/direct`,
+`app/remote`) and the semantic runtime ports they consume. Resolving a Host service in
+order to construct an owner is composition; owning that service's semantics is not.
+
+## Mounted surface ownership
+
+`src/app/surface/runtime.ts` remains the ONE aggregate `createSurfaceRuntime()`
+constructor: it builds the mounted `TuiApp` slot, wires the sub-owners together and owns
+the cross-sub-owner disposal ordering. The independent surface lifetimes live in their
+own application-level owners next to it:
+
+```text
+app/surface/notification-runtime.ts      completion notification + terminal focus tracking
+app/surface/extension-runtime.ts         extension surface host + attach/detach lifetime
+app/surface/plugin-manager-runtime.ts    SurfaceRuntime <-> PluginManagerController glue
+app/surface/task-runtime.ts              Task Center + Job viewer state machine
+app/surface/interaction-runtime.ts       approval/question surface attachment
+app/surface/event-routing.ts             application-level presentation event routing
+```
+
+Each is constructed exactly once from `createSurfaceRuntime()`; no bootstrap code
+constructs them directly. Search/transcript VIEW ownership stays in the aggregate until
+TS6, and leaf TUI components/panels/pickers stay in place until TS4.
 
 ## TUI
 
@@ -247,13 +292,19 @@ placement policy above. It parses the TypeScript AST and rejects:
 src/runtime/**                    -> src/app/**
 src/runtime/**                    -> src/tui/**
 non-composition modules           -> src/app/direct/** or src/runtime/direct/**
-owners / presentation / TUI       -> src/app/bootstrap.ts
+owners / presentation / TUI       -> the src/app/bootstrap.ts + src/app/bootstrap/** zone
+src/domain/**                     -> src/app/**, src/tui/** or experimental Remote composition
 src/tui/** (and the commands.ts
   command-layer facade)           -> experimental Remote composition
 the src/startup.ts static graph   -> experimental Remote composition
 app/remote/** dynamic imports     -> any owner/target other than the ONE sanctioned edge
 src/app/surface/**                -> new Direct<...>(...) semantic adapters
 ```
+
+The bootstrap zone is `src/app/bootstrap.ts` plus every `src/app/bootstrap/**` file,
+matched by DIRECTORY: a new extraction joins the zone (and its rules) automatically
+instead of escaping them by choosing a new file name. Only `src/index.ts` and the zone
+itself may import bootstrap code; the zone itself may import Direct wiring.
 
 It also enforces the root ledger (`scripts/source-root-baseline.json`) over every
 `src/*.ts|.tsx|.mts|.cts` module: a new unclassified root module, a stale `legacy`
@@ -284,8 +335,8 @@ through them in ownership-first order:
 
 ```text
 TS0  architecture authority + long-lived gate refresh          DONE
-TS1  TUI command layer + source placement policy                CURRENT
-TS2 + TS3  app/bootstrap + app/surface composition convergence  NEXT
+TS1  TUI command layer + source placement policy                DONE
+TS2 + TS3  app/bootstrap + app/surface composition convergence  CURRENT
 TS4–TS8  TuiApp / transcript / residual closure                 NOT STARTED
 
 TS4      TuiApp leaf / component extraction
@@ -294,6 +345,14 @@ TS6      TuiApp transcript-view extraction
 TS7      transcript.ts -> domain/transcript/** internal modularization (ONE TranscriptFolder authority)
 TS8      residual audit + architecture closure
 ```
+
+TS2 split the application composition root into the facade plus six wiring helpers
+(`runtime-selection`, `presentation-bridge`, `task-source`, `event-wiring`,
+`lifecycle`, `session-startup`); TS3 moved `src/status/**` to `src/domain/status/**`,
+normalized the Plugin Manager application ownership to `src/app/plugin-manager/**`
+(leaving only the concrete panel at `src/plugin-manager/panel.ts` for TS4) and split
+`src/app/surface/runtime.ts` into explicit application-level surface owners while
+`createSurfaceRuntime()` stays the one aggregate.
 
 Each PR that introduces a new architectural zone extends the architecture gate
 for that zone; the gate deliberately enforces only the zones that exist today.

@@ -11,7 +11,7 @@ knows where the rest lives.
 | File | Audience | What it records |
 |---|---|---|
 | `code-review.md` | contributors/reviewers | Project review checkpoints, contract navigation, evidence/current-state requirements, and PR acceptance vs stage closure; generic review-loop mechanics stay in the reusable skill |
-| `architecture.md` | contributors | Which module owns which state, and the planned extraction order for the runner's remaining responsibilities |
+| `architecture.md` | contributors | The ownership/authority map, the canonical layers, the dependency direction, the source-placement policy (canonical zones + the root-module ledger), the architecture gate rules, and the Post-M3 TS convergence train state |
 | `transcript-display-disclosure.md` | contributors | The canonical DisplayPreset authority, layered disclosure defaults, semantic transcript classes, migration precedence, command compatibility, and Direct/Remote parity boundary |
 | `overlay-focus-contract.md` | contributors | The managed-overlay / focus / fullscreen state model: the authority map, the synchronous-reentrancy transaction invariant, the transition map, the reentrancy matrix, the fork focus-transition rules (X056), and the regression checklist for `/model`, new modals, plugin UI and fullscreen work |
 | `concurrency.md` | contributors | Why dsh sessions cannot be shared across processes; the DSH `SessionHandle` / `SessionWriteLease` (kernel flock) as the sole cross-process writer authority, and the TUI's process-local coordination (transition gate, operation barrier, generation/stale fences) |

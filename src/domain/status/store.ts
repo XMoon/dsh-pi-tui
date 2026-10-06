@@ -8,7 +8,7 @@
  * leaves every section reference unchanged does not notify — so a
  * same-value refresh never triggers a render storm. The revision counter
  * supports footer/command caches.
- * @module @xmoon76/dsh-pi-tui/status/store
+ * @module @xmoon76/dsh-pi-tui/domain/status/store
  */
 
 import { emptyStatusSnapshot, type StatusPatch, type StatusSnapshot } from './types.ts'

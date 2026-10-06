@@ -4,7 +4,7 @@
  * waiting-question > applying-compaction > compacting > working > idle.
  * The footer never re-derives it. `busy` stays the machine-behavior fact
  * the Esc/cancel path reads; it is NOT the same as `phase`.
- * @module @xmoon76/dsh-pi-tui/status/derive-activity
+ * @module @xmoon76/dsh-pi-tui/domain/status/derive-activity
  */
 
 import type { ActivityStatus, RunPhase } from './types.ts'

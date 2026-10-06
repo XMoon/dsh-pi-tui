@@ -9,7 +9,7 @@
  *
  * The module stays free of Host type imports (the boundary gate): the
  * runner instantiates it with the real services.
- * @module @xmoon76/dsh-pi-tui/status/derive-plan
+ * @module @xmoon76/dsh-pi-tui/domain/status/derive-plan
  */
 
 import type { PlanStatus } from './types.ts'

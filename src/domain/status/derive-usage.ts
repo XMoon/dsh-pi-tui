@@ -3,7 +3,7 @@
  * StatsFolder snapshot. The footer consumes THIS structure — never a
  * preformatted `statsLine` (which remains a display-only formatter output
  * for /status and legacy surfaces).
- * @module @xmoon76/dsh-pi-tui/status/derive-usage
+ * @module @xmoon76/dsh-pi-tui/domain/status/derive-usage
  */
 
 import type { SessionStats } from '../../stats.ts'
