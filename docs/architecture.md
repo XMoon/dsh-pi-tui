@@ -38,7 +38,8 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/tui-app.ts` | current TUI root facade + remaining legacy presentation/interaction implementation |
 | `src/tui/commands/**` | Client-local built-in slash command definitions (TS1 domain modules) |
 | `src/commands.ts` | stable command facade + registration/catalog coordinator |
-| `src/transcript.ts` | ONE transcript semantic authority; TS7 modularization target |
+| `src/transcript.ts` | stable transcript compatibility facade + Markdown exporter island (TS7); canonical semantics live in `src/domain/transcript/**` |
+| `src/domain/transcript/**` | ONE transport/UI-neutral transcript semantic/lifecycle authority (TS7): fold, classification, Context form/provenance, Workflow projection, search corpus, grouping and window semantics |
 | `src/extension/**` | extension service/Client-local extension ownership |
 | `src/domain/footer/**` | transport/UI-neutral footer layout/policy/command DTOs (TS5) |
 | `src/domain/notification/**` | transport/UI-neutral notification policy + completion state machine (TS5) |
@@ -54,10 +55,11 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/tui/plugin-manager/panel.ts` | the concrete Plugin Manager terminal panel (TS4) |
 | remaining historical feature dirs (`image/`, `attachment/`, `file-completion/`, …) | keep domain ownership until their assigned stage |
 
-`src/tui-app.ts` and `src/transcript.ts` are still the large owners of their
-domains. That size is structural debt, not an invitation to move their semantics
-into a new layer. `src/commands.ts` is already a facade/coordinator: the built-in
-definitions live in `src/tui/commands/**`.
+`src/tui-app.ts` is still a large owner of its domain. That size is structural
+debt, not an invitation to move its semantics into a new layer.
+`src/commands.ts` and `src/transcript.ts` are already facades: the built-in
+command definitions live in `src/tui/commands/**` and the transcript semantics
+live in `src/domain/transcript/**`.
 
 ## Canonical layers
 
@@ -293,18 +295,24 @@ Plugins consume host-owned extension APIs, registries and brokers, not raw
 
 **There is ONE transcript semantic authority.**
 
-`src/transcript.ts` — and the future `src/domain/transcript/**` module split, with
-`src/transcript.ts` kept as the facade — owns the
-semantic fold/projection facts: durable chronology, turn/step identity,
-assistant/thinking convergence, workflow/subcall projection, read grouping,
-compaction fusion, search corpus identity/revision and `TranscriptItemId`
-allocation.
+`src/domain/transcript/**` owns the semantic fold/projection facts: durable
+chronology, turn/step identity, assistant/thinking convergence, workflow/subcall
+projection, read grouping, compaction fusion, search corpus identity/revision
+and `TranscriptItemId` allocation. `src/transcript.ts` is the stable
+compatibility facade: it re-exports those owners (the SAME `TranscriptFolder`
+constructor) and keeps the existing Markdown exporter compatibility island
+outside the domain.
+
+TS7 split the former `src/transcript.ts` monolith into the ONE domain graph
+`types` / `semantics` / `context-semantics` / `workflow-projection` / `search` /
+`grouping` / `window` / `folder`. It is an internal modularization only: no
+second mutable `TranscriptFolder`/search/focus semantic store, and a
+`domain-transcript-imports-backend-mechanics` gate rule keeps
+`domain/transcript/**` blind to TUI/renderer mechanics, application currentness,
+the Direct/Remote adapters and the facade.
 
 TUI/Focus/Compact/Search presentation may consume those facts but may not own an
-independent chronology or fold. The Post-M3 TS7 modularization of
-`src/transcript.ts` into `src/domain/transcript/**` is an internal module split
-only: no second mutable
-`TranscriptFolder`/search/focus semantic store.
+independent chronology or fold.
 
 The renderer-neutral PRESENTATION side of the transcript is already split
 (TS6): `src/tui/transcript/**` owns the canonical Work/Context structure, the
@@ -316,7 +324,7 @@ mechanics. The direction is one-way and mechanically enforced:
 ```text
 PiTui transcript mechanics (tui/components/transcript/**)
   -> backend-neutral transcript presentation core (tui/transcript/**)
-  -> semantic transcript facts (src/transcript.ts, TS7: domain/transcript/**)
+  -> semantic transcript facts (src/domain/transcript/**)
 ```
 
 A future TSP renderer consumes the SAME `tui/transcript/**` core; it never
@@ -427,13 +435,14 @@ TS2 + TS3  app/bootstrap + app/surface composition convergence  DONE
 TS4  TUI leaf / component / panel / picker convergence          DONE
 TS5  TuiApp interaction / overlay / editor convergence          DONE
 TS6  transcript presentation core + PiTui transcript mechanics  DONE
-TS7–TS8  transcript semantics / residual closure                NOT STARTED
+TS7  transcript semantic domain + ONE TranscriptFolder authority DONE
+TS8  residual source-tree / placement closure                   NOT STARTED
 
 TS4      TuiApp leaf / component extraction
 TS5      TuiApp interaction / overlay / editor convergence
 TS6      backend-neutral transcript presentation core + PiTui transcript mechanics
 TS7      transcript.ts -> domain/transcript/** internal modularization (ONE TranscriptFolder authority)
-TS8      residual audit + architecture closure
+TS8      residual source-tree normalization / final placement closure
 ```
 
 TS2 split the application composition root into the facade plus six wiring helpers
@@ -489,10 +498,11 @@ src/context-row.ts              -> src/tui/components/transcript/context-row.ts
 src/search-presentation.ts      -> src/tui/components/transcript/search-presentation.ts
 ```
 
-`src/context-presentation.ts` keeps only the transitional Context semantic
-authority (`contextFormOf` / `isAmbientContext`) until TS7 re-homes it into
-`domain/transcript/**`; `src/search-overlay.ts` and `src/display-preset.ts` stay
-deliberately unmoved for TS7/TS8. The Direct-vs-Remote presentation parity
+`src/context-presentation.ts` and `src/transcript-semantics.ts` are retired
+(TS7): the Context form/provenance/ambient authority now lives in
+`src/domain/transcript/context-semantics.ts` and the classification in
+`src/domain/transcript/semantics.ts`. `src/search-overlay.ts` and
+`src/display-preset.ts` stay deliberately unmoved for TS8. The Direct-vs-Remote presentation parity
 comparator left `src/runtime/**` for
 `scripts/support/presentation-read-shadow.ts` (qualification tooling, not
 runtime product authority), so `runtime/**` still imports zero `tui/**`.

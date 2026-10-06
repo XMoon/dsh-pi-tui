@@ -39,8 +39,8 @@ preset.
 
 ## Semantic classes
 
-`transcript-semantics.ts` classifies source messages without inspecting display
-text:
+`src/domain/transcript/semantics.ts` classifies source messages without
+inspecting display text:
 
 - `conversation`: user and assistant messages, including intermediate and final replies;
 - `process`: thinking, ordinary tool activity, and retries;
@@ -186,10 +186,11 @@ the `tui-transcript-imports-renderer-mechanics` architecture rule:
 | rendered-row search geometry/highlight | `src/tui/components/transcript/search-presentation.ts` |
 
 `tui/transcript/**` imports no PiTui, Tern, `TuiApp`, theme/icons, renderer
-registry or concrete TUI component. The transitional Context semantic authority
-(`contextFormOf` / `isAmbientContext`) stays in `src/context-presentation.ts`
-until TS7; `src/search-overlay.ts` and `src/display-preset.ts` stay unmoved for
-TS7/TS8.
+registry or concrete TUI component, and since TS7 it reads the semantic owners
+from `src/domain/transcript/**` instead of the `src/transcript.ts` facade. The
+Context semantic authority (`contextFormOf` / `isAmbientContext`) now lives in
+`src/domain/transcript/context-semantics.ts`; `src/search-overlay.ts` and
+`src/display-preset.ts` stay unmoved for TS8.
 
 ## Compact projection
 
