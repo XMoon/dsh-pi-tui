@@ -45,11 +45,23 @@ function mountedStore(): { app: TuiApp; store: StatusStore; dispose: () => void 
   }
 }
 
+/** The null terminal notification presentation (the terminal sequences are
+ *  asserted by the notification suites; these fixtures exercise the surface
+ *  aggregate without a real terminal). */
+const nullPresentation = {
+  handleFocusReport: () => {},
+  markFocused: () => {},
+  focusState: () => 'focused' as const,
+  notify: () => {},
+  enableFocusReporting: () => {},
+  disableFocusReporting: () => {},
+}
+
 /** The real surface owner over a null notification sink (cheap, no mount). */
 function surfaceOwner() {
   return createSurfaceRuntime({
     tuiVersion: '0.0.0-test',
-    notificationWriter: { write: () => {} },
+    notificationPresentation: nullPresentation,
     notificationMode: undefined,
     notificationMethod: undefined,
     createPluginManagerPanel,

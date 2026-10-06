@@ -15,8 +15,13 @@
  * reports (through the app's `onTerminalFocus` seam) and the controller
  * reads `state` at settle time. It never writes to the terminal itself —
  * the runner owns the `CSI ? 1004 h/l` mode writes.
- * @module @xmoon76/dsh-pi-tui/terminal-focus
+ * @module @xmoon76/dsh-pi-tui/tui/notification/terminal-focus
  */
+
+import type { TerminalFocusState } from '../../domain/notification/types.ts'
+
+export type { TerminalFocusState } from '../../domain/notification/types.ts'
+
 
 /** The terminal focus reports (CSI ? 1004): `ESC[I` = focused,
  * `ESC[O` = unfocused. */
@@ -27,9 +32,6 @@ export const FOCUS_OUT_SEQUENCE = '\x1b[O'
 export const ENABLE_FOCUS_REPORTING = '\x1b[?1004h'
 /** Disable terminal focus reporting. */
 export const DISABLE_FOCUS_REPORTING = '\x1b[?1004l'
-
-/** The tracker's focus state. */
-export type TerminalFocusState = 'focused' | 'unfocused'
 
 /** Whether one raw input chunk is a terminal focus report. */
 export function isFocusReport(data: string): boolean {

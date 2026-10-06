@@ -34,7 +34,7 @@
  */
 
 import { runSyncDisposalSteps } from '../../disposal.ts'
-import { DISABLE_FOCUS_REPORTING } from '../../notification/terminal-focus.ts'
+import { DISABLE_FOCUS_REPORTING } from '../../tui/notification/terminal-focus.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { Diag } from '../../diag.ts'
 import type { SessionRetirementReport } from '../session/owner-access.ts'

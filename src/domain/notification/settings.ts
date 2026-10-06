@@ -9,7 +9,7 @@
  * admit the meaningless `enabled=false + condition=always` combination).
  * The default is `unfocused`: the capability is ON, but a notification
  * fires only while the terminal is not focused.
- * @module @xmoon76/dsh-pi-tui/notification-settings
+ * @module @xmoon76/dsh-pi-tui/domain/notification/settings
  */
 
 /** When a settled main agent triggers a completion notification. */

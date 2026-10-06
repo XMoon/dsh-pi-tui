@@ -27,6 +27,10 @@ const surfaceSource = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.
 // so the focus/feed locks read that module. The aggregate only FORWARDS the
 // delegate calls; the runner still never reaches the controller.
 const notificationSource = readFileSync(join(root, 'src', 'app', 'surface', 'notification-runtime.ts'), 'utf8')
+// TS5 §14: the terminal sequences, the focus tracker and the notifier moved to
+// the TUI presentation owner; the application owner now delegates through the
+// injected structural presentation, so the terminal locks read that module.
+const presentationSource = readFileSync(join(root, 'src', 'tui', 'notification', 'runtime.ts'), 'utf8')
 // TS3 §36: the presentation event routing moved into its own surface owner.
 const routingSource = readFileSync(join(root, 'src', 'app', 'surface', 'event-routing.ts'), 'utf8')
 // A5b-5: the TuiApp event adapter (onUserInput / onTerminalFocus / ...) moved
@@ -115,13 +119,21 @@ test('the live-agent identity resets at every commit site plus teardown', () => 
 })
 
 test('focus reporting is enabled at mount and disabled on EVERY exit path', () => {
-  // A4-4: the surface owns the mount enable + the normal-cleanup disable; the
+  // A4-4 + TS5 §14.2: the TUI presentation owns the mount enable and the
+  // disable write; the application surface delegates through the injected
+  // presentation (so no terminal sequence reaches the application owner); the
   // terminal-total fatal catch (outside the startup IIFE) keeps its own guarded
   // write, because the surface owner is not in scope on that path.
-  assert.equal(notificationSource.split('ENABLE_FOCUS_REPORTING').length - 1, 2,
-    'the surface notification owner enables focus reporting exactly once (the constant use + import)')
-  assert.equal(notificationSource.split('DISABLE_FOCUS_REPORTING').length - 1, 2,
-    'the surface notification owner disables focus reporting exactly once (the constant use + import)')
+  assert.equal(presentationSource.split('ENABLE_FOCUS_REPORTING').length - 1, 2,
+    'the terminal presentation enables focus reporting exactly once (the constant use + import)')
+  assert.equal(presentationSource.split('DISABLE_FOCUS_REPORTING').length - 1, 2,
+    'the terminal presentation disables focus reporting exactly once (the constant use + import)')
+  assert.equal(notificationSource.split('ENABLE_FOCUS_REPORTING').length - 1, 0,
+    'the application notification owner must not carry a terminal sequence')
+  assert.equal(notificationSource.split('DISABLE_FOCUS_REPORTING').length - 1, 0,
+    'the application notification owner must not carry a terminal sequence')
+  assert.equal(notificationSource.split('presentation.enableFocusReporting()').length - 1, 1,
+    'the application owner delegates the mount enable to the injected presentation')
   assert.equal(indexSource.split('notificationWriter.write(ENABLE_FOCUS_REPORTING)').length - 1, 0,
     'the runner no longer enables focus reporting itself')
   // TS2 §11 moved the terminal-total fatal catch into the bootstrap composition
@@ -161,9 +173,9 @@ test('user activity restores the tracker to focused (the onUserInput wiring)', (
   assert.ok(wiring.includes('deps.surface.noteUserInput()'),
     'onUserInput must route to the surface tracker restore')
   const restoreBody = notificationMethodBody('noteUserInput')
-  assert.ok(restoreBody.includes('terminalFocusTracker.markFocused()'),
-    'noteUserInput must restore the tracker to focused')
-  assert.ok(restoreBody.includes('completionController.setFocus(terminalFocusTracker.state)'),
+  assert.ok(restoreBody.includes('presentation.markFocused()'),
+    'noteUserInput must restore the terminal tracker to focused through the presentation')
+  assert.ok(restoreBody.includes('completionController.setFocus(presentation.focusState())'),
     'noteUserInput must re-sync the controller focus')
   // The onTerminalFocus wiring keeps feeding the tracker + controller.
   const focusStart = eventsSource.indexOf('onTerminalFocus: (focused) => {')
@@ -172,8 +184,8 @@ test('user activity restores the tracker to focused (the onUserInput wiring)', (
   assert.ok(focusWiring.includes('deps.surface.handleTerminalFocus(focused)'),
     'onTerminalFocus must route to the surface tracker')
   const focusBody = notificationMethodBody('handleTerminalFocus')
-  assert.ok(focusBody.includes('terminalFocusTracker.handleFocusReport('),
-    'handleTerminalFocus must feed the tracker')
-  assert.ok(focusBody.includes('completionController.setFocus(terminalFocusTracker.state)'),
+  assert.ok(focusBody.includes('presentation.handleFocusReport('),
+    'handleTerminalFocus must feed the terminal tracker through the presentation')
+  assert.ok(focusBody.includes('completionController.setFocus(presentation.focusState())'),
     'handleTerminalFocus must re-sync the controller focus')
 })

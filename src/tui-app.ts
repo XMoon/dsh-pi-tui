@@ -127,7 +127,7 @@ import {
   type ColorPalette,
 } from './theme.ts'
 import { isDiffResult, renderDiffLines, renderDiffView, summarizeDiffs } from './diff.ts'
-import { ENABLE_FOCUS_REPORTING, isFocusReport } from './notification/terminal-focus.ts'
+import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
 import type { TaskPanelItem } from './task-presentation.ts'
 import type { TaskBrowserViewState } from './app/surface/task-runtime.ts'

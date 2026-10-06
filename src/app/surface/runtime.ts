@@ -125,12 +125,11 @@ import { streamingToolPreviewSnapshot } from '../../streaming-tool-preparing.ts'
 import { buildPendingPresentation } from '../../pending-presentation.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../../search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from '../../search-profile.ts'
-import type { TerminalNotifierWriter } from '../../notification/terminal-notifier.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 // TS3 §31-§36: the surface's independent application-level owners. Each is
 // constructed exactly once here; none of them imports this aggregate's value
 // implementation (only its cross-owner facade types).
-import { createNotificationRuntime, type AgentLifecycleStatus } from './notification-runtime.ts'
+import { createNotificationRuntime, type AgentLifecycleStatus, type TerminalNotificationPresentation } from './notification-runtime.ts'
 import {
   createExtensionRuntime,
   type OptionCapability,
@@ -222,9 +221,12 @@ export interface SurfaceMountDeps {
 export interface SurfaceRuntimeOptions {
   /** The TUI package version rendered in the initial status snapshot. */
   readonly tuiVersion: string
-  /** The guarded terminal sink shared with the runner's fatal-path focus
-   *  disable (the sink is stateless; both writers emit the same sequences). */
-  readonly notificationWriter: TerminalNotifierWriter
+  /**
+   * The concrete terminal notification presentation (TS5 §14.3): the
+   * composition zone selects the TUI implementation and injects it here, so no
+   * application owner imports a `tui/**` path.
+   */
+  readonly notificationPresentation: TerminalNotificationPresentation
   /** The persisted notification settings at startup (parsed by the owner). */
   readonly notificationMode: string | undefined
   readonly notificationMethod: string | undefined
@@ -431,7 +433,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // owned by its own module (TS3 §31); it exists from construction on and has
   // no teardown step (process-end state, exactly as before the split).
   const notification = createNotificationRuntime({
-    notificationWriter: options.notificationWriter,
+    presentation: options.notificationPresentation,
     notificationMode: options.notificationMode,
     notificationMethod: options.notificationMethod,
   })

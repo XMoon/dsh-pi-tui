@@ -19,7 +19,7 @@ import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../keybindings/home-end-
 import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from '../../display-preset.ts'
 import { parseProgressUpdates, parseResponseStyle } from '../../communication-policy.ts'
 import { parseGitAttributionMode } from '../../git-attribution.ts'
-import { parseNotificationMethod, parseNotificationMode } from '../../notification/settings.ts'
+import { parseNotificationMethod, parseNotificationMode } from '../../domain/notification/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../../wheel-scroll.ts'
 import { iconStyleOf } from '../../icons.ts'
 import { parseUserKeybindings } from '../keybindings/config.ts'
