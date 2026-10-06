@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/compact-projection
  */
 
-import type { ContextCluster } from './context-presentation.ts'
+import type { ContextCluster } from './tui/transcript/context-structure.ts'
 import { projectTranscriptStructure, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import type { TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import type { TranscriptMessage } from './transcript.ts'

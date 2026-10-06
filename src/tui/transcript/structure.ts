@@ -22,7 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/transcript/structure
  */
 
-import { clusterAdjacentAmbientContext, type ContextCluster } from '../../context-presentation.ts'
+import { clusterAdjacentAmbientContext, type ContextCluster } from './context-structure.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool } from '../../transcript-semantics.ts'
 import { isPostTurnReplayEvidence, type TranscriptMessage } from '../../transcript.ts'
 

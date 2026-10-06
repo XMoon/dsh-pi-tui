@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { projectCompact } from '../src/compact-projection.ts'
-import { clusterAdjacentAmbientContext } from '../src/context-presentation.ts'
+import { clusterAdjacentAmbientContext } from '../src/tui/transcript/context-structure.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

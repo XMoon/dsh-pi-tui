@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { projectCompact } from '../src/compact-projection.ts'
 import { summarizeWorkSpan } from '../src/compact-work.ts'
-import { clusterAdjacentAmbientContext } from '../src/context-presentation.ts'
+import { clusterAdjacentAmbientContext } from '../src/tui/transcript/context-structure.ts'
 import { focusExpandedTailStructure, focusThoughtLeadBoundary, projectFocus } from '../src/focus-activity.ts'
 import {
   clusterByMemberOf,

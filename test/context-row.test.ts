@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/context-row.ts'
+import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/tui/components/transcript/context-row.ts'
 import { color } from '../src/theme.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
