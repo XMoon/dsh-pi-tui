@@ -35,12 +35,12 @@
   the derives carry no Host type imports), and the runner (`src/index.ts`)
   wires the real services in — the two new `index.ts` baseline entries
   (`planMode`, `sandboxPolicy`) are exactly that wiring, not UI debt.
-- The **application-layer dependency direction** between the new `src/app/**`
+- The **application-layer dependency direction** between the `src/app/**`
   owners, the frozen `src/runtime/**` semantic layer, and presentation modules
-  is enforced separately by `scripts/pre-m3-architecture-gate.mjs`
-  (`pnpm gate:architecture`, see the Pre-M3 TS Architecture Convergence status
-  in `docs/client-server-migration.md`). This file stays the Host-coupling
-  authority only; the two gates answer different questions.
+  is enforced separately by `scripts/application-architecture-gate.mjs`
+  (`pnpm gate:architecture`, see the application architecture dependency
+  direction status in `docs/client-server-migration.md`). This file stays the
+  Host-coupling authority only; the two gates answer different questions.
 
 ## Composition ownership and wire-shape inventory
 
@@ -123,7 +123,7 @@ lands.
 | `jobController` | Host-owned | `BASE_HOST_PREREQUISITE` | the existing TUI row | `JobObservationPort` | `IJobs` + generated `job` Remote | reuse; no second job observation authority | `test/remote-job-observation.test.ts` + the Job roster in `test/remote-client-runtime.test.ts` |
 | M3 Host API/session helper rows | Host-owned | `MIGRATION_ADDITIVE_HOST` | `RemoteHostRuntime` | the M3 adapters | official Host plugins + generated Remotes | additive; mount only the frozen additive closure | `test/remote-client-runtime.test.ts` |
 | TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority; the Remote Task composition resolves no Host `ctx.jobs`/`ctx.subagents` (Direct-only gate, M3-5 PR6) | `test/runner-viewer-task-integration.test.ts` + `test/runner-remote-task-center.test.ts` + the Remote Task locality source lock in `test/application-runtime-selection.test.ts` |
-| Application runtime selection (`SelectedApplicationRuntime`) | Client-local composition | composition spine (M3-4 PR1) | `src/app/remote/application-runtime.ts` (Remote aggregate) + `selectApplicationRuntime` in `src/app/bootstrap.ts` (the seam) | `bindSessionRuntime` common inputs (`owners`/`retirement`/`lifecycle`) and the runner's `backend` | Remote aggregate reuses the M3-1 wire + M3-3B backend + M3-2 owner services; reached ONLY through `runtime/backend-loader.ts` (the ONE frozen dynamic edge into `app/remote/runtime.ts`, which statically re-exports the aggregate) | exactly ONE Remote Host/Client graph, ONE semantic assembly, ONE owner registry per selected runtime; no second construction site; no public/config/env selector — normal `apply()` stays Direct | `test/remote-application-runtime.test.ts` + `test/application-runtime-selection.test.ts` + the dynamic-boundary rules in `test/pre-m3-architecture-gate.test.mjs` |
+| Application runtime selection (`SelectedApplicationRuntime`) | Client-local composition | composition spine (M3-4 PR1) | `src/app/remote/application-runtime.ts` (Remote aggregate) + `selectApplicationRuntime` in `src/app/bootstrap.ts` (the seam) | `bindSessionRuntime` common inputs (`owners`/`retirement`/`lifecycle`) and the runner's `backend` | Remote aggregate reuses the M3-1 wire + M3-3B backend + M3-2 owner services; reached ONLY through `runtime/backend-loader.ts` (the ONE frozen dynamic edge into `app/remote/runtime.ts`, which statically re-exports the aggregate) | exactly ONE Remote Host/Client graph, ONE semantic assembly, ONE owner registry per selected runtime; no second construction site; no public/config/env selector — normal `apply()` stays Direct | `test/remote-application-runtime.test.ts` + `test/application-runtime-selection.test.ts` + the dynamic-boundary rules in `test/application-architecture-gate.test.mjs` |
 | PiTui Client UI subtree (`RemoteClientUiRuntime`) | CLIENT_LOCAL | `CLIENT_LOCAL` | `src/app/remote/client-ui-runtime.ts`, composed by the Remote application runtime (M3-6 PR1) on the EXISTING official Client Context (`wire.client.context` — `client-runtime.ts` stays the official transport/data core and creates that Context exactly once) | SurfaceRuntime / extension-facing TUI owners (through `RemoteApplicationOverride.extensionService` — the narrow service object; it does not expose the Client Context or plugin fibers, only the selected PiTuiExtensionService capability crosses the in-process composition seam) | none for extension callbacks (TUI-local `src/extensions.ts`/`src/builtins.ts` plugin fibers); plugins may separately consume public Client/Remote facts | one subtree per Remote application aggregate: exactly three fibers (Client-local tuiStartup facts provider → extension host → builtins), no second Client Context, no generic Loader/profile/bundle discovery | `test/remote-client-ui-runtime.test.ts` (component) + `test/remote-application-runtime.test.ts` (aggregate) + `test/runner-remote-command-plane.test.ts` (L6 locality) |
 
 The exact package/row names may evolve; the ownership rule must remain explicit.

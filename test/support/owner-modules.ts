@@ -106,7 +106,7 @@ export function ownerFile(rel: string): string {
  * an object-literal initializer behind — `(...)`, `x as T`, `<T>x`, `x!`,
  * `x satisfies T` — looping until the expression stops changing.
  *
- * This mirrors the unwrap in `scripts/pre-m3-architecture-gate.mjs`
+ * This mirrors the unwrap in `scripts/application-architecture-gate.mjs`
  * (`findDirectAdapterConstructions`). It lives here, next to the production
  * walkers it guards, because BOTH A5b AST guards
  * (`test/a5-composition-inventory.test.ts` and
@@ -146,7 +146,7 @@ export function unwrapExpression(
  * `packages/` and `dist/` are never reached because the walk starts at `src/`;
  * `node_modules`/`dist` are skipped defensively.
  *
- * The extension filter mirrors `scripts/pre-m3-architecture-gate.mjs`'s
+ * The extension filter mirrors `scripts/application-architecture-gate.mjs`'s
  * `collectSourceEntries()` — `.ts`, `.mts` and `.cts` (which also cover the
  * `.d.ts` / `.d.mts` / `.d.cts` declaration spellings) — so no production
  * TypeScript source is skipped silently.
