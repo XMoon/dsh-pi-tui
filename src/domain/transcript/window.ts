@@ -1,13 +1,20 @@
 /**
- * Presentation-only navigation state for a bounded transcript window.
+ * Canonical transcript window semantics (TS7): the latest/history navigation
+ * state machine, the bounded turn-window projection and the projected-window
+ * carrier.
  *
- * The transcript folder remains the source of history truth. This controller
- * only remembers whether the surface follows the live tail or is browsing a
- * turn-anchored window, so the same state machine can be used by the main
- * session and by a subagent viewer without knowing anything about DSH or the
- * renderer.
- * @module @xmoon76/dsh-pi-tui/transcript-window
+ * The folder remains the source of history truth. This controller only remembers
+ * whether a surface follows the live tail or browses a turn-anchored window, so
+ * the same state machine serves the main session and a subagent viewer without
+ * knowing anything about DSH or the renderer. It is the ONE authority for
+ * whether navigation changed semantic state: a no-op boundary move returns
+ * false and mutates nothing, so the surface can decide the movement BEFORE
+ * capturing any viewport anchor.
+ * @module @xmoon76/dsh-pi-tui/domain/transcript/window
  */
+
+import { recentTurnThreshold } from './grouping.ts'
+import type { TranscriptMessage } from './types.ts'
 
 /** The semantic state of the transcript presentation window. */
 export interface TranscriptWindowState {
@@ -252,4 +259,69 @@ export class TranscriptWindowController {
       hasNewer: this.current.mode === 'history' && endIndex < latestIndex,
     }
   }
+}
+/** A bounded transcript projection plus navigation facts. */
+export interface TranscriptWindow {
+  /** The materialized messages for the selected turn range. */
+  messages: TranscriptMessage[]
+  /** First/last actual turns in the selected range (summary rows excluded). */
+  firstTurn?: number
+  lastTurn?: number
+  /** Whether another turn page exists on either side of this projection. */
+  hasOlder: boolean
+  hasNewer: boolean
+}
+/**
+ * Collapse turns older than the display window into one leading summary
+ * entry with aggregate counts. Entries at/after the boundary survive; the
+ * result is a fresh array when anything collapses.
+ * @param messages - the folded transcript.
+ * @param maxTurns - window size in turns; entries of older turns collapse.
+ * @param endTurn - window end turn (newest when absent), see {@link FoldOptions}.
+ * @returns the windowed transcript.
+ */
+export function windowMessages(messages: readonly TranscriptMessage[], maxTurns: number, endTurn?: number): TranscriptMessage[] {
+  if (maxTurns <= 0) return [...messages]
+  if (endTurn !== undefined) {
+    // Anchored window (transcript search): keep exactly the maxTurns distinct
+    // turns ENDING at endTurn and collapse the older turns above them; turns
+    // newer than the anchor are hidden (the search jumped back in history).
+    const turns = new Set<number>()
+    for (const message of messages) {
+      if ('turn' in message) turns.add(message.turn)
+    }
+    const sorted = [...turns].sort((a, b) => b - a)
+    const anchor = sorted.indexOf(endTurn)
+    if (anchor === -1) return windowMessages(messages, maxTurns)
+    const windowTurns = new Set(sorted.slice(anchor, anchor + maxTurns))
+    const kept = messages.filter(message => !('turn' in message) || windowTurns.has(message.turn))
+    const newerTurns = new Set(sorted.slice(0, anchor))
+    const oldTurns = new Set(sorted.slice(anchor + maxTurns))
+    if (newerTurns.size === 0 && oldTurns.size === 0) return kept
+    const parts: string[] = []
+    if (newerTurns.size > 0) parts.push(`${newerTurns.size} newer turn${newerTurns.size === 1 ? '' : 's'}`)
+    if (oldTurns.size > 0) parts.push(`${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`)
+    kept.unshift({ kind: 'summary', text: `… ${parts.join(' · ')} — window ${maxTurns} turns` })
+    return kept
+  }
+  const boundary = recentTurnThreshold(messages, maxTurns)
+  if (boundary === 0) return [...messages]
+  const oldTurns = new Set<number>()
+  const kept: TranscriptMessage[] = []
+  let oldTools = 0
+  let oldCount = 0
+  for (const message of messages) {
+    if ('turn' in message && message.turn < boundary) {
+      oldCount += 1
+      if (message.kind === 'tool') oldTools += 1
+      oldTurns.add(message.turn)
+      continue
+    }
+    kept.push(message)
+  }
+  if (oldCount === 0) return [...messages]
+  const turnsText = `${oldTurns.size} earlier turn${oldTurns.size === 1 ? '' : 's'}`
+  const toolsText = `${oldTools} tool call${oldTools === 1 ? '' : 's'}`
+  kept.unshift({ kind: 'summary', text: `… ${turnsText} · ${toolsText} — window ${maxTurns} turns` })
+  return kept
 }

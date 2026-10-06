@@ -35,7 +35,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ProcessTerminal, TuiAltScreen } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
-import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from '../test/virtual-terminal.ts'
 

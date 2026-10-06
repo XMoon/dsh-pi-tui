@@ -100,7 +100,6 @@
     "token-usage.ts",
     "tool-presentation-client.ts",
     "transcript-render-profile.ts",
-    "transcript-window.ts",
     "transition-gate.ts",
     "transition.ts",
     "tui-config.ts",

@@ -6,7 +6,7 @@ import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/transcript.ts'
-import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 
 function longSession(turnCount: number): SessionEvent[] {
   const events: SessionEvent[] = []
