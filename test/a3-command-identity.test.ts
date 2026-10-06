@@ -15,10 +15,21 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { compositionSource } from './support/composition-surface.ts'
 
 const commandsSource = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
+// TS1 decomposes the built-in command definitions into `src/commands/*.ts`;
+// the WHOLE command layer is the facade plus every domain module (deterministic
+// sorted directory scan). Assertions that pin a property of the command layer
+// as a whole — never the moved implementation's location — use this handle.
+const commandLayerSource = [
+  commandsSource,
+  ...readdirSync(new URL('../src/commands/', import.meta.url))
+    .filter(name => name.endsWith('.ts'))
+    .sort()
+    .map(name => readFileSync(new URL(`../src/commands/${name}`, import.meta.url), 'utf8')),
+].join('\n')
 const indexSource = compositionSource()
 // A3-5 relocated the semantic, scope-bound command facades (and their ONE
 // stale-throwing admission) out of the runner into the bound command runtime.
@@ -47,16 +58,16 @@ function code(source: string): string {
 test('the /skill paths resolve ONE atomic live scope and never pair two identity reads', () => {
   // The obsolete paired resolver is deleted from the interface AND the index
   // provider: the scope is the only identity the command layer handles.
-  assert.equal(count(commandsSource, 'requireLiveAgentScope'), 0,
+  assert.equal(count(commandLayerSource, 'requireLiveAgentScope'), 0,
     'the agent+scope pairing member must be gone from the command layer')
   assert.equal(count(indexSource, 'requireLiveAgentScope'), 0,
     'the agent+scope pairing provider must be gone from the index')
   // The rejected shape: an awaited agent resolution paired with a scope. A
   // destructured agent+scope tuple never appears, and no command reads a live
   // agent identity at all.
-  assert.equal(count(commandsSource, 'const { agent, scope }'), 0,
+  assert.equal(count(commandLayerSource, 'const { agent, scope }'), 0,
     'no path may destructure a paired agent+scope identity')
-  assert.equal(count(commandsSource, 'runner.liveAgent'), 0,
+  assert.equal(count(commandLayerSource, 'runner.liveAgent'), 0,
     'the command layer never reads a Direct Agent')
   // Four /skill call sites (two wrappers, the handler, the picker): every one
   // threads the SAME atomically captured scope.
@@ -102,7 +113,7 @@ test('requireLiveSessionScope ensures the session then captures the scope atomic
 })
 
 test('sessionGeneration no longer exists in the command layer', () => {
-  assert.equal(commandsSource.includes('sessionGeneration'), false,
+  assert.equal(commandLayerSource.includes('sessionGeneration'), false,
     'A3-2 deletes the member: the scope-bound refresh facade carries the target key')
 })
 
@@ -257,9 +268,9 @@ test('a superseded skill/permission interaction is refused gracefully, never thr
     'the picker selection notifies instead of throwing')
   // The stale /settings panel CLOSES and tells the user instead of dispatching
   // the retained scope to the replacement owner.
-  assert.ok(commandsSource.includes("app.notify('the session changed — the approval policy was not applied', 'error')"),
+  assert.ok(commandLayerSource.includes("app.notify('the session changed — the approval policy was not applied', 'error')"),
     'the settings panel reports the refused write')
-  assert.ok(commandsSource.includes('closeSettings()'), 'the stale panel closes itself')
+  assert.ok(commandLayerSource.includes('closeSettings()'), 'the stale panel closes itself')
   // /yolo maps the refused write to a command error.
   assert.ok(commandsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
     'the permission preset refusal is user-visible')
