@@ -241,15 +241,43 @@ export const ARCHITECTURE_RULES = [
     forbids: (resolved) => resolved.startsWith('app/direct/') || resolved.startsWith('runtime/direct/'),
   },
   {
-    // TS2: the forbidden target is the WHOLE composition zone, not one path.
-    // A helper module that owns wiring is still composition, so an application
-    // owner importing `app/bootstrap/lifecycle.ts` inverts the dependency
-    // exactly like importing the facade. Bootstrap helpers may import sibling
-    // helpers (they are inside the zone).
+    // TS2 fixes the composition zone's INTERNAL direction (plan §7.2/§54). The
+    // three contracts below are deliberately separate rules, so "the entry may
+    // import the facade but not its implementation helpers" and "a helper may
+    // import siblings but never the facade" are each their own mechanical
+    // invariant instead of one blanket exemption of index.ts + the whole zone
+    // (which would let `index.ts -> app/bootstrap/lifecycle.ts` and
+    // `app/bootstrap/lifecycle.ts -> app/bootstrap.ts` through).
+    //
+    // Contract 1: the package entry uses the FACADE only.
+    id: 'entry-imports-bootstrap-helper',
+    message:
+      'src/index.ts may import the app/bootstrap.ts facade only — the src/app/bootstrap/** helpers are '
+      + 'implementation, never the package entry (index -> facade -> helpers)',
+    applies: (srcRel) => srcRel === 'index.ts',
+    forbids: (resolved) => resolved.startsWith('app/bootstrap/'),
+  },
+  {
+    // Contract 2: a helper never imports the facade. `bootstrap.ts -> helper`
+    // and `helper -> sibling helper` are both legal; the reverse edge is the
+    // value cycle the frozen direction forbids.
+    id: 'helper-imports-bootstrap-facade',
+    message:
+      'a src/app/bootstrap/** composition helper must not import the app/bootstrap.ts facade — the facade '
+      + 'imports helpers, never the reverse (a facade<->helper value cycle)',
+    applies: (srcRel) => srcRel.startsWith('app/bootstrap/'),
+    forbids: (resolved) => resolved === 'app/bootstrap.ts',
+  },
+  {
+    // Contract 3: everyone else stays outside the zone entirely. The forbidden
+    // target is the WHOLE composition zone, not one path: a helper module that
+    // owns wiring is still composition, so an application owner importing
+    // `app/bootstrap/lifecycle.ts` inverts the dependency exactly like importing
+    // the facade.
     id: 'owner-imports-bootstrap',
     message:
       'application owners must not import the src/app/bootstrap.ts facade or the src/app/bootstrap/** '
-      + 'composition-helper zone (index -> bootstrap -> owners)',
+      + 'composition-helper zone (index -> facade -> helpers -> owners)',
     applies: (srcRel) => srcRel !== 'index.ts' && !isBootstrapCompositionFile(srcRel),
     forbids: (resolved) => isBootstrapCompositionFile(resolved),
   },
