@@ -11,8 +11,9 @@
  * keybinding authority's machine-readable key vocabulary (the KeyId grammar
  * tables, the canonical label map, the pi-tui binding presets, the shared
  * terminal-ambiguous inventory) and the diagnostics that NAME a fixed key.
- * A rendered label can never match those rows, and every row fails closed —
- * editing the line drops its exemption.
+ * Those rows are scoped to their owning FILE and their EXACT trimmed line, and
+ * they fail closed: editing the line, appending a label to it, or reusing the
+ * fragment in another owner all drop the exemption and re-flag it.
  *
  * Allowlist (focused-component / protocol seams — the plan's sanctioned
  * exceptions):
@@ -99,6 +100,10 @@ const ALLOWLIST = [
 /** The sanctioned hard-coded key labels in user-facing strings: fork
  * editor-level keys and capturing-overlay fixed keys that do not follow
  * the Host keymap. */
+/** The PRE-TS5 substring exceptions: matched against the trimmed line in ANY
+ *  file (a documented legacy seam — fork editor-level keys, capturing-overlay
+ *  fixed keys, semantic key-id comparisons). These rows pre-date TS5 and are
+ *  kept verbatim; a NEW exception must NOT use this global form. */
 const STRING_ALLOWLIST = [
   // The Home/End settings row describes the fork EDITOR's Ctrl+Home/End —
   // an editor-level key, not a Host action (does not follow the keymap).
@@ -112,45 +117,54 @@ const STRING_ALLOWLIST = [
   // The default Ctrl+D editor-ownership branch is semantic routing, not UI copy.
   "key === 'ctrl+d'",
   // Dynamic exit-confirmation labels are intentionally not allowlisted.
-  //
-  // --- TS5 §18.1: POSITION-level exceptions inside the keybinding authority
-  // (now under `src/tui/keybindings/**`, which the scan enumerates recursively
-  // like every other TUI module). Each row is ONE exact line of machine-readable
-  // key vocabulary or a fixed-key diagnostic — never a rendered label — and each
-  // fails closed: editing the line drops its exemption and the gate re-flags it.
-  //
-  // (1) The canonical KeyId GRAMMAR tables in `key-identity.ts` (the machine key
-  // inventories the resolver/decoder switch on). Nine rows cover the twelve
-  // flagged lines: two pairs are byte-identical table lines.
-  "'up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f'",
-  "'alt+left', 'ctrl+left', 'alt+b', 'alt+right', 'ctrl+right', 'alt+f'",
-  "'home', 'ctrl+home', 'ctrl+a', 'end', 'ctrl+end', 'ctrl+e'",
-  "'pageUp', 'ctrl+pageUp', 'pageDown', 'ctrl+pageDown'",
-  "'ctrl+]', 'ctrl+alt+]'",
-  "'backspace', 'shift+backspace', 'delete', 'shift+delete', 'ctrl+d'",
-  "'ctrl+w', 'alt+backspace', 'alt+d', 'alt+delete'",
-  "'ctrl+u', 'ctrl+k', 'ctrl+y', 'alt+y', 'ctrl+-'",
-  "'shift+enter', 'ctrl+j', 'enter', 'tab', 'escape', 'ctrl+c'",
-  // (2) The shared terminal-ambiguous key INVENTORY `config.ts` canonicalizes
-  // (`TERMINAL_AMBIGUOUS_KEY_IDS`): machine tokens, never rendered.
-  "['ctrl+[', 'ctrl+j', 'ctrl+m', 'ctrl+i', 'ctrl+h', 'ctrl+_', 'ctrl+-', 'ctrl+backspace']",
-  // (3) The KeyId → human label map (`hints.ts`): the label AUTHORITY itself —
-  // it is what `keyHint()` renders, so its own spellings cannot be a stale copy.
-  "'ctrl+[': 'Ctrl+['",
-  // (4) The pi-tui viewport binding PRESETS (`home-end-mode.ts`): machine
-  // binding values, not rendered copy.
-  "'tui.altScreen.top': mode === 'input'",
-  "'tui.altScreen.bottom': mode === 'input'",
-  // (5) Semantic pre-submit comparisons over a FIXED editor key (not host
-  // routing): the parser's and the recorder's `shift+enter` guards.
-  "canonicalEntry === 'shift+enter'",
-  "key === 'shift+enter'",
-  // (6) User-facing diagnostics that NAME fixed terminal/editor keys (the same
-  // sanctioned category as the approval dialog's `[esc/ctrl+c] cancel` row): the
-  // copy explains a fixed key rather than rendering a (remappable) binding label.
-  "cannot bind Shift+Enter — it is the editor newline key",
-  "collides with a fixed key on legacy terminals",
-  "Shift+Enter is reserved for inserting a newline.",
+]
+
+/**
+ * TS5 §18.1 exceptions for the keybinding AUTHORITY tree (now enumerated
+ * recursively with every other `src/tui/**` module): the machine-readable key
+ * vocabulary and the diagnostics that NAME a fixed key — never a rendered
+ * label. Each row is scoped to its OWNING FILE and the EXACT trimmed source
+ * line, so an edited line (an appended remappable label included), a
+ * whitespace/quote change, or the same fragment appearing in another owner
+ * stops matching and is re-flagged. The classifier keeps scanning every other
+ * literal on every other line.
+ */
+export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; readonly line: string }> = [
+  // (1) The canonical KeyId GRAMMAR tables (`key-identity.ts`): the machine key
+  // inventories the resolver/decoder switch on.
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'alt+left', 'ctrl+left', 'alt+b', 'alt+right', 'ctrl+right', 'alt+f'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'home', 'ctrl+home', 'ctrl+a', 'end', 'ctrl+end', 'ctrl+e'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'pageUp', 'ctrl+pageUp', 'pageDown', 'ctrl+pageDown'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'ctrl+]', 'ctrl+alt+]'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'backspace', 'shift+backspace', 'delete', 'shift+delete', 'ctrl+d'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'ctrl+w', 'alt+backspace', 'alt+d', 'alt+delete'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'ctrl+u', 'ctrl+k', 'ctrl+y', 'alt+y', 'ctrl+-'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'shift+enter', 'ctrl+j', 'enter', 'tab', 'escape', 'ctrl+c'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "['up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'pageUp', 'ctrl+pageUp', 'pageDown', 'ctrl+pageDown'," },
+  { file: 'src/tui/keybindings/key-identity.ts', line: "'ctrl+]', 'ctrl+alt+]', 'enter', 'escape']" },
+  // (2) The shared terminal-ambiguous key INVENTORY (`config.ts`) the parser
+  // canonicalizes (`TERMINAL_AMBIGUOUS_KEY_IDS`): machine tokens, never rendered.
+  { file: 'src/tui/keybindings/config.ts', line: "['ctrl+[', 'ctrl+j', 'ctrl+m', 'ctrl+i', 'ctrl+h', 'ctrl+_', 'ctrl+-', 'ctrl+backspace'].map(key => canonicalizeKeyId(key as KeyId))," },
+  // (3) Semantic pre-submit comparisons over a FIXED editor key (`config.ts`).
+  { file: 'src/tui/keybindings/config.ts', line: "if (actionId === 'app.input.submit' && canonicalEntry === 'shift+enter') {" },
+  // (4) User-facing diagnostics that NAME fixed terminal/editor keys (the same
+  // sanctioned category as the approval dialog's `[esc/ctrl+c] cancel`): the copy
+  // explains a fixed key instead of rendering a remappable binding label.
+  { file: 'src/tui/keybindings/config.ts', line: "diagnostics.push('keybindings: \"app.input.submit\" cannot bind Shift+Enter — it is the editor newline key — ignored')" },
+  { file: 'src/tui/keybindings/config.ts', line: "diagnostics.push(`keybindings: \"${actionId}\" cannot bind \"${entry}\" — it collides with a fixed key on legacy terminals (Ctrl+[ is Esc; Ctrl+J/M is Enter; Ctrl+I/H are Tab/Backspace; Ctrl+_ and Ctrl+- are one key; Ctrl+Backspace is Backspace on legacy, Ctrl+Backspace on Windows Terminal) — ignored`)" },
+  // (5) The KeyId → human label map (`hints.ts`): the label AUTHORITY itself —
+  // it IS what `keyHint()` renders, so its own spelling cannot be a stale copy.
+  { file: 'src/tui/keybindings/hints.ts', line: "'ctrl+[': 'Ctrl+['," },
+  // (6) The pi-tui viewport binding PRESETS (`home-end-mode.ts`): machine binding
+  // values, not rendered copy.
+  { file: 'src/tui/keybindings/home-end-mode.ts', line: "'tui.altScreen.top': mode === 'input' ? 'ctrl+home' : 'home'," },
+  { file: 'src/tui/keybindings/home-end-mode.ts', line: "'tui.altScreen.bottom': mode === 'input' ? 'ctrl+end' : 'end'," },
+  // (7) The keybinding editor recorder (`ui/recorder.ts`): the fixed-editor-key
+  // comparison and the message it returns for that one key.
+  { file: 'src/tui/keybindings/ui/recorder.ts', line: "if (key === 'shift+enter') {" },
+  { file: 'src/tui/keybindings/ui/recorder.ts', line: "return { key: undefined, message: 'Shift+Enter is reserved for inserting a newline.' }" },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */
@@ -207,6 +221,8 @@ export function findStringLabelViolations(file: string, source: string): Keybind
     const stripped = line.replace(/matchesKey\(\s*data\s*,\s*'[^']*'\)/g, '')
     if (!STRING_CHORD_PATTERN.test(stripped)) continue
     if (STRING_ALLOWLIST.some(label => line.includes(label))) continue
+    // TS5 rows are scoped to the owning file AND the exact trimmed line.
+    if (SCOPED_STRING_ALLOWLIST.some(entry => entry.file === file && entry.line === trimmed)) continue
     out.push({ file, line: index + 1, text: trimmed, kind: 'string-label' })
   }
   return out

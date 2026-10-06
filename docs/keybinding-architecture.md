@@ -315,8 +315,10 @@ the user's live bindings:
   editor-level keys (Ctrl+Home/End), the keybinding authority's
   machine-readable vocabulary (the canonical KeyId grammar tables, the
   KeyId→label map, the pi-tui binding presets, the shared terminal-ambiguous
-  key inventory) and the diagnostics that NAME a fixed key. Every exemption
-  fails closed — editing the line drops it and the gate re-flags the line.
+  key inventory) and the diagnostics that NAME a fixed key. Each authority
+  exemption is scoped to its OWNING FILE and its EXACT trimmed line, so it
+  fails closed — editing that line, appending a label to it, or reusing the
+  fragment in another module drops the exemption and the gate re-flags it.
   Its host-interaction chord scan follows the owner: the TuiApp facade
   remainder plus `src/tui/interaction/approval-runtime.ts`, while focused
   components keep their own fixed keys.
