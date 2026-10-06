@@ -127,17 +127,24 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the switch no-op compares the CORE session id')
   assert.ok(!switchLocked.includes('agentNow('), 'the switch no-op must not read the Direct attachment')
 
-  // Task Browser jobs fence: the composition root derives the key + injects the
-  // session id from the ownership core; the A5b-6 retention policy (the
-  // retained snapshot + the same-session fence) is Task-Center-owned and reads
-  // both at CALL time (locked in test/a5b-bootstrap-closure.test.ts).
-  const jobFence = spanOf(indexSource, 'const taskReadKey = (): string | undefined => {', 'surface.attachTasks({')
-  assert.ok(jobFence.includes('const sessionId = ownership.currentSessionId()'),
-    'the Job snapshot key takes its session id from the core')
-  assert.ok(jobFence.includes('`${ownership.generation()}:${sessionId}`'),
+  // Task Browser jobs fence: the branch composition moved to the bootstrap
+  // composition zone (`src/app/bootstrap/task-source.ts`, TS2 §9), so the key
+  // lock reads the owner that now builds it — the composition root derives
+  // nothing itself and injects the ownership-core reads. The A5b-6 retention
+  // policy (the retained snapshot + the same-session fence) is Task-Center-owned
+  // and reads both at CALL time (locked in test/a5b-bootstrap-closure.test.ts).
+  const taskSourceSource = readFileSync(new URL('../src/app/bootstrap/task-source.ts', import.meta.url), 'utf8')
+  const jobFence = spanOf(taskSourceSource, 'const taskReadKey = (): string | undefined => {', 'return { taskRead }')
+  assert.ok(jobFence.includes('const sessionId = currentSessionId()'),
+    'the Job snapshot key takes its session id from the injected ownership read')
+  assert.ok(jobFence.includes('`${generation()}:${sessionId}`'),
     'the Job snapshot identity key is built from the core generation + session id')
-  assert.ok(jobFence.includes('currentSessionId: () => ownership.currentSessionId()'),
-    'the runner injects the SAME core session id for the owner-side jobs read')
+  assert.ok(jobFence.includes('currentSessionId,'),
+    'the SAME injected ownership read is forwarded to the owner-side jobs read')
+  assert.ok(!jobFence.includes('agentNow('),
+    'the Task read composition must not resolve the session id from the Direct attachment')
+  assert.ok(indexSource.includes('currentSessionId: () => ownership.currentSessionId()'),
+    'the composition root injects the ownership-core session id')
   assert.ok(!indexSource.includes('readJobs'),
     'the root must not provide the jobs-read retention policy (moved to the surface owner)')
 

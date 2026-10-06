@@ -82,8 +82,13 @@ export const DEPRECATED_READER_ALLOWLIST = [
   // in the runner); the debt moved WITH the call site, never doubled. A3-5
   // relocated the provider bodies into the runner's command-runtime surface
   // hooks, so the same two call sites now read through `attachmentForSession`.
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'computeStats(command.attachmentForSession(sessionId).session.snapshotEvents())', why: '/status Direct stats fold over the in-process session log (A3-5 command-runtime surface hook)' },
-  { file: 'src/app/bootstrap.ts', call: 'eventAt', site: 'const event = session.eventAt(SessionSeq(seq))', why: '/copy last assistant-message read over the Direct in-process session log (A3-2 facade provider)' },
+  // TS2 §8 then moved the branch-selection glue (and these two call sites WITH
+  // it) into `src/app/bootstrap/presentation-bridge.ts`; the composition root
+  // supplies only the ONE fenced session accessor
+  // (`directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session`),
+  // so the frozen debt count is unchanged, not doubled.
+  { file: 'src/app/bootstrap/presentation-bridge.ts', call: 'snapshotEvents', site: 'computeStats(directSessionFor(sessionId).snapshotEvents())', why: '/status Direct stats fold over the in-process session log (TS2: relocated with the presentation bridge; the fenced attachment is injected by the composition root)' },
+  { file: 'src/app/bootstrap/presentation-bridge.ts', call: 'eventAt', site: 'const event = session.eventAt(seq)', why: '/copy last assistant-message read over the Direct in-process session log (TS2: relocated with the presentation bridge; the fenced attachment is injected by the composition root)' },
   // A4-7 relocated the compaction-settle working read into the injected
   // `currentWorkingFromLog` capability (the surface owns only the WHEN); the
   // debt moved WITH the call site, never doubled. The surface never reads the

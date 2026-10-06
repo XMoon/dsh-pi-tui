@@ -5,6 +5,25 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 /**
+ * Mirror of `scripts/application-architecture-gate.mjs`'s `SOURCE_EXTENSIONS`.
+ *
+ * The production support modules are TypeScript, so they cannot import the
+ * unchecked `.mjs` gate script without an implicit-`any` error. The two copies
+ * are kept in lockstep by a drift guard in
+ * `test/application-architecture-gate.test.mjs` (it can import both).
+ */
+export const PRODUCTION_SOURCE_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.mts', '.cts']
+
+/**
+ * Mirror of the gate's `scriptKindOf`: `.tsx` must be parsed as TSX, or a legal
+ * JSX tree hides the declarations an AST scan is looking for. Also drift-
+ * guarded by `test/application-architecture-gate.test.mjs`.
+ */
+export function productionScriptKind(rel: string): ts.ScriptKind {
+  return rel.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+}
+
+/**
  * The A5b owner surface: the composition surface (plan A5 §22) PLUS the
  * application modules the A5b slices extract bootstrap responsibilities into
  * (`app/surface`, `app/command`, `app/submission`).
@@ -146,12 +165,14 @@ export function unwrapExpression(
  * `packages/` and `dist/` are never reached because the walk starts at `src/`;
  * `node_modules`/`dist` are skipped defensively.
  *
- * The extension filter mirrors `scripts/application-architecture-gate.mjs`'s
- * `collectSourceEntries()` — `.ts`, `.mts` and `.cts` (which also cover the
- * `.d.ts` / `.d.mts` / `.d.cts` declaration spellings) — so no production
- * TypeScript source is skipped silently.
+ * The extension filter is the SAME set as
+ * `scripts/application-architecture-gate.mjs`'s `collectSourceEntries()` —
+ * `.ts`, `.tsx`, `.mts`, `.cts` (which also cover the `.d.ts` / `.d.mts` /
+ * `.d.cts` declaration spellings) — so no production TypeScript source is
+ * skipped silently and a `.tsx` duplicate cannot escape the single-owner scans
+ * (TS1/TS2: the production gate already scanned `.tsx`).
  */
-export function productionSources(): Array<{ rel: string; source: string }> {
+export function productionSourcesUnder(root: string): Array<{ rel: string; source: string }> {
   const out: Array<{ rel: string; source: string }> = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -159,13 +180,18 @@ export function productionSources(): Array<{ rel: string; source: string }> {
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === 'dist') continue
         walk(path)
-      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.mts') || entry.name.endsWith('.cts')) {
-        out.push({ rel: relative(ROOT, path).split('\\').join('/'), source: readFileSync(path, 'utf8') })
+      } else if (PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
+        out.push({ rel: relative(root, path).split('\\').join('/'), source: readFileSync(path, 'utf8') })
       }
     }
   }
-  walk(join(ROOT, 'src'))
+  walk(join(root, 'src'))
   return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+}
+
+/** {@link productionSourcesUnder} bound to this repository root. */
+export function productionSources(): Array<{ rel: string; source: string }> {
+  return productionSourcesUnder(ROOT)
 }
 
 /**
@@ -185,10 +211,13 @@ export function productionSources(): Array<{ rel: string; source: string }> {
  * outside the helper entirely. The architecture gate locks the dependency
  * direction only — it performs no type analysis.
  */
-export function aliasAwareConstructionSites(name: string): string[] {
-  const files = productionSources().map(({ rel, source }) => ({
+export function aliasAwareConstructionSites(
+  name: string,
+  sources: Array<{ rel: string; source: string }> = productionSources(),
+): string[] {
+  const files = sources.map(({ rel, source }) => ({
     rel,
-    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel)),
   }))
   const aliases = new Set<string>()
   let changed = true

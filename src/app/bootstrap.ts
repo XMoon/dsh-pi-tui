@@ -22,7 +22,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-subagent'
-import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-tool-todo'
@@ -71,7 +71,7 @@ import { parseGitAttributionMode, type GitAttributionState } from '../git-attrib
 import { resolveDisplayPreset, type DisplayState } from '../display-preset.ts'
 import { DISABLE_FOCUS_REPORTING } from '../notification/terminal-focus.ts'
 import { guardedStreamWriter } from '../notification/terminal-notifier.ts'
-import { computeStats, type SessionStats, type SessionStatsFacts, sessionStatsFactsOf } from '../stats.ts'
+import { type SessionStatsFacts, sessionStatsFactsOf } from '../stats.ts'
 import { isAssistantTokenDelta } from '../token-usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../status/derive-plan.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
@@ -102,13 +102,14 @@ import type {
   RemoteTransportLifetime,
 } from '../app/application-runtime.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
+import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
+import { createTaskSource } from './bootstrap/task-source.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
-import { createSurfaceRuntime, type TaskSurfaceRead } from '../app/surface/runtime.ts'
-import { DirectTaskReader } from '../runtime/direct/task-read-direct.ts'
+import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
@@ -123,7 +124,6 @@ import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapsh
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
-import { DirectPresentationReader } from '../runtime/direct/presentation-read-direct.ts'
 import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { dangerCommand } from '../command-policy.ts'
@@ -529,19 +529,6 @@ export function applyRunnerWithRuntime(
      * future selected Remote transport disposes adapters -> Client -> Host
      * fibers, never the current Session (that stays `app/session` ownership).
      */
-    /** PR4 §4.3: the branch-shared loadThrough read (Direct maps to its
-     *  full-coverage adapter; Remote runs the official jump loop off the
-     *  exact retained binding, generation-fenced inside the reader). */
-    const presentationLoadThrough = async (
-      sessionId: string,
-      seq: number,
-      signal?: AbortSignal,
-    ): Promise<import('../runtime/presentation-read-port.ts').PresentationReadSnapshot | undefined> => {
-      const reader = remoteSources === undefined
-        ? directPresentationReader
-        : remoteSources.presentationReader
-      return reader.loadThrough(sessionId, seq, signal)
-    }
     const disposeSelectedTransport = (): Promise<void> => selectedRuntime.disposeTransport()
     disposeSelectedTransportRef = disposeSelectedTransport
     /**
@@ -552,45 +539,25 @@ export function applyRunnerWithRuntime(
      */
     const agentNow = (): Agent | undefined => directRuntime()?.owners.currentDirectAttachment()
 
-    /** The Direct presentation reader (PR4 §4.3): the full-coverage adapter
-     *  over the exact attachment map + the assistant-stream baseline — the
-     *  SAME sources the parity shadow consumes; never a second fold. */
-    const directPresentationReader = new DirectPresentationReader({
-      agentFor: (sessionId) => {
-        const agent = agentNow()
-        return agent !== undefined && agent.session.id === sessionId ? agent : undefined
-      },
+    /**
+     * The application presentation bridge (TS2 §8): the branch-selection glue
+     * connecting the selected runtime + the existing Direct presentation reader
+     * + the existing Remote source bundle to the narrow reads this root
+     * consumes. It owns NO presentation semantics (no fold, no search, no
+     * viewport, no status derivation).
+     */
+    const presentationBridge = createPresentationBridge({
+      remoteSources,
+      currentSessionId: () => ownership.currentSessionId(),
+      currentDirectAgent: () => agentNow(),
       assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
+      directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session,
     })
     /**
      * Whether the ownership subject captured at ADMISSION is still the CURRENT
      * one (exact owner + generation). `captureSubject()` is undefined for a
      * sessionless capture, which must match a still-sessionless slot.
      */
-    /**
-     * The Remote live-session facts projection (M3-4 PR3 §11): the structural
-     * {status, session.id} face every transport-neutral consumer reads. Only
-     * meaningful on the Remote branch (`remoteSources !== undefined`); returns
-     * undefined when no current owner exists.
-     */
-    const remoteLiveSessionFacts = (): { readonly status: string; readonly session: { readonly id: string } } | undefined => {
-      if (remoteSources === undefined) return undefined
-      const sessionId = ownership.currentSessionId()
-      if (sessionId === undefined) return undefined
-      return {
-        status: remoteSources.sessionFacts.running(sessionId) === true ? 'running' : 'idle',
-        session: { id: sessionId },
-      }
-    }
-    /**
-     * The scope-checked projection for an echo install: the session id must
-     * match the scope's own (never "whatever is current"), undefined when the
-     * scope's session has no current owner.
-     */
-    const liveSessionFactsFor = (scope: LiveSessionScope): { readonly status: string; readonly session: { readonly id: string } } | undefined => {
-      const facts = remoteLiveSessionFacts()
-      return facts !== undefined && facts.session.id === scope.sessionId ? facts : undefined
-    }
     const captureMatches = (subject: SessionSubject | undefined): boolean =>
       subject === undefined ? ownership.owner() === undefined : ownership.isSubjectCurrent(subject)
     /**
@@ -1175,7 +1142,7 @@ export function applyRunnerWithRuntime(
       ...(remoteSources === undefined ? {} : {
         remote: {
           read: (sessionId) => remoteSources.presentationReader.read(sessionId, lifecycleController.signal),
-          running: (sessionId) => remoteRunningOf(sessionId),
+          running: (sessionId) => presentationBridge.remoteRunningOf(sessionId),
           plan: (sessionId) => remoteSources.sessionFacts.plan(sessionId)?.active,
           // The §6.5 visible-commit fence (EXACT GENERATION, never
           // sessionId alone): the token is captured before the reader
@@ -1235,10 +1202,6 @@ export function applyRunnerWithRuntime(
       remoteIngressHandle = undefined
     }
     lifecycleController.signal.addEventListener('abort', disposeRemoteIngress, { once: true })
-
-    /** The official `running` bit of the exact retained binding (Remote). */
-    const remoteRunningOf = (sessionId: string): boolean | undefined =>
-      remoteSources === undefined ? undefined : remoteSources.sessionFacts.running(sessionId)
 
     /**
      * Initialize the WHOLE Remote live surface for one session: hydrate
@@ -1386,47 +1349,6 @@ export function applyRunnerWithRuntime(
     // runner facade is built later, after the semantic command runtime binds.
     // Every owner below is read live (getter/closure), so this site's order is
     // irrelevant and no capability can go stale.
-      // PR4 §3.3/§3.6: the branch-shared seam bodies. The DIRECT folds read
-      // the exact attachment's whole log; the REMOTE compositions read the
-      // official whole-log projections + the paged bounded window through
-      // the shared composers (never a Direct attachment resolution).
-      const directSessionStats = (sessionId: string): SessionStats =>
-        computeStats(command.attachmentForSession(sessionId).session.snapshotEvents())
-      const directLastAssistantText = (sessionId: string): string | undefined => {
-        const session = command.attachmentForSession(sessionId).session
-        // Single-event lookup: walk BACKWARDS with eventAt (alpha.4) — never
-        // materialize the whole log for one message.
-        for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
-          const event = session.eventAt(SessionSeq(seq))
-          if (event?.type !== 'assistant/message') continue
-          return event.data.message.content
-            .filter(block => block.type === 'text')
-            .map(block => (block as { text: string }).text)
-            .join('')
-        }
-        return undefined
-      }
-      /** The official whole-log `sessionStats` projection value off the
-       *  exact retained binding (PR4 §3.3; unknown-shaped until the composer
-       *  narrows it; an absent projection reads unmeasured totals). */
-      const sessionStatsProjectionOf = (sessionId: string): unknown =>
-        remoteSources === undefined ? undefined : remoteSources.sessionFacts.sessionStatsProjection(sessionId)
-      /** The §6.5 transport-identity fence the Remote compositions re-check
-       *  after every await (Connection generation + exact binding object).
-       *  The token is captured ONCE at construction (the operation's
-       *  admission); `isCurrent` only ever COMPARES that frozen token — a
-       *  same-session-id binding rollover between capture and settle must
-       *  read stale, never re-capture the replacement as current. */
-      const remoteTransportFenceOf = (sessionId: string) => {
-        const sources = remoteSources
-        const token = sources === undefined ? undefined : sources.sessionFacts.captureTransportToken(sessionId)
-        return {
-          isCurrent: () => {
-            if (sources === undefined || token === undefined) return false
-            return sources.sessionFacts.isTransportTokenCurrent(sessionId, token)
-          },
-        }
-      }
     // Explicit annotation: the Direct seams below read the owner back
     // (late-bound through `command`), so the initializer cannot drive inference.
     const command: CommandSurface<ModelSelection, Agent> = createCommandSurface<ModelSelection, SessionId, Agent>({
@@ -1589,24 +1511,24 @@ export function applyRunnerWithRuntime(
           return commands.list(agentNow()).map(commandSummaryOf)
         },
         sessionStats: (sessionId, signal) => remoteSources === undefined
-          ? Promise.resolve(sessionStatsFactsOf(directSessionStats(sessionId)))
+          ? Promise.resolve(sessionStatsFactsOf(presentationBridge.directSessionStats(sessionId)))
           : composeRemoteSessionStats({
             sessionId,
             reader: remoteSources.presentationReader,
-            fence: remoteTransportFenceOf(sessionId),
+            fence: presentationBridge.remoteTransportFenceOf(sessionId),
             facts: {
-              sessionStats: sessionStatsProjectionOf(sessionId),
+              sessionStats: presentationBridge.sessionStatsProjectionOf(sessionId),
               usage: remoteSources.sessionFacts.sessionStatus(sessionId)?.usage,
               contextWindow: remoteSources.sessionFacts.sessionStatus(sessionId)?.context?.contextWindow,
             },
             signal,
           }),
         lastAssistantText: (sessionId, signal) => remoteSources === undefined
-          ? Promise.resolve(directLastAssistantText(sessionId))
+          ? Promise.resolve(presentationBridge.directLastAssistantText(sessionId))
           : composeRemoteLastAssistantText({
             sessionId,
             reader: remoteSources.presentationReader,
-            fence: remoteTransportFenceOf(sessionId),
+            fence: presentationBridge.remoteTransportFenceOf(sessionId),
             signal,
           }),
         promptAdmission: (agent, hasImages, task) => {
@@ -2090,7 +2012,7 @@ export function applyRunnerWithRuntime(
       // branch reads the exact Agent; the Remote branch projects the CURRENT
       // owner's session id + official running bit — the controller consumes
       // only { session.id, status }, never a Direct Agent identity.
-      liveAgent: () => agentNow() ?? (remoteLiveSessionFacts() as Agent | undefined),
+      liveAgent: () => agentNow() ?? (presentationBridge.remoteLiveSessionFacts() as Agent | undefined),
       ownership: {
         generation: () => ownership.generation(),
         captureSubject: () => ownership.captureSubject(),
@@ -2251,7 +2173,7 @@ export function applyRunnerWithRuntime(
         // fallback internally; this owner never branches.)
         turnOutline: (sessionId) => backend.sessionReader.turnOutline(sessionId),
         loadThrough: async (sessionId, seq, signal) => {
-          const snapshot = await presentationLoadThrough(sessionId, seq, signal)
+          const snapshot = await presentationBridge.loadThrough(sessionId, seq, signal)
           return snapshot === undefined ? undefined : snapshot.durableEvents
         },
         // §2.2/§16: the transport identity is captured ONCE at picker open
@@ -2700,55 +2622,23 @@ export function applyRunnerWithRuntime(
     // row-disposition helpers. No new Backend port and no second task model.
     const jobs = remoteSources === undefined ? ctx.get('jobs') : undefined
     const subagents = remoteSources === undefined ? ctx.get('subagents') : undefined
-    // The selected Task read source: Direct composes the Host catalog/registry
-    // reads; Remote composes the official Client projection/Session-list reads
-    // from the ONE Remote application graph. Neither branch is a second task
-    // model — both satisfy the same semantic Task read port. The Direct jobs
-    // half is optional service-wise (a composition without the jobs service has
-    // no roster, exactly as before).
-    const directTaskReader = remoteSources !== undefined || subagents === undefined
-      ? undefined
-      : new DirectTaskReader({
-        agentFor: (sessionId) => agents.get(SessionId(sessionId)),
-        subagents: {
-          listDescendants: (sessionId, signal) => subagents.listDescendants(sessionId as SessionId, signal),
-        },
-        jobs: { list: (caller) => jobs?.list(caller as SessionId) ?? [] },
-      })
-    const taskReadKey = (): string | undefined => {
-      const sessionId = ownership.currentSessionId()
-      return cleanedUp || sessionId === undefined ? undefined : `${ownership.generation()}:${sessionId}`
-    }
-    const taskRead: TaskSurfaceRead | undefined = remoteSources === undefined
-      ? directTaskReader === undefined ? undefined : {
-        currentKey: taskReadKey,
-        currentSessionId: () => ownership.currentSessionId(),
-        // The Direct Task read is addressed by the live owner Agent (the
-        // semantic read's availability rule is the Direct attachment).
-        readTask: () => {
-          const sessionId = agentNow()?.session.id
-          return sessionId === undefined
-            ? Promise.resolve(undefined)
-            : directTaskReader.readDescendants(sessionId)
-        },
-        // The LIVE Direct runtime fact, read at COMMIT time: the Agent
-        // registry, never the catalog's store-presence activity.
-        activityOf: (childId) => agents?.get(childId as SessionId)?.status,
-      }
-      : {
-        currentKey: taskReadKey,
-        currentSessionId: () => ownership.currentSessionId(),
-        readTask: () => {
-          const sessionId = ownership.currentSessionId()
-          return sessionId === undefined
-            ? Promise.resolve(undefined)
-            : remoteSources.task.readDescendants(sessionId)
-        },
-        // The official Client current-activity fact, read at COMMIT time from
-        // the Session LIST (no descendant binding is borrowed or retained) —
-        // never the durable catalog presence.
-        activityOf: (childId) => remoteSources.task.activityOf(childId),
-      }
+    // The selected Task read source: the branch composition lives in
+    // `app/bootstrap/task-source.ts` (TS2 §9); the Host service lookups above
+    // stay HERE and the helper receives the already-resolved narrow values.
+    const taskSource = createTaskSource({
+      remoteSources,
+      subagents: subagents === undefined ? undefined : {
+        listDescendants: (sessionId, signal) => subagents.listDescendants(sessionId as SessionId, signal),
+      },
+      jobs: jobs === undefined ? undefined : {
+        list: (caller) => jobs.list(caller as SessionId) ?? [],
+      },
+      agents: { get: (sessionId) => agents.get(SessionId(sessionId)) },
+      currentSessionId: () => ownership.currentSessionId(),
+      generation: () => ownership.generation(),
+      isCleanedUp: () => cleanedUp,
+      currentDirectSessionId: () => agentNow()?.session.id,
+    })
     surface.attachTasks({
       // The Task Center's owner session id is the TRANSPORT-NEUTRAL ownership
       // read: the Direct live Agent's session, or (Remote) the current owner
@@ -2797,7 +2687,7 @@ export function applyRunnerWithRuntime(
           // the next semantic read).
           subscribe: (listener) => remoteSources.task.subscribeJobs(() => listener({ type: 'state' })),
         },
-      taskRead,
+      taskRead: taskSource.taskRead,
     }, {
       diag,
       isCleanedUp: () => cleanedUp,
@@ -2869,7 +2759,7 @@ export function applyRunnerWithRuntime(
           // the exact-Direct-owner resolution stays Direct-only.
           const agent = remoteSources === undefined
             ? command.agentForLiveScope(scope)
-            : liveSessionFactsFor(scope)
+            : presentationBridge.liveSessionFactsFor(scope)
           if (agent === undefined) return
           submission.beginLocalSubmission({
             requestId,

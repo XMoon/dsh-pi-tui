@@ -29,8 +29,8 @@ import { aliasAwareConstructionSites, ownerFile, ownerSource, productionSource, 
  * A5b-6 flips the ledger to empty; from then on the lock is final.
  *
  * Plan §8.2's minimum closure list and where each clause is locked:
- *   1. bootstrap exists and is the sole composition root —
- *      "src/app/bootstrap.ts is the sole application composition root" below;
+ *   1. the composition zone exists — one facade plus its helpers —
+ *      "the composition zone is one facade plus its bootstrap helpers" below;
  *   2. `src/index.ts` remains a facade —
  *      "the package entry is a facade and defines no application handler";
  *   3. forbidden handler definitions absent — the two ledger tests below;
@@ -89,16 +89,27 @@ function declares(source: string, name: string): boolean {
   return new RegExp(`\\b(?:const|let|var|function|class)\\s+${name}\\b`).test(source)
 }
 
-test('A5b: src/app/bootstrap.ts is the sole application composition root', () => {
-  // Plan §8.2(1). `compositionSources()` throws when either file is missing, so
-  // this also locks the EXISTENCE of the composition root; the pair is the
-  // whole composition surface, so no second application composition root may
-  // appear (the owners consume narrow injected callbacks instead).
-  assert.deepEqual(
-    compositionSources().map(({ rel }) => rel),
-    ['src/index.ts', 'src/app/bootstrap.ts'],
-    'the composition surface must be exactly the package entry plus src/app/bootstrap.ts',
-  )
+test('A5b: the composition zone is one facade plus its bootstrap helpers, and nothing else', () => {
+  // Plan §8.2(1), restated durably by TS2. `compositionSources()` throws when a
+  // listed file is missing, so this locks the EXISTENCE of the entry and the
+  // facade; the zone is the ONLY place application composition may live, so no
+  // second application composition root may appear anywhere else (the owners
+  // consume narrow injected callbacks instead).
+  const files = compositionSources().map(({ rel }) => rel)
+  assert.equal(files[0], 'src/index.ts', 'the package entry is the first composition-surface file')
+  assert.equal(files[1], 'src/app/bootstrap.ts', 'src/app/bootstrap.ts is the sole composition facade')
+  for (const rel of files.slice(2)) {
+    assert.ok(rel.startsWith('src/app/bootstrap/'),
+      `src/app/bootstrap/** is the only composition-helper zone (${rel} is outside it)`)
+  }
+  // The zone is closed: the Cordis composition entries may be exported from the
+  // facade ONLY, so a "bootstrap-like" root appearing elsewhere fails here even
+  // before the architecture gate's dependency rules are consulted.
+  for (const { rel, source } of productionSources()) {
+    if (rel === 'src/app/bootstrap.ts') continue
+    assert.doesNotMatch(source, /export\s+(?:async\s+)?function\s+(?:applyRunner|applyRunnerWithRuntime)\b/u,
+      `${rel} exports an application composition entry — the composition zone is src/app/bootstrap.ts + src/app/bootstrap/**`)
+  }
 })
 
 test('A5b: a forbidden handler is absent from bootstrap or explicitly on the slice ledger', () => {

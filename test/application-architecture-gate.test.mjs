@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import ts from 'typescript'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { PRODUCTION_SOURCE_EXTENSIONS, productionScriptKind } from './support/owner-modules.ts'
 import {
   ARCHITECTURE_RULES,
   buildStaticEdges,
@@ -25,6 +26,7 @@ import {
   findRemoteDynamicImportViolations,
   findSourceRootViolations,
   findViolations,
+  isBootstrapCompositionFile,
   isDirectCompositionFile,
   isRemoteComposition,
   listSourceRootFiles,
@@ -35,6 +37,8 @@ import {
   REMOTE_DYNAMIC_IMPORT_OWNER,
   REMOTE_DYNAMIC_IMPORT_TARGET,
   resolveRelativeImport,
+  scriptKindOf,
+  SOURCE_EXTENSIONS,
   STARTUP_REMOTE_COMPOSITION_RULE,
   staticImportCandidates,
 } from '../scripts/application-architecture-gate.mjs'
@@ -831,6 +835,23 @@ test('the REAL production tree carries the bootstrap composition zone -> backend
   const tree = collectSourceEntries()
   assert.deepEqual(findViolations(tree), [], 'the real tree stays clean with the real seam edge')
   assert.deepEqual(findRemoteDynamicImportViolations(tree), [], 'the real tree keeps the exact dynamic-import owner and single target')
+})
+
+test('the test-support production scan mirrors the gate extension set and parser kind (TS2 §19)', () => {
+  // `test/support/owner-modules.ts` is TypeScript and cannot import this
+  // unchecked `.mjs` gate script, so it mirrors the two facts below. The mirror
+  // is only safe while it is provably identical — hence this drift guard: a
+  // `.tsx` (or `.mts`/`.cts`) production module must be seen by the whole-tree
+  // duplicate detectors with the SAME parser kind the production gate uses.
+  assert.deepEqual(
+    [...PRODUCTION_SOURCE_EXTENSIONS],
+    SOURCE_EXTENSIONS,
+    'the test-support production scan must cover exactly the extensions the gate scans',
+  )
+  for (const rel of ['a.ts', 'a.tsx', 'a.mts', 'a.cts']) {
+    assert.equal(productionScriptKind(rel), scriptKindOf(rel), `${rel} must use the gate's parser kind`)
+  }
+  assert.notEqual(scriptKindOf('a.tsx'), scriptKindOf('a.ts'), 'a .tsx module must not parse as plain TS')
 })
 
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
