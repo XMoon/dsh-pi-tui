@@ -765,8 +765,8 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   a turn boundary so no Activity span ever inherits another turn's count or
   timing (a group's action cardinality and wall span stay on the turn that
   renders the card). The shared Think/Action/Preparing slot geometry lives
-  in `src/compact-process-preview.ts` (one authority for Focus and
-  Activity); the Think slot shows the LATEST logical line of the bounded
+  in `src/tui/components/transcript/compact-process-preview.ts` (TS6; one
+  authority for Focus and Activity); the Think slot shows the LATEST logical line of the bounded
   reasoning tail in both states (running follows the right edge, settled
   head-truncates).
 - **Collapsed Action slot + `actions` header stats (2026-09-22
@@ -802,7 +802,9 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   interactions (`ask_user_question` / `exit_plan_mode`) remain externally
   owned, never duplicate themselves in Action and never count. Focus and
   Activity share ONE classifier, ONE latest-candidate rule, ONE Action
-  formatter and ONE subtype-stat formatter (`compact-process-preview.ts` —
+  formatter and ONE subtype-stat formatter (`src/tui/transcript/process-summary.ts`
+  for the renderer-neutral classifier and stats; the physical Action slot line in
+  `src/tui/components/transcript/compact-process-preview.ts` —
   count-desc/name-asc, max 3 named subtypes, `+N` counts remaining SUBTYPES),
   and their component caches key on bounded Action + ActionStats signatures
   so a synthetic Action repaints even when the turn's tool state is
@@ -969,7 +971,8 @@ F4 behavior and documents the guarantees in
 PR5 extracts the ONE preset-neutral semantic segmentation and makes Compact,
 Full and expanded Focus materialize it instead of each re-deriving boundaries:
 
-- **`transcript-projection.ts` is the canonical authority.**
+- **`src/tui/transcript/structure.ts` (TS6; formerly `transcript-projection.ts`)
+  is the canonical authority.**
   `projectTranscriptStructure(raw window)` returns `Message | Work span |
   Context cluster` and reads no preset, surface, Ctrl+O, mouse, search,
   disclosure, viewport or width state. `isTranscriptWorkMember()` is the single

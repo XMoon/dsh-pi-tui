@@ -278,7 +278,7 @@ export function projectFocus(
         out.push({ kind: 'message', message: member, containerPath: [{ kind: 'focus-root', turn }] })
       }
       // The tail consumes the SAME canonical segmentation as Compact/Full
-      // (`transcript-projection.ts`), computed over the UNFILTERED tail so the
+      // (`structure.ts`), computed over the UNFILTERED tail so the
       // held-back final never changes raw adjacency. A canonical Work span is
       // emitted as a nested container block (F6) and materialized by TuiApp
       // according to the effective Work disclosure; the TuiApp cluster

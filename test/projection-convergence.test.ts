@@ -1,7 +1,7 @@
 /**
  * PR5/F5 Projection Convergence.
  *
- * The canonical transcript structure (`transcript-projection.ts`) is the ONE
+ * The canonical transcript structure (`tui/transcript/structure.ts`) is the ONE
  * authority for where a raw chronology forms a Work span, a Context cluster
  * and a surfaced-interaction boundary. Compact, Full and expanded Focus
  * materialize that same structure with different presentation depth; none of

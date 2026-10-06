@@ -47,6 +47,8 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/tui/footer/**` | terminal footer composition/configuration/runtime (TS5) |
 | `src/tui/notification/**` | terminal focus reports, notifier and notification presentation (TS5) |
 | `src/tui/components/**` | generic TUI leaf components (frames, transcript leaves, media, marquee) |
+| `src/tui/transcript/**` | backend-neutral Client transcript presentation core (TS6: canonical structure, container vocabulary, Context clustering/summary, process/Work summary, Compact/Focus projections, reveal resolution) |
+| `src/tui/components/transcript/**` | PiTui transcript mechanics (TS6: Focus/Activity cards, Context cluster/rows, rendered search highlight) |
 | `src/tui/panels/**` | TUI panels (task browser, history, approval dialog, output viewer) |
 | `src/tui/pickers/**` | TUI pickers, the picker adapters and the marquee/filter seam |
 | `src/tui/plugin-manager/panel.ts` | the concrete Plugin Manager terminal panel (TS4) |
@@ -123,6 +125,8 @@ src/runtime/** never imports src/tui/**
 application owners never import the bootstrap composition zone (facade or helper)
 application owners never import src/tui/** implementation
 src/domain/** never imports src/app/**, src/tui/** or experimental Remote composition
+src/tui/transcript/** never imports PiTui, Tern, TuiApp, theme/icons, the renderer
+  registry or another concrete TUI mechanics module
 Remote is reached through one sanctioned lazy boundary
 Direct remains the production/default backend
 ```
@@ -155,9 +159,9 @@ coordinator for the same definitions). `src/tui/**` is the Client terminal
 presentation layer: `src/tui-app.ts` plus the extracted presentation owners
 (`src/tui/commands/**` from TS1; `src/tui/components/**`, `src/tui/panels/**`,
 `src/tui/pickers/**` and `src/tui/plugin-manager/**` from TS4; the interaction,
-keybinding, footer and notification owners from TS5; the transcript-view owner
-in TS6). It is not an application or Host layer — application lifecycle/
-orchestration stays in `src/app/**`.
+keybinding, footer and notification owners from TS5; the transcript presentation
+core and the PiTui transcript mechanics from TS6). It is not an application or
+Host layer — application lifecycle/orchestration stays in `src/app/**`.
 
 ## Source placement and the root ledger
 
@@ -169,7 +173,7 @@ stable
   deliberate root entries/facades expected to remain during this train
 
 legacy
-  grandfathered historical root modules awaiting TS6–TS8 owner migration
+  grandfathered historical root modules awaiting TS7–TS8 owner migration
 ```
 
 The architecture gate fails when a current `src/*.ts|.tsx|.mts|.cts` module is
@@ -179,7 +183,8 @@ a `stable` entry no longer exists, when an entry is duplicated, or when the sche
 is unknown. The gate never auto-writes or auto-accepts a baseline entry. During
 TS5–TS8 a move deletes the corresponding `legacy` entry in the same PR; an
 ordinary new root module is never allowed. TS5 retired the nine frozen root
-interaction modules (`119 -> 110`).
+interaction modules (`119 -> 110`); TS6 retired the nine frozen root transcript
+presentation modules (`110 -> 101`).
 
 ## Existing directory convergence
 
@@ -254,9 +259,13 @@ tui/notification/**       the focus tracker, the OSC/bell notifier, the focus-re
 ```
 
 Each is constructed exactly once from `createSurfaceRuntime()`; no bootstrap code
-constructs them directly. Search/transcript VIEW ownership stays in the aggregate until
-TS6; the leaf TUI components/panels/pickers now live in their canonical
-`src/tui/**` owners (TS4 DONE).
+constructs them directly. The leaf TUI components/panels/pickers live in their
+canonical `src/tui/**` owners (TS4 DONE). Search/transcript VIEW ownership moved
+out of the aggregate in TS6: the reusable transcript presentation core is
+`src/tui/transcript/**` and the PiTui transcript mechanics are
+`src/tui/components/transcript/**`, while `TuiApp` keeps the mutable
+composition/renderer state (expansion sets, component caches, viewport, hit
+maps).
 
 ## TUI
 
@@ -268,9 +277,13 @@ the approval lifecycle, the keybinding authority, the footer runtime and the
 notification presentation out of `TuiApp` and behind their canonical owners
 (`src/tui/interaction/**`, `src/tui/keybindings/**`, `src/tui/footer/**`,
 `src/tui/notification/**`). `TuiApp` remains the terminal composition facade and
-the high-level coordinator; TS6 will extract the transcript-view orchestration.
-The remaining size is structural debt, not a reason to move business semantics
-into the TUI.
+the high-level coordinator; TS6 moved the reusable transcript presentation
+algorithms (canonical structure, Context clustering/summary, process/Work
+summary, Compact/Focus projections, reveal resolution) into
+`src/tui/transcript/**` and the PiTui transcript cards into
+`src/tui/components/transcript/**`, leaving the mutable renderer state and the
+Full materialization in the facade. The remaining size is structural debt, not a
+reason to move business semantics into the TUI.
 
 Plugins consume host-owned extension APIs, registries and brokers, not raw
 `TuiApp` or vendored `pi-tui` internals. See `docs/extension-api.md`,
@@ -292,6 +305,22 @@ independent chronology or fold. The Post-M3 TS7 modularization of
 `src/transcript.ts` into `src/domain/transcript/**` is an internal module split
 only: no second mutable
 `TranscriptFolder`/search/focus semantic store.
+
+The renderer-neutral PRESENTATION side of the transcript is already split
+(TS6): `src/tui/transcript/**` owns the canonical Work/Context structure, the
+container-owner vocabulary, the Context clustering/summary, the process/Work
+summary, the Compact/Focus projections and the reveal resolution, while
+`src/tui/components/transcript/**` owns the PiTui cards and rendered search
+mechanics. The direction is one-way and mechanically enforced:
+
+```text
+PiTui transcript mechanics (tui/components/transcript/**)
+  -> backend-neutral transcript presentation core (tui/transcript/**)
+  -> semantic transcript facts (src/transcript.ts, TS7: domain/transcript/**)
+```
+
+A future TSP renderer consumes the SAME `tui/transcript/**` core; it never
+replaces or duplicates it. TS6 shipped no TSP/Tern implementation.
 
 ## Direct and Remote
 
@@ -397,11 +426,12 @@ TS1  TUI command layer + source placement policy                DONE
 TS2 + TS3  app/bootstrap + app/surface composition convergence  DONE
 TS4  TUI leaf / component / panel / picker convergence          DONE
 TS5  TuiApp interaction / overlay / editor convergence          DONE
-TS6–TS8  transcript / residual closure                          NOT STARTED
+TS6  transcript presentation core + PiTui transcript mechanics  DONE
+TS7–TS8  transcript semantics / residual closure                NOT STARTED
 
 TS4      TuiApp leaf / component extraction
 TS5      TuiApp interaction / overlay / editor convergence
-TS6      TuiApp transcript-view extraction
+TS6      backend-neutral transcript presentation core + PiTui transcript mechanics
 TS7      transcript.ts -> domain/transcript/** internal modularization (ONE TranscriptFolder authority)
 TS8      residual audit + architecture closure
 ```
@@ -436,6 +466,36 @@ It also extracted the low-risk TuiApp leaves into `src/tui/components/frame.ts`,
 application-owned type in `src/app/surface/task-runtime.ts` (the owner that stores
 `quickTaskState`/`restoreState`), so the TUI panel consumes it as a type instead
 of owning it.
+
+TS6 split the backend-neutral transcript presentation core from the PiTui
+mechanics and retired the nine frozen root modules in the same PR
+(`110 -> 101` legacy entries). The new
+`tui-transcript-imports-renderer-mechanics` gate rule enforces the direction for
+static, type-only and literal value-dynamic imports, with no allowlist:
+
+```text
+src/transcript-projection.ts    -> src/tui/transcript/structure.ts
+src/transcript-disclosure.ts    -> src/tui/transcript/container-owner.ts
+src/compact-projection.ts       -> src/tui/transcript/compact-projection.ts
+src/focus-activity.ts           -> src/tui/transcript/focus-projection.ts
+                                 + src/tui/components/transcript/focus-activity.ts
+src/compact-process-preview.ts  -> src/tui/transcript/process-summary.ts
+                                 + src/tui/components/transcript/compact-process-preview.ts
+src/compact-work.ts             -> src/tui/transcript/work-summary.ts
+                                 + src/tui/components/transcript/compact-work.ts
+src/context-cluster.ts          -> src/tui/transcript/context-summary.ts
+                                 + src/tui/components/transcript/context-cluster.ts
+src/context-row.ts              -> src/tui/components/transcript/context-row.ts
+src/search-presentation.ts      -> src/tui/components/transcript/search-presentation.ts
+```
+
+`src/context-presentation.ts` keeps only the transitional Context semantic
+authority (`contextFormOf` / `isAmbientContext`) until TS7 re-homes it into
+`domain/transcript/**`; `src/search-overlay.ts` and `src/display-preset.ts` stay
+deliberately unmoved for TS7/TS8. The Direct-vs-Remote presentation parity
+comparator left `src/runtime/**` for
+`scripts/support/presentation-read-shadow.ts` (qualification tooling, not
+runtime product authority), so `runtime/**` still imports zero `tui/**`.
 
 Each PR that introduces a new architectural zone extends the architecture gate
 for that zone; the gate deliberately enforces only the zones that exist today.

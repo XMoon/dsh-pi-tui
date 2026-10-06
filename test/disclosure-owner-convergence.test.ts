@@ -1,6 +1,6 @@
 /**
  * PR6/F6 pure tests for the neutral transcript container-owner vocabulary
- * (`transcript-disclosure.ts`) and the canonical Work membership index.
+ * (`tui/transcript/container-owner.ts`) and the canonical Work membership index.
  * @module @xmoon76/dsh-pi-tui/disclosure-owner-convergence.test
  */
 
