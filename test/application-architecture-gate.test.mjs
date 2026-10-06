@@ -1004,6 +1004,23 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
   assert.equal(dynamic.length, 1, 'app owner -> tui/** value dynamic import must be rejected')
   assert.equal(dynamic[0].rule, 'app-imports-tui')
   assert.equal(dynamic[0].line, 1)
+  // The template-literal spelling with no substitution is the SAME module
+  // reference (NoSubstitutionTemplateLiteral in the AST) and must be caught too.
+  const dynamicTemplate = findViolations([
+    entry('app/surface/plugin-manager-runtime.ts', "const { PluginManagerPanel } = await import(`../../tui/plugin-manager/panel.ts`)\n"),
+    entry('tui/plugin-manager/panel.ts', 'export const PluginManagerPanel = 1\n'),
+  ])
+  assert.equal(dynamicTemplate.length, 1, 'app owner -> tui/** template-literal dynamic import must be rejected')
+  assert.equal(dynamicTemplate[0].rule, 'app-imports-tui')
+  // A `${…}` substitution is genuinely dynamic and stays outside the static model.
+  assert.deepEqual(
+    findViolations([
+      entry('app/surface/plugin-manager-runtime.ts', 'const p = await import(`../../tui/plugin-manager/${name}.ts`)\n'),
+      entry('tui/plugin-manager/panel.ts', 'export const PluginManagerPanel = 1\n'),
+    ]),
+    [],
+    'a substituted template specifier is not statically resolvable',
+  )
   // …while the composition zone keeps its dynamic selection freedom.
   assert.deepEqual(
     findViolations([
@@ -1013,6 +1030,14 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
     [],
     'the bootstrap composition zone may also dynamically import tui/**',
   )
+  assert.deepEqual(
+    findViolations([
+      entry('app/bootstrap.ts', 'const { createPluginManagerPanel } = await import(`../tui/plugin-manager/panel.ts`)\n'),
+      entry('tui/plugin-manager/panel.ts', 'export const createPluginManagerPanel = 1\n'),
+    ]),
+    [],
+    'the bootstrap composition zone may also use the template-literal spelling',
+  )
   // The sanctioned Remote lazy edge stays governed ONLY by its own rule: the
   // generic runtime/app rules must not be applied to dynamic imports wholesale.
   const remoteEdge = findViolations([
@@ -1020,6 +1045,14 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
     entry('app/remote/runtime.ts', 'export const backend = 1\n'),
   ])
   assert.deepEqual(remoteEdge, [], 'the sanctioned Remote dynamic edge is not re-classified')
+  // The second consumer of the shared primitive: the Remote lazy-boundary rule
+  // now also sees the template-literal spelling (primitive semantic completion).
+  const remoteEdgeTemplate = findViolations([
+    entry('app/remote/not-the-loader.ts', 'const backend = await import(`./runtime.ts`)\n'),
+    entry('app/remote/runtime.ts', 'export const backend = 1\n'),
+  ])
+  assert.equal(remoteEdgeTemplate.length, 1, 'only the loader owner may dynamically import the Remote composition root')
+  assert.equal(remoteEdgeTemplate[0].rule, 'remote-dynamic-import-owner')
 })
 
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
@@ -1030,9 +1063,18 @@ test('parseValueDynamicImports reports only value import() calls with literal sp
       "// const c = await import('./c.ts')",
       "type T = import('./d.ts').T",
       "import { e } from './e.ts'",
+      // A template literal with NO substitution is an EQUIVALENT static spelling
+      // (the AST calls it NoSubstitutionTemplateLiteral, not StringLiteral), so
+      // the primitive must classify it exactly like the string form.
+      'const f = await import(`./f.ts`)',
+      // …while a substitution is a genuinely dynamic expression and stays out.
+      'const g = await import(`./g/${name}.ts`)',
     ].join('\n'),
   )
-  assert.deepEqual(specs, [{ specifier: './a.ts', line: 1 }])
+  assert.deepEqual(specs, [
+    { specifier: './a.ts', line: 1 },
+    { specifier: './f.ts', line: 6 },
+  ])
 })
 
 test('findViolations includes the Remote dynamic-import owner rule in the production tree scan', () => {

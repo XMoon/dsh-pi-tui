@@ -409,9 +409,15 @@ export function parseImportSpecifiers(source, rel = 'module.ts') {
 
 /**
  * Extract every VALUE dynamic `import('...')` call with its 1-based line
- * number (the form `parseImportSpecifiers` deliberately ignores). Static
- * imports, export-from clauses, and `import('...')` TYPE queries are not
- * reported here.
+ * number (the form `parseImportSpecifiers` deliberately ignores), where the
+ * specifier is STATICALLY KNOWN: a string literal or a template literal with no
+ * substitution (`` import(`./x.ts`) ``, which the AST classifies as
+ * `NoSubstitutionTemplateLiteral`, NOT `StringLiteral`). Both spellings are
+ * equivalent module references, so classifying on `StringLiteral` alone would
+ * leave an equivalent spelling out of every consumer of this primitive.
+ * A `${…}` substitution is a genuinely dynamic expression and stays outside a
+ * static dependency gate's scope, as do static imports, export-from clauses and
+ * `import('...')` TYPE queries (all handled by `parseImportSpecifiers`).
  * @param {string} source file contents
  * @param {string} [rel] src-relative path (drives the parser kind; `.tsx` => TSX)
  * @returns {Array<{ specifier: string, line: number }>}
@@ -426,7 +432,7 @@ export function parseValueDynamicImports(source, rel = 'module.ts') {
       && node.arguments.length > 0
     ) {
       const argument = node.arguments[0]
-      if (ts.isStringLiteral(argument)) {
+      if (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument)) {
         out.push({ specifier: argument.text, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 })
       }
     }
