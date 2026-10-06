@@ -241,7 +241,12 @@ test('PR5 the transcript-export capability is REQUIRED and refused unless exactl
     'the runner capability is a required boolean (no optional marker)')
   assert.equal(code('commands.ts').includes('transcriptExportAvailable?:'), false,
     'no optional declaration of the capability may reappear')
-  const handler = commands.slice(commands.indexOf("name: 'transcript'"))
+  // TS1 moved the built-in /transcript definition into the artifacts command
+  // owner; the capability DECLARATION stays on the facade.
+  const artifacts = code('tui/commands/artifacts.ts')
+  const handlerAt = artifacts.indexOf("name: 'transcript'")
+  assert.ok(handlerAt !== -1, 'the /transcript definition lives in the artifacts command owner')
+  const handler = artifacts.slice(handlerAt)
   assert.ok(handler.includes('runner.transcriptExportAvailable !== true'),
     'the /transcript handler refuses unless the declared capability is exactly true')
   // The production composition declares it per selected runtime, and the

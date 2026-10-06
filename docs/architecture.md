@@ -2,12 +2,13 @@
 
 > Status: CURRENT — Post-M3 architecture authority
 >
-> Audited baseline: `next @ c09e8ab0733425a3a50ce3941dc9bfca0367e413`
-> (`M3 DONE / M4 NOT STARTED`, package `@xmoon76/dsh-pi-tui@0.5.1`).
+> Audited baseline: `next @ 3c896e018d8abf2b33b469bba53d45bd2033a5ab`
+> (`M3 DONE / M4 NOT STARTED`, package `@xmoon76/dsh-pi-tui@0.5.1`, TS1 branch).
 >
 > Later commits may move or split modules and rename internal owners; the
-> ownership zones and the dependency direction below are the long-lived
-> contract. Semantics beyond this document stay with their owning contract doc.
+> ownership zones, the canonical layers and the dependency direction below are
+> the long-lived contract. Semantics beyond this document stay with their owning
+> contract doc.
 
 Host business coupling and the Direct → Remote migration are tracked separately:
 
@@ -24,7 +25,7 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/app/bootstrap.ts` | application composition root; connects owners, lifecycle, services |
 | `src/app/session/**` | Session application ownership/currentness/orchestration |
 | `src/app/submission/**` | prompt/user-shell application orchestration |
-| `src/app/command/**` | command authority/catalog/application facade |
+| `src/app/command/**` | application command authority/catalog/execution |
 | `src/app/surface/**` | mounted surface/application presentation ownership |
 | `src/app/direct/**` | Direct-only application composition/owners |
 | `src/app/remote/**` | experimental Remote composition/Client application ownership |
@@ -44,6 +45,31 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 domains. That size is structural debt, not an invitation to move their semantics
 into a new layer. `src/commands.ts` is already a facade/coordinator: the built-in
 definitions live in `src/tui/commands/**`.
+
+## Canonical layers
+
+Every production module belongs to exactly one owner layer:
+
+| Layer | Owns |
+|---|---|
+| `src/app/**` | application lifecycle, orchestration, currentness and owner composition |
+| `src/runtime/**` | semantic ports/contracts plus Direct/Remote backend adapters |
+| `src/domain/**` | transport/UI-neutral semantic models, policies, folds and derived state |
+| `src/client/**` | Client-local non-TUI platform capability (local media, clipboard, artifact IO) |
+| `src/tui/**` | terminal rendering, pickers, panels, commands and interaction |
+| `src/extension/**` | the public extension compatibility boundary |
+
+Root modules are limited to the documented facades/compatibility islands
+(`src/index.ts`, `src/startup.ts`, `src/commands.ts`, `src/tui-app.ts`,
+`src/transcript.ts`); an ordinary new `src/*.ts` feature/helper is forbidden and
+mechanically rejected (see "Source placement and the root ledger").
+
+A domain may appear in multiple layers when the responsibilities differ:
+
+```text
+src/app/command/**   application command authority / lifecycle / execution
+src/tui/commands/**  terminal slash-command definition / presentation
+```
 
 ## Dependency direction
 
@@ -69,24 +95,70 @@ The load-bearing rules:
 
 ```text
 src/runtime/** never imports src/app/**
+src/runtime/** never imports src/tui/**
 application owners never import bootstrap
 Remote is reached through one sanctioned lazy boundary
 Direct remains the production/default backend
 ```
 
-The command layer follows the same direction:
+The TUI layer follows the same direction:
 
 ```text
-src/commands.ts / src/tui/commands/**
-  never import Direct/Remote implementation zones;
-  consume semantic/application-facing contracts only
+src/tui/**
+  does not import Direct/Remote implementation/composition
+  does not import app/bootstrap
+  consumes semantic/application-facing contracts
 ```
 
-`src/tui/**` is the Client terminal presentation layer: `src/tui-app.ts` plus
-the extracted presentation owners (`src/tui/commands/**` today; components,
-interaction and transcript view owners in TS4–TS6). It is not an application or
-Host layer — application lifecycle/orchestration stays in `src/app/**`.
+`src/commands.ts` stays in that scope as the TUI command layer's transitional
+facade/coordinator (it owns the dynamic skill wrappers and the catalog
+coordinator for the same definitions). `src/tui/**` is the Client terminal
+presentation layer: `src/tui-app.ts` plus the extracted presentation owners
+(`src/tui/commands/**` today; components, interaction and transcript view owners
+in TS4–TS6). It is not an application or Host layer — application
+lifecycle/orchestration stays in `src/app/**`.
 
+## Source placement and the root ledger
+
+`scripts/source-root-baseline.json` records the current ROOT production modules as
+a **shrinking migration ledger**, not an allowlist:
+
+```text
+stable
+  deliberate root entries/facades expected to remain during this train
+
+legacy
+  grandfathered historical root modules awaiting TS4–TS8 owner migration
+```
+
+The architecture gate fails when a current `src/*.ts|.mts|.cts` module is in
+neither list (a new unclassified root module), when a `legacy` entry no longer
+exists (stale entry — remove it in the same PR that moved/deleted the file), when
+a `stable` entry no longer exists, when an entry is duplicated, or when the schema
+is unknown. The gate never auto-writes or auto-accepts a baseline entry. During
+TS4–TS8 a move deletes the corresponding `legacy` entry in the same PR; an
+ordinary new root module is never allowed.
+
+## Existing directory convergence
+
+The historical feature directories are normalized stage by stage; none of them
+moves in TS1. Their intended owners:
+
+| Directory | Target owner | Stage |
+|---|---|---|
+| `components/` | `tui/components/` | TS4 |
+| `keybinding-ui/` | `tui/keybindings/ui/` | TS5 |
+| `keybindings/` | `tui/keybindings/` | TS5 |
+| `footer/` | `domain/footer/` + `tui/footer/` | TS5 |
+| `notification/` | `domain/notification/` + `tui/notification/` | TS5 |
+| `plugin-manager/` | `app/plugin-manager/` + `tui/plugin-manager/` | TS3/TS4 |
+| `status/` | `domain/status/` | TS3 |
+| `image/` | `client/media/image/` | TS8 |
+| `attachment/` | `client/media/attachment/` | TS8 |
+| `file-completion/` | `domain/` + `tui/` + `runtime/direct/` | TS8 |
+
+The implementation stays where it is until its assigned stage; this table records
+the intended owner, not completed work.
 
 ## Composition root
 
@@ -165,18 +237,24 @@ pnpm gate:architecture
   -> scripts/application-architecture-gate.mjs
 ```
 
-The gate is the mechanical enforcement of the dependency direction above. It
-parses the TypeScript AST and rejects:
+The gate is the mechanical enforcement of the dependency direction and the source
+placement policy above. It parses the TypeScript AST and rejects:
 
 ```text
 src/runtime/**                    -> src/app/**
+src/runtime/**                    -> src/tui/**
 non-composition modules           -> src/app/direct/** or src/runtime/direct/**
 owners / presentation / TUI       -> src/app/bootstrap.ts
-commands.ts / tui/commands/**     -> experimental Remote composition
+src/tui/** (and the commands.ts
+  command-layer facade)           -> experimental Remote composition
 the src/startup.ts static graph   -> experimental Remote composition
 app/remote/** dynamic imports     -> any owner/target other than the ONE sanctioned edge
 src/app/surface/**                -> new Direct<...>(...) semantic adapters
 ```
+
+It also enforces the root ledger (`scripts/source-root-baseline.json`): a new
+unclassified root module, a stale `legacy` entry, a missing `stable` facade, a
+duplicate entry or an unknown schema fails the gate.
 
 Its rule unit tests live in `test/application-architecture-gate.test.mjs`.
 
@@ -184,7 +262,7 @@ Do not merge this gate with the Host-coupling gate:
 
 ```text
 gate:architecture
-  = application/module dependency direction
+  = application/module dependency direction + source placement
 
 gate:boundary
   = Host business coupling / allowed Host-service boundary
@@ -200,12 +278,16 @@ oversized and multi-owner. The Post-M3 TypeScript convergence train works
 through them in ownership-first order:
 
 ```text
-TS1  commands.ts domain decomposition                       DONE
-TS2  app/bootstrap.ts composition-root decomposition        next
-TS3  app/surface/runtime.ts surface-owner decomposition
-TS4–TS6  TuiApp leaf / interaction / transcript-view extraction
-TS7  transcript.ts internal modularization (ONE TranscriptFolder authority)
-TS8  residual audit + architecture closure
+TS0  architecture authority + long-lived gate refresh          DONE
+TS1  TUI command layer + source placement policy                CURRENT
+TS2 + TS3  app/bootstrap + app/surface composition convergence  NEXT
+TS4–TS8  TuiApp / transcript / residual closure                 NOT STARTED
+
+TS4      TuiApp leaf / component extraction
+TS5      TuiApp interaction / overlay / editor convergence
+TS6      TuiApp transcript-view extraction
+TS7      transcript.ts internal modularization (ONE TranscriptFolder authority)
+TS8      residual audit + architecture closure
 ```
 
 Each PR that introduces a new architectural zone extends the architecture gate

@@ -23,11 +23,14 @@ import {
   collectSourceEntries,
   findDirectAdapterConstructions,
   findRemoteDynamicImportViolations,
+  findSourceRootViolations,
   findViolations,
   isDirectCompositionFile,
   isRemoteComposition,
+  listSourceRootFiles,
   parseImportSpecifiers,
   parseValueDynamicImports,
+  readSourceRootBaseline,
   REMOTE_COMPOSITION_SPECIFIER,
   REMOTE_DYNAMIC_IMPORT_OWNER,
   REMOTE_DYNAMIC_IMPORT_TARGET,
@@ -696,11 +699,11 @@ test('findViolations includes the Remote dynamic-import owner rule in the produc
   assert.deepEqual(findViolations(tree), [], 'the full production scan stays clean with the M3-1 rules')
 })
 
-test('the built-in command layer must not import experimental Remote composition (TS1)', () => {
-  // TS1 created the first long-lived `src/tui/commands/**` zone: the command
-  // definitions consume semantic/application-facing contracts only.
-  const commandFiles = [
-    'commands.ts',
+test('the TUI layer must not import experimental Remote composition (TS1)', () => {
+  // TS1 created the first long-lived `src/tui/**` layer: terminal presentation
+  // consumes semantic/application-facing contracts only.
+  const tuiFiles = [
+    'tui/foo.ts',
     'tui/commands/settings.ts',
     'tui/commands/sessions.ts',
     'tui/commands/models.ts',
@@ -710,13 +713,16 @@ test('the built-in command layer must not import experimental Remote composition
     'tui/commands/status.ts',
     'tui/commands/auth.ts',
     'tui/commands/utility.ts',
+    // The transitional command-layer facade/coordinator stays in the TUI-layer
+    // rule's scope (strictly stronger than the plan's `tui/**` minimum).
+    'commands.ts',
   ]
   const relativeTo = (file, target) => (file.includes('/') ? '../'.repeat(file.split('/').length - 1) : './') + target
-  for (const file of commandFiles) {
+  for (const file of tuiFiles) {
     for (const target of ['runtime/remote/session-reader-remote.ts', 'app/remote/runtime.ts', 'app/remote/application-runtime.ts']) {
       const violations = findViolations([entry(file, `import { x } from '${relativeTo(file, target)}'\n`)])
       assert.equal(violations.length, 1, `${file} -> ${target} must be rejected`)
-      assert.equal(violations[0].rule, 'commands-imports-remote-composition')
+      assert.equal(violations[0].rule, 'tui-imports-remote-composition')
     }
     for (const specifier of [
       '@deepseek-ai/dsh-commands/remote',
@@ -725,7 +731,7 @@ test('the built-in command layer must not import experimental Remote composition
     ]) {
       const violations = findViolations([entry(file, `import { x } from '${specifier}'\n`)])
       assert.equal(violations.length, 1, `${file} -> ${specifier} must be rejected`)
-      assert.equal(violations[0].rule, 'commands-imports-remote-composition')
+      assert.equal(violations[0].rule, 'tui-imports-remote-composition')
     }
   }
   // Normal semantic ports, application owners and protocol/capability surfaces
@@ -751,3 +757,53 @@ test('the built-in command layer must not import experimental Remote composition
   )
 })
 
+test('the semantic runtime layer must not import terminal presentation (TS1)', () => {
+  for (const file of ['runtime/foo.ts', 'runtime/direct/backend-direct.ts', 'runtime/remote/x.ts']) {
+    const up = '../'.repeat(file.split('/').length - 1)
+    const violations = findViolations([entry(file, `import { x } from '${up}tui/commands/settings.ts'\n`)])
+    assert.equal(violations.length, 1, `${file} -> tui/** must be rejected`)
+    assert.equal(violations[0].rule, 'runtime-imports-tui')
+  }
+  // runtime -> its own semantic ports and the app layer keeps its existing rule.
+  assert.deepEqual(findViolations([entry('runtime/catalog-port.ts', "import type { T } from '../runtime/backend.ts'\n")]), [])
+})
+
+test('the source-root baseline accepts the exact captured tree and fails closed on every drift (TS1 §20.3)', (t) => {
+  const baseline = readSourceRootBaseline()
+  const current = listSourceRootFiles()
+  assert.deepEqual(findSourceRootViolations(baseline, current), [],
+    'the checked-in baseline must match the exact current root module set')
+  // The stable set is the deliberate root facade contract; legacy is the
+  // mechanically generated remainder (no hand selection).
+  assert.deepEqual(baseline.stable, ['commands.ts', 'index.ts', 'startup.ts', 'transcript.ts', 'tui-app.ts'])
+  assert.deepEqual(baseline.legacy, current.filter(name => !baseline.stable.includes(name)))
+  assert.equal(baseline.legacy.length > 0, true, 'legacy entries exist during the train')
+  // Mutation fixtures: never touch the real baseline.
+  const mutated = (patch) => findSourceRootViolations({ ...baseline, ...patch }, current)
+  assert.match(mutated({ legacy: [...baseline.legacy, 'new-feature.ts'] }).join('\n'), /new-feature\.ts/,
+    'a new ordinary root module must FAIL when it is neither in stable nor legacy')
+  assert.match(
+    findSourceRootViolations(baseline, [...current, 'new-feature.ts']).join('\n'),
+    /new unclassified root production module: src\/new-feature\.ts/,
+    'a new on-disk root module must FAIL')
+  assert.match(
+    mutated({ legacy: [...baseline.legacy, 'moved-away.ts'] }).join('\n'),
+    /stale baseline entry: src\/moved-away\.ts/,
+    'a legacy entry that no longer exists must FAIL as a stale baseline')
+  assert.match(
+    findSourceRootViolations(baseline, current.filter(name => name !== 'commands.ts')).join('\n'),
+    /stable root entry missing: src\/commands\.ts/,
+    'a missing stable facade must FAIL')
+  assert.match(
+    mutated({ legacy: [...baseline.legacy, 'index.ts'] }).join('\n'),
+    /src\/index\.ts is listed in BOTH stable and legacy/,
+    'a duplicate stable/legacy entry must FAIL')
+  // Unknown schema/version fails closed.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('ts1-root-baseline-')
+  const badSchema = join(dir, 'bad.json')
+  writeFileSync(badSchema, JSON.stringify({ version: 2, stable: ['index.ts'], legacy: [] }))
+  assert.throws(() => readSourceRootBaseline(badSchema), /unsupported source-root baseline schema/)
+  writeFileSync(badSchema, JSON.stringify({ version: 1, stable: ['index.ts'], legacy: [7] }))
+  assert.throws(() => readSourceRootBaseline(badSchema), /unsupported source-root baseline schema/)
+})

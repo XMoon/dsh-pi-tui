@@ -70,13 +70,23 @@
  *      importing `app/remote/**` fails, and so does a second dynamic target
  *      under the owner. Dynamic imports outside the Remote composition
  *      boundary stay out of scope.
- *   7. (TS1) `src/commands.ts` and `src/tui/commands/**` — the built-in TUI
- *      command definitions — must not import experimental Remote composition
- *      (`runtime/remote/**`, `app/remote/**`, or a Remote package face): the
- *      command layer consumes semantic/application-facing contracts only. The
- *      existing rules already forbid Direct implementation imports and
- *      `app/bootstrap.ts` there, so this is the first LONG-LIVED command-zone
- *      rule; it is extended by the PR that introduces each later zone.
+ *   7. (TS1) `src/tui/**` — the terminal presentation layer, including the
+ *      `src/commands.ts` command-layer facade/coordinator — must not import
+ *      experimental Remote composition (`runtime/remote/**`, `app/remote/**`,
+ *      or a Remote package face): terminal presentation consumes
+ *      semantic/application-facing contracts only. The existing rules already
+ *      forbid Direct implementation imports and `app/bootstrap.ts` there, so
+ *      this is the first LONG-LIVED TUI-layer rule; it is extended by the PR
+ *      that introduces each later zone.
+ *   8. (TS1) `src/runtime/**` must not import `src/tui/**`: the semantic/adaptor
+ *      layer never depends on terminal presentation.
+ *
+ * Root source placement (plan §20.3): `scripts/source-root-baseline.json` is a
+ * shrinking ledger of the ROOT production modules. A new `src/*.ts` module must
+ * belong to a canonical layer (`app`/`runtime`/`domain`/`client`/`tui`/
+ * `extension`) instead; a `legacy` entry that no longer exists, a missing
+ * `stable` facade, a duplicate entry, or an unknown schema fails closed. The
+ * gate never writes or accepts a new baseline entry.
  *
  * Existing historical exceptions, when a phase proves one, are recorded in
  * {@link ARCHITECTURE_ALLOWLIST} (file + resolved target, TYPE-ONLY only); new
@@ -169,6 +179,12 @@ export const ARCHITECTURE_RULES = [
     forbids: (resolved) => resolved.startsWith('app/'),
   },
   {
+    id: 'runtime-imports-tui',
+    message: 'src/runtime/** must not import src/tui/** (the semantic/adaptor layer never depends on terminal presentation)',
+    applies: (srcRel) => srcRel.startsWith('runtime/'),
+    forbids: (resolved) => resolved.startsWith('tui/'),
+  },
+  {
     id: 'direct-import-outside-composition',
     message:
       'only src/index.ts, src/app/bootstrap.ts, src/app/direct/** and src/runtime/** may import '
@@ -183,11 +199,17 @@ export const ARCHITECTURE_RULES = [
     forbids: (resolved) => resolved === 'app/bootstrap.ts',
   },
   {
-    id: 'commands-imports-remote-composition',
+    // TS1 broadens the v1 command-layer rule to the whole long-lived TUI layer
+    // (`src/tui/**`). `src/commands.ts` stays in scope as the TUI command
+    // layer's transitional facade/coordinator: it owns the dynamic skill
+    // wrappers and the catalog coordinator for the same definitions, so it
+    // consumes the same semantic/application-facing contracts. This is strictly
+    // stronger than the plan's `tui/**` scope, with no allowlist.
+    id: 'tui-imports-remote-composition',
     message:
-      'src/commands.ts and src/tui/commands/** must not import experimental Remote composition '
-      + '(the built-in command definitions consume semantic/application-facing contracts only)',
-    applies: (srcRel) => srcRel === 'commands.ts' || srcRel.startsWith('tui/commands/'),
+      'src/tui/** (and the src/commands.ts command-layer facade) must not import experimental Remote composition '
+      + '(terminal presentation consumes semantic/application-facing contracts only)',
+    applies: (srcRel) => srcRel.startsWith('tui/') || srcRel === 'commands.ts',
     forbids: (resolved, specifier) => isRemoteComposition(resolved, specifier),
   },
 ]
@@ -543,17 +565,82 @@ export function scanArchitecture(dir = SRC) {
   return findViolations(collectSourceEntries(dir))
 }
 
+/** The checked-in shrinking baseline of ROOT production modules (plan §20.3). */
+export const SOURCE_ROOT_BASELINE_PATH = join(ROOT, 'scripts/source-root-baseline.json')
+
+/** Read and shape-check the source-root baseline. Never auto-writes. */
+export function readSourceRootBaseline(path = SOURCE_ROOT_BASELINE_PATH) {
+  const raw = JSON.parse(readFileSync(path, 'utf8'))
+  const isNameList = (value) => Array.isArray(value) && value.every(name => typeof name === 'string' && name !== '')
+  if (raw.version !== 1 || !isNameList(raw.stable) || !isNameList(raw.legacy)) {
+    throw new Error(`unsupported source-root baseline schema in ${path} (expected { version: 1, stable: string[], legacy: string[] })`)
+  }
+  return { version: raw.version, stable: raw.stable, legacy: raw.legacy }
+}
+
+/** Every ROOT production module (`src/*.ts|.mts|.cts`), sorted, directories excluded. */
+export function listSourceRootFiles(dir = SRC) {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /\.(?:ts|mts|cts)$/u.test(entry.name))
+    .map(entry => entry.name)
+    .sort()
+}
+
+/**
+ * Root-placement enforcement (plan §20.3): a current root module must be in
+ * `stable ∪ legacy`; a `legacy` entry must still exist (stale entries are
+ * removed by the PR that moves the file); a `stable` entry must still exist
+ * (the facade contract changes deliberately with docs + baseline); duplicates
+ * and unknown schema fail closed. The baseline is a shrinking migration
+ * ledger, never an exemption mechanism.
+ */
+export function findSourceRootViolations(baseline, currentRootFiles) {
+  const violations = []
+  const current = new Set(currentRootFiles)
+  const stable = new Set(baseline.stable)
+  const legacy = new Set(baseline.legacy)
+  for (const name of stable) {
+    if (legacy.has(name)) violations.push(`src/${name} is listed in BOTH stable and legacy`)
+  }
+  const known = new Set([...stable, ...legacy])
+  for (const name of current) {
+    if (!known.has(name)) {
+      violations.push(`new unclassified root production module: src/${name} (place it in a canonical layer: app/runtime/domain/client/tui/extension)`)
+    }
+  }
+  for (const name of legacy) {
+    if (!current.has(name)) {
+      violations.push(`stale baseline entry: src/${name} no longer exists — remove its legacy entry in the same PR that moved/deleted it`)
+    }
+  }
+  for (const name of stable) {
+    if (!current.has(name)) {
+      violations.push(`stable root entry missing: src/${name} — update the facade contract, docs and baseline deliberately`)
+    }
+  }
+  return violations
+}
+
 function main() {
   const entries = collectSourceEntries()
+  const rootViolations = findSourceRootViolations(readSourceRootBaseline(), listSourceRootFiles())
   if (process.argv.includes('--report')) {
     console.log(`application-architecture-gate: scanned ${entries.length} src file(s)`)
     for (const rule of ARCHITECTURE_RULES) console.log(`  rule ${rule.id}`)
     console.log(`  rule ${STARTUP_REMOTE_COMPOSITION_RULE.id}`)
     console.log('  rule remote-dynamic-import-owner')
     console.log('  rule surface-constructs-direct-adapter')
+    const baseline = readSourceRootBaseline()
+    console.log(`  source-root baseline: ${baseline.stable.length} stable + ${baseline.legacy.length} legacy root module(s)`)
     return
   }
   const violations = findViolations(entries)
+  if (rootViolations.length > 0) {
+    console.error('application-architecture-gate: source-root placement violated:')
+    for (const detail of rootViolations) console.error(`  ${detail}`)
+    console.error('\nSee docs/architecture.md (source module placement).')
+    process.exit(1)
+  }
   if (violations.length > 0) {
     console.error('application-architecture-gate: application-layer dependency direction violated:')
     for (const v of violations) console.error(`  src/${v.file}:${v.line} [${v.rule}] ${v.detail}`)
