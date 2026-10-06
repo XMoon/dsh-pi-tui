@@ -13,7 +13,7 @@ import { CURSOR_MARKER, TuiAltScreen, visibleWidth } from '@xmoon76/pi-tui'
 import {
   SearchablePicker,
   type SearchablePickerTheme,
-} from '../src/searchable-picker.ts'
+} from '../src/tui/pickers/searchable-picker.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const testTheme: SearchablePickerTheme = {

@@ -15,7 +15,7 @@ import type {
   MarkdownTheme,
   SettingsListTheme,
 } from '@xmoon76/pi-tui'
-import type { SearchablePickerTheme } from './searchable-picker.ts'
+import type { SearchablePickerTheme } from './tui/pickers/searchable-picker.ts'
 
 /** Semantic palette tokens, mirroring pi's ColorPalette vocabulary. */
 export interface ColorPalette {

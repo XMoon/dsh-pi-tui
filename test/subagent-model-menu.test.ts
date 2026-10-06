@@ -20,7 +20,7 @@ import {
   projectSubagentAllowlist,
   type AllowlistCatalogState,
   type SubagentAllowlistPickerDeps,
-} from '../src/subagent-model-menu.ts'
+} from '../src/tui/pickers/subagent-model-menu.ts'
 import type { ModelDirectoryDto } from '../src/runtime/catalog-port.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from '../src/runtime/config-port.ts'
 import type { OwnedTaskOptions } from '../src/detached.ts'

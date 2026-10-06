@@ -26,7 +26,7 @@
  * and the operation tokens; the injected `apply` resolves with the semantic
  * settlement so a rejected/cancelled/unsupported write keeps the picker usable.
  *
- * @module @xmoon76/dsh-pi-tui/model-picker
+ * @module @xmoon76/dsh-pi-tui/tui/pickers/model-picker
  */
 
 import {
@@ -38,10 +38,10 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import type { OwnedTaskOptions } from './detached.ts'
-import type { ModelDirectoryDto, ModelSelectionDto } from './runtime/catalog-port.ts'
+import type { OwnedTaskOptions } from '../../detached.ts'
+import type { ModelDirectoryDto, ModelSelectionDto } from '../../runtime/catalog-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
-import { selectListTheme } from './theme.ts'
+import { selectListTheme } from '../../theme.ts'
 
 /** The semantic settlement of one applied selection, as the picker needs it:
  *  a rejected/cancelled/unsupported write never committed, so the picker stays

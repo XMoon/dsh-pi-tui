@@ -60,7 +60,7 @@ import {
 import {
   SearchablePicker,
   type SearchablePickerTruncatePrimaryContext,
-} from './searchable-picker.ts'
+} from './tui/pickers/searchable-picker.ts'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
 import { runSyncDisposalSteps } from './disposal.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'

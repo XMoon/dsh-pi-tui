@@ -16,7 +16,7 @@ import { CURSOR_MARKER, SettingsList, type SettingItem } from '@xmoon76/pi-tui'
 import { customThemesDir, darkColors, loadCustomTheme, settingsListTheme } from '../src/theme.ts'
 import { ThemeRegistry } from '../src/theme-registry.ts'
 import { resolveThemeSelection, themePickerRows } from '../src/theme-source.ts'
-import { ThemeSubmenu, themeDisplayName } from '../src/theme-menu.ts'
+import { ThemeSubmenu, themeDisplayName } from '../src/tui/pickers/theme-menu.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

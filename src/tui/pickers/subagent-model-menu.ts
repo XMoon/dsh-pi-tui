@@ -33,7 +33,7 @@
  * Async cancellation follows the picker contract: the component owns a
  * `disposed` latch and routes the directory load through the injected
  * `runOwned`; a result that settles after the user left is dropped.
- * @module @xmoon76/dsh-pi-tui/subagent-model-menu
+ * @module @xmoon76/dsh-pi-tui/tui/pickers/subagent-model-menu
  */
 
 import {
@@ -44,11 +44,11 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import type { OwnedTaskOptions } from './detached.ts'
-import type { ModelDirectoryDto } from './runtime/catalog-port.ts'
-import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from './runtime/config-port.ts'
+import type { OwnedTaskOptions } from '../../detached.ts'
+import type { ModelDirectoryDto } from '../../runtime/catalog-port.ts'
+import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from '../../runtime/config-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
-import { selectListTheme } from './theme.ts'
+import { selectListTheme } from '../../theme.ts'
 
 /** The catalog surface the allowlist picker needs: the OFFICIAL grouped
  *  model directory (the runtime's model catalog port, read off the live
