@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   HOST_INTERACTION_FILES,
+  SCOPED_STRING_ALLOWLIST,
   findHostChordViolations,
   findStringLabelViolations,
   scanHostKeybindingViolations,
@@ -124,24 +125,54 @@ test('host-keybindings: the string scan enumerates every src/tui module (no file
   assert.deepEqual(scannedStringFiles(ROOT).filter(f => !files.includes(f)), [])
 })
 
-test('host-keybindings: a NEW label in the previously-exempted authority files FAILS', () => {
+test('host-keybindings: a NEW label anywhere in the authority tree FAILS', () => {
   // The authority files are scanned now, so a fresh hard-coded label there is
-  // caught — INCLUDING one on a line that is not one of the sanctioned
-  // machine-vocabulary rows (the mutation discriminates positions, not files).
-  const keyIdentity = 'src/tui/keybindings/key-identity.ts'
-  const list = 'src/tui/keybindings/ui/list.ts'
+  // caught — including one on a line that is not a sanctioned machine row.
   const fresh = [
-    [keyIdentity, "const hint = 'Ctrl+O to fold'\n"],
-    [list, "const hint = 'Ctrl+O to fold'\n"],
+    'src/tui/keybindings/key-identity.ts',
+    'src/tui/keybindings/ui/list.ts',
   ]
-  for (const [file, source] of fresh) {
-    const violations = findStringLabelViolations(file, source)
+  for (const file of fresh) {
+    const violations = findStringLabelViolations(file, "const hint = 'Ctrl+O to fold'\n")
     assert.equal(violations.length, 1, `${file}: a fresh chord label must be reported`)
     assert.equal(violations[0].kind, 'string-label')
   }
-  // The sanctioned machine-vocabulary rows of those same files stay accepted
-  // (the real files are scanned by the real-tree case above).
-  assert.deepEqual(findStringLabelViolations(keyIdentity, "'up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f',\n"), [])
-  assert.deepEqual(findStringLabelViolations('src/tui/keybindings/home-end-mode.ts', "'tui.altScreen.top': mode === 'input' ? 'ctrl+home' : 'home',\n"), [])
-  assert.deepEqual(findStringLabelViolations('src/tui/keybindings/hints.ts', "'ctrl+[': 'Ctrl+[',\n"), [])
+})
+
+test('host-keybindings: the TS5 exceptions are owner- and line-scoped (fail closed)', () => {
+  // Every TS5 row must be LIVE in its owning file (a stale row would be dead
+  // weight) and must stay accepted there...
+  assert.ok(SCOPED_STRING_ALLOWLIST.length > 0)
+  for (const row of SCOPED_STRING_ALLOWLIST) {
+    assert.ok(row.file.startsWith('src/tui/keybindings/'), `${row.file} must be a keybinding-authority owner`)
+    assert.ok(scannedStringFiles(ROOT).includes(row.file), `${row.file} must be scanned`)
+    const lines = readFileSync(join(ROOT, row.file), 'utf8').split('\n')
+    assert.ok(lines.some(line => line.trim() === row.line), `${row.file}: the row must name a real line — ${row.line}`)
+    assert.deepEqual(findStringLabelViolations(row.file, `${row.line}\n`), [], `${row.file}: the sanctioned row itself stays accepted`)
+  }
+  // ...while the SAME fragment stops matching as soon as the line changes: an
+  // appended remappable label, an edited line, and the fragment copied into
+  // another owner must all be re-flagged (the reviewer's discriminating controls).
+  const first = SCOPED_STRING_ALLOWLIST[0]
+  const last = SCOPED_STRING_ALLOWLIST[SCOPED_STRING_ALLOWLIST.length - 1]
+  for (const row of [first, last]) {
+    const appended = findStringLabelViolations(row.file, `${row.line} const hint = 'Ctrl+O to fold'\n`)
+    assert.equal(appended.length, 1, `${row.file}: an appended remappable label must be re-flagged`)
+    const edited = findStringLabelViolations(row.file, `${row.line} // edited\n`)
+    assert.equal(edited.length, 1, `${row.file}: an edited exempted line must be re-flagged`)
+  }
+  // The exempted fragment in ANOTHER owner (inside the same keybinding tree and
+  // outside it) is not covered: the exception names one file, not a substring.
+  assert.equal(findStringLabelViolations('src/tui/keybindings/ui/list.ts', `${first.line}\n`).length, 1)
+  assert.equal(findStringLabelViolations('src/tui/keybindings/ui/list.ts', `${last.line}\n`).length, 1)
+  assert.equal(findStringLabelViolations('src/tui/footer/composer.ts', `${last.line}\n`).length, 1)
+  // The mixed-content escape the reviewer probed (an exempted diagnostic line
+  // with an ADDITIONAL remappable label appended) is no longer a bypass.
+  assert.equal(
+    findStringLabelViolations(
+      'src/tui/keybindings/ui/recorder.ts',
+      "return { key: undefined, message: 'Shift+Enter is reserved for inserting a newline. Ctrl+O to fold' }\n",
+    ).length,
+    1,
+  )
 })
