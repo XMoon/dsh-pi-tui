@@ -5737,8 +5737,9 @@ mounted fatal:
   `test/viewer-lifecycle-release.test.ts` (throwing ingress still releases
   the retained child binding); `test/command-catalog-reconnect.test.ts`
   CCR-9 (throwing official unsubscribe still disposes the coordinator and
-  retires the refresh path); `test/settings-runtime-lifecycle.test.ts`
-  (throwing footer unsubscribe / runner disposal still release siblings);
+  retires the refresh path); `test/footer-runtime-lifecycle.test.ts`
+  (throwing footer unsubscribe / runner disposal still release siblings; TS5 §13.4
+  moved the slots into the TUI footer runtime, and the test followed);
   `test/plugin-manager-port.test.ts` (throwing install unsubscribe still
   releases invalidation); `test/question-remote-lifecycle.test.ts` (throwing
   projection unsubscribe still aborts the mounted form and runs the active

@@ -159,7 +159,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     // a diagnostic. The catch is also the net for errors thrown AFTER
     // the rebuild succeeded: HostKeybindingManager.rebuild() is ordered
     // keymap-first, invalidate-last, so a throwing UI invalidation (a
-    // startup-eager callback — the footerCommandRunner TDZ was exactly
+    // startup-eager callback — the footer-command slot TDZ was exactly
     // this) leaves the NEW keymap active. The diagnostic must not claim
     // a last-known-good rollback that did not happen; /keybindings
     // reload re-applies from the document either way. The TUI owns the

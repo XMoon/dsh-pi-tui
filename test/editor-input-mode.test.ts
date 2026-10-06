@@ -1,5 +1,5 @@
 /**
- * Pure tests for the editor input-mode codec (src/editor-input-mode.ts):
+ * Pure tests for the editor input-mode codec (src/tui/interaction/editor-input-mode.ts):
  * the `!` / `!!` prefixes are editor STATE, never document text — the
  * codec serializes a mode + body back into the wire form at host
  * boundaries and decodes serialized lines (history entries, pastes,

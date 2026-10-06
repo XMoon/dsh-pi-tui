@@ -639,7 +639,7 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
         if (declLine !== undefined && declLine > callLine) {
           violations.push(
             `${ref} → ${ref} (declared at line ${declLine}) captured by the startProcessTui arguments (call at line ${callLine})`
-              + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+              + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footer-command slots)',
           )
         }
         continue
@@ -657,7 +657,7 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
           if (declLine !== undefined && declLine > callLine) {
             violations.push(
               `…${ref} (declared at line ${declLine}) spread into the startProcessTui arguments (call at line ${callLine})`
-                + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+                + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footer-command slots)',
             )
           }
         }
@@ -676,7 +676,7 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
         if (declLine === undefined || declLine <= callLine) continue
         violations.push(
           `${name} → ${ref} (declared at line ${declLine}) captured by the startProcessTui arguments (call at line ${callLine})`
-            + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+            + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footer-command slots)',
         )
       }
     }
