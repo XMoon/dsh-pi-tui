@@ -99,7 +99,7 @@ Decisions that matter:
 - `src/shell-completion.ts` — new module (bridge + cache + subcommand table).
 - `src/mentions.ts` — `MentionProvider.getSuggestions` branches on a
   `!`-line; `applyCompletion` routes command-name items.
-- `src/tui-editor.ts` — no change needed (the fork's autocomplete machinery
+- `src/tui/interaction/tui-editor.ts` — no change needed (the fork's autocomplete machinery
   already re-triggers after input; the provider swap is transparent).
 
 **Tests**
@@ -458,8 +458,8 @@ context, `!!` = session-excluded — see the terminology note in §2).
 ### Design
 
 Three explicit modes — `prompt`, `shell-context`, `shell-local` — owned by
-`TuiEditor` (`src/tui-editor.ts`), with a pure codec in
-`src/editor-input-mode.ts` (`shellPrefixForMode` / `serializeEditorInput` /
+`TuiEditor` (`src/tui/interaction/tui-editor.ts`), with a pure codec in
+`src/tui/interaction/editor-input-mode.ts` (`shellPrefixForMode` / `serializeEditorInput` /
 `editorModeFromHistoryEntry`). The buffer holds the bare command body; the
 mode is serialized back into the textual `!`/`!!` protocol ONLY at host
 boundaries. The internal enum name `shell-local` is a COMPATIBILITY name:
@@ -521,13 +521,13 @@ the body/cursor never jump on a mode switch. The editor border uses
 
 **Touch points**
 
-- `src/editor-input-mode.ts` (new) — the pure codec.
-- `src/tui-editor.ts` — mode state, transitions, render, paste
+- `src/tui/interaction/editor-input-mode.ts` (new) — the pure codec.
+- `src/tui/interaction/tui-editor.ts` — mode state, transitions, render, paste
   normalization, history hooks, Tab routing.
 - `src/tui-app.ts` — boundary serialization/decoding, Esc ladder, seat-mode
   routing, footer hint.
 - `src/mentions.ts` — the virtual completion prefix.
-- `src/editor-seat-holder.ts` — `getInputMode`/`setSerializedInput` on the
+- `src/tui/interaction/editor-seat-holder.ts` — `getInputMode`/`setSerializedInput` on the
   seat surface, wire-form handoff.
 
 **Tests**
