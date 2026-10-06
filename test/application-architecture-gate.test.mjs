@@ -857,12 +857,15 @@ test('the test-support production scan mirrors the gate extension set and parser
 test('the domain layer is transport/UI-neutral and the app/plugin owners stay off Direct implementations (TS3)', () => {
   // TS3 §24/§42/§67. Each case lists the EXACT rule ids that must fire (most
   // have exactly one owner rule; a runtime module reaching a bootstrap helper is
-  // an inversion of two independent rules).
+  // an inversion of two independent rules). The `rel` values are RELATIVE TO
+  // `src/` — the same convention `collectSourceEntries()` produces — so a
+  // `src/...` spelling would silently match NO rule and the case would assert
+  // nothing.
   const cases = [
-    ['src/domain/status/foo.ts', '../../app/surface/runtime.ts', ['domain-imports-app']],
-    ['src/domain/status/foo.ts', '../../tui/commands/status.ts', ['domain-imports-tui']],
-    ['src/domain/status/foo.ts', '../../app/remote/runtime.ts', ['domain-imports-remote-composition']],
-    ['src/domain/status/foo.ts', '../../runtime/remote/session-reader-remote.ts', ['domain-imports-remote-composition']],
+    ['domain/status/foo.ts', '../../app/surface/runtime.ts', ['domain-imports-app']],
+    ['domain/status/foo.ts', '../../tui/commands/status.ts', ['domain-imports-tui']],
+    ['domain/status/foo.ts', '../../app/remote/runtime.ts', ['domain-imports-remote-composition']],
+    ['domain/status/foo.ts', '../../runtime/remote/session-reader-remote.ts', ['domain-imports-remote-composition']],
     ['app/plugin-manager/controller.ts', '../../runtime/direct/plugin-manager-direct.ts', ['direct-import-outside-composition']],
     ['app/session/foo.ts', '../bootstrap/lifecycle.ts', ['owner-imports-bootstrap']],
     ['app/surface/foo.ts', '../bootstrap/event-wiring.ts', ['owner-imports-bootstrap']],
@@ -883,9 +886,13 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     // The Plugin Manager APPLICATION owner consumes its semantic port.
     ['app/plugin-manager/controller.ts', '../../runtime/plugin-manager-port.ts'],
     // The neutral domain layer may consume neutral runtime port contracts.
-    ['src/domain/status/foo.ts', '../../runtime/session-reader-port.ts'],
+    ['domain/status/foo.ts', '../../runtime/session-reader-port.ts'],
   ]
   for (const [file, specifier] of allowed) {
+    // Each positive control is anchored by a NEGATIVE case above, so "allowed"
+    // can never be satisfied vacuously by a rule that does not run: the
+    // domain-file Direct/Remote imports, the plugin-manager Direct import and the
+    // runtime -> app import all fail in the `cases` table.
     assert.deepEqual(
       findViolations([entry(file, `import { x } from '${specifier}'\n`)]),
       [],
