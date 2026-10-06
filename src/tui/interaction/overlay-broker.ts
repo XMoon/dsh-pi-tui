@@ -42,11 +42,11 @@
  * and {@link rebind} attaches each fresh projection; logical topology,
  * visibility intent, focus intent and z-order all survive.
  *
- * @module @xmoon76/dsh-pi-tui/overlay-broker
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/overlay-broker
  */
 
 import type { OverlayHandle } from '@xmoon76/pi-tui'
-import { runSyncDisposalSteps } from './disposal.ts'
+import { runSyncDisposalSteps } from '../../disposal.ts'
 
 /** The broker's view of the active question suspension (owned by TuiApp's
  * QuestionFlow). The broker reads/writes it through this seam. */

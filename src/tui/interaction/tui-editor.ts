@@ -19,15 +19,15 @@
  * `!!` prefixes are editor STATE, never document text: the buffer holds
  * the bare command body, and the mode is serialized back into the
  * existing textual `!` / `!!` protocol only at host boundaries.
- * @module @xmoon76/dsh-pi-tui/tui-editor
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/tui-editor
  */
 
 import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
-import { SelectedMarquee } from './tui/components/marquee.ts'
-import { color } from './theme.ts'
-import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
+import { SelectedMarquee } from '../components/marquee.ts'
+import { color } from '../../theme.ts'
+import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from '../../file-completion/context.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
-import { extractInlineSkillPrefix } from './skill-reference-completion.ts'
+import { extractInlineSkillPrefix } from '../../skill-reference-completion.ts'
 
 /** Host render-routing options for the host editor. */
 export interface TuiEditorOptions {

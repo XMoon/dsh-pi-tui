@@ -59,13 +59,13 @@
  * - the router never executes plugin code on the raw input path: it maps
  *   a normalized key to a SEMANTIC action (TuiAction), and TuiApp
  *   executes the action through its host-owned paths.
- * @module @xmoon76/dsh-pi-tui/input-router
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/input-router
  */
 
 import { isKeyRelease, isKeyRepeat, matchesKey, parseKey } from '@xmoon76/pi-tui'
 import type { KeyId } from '@xmoon76/pi-tui'
-import type { NormalizedKey, TuiAction } from './extension/public-types.ts'
-import { isTextProducingKeyId } from './keybindings/key-identity.ts'
+import type { NormalizedKey, TuiAction } from '../../extension/public-types.ts'
+import { isTextProducingKeyId } from '../../keybindings/key-identity.ts'
 
 /** The live surface context the router reads (provided by TuiApp). */
 export interface InputRouterContext {

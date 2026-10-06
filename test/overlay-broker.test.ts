@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { OverlayBroker } from '../src/overlay-broker.ts'
+import { OverlayBroker } from '../src/tui/interaction/overlay-broker.ts'
 import type { OverlayHandle } from '@xmoon76/pi-tui'
 
 

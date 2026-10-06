@@ -41,8 +41,8 @@ import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { Diag } from '../../diag.ts'
 import { runDetached } from '../../detached.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
-import type { TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
-import type { QuestionFlowDraft } from '../../question.ts'
+import type { QuestionFlowDraft, TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
+
 import type { QuestionAttentionRow } from '../../task-center-attention.ts'
 
 /** Client rejection codes the forwarded waterfall preserves across the wire. */

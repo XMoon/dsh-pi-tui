@@ -19,10 +19,10 @@ import { isCancellation, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { Diag } from '../../diag.ts'
 import type { SessionArchivePort } from '../../runtime/session-archive-port.ts'
-import type { SaveLocationResult } from '../../save-location.ts'
+import type { SaveLocationResult, TuiApp } from '../../tui-app.ts'
 import { sessionArtifactFilename } from '../../session-artifact-filename.ts'
 import { renderTranscriptMarkdown } from '../../transcript.ts'
-import type { TuiApp } from '../../tui-app.ts'
+
 
 /** One artifact save workflow outcome. */
 export type ArtifactSaveOutcome =

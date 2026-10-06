@@ -17,7 +17,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { InputRouter } from '../src/input-router.ts'
+import { InputRouter } from '../src/tui/interaction/input-router.ts'
 import type { NormalizedKey, TuiAction } from '../src/extension/public-types.ts'
 
 

@@ -14,7 +14,7 @@ import {
   serializeEditorInput,
   serializedDraftHasPayload,
   shellPrefixForMode,
-} from '../src/editor-input-mode.ts'
+} from '../src/tui/interaction/editor-input-mode.ts'
 
 test('shellPrefixForMode maps the three modes to their prefixes', () => {
   assert.equal(shellPrefixForMode('prompt'), '')

@@ -8,14 +8,14 @@
  *
  * Pure component: the app layer owns the promise/abort plumbing, the seat
  * swap, and routes input here while the flow is active.
- * @module @xmoon76/dsh-pi-tui/question
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/question
  */
 
 import { decodeKittyPrintable, getKeybindings, Input, matchesKey, type KeyId, type Keybinding } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
-import { componentKeymap } from './keybindings/component-keymap.ts'
-import { color } from './theme.ts'
+import { componentKeymap } from '../../keybindings/component-keymap.ts'
+import { color } from '../../theme.ts'
 
 const segmenter = getGraphemeSegmenter()
 

@@ -737,12 +737,12 @@ test('the host editor consumes the X044 protected autocomplete seam directly (no
   // `as unknown as AutocompleteInternals` casts would silently survive
   // upstream signature changes and explode at runtime — the exact class
   // of breakage the re-vendor gates exist to prevent.
-  const path = join(srcDir, 'tui-editor.ts')
+  const path = join(srcDir, 'tui/interaction/tui-editor.ts')
   const source = readFileSync(path, 'utf8')
   assert.ok(!source.includes('AutocompleteInternals'),
     'the AutocompleteInternals cast interface must not exist — the host calls the protected seam directly')
   // Narrow on the CAST IDIOM only: an unrelated, legitimate `as unknown
   // as` in this file (a future compat seam) must not trip the X044 gate.
   assert.ok(!source.includes('as unknown as AutocompleteInternals'),
-    'tui-editor.ts must not cast to reach editor internals (X044)')
+    'tui/interaction/tui-editor.ts must not cast to reach editor internals (X044)')
 })

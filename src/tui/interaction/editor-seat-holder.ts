@@ -19,13 +19,13 @@
  *   draft PRESERVED;
  * - the seat never executes submission/session logic — the host owns
  *   every invariant (plan §14.3).
- * @module @xmoon76/dsh-pi-tui/editor-seat-holder
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/editor-seat-holder
  */
 
 import type { Component } from '@xmoon76/pi-tui'
 import { matchesKey } from '@xmoon76/pi-tui'
-import type { EditorHost, EditorSnapshot, ExtensionEditor } from './extension/public-types.ts'
-import { compileView } from './extension/internal/component-compiler.ts'
+import type { EditorHost, EditorSnapshot, ExtensionEditor } from '../../extension/public-types.ts'
+import { compileView } from '../../extension/internal/component-compiler.ts'
 import { editorModeFromHistoryEntry, serializeEditorInput, shellPrefixForMode } from './editor-input-mode.ts'
 
 function safeEditorErrorMessage(error: unknown): string {
@@ -101,7 +101,7 @@ export interface SeatEditor {
    * encodings, bracketed paste, key release/repeat filtering); the host
    * default has no hook (the fork Editor is the focused component
    * itself). */
-  handleInput?(event: import('./extension/public-types.ts').EditorInputEvent): boolean
+  handleInput?(event: import('../../extension/public-types.ts').EditorInputEvent): boolean
   dispose(): void
 }
 
@@ -693,7 +693,7 @@ export class EditorSeatHolder {
   }
 
   /** Compile the plugin's ExtensionView into a mountable component. */
-  private compileView(view: import('./extension/public-types.ts').ExtensionView): Component {
+  private compileView(view: import('../../extension/public-types.ts').ExtensionView): Component {
     return compileView(view).component
   }
 

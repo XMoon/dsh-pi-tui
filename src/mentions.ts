@@ -36,7 +36,7 @@ import {
   type SlashCommand,
 } from '@xmoon76/pi-tui'
 import { shellCompletionContext, suggestShellCompletion } from './shell-completion.ts'
-import { shellPrefixForMode, type EditorInputMode } from './editor-input-mode.ts'
+import { shellPrefixForMode, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference-completion.ts'
 import type { HumanSkillSummary } from './skill-catalog.ts'
 import {

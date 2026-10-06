@@ -27,7 +27,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/keybindings/manager.ts'
 import { deriveKeybindingContext } from '../src/keybindings/context.ts'
-import { InputRouter } from '../src/input-router.ts'
+import { InputRouter } from '../src/tui/interaction/input-router.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
