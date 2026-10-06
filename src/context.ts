@@ -1,144 +1,29 @@
 /**
- * Context-injection presentation for the TUI: the same provenance projection
- * the Web derives in @deepseek-ai/dsh-client-runtime's contextProvenance, so
- * an injected-context row names its producer the same way a Web row does
- * (AGENTS.md, @deepseek-ai/dsh-system-prompt, skill-catalog, ...). Pure and
- * tolerant: a source arrives as opaque JSON (MessageSource is merge-
- * extensible), so every unreadable shape degrades to `inject` with whatever
- * name the record still carries.
+ * Context-injection PRESENTATION compatibility helpers (TS7): the card-header
+ * icon semantic and the notice one-line summary. The semantic form/provenance
+ * parser and the carrier types now live in
+ * `src/domain/transcript/context-semantics.ts`; this module consumes that one
+ * parser through its low-level source readers and re-exports the canonical
+ * semantic surface for its existing consumers. It never re-parses a source.
  * @module @xmoon76/dsh-pi-tui/context
  */
 
 import { type IconSemantic } from './icons.ts'
+import { asRecord, readString } from './domain/transcript/context-semantics.ts'
 
-/** One durable source narrowed to the readable-record shape; null for anything else. */
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-  return value as Record<string, unknown>
-}
-
-/** A record field read as a non-empty string, or null. */
-function readString(record: Record<string, unknown>, key: string): string | null {
-  const value = record[key]
-  return typeof value === 'string' && value.length > 0 ? value : null
-}
-
-/** Distinct non-empty `field` values of an array-valued source member, in first-seen order.
- * The `seen` Set keeps a foreign/legacy log with a very large member array
- * linear; an `includes()` scan here is an accidental O(n^2). */
-function collect(source: Record<string, unknown>, member: string, field: string): string[] {
-  const list = source[member]
-  if (!Array.isArray(list)) return []
-  const seen = new Set<string>()
-  const names: string[] = []
-  for (const entry of list) {
-    const record = asRecord(entry)
-    const value = record === null ? null : readString(record, field)
-    if (value !== null && !seen.has(value)) {
-      seen.add(value)
-      names.push(value)
-    }
-  }
-  return names
-}
-
-/** A collected name list rendered as one label; null when the list is empty. */
-function joined(names: readonly string[]): string | null {
-  return names.length > 0 ? names.join(', ') : null
-}
-
-/** The role and producer name to present for one logged context source. */
-export interface ContextProvenance {
-  /** recall for a cross-session reference; inject for everything else. */
-  role: 'inject' | 'recall'
-  /** The producer name (file path, plugin name, skill name); null when unreadable. */
-  label: string | null
-}
-
-/**
- * Project one durable message source onto its transcript role and producer
- * name, exactly like the Web's contextProvenance: agent-instructions name
- * their changed file paths, plugins their plugin id, skill invocations their
- * skill name, session references their recalled labels; unknown kinds carry
- * the kind itself.
- * @param source - the logged user/message source, exactly as recorded.
- * @returns the role and producer name to present for this context.
- */
-export function contextProvenance(source: unknown): ContextProvenance {
-  const record = asRecord(source)
-  const kind = record === null ? null : readString(record, 'kind')
-  if (record === null || kind === null) return { role: 'inject', label: null }
-  switch (kind) {
-    case 'session-reference':
-      return { role: 'recall', label: joined(collect(record, 'references', 'label')) ?? kind }
-    case 'agent-instructions':
-      return { role: 'inject', label: joined(collect(record, 'changes', 'path')) ?? kind }
-    case 'plugin':
-      return { role: 'inject', label: readString(record, 'plugin') ?? kind }
-    case 'skill-invocation':
-      return { role: 'inject', label: readString(record, 'name') ?? kind }
-    default:
-      return { role: 'inject', label: kind }
-  }
-}
-
-/**
- * The producer-declared context-form vocabulary of `@deepseek-ai/dsh-llm`.
- * Kept as a local structural union instead of an imported type: the fold
- * records the SEMANTIC value it saw, and an unknown future value must
- * degrade to `undefined` (standalone generic Context), never be coerced
- * into an ambient role.
- */
-export type TranscriptContextForm =
-  | 'instructions'
-  | 'catalog'
-  | 'snapshot'
-  | 'notice'
-  | 'relay'
-  | 'recall'
-
-/** The presentation-only context provenance a folded system row retains. */
-export interface TranscriptContextPresentation {
-  /** The producer-declared form; undefined for unknown/legacy producers. */
-  readonly form?: TranscriptContextForm
-  /** The raw source `kind` (who produced it), when readable. */
-  readonly sourceKind?: string
-  /** The sending session for relay/notice forms, when present. */
-  readonly senderSessionId?: string
-  /** recall for a cross-session reference; inject for everything else. */
-  readonly role: 'inject' | 'recall'
-}
-
-/** Whether a raw value is one of the declared context forms. */
-export function isTranscriptContextForm(value: unknown): value is TranscriptContextForm {
-  return value === 'instructions' || value === 'catalog' || value === 'snapshot'
-    || value === 'notice' || value === 'relay' || value === 'recall'
-}
-
-/**
- * Project one logged context source onto the presentation-only metadata the
- * transcript fold retains: the producer-declared `form` (the authority for
- * presentation role and ambient clustering), the raw `kind`, a
- * relay/notice sender, and the inject/recall role. This is the SINGLE
- * parser of raw context sources; the fold and every projection consume its
- * result. An absent/unknown form stays undefined — the caller must present
- * the row as standalone generic Context.
- * @param source - the logged user/message source, exactly as recorded.
- */
-export function contextPresentation(source: unknown): TranscriptContextPresentation {
-  const record = asRecord(source)
-  const role = contextProvenance(source).role
-  if (record === null) return { role }
-  const kind = readString(record, 'kind')
-  const form = record['form']
-  const senderSessionId = readString(record, 'senderSessionId')
-  return {
-    ...isTranscriptContextForm(form) ? { form } : {},
-    ...kind === null ? {} : { sourceKind: kind },
-    ...senderSessionId === null ? {} : { senderSessionId },
-    role,
-  }
-}
+export {
+  AMBIENT_CONTEXT_FORMS,
+  contextFormOf,
+  contextPresentation,
+  contextProvenance,
+  isAmbientContext,
+  isTranscriptContextForm,
+} from './domain/transcript/context-semantics.ts'
+export type {
+  ContextProvenance,
+  TranscriptContextForm,
+  TranscriptContextPresentation,
+} from './domain/transcript/context-semantics.ts'
 
 /**
  * The card-header icon SEMANTIC for one context injection, keyed by source
@@ -165,6 +50,7 @@ export function contextIconSemantic(source: unknown): IconSemantic {
   }
 }
 
+/** The producer's one-line notice summary, or null when absent. */
 export function contextSummary(source: unknown): string | null {
   const record = asRecord(source)
   if (record === null) return null

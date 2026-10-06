@@ -24,7 +24,7 @@ import {
   type TurnActivity,
   type TranscriptMessage,
 } from '../../transcript.ts'
-import { isSurfacedContext, isSurfacedInteractionTool } from '../../transcript-semantics.ts'
+import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import { isNoticeContext } from './context-structure.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './structure.ts'
 import type { TranscriptContainerPath } from './container-owner.ts'

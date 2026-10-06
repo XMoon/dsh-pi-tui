@@ -18,7 +18,7 @@
  */
 
 import { isPostTurnReplayEvidence, type TranscriptMessage, type TranscriptToolMessage } from '../../transcript.ts'
-import { isSurfacedInteractionToolName } from '../../transcript-semantics.ts'
+import { isSurfacedInteractionToolName } from '../../domain/transcript/semantics.ts'
 
 /**
  * Human elapsed duration from millis: seconds under a minute, `m s` above.

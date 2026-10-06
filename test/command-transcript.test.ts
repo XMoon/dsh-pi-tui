@@ -23,7 +23,7 @@ import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import { projectFocus } from '../src/tui/transcript/focus-projection.ts'
-import { classifyTranscriptMessage } from '../src/transcript-semantics.ts'
+import { classifyTranscriptMessage } from '../src/domain/transcript/semantics.ts'
 
 function event<K extends string>(
   type: K,

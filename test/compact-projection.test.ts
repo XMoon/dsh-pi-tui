@@ -10,7 +10,7 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { contextFormOf, isAmbientContext } from '../src/context-presentation.ts'
+import { contextFormOf, isAmbientContext } from '../src/domain/transcript/context-semantics.ts'
 import {
   clusterAdjacentAmbientContext,
   contextPresentationKind,

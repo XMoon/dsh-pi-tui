@@ -203,7 +203,7 @@ export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
 import { MentionProvider } from './mentions.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
-import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
   SearchHighlightComponent,
   buildSourceGeometry,
