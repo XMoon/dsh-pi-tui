@@ -2666,9 +2666,10 @@ the composition and presentation.
 
 ### Closure evidence
 
-- Contract authority: `docs/concurrency.md` (exact identity, handle
-  mapping, retirement semantics, transition ordering, lifecycle reference
-  table).
+- Contract authority: this document's M3-2 status section (exact-binding
+  identity, handle-to-owner mapping, retirement semantics, transition ordering
+  and the lifecycle reference-ownership evidence), with `docs/concurrency.md`
+  owning the Direct physical session-ownership/writer stack.
 - Composition owner: `src/app/remote/session-owners.ts`
   (`createRemoteSessionOwnerServices`), consumed by the transport-neutral
   `src/app/session/**` orchestration.
