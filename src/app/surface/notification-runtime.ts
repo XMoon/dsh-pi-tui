@@ -1,26 +1,30 @@
 /**
- * The surface-owned completion-notification and terminal-focus presentation
- * (TS3 §31).
+ * The surface-owned completion-notification LIFECYCLE (TS3 §31, TS5 §14.3).
  *
- * This owner holds the ONE `CompletionNotificationController`, the ONE
- * `TerminalFocusTracker` and the ONE `TerminalNotifier` for the mounted surface,
- * plus the terminal focus-reporting enable/disable writes. It is constructed
- * once by `createSurfaceRuntime()` and lives for the surface's lifetime; nothing
- * here is released by a teardown step (the presentation is process-end state,
- * exactly as before the split).
+ * This owner holds the ONE `CompletionNotificationController` for the mounted
+ * surface and coordinates the completion-owner identity, the authoritative
+ * `agent/status` feed, the persisted mode/method policy and the focus policy.
+ * It does NOT hold the terminal facts: the `TerminalFocusTracker`, the
+ * `TerminalNotifier` and the focus-reporting `CSI ? 1004` writes live in the
+ * injected structural presentation (`tui/notification/**`), which the
+ * composition zone selects and passes in.
+ *
+ * It is constructed once by `createSurfaceRuntime()` and lives for the surface's
+ * lifetime; nothing here is released by a teardown step (the presentation is
+ * process-end state, exactly as before the split).
  *
  * Preserved rules:
  *
  * - a notification failure is Client-local UX and must NEVER crash the TUI (the
- *   sink wrapper contains synchronous throws);
+ *   presentation contains its own synchronous throws);
  * - the controller consumes the AUTHORITATIVE `agent/status` runtime fact through
  *   the single `onAgentStatus` / `setCompletionOwner` seam — never `turn/end`,
  *   timers or debounces;
- * - a focus report only records tracker state; any REAL user input restores
+ * - a focus report only records presentation state; any REAL user input restores
  *   'focused' so a missed FOCUS_IN can never falsely notify;
- * - the focus-reporting write goes through the injected guarded writer and every
- *   failure is contained (a broken stdout may not fail the TUI mount or leak the
- *   CSI mode into the shell).
+ * - the focus-reporting write goes through the injected guarded writer inside the
+ *   presentation and every failure is contained (a broken stdout may not fail the
+ *   TUI mount or leak the CSI mode into the shell).
  *
  * @module @xmoon76/dsh-pi-tui/app/surface/notification-runtime
  */
