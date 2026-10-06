@@ -2224,6 +2224,14 @@ export class TuiApp {
   /** Latched by dispose(): after the final teardown, interactive
    * capabilities fail benignly instead of touching a dead terminal. */
   private disposed = false
+  /**
+   * The DESIRED terminal progress state (OSC 9;4 — plan §6). Presentation
+   * state only, never a second Agent lifecycle authority: it survives a
+   * stop() because ProcessTerminal.stop() clears the physical indicator and
+   * its keepalive, and every TuiApp-owned screen (re)start re-asserts this
+   * value.
+   */
+  private terminalProgressActive = false
   /** Re-vendor lifecycle follow-up P3: whether this surface currently
    * holds the process's single live-TUI slot (claimed at the first
    * successful start, released only by the FINAL dispose — never by
@@ -3656,6 +3664,9 @@ export class TuiApp {
       }
       throw error
     }
+    // A stop() before this start (a plain stop/start round-trip) cleared the
+    // physical progress indicator; re-assert the desired state (plan §7).
+    this.restoreTerminalProgress()
   }
 
   /**
@@ -3747,6 +3758,9 @@ export class TuiApp {
       this.tui.start()
       this.tui.requestRender(true)
     }
+    // The suspend stopped the active screen (clearing OSC 9;4 + its
+    // keepalive): restore a still-desired busy state (plan §7/§12.7).
+    this.restoreTerminalProgress()
   }
 
   /** Leave raw mode and stop rendering. The process live-TUI slot is
@@ -3790,6 +3804,43 @@ export class TuiApp {
       () => this.fullscreen?.stop(),
       () => { this.fullscreen = undefined },
     ])
+  }
+
+  /**
+   * Project the authoritative main-Agent running state onto the terminal's
+   * native progress indicator (plan §6/§8). The terminal protocol — OSC 9;4
+   * plus its keepalive — stays owned by the injected `Terminal`; this method
+   * only carries the desired boolean. Presentation only: an equal write is
+   * deduped (repeated `agent/status=running` must not churn the indicator),
+   * and a synchronous terminal-write failure is contained (plan §16 — a
+   * broken stdout must never crash the TUI).
+   */
+  setTerminalProgress(active: boolean): void {
+    if (this.terminalProgressActive === active) return
+    this.terminalProgressActive = active
+    this.writeTerminalProgress(active)
+  }
+
+  /**
+   * Re-assert the DESIRED progress state after a TuiApp-owned screen (re)start
+   * (plan §7): `ProcessTerminal.stop()` clears OSC 9;4 and its keepalive, so
+   * every stop/start round-trip — the external-editor suspend, a fullscreen
+   * swap, a plain stop()/start() — must restore a still-desired busy state.
+   */
+  private restoreTerminalProgress(): void {
+    if (!this.terminalProgressActive) return
+    this.writeTerminalProgress(true)
+  }
+
+  /** Write one progress hint through the injected terminal, containing a
+   * synchronous terminal-write failure (the async stream error is already
+   * contained by the runner's guarded stdout listener). */
+  private writeTerminalProgress(active: boolean): void {
+    try {
+      this.terminal.setProgress(active)
+    } catch {
+      // Terminal presentation only: the semantic agent lifecycle continues.
+    }
   }
 
   /**
@@ -5700,6 +5751,9 @@ export class TuiApp {
       // gesture) BEFORE start, so a press immediately after re-entry can
       // never resolve against a frame the new surface never drew.
       alt.start()
+      // The main screen's stop cleared the physical progress indicator;
+      // re-assert the desired state on the new alt screen (plan §7).
+      this.restoreTerminalProgress()
       // The alt screen starts with NO focused component: without this, every
       // key after Ctrl+F is dropped (the app-level listener still sees
       // shortcuts, but the editor never receives text or Enter). M9: focus
@@ -5716,6 +5770,9 @@ export class TuiApp {
       // A latched profiler window must not leak across a fullscreen swap.
       this.resetScrollProfileFrame()
       this.tui.start()
+      // The alt screen's stop cleared the physical progress indicator;
+      // re-assert the desired state on the main screen (plan §7).
+      this.restoreTerminalProgress()
       // The alt screen's stop disables focus reporting (?1004l rides the
       // mouse-disable sequence). The main screen keeps needing focus
       // events (the host's completion-notification tracker observes
