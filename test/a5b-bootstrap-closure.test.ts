@@ -597,8 +597,11 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
   [
     'src/app/surface/settings-runtime.ts',
     [
-      'userFooterCustomItemsForSave', 'footerCommandRunner', 'footerCommandUnsubscribe',
-      'footerDynamicItemRuntime', 'keybindings', 'applyUserKeybindings',
+      // TS5 §12/§13.4: the memoized keybinding-manager slot and the footer
+      // command slots left this owner — the mounted surface owns the keymap and
+      // the TUI footer runtime (`tui/footer/runtime.ts`) owns the runner's
+      // resources, so the application owner declares neither.
+      'userFooterCustomItemsForSave', 'applyUserKeybindings',
       'footerWarningShown', 'customFooterWarningShown', 'footerCommandItemWarningShown',
       'disableFooterCommand', 'applyFooterSettings', 'setDisplayPreset',
     ],
@@ -926,7 +929,10 @@ test('A5b-6: no application-owner mutable state category remains in the composit
     ]],
     ['viewer mutable state', ['viewerOpen', 'openingViewer', 'pendingSubagentCalls', 'viewerSessionAbort']],
     ['footer/display mutable state machine', [
-      'footerCommandRunner', 'footerCommandUnsubscribe', 'footerDynamicItemRuntime',
+      // TS5 §13.4: the whole-footer runner, its status subscription and the
+      // per-item runner now live behind the TUI footer runtime; the composition
+      // zone must not declare them (or their former slot names) either.
+      'commandRunner', 'commandUnsubscribe', 'dynamicItemRuntime',
       'userFooterCustomItemsForSave', 'applyFooterSettings', 'footerWarningShown',
     ]],
   ]

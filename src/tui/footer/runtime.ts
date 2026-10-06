@@ -77,13 +77,14 @@ export function createFooterRuntime(host: FooterRuntimeHost): FooterRuntime {
   let dynamicItemRuntime: FooterDynamicItemRuntime | undefined
 
   const disableCommand = (): void => {
-    // Release the one-shot slots BEFORE running their callbacks (a throwing
-    // unsubscribe/dispose must not leave a live callback behind).
+    // Retire each one-shot slot BEFORE running its callback (a throwing
+    // unsubscribe/dispose must not leave a live callback behind), preserving
+    // the pre-TS5 release order exactly.
     const unsubscribe = commandUnsubscribe
-    const runner = commandRunner
     commandUnsubscribe = undefined
-    commandRunner = undefined
     unsubscribe?.()
+    const runner = commandRunner
+    commandRunner = undefined
     runner?.dispose()
     host.onCommandOutput(undefined)
   }
