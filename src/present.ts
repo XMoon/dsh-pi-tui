@@ -16,14 +16,17 @@ import type {
 import { finalizedBlockFallbackText, fileAttachmentSummary } from './content-block-presentation.ts'
 import { type IconSemantic } from './icons.ts'
 
+import type { JsonValue } from './domain/transcript/types.ts'
+
 /**
  * A JSON-serializable value (the tool-private presentation payload shape).
  * DSH 0.1.2-alpha.2 moved `JsonValue` from `@deepseek-ai/dsh-session` to
  * `@deepseek-ai/dsh-util-values`; the TUI keeps a local type-only copy so
- * the presentation surface needs no new peer dependency. Identical to the
- * official recursive definition.
+ * the presentation surface needs no new peer dependency. TS7 moved the
+ * canonical owner to `domain/transcript/types.ts` (the tool-carrier owner);
+ * this module re-exports it for compatibility.
  */
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+export type { JsonValue }
 
 /** Figma row titles per variant (design literals, not translatable copy). */
 const VARIANT_TITLES = {
