@@ -5,8 +5,8 @@
  * @module @xmoon76/dsh-pi-tui/scripts/support/presentation-read-shadow
  */
 
-import { projectFocus, type FocusProjectedBlock } from '../../src/focus-activity.ts'
-import { projectCompact } from '../../src/compact-projection.ts'
+import { projectFocus, type FocusProjectedBlock } from '../../src/tui/transcript/focus-projection.ts'
+import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
 import type { TranscriptContainerPath } from '../../src/tui/transcript/container-owner.ts'
 import type { DisplayPreset } from '../../src/display-preset.ts'
 import { TranscriptWindowController, type TranscriptWindowSnapshot } from '../../src/transcript-window.ts'

@@ -12,7 +12,7 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
-import { projectCompact } from '../src/compact-projection.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
 import { isTranscriptWorkMember, projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
@@ -32,9 +32,8 @@ import {
   focusStatusLabel,
   formatFocusDuration,
   formatFocusHeaderLine,
-  projectFocus,
-  type FocusProjectedBlock,
-} from '../src/focus-activity.ts'
+} from '../src/tui/components/transcript/focus-activity.ts'
+import { projectFocus, type FocusProjectedBlock } from '../src/tui/transcript/focus-projection.ts'
 import { compactActionPresentation, type CompactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'
 import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionSourceOf, compactActionStatParts, type CompactActionStats } from '../src/tui/transcript/process-summary.ts'
 

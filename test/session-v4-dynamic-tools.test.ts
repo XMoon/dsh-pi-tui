@@ -34,8 +34,8 @@ import SessionStore, { SessionId, SessionSeq, type SessionEvent } from '@deepsee
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { projectCompact } from '../src/compact-projection.ts'
-import { projectFocus } from '../src/focus-activity.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
+import { projectFocus } from '../src/tui/transcript/focus-projection.ts'
 import { resultTextLines, writeFoldedPreview } from '../src/present.ts'
 import { collectRewindCandidates } from '../src/rewind.ts'
 import {

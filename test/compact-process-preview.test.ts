@@ -28,7 +28,7 @@ import {
 } from '../src/tui/transcript/process-summary.ts'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
-import { focusCollapsedBody } from '../src/focus-activity.ts'
+import { focusCollapsedBody } from '../src/tui/components/transcript/focus-activity.ts'
 import type { TranscriptCommandMessage, TranscriptMessage, TranscriptToolMessage, TurnActivity } from '../src/transcript.ts'
 
 const WIDTH = 40
