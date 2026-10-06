@@ -66,8 +66,8 @@ test('setTerminalProgress dedupes equal writes (no per-status churn)', () => {
     app.setTerminalProgress(true)
     app.setTerminalProgress(false)
     app.setTerminalProgress(false)
-    assert.deepEqual(progress, [true, false],
-      'three runnings write ONE active hint; a repeated idle writes ONE clear')
+    assert.deepEqual(progress, [false, true, false],
+      'the mount claims idle; three runnings write ONE active hint; a repeated idle writes ONE clear')
   } finally {
     app.dispose()
   }
@@ -81,8 +81,8 @@ test('a fullscreen round-trip restores a still-running progress state', () => {
     assert.equal(app.isFullscreen(), true)
     app.setFullscreen(false)
     assert.equal(app.isFullscreen(), false)
-    assert.deepEqual(progress, [true, true, true],
-      'each screen restart re-asserts the desired busy state (the stop cleared it)')
+    assert.deepEqual(progress, [false, true, true, true],
+      'the mount claims idle; each screen restart re-asserts the desired busy state')
   } finally {
     app.dispose()
   }
@@ -94,7 +94,23 @@ test('a plain stop/start round-trip restores a still-running progress state', ()
     app.setTerminalProgress(true)
     app.stop()
     app.start()
-    assert.deepEqual(progress, [true, true])
+    assert.deepEqual(progress, [false, true, true])
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a fresh TuiApp claims the terminal progress state once at mount', () => {
+  const { app, progress } = mountApp()
+  try {
+    // The pane's progress indicator is terminal-side state that can outlive a
+    // process: Tern paints a pane "running" while a foreground command runs
+    // (and `dsh` itself is that command), and a killed process can leave
+    // OSC 9;4;3 behind. The mount must therefore assert the desired state.
+    assert.deepEqual(progress, [false], 'the mount asserts the idle state (clearing any stale pane busy)')
+    app.stop()
+    app.start()
+    assert.deepEqual(progress, [false], 'a later restart re-asserts only a DESIRED busy state')
   } finally {
     app.dispose()
   }
@@ -105,9 +121,9 @@ test('a stopped TuiApp folds the desired progress without writing the terminal',
   try {
     app.stop()
     app.setTerminalProgress(true)
-    assert.deepEqual(progress, [], 'a stopped surface never writes physical progress')
+    assert.deepEqual(progress, [false], 'a stopped surface never writes physical progress')
     app.start()
-    assert.deepEqual(progress, [true], 'the restart projects the folded desired state exactly once')
+    assert.deepEqual(progress, [false, true], 'the restart projects the folded desired state exactly once')
   } finally {
     app.dispose()
   }
@@ -132,14 +148,14 @@ test('a $EDITOR-suspended TuiApp folds status changes and projects once on resum
     // The suspend runs synchronously before the first await: $EDITOR now owns
     // the terminal for the whole time this promise is pending.
     const pending = app.launchExternalEditor()
-    assert.deepEqual(progress, [true], 'the suspend itself writes no progress')
+    assert.deepEqual(progress, [false, true], 'the suspend itself writes no progress')
     // The Agent keeps reporting while $EDITOR is open: idle -> running again.
     app.setTerminalProgress(false)
     app.setTerminalProgress(true)
-    assert.deepEqual(progress, [true], 'a suspended terminal never receives progress bytes')
+    assert.deepEqual(progress, [false, true], 'a suspended terminal never receives progress bytes')
     release('edited')
     await pending
-    assert.deepEqual(progress, [true, true], 'the resume projects the latest desired state exactly once')
+    assert.deepEqual(progress, [false, true, true], 'the resume projects the latest desired state exactly once')
   } finally {
     app.dispose()
   }
@@ -164,7 +180,7 @@ test('an external-editor suspend/resume restores a still-running progress state'
     app.setTerminalProgress(true)
     await app.launchExternalEditor()
     assert.equal(terminalStops, 1, 'the suspend stops the active screen (clearing the physical indicator)')
-    assert.deepEqual(progress, [true, true], 'the resume re-asserts the desired busy state')
+    assert.deepEqual(progress, [false, true, true], 'the resume re-asserts the desired busy state')
   } finally {
     app.dispose()
   }
@@ -307,15 +323,15 @@ test('a pre-mount main running status is latched and projected exactly once at m
   })
   try {
     await drain()
-    assert.deepEqual(h.progress, [true], 'the pre-mount running state projects exactly once at mount')
+    assert.deepEqual(h.progress, [false, true], 'the mount claim clears stale pane state, then the pre-mount running projects once')
     h.routeStatus('main', 'running')
     h.routeStatus('main', 'running')
     await drain()
-    assert.deepEqual(h.progress, [true], 'repeated running statuses never churn the indicator')
+    assert.deepEqual(h.progress, [false, true], 'repeated running statuses never churn the indicator')
     h.routeStatus('main', 'idle')
     h.routeStatus('main', 'idle')
     await drain()
-    assert.deepEqual(h.progress, [true, false], 'a repeated idle writes ONE clear')
+    assert.deepEqual(h.progress, [false, true, false], 'a repeated idle writes ONE clear')
   } finally {
     h.dispose()
   }
@@ -330,10 +346,10 @@ test('a child or stale agent status never touches the pane progress', async () =
   })
   try {
     await drain()
-    assert.deepEqual(h.progress, [], 'only the current main Agent projects progress')
+    assert.deepEqual(h.progress, [false], 'only the mount claim ran; no status projected progress')
     h.routeStatus('main', 'running')
     await drain()
-    assert.deepEqual(h.progress, [true], 'the main Agent still projects after the child/stale noise')
+    assert.deepEqual(h.progress, [false, true], 'the main Agent still projects after the child/stale noise')
   } finally {
     h.dispose()
   }
@@ -344,17 +360,17 @@ test('a completion-owner commit clears the retiree progress and the new owner mu
   try {
     h.routeStatus('A', 'running')
     await drain()
-    assert.deepEqual(h.progress, [true], 'owner A running projects busy')
+    assert.deepEqual(h.progress, [false, true], 'owner A running projects busy')
     h.setOwner('B')
-    assert.deepEqual(h.progress, [true, false], 'the owner commit clears the retiree busy state immediately')
+    assert.deepEqual(h.progress, [false, true, false], 'the owner commit clears the retiree busy state immediately')
     h.routeStatus('A', 'idle')
     h.routeStatus('A', 'running')
     h.routeStatus('B', 'idle')
     await drain()
-    assert.deepEqual(h.progress, [true, false], 'late A statuses and a first-idle B are inert')
+    assert.deepEqual(h.progress, [false, true, false], 'late A statuses and a first-idle B are inert')
     h.routeStatus('B', 'running')
     await drain()
-    assert.deepEqual(h.progress, [true, false, true], 'B becomes busy only after its own running event')
+    assert.deepEqual(h.progress, [false, true, false, true], 'B becomes busy only after its own running event')
   } finally {
     h.dispose()
   }
@@ -365,9 +381,9 @@ test('surface disposal retires the pane progress before the mounted app dies', a
   try {
     h.routeStatus('main', 'running')
     await drain()
-    assert.deepEqual(h.progress, [true])
+    assert.deepEqual(h.progress, [false, true])
     h.dispose()
-    assert.deepEqual(h.progress, [true, false], 'disposal clears the busy hint explicitly')
+    assert.deepEqual(h.progress, [false, true, false], 'disposal clears the busy hint explicitly')
   } finally {
     h.dispose()
   }
@@ -384,31 +400,39 @@ test('disposal clears the REAL OSC 9;4 indicator and stops its keepalive (plan Â
   // other task can run inside them, so the node:test child (which reports its
   // results through stdout) can neither lose a result line nor have raw OSC
   // bytes injected into the report.
-  const capture = (run: () => void): void => {
+  const captured = <T>(run: () => T): T => {
     const previousWrite = process.stdout.write
     process.stdout.write = ((chunk: unknown) => { writes.push(String(chunk)); return true }) as never
     try {
-      run()
+      return run()
     } finally {
       process.stdout.write = previousWrite
     }
   }
   const activeWrites = (): number => writes.filter(write => write === '\x1b]9;4;3\x07').length
   const clearWrites = (): number => writes.filter(write => write === '\x1b]9;4;0\x07').length
-  const h = mountSurface((controls) => controls.setOwner('main'), { realProgress: true })
+  // The MOUNT is itself a capture window: the very first real byte is the
+  // claim clear (see below) and must not leak into the report.
+  const h = captured(() => mountSurface((controls) => controls.setOwner('main'), { realProgress: true }))
   try {
-    capture(() => h.routeStatus('main', 'running'))
+    // The mount CLAIM is the first real byte: the fresh TuiApp asserts the idle
+    // state, which is what clears a pane the terminal had already painted busy
+    // (Tern marks a pane running while `dsh` itself is the foreground command).
+    const clearedAtMount = clearWrites()
+    assert.equal(clearedAtMount, 1, 'the mount claims the idle state with one real OSC 9;4 clear')
+    assert.equal(activeWrites(), 0, 'the mount must not paint an active indicator')
+    captured(() => h.routeStatus('main', 'running'))
     await drain()
     assert.equal(activeWrites(), 1, 'a running status writes ONE real OSC 9;4 active sequence')
-    assert.equal(clearWrites(), 0)
-    capture(() => t.mock.timers.tick(1000))
+    assert.equal(clearWrites(), clearedAtMount, 'a running status adds no clear')
+    captured(() => t.mock.timers.tick(1000))
     assert.equal(activeWrites(), 2, 'the terminal keepalive re-asserts the active indicator')
-    capture(() => h.dispose())
-    assert.equal(clearWrites(), 1, 'disposal clears the real indicator')
+    captured(() => h.dispose())
+    assert.equal(clearWrites(), clearedAtMount + 1, 'disposal clears the real indicator')
     const activeAfterDispose = activeWrites()
-    capture(() => t.mock.timers.tick(5000))
+    captured(() => t.mock.timers.tick(5000))
     assert.equal(activeWrites(), activeAfterDispose, 'no keepalive survives disposal')
-    assert.equal(clearWrites(), 1, 'no later progress write survives disposal')
+    assert.equal(clearWrites(), clearedAtMount + 1, 'no later progress write survives disposal')
   } finally {
     h.dispose()
   }
@@ -428,10 +452,10 @@ test('notification mode off suppresses the toast but never the pane progress (pl
   try {
     h.routeStatus('main', 'running')
     await drain()
-    assert.deepEqual(h.progress, [true], 'the running state projects progress regardless of notification mode')
+    assert.deepEqual(h.progress, [false, true], 'the running state projects progress regardless of notification mode')
     h.routeStatus('main', 'idle')
     await drain()
-    assert.deepEqual(h.progress, [true, false], 'the idle state clears progress regardless of notification mode')
+    assert.deepEqual(h.progress, [false, true, false], 'the idle state clears progress regardless of notification mode')
     assert.deepEqual(notifications, [], 'mode off still suppresses the completion toast')
   } finally {
     h.dispose()
