@@ -65,7 +65,6 @@
     "rewind.ts",
     "scroll-render-profile.ts",
     "search-overlay.ts",
-    "search-presentation.ts",
     "search-profile.ts",
     "search.ts",
     "session-artifact-filename.ts",
