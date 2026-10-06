@@ -824,10 +824,30 @@ export interface SubagentViewerTarget {
   readonly access?: ViewerAccess
 }
 
-// The submit-gesture contract lives with the interaction owners (TS5 §11.3);
-// the stable facade keeps re-exporting it for the existing consumers.
-import type { ComposerSubmitGesture, ComposerSubmitRequest } from './tui/interaction/submit-contract.ts'
-export type { ComposerSubmitGesture, ComposerSubmitRequest } from './tui/interaction/submit-contract.ts'
+// The submit-gesture contract stays on this facade (TS5 §11.3 packaging
+// constraint): `resolveSubmitDelivery` in `src/command-policy.ts` exposes it
+// through the PUBLIC declaration surface, and tsdown emits a repository-private
+// `src/<nested module>.d.ts` region for ANY publicly-referenced declaration that
+// is not declared in an allowlisted root module — `scripts/tarball-smoke.mjs`
+// rejects such a region as a packaging leak (verified for a pure type-only
+// re-export, a value re-export and declared facade aliases alike). The
+// dispatcher's type-only import of this facade is erased at runtime, so the
+// TUI-internal edge is a compile-time cycle only.
+/**
+ * The WEB composer submit gestures (DSH `ComposerSubmitGesture`): plain
+ * Enter, or the Cmd/Ctrl-accelerated chord. The busy-Enter policy resolves
+ * each to a delivery mode — plain Enter to the preferred mode, the
+ * accelerated chord to its OPPOSITE — so the chord is never a fixed mode.
+ */
+export type ComposerSubmitGesture = 'enter' | 'accelerated'
+
+/**
+ * One submission request raised at the editor seat. The two gestures are
+ * resolved by the busy-Enter policy; `explicit-queue` is the public
+ * `queue-draft` action — an explicit delivery command, NOT a gesture: it
+ * queues regardless of the preference (and of the agent's liveness).
+ */
+export type ComposerSubmitRequest = ComposerSubmitGesture | 'explicit-queue'
 
 /** Whether a viewer submit is the empty accelerated queue-steer gesture. */
 export function isEmptyAcceleratedViewerSubmit(text: string, gesture: ComposerSubmitRequest): boolean {

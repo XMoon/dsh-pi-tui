@@ -15,7 +15,7 @@
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'
-import type { ComposerSubmitRequest } from '../interaction/submit-contract.ts'
+import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type { AppKeybindingId } from './types.ts'
 
 /** The Host business surface the dispatcher routes to. Every method
