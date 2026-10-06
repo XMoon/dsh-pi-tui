@@ -2242,6 +2242,10 @@ export class TuiApp {
    * re-asserts it.
    */
   private terminalPresentationActive = false
+  /** Whether this surface has already asserted its desired progress state on
+   *  the terminal (see {@link enterTerminalPresentation}): exactly ONE
+   *  unconditional claim per TuiApp lifetime. */
+  private terminalProgressClaimed = false
   /** Re-vendor lifecycle follow-up P3: whether this surface currently
    * holds the process's single live-TUI slot (claimed at the first
    * successful start, released only by the FINAL dispose — never by
@@ -3848,10 +3852,24 @@ export class TuiApp {
    * immediately after EVERY TuiApp-owned screen start (plan §7):
    * `ProcessTerminal.stop()` cleared the physical indicator, so a still
    * desired busy state is re-asserted here.
+   *
+   * The FIRST claim additionally WRITES the desired state unconditionally. The
+   * progress indicator is terminal-side state that outlives a process, and a
+   * terminal may paint it for reasons that have nothing to do with the agent:
+   * Tern marks a pane "running" while a foreground command runs — and `dsh`
+   * itself is such a command — while a crashed/killed process can leave
+   * `OSC 9;4;3` behind. Asserting the desired state once makes the indicator
+   * authoritative from the mount on, exactly as `CSI ? 1004` focus reporting is
+   * asserted at mount and released on every exit.
    */
   private enterTerminalPresentation(): void {
     this.terminalPresentationActive = true
-    this.restoreTerminalProgress()
+    if (this.terminalProgressClaimed) {
+      this.restoreTerminalProgress()
+      return
+    }
+    this.terminalProgressClaimed = true
+    this.writeTerminalProgress(this.terminalProgressActive)
   }
 
   /**
