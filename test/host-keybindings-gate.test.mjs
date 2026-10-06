@@ -102,20 +102,46 @@ test('host-keybindings: the approval panel label seam stays accepted', () => {
   assert.deepEqual(findStringLabelViolations(APPROVAL_DIALOG, APPROVAL_DIALOG_SOURCE), [])
 })
 
-test('host-keybindings: the string-scan policy covers the action table but not the key grammar', () => {
+test('host-keybindings: the string scan enumerates every src/tui module (no file exemption)', () => {
   const files = scannedStringFiles(ROOT)
-  // The action TABLE's descriptions render in /keybindings and /help.
-  assert.ok(files.includes('src/tui/keybindings/definitions.ts'), 'the action table must stay covered')
-  // The key grammar / label authority / binding presets are the source of
-  // truth a label must follow, so they are excluded (unchanged coverage
-  // relative to the pre-TS5 root layout).
-  for (const authority of [
+  // TS5 §18.1: the keybinding authority (incl. its recorder UI and the action
+  // table) is enumerated like every other TUI module. There is no file- or
+  // subtree-level exemption anywhere under `src/tui/**`.
+  for (const covered of [
+    'src/tui/keybindings/definitions.ts',
     'src/tui/keybindings/key-identity.ts',
     'src/tui/keybindings/hints.ts',
     'src/tui/keybindings/home-end-mode.ts',
     'src/tui/keybindings/config.ts',
     'src/tui/keybindings/ui/recorder.ts',
+    'src/tui/keybindings/ui/list.ts',
+    'src/tui/keybindings/ui/action-editor.ts',
+    'src/tui/interaction/question.ts',
+    'src/tui/footer/composer.ts',
   ]) {
-    assert.ok(!files.includes(authority), `${authority} must not be string-scanned`)
+    assert.ok(files.includes(covered), `${covered} must be string-scanned`)
   }
+  assert.deepEqual(scannedStringFiles(ROOT).filter(f => !files.includes(f)), [])
+})
+
+test('host-keybindings: a NEW label in the previously-exempted authority files FAILS', () => {
+  // The authority files are scanned now, so a fresh hard-coded label there is
+  // caught — INCLUDING one on a line that is not one of the sanctioned
+  // machine-vocabulary rows (the mutation discriminates positions, not files).
+  const keyIdentity = 'src/tui/keybindings/key-identity.ts'
+  const list = 'src/tui/keybindings/ui/list.ts'
+  const fresh = [
+    [keyIdentity, "const hint = 'Ctrl+O to fold'\n"],
+    [list, "const hint = 'Ctrl+O to fold'\n"],
+  ]
+  for (const [file, source] of fresh) {
+    const violations = findStringLabelViolations(file, source)
+    assert.equal(violations.length, 1, `${file}: a fresh chord label must be reported`)
+    assert.equal(violations[0].kind, 'string-label')
+  }
+  // The sanctioned machine-vocabulary rows of those same files stay accepted
+  // (the real files are scanned by the real-tree case above).
+  assert.deepEqual(findStringLabelViolations(keyIdentity, "'up', 'down', 'left', 'right', 'ctrl+b', 'ctrl+f',\n"), [])
+  assert.deepEqual(findStringLabelViolations('src/tui/keybindings/home-end-mode.ts', "'tui.altScreen.top': mode === 'input' ? 'ctrl+home' : 'home',\n"), [])
+  assert.deepEqual(findStringLabelViolations('src/tui/keybindings/hints.ts', "'ctrl+[': 'Ctrl+[',\n"), [])
 })
