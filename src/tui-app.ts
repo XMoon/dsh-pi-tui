@@ -224,7 +224,7 @@ import {
   type WorkflowPhasePresentation,
 } from './workflow-presentation.ts'
 import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
-import type { TranscriptWindowState } from './transcript-window.ts'
+import type { TranscriptWindowState } from './domain/transcript/window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { createScrollRenderProfiler } from './scroll-render-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'

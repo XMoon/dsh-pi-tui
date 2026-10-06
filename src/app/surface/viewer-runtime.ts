@@ -32,7 +32,7 @@ import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
 import { StatsFolder } from '../../stats.ts'
 import { childOwnEvents, TranscriptFolder } from '../../transcript.ts'
-import { TranscriptWindowController } from '../../transcript-window.ts'
+import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import { applyStreamingToolPreviewEvent } from '../../streaming-tool-preparing.ts'
 import { createViewerOpenToken, matchPendingSubagentCall, teardownViewerForSessionSwap } from '../../subagent-viewer.ts'
 import {
