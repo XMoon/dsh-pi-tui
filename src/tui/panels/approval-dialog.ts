@@ -10,7 +10,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/panels/approval-dialog
  */
 
-import { truncateToWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { Box, Text, truncateToWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { color } from '../../theme.ts'
 
@@ -162,4 +162,61 @@ export function approvalOverlayGeometry(columns: number, rows: number): Approval
   const height = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 1
   const maxHeight = Math.max(1, Math.min(height, 16, Math.max(8, height - 2)))
   return { width, maxHeight, contentWidth: Math.max(1, width - 8) }
+}
+
+/**
+ * Build approval content for the current geometry without mounting it.
+ * @param request - the approval prompt.
+ * @param geometry - the live geometry budget (contentWidth already clamped).
+ * @returns the dialog component.
+ */
+export function buildApprovalDialog(request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry): Component {
+  const { maxHeight, contentWidth } = geometry
+  // Height budget in WRAPPED rows: the dialog must NEVER lose the key
+  // hints or the bottom border to the maxHeight slice. The title and the
+  // danger banner are width-cropped so each is exactly ONE display row;
+  // the hints row wraps naturally and its WRAPPED height is counted
+  // (shrunk when the terminal is too small for it). Fixed chrome = 1
+  // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
+  // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
+  const titleShown = truncateToWidth(`Approve ${request.toolName}?`, contentWidth, '…')
+  const dangerShown = request.danger === true
+    ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
+    : ''
+  const HINTS = '[y] allow once   [n] reject   [esc/ctrl+c] cancel'
+  const hintBudget = Math.max(0, maxHeight - (1 + (dangerShown === '' ? 0 : 1) + 1 + 2 + 2))
+  const hintShown = capWrappedToHeight(HINTS, contentWidth, hintBudget).text
+  const hintWrapped = hintShown === '' ? 0 : wrapTextWithAnsi(hintShown, contentWidth).length
+  const chrome = 1 + (dangerShown === '' ? 0 : 1) + 1 + hintWrapped + 2 + 2
+  // The reason and the argument preview share what the chrome leaves:
+  // BOTH capped by their wrapped height, because a single long line can
+  // wrap across many display rows (a raw-line count under-budgets). A cut
+  // section ends in a `... N more` marker row that rides inside its
+  // budget, so the dialog tells the user what was dropped.
+  const reasonBudget = Math.max(0, maxHeight - chrome)
+  const reasonRaw = request.reason ?? ''
+  const reasonShown = capWrappedToMarker(reasonRaw, contentWidth, reasonBudget).text
+  const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
+  const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
+  const dialog = new Box(1, 1)
+  dialog.addChild(new Text(titleShown, 1, 0))
+  if (dangerShown !== '') {
+    dialog.addChild(new Text(color.error(dangerShown), 1, 0))
+  }
+  if (request.arguments !== undefined && request.arguments !== '' && previewBudget > 0) {
+    // Preview the first six argument lines; the marker helper owns ALL
+    // truncation (a separate 240-char '…' pre-cap left an uncounted cut
+    // when the capped string still fit the budget).
+    const sixLines = request.arguments.split('\n').slice(0, 6).join('\n')
+    const previewShown = capWrappedToMarker(sixLines, contentWidth, previewBudget).text
+    if (previewShown !== '') {
+      dialog.addChild(new Text(color.textDim(previewShown), 1, 0))
+    }
+  }
+  if (reasonShown !== '') {
+    dialog.addChild(new Text(reasonShown, 1, 0))
+  }
+  dialog.addChild(new Text(' ', 1, 0))
+  dialog.addChild(new Text(hintShown, 1, 0))
+  return dialog
 }
