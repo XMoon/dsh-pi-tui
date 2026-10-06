@@ -23,7 +23,7 @@
 
 import type { StreamingToolPreview, TodoItem, TuiApp } from '../../tui-app.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import type { TranscriptFolder } from '../../transcript.ts'
+import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import type { PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
 import type { SubmissionPresentationItem } from '../../submission-presentation.ts'
