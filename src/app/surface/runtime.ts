@@ -157,10 +157,10 @@ import { DISABLE_FOCUS_REPORTING, ENABLE_FOCUS_REPORTING, FOCUS_IN_SEQUENCE, FOC
 import { TerminalNotifier, type TerminalNotifierWriter } from '../../notification/terminal-notifier.ts'
 import { normalizedKeyToKeyId } from '../../keybindings/manager.ts'
 import { SurfaceHost } from '../../extension/internal/surface-host.ts'
-import { PluginManagerController } from '../../plugin-manager/controller.ts'
-import { PluginManagerHostRegistry, type PluginManagerHostClaim } from '../../plugin-manager/host-registry.ts'
+import { PluginManagerController } from '../plugin-manager/controller.ts'
+import { PluginManagerHostRegistry, type PluginManagerHostClaim } from '../plugin-manager/host-registry.ts'
 import { PluginManagerPanel } from '../../plugin-manager/panel.ts'
-import { observeTuiExtensions } from '../../plugin-manager/extension-inventory.ts'
+import { observeTuiExtensions } from '../plugin-manager/extension-inventory.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 

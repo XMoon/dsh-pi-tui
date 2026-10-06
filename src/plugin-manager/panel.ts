@@ -11,8 +11,8 @@
 import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { color } from '../theme.ts'
-import type { PluginManagerController, PluginInstallView } from './controller.ts'
-import type { PluginManagerRow } from './model.ts'
+import type { PluginManagerController, PluginInstallView } from '../app/plugin-manager/controller.ts'
+import type { PluginManagerRow } from '../app/plugin-manager/model.ts'
 
 function tone(text: string, rowTone: PluginManagerRow['tone']): string {
   switch (rowTone) {

@@ -18,7 +18,7 @@
  * The controller OUTLIVES the panel (plan §17): closing the surface never
  * cancels an active install, and reopening resumes the same operation.
  *
- * @module @xmoon76/dsh-pi-tui/plugin-manager/controller
+ * @module @xmoon76/dsh-pi-tui/app/plugin-manager/controller
  */
 
 import type {
@@ -27,10 +27,10 @@ import type {
   PluginManagerPort,
   PluginManagerSnapshot,
   PluginSpecInspectionFact,
-} from '../runtime/plugin-manager-port.ts'
-import { runDetached } from '../detached.ts'
-import { runSyncDisposalSteps } from '../disposal.ts'
-import type { Diag } from '../diag.ts'
+} from '../../runtime/plugin-manager-port.ts'
+import { runDetached } from '../../detached.ts'
+import { runSyncDisposalSteps } from '../../disposal.ts'
+import type { Diag } from '../../diag.ts'
 import { classifyPluginPackages, type PluginClassificationInput, type PluginPresentationRole } from './classify.ts'
 import type { TuiExtensionObservation } from './extension-inventory.ts'
 import {

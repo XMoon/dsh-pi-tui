@@ -15,7 +15,7 @@
  * same card aggregate into one extension fact set; an `entryId` claimed by
  * zero or several cards classifies none of them.
  *
- * @module @xmoon76/dsh-pi-tui/plugin-manager/classify
+ * @module @xmoon76/dsh-pi-tui/app/plugin-manager/classify
  */
 
 import type { TuiExtensionObservation } from './extension-inventory.ts'

@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { observeTuiExtensions } from '../src/plugin-manager/extension-inventory.ts'
+import { observeTuiExtensions } from '../src/app/plugin-manager/extension-inventory.ts'
 
 test('aggregates contributions per owner with health and capability use', () => {
   const observations = observeTuiExtensions({

@@ -9,7 +9,7 @@
  * the owner but never fake a user close — otherwise a later `/plugins` would
  * wrongly believe the manager is still open and refuse to open.
  *
- * @module @xmoon76/dsh-pi-tui/plugin-manager/host-registry
+ * @module @xmoon76/dsh-pi-tui/app/plugin-manager/host-registry
  */
 
 /** The active-surface claim for one host. */

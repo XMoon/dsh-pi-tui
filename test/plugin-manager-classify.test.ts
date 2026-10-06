@@ -10,14 +10,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SELF_BUNDLE, classifyPluginPackages, type PluginClassificationInput } from '../src/plugin-manager/classify.ts'
-import type { TuiExtensionObservation } from '../src/plugin-manager/extension-inventory.ts'
+import { SELF_BUNDLE, classifyPluginPackages, type PluginClassificationInput } from '../src/app/plugin-manager/classify.ts'
+import type { TuiExtensionObservation } from '../src/app/plugin-manager/extension-inventory.ts'
 import {
   buildPluginManagerModel,
   bundleValue,
   cardDetailRows,
   entryValue,
-} from '../src/plugin-manager/model.ts'
+} from '../src/app/plugin-manager/model.ts'
 import type { PluginBundleFact, PluginManagerSnapshot, PluginRowFact } from '../src/runtime/plugin-manager-port.ts'
 
 function observation(overrides: Partial<TuiExtensionObservation> = {}): TuiExtensionObservation {

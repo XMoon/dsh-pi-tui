@@ -9,7 +9,7 @@
  * object. It is deliberately package-private — never part of the public
  * `@xmoon76/dsh-pi-tui/extensions` API.
  *
- * @module @xmoon76/dsh-pi-tui/plugin-manager/extension-inventory
+ * @module @xmoon76/dsh-pi-tui/app/plugin-manager/extension-inventory
  */
 
 /** The minimal read view of one live contribution (`ContributionHealth`). */
