@@ -525,8 +525,10 @@ test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendere
   assert.equal(branch.includes("'unconfigured'"),
     false, 'an unavailable projection must never become "unconfigured"')
   assert.equal(branch.includes('???'), false)
-  // The card renders the fact only when it is present.
-  const card = code('tui-app.ts')
+  // The card renders the fact only when it is present. TS4 §51: the card's
+  // rendering owner is now the TUI component module, so this source lock
+  // follows the real owner (path-only migration — same exact substrings).
+  const card = code('tui/components/welcome-card.ts')
   assert.ok(card.includes("...facts.model === undefined ? [] : [`${color.textDim(label('model'))}"),
     'the card omits the model line when the fact is absent')
   assert.ok(card.includes('model?: string'),
