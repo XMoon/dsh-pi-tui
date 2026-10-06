@@ -35,7 +35,7 @@ import { recallHistoryForSession, type ParsedHistoryRecord } from '../../history
 import { hydrateSessionUi } from '../../session-ui-hydrate.ts'
 import { StatsFolder } from '../../stats.ts'
 import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep } from '../../streaming-tool-preparing.ts'
-import { TranscriptFolder } from '../../transcript.ts'
+import { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import type { Diag } from '../../diag.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'

@@ -10,7 +10,7 @@
  */
 
 import { StatsFolder } from './stats.ts'
-import { TranscriptFolder } from './transcript.ts'
+import { TranscriptFolder } from './domain/transcript/folder.ts'
 
 type SessionEvents = Parameters<TranscriptFolder['apply']>[0]
 
