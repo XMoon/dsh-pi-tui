@@ -2,8 +2,7 @@
  * Renderer-neutral ambient Context presentation structure.
  *
  * The semantic question "is this row an ambient Context fact?" belongs to the
- * transitional semantic source (`context-presentation.ts`, TS7:
- * `domain/transcript/**`). THIS module owns the presentation question: "which
+ * canonical semantic source (`domain/transcript/context-semantics.ts`). THIS module owns the presentation question: "which
  * presentation role does one surfaced Context row take, and where do adjacent
  * ambient facts form ONE presentation container with ONE owner?".
  *

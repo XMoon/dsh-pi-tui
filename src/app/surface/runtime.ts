@@ -35,7 +35,7 @@
  *   repaint SCHEDULING (the coalescing flush timer and the projection glue) and
  *   the transcript-navigation / Ctrl+R search presentation callback wiring live
  *   here (A4-8, plan §17). The runner keeps the transcript/search/viewport
- *   ALGORITHMS (`transcript.ts`, `search-overlay.ts`, `transcript-window.ts`)
+ *   ALGORITHMS (`domain/transcript/**`, `search-overlay.ts`)
  *   and the state INSTANCES, injected through the routing source; moving that
  *   view ownership to `tui/**` is TS6;
  * - the Task Center / Job viewer state machine is delegated to `task-runtime.ts`
@@ -543,7 +543,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // runner-owned state instances (main/child folders, window controllers,
   // stats, streaming previews) arrive through the injected routing source; the
   // transcript/search/viewport ALGORITHMS stay in their own modules
-  // (`transcript.ts`, `search-overlay.ts`, `transcript-window.ts`).
+  // (`domain/transcript/**`, `search-overlay.ts`).
 
   /** The main-vs-viewed-child presentation selection. */
   const viewedChildMounted = (): boolean => routing().viewedChildId() !== undefined
@@ -568,8 +568,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   let searchBindingForRepaint: (() => TranscriptSearchPresentation | undefined) | undefined
 
   /** Project one SELECTED target. The projection/geometry algorithms stay in
-   *  `transcript.ts`/`transcript-window.ts`; this is the repaint glue moved
-   *  verbatim from the runner. */
+   *  `domain/transcript/**`; this is the repaint glue moved verbatim from the
+   *  runner. */
   const repaintTarget = (
     folder: TranscriptFolder,
     controller: TranscriptWindowController,

@@ -441,7 +441,9 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/default-intent.ts` | (none) | The pure D2.3 sessionless `/model` default-intent state machine (operation ancestry + settle authority). It uses the structural `ModelSelectionValue` (generic over the caller's selection type) — no `ctx`, no Host services, no I/O, no Host import. |
 | `src/sessions.ts` | `import:dsh-session` | Type-only session types. |
 | `src/stats.ts` | `import:dsh-session` | Type-only. |
-| `src/transcript.ts` | `import:dsh-session` | Type-only; transcript folding must consume the client session event/window, not transport (plan §20). |
+| `src/transcript.ts` | `import:dsh-session` | Type-only; the stable TS7 facade and the Markdown exporter consume the client session event/window type, not transport (plan §20). |
+| `src/domain/transcript/types.ts` | `import:dsh-session` | Type-only; the canonical session-event identity carriers (`CommandId` / `SessionEventSeq`) relocated by TS7 from `src/transcript.ts`. |
+| `src/domain/transcript/folder.ts` | `import:dsh-session` | Session event/window values (`isReplacementSurfaceEvent`, `TOOL_NOT_STARTED`) consumed by the ONE fold; relocated by TS7 from `src/transcript.ts`. |
 
 TS6 reclassified the former `src/runtime/remote/presentation-read-shadow.ts`
 row: the D1.3 Direct-vs-Remote presentation comparator is qualification
