@@ -4,7 +4,9 @@
  * the notification through the moved domain controller, the presentation writes
  * the real terminal bytes, the focus-reporting mode rides the same guarded writer,
  * and a broken writer is contained — the runtime evidence the wiring source audit
- * in `test/notification-wiring.test.ts` deliberately is not.
+ * in `test/notification-wiring.test.ts` deliberately is not. It drives the
+ * application owner's `onAgentStatus` seam directly: the DSH event-source and
+ * routing chain ABOVE that seam is out of this PR's scope and is not claimed.
  * @module @xmoon76/dsh-pi-tui/notification-presentation-path.test
  */
 
@@ -33,8 +35,21 @@ test('TS5: agent/status running -> idle reaches the injected terminal presentati
   assert.deepEqual(writes, ['\x07'], 'the settle writes exactly one bell')
   runtime.onAgentStatus('agent-1', 'idle')
   assert.deepEqual(writes, ['\x07'], 'a repeated idle never re-notifies')
+})
+
+test('TS5: the completion-owner fence is load-bearing', () => {
+  // A RETIRED agent observed running -> idle must not notify. The observation
+  // order is what makes this discriminating: without the identity fence the
+  // retired agent's OWN running -> idle would settle. The live agent still
+  // notifies afterwards (positive control).
+  const { writes, runtime } = createPath()
+  runtime.setCompletionOwner('agent-1')
+  runtime.onAgentStatus('retired', 'running')
   runtime.onAgentStatus('retired', 'idle')
-  assert.deepEqual(writes, ['\x07'], 'a retired agent id can never notify')
+  assert.deepEqual(writes, [], 'a retired agent id can never notify')
+  runtime.onAgentStatus('agent-1', 'running')
+  runtime.onAgentStatus('agent-1', 'idle')
+  assert.deepEqual(writes, ['\x07'], 'the live agent still settles')
 })
 
 test('TS5: the mode/method policy flows through the presentation', () => {
