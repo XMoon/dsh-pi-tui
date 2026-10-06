@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
-import { compositionFile, compositionSources } from './support/composition-surface.ts'
+import { compositionFile, compositionSources, compositionSourcesUnder } from './support/composition-surface.ts'
 import { aliasAwareConstructionSites, ownerFile, ownerSource, productionScriptKind, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
+
+/** This repository root. */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -15,18 +22,12 @@ import { aliasAwareConstructionSites, ownerFile, ownerSource, productionScriptKi
  * connect → start → dispose/fatal cleanup (plan §2.1).
  *
  * The final A5 state forbids the handler groups and implementation literals
- * below from being DEFINED in bootstrap (plan §7.6.2). Until the corresponding
- * slice lands they are legitimately still there, so this test keeps a frozen,
- * per-slice ledger:
- *
- * - a forbidden name is either absent from bootstrap, or listed in
- *   `PENDING_BOOTSTRAP_HANDLERS` with the slice that removes it;
- * - every ledger entry must still be a real declaration in bootstrap, so a
- *   slice cannot delete the implementation while leaving a stale exemption
- *   behind, and the ledger cannot quietly outlive the debt;
- * - the package entry never defines any of them.
- *
- * A5b-6 flips the ledger to empty; from then on the lock is final.
+ * below from being DEFINED in the composition layer (plan §7.6.2). Every A5b
+ * slice has landed and the per-slice ledger was retired together with the A5b
+ * root matrix, so the lock is permanent and ZONE-wide (TS2): a forbidden name
+ * must be absent from `src/app/bootstrap.ts` AND from every
+ * `src/app/bootstrap/**` helper at any depth, and the package entry never
+ * defines any of them.
  *
  * Plan §8.2's minimum closure list and where each clause is locked:
  *   1. the composition zone exists — one facade plus its helpers —
@@ -50,18 +51,11 @@ import { aliasAwareConstructionSites, ownerFile, ownerSource, productionScriptKi
  * (plan §7.6.5).
  */
 
-interface PendingHandler {
-  /** root-scope declaration name in `src/app/bootstrap.ts` */
-  readonly name: string
-  /** the A5b slice that extracts it into its real owner */
-  readonly slice: 'A5b-1' | 'A5b-2' | 'A5b-3' | 'A5b-4' | 'A5b-5' | 'A5b-6'
-  /** where it lands (the owner module) */
-  readonly owner: string
-}
-
 /**
- * Plan §7.6.2: definitions `src/app/bootstrap.ts` must not contain at the final
- * A5 state. This list is durable — it does not shrink as slices land.
+ * Plan §7.6.2: definitions that must not exist anywhere in the composition
+ * layer. This list is durable — it does not shrink as slices land, and TS2 made
+ * it ZONE-wide: `src/app/bootstrap/**` is now a legal home for composition code,
+ * so "absent from bootstrap" can no longer mean "absent from `bootstrap.ts`".
  */
 const FINAL_FORBIDDEN_HANDLERS: readonly string[] = [
   'runLocalShell',
@@ -81,12 +75,63 @@ const FINAL_FORBIDDEN_HANDLERS: readonly string[] = [
   'runner', // the TuiCommandRunner literal
 ]
 
-/** The transitional ledger: forbidden handlers still implemented in bootstrap. */
-const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = []
+/**
+ * The whole bootstrap composition ZONE under one repository root: the facade
+ * plus every `src/app/bootstrap/**` helper, at any depth.
+ *
+ * The "this must not exist in the composition layer" locks read the ZONE, not
+ * just the facade (TS2 §17/§20): the retired A5b root matrix used to re-see every
+ * bootstrap declaration, and with it gone a new helper could otherwise
+ * reintroduce an application handler, an extracted owner's state or an
+ * application-owner mutable-state category with every lock still green. The
+ * locks that genuinely belong to the FACADE alone (`applyRunner`, the owner
+ * constructions, the exact connectors) keep reading `compositionFile`/
+ * `compositionSource` directly.
+ */
+function bootstrapZoneUnder(root: string): string {
+  return compositionSourcesUnder(root)
+    .filter(({ rel }) => rel === 'src/app/bootstrap.ts' || rel.startsWith('src/app/bootstrap/'))
+    .map(({ rel, source }) => `// >>> ${rel}\n${source}`)
+    .join('\n')
+}
 
-/** Does `source` declare `name` at any scope? */
+/** {@link bootstrapZoneUnder} bound to this repository root. */
+function bootstrapZone(): string {
+  return bootstrapZoneUnder(ROOT)
+}
+
+/** True when the two sources declare the same set of `let`/`const`/`function`/`class` names. */
 function declares(source: string, name: string): boolean {
   return new RegExp(`\\b(?:const|let|var|function|class)\\s+${name}\\b`).test(source)
+}
+
+/**
+ * Every forbidden handler must be absent from the WHOLE composition zone. The
+ * transitional per-slice ledger is retired with the A5b root matrix: the A5b
+ * slices have all landed (`MUST_MOVE` residual was 0), so this is now a
+ * permanent, non-shrinking contract.
+ */
+function assertForbiddenHandlersAbsent(zone: string): void {
+  for (const name of FINAL_FORBIDDEN_HANDLERS) {
+    assert.equal(
+      declares(zone, name),
+      false,
+      `${name} is implemented in the bootstrap composition zone — that handler belongs to its owner layer`,
+    )
+  }
+}
+
+/** No application-owner mutable-state CATEGORY may be declared in the zone. */
+function assertOwnerStateCategoriesAbsent(
+  zone: string,
+  categories: ReadonlyArray<readonly [string, readonly string[]]>,
+): void {
+  for (const [category, names] of categories) {
+    for (const name of names) {
+      assert.equal(declares(zone, name), false,
+        `the bootstrap composition zone must not declare ${name} (${category}, plan §7.6.2)`)
+    }
+  }
 }
 
 test('A5b: the composition zone is one facade plus its bootstrap helpers, and nothing else', () => {
@@ -112,30 +157,34 @@ test('A5b: the composition zone is one facade plus its bootstrap helpers, and no
   }
 })
 
-test('A5b: a forbidden handler is absent from bootstrap or explicitly on the slice ledger', () => {
-  const root = compositionFile('src/app/bootstrap.ts')
-  const ledger = new Set(PENDING_BOOTSTRAP_HANDLERS.map((e) => e.name))
-  for (const name of FINAL_FORBIDDEN_HANDLERS) {
-    if (!declares(root, name)) continue
-    assert.ok(
-      ledger.has(name),
-      `${name} is implemented in bootstrap without a slice ledger entry — record the A5b slice that extracts it`,
-    )
-  }
+test('A5b: no forbidden handler exists anywhere in the bootstrap composition zone', () => {
+  // Permanent replacement for the retired per-slice ledger: every A5b slice has
+  // landed, so the forbidden-handler contract no longer shrinks and no longer
+  // needs a migration exemption list.
+  const zone = bootstrapZone()
+  assert.ok(zone.includes('src/app/bootstrap.ts'), 'the zone must contain the facade')
+  assert.ok(zone.includes('src/app/bootstrap/lifecycle.ts'), 'the zone must contain the helpers')
+  assertForbiddenHandlersAbsent(zone)
 })
 
-test('A5b: every ledger entry is a live declaration scheduled for a known slice', () => {
-  const root = compositionFile('src/app/bootstrap.ts')
-  const seen = new Set<string>()
-  for (const entry of PENDING_BOOTSTRAP_HANDLERS) {
-    assert.equal(seen.has(entry.name), false, `${entry.name} is listed twice in the ledger`)
-    seen.add(entry.name)
-    assert.ok(FINAL_FORBIDDEN_HANDLERS.includes(entry.name), `${entry.name} is not on the final forbidden list`)
-    assert.ok(
-      declares(root, entry.name),
-      `the ledger still exempts ${entry.name} for ${entry.slice}, but bootstrap no longer declares it — delete the ledger entry`,
-    )
-  }
+test('A5b/TS2: a forbidden handler reintroduced in a NESTED helper fails the zone lock (mutation)', (t) => {
+  // The real consumer, on a fixture tree: a new helper at ANY depth that
+  // redeclares a forbidden handler must fail, and the same fixture without it
+  // must pass — otherwise "absent from the composition zone" would only be
+  // covering the facade.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-zone-forbidden-')
+  mkdirSync(join(root, 'src', 'app', 'bootstrap', 'nested'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.ts'), 'export const entry = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap.ts'), 'export const bootstrap = 1\n')
+  const nested = join(root, 'src', 'app', 'bootstrap', 'nested', 'legacy.ts')
+  writeFileSync(nested, 'export const harmless = 1\n')
+  assertForbiddenHandlersAbsent(bootstrapZoneUnder(root))
+  writeFileSync(nested, 'const registerCommands = (): void => {}\nconst pendingSubmissions = []\n')
+  const zone = bootstrapZoneUnder(root)
+  assert.ok(declares(zone, 'registerCommands'), 'the fixture must actually reintroduce the name in the zone')
+  assert.throws(() => assertForbiddenHandlersAbsent(zone),
+    'a handler reintroduced in a NESTED bootstrap helper must fail the zone lock')
 })
 
 test('A5b: the package entry is a facade and defines no application handler', () => {
@@ -580,16 +629,19 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
   ],
 ]
 
-test('A5b: every extracted declaration lives in its named owner, never in the composition root', () => {
-  const root = compositionFile('src/app/bootstrap.ts')
+test('A5b: every extracted declaration lives in its named owner, never in the composition ZONE', () => {
+  // TS2 §17/§20: the "must not return" half reads the WHOLE zone, so a helper —
+  // at any depth — cannot take an extracted declaration back into the
+  // composition layer. The owner-side half is unchanged.
+  const zone = bootstrapZone()
   for (const [rel, names] of EXTRACTED_DECLARATIONS) {
     const owner = ownerFile(rel)
     for (const name of names) {
       assert.ok(declares(owner, name), `${name} must be declared in the owner ${rel}`)
       assert.equal(
-        declares(root, name),
+        declares(zone, name),
         false,
-        `src/app/bootstrap.ts must not declare ${name} — it belongs to ${rel}`,
+        `the bootstrap composition zone must not declare ${name} — it belongs to ${rel}`,
       )
     }
   }
@@ -807,29 +859,32 @@ test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read l
     'the composition root must no longer receive the viewer publication callback')
 })
 
-test('A5b-6: the composition root implements no TuiAppEvents/TuiCommandRunner literal', () => {
+test('A5b-6: the composition ZONE implements no TuiAppEvents/TuiCommandRunner literal', () => {
   // Plan §7.6.2, second list. A literal is detected by its type annotation
   // (`: TuiAppEvents = {` / `: TuiCommandRunner = {`); the type-only references
   // the composition still needs (e.g. `TuiCommandRunner['agents']`) are fine.
-  const root = compositionFile('src/app/bootstrap.ts')
+  // TS2: the scan is ZONE-wide — a helper implementing either literal would be a
+  // second application implementation living in the composition layer.
+  const zone = bootstrapZone()
   for (const type of ['TuiAppEvents', 'TuiCommandRunner']) {
     assert.equal(
-      new RegExp(`:\\s*${type}\\s*=\\s*\\{`).test(root),
+      new RegExp(`:\\s*${type}\\s*=\\s*\\{`).test(zone),
       false,
-      `src/app/bootstrap.ts must not implement ${type} as an object literal`,
+      `the bootstrap composition zone must not implement ${type} as an object literal`,
     )
   }
-  assert.equal(declares(root, 'surfaceEvents'), false,
-    'the TuiAppEvents implementation must live in its owner, not the composition root')
+  assert.equal(declares(zone, 'surfaceEvents'), false,
+    'the TuiAppEvents implementation must live in its owner, not the composition layer')
 })
 
-test('A5b-6: no application-owner mutable state category remains in the composition root', () => {
+test('A5b-6: no application-owner mutable state category remains in the composition ZONE', (t) => {
   // Plan §7.6.2 categories: client-local history state, command claim/catalog
   // mutable slots, submission FIFO/ack/local-echo state, viewer mutable state
   // and the footer/display state machine. Each name below is a real declaration
   // of its named owner (pinned in EXTRACTED_DECLARATIONS above); this lock keeps
-  // the CATEGORY explicit and mutation-sensitive.
-  const root = compositionFile('src/app/bootstrap.ts')
+  // the CATEGORY explicit and mutation-sensitive, and since TS2 it scans the
+  // whole bootstrap zone (a helper must not reintroduce a category either).
+  const zone = bootstrapZone()
   const categories: ReadonlyArray<readonly [string, readonly string[]]> = [
     ['client-local history state', ['knownHistoryCwdSet', 'lastHistoryContent', 'bootHistoryEntries']],
     ['command claim/catalog mutable slots', [
@@ -847,12 +902,20 @@ test('A5b-6: no application-owner mutable state category remains in the composit
       'userFooterCustomItemsForSave', 'applyFooterSettings', 'footerWarningShown',
     ]],
   ]
-  for (const [category, names] of categories) {
-    for (const name of names) {
-      assert.equal(declares(root, name), false,
-        `src/app/bootstrap.ts must not declare ${name} (${category}, plan §7.6.2)`)
-    }
-  }
+  assertOwnerStateCategoriesAbsent(zone, categories)
+  // The real consumer on a fixture tree: a category reintroduced in a NESTED
+  // helper must fail, and the same fixture without it must pass.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-zone-state-')
+  mkdirSync(join(root, 'src', 'app', 'bootstrap', 'nested'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.ts'), 'export const entry = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap.ts'), 'export const bootstrap = 1\n')
+  const nested = join(root, 'src', 'app', 'bootstrap', 'nested', 'legacy.ts')
+  writeFileSync(nested, 'export const harmless = 1\n')
+  assertOwnerStateCategoriesAbsent(bootstrapZoneUnder(root), categories)
+  writeFileSync(nested, 'const pendingSubmissions = new Map()\nconst knownHistoryCwdSet = new Set()\n')
+  assert.throws(() => assertOwnerStateCategoriesAbsent(bootstrapZoneUnder(root), categories),
+    'an application-owner state category reintroduced in a NESTED bootstrap helper must fail the zone lock')
 })
 
 test('A5b-6: the composition root holds exactly one ownership and scope authority', () => {

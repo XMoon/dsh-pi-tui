@@ -293,6 +293,8 @@ src/runtime/**                    -> src/app/**
 src/runtime/**                    -> src/tui/**
 non-composition modules           -> src/app/direct/** or src/runtime/direct/**
 owners / presentation / TUI       -> the src/app/bootstrap.ts + src/app/bootstrap/** zone
+src/index.ts                      -> any src/app/bootstrap/** helper (facade only)
+src/app/bootstrap/**              -> the src/app/bootstrap.ts facade (siblings are fine)
 src/domain/**                     -> src/app/**, src/tui/** or experimental Remote composition
 src/tui/** (and the commands.ts
   command-layer facade)           -> experimental Remote composition
@@ -303,8 +305,18 @@ src/app/surface/**                -> new Direct<...>(...) semantic adapters
 
 The bootstrap zone is `src/app/bootstrap.ts` plus every `src/app/bootstrap/**` file,
 matched by DIRECTORY: a new extraction joins the zone (and its rules) automatically
-instead of escaping them by choosing a new file name. Only `src/index.ts` and the zone
-itself may import bootstrap code; the zone itself may import Direct wiring.
+instead of escaping them by choosing a new file name. Its internal direction is
+three mechanical contracts:
+
+```text
+src/index.ts           may import app/bootstrap.ts (the facade) only — never app/bootstrap/**
+src/app/bootstrap.ts   may import app/bootstrap/** (and names itself)
+src/app/bootstrap/**   may import SIBLING helpers; never app/bootstrap.ts (no facade<->helper value cycle)
+every other module     may import neither the facade nor the zone
+```
+
+The zone itself may import Direct wiring; the entry may not reach past the facade
+into an implementation helper.
 
 It also enforces the root ledger (`scripts/source-root-baseline.json`) over every
 `src/*.ts|.tsx|.mts|.cts` module: a new unclassified root module, a stale `legacy`

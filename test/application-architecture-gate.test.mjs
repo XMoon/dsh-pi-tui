@@ -177,13 +177,14 @@ test('application owners importing the bootstrap composition zone are rejected (
     }
   }
   // The composition direction itself is the ONE allowed exception: the entry
-  // imports bootstrap, the facade names its own module, and bootstrap helpers
-  // may import sibling helpers (they are inside the zone).
+  // imports the FACADE, the facade imports helpers, and helpers import sibling
+  // helpers. The facade<->helper reverse edge and the entry->helper edge are
+  // separate contracts asserted right below.
   const allowed = [
     { file: 'index.ts', target: 'app/bootstrap' },
-    { file: 'app/bootstrap.ts', target: 'bootstrap' },
+    { file: 'app/bootstrap.ts', target: 'app/bootstrap/lifecycle' },
+    { file: 'app/bootstrap.ts', target: 'app/bootstrap' },
     { file: 'app/bootstrap/runtime-selection.ts', target: 'app/bootstrap/lifecycle' },
-    { file: 'app/bootstrap/lifecycle.ts', target: 'app/bootstrap' },
   ]
   for (const { file, target } of allowed) {
     const depth = file.split('/').length - 1
@@ -197,12 +198,39 @@ test('application owners importing the bootstrap composition zone are rejected (
       )
     }
   }
+  // Contract 1 (plan §7.2/§54): the package entry must go through the FACADE —
+  // importing a bootstrap helper directly bypasses it.
+  for (const ext of spellings) {
+    for (const target of ['app/bootstrap/lifecycle', 'app/bootstrap/event-wiring']) {
+      const violations = findViolations([entry('index.ts', `import { x } from './${target}${ext}'\n`), ...scanned])
+      assert.equal(violations.length, 1, `index.ts -> ${target}${ext} must be rejected`)
+      assert.equal(violations[0].rule, 'entry-imports-bootstrap-helper')
+    }
+  }
+  // Contract 2 (plan §54): a helper must never import the facade — that is the
+  // `bootstrap.ts -> helper -> bootstrap.ts` value cycle. The known-target set
+  // here is JUST the facade: `findViolations` keys imports by `rel`, so the
+  // importer must not also appear as a scanned entry (it would overwrite its own
+  // import list).
+  const facadeTarget = [entry('app/bootstrap.ts', 'export const bootstrap = 1\n')]
+  for (const ext of spellings) {
+    for (const file of ['app/bootstrap/lifecycle.ts', 'app/bootstrap/event-wiring.ts']) {
+      const violations = findViolations([entry(file, `import { x } from '../bootstrap${ext}'\n`), ...facadeTarget])
+      assert.equal(violations.length, 1, `${file} -> ../bootstrap${ext} must be rejected`)
+      assert.equal(violations[0].rule, 'helper-imports-bootstrap-facade')
+    }
+  }
   // A type-only import is still an inverted dependency.
   for (const ext of spellings) {
     assert.equal(
       findViolations([entry('app/surface/runtime.ts', `import type { B } from '../../app/bootstrap/event-wiring${ext}'\n`), ...scanned]).length,
       1,
       `a type-only owner -> helper${ext} import must be rejected`,
+    )
+    assert.equal(
+      findViolations([entry('app/bootstrap/lifecycle.ts', `import type { B } from '../bootstrap${ext}'\n`), ...facadeTarget]).length,
+      1,
+      `a type-only helper -> facade${ext} import must be rejected`,
     )
   }
 })
