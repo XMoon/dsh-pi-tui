@@ -1,12 +1,14 @@
 /**
- * Static audit for the Pre-M3 TS Architecture Convergence dependency direction
- * (plan §5 Dependency direction, §15 Architecture gate 最终规则): the real
+ * Static audit for the long-lived application-layer dependency direction between
+ * `src/app/**` owners, `src/runtime/**` semantic/adaptor layers, presentation/TUI
+ * modules, and the experimental Remote composition boundary (see
+ * `docs/architecture.md`): the real
  * production tree must satisfy every application-layer rule, and the gate's
  * AST scanner must catch each synthetic violation while ignoring comments,
  * dynamic imports, package imports, and the deliberate non-Backend Direct
- * application owners. The gate itself (`scripts/pre-m3-architecture-gate.mjs`)
+ * application owners. The gate itself (`scripts/application-architecture-gate.mjs`)
  * is the enforcement; this test guards the rules against regressions.
- * @module @xmoon76/dsh-pi-tui/pre-m3-architecture-gate.test
+ * @module @xmoon76/dsh-pi-tui/application-architecture-gate.test
  */
 
 import assert from 'node:assert/strict'
@@ -32,7 +34,7 @@ import {
   resolveRelativeImport,
   STARTUP_REMOTE_COMPOSITION_RULE,
   staticImportCandidates,
-} from '../scripts/pre-m3-architecture-gate.mjs'
+} from '../scripts/application-architecture-gate.mjs'
 
 /** One synthetic source entry; `findViolations` only needs rel + source. */
 const entry = (rel, source) => ({ rel, source })

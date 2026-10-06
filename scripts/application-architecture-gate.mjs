@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 /**
- * @xmoon76/dsh-pi-tui/scripts/pre-m3-architecture-gate — CI guard for the
- * Pre-M3 TS Architecture Convergence application-layer dependency direction
- * (see `temp/m3/dsh-pi-tui-pre-m3-ts-architecture-convergence-implementation-plan-20260925.md`
- * §5 Dependency direction and §15 Architecture gate 最终规则).
+ * @xmoon76/dsh-pi-tui/scripts/application-architecture-gate — CI guard for the
+ * long-lived application-layer dependency direction between `src/app/**` owners,
+ * `src/runtime/**` semantic/adaptor layers, presentation/TUI modules, and the
+ * experimental Remote composition boundary (see `docs/architecture.md`; the
+ * enforcement inventory lives in `docs/client-server-migration.md`).
  *
  * This gate is deliberately separate from `scripts/client-boundary-gate.mjs`:
  *
  *   client-boundary-gate  = Host business coupling debt (which src/ file may
  *                           touch which Host service / Host type)
- *   pre-m3-architecture-gate
+ *   application-architecture-gate
  *                         = application-layer dependency DIRECTION between the
- *                           new `src/app/**` owners, the frozen `src/runtime/**`
- *                           semantic layer, and presentation modules
+ *                           `src/app/**` owners, the `src/runtime/**` semantic
+ *                           layer, and presentation modules
  *
  * The scanner parses TypeScript ASTs with the repo's existing `typescript`
  * dependency (no new dependency). Supported static forms: `import ... from
@@ -31,27 +32,27 @@
  * Rules enforced:
  *   1. `src/runtime/**` must not import `src/app/**`.
  *   2. Direct wiring is importable ONLY by the composition owners: `src/index.ts`,
- *      the future `src/app/bootstrap.ts`, `src/app/direct/**` itself, and the
+ *      `src/app/bootstrap.ts`, `src/app/direct/**` itself, and the
  *      semantic `src/runtime/**`. This covers `app/direct/**` and
  *      `runtime/direct/**` targets for every other module — the non-Direct
  *      application owners (`app/session`, `app/submission`, `app/command`,
- *      `app/surface`) and the whole §5.2 presentation/presentation-adjacent
+ *      `app/surface`) and the whole presentation/presentation-adjacent
  *      surface. A consumer that needs a Direct fact declares its own interface
- *      and the bootstrap injects the implementation (§5.4), so no Direct import
+ *      and the bootstrap injects the implementation, so no Direct import
  *      is required. This is the enumeration-free form of the presentation rule;
  *      one proven historical exception is recorded in
  *      {@link ARCHITECTURE_ALLOWLIST} and is restricted to TYPE-ONLY imports.
  *   3. No application owner or presentation module may import
  *      `src/app/bootstrap.ts`: the dependency direction is
- *      `index -> bootstrap -> owners`, never `owner -> bootstrap` (§8.4). The
+ *      `index -> bootstrap -> owners`, never `owner -> bootstrap`. The
  *      composition root connects owners through narrow injected callbacks; an
  *      owner that reaches back into bootstrap would invert the graph.
  *   4. Nothing statically reachable from `src/startup.ts` may import
  *      experimental Remote composition (`src/runtime/remote/**`,
  *      `src/app/remote/**`, any `@deepseek-ai/dsh-<pkg>/client` or
  *      `/remote` subpath entry, and the `@deepseek-ai/dsh-client-*` /
- *      `@deepseek-ai/dsh-api-*` root entries): §15.4 keeps the
- *      startup compatibility island free of a Remote/Connection static
+ *      `@deepseek-ai/dsh-api-*` root entries): the
+ *      startup compatibility island stays free of a Remote/Connection static
  *      dependency, including through an intermediate module.
  *   5. `src/app/surface/**` must not construct Direct semantic adapters
  *      (`new Direct<...>(...)`); those belong to
@@ -76,9 +77,9 @@
  * absorb new debt.
  *
  * Usage:
- *   node scripts/pre-m3-architecture-gate.mjs            # check (exit 1 on violation)
- *   node scripts/pre-m3-architecture-gate.mjs --report   # print scanned zones
- * @module pre-m3-architecture-gate
+ *   node scripts/application-architecture-gate.mjs            # check (exit 1 on violation)
+ *   node scripts/application-architecture-gate.mjs --report   # print scanned zones
+ * @module application-architecture-gate
  */
 
 import { readFileSync, readdirSync } from 'node:fs'
@@ -91,7 +92,7 @@ const SRC = join(ROOT, 'src')
 
 /**
  * Direct application owners that are deliberately NOT Backend adapters and may
- * be constructed outside `runtime/direct/backend-direct.ts` (plan §15.5).
+ * be constructed outside `runtime/direct/backend-direct.ts`.
  */
 export const DIRECT_APPLICATION_EXCEPTIONS = new Set(['DirectModelSelectionOwner'])
 
@@ -114,8 +115,8 @@ export const REMOTE_DYNAMIC_IMPORT_TARGET = 'app/remote/runtime.ts'
  * Existing historical exceptions as `"<src-relative file>:<resolved target>"`.
  * An allowlist entry excuses ONLY a TYPE-ONLY import of that target; a value
  * import of the same target still fails. Today exactly one: the legacy settings
- * migration reads the Direct TUI-settings facade's types (no wiring). §15.3
- * permits a narrow allowlist for proven historical exceptions; it must never
+ * migration reads the Direct TUI-settings facade's types (no wiring). A narrow
+ * allowlist may record a proven historical exception; it must never
  * grow to absorb new debt.
  */
 export const ARCHITECTURE_ALLOWLIST = ['legacy-settings-migration.ts:runtime/direct/tui-settings-direct.ts']
@@ -129,10 +130,10 @@ export const ARCHITECTURE_ALLOWLIST = ['legacy-settings-migration.ts:runtime/dir
  * Every other module — including the non-Direct application owners
  * (`app/session`, `app/submission`, `app/command`, `app/surface`) and the whole
  * presentation surface — must consume semantic ports / the `Backend` / narrow
- * injected callbacks. This is the §5 dependency graph and the §5.2 presentation
+ * injected callbacks. This is the dependency graph and the presentation
  * boundary in enumeration-free form: a consumer that needs a Direct fact
- * declares its own interface and the bootstrap injects the implementation
- * (§5.4), so no Direct import is ever required.
+ * declares its own interface and the bootstrap injects the implementation,
+ * so no Direct import is ever required.
  */
 export function isDirectCompositionFile(srcRel) {
   return srcRel === 'index.ts'
@@ -530,7 +531,7 @@ export function scanArchitecture(dir = SRC) {
 function main() {
   const entries = collectSourceEntries()
   if (process.argv.includes('--report')) {
-    console.log(`pre-m3-architecture-gate: scanned ${entries.length} src file(s)`)
+    console.log(`application-architecture-gate: scanned ${entries.length} src file(s)`)
     for (const rule of ARCHITECTURE_RULES) console.log(`  rule ${rule.id}`)
     console.log(`  rule ${STARTUP_REMOTE_COMPOSITION_RULE.id}`)
     console.log('  rule remote-dynamic-import-owner')
@@ -539,14 +540,14 @@ function main() {
   }
   const violations = findViolations(entries)
   if (violations.length > 0) {
-    console.error('pre-m3-architecture-gate: application-layer dependency direction violated:')
+    console.error('application-architecture-gate: application-layer dependency direction violated:')
     for (const v of violations) console.error(`  src/${v.file}:${v.line} [${v.rule}] ${v.detail}`)
-    console.error('\nSee the Pre-M3 TS Architecture Convergence plan §5/§15 and docs/client-server-migration.md.')
+    console.error('\nSee docs/architecture.md and docs/client-server-migration.md.')
     process.exit(1)
   }
-  console.log(`pre-m3-architecture-gate: ok (${entries.length} file(s), dependency direction clean)`)
+  console.log(`application-architecture-gate: ok (${entries.length} file(s), dependency direction clean)`)
 }
 
-if (process.argv[1] && relative(ROOT, process.argv[1]).replace(/\\/g, '/') === 'scripts/pre-m3-architecture-gate.mjs') {
+if (process.argv[1] && relative(ROOT, process.argv[1]).replace(/\\/g, '/') === 'scripts/application-architecture-gate.mjs') {
   main()
 }

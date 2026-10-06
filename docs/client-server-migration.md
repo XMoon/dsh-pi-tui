@@ -2354,8 +2354,9 @@ TypeScript restructure. It is structural only:
   `submission` (TUI writer orchestration), `command` (TUI command-runner
   facade), `surface` (TUI/backend-consumer wiring). `src/runtime/**` keeps its
   semantic ports/adapters and must not import `src/app/**`.
-- **Machine-enforced direction.** `scripts/pre-m3-architecture-gate.mjs`
-  (`pnpm gate:architecture`) parses the TypeScript AST and rejects
+- **Machine-enforced direction.** The application architecture gate, introduced
+  during Pre-M3 and now located at `scripts/application-architecture-gate.mjs`
+  (`pnpm gate:architecture`), parses the TypeScript AST and rejects
   `runtime → app`, Direct imports from any module that is not a composition
   owner (`index.ts`, `app/bootstrap.ts`, `app/direct/**`, `runtime/**`) — the
   §5.2 presentation boundary in enumeration-free form, with one type-only
@@ -3812,7 +3813,7 @@ Closure evidence for PR1:
   Direct factory, and returns the ONE aggregate; missing lazy boundary fails
   closed; the production bootstrap calls the seam with the Direct branch
   only.
-- Boundary proof: `test/pre-m3-architecture-gate.test.mjs` — the M3-4
+- Boundary proof: `test/application-architecture-gate.test.mjs` — the M3-4
   `bootstrap -> backend-loader -> dynamic app/remote/application-runtime`
   shape is the sanctioned one; any other dynamic importer and any static
   Remote edge (including from startup) still fail.
