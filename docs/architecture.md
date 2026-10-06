@@ -188,7 +188,8 @@ Plugins consume host-owned extension APIs, registries and brokers, not raw
 
 **There is ONE transcript semantic authority.**
 
-`src/transcript.ts` — and the future `src/transcript/**` module split — owns the
+`src/transcript.ts` — and the future `src/domain/transcript/**` module split, with
+`src/transcript.ts` kept as the facade — owns the
 semantic fold/projection facts: durable chronology, turn/step identity,
 assistant/thinking convergence, workflow/subcall projection, read grouping,
 compaction fusion, search corpus identity/revision and `TranscriptItemId`
@@ -196,7 +197,8 @@ allocation.
 
 TUI/Focus/Compact/Search presentation may consume those facts but may not own an
 independent chronology or fold. The Post-M3 TS7 modularization of
-`src/transcript.ts` is an internal module split only: no second mutable
+`src/transcript.ts` into `src/domain/transcript/**` is an internal module split
+only: no second mutable
 `TranscriptFolder`/search/focus semantic store.
 
 ## Direct and Remote
@@ -286,7 +288,7 @@ TS4–TS8  TuiApp / transcript / residual closure                 NOT STARTED
 TS4      TuiApp leaf / component extraction
 TS5      TuiApp interaction / overlay / editor convergence
 TS6      TuiApp transcript-view extraction
-TS7      transcript.ts internal modularization (ONE TranscriptFolder authority)
+TS7      transcript.ts -> domain/transcript/** internal modularization (ONE TranscriptFolder authority)
 TS8      residual audit + architecture closure
 ```
 
