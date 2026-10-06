@@ -5,14 +5,14 @@
  * registry). It never reads a Host service, never mutates inventory and
  * never decides success.
  *
- * @module @xmoon76/dsh-pi-tui/plugin-manager/panel
+ * @module @xmoon76/dsh-pi-tui/tui/plugin-manager/panel
  */
 
 import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
-import { color } from '../theme.ts'
-import type { PluginManagerController, PluginInstallView } from '../app/plugin-manager/controller.ts'
-import type { PluginManagerRow } from '../app/plugin-manager/model.ts'
+import { color } from '../../theme.ts'
+import type { PluginManagerController, PluginInstallView } from '../../app/plugin-manager/controller.ts'
+import type { PluginManagerRow } from '../../app/plugin-manager/model.ts'
 
 function tone(text: string, rowTone: PluginManagerRow['tone']): string {
   switch (rowTone) {
@@ -362,4 +362,18 @@ export class PluginManagerPanel implements Component, Focusable {
     lines.push(color.textDim(truncateToWidth(hint, width, '…')))
     return { lines, selectedLine: undefined }
   }
+}
+
+/**
+ * The concrete panel factory the composition zone injects into the application
+ * Plugin Manager owner (TS4 §9). It constructs exactly one `PluginManagerPanel`
+ * with the same arguments and nothing else — no wrapping, caching, registry or
+ * lifecycle.
+ */
+export function createPluginManagerPanel(
+  controller: PluginManagerController,
+  requestRender: () => void,
+  options: { readonly onDispose?: () => void } = {},
+): PluginManagerPanel {
+  return new PluginManagerPanel(controller, requestRender, options)
 }
