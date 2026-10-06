@@ -1143,6 +1143,8 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     ['../notification/x.ts', 'tui/notification/x.ts'],
     ['../plugin-manager/x.ts', 'tui/plugin-manager/x.ts'],
     ['../../tui-app.ts', 'tui-app.ts'],
+    // The command facade is part of the TUI command layer, not a core input.
+    ['../../commands.ts', 'commands.ts'],
     ['../../theme.ts', 'theme.ts'],
     ['../../icons.ts', 'icons.ts'],
     // The allowance is the core SUBTREE, not a name prefix: a similarly-named
