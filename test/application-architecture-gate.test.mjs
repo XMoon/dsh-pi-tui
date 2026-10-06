@@ -1079,6 +1079,44 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
   assert.equal(remoteEdgeWrapped[0].rule, 'remote-dynamic-import-owner')
 })
 
+test('TS5 ownership boundaries are non-vacuous (app/domain/runtime -> tui locks)', () => {
+  // The TS5 owners are exactly the files the plan names. Each direction lock
+  // must reject a concrete `tui/**` import from its layer (type-only included),
+  // so "the new owners are behind a seam" cannot pass vacuously.
+  const negatives = [
+    ['app/surface/settings-runtime.ts', '../../tui/keybindings/manager.ts', 'tui/keybindings/manager.ts', 'app-imports-tui'],
+    ['app/surface/settings-runtime.ts', '../../tui/footer/runtime.ts', 'tui/footer/runtime.ts', 'app-imports-tui'],
+    ['app/surface/notification-runtime.ts', '../../tui/notification/runtime.ts', 'tui/notification/runtime.ts', 'app-imports-tui'],
+    ['domain/footer/layout.ts', '../../tui/footer/composer.ts', 'tui/footer/composer.ts', 'domain-imports-tui'],
+    ['domain/notification/controller.ts', '../../tui/notification/terminal-notifier.ts', 'tui/notification/terminal-notifier.ts', 'domain-imports-tui'],
+    ['runtime/backend-loader.ts', '../tui/interaction/input-router.ts', 'tui/interaction/input-router.ts', 'runtime-imports-tui'],
+  ]
+  for (const [file, specifier, target, rule] of negatives) {
+    const violations = findViolations([
+      entry(file, `import type { X } from '${specifier}'\n`),
+      entry(target, 'export type X = 1\n'),
+    ])
+    assert.equal(violations.length, 1, `${file} -> ${specifier} must be rejected`)
+    assert.equal(violations[0].rule, rule)
+  }
+  // Positive controls: the composition zone selects the concrete TUI
+  // implementation, and the TUI consumes application-facing / extension
+  // structural contracts.
+  const positives = [
+    ['app/bootstrap.ts', '../tui/notification/runtime.ts', 'tui/notification/runtime.ts'],
+    ['app/bootstrap/lifecycle.ts', '../../tui/notification/runtime.ts', 'tui/notification/runtime.ts'],
+    ['tui/interaction/approval-runtime.ts', '../../app/surface/notification-runtime.ts', 'app/surface/notification-runtime.ts'],
+    ['tui/keybindings/manager.ts', '../../extension/public-types.ts', 'extension/public-types.ts'],
+  ]
+  for (const [file, specifier, target] of positives) {
+    assert.deepEqual(
+      findViolations([entry(file, `import { x } from '${specifier}'\n`), entry(target, 'export const x = 1\n')]),
+      [],
+      `${file} -> ${specifier} must stay allowed`,
+    )
+  }
+})
+
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
   const specs = parseValueDynamicImports(
     [

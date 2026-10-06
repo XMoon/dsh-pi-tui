@@ -94,7 +94,7 @@ follow-up read always observes the current ownership.
 | `src/skill-catalog-refresh.ts` | `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; target-change transitions; same-target retention; standing degradation notices; dispose cancellation) and `CoalescingRefreshGate` |
 | `src/skill-reference-completion.ts` | The pure Client-local inline skill reference grammar: `extractInlineSkillPrefix()` (whitespace-boundary `/name` token classification, first-line command seat excluded) and `applyInlineSkillReference()` (replace `/query` with `/name `, one separator, cursor on it). No Context/Agent/Session/registry/Remote access |
 | `src/mentions.ts` | `MentionProvider` inline skill source: prompt-mode routing, fuzzy candidates from the detached `HumanSkillSummary[]`, query-part prefix (never `/`-prefixed), strict snapshot fence, catalog-guarded apply |
-| `src/tui-editor.ts` | The consumer-side natural trigger: the vendored editor rejects `/` as a trigger character, so the host editor re-triggers the provider on the pure classifier (same pattern as the `@`-mention trigger) |
+| `src/tui/interaction/tui-editor.ts` | The consumer-side natural trigger: the vendored editor rejects `/` as a trigger character, so the host editor re-triggers the provider on the pure classifier (same pattern as the `@`-mention trigger) |
 
 ## D1.2 authority shadow
 

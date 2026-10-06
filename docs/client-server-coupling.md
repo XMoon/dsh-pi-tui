@@ -460,18 +460,19 @@ Client-local policy over the semantic projection: the ephemeral steering lane's
 `placement + running` state in `src/tui-app.ts`, and the parked-steering
 recovery notice in `src/steer.ts` explains the official next-wake path while
 performing no Host write. Representative files:
-`src/tui-app.ts`, `src/tui-editor.ts`, `src/theme.ts`, `src/present.ts`
-(rendering half), `src/clipboard.ts`, `src/history.ts`, `src/search.ts`,
-`src/overlay-broker.ts`, `src/keybinding-registry.ts`,
-`src/editor-registry.ts`, `src/renderer-registry.ts`.
+`src/tui-app.ts`, `src/tui/interaction/tui-editor.ts`, `src/theme.ts`,
+`src/present.ts` (rendering half), `src/clipboard.ts`, `src/history.ts`,
+`src/search.ts`, `src/tui/interaction/overlay-broker.ts`,
+`src/keybinding-registry.ts`, `src/editor-registry.ts`,
+`src/renderer-registry.ts`.
 `src/session-artifact-filename.ts` (Pre-Stage-D export convergence) is
 Client-local filename policy with ZERO Host coupling: the archive name
 mirrors the upstream `sessionLogZipFilename` convention exactly and is
 test-pinned against the upstream function (parity test in
 `test/export-command.test.ts`), and the transcript name shares the same
 safe full-Session-id convention. `src/client-artifact-save.ts` and
-`src/save-location.ts` are the Client-local temp/atomic-commit sink and the
-Save Location UI — zero Host coupling.
+`src/tui/interaction/save-location.ts` are the Client-local temp/atomic-commit
+sink and the Save Location UI — zero Host coupling.
 
 ### User shell ownership (shell amendment, M3-4 PR3)
 

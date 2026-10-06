@@ -745,7 +745,8 @@ Every new feature declares its machine ownership (AGENTS.md guardrail):
   Direct backend provides the facts; a Remote backend must source the same
   derivations from the DSH client contract — the status seam is the
   sanctioned migration port (see `docs/client-server-coupling.md`).
-- **The footer surface (composer/layout/items/configurator, `src/footer/`)
+- **The footer surface (composer/layout/items/configurator, `src/tui/footer/`
+  presentation over the neutral `src/domain/footer/` configuration)
   is client-local presentation.** It consumes the snapshot; no Host
   service is read there. The extension footer items ride the public
   extension service (Stable; Direct profile-Context-composed, Remote

@@ -40,13 +40,17 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/commands.ts` | stable command facade + registration/catalog coordinator |
 | `src/transcript.ts` | ONE transcript semantic authority; TS7 modularization target |
 | `src/extension/**` | extension service/Client-local extension ownership |
-| `src/keybindings/**` | keybinding definitions/dispatch machinery |
-| `src/footer/**` | footer composition/configuration |
+| `src/domain/footer/**` | transport/UI-neutral footer layout/policy/command DTOs (TS5) |
+| `src/domain/notification/**` | transport/UI-neutral notification policy + completion state machine (TS5) |
+| `src/tui/interaction/**` | input/overlay/editor-seat interaction primitives and modal lifecycles (TS5) |
+| `src/tui/keybindings/**` | keybinding definitions/dispatch machinery (TS5) |
+| `src/tui/footer/**` | terminal footer composition/configuration/runtime (TS5) |
+| `src/tui/notification/**` | terminal focus reports, notifier and notification presentation (TS5) |
 | `src/tui/components/**` | generic TUI leaf components (frames, transcript leaves, media, marquee) |
 | `src/tui/panels/**` | TUI panels (task browser, history, approval dialog, output viewer) |
 | `src/tui/pickers/**` | TUI pickers, the picker adapters and the marquee/filter seam |
 | `src/tui/plugin-manager/panel.ts` | the concrete Plugin Manager terminal panel (TS4) |
-| remaining historical feature dirs (`image/`, `attachment/`, `notification/`, `file-completion/`, `keybinding-ui/`, …) | keep domain ownership until their assigned stage |
+| remaining historical feature dirs (`image/`, `attachment/`, `file-completion/`, …) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` and `src/transcript.ts` are still the large owners of their
 domains. That size is structural debt, not an invitation to move their semantics
@@ -150,9 +154,10 @@ facade/coordinator (it owns the dynamic skill wrappers and the catalog
 coordinator for the same definitions). `src/tui/**` is the Client terminal
 presentation layer: `src/tui-app.ts` plus the extracted presentation owners
 (`src/tui/commands/**` from TS1; `src/tui/components/**`, `src/tui/panels/**`,
-`src/tui/pickers/**` and `src/tui/plugin-manager/**` from TS4; interaction and
-transcript-view owners in TS5–TS6). It is not an application or Host layer —
-application lifecycle/orchestration stays in `src/app/**`.
+`src/tui/pickers/**` and `src/tui/plugin-manager/**` from TS4; the interaction,
+keybinding, footer and notification owners from TS5; the transcript-view owner
+in TS6). It is not an application or Host layer — application lifecycle/
+orchestration stays in `src/app/**`.
 
 ## Source placement and the root ledger
 
@@ -164,7 +169,7 @@ stable
   deliberate root entries/facades expected to remain during this train
 
 legacy
-  grandfathered historical root modules awaiting TS5–TS8 owner migration
+  grandfathered historical root modules awaiting TS6–TS8 owner migration
 ```
 
 The architecture gate fails when a current `src/*.ts|.tsx|.mts|.cts` module is
@@ -173,7 +178,8 @@ exists (stale entry — remove it in the same PR that moved/deleted the file), w
 a `stable` entry no longer exists, when an entry is duplicated, or when the schema
 is unknown. The gate never auto-writes or auto-accepts a baseline entry. During
 TS5–TS8 a move deletes the corresponding `legacy` entry in the same PR; an
-ordinary new root module is never allowed.
+ordinary new root module is never allowed. TS5 retired the nine frozen root
+interaction modules (`119 -> 110`).
 
 ## Existing directory convergence
 
@@ -183,10 +189,10 @@ owners:
 | Directory | Target owner | Stage |
 |---|---|---|
 | `components/` | `tui/components/` (DONE — `src/components/` is absent) | TS4 DONE |
-| `keybinding-ui/` | `tui/keybindings/ui/` | TS5 |
-| `keybindings/` | `tui/keybindings/` | TS5 |
-| `footer/` | `domain/footer/` + `tui/footer/` | TS5 |
-| `notification/` | `domain/notification/` + `tui/notification/` | TS5 |
+| `keybinding-ui/` | `tui/keybindings/ui/` (DONE — `src/keybinding-ui/` is absent) | TS5 DONE |
+| `keybindings/` | `tui/keybindings/` (DONE — `src/keybindings/` is absent) | TS5 DONE |
+| `footer/` | `domain/footer/` + `tui/footer/` (DONE — `src/footer/` is absent) | TS5 DONE |
+| `notification/` | `domain/notification/` + `tui/notification/` (DONE — `src/notification/` is absent) | TS5 DONE |
 | `plugin-manager/` | `app/plugin-manager/` + `tui/plugin-manager/panel.ts` (DONE — `src/plugin-manager/` is absent) | TS3 + TS4 DONE |
 | `status/` | `domain/status/` (DONE — `src/status/` is absent) | TS3 DONE |
 | `image/` | `client/media/image/` | TS8 |
@@ -241,9 +247,14 @@ TS6; the leaf TUI components/panels/pickers now live in their canonical
 `TuiApp` is an implementation detail, not a semantic authority and not a public
 extension API.
 
-It still owns too many presentation/interaction responsibilities; TS5–TS6 will
-converge the remaining owners. This debt is structural, not a reason to move business
-semantics into the TUI.
+TS5 moved the interaction primitives, the question/save-location seat frames,
+the approval lifecycle, the keybinding authority, the footer runtime and the
+notification presentation out of `TuiApp` and behind their canonical owners
+(`src/tui/interaction/**`, `src/tui/keybindings/**`, `src/tui/footer/**`,
+`src/tui/notification/**`). `TuiApp` remains the terminal composition facade and
+the high-level coordinator; TS6 will extract the transcript-view orchestration.
+The remaining size is structural debt, not a reason to move business semantics
+into the TUI.
 
 Plugins consume host-owned extension APIs, registries and brokers, not raw
 `TuiApp` or vendored `pi-tui` internals. See `docs/extension-api.md`,
@@ -368,8 +379,8 @@ through them in ownership-first order:
 TS0  architecture authority + long-lived gate refresh          DONE
 TS1  TUI command layer + source placement policy                DONE
 TS2 + TS3  app/bootstrap + app/surface composition convergence  DONE
-TS4  TUI leaf / component / panel / picker convergence          CURRENT
-TS5  TuiApp interaction / overlay / editor convergence          NEXT
+TS4  TUI leaf / component / panel / picker convergence          DONE
+TS5  TuiApp interaction / overlay / editor convergence          DONE
 TS6–TS8  transcript / residual closure                          NOT STARTED
 
 TS4      TuiApp leaf / component extraction
