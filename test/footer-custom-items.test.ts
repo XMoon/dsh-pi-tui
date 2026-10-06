@@ -9,8 +9,8 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
-import { FooterComposer } from '../src/footer/composer.ts'
-import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
+import { FooterComposer } from '../src/tui/footer/composer.ts'
+import { FooterCustomItemCatalog } from '../src/tui/footer/custom-item-catalog.ts'
 import {
   DEFAULT_CUSTOM_COMMAND_REFRESH_MS,
   effectiveCustomCommandRefreshMs,
@@ -18,10 +18,10 @@ import {
   parseFooterCustomItem,
   parseFooterCustomItems,
 } from '../src/domain/footer/custom-items.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { FooterItemRegistry } from '../src/footer/item-registry.ts'
-import { FooterConfiguratorModel, itemMenuFor } from '../src/footer/configurator-model.ts'
-import type { FooterItemDefinition } from '../src/footer/types.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
+import { FooterItemRegistry } from '../src/tui/footer/item-registry.ts'
+import { FooterConfiguratorModel, itemMenuFor } from '../src/tui/footer/configurator-model.ts'
+import type { FooterItemDefinition } from '../src/tui/footer/presentation-types.ts'
 import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

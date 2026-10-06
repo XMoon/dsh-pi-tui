@@ -9,8 +9,8 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { FooterComposer } from '../src/footer/composer.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
+import { FooterComposer } from '../src/tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'

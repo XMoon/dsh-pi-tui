@@ -30,15 +30,15 @@ import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../keyb
 import type { KeybindingEditorModel } from '../keybindings/ui/model.ts'
 import { parseFooterLayout, isFooterLayout } from '../../domain/footer/layout.ts'
 import { DEFAULT_FOOTER_LAYOUT } from '../../domain/footer/presets.ts'
-import { FooterComposer } from '../../footer/composer.ts'
-import { FooterCustomItemCatalog } from '../../footer/custom-items.ts'
+import { FooterComposer } from '../footer/composer.ts'
+import { FooterCustomItemCatalog } from '../footer/custom-item-catalog.ts'
 import {
   parseFooterCustomItem,
   parseFooterCustomItems,
   type FooterCustomItemSettings,
 } from '../../domain/footer/custom-items.ts'
-import { FooterItemRegistry } from '../../footer/item-registry.ts'
-import { FooterConfiguratorModel, sameFooterCustomItem } from '../../footer/configurator-model.ts'
+import { FooterItemRegistry } from '../footer/item-registry.ts'
+import { FooterConfiguratorModel, sameFooterCustomItem } from '../footer/configurator-model.ts'
 import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { color } from '../../theme.ts'

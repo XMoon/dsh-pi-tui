@@ -16,7 +16,7 @@
  */
 
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { shortCwd } from './footer/formatters.ts'
+import { shortCwd } from './tui/footer/formatters.ts'
 
 /** The title display cap (terminal cells, not code units). */
 export const MAX_TERMINAL_TITLE_WIDTH = 40

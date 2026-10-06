@@ -20,13 +20,13 @@
  * timer and its cache; whole-footer command mode suspends every per-item
  * runner (the command surface covers the native items); dispose() leaves
  * no child, timer or listener behind.
- * @module @xmoon76/dsh-pi-tui/footer/dynamic-item-runtime
+ * @module @xmoon76/dsh-pi-tui/tui/footer/dynamic-item-runtime
  */
 
 import { FooterCommandRunner } from './command-runner.ts'
-import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
-import { customCommandConfigOf, type FooterCustomCommandItemSettings } from '../domain/footer/custom-items.ts'
-import type { StatusSnapshot } from '../domain/status/types.ts'
+import type { FooterCommandConfig } from '../../domain/footer/command-config.ts'
+import { customCommandConfigOf, type FooterCustomCommandItemSettings } from '../../domain/footer/custom-items.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
 
 /** The runtime's options. */
 export interface FooterDynamicItemRuntimeOptions {

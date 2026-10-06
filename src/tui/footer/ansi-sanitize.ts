@@ -5,7 +5,7 @@
  * text, SGR color/style sequences, and OSC 8 hyperlinks. Everything else
  * — cursor movement, screen clears, OSC title, OSC 52 clipboard, device
  * control, unknown ESC sequences, C0 controls — is stripped.
- * @module @xmoon76/dsh-pi-tui/footer/ansi-sanitize
+ * @module @xmoon76/dsh-pi-tui/tui/footer/ansi-sanitize
  */
 
 /** One KEEP alternative: an SGR sequence (`ESC [ params m`) or an OSC 8

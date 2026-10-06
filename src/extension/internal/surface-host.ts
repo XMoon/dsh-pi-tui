@@ -24,7 +24,7 @@ import { InvalidateBatcher } from './batcher.ts'
 import { SurfaceStateStore } from './surface-state.ts'
 import { HeaderBadgeOutlet, DockItemOutlet, FooterSegmentOutlet } from './slot-outlet.ts'
 import { WidgetOutlet } from './widget-outlet.ts'
-import type { FooterItemDefinition } from '../../footer/types.ts'
+import type { FooterItemDefinition } from '../../tui/footer/presentation-types.ts'
 
 /** The surface host bound to one live surface. */
 export class SurfaceHost {

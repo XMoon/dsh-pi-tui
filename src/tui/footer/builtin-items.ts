@@ -14,10 +14,10 @@
  * data-source items (cwd/turns-steps/usage placements) follow the display
  * subject's section values. `stats-line` stays registered as the legacy
  * composite for existing custom layouts, never in the default preset.
- * @module @xmoon76/dsh-pi-tui/footer/builtin-items
+ * @module @xmoon76/dsh-pi-tui/tui/footer/builtin-items
  */
 
-import type { StatusSnapshot } from '../domain/status/types.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   formatCacheHit,
@@ -48,7 +48,7 @@ import {
   formatVersion,
   formatWorkingDirectory,
 } from './formatters.ts'
-import type { FooterItemDefinition } from './types.ts'
+import type { FooterItemDefinition } from './presentation-types.ts'
 import { FooterItemRegistry } from './item-registry.ts'
 
 /** The legacy permission badge mapping (M1 parity — the plan's §14.4 tone

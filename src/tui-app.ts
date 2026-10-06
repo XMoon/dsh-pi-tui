@@ -139,15 +139,18 @@ import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusP
 import { deriveActivityStatus } from './domain/status/derive-activity.ts'
 import { initialStatusSnapshot } from './domain/status/snapshot.ts'
 import { StatusStore as StatusStoreImpl } from './domain/status/store.ts'
-import { FooterComposer, mergeCommandSurface } from './footer/composer.ts'
-import { createBuiltinFooterRegistry } from './footer/builtin-items.ts'
-import { resolveFooterInstruction } from './footer/instruction.ts'
+import { FooterComposer, mergeCommandSurface } from './tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from './tui/footer/builtin-items.ts'
+import { resolveFooterInstruction } from './tui/footer/instruction.ts'
 import { layoutForPreset } from './domain/footer/presets.ts'
-import { FooterConfiguratorModel } from './footer/configurator-model.ts'
-import { FooterConfiguratorPanel } from './footer/configurator.ts'
-import { FooterCustomItemCatalog } from './footer/custom-items.ts'
-import type { FooterItemRegistry } from './footer/item-registry.ts'
-import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './footer/types.ts'
+import { FooterConfiguratorModel } from './tui/footer/configurator-model.ts'
+import { FooterConfiguratorPanel } from './tui/footer/configurator.ts'
+import { FooterCustomItemCatalog } from './tui/footer/custom-item-catalog.ts'
+import type { FooterItemRegistry } from './tui/footer/item-registry.ts'
+import { createFooterRuntime, type FooterRuntime } from './tui/footer/runtime.ts'
+import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './tui/footer/presentation-types.ts'
+import type { FooterCommandConfig } from './domain/footer/command-config.ts'
+import type { FooterCustomCommandItemSettings } from './domain/footer/custom-items.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
 import { SelectedMarquee } from './tui/components/marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
@@ -2172,6 +2175,22 @@ export class TuiApp {
    * setFooterCommandItemValue; the catalog's value source reads it
    * SYNCHRONOUSLY during render — the render path never spawns. */
   private readonly footerCommandItemValues = new Map<string, string>()
+  /**
+   * The footer command runtime (TS5 §13.4): the ONE owner of the whole-footer
+   * runner, the per-item runners, the status subscription that refreshes them
+   * and their disposal. The application settings owner calls the narrow
+   * capabilities below; it never constructs these TUI resources itself.
+   */
+  private readonly footerRuntime: FooterRuntime = createFooterRuntime({
+    snapshot: () => this.statusStore.snapshot(),
+    width: () => this.getTerminalWidth(),
+    height: () => this.getTerminalHeight(),
+    subscribeStatus: (listener) => this.statusStore.subscribe(listener),
+    onCommandOutput: (rows) => { this.setFooterCommandRows(rows) },
+    onCommandItemValue: (id, value) => { this.setFooterCommandItemValue(id, value) },
+    onNotifyOnce: (message) => { this.notify(message, 'error') },
+    effectiveLayout: () => this.getEffectiveFooterLayout(),
+  })
   /** The footer composer (M1): renders the active layout against the
    * snapshot. */
   private readonly footerComposer: FooterComposer
@@ -16445,6 +16464,47 @@ export class TuiApp {
   setFooterCommandRows(rows: string[] | undefined): void {
     this.commandRows = rows
     this.renderFooter()
+  }
+
+  /**
+   * TS5 §13.4: the narrow footer-command capabilities the application settings
+   * owner drives. Each maps 1:1 onto the existing footer-command operation, so
+   * the TUI keeps the sole ownership of the runner resources while the
+   * application keeps the trust decision and the apply ordering.
+   */
+  applyFooterCommandConfig(config: FooterCommandConfig, signal: AbortSignal): void {
+    this.footerRuntime.armCommand(config, signal)
+  }
+
+  /** Disable the whole-footer command surface (the native layout applies). */
+  disableFooterCommand(): void {
+    this.footerRuntime.disableCommand()
+  }
+
+  /** Reconcile the per-item command runners with the USER-layer trusted
+   *  definitions and the authorized activation ids. */
+  syncFooterCommandItems(
+    trustedCommands: readonly FooterCustomCommandItemSettings[],
+    authorizedIds: ReadonlySet<string>,
+    signal: AbortSignal,
+  ): void {
+    this.footerRuntime.syncCommandItems(trustedCommands, authorizedIds, signal)
+  }
+
+  /** Suspend every per-item command runner (the whole-footer surface covers
+   *  the native items). */
+  suspendFooterCommandItems(): void {
+    this.footerRuntime.suspendCommandItems()
+  }
+
+  /** Refresh the armed whole-footer command runner (terminal resize). */
+  requestFooterCommandRefresh(): void {
+    this.footerRuntime.requestRefresh()
+  }
+
+  /** Release every footer-command resource (idempotent). */
+  disposeFooterCommand(): void {
+    this.footerRuntime.dispose()
   }
 
   /** M5: the live terminal width (the command runner's geometry input). */

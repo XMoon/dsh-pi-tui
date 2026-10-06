@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { renderSpans } from '../src/footer/composer.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
+import { renderSpans } from '../src/tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
-import type { FooterItemRef } from '../src/footer/types.ts'
+import type { FooterItemRef } from '../src/tui/footer/presentation-types.ts'
 
 const registry = createBuiltinFooterRegistry()
 const ref: FooterItemRef = { id: 'tasks' }

@@ -5,7 +5,7 @@
  * overwrite a newer snapshot; the output is capped, sanitized and
  * row-limited; failures fall back to the native layout with a one-shot
  * diagnostic (never a per-second notify).
- * @module @xmoon76/dsh-pi-tui/footer/command-runner
+ * @module @xmoon76/dsh-pi-tui/tui/footer/command-runner
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -13,9 +13,9 @@ import { readFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { truncateToWidth } from '@xmoon76/pi-tui'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'
-import { buildCommandInput } from '../domain/footer/command-protocol.ts'
-import type { StatusSnapshot } from '../domain/status/types.ts'
-import { MAX_COMMAND_TIMEOUT_MS, type FooterCommandConfig } from '../domain/footer/command-config.ts'
+import { buildCommandInput } from '../../domain/footer/command-protocol.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
+import { MAX_COMMAND_TIMEOUT_MS, type FooterCommandConfig } from '../../domain/footer/command-config.ts'
 
 
 /** The runner's options. */

@@ -125,7 +125,7 @@ test('C0/C1 control characters in a title are stripped', () => {
 
 test('shortPathCwd delegates to the footer formatter (single implementation, no drift)', async () => {
   // The footer's shortCwd is the ONE implementation; the title must use it.
-  const { shortCwd } = await import('../src/footer/formatters.ts')
+  const { shortCwd } = await import('../src/tui/footer/formatters.ts')
   for (const cwd of ['/foo/bar', '/foo/bar/baz', '/', 'C:\\repo', 'C:\\repo\\work\\deep', '\\\\server\\share\\deep']) {
     assert.equal(shortPathCwd(cwd), shortCwd(cwd), `shortPathCwd must equal footer shortCwd for ${cwd}`)
   }
