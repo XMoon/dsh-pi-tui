@@ -2812,7 +2812,7 @@ export class TuiApp {
   /**
    * The shared DisplayState derives Focus when its preset is `focus`; while
    * active, the transcript projection replaces each turn's intermediate
-   * activity with a live Thought block (see focus-activity.ts). The
+   * activity with a live Thought block (see tui/transcript/focus-projection.ts). The
    * WorkingIndicator is NEVER hidden by Focus — the two surfaces are
    * independent.
    */
@@ -7620,7 +7620,7 @@ export class TuiApp {
   /**
    * The presentation projection over the current transcript window. The
    * semantic segmentation is owned once by
-   * {@link projectTranscriptStructure} (`transcript-projection.ts`); this entry
+   * {@link projectTranscriptStructure} (`tui/transcript/structure.ts`); this entry
    * selects the materialization from the {@link displayPolicyFor} layers:
    * Compact (turnLayer open + Process collapsed) renders Work cards, Focus
    * (focusBehavior) runs the Focus turn projection and substitutes the canonical

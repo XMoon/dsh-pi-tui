@@ -1,7 +1,7 @@
 /**
  * Compact materialization over the canonical transcript structure.
  *
- * The semantic segmentation is owned by `transcript-projection.ts`; this module
+ * The semantic segmentation is owned by `structure.ts`; this module
  * only decides how Compact PRESENTS it: a collapsed Work span emits its header
  * block, an expanded span emits the header followed by its raw member rows, and
  * an ambient Context cluster emits a header (or flat members on a surface with

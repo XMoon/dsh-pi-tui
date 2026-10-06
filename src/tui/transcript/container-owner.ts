@@ -1,5 +1,5 @@
 /**
- * Neutral transcript-disclosure container vocabulary.
+ * Neutral transcript container-owner vocabulary.
  *
  * F5 made Work and Context-cluster semantic identity preset-neutral; this
  * module owns the ONE container-owner vocabulary the disclosure layer uses to
@@ -11,7 +11,7 @@
  *
  * This file holds pure vocabulary/equality helpers only. Mutable TuiApp
  * disclosure state stays in `tui-app.ts`, and the canonical segmentation stays
- * in `transcript-projection.ts`.
+ * in `structure.ts`.
  * @module @xmoon76/dsh-pi-tui/tui/transcript/container-owner
  */
 
