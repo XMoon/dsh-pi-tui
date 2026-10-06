@@ -196,12 +196,24 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
   const seamsEnd = indexSource.indexOf('\n      surfaceCatalogContext:', seamsAt)
   const seamsBody = indexSource.slice(seamsAt, seamsEnd)
   // PR4 §3.3/§12.4 relocated the Direct stats / last-assistant reads into the
-  // branch-shared helpers just above the seams (they are still the composition
-  // root's OWN fenced-attachment reads): the invariant is "every Direct
-  // session-log read resolves the exact fenced attachment", checked
-  // composition-root-wide, while the seams keep no raw current read.
-  assert.equal(count(indexSource, 'command.attachmentForSession('), 2,
+  // branch-shared helpers; TS2 §8 then moved those helpers (and their two
+  // session-log reads) into `src/app/bootstrap/presentation-bridge.ts`. The
+  // invariant is "every Direct session-log read resolves the EXACT fenced
+  // attachment": the composition zone provides the fenced session accessor
+  // exactly ONCE, and the helper performs both reads through that injected
+  // accessor and nothing else.
+  const bridgeSource = readFileSync(new URL('../src/app/bootstrap/presentation-bridge.ts', import.meta.url), 'utf8')
+  assert.equal(
+    count(indexSource, 'directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session,'),
+    1,
+    'the composition zone must provide the exact fenced attachment exactly once',
+  )
+  assert.equal(count(indexSource, 'command.attachmentForSession('), 1,
     'the Direct session-log reads must resolve the exact fenced attachment')
+  assert.equal(count(bridgeSource, 'directSessionFor('), 2,
+    'both Direct session-log reads (the stats fold and the last-assistant read) go through the injected fenced accessor')
+  assert.equal(count(bridgeSource, 'deps.'), 0,
+    'the bridge reads only its injected dependencies, never a raw current attachment')
   assert.equal(count(seamsBody, 'deps.liveAgent()'), 0,
     'the seams never resolve the raw current attachment')
   assert.equal(count(seamsBody, 'commands.list(agentNow())'), 1,

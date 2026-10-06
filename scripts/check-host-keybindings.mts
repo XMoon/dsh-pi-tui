@@ -43,11 +43,25 @@ const COMMAND_STRING_FILES = [
     .map(name => `src/tui/commands/${name}`),
 ]
 
+/**
+ * The application composition zone's user-facing strings: the facade plus EVERY
+ * `src/app/bootstrap/**` helper (TS2 §21). The directory scan is deterministic
+ * (sorted) so a user-facing string that moves into a new composition helper
+ * stays covered instead of silently escaping the chord-label gate.
+ */
+const BOOTSTRAP_STRING_FILES = [
+  'src/app/bootstrap.ts',
+  ...readdirSync(join(process.cwd(), 'src/app/bootstrap'))
+    .filter(name => name.endsWith('.ts'))
+    .sort()
+    .map(name => `src/app/bootstrap/${name}`),
+]
+
 /** The user-facing string files (hard-coded chord labels must not
  * resurface in anything the user sees). */
 const SCANNED_STRING_FILES = [
   'src/index.ts',
-  'src/app/bootstrap.ts',
+  ...BOOTSTRAP_STRING_FILES,
   ...COMMAND_STRING_FILES,
   'src/tui-app.ts',
   'src/local-shell-card.ts',

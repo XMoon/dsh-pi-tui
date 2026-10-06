@@ -1,9 +1,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import ts from 'typescript'
 
 import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
-import { aliasAwareConstructionSites, ownerFile, ownerOccurrences, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import {
+  aliasAwareConstructionSites,
+  ownerFile,
+  ownerOccurrences,
+  productionSource,
+  productionSources,
+  productionSourcesUnder,
+  unwrapExpression,
+} from './support/owner-modules.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -94,11 +105,12 @@ const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
   ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
-test('A5: the composition surface is the entry plus the composition root', () => {
+test('A5: the composition surface is the entry plus the composition zone', () => {
   const sources = compositionSources()
   assert.equal(sources[0].rel, 'src/index.ts', 'the package entry is the first composition-surface file')
-  for (const { rel } of sources) {
-    assert.ok(rel === 'src/index.ts' || rel === 'src/app/bootstrap.ts', `${rel} is not a composition-surface file`)
+  assert.equal(sources[1].rel, 'src/app/bootstrap.ts', 'the composition facade is the second composition-surface file')
+  for (const { rel } of sources.slice(2)) {
+    assert.ok(rel.startsWith('src/app/bootstrap/'), `${rel} is not a composition-surface file`)
   }
 })
 
@@ -114,13 +126,19 @@ test('A5a: the composition ROOT owns every composition site (the entry owns none
   // aggregate counts below cannot catch a regression that moves a construction
   // back into the entry while deleting it from the composition root — the
   // count stays 1 and every aggregate lock stays green (A5a review P2).
-  assert.deepEqual(
-    compositionSources().map(({ rel }) => rel),
-    ['src/index.ts', 'src/app/bootstrap.ts'],
-    'the composition surface must be exactly the package entry plus the composition root',
-  )
+  //
+  // TS2: the composition ROOT is the whole composition zone — the facade plus
+  // every `src/app/bootstrap/**` helper. The entry stays excluded absolutely;
+  // "the root owns it" means the zone owns it (the helper split is checked by
+  // the per-module location locks in test/a5b-bootstrap-closure.test.ts).
+  const files = compositionSources().map(({ rel }) => rel)
+  assert.equal(files[0], 'src/index.ts', 'the composition surface must start with the package entry')
+  assert.equal(files[1], 'src/app/bootstrap.ts', 'the composition facade must follow the entry')
+  for (const rel of files.slice(2)) {
+    assert.ok(rel.startsWith('src/app/bootstrap/'), `the composition surface must not widen past the bootstrap zone (${rel})`)
+  }
   const entry = compositionFile('src/index.ts')
-  const root = compositionFile('src/app/bootstrap.ts')
+  const root = compositionSource()
 
   // Plan §29 markers: the entry carries no composition/assembly at all.
   for (const marker of [
@@ -510,4 +528,50 @@ test('A5: the composition surface keeps the startup order', () => {
     assert.ok(at > cursor, `${step} must come after the previous startup step`)
     cursor = at
   }
+})
+
+test('A5/TS2: a .tsx production duplicate cannot escape the single-owner scans', (t) => {
+  // TS1 closed the `.tsx` hole in the production architecture gate; this helper
+  // (the whole-tree duplicate DETECTOR behind the A5b single-owner locks) must
+  // scan the SAME extension set, and must parse a `.tsx` module as TSX. Without
+  // both, a JSX-bearing production module could hold a second composition
+  // construction invisibly.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-a5b-tsx-')
+  mkdirSync(join(root, 'src', 'app', 'surface'), { recursive: true })
+  writeFileSync(join(root, 'src', 'app', 'bootstrap.ts'), 'export const bootstrap = 1\n')
+  const jsxSource = [
+    'export function Probe() {',
+    '  return (',
+    '    <section data-probe={createSessionOwnershipCore({})}>',
+    '      probe',
+    '    </section>',
+    '  )',
+    '}',
+    '',
+  ].join('\n')
+  const rel = 'src/app/surface/duplicate.tsx'
+  writeFileSync(join(root, rel), jsxSource)
+
+  const sources = productionSourcesUnder(root)
+  assert.deepEqual(
+    sources.map(({ rel: scanned }) => scanned),
+    ['src/app/bootstrap.ts', rel],
+    'the production scan must include the .tsx module',
+  )
+  assert.deepEqual(
+    aliasAwareConstructionSites('createSessionOwnershipCore', sources),
+    [rel],
+    'a duplicate composition construction in a .tsx production module must be attributed to its own file',
+  )
+  // Positive control for the parser kind: under the WRONG kind the JSX file is
+  // not a valid module, so the scan of the same bytes cannot be the reason this
+  // passes. The same construction in a real `.ts` file is still found.
+  const tsSpelling = [{ rel: 'src/app/surface/duplicate.ts', source: 'export const s = createSessionOwnershipCore({})\n' }]
+  assert.deepEqual(aliasAwareConstructionSites('createSessionOwnershipCore', tsSpelling), ['src/app/surface/duplicate.ts'])
+  assert.deepEqual(
+    aliasAwareConstructionSites('createSessionOwnershipCore', [{ rel: 'src/app/surface/duplicate.ts', source: jsxSource }]),
+    [],
+    'the JSX source parsed as plain TS must not silently look like a scanned module — the extension drives the parser kind',
+  )
 })
