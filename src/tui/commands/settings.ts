@@ -14,45 +14,45 @@
 import type { SettingItem } from '@xmoon76/pi-tui'
 import { SettingsList } from '@xmoon76/pi-tui'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
-import type { TuiApp } from '../tui-app.ts'
-import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../home-end-keys.ts'
-import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from '../display-preset.ts'
-import { parseProgressUpdates, parseResponseStyle } from '../communication-policy.ts'
-import { parseGitAttributionMode } from '../git-attribution.ts'
-import { parseNotificationMethod, parseNotificationMode } from '../notification/settings.ts'
-import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../wheel-scroll.ts'
-import { iconStyleOf } from '../icons.ts'
-import { parseUserKeybindings } from '../keybindings/config.ts'
-import { formatKeyId } from '../keybindings/hints.ts'
-import type { AppKeybindingId } from '../keybindings/types.ts'
-import { KeybindingEditorController } from '../keybinding-ui/controller.ts'
-import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../keybinding-ui/list.ts'
-import type { KeybindingEditorModel } from '../keybinding-ui/model.ts'
-import { parseFooterLayout, isFooterLayout } from '../footer/layout.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../footer/presets.ts'
-import { FooterComposer } from '../footer/composer.ts'
+import type { TuiApp } from '../../tui-app.ts'
+import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../../home-end-keys.ts'
+import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from '../../display-preset.ts'
+import { parseProgressUpdates, parseResponseStyle } from '../../communication-policy.ts'
+import { parseGitAttributionMode } from '../../git-attribution.ts'
+import { parseNotificationMethod, parseNotificationMode } from '../../notification/settings.ts'
+import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../../wheel-scroll.ts'
+import { iconStyleOf } from '../../icons.ts'
+import { parseUserKeybindings } from '../../keybindings/config.ts'
+import { formatKeyId } from '../../keybindings/hints.ts'
+import type { AppKeybindingId } from '../../keybindings/types.ts'
+import { KeybindingEditorController } from '../../keybinding-ui/controller.ts'
+import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../../keybinding-ui/list.ts'
+import type { KeybindingEditorModel } from '../../keybinding-ui/model.ts'
+import { parseFooterLayout, isFooterLayout } from '../../footer/layout.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../../footer/presets.ts'
+import { FooterComposer } from '../../footer/composer.ts'
 import {
   FooterCustomItemCatalog,
   parseFooterCustomItem,
   parseFooterCustomItems,
   type FooterCustomItemSettings,
-} from '../footer/custom-items.ts'
-import { FooterItemRegistry } from '../footer/item-registry.ts'
-import { FooterConfiguratorModel, sameFooterCustomItem } from '../footer/configurator-model.ts'
-import { runOwned } from '../detached.ts'
-import { safeErrorMessage } from '../error-boundary.ts'
-import { color } from '../theme.ts'
-import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from '../theme-menu.ts'
-import { SubagentModelAllowlistPicker, allowlistSummary } from '../subagent-model-menu.ts'
-import { resolveThemeSelection, normalizePersistedTheme } from '../theme-source.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc } from '../runtime/config-port.ts'
+} from '../../footer/custom-items.ts'
+import { FooterItemRegistry } from '../../footer/item-registry.ts'
+import { FooterConfiguratorModel, sameFooterCustomItem } from '../../footer/configurator-model.ts'
+import { runOwned } from '../../detached.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
+import { color } from '../../theme.ts'
+import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from '../../theme-menu.ts'
+import { SubagentModelAllowlistPicker, allowlistSummary } from '../../subagent-model-menu.ts'
+import { resolveThemeSelection, normalizePersistedTheme } from '../../theme-source.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc } from '../../runtime/config-port.ts'
 import { displaySessionId } from './sessions.ts'
 import type {
   DetachTask,
   RegisterOne,
   RegisterTuiCommand,
   TuiCommandRunner,
-} from '../commands.ts'
+} from '../../commands.ts'
 
 /** The runner operations the settings/display commands consume. */
 type SettingsCommandRunner = Pick<
@@ -1321,7 +1321,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               // disk reset but the runtime claiming "reset failed"), and a
               // Remote adapter must not be a GET → PUT → GET round trip:
               // reset is write + local projection.
-              await settings.replace(doc as unknown as import('../runtime/config-port.ts').TuiSettingsDoc)
+              await settings.replace(doc as unknown as import('../../runtime/config-port.ts').TuiSettingsDoc)
               // Apply the cleared configuration NOW: with the automatic
               // settings watch removed (review round 28 — the reload seam is
               // explicit), a reset that only persisted would leave the
