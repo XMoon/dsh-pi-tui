@@ -14,7 +14,7 @@
 import type { ContextCluster } from './context-structure.ts'
 import { projectTranscriptStructure, type TranscriptWorkSpan } from './structure.ts'
 import type { TranscriptContainerPath } from './container-owner.ts'
-import type { TranscriptMessage } from '../../transcript.ts'
+import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 
 /**
  * The Compact Work span is the canonical {@link TranscriptWorkSpan}. The alias

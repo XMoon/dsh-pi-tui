@@ -15,7 +15,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/transcript/container-owner
  */
 
-import type { TranscriptMessage } from '../../transcript.ts'
+import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 
 /**
  * One semantic container that can own a disclosure on the current surface.

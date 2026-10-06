@@ -24,7 +24,8 @@
 
 import { clusterAdjacentAmbientContext, type ContextCluster } from './context-structure.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
-import { isPostTurnReplayEvidence, type TranscriptMessage } from '../../transcript.ts'
+import { isPostTurnReplayEvidence } from '../../domain/transcript/semantics.ts'
+import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 
 /**
  * One presentation-only contiguous Process run. `members` preserve raw

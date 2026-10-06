@@ -24,7 +24,8 @@ import {
   type CompactActionSource,
   type CompactActionStats,
 } from './process-summary.ts'
-import { THINKING_TAIL_CAP, transcriptTimingOf, type TranscriptTiming } from '../../transcript.ts'
+import { transcriptTimingOf } from '../../domain/transcript/folder.ts'
+import { THINKING_TAIL_CAP, type TranscriptTiming } from '../../domain/transcript/types.ts'
 
 /** The span-local aggregate facts the collapsed Activity card renders. */
 export interface CompactWorkSummary {
