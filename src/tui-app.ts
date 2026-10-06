@@ -233,6 +233,7 @@ import { compactActionPresentation, compactActionSignature, compactActionStatsSi
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
 import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
+import { transcriptRevealAncestryFor, transcriptRevealPathFor, type TranscriptRevealAncestry } from './tui/transcript/reveal.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { CompactWorkComponent } from './tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from './tui/transcript/work-summary.ts'
@@ -1750,14 +1751,6 @@ type ExpandHint = 'click' | 'click-fold' | 'fold' | 'thinking' | undefined
  * and is not repeated here. */
 type SearchRevealPath = TranscriptContainerPath
 
-/** The STABLE ancestry of one search target on the current preset/surface: the
- * canonical Work span and/or Context cluster that could hide it. The current
- * open/hidden state is deliberately NOT part of this value (plan §30). */
-interface SearchRevealAncestry {
-  readonly work?: TranscriptWorkSpan
-  readonly cluster?: ContextCluster
-}
-
 /** The Work a live Preparing call belongs to: the turn's still-open trailing
  * Process run, or a NEW (ephemeral) pending run when that run was closed. */
 type WorkPreparingOwner =
@@ -2886,7 +2879,7 @@ export class TuiApp {
     readonly fullscreen: boolean
     readonly disclosureAvailable: boolean
     readonly messages: readonly TranscriptMessage[]
-    readonly ancestry: SearchRevealAncestry
+    readonly ancestry: TranscriptRevealAncestry
   } | undefined
   /** `focusRootHidesSearchTarget()` memo: the collapsed Focus visibility of one
    * search target for the current window/activity epoch. */
@@ -7770,33 +7763,29 @@ export class TuiApp {
    * state is evaluated separately by {@link revealPathFromAncestry}, so a
    * disclosure toggle can never be served a stale path.
    */
-  private searchRevealAncestryFor(message: TranscriptMessage): SearchRevealAncestry {
+  private searchRevealAncestryFor(message: TranscriptMessage): TranscriptRevealAncestry {
     this.transcriptPresentationDiagnostics.searchOwnerResolutions += 1
-    const ancestry: { work?: TranscriptWorkSpan; cluster?: ContextCluster } = {}
     // Work is a real collapsed container only where the current materialization
     // emits a header AND the surface has an operable disclosure action (a flat
     // fail-open Work hides nothing, so it mints no reveal node).
     const policy = displayPolicyFor(this.displayState.preset)
-    const workIsContainer = this.transcriptDisclosureActionAvailable()
-      && (policy.focusBehavior || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed'))
-    if (workIsContainer) {
-      const span = this.canonicalStructureIndex().workByMember.get(message)
-      if (span !== undefined) ancestry.work = span
-    }
-    // A FLAT cluster (no operable owner) has no header hiding its members, so
-    // it is not a disclosure owner: resolving or promoting it would strand a
-    // manual owner that would unexpectedly reopen the cluster on a surface
-    // change. The SEMANTIC clustering is untouched.
-    if (!this.contextClusterDefaultExpanded()) {
-      const cluster = this.canonicalStructureIndex().clusterByMember.get(message)
-      if (cluster !== undefined) ancestry.cluster = cluster
-    }
-    return ancestry
+    // A FLAT cluster (no operable owner) has no header hiding its members, so it
+    // is not a disclosure owner: resolving or promoting it would strand a manual
+    // owner that would unexpectedly reopen the cluster on a surface change. The
+    // SEMANTIC clustering is untouched. The canonical lookup itself lives in
+    // `tui/transcript/reveal.ts`.
+    return transcriptRevealAncestryFor(message, {
+      workByMember: this.canonicalStructureIndex().workByMember,
+      clusterByMember: this.canonicalStructureIndex().clusterByMember,
+      workIsContainer: this.transcriptDisclosureActionAvailable()
+        && (policy.focusBehavior || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed')),
+      clusterIsContainer: !this.contextClusterDefaultExpanded(),
+    })
   }
 
   /** Memoize the STABLE ancestry on (target, preset, surface, capability,
    * window) — never the mutable open state (plan §30). */
-  private searchRevealAncestry(target: TranscriptMessage): SearchRevealAncestry {
+  private searchRevealAncestry(target: TranscriptMessage): TranscriptRevealAncestry {
     const disclosureAvailable = this.transcriptDisclosureActionAvailable()
     const memo = this.revealedOwnerMemo
     if (memo !== undefined && memo.target === target && memo.preset === this.displayState.preset
@@ -7818,17 +7807,15 @@ export class TuiApp {
 
   /** Evaluate the CURRENT reveal path from stable ancestry: only ancestors that
    * actually hide the row right now become nodes. */
-  private revealPathFromAncestry(ancestry: SearchRevealAncestry): SearchRevealPath | undefined {
-    const path: TranscriptContainerOwner[] = []
-    if (ancestry.work !== undefined && !this.openWorkOwners.has(ancestry.work.owner)) {
-      path.push({ kind: 'work', owner: ancestry.work.owner })
-    }
-    if (ancestry.cluster !== undefined
-      && !this.expandedContextClusterOwners.has(ancestry.cluster.owner)
-      && !this.regularBulkOwnsTurn(ancestry.cluster.turn)) {
-      path.push({ kind: 'context-cluster', owner: ancestry.cluster.owner })
-    }
-    return path.length === 0 ? undefined : path
+  private revealPathFromAncestry(ancestry: TranscriptRevealAncestry): SearchRevealPath | undefined {
+    return transcriptRevealPathFor(ancestry, {
+      workOpen: span => this.openWorkOwners.has(span.owner),
+      // The cluster's live openness: a manual disclosure, the regular bulk
+      // master's recent-turn expansion (never the search reveal itself —
+      // resolving it would recurse).
+      clusterOpen: cluster => this.expandedContextClusterOwners.has(cluster.owner)
+        || this.regularBulkOwnsTurn(cluster.turn),
+    })
   }
 
   /**
