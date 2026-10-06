@@ -14,7 +14,7 @@ import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { componentKeymap } from './keybindings/component-keymap.ts'
 import { color, taskStatusColor } from './theme.ts'
-import { SelectedMarquee } from './marquee.ts'
+import { SelectedMarquee } from './tui/components/marquee.ts'
 import { singlePhysicalLine } from './presentation-lines.ts'
 import {
   isTaskItemActive,

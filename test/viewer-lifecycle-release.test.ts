@@ -174,7 +174,7 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
   assert.ok(app.includes('this.imageScope?.(),'),
     'the scope is sampled where the thumbnail is CONSTRUCTED')
   const thumbnail = readFileSync(
-    new URL('../src/components/media/image-thumbnail.ts', import.meta.url),
+    new URL('../src/tui/components/media/image-thumbnail.ts', import.meta.url),
     'utf8',
   )
   assert.ok(thumbnail.includes('this.loader.get(this.ref, this.scope)'),

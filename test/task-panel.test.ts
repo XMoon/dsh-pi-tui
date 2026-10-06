@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel, formatElapsed, type TaskPanelItem } from '../src/task-panel.ts'
-import { MARQUEE_STEP_MS } from '../src/marquee.ts'
+import { MARQUEE_STEP_MS } from '../src/tui/components/marquee.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 

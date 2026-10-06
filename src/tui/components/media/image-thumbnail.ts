@@ -16,14 +16,14 @@
  * asks the loader to fire the async read on first render; the loader's
  * subscriber notification invalidates the component, which repaints with
  * the resolved bytes (plan §16.1 + the fork's dynamic-load contract).
- * @module @xmoon76/dsh-pi-tui/components/media/image-thumbnail
+ * @module @xmoon76/dsh-pi-tui/tui/components/media/image-thumbnail
  */
 
 import { Image, getCapabilities } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import { formatBytes } from '../../image/errors.ts'
-import type { ImageLoader } from '../../image/loader.ts'
-import type { ImageAttachmentRefLike } from '../../image/admission.ts'
+import { formatBytes } from '../../../image/errors.ts'
+import type { ImageLoader } from '../../../image/loader.ts'
+import type { ImageAttachmentRefLike } from '../../../image/admission.ts'
 
 /** The thumbnail sizing constants (kimi parity, §17). */
 export const MAX_IMAGE_ROWS = 12

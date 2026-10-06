@@ -23,7 +23,7 @@
  */
 
 import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
-import { SelectedMarquee } from './marquee.ts'
+import { SelectedMarquee } from './tui/components/marquee.ts'
 import { color } from './theme.ts'
 import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from './file-completion/context.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'

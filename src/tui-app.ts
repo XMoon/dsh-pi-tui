@@ -63,8 +63,8 @@ import {
 } from './searchable-picker.ts'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
 import { runSyncDisposalSteps } from './disposal.ts'
-import { ImageThumbnail } from './components/media/image-thumbnail.ts'
-import { FileAttachmentComponent } from './components/media/file-attachment.ts'
+import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
+import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
 import {
   detectThemeFromBackground,
   detectThemeFromColorFgBg,
@@ -99,7 +99,7 @@ import { FooterCustomItemCatalog } from './footer/custom-items.ts'
 import type { FooterItemRegistry } from './footer/item-registry.ts'
 import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './footer/types.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
-import { SelectedMarquee } from './marquee.ts'
+import { SelectedMarquee } from './tui/components/marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
@@ -2971,7 +2971,7 @@ export interface TuiAppOptions {
    * store, exposed so a mounted test can stage REAL draft bytes through the
    * production intake surface. Never read by production code paths. */
   draftImageStoreForTest?: import('./image/draft-store.ts').DraftImageStore
-  imageTheme?: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme
+  imageTheme?: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme
   /**
    * The presentation scope the transcript being built belongs to (M3-5 PR2
    * review, P1). The SURFACE supplies it; the renderer samples it ONCE per
@@ -4167,7 +4167,7 @@ export class TuiApp {
   /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
   readonly draftImageStoreForTest: import('./image/draft-store.ts').DraftImageStore | undefined
   /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
-  private readonly imageTheme: import('./components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
+  private readonly imageTheme: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
   private readonly imageScope: (() => unknown) | undefined
   /** The busy indicator row directly above the editor border; idle renders nothing. */
   private readonly working: WorkingIndicator
