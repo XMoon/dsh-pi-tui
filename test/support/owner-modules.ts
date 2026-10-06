@@ -96,6 +96,17 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   // Task-Center jobs-read retention policy into it (plan §7.6.2), so its
   // ownership location is now locked from the A5b owner surface.
   { rel: 'src/app/surface/runtime.ts', role: 'owner' },
+  // TS3: the surface's independent application-level owners. The aggregate
+  // remains the ONE `createSurfaceRuntime()` entry; each sub-owner owns its own
+  // state and disposal hook, and the aggregate
+  // `ownerSource()`/`ownerOccurrences()` locks (bag detection, exact
+  // single-owner counts) now cover them too.
+  { rel: 'src/app/surface/notification-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/extension-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/plugin-manager-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/task-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/interaction-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/event-routing.ts', role: 'owner' },
   // A5b-1: viewer + live-session presentation.
   { rel: 'src/app/surface/session-presentation.ts', role: 'owner' },
   { rel: 'src/app/surface/viewer-runtime.ts', role: 'owner' },

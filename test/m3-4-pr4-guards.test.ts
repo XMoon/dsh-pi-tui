@@ -493,7 +493,9 @@ test('PR5 §3.2 (F1): the live ingress re-answers availability off the SAME fold
   assert.ok(reset.includes('recentCoverageComplete = false'),
     'the generation reset clears the coverage fact with the bit')
   // The live ingress performs the pair on the same fold, at BOTH append sites.
-  const routing = code('app/surface/runtime.ts')
+  // TS3 §36: the routing bodies (and their append/pair calls) live in the
+  // presentation event router owner.
+  const routing = code('app/surface/event-routing.ts')
   const pairs = routing.split('main.stats.apply([event])').length - 1
   const refreshes = routing.split('main.refreshRecentPerformanceAvailability()').length - 1
   assert.ok(pairs > 0 && refreshes === pairs,
