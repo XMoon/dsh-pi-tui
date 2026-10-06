@@ -194,6 +194,46 @@ export function isRemoteComposition(resolved, specifier) {
 }
 
 /**
+ * The concrete renderer / TuiApp / chrome owners the backend-neutral transcript
+ * presentation core must never reach: a `tui/transcript/**` module that needs
+ * one of these has a renderer-specific helper that belongs under
+ * `tui/components/**` (or stays in TuiApp), and the helper must be split instead
+ * of widening this list into an allowlist.
+ */
+const TRANSCRIPT_CORE_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
+
+const TRANSCRIPT_CORE_FORBIDDEN_TARGET_PREFIXES = [
+  'tui/components/',
+  'tui/panels/',
+  'tui/pickers/',
+  'tui/interaction/',
+  'tui/footer/',
+  'tui/notification/',
+  'tui/plugin-manager/',
+]
+
+const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
+  'tui-app.ts',
+  'theme.ts',
+  'icons.ts',
+  'renderer-registry.ts',
+])
+
+/**
+ * True when a `tui/transcript/**` import reaches concrete renderer mechanics.
+ * A bare package specifier keeps its bare text as `resolved`, so the vendored
+ * fork and the future Tern SDK are matched on the specifier; a relative import
+ * arrives canonicalized to its on-disk `src/`-relative target.
+ * @param {string} resolved canonicalized target (or bare specifier)
+ * @param {string} specifier the raw import specifier
+ */
+export function isTranscriptRendererMechanics(resolved, specifier) {
+  if (TRANSCRIPT_CORE_FORBIDDEN_PACKAGES.some(pkg => specifier === pkg || specifier.startsWith(`${pkg}/`))) return true
+  return TRANSCRIPT_CORE_FORBIDDEN_TARGET_PREFIXES.some(prefix => resolved.startsWith(prefix))
+    || TRANSCRIPT_CORE_FORBIDDEN_TARGETS.has(resolved)
+}
+
+/**
  * The per-file static dependency-direction rules. `applies` decides whether the
  * rule governs the importing file; `forbids` decides whether the import target
  * (or module specifier for package imports) violates it.
@@ -324,6 +364,27 @@ export const ARCHITECTURE_RULES = [
       + '(terminal presentation consumes semantic/application-facing contracts only)',
     applies: (srcRel) => srcRel.startsWith('tui/') || srcRel === 'commands.ts',
     forbids: (resolved, specifier) => isRemoteComposition(resolved, specifier),
+  },
+  {
+    // TS6: `src/tui/transcript/**` is the backend-neutral transcript
+    // presentation core consumed by BOTH the current PiTui mechanics and a
+    // future TSP mechanics. It must stay blind to concrete renderer chrome —
+    // the direction is `PiTui mechanics -> tui/transcript -> semantic
+    // transcript facts`, never the reverse. A core module needing theme, icons,
+    // width/component mechanics, TuiApp or the renderer registry means the
+    // helper was misclassified and must be split into `tui/components/**`,
+    // not allowlisted here.
+    id: 'tui-transcript-imports-renderer-mechanics',
+    message:
+      'src/tui/transcript/** is the backend-neutral transcript presentation core: it must not import PiTui, Tern, '
+      + 'TuiApp, theme/icons, the renderer registry or another concrete TUI mechanics module (split the helper instead of allowlisting it)',
+    applies: (srcRel) => srcRel.startsWith('tui/transcript/'),
+    forbids: (resolved, specifier) => isTranscriptRendererMechanics(resolved, specifier),
+    // A literal `await import('...')` reaches the same module as a static
+    // import; a rule that only consumed `parseImportSpecifiers()` would leave
+    // an escape hatch for both the relative component target and the bare
+    // package specifier.
+    checksValueDynamicImport: true,
   },
 ]
 
@@ -724,14 +785,17 @@ export function findViolations(entries, options = {}) {
     // A literal VALUE dynamic import never reaches `parseImportSpecifiers()`, so
     // a rule that only consumes that list would be bypassed by
     // `await import('.../tui/...')`. Rules that opt in are evaluated against
-    // `parseValueDynamicImports()` too, with the same canonicalized target.
+    // `parseValueDynamicImports()` too, with the same canonicalized target: a
+    // relative specifier canonicalizes to its on-disk target, a bare package
+    // specifier keeps its bare text (the same convention the static loop uses).
     for (const rule of ARCHITECTURE_RULES) {
       if (rule.checksValueDynamicImport !== true) continue
       if (!rule.applies(rel)) continue
       for (const { specifier, line } of parseValueDynamicImports(sourceByRel.get(rel), rel)) {
         const dynamicRelative = resolveRelativeImport(rel, specifier)
-        if (dynamicRelative === undefined) continue
-        const target = staticImportCandidates(dynamicRelative).find(candidate => known.has(candidate)) ?? dynamicRelative
+        const target = dynamicRelative === undefined
+          ? specifier
+          : staticImportCandidates(dynamicRelative).find(candidate => known.has(candidate)) ?? dynamicRelative
         if (!rule.forbids(target, specifier)) continue
         violations.push({ file: rel, line, rule: rule.id, detail: `${rule.message} (${specifier})` })
       }

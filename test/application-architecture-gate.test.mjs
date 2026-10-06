@@ -1117,6 +1117,81 @@ test('TS5 ownership boundaries are non-vacuous (app/domain/runtime -> tui locks)
   }
 })
 
+test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () => {
+  // `src/tui/transcript/**` is consumed by the concrete renderer mechanics, so
+  // the direction `PiTui mechanics -> tui/transcript` is the only legal one. Each
+  // negative below names a distinct renderer-mechanics family the core must stay
+  // blind to; the positive controls are anchored by those negatives, so "allowed"
+  // cannot pass vacuously.
+  const forbidden = [
+    ['@xmoon76/pi-tui', '@xmoon76/pi-tui'],
+    ['@xmoon76/pi-tui/dist/index.mjs', '@xmoon76/pi-tui/dist/index.mjs'],
+    ['@stencil-hq/tern', '@stencil-hq/tern'],
+    ['@stencil-hq/tern/ui', '@stencil-hq/tern/ui'],
+    ['../components/transcript/focus-activity.ts', 'tui/components/transcript/focus-activity.ts'],
+    ['../panels/x.ts', 'tui/panels/x.ts'],
+    ['../pickers/x.ts', 'tui/pickers/x.ts'],
+    ['../interaction/x.ts', 'tui/interaction/x.ts'],
+    ['../footer/x.ts', 'tui/footer/x.ts'],
+    ['../notification/x.ts', 'tui/notification/x.ts'],
+    ['../plugin-manager/x.ts', 'tui/plugin-manager/x.ts'],
+    ['../../tui-app.ts', 'tui-app.ts'],
+    ['../../theme.ts', 'theme.ts'],
+    ['../../icons.ts', 'icons.ts'],
+    ['../../renderer-registry.ts', 'renderer-registry.ts'],
+  ]
+  for (const [specifier, target] of forbidden) {
+    const valueImport = findViolations([
+      entry('tui/transcript/x.ts', `import { x } from '${specifier}'\n`),
+      entry(target, 'export const x = 1\n'),
+    ])
+    assert.equal(valueImport.length, 1, `tui/transcript/x.ts -> ${specifier} must be rejected`)
+    assert.equal(valueImport[0].rule, 'tui-transcript-imports-renderer-mechanics')
+    assert.equal(valueImport[0].line, 1)
+    // A type-only import reaches the same owner and is never an escape hatch.
+    const typeImport = findViolations([
+      entry('tui/transcript/x.ts', `import type { X } from '${specifier}'\n`),
+      entry(target, 'export type X = 1\n'),
+    ])
+    assert.equal(typeImport.length, 1, `tui/transcript/x.ts -> ${specifier} (type-only) must be rejected too`)
+    assert.equal(typeImport[0].rule, 'tui-transcript-imports-renderer-mechanics')
+  }
+  // The literal dynamic spellings reach the same module: a relative component
+  // target and a bare package specifier both opt into `parseValueDynamicImports`.
+  const dynamicRelative = findViolations([
+    entry('tui/transcript/x.ts', "const m = await import('../components/transcript/x.ts')\n"),
+    entry('tui/components/transcript/x.ts', 'export const m = 1\n'),
+  ])
+  assert.equal(dynamicRelative.length, 1, 'a relative renderer-mechanics dynamic import must be rejected')
+  assert.equal(dynamicRelative[0].rule, 'tui-transcript-imports-renderer-mechanics')
+  const dynamicPackage = findViolations([
+    entry('tui/transcript/x.ts', "const m = await import('@xmoon76/pi-tui')\n"),
+  ])
+  assert.equal(dynamicPackage.length, 1, 'a bare renderer-package dynamic import must be rejected')
+  assert.equal(dynamicPackage[0].rule, 'tui-transcript-imports-renderer-mechanics')
+  // Positive controls: the TS6 transitional semantic roots, the pure
+  // application-facing policy and every intra-core module stay open.
+  const allowed = [
+    // Transitional semantic roots the core consumes until TS7 re-homes them.
+    ['tui/transcript/x.ts', '../../transcript.ts', 'transcript.ts', 'export const x = 1\n'],
+    ['tui/transcript/x.ts', '../../transcript-semantics.ts', 'transcript-semantics.ts', 'export const x = 1\n'],
+    ['tui/transcript/x.ts', '../../context-presentation.ts', 'context-presentation.ts', 'export const x = 1\n'],
+    // Shared transitional policy with a real pure consumer.
+    ['tui/transcript/x.ts', '../../display-preset.ts', 'display-preset.ts', 'export const x = 1\n'],
+    // Sibling core modules are the point of the directory.
+    ['tui/transcript/x.ts', './structure.ts', 'tui/transcript/structure.ts', 'export const x = 1\n'],
+    // The reverse direction is the contract: PiTui mechanics consume the core.
+    ['tui/components/transcript/x.ts', '../../transcript/structure.ts', 'tui/transcript/structure.ts', 'export const x = 1\n'],
+  ]
+  for (const [file, specifier, target, source] of allowed) {
+    assert.deepEqual(
+      findViolations([entry(file, `import { x } from '${specifier}'\n`), entry(target, source)]),
+      [],
+      `${file} -> ${specifier} must stay allowed`,
+    )
+  }
+})
+
 test('parseValueDynamicImports reports only value import() calls with literal specifiers', () => {
   const specs = parseValueDynamicImports(
     [
