@@ -7,8 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
-import { isValidKeyId, isPlainPrintableKey, LEADER_PREFIX, parseUserKeybindings } from '../src/keybindings/config.ts'
+import { APP_KEYBINDINGS } from '../src/tui/keybindings/definitions.ts'
+import { isValidKeyId, isPlainPrintableKey, LEADER_PREFIX, parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 
 test('KeyId validation accepts the fork grammar', () => {
   assert.ok(isValidKeyId('ctrl+s'))

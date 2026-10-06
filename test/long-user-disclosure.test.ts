@@ -16,7 +16,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import type { ExtensionView } from '../src/extension/public-types.ts'
 import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'

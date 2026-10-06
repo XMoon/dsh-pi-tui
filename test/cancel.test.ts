@@ -16,7 +16,7 @@ import type { SettingItem } from '@xmoon76/pi-tui'
 import { interruptAgent } from '../src/index.ts'
 import type { SessionWriter } from '../src/runtime/session-writer-port.ts'
 import { rewindPickerItem } from '../src/rewind.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

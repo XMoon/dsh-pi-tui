@@ -12,7 +12,7 @@
  * KEYS ARE NOT HARD-CODED HERE: host shortcuts are semantic actions
  * (app.*) resolved through the user-orchestrable keymap (plan M0–M6). The
  * single source of truth for default keys is
- * src/keybindings/definitions.ts; the effective map (user overrides
+ * src/tui/keybindings/definitions.ts; the effective map (user overrides
  * applied) is inspectable at runtime with `/keybindings`. Comments in this
  * file name keys only when the SEMANTICS are key-specific (e.g. the
  * Ctrl+C clear-draft behavior); every other mention is a shorthand for
@@ -244,14 +244,16 @@ import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
 import { InputRouter } from './tui/interaction/input-router.ts'
-import { AppActionDispatcher, type AppActionHost } from './keybindings/action-dispatcher.ts'
-import { componentKeymap } from './keybindings/component-keymap.ts'
-import { deriveKeybindingContext } from './keybindings/context.ts'
-import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './keybindings/definitions.ts'
-import { formatKeyId, formatLeaderSequence } from './keybindings/hints.ts'
-import type { LeaderStateMachine } from './keybindings/leader.ts'
-import { HostKeybindingManager } from './keybindings/manager.ts'
-import type { AppKeybindingId, KeybindingContext, KeybindingSource, UserKeybindingsConfig } from './keybindings/types.ts'
+import { AppActionDispatcher, type AppActionHost } from './tui/keybindings/action-dispatcher.ts'
+import { componentKeymap } from './tui/keybindings/component-keymap.ts'
+import { parseUserKeybindings } from './tui/keybindings/config.ts'
+import { deriveKeybindingContext } from './tui/keybindings/context.ts'
+import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './tui/keybindings/definitions.ts'
+import { formatKeyId, formatLeaderSequence } from './tui/keybindings/hints.ts'
+import type { LeaderStateMachine } from './tui/keybindings/leader.ts'
+import { applyHomeEndKeyMode, homeEndKeysModeOf } from './tui/keybindings/home-end-mode.ts'
+import { HostKeybindingManager, normalizedKeyToKeyId } from './tui/keybindings/manager.ts'
+import type { AppKeybindingId, KeybindingContext, KeybindingSource, UserKeybindingsConfig } from './tui/keybindings/types.ts'
 import {
   isLocalShellCard,
   localShellHiddenMarker,
@@ -271,7 +273,7 @@ import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
 import { UnstableMountedComponentAdapter } from './extension/internal/unstable-mount.ts'
 import { normalizeInputEvent } from './extension/internal/input-events.ts'
-import type { DisplaySubjectSnapshot, ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot } from './extension/public-types.ts'
+import type { DisplaySubjectSnapshot, ExtensionView, MessagePresentationSnapshot, ToolPresentationSnapshot, TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
 
 /** How many most-recent turns Ctrl+O expands; mirrors pi's default. */
 export const EXPAND_RECENT_TURNS = 3
@@ -819,21 +821,10 @@ export interface SubagentViewerTarget {
   readonly access?: ViewerAccess
 }
 
-/**
- * The WEB composer submit gestures (DSH `ComposerSubmitGesture`): plain
- * Enter, or the Cmd/Ctrl-accelerated chord. The busy-Enter policy resolves
- * each to a delivery mode — plain Enter to the preferred mode, the
- * accelerated chord to its OPPOSITE — so the chord is never a fixed mode.
- */
-export type ComposerSubmitGesture = 'enter' | 'accelerated'
-
-/**
- * One submission request raised at the editor seat. The two gestures are
- * resolved by the busy-Enter policy; `explicit-queue` is the public
- * `queue-draft` action — an explicit delivery command, NOT a gesture: it
- * queues regardless of the preference (and of the agent's liveness).
- */
-export type ComposerSubmitRequest = ComposerSubmitGesture | 'explicit-queue'
+// The submit-gesture contract lives with the interaction owners (TS5 §11.3);
+// the stable facade keeps re-exporting it for the existing consumers.
+import type { ComposerSubmitGesture, ComposerSubmitRequest } from './tui/interaction/submit-contract.ts'
+export type { ComposerSubmitGesture, ComposerSubmitRequest } from './tui/interaction/submit-contract.ts'
 
 /** Whether a viewer submit is the empty accelerated queue-steer gesture. */
 export function isEmptyAcceleratedViewerSubmit(text: string, gesture: ComposerSubmitRequest): boolean {
@@ -4542,6 +4533,45 @@ export class TuiApp {
    * mode and plugin rules through it; diagnostics read its snapshot. */
   keybindingsManager(): HostKeybindingManager {
     return this.keybindings
+  }
+
+  /**
+   * Apply one user keybinding document read (TS5 §12): the TUI owns the
+   * parse/apply semantics, so the application settings owner never imports the
+   * terminal keybinding implementation. Parse diagnostics are reported through
+   * the injected sink BEFORE the keymap is rebuilt (the original ordering); a
+   * throwing rebuild propagates to the caller's fail-soft path.
+   * @param raw - the raw `keybindings` settings value.
+   * @param onDiagnostic - the application diagnostic sink.
+   */
+  applyUserKeybindings(raw: unknown, onDiagnostic: (message: string) => void): void {
+    const parsed = parseUserKeybindings(raw)
+    for (const message of parsed.diagnostics) onDiagnostic(message)
+    this.keybindingsManager().setUserConfiguration(parsed)
+  }
+
+  /** Apply the env-driven safe-keybindings mode (TS5 §12). */
+  setSafeKeybindingsMode(enabled: boolean): void {
+    this.keybindingsManager().setSafeMode(enabled)
+  }
+
+  /** Apply the persisted Home/End navigation preset (TS5 §12): the pi-tui
+   *  global viewport bindings stay TUI-owned. */
+  setHomeEndMode(raw: string | undefined): void {
+    applyHomeEndKeyMode(homeEndKeysModeOf(raw))
+  }
+
+  /**
+   * Apply the extension registry's plugin-keybinding snapshot (TS5 §12): the
+   * TUI key authority normalizes the public chord identity into the fork's
+   * KeyId grammar, so `app/surface` never reaches the keybinding implementation.
+   */
+  setPluginKeybindingRules(bindings: TuiKeybindingRegistrySnapshot['bindings']): void {
+    this.keybindingsManager().setPluginRules(bindings.map(binding => ({
+      id: binding.id,
+      action: binding.action,
+      key: normalizedKeyToKeyId(binding.key),
+    })))
   }
 
   /** Dispatch one resolved semantic action (plan §9). The Esc and exit

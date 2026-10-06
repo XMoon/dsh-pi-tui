@@ -3,7 +3,7 @@
  * the human label the footer/help/settings render. The UI must never
  * hard-code "Shift+Tab" again — it renders `keyHint(keymap, action)` so a
  * user remap automatically updates every hint.
- * @module @xmoon76/dsh-pi-tui/keybindings/hints
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/hints
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'

@@ -11,11 +11,11 @@
  * methods (submitDraft, steerDraft, …) which already own the guards. A
  * host method returns `true` when it consumed the key, `false` when the
  * key must fall through (e.g. pasteMedia without a clipboard handler).
- * @module @xmoon76/dsh-pi-tui/keybindings/action-dispatcher
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/action-dispatcher
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'
-import type { ComposerSubmitRequest } from '../tui-app.ts'
+import type { ComposerSubmitRequest } from '../interaction/submit-contract.ts'
 import type { AppKeybindingId } from './types.ts'
 
 /** The Host business surface the dispatcher routes to. Every method

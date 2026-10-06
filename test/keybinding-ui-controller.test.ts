@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
 import {
   KeybindingEditorController,
   type KeybindingMutation,
-} from '../src/keybinding-ui/controller.ts'
+} from '../src/tui/keybindings/ui/controller.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../src/runtime/config-port.ts'
 
 function settingsFixture(initialKeybindings: unknown, footerCustomItems?: unknown): {

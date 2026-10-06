@@ -14,7 +14,7 @@
  *
  * Conflicts (same key + overlapping scope + same priority) are deactivated
  * with a diagnostic — never silent last-write-wins (plan §15/§16).
- * @module @xmoon76/dsh-pi-tui/keybindings/effective-keymap
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/effective-keymap
  */
 
 import { matchesKey, type KeyId } from '@xmoon76/pi-tui'

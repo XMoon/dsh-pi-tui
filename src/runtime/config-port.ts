@@ -42,7 +42,7 @@ import type { FooterCustomItemsParseResult } from '../footer/custom-items.ts'
  * configured. The user keybinding overrides (`keybindings`) ride as a
  * whole-value RAW field of the profile-owned plugin Config — the field is
  * deliberately not a semantic DTO: the keybinding shape is owned by
- * src/keybindings/config.ts (the only validator), and the settings
+ * src/tui/keybindings/config.ts (the only validator), and the settings
  * document is the storage the Direct adapter passes through verbatim.
  * A future Remote adapter MUST preserve this raw field verbatim too
  * (get/replace round-trip), never reinterpret it — add a Remote-shaped

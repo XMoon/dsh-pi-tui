@@ -8,10 +8,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS, PROTECTED_HOST_ACTIONS, VIEWER_BLOCKED_PARENT_ACTIONS } from '../src/keybindings/definitions.ts'
-import { isValidKeyId } from '../src/keybindings/config.ts'
-import { scopesOverlap } from '../src/keybindings/conflicts.ts'
-import type { AppKeybindingId } from '../src/keybindings/types.ts'
+import { APP_KEYBINDINGS, NON_CONFIGURABLE_ACTIONS, PROTECTED_HOST_ACTIONS, VIEWER_BLOCKED_PARENT_ACTIONS } from '../src/tui/keybindings/definitions.ts'
+import { isValidKeyId } from '../src/tui/keybindings/config.ts'
+import { scopesOverlap } from '../src/tui/keybindings/conflicts.ts'
+import type { AppKeybindingId } from '../src/tui/keybindings/types.ts'
 
 test('every action id is unique and matches its own key', () => {
   const ids = Object.keys(APP_KEYBINDINGS)

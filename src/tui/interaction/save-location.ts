@@ -30,7 +30,7 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
-import { componentKeymap } from '../../keybindings/component-keymap.ts'
+import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { color } from '../../theme.ts'
 import type { DirectoryCompletionItem } from '../../file-completion/directory-completion.ts'
 

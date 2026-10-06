@@ -20,7 +20,7 @@
  * The machine is pure state + timing: it never touches the terminal or
  * the app. The app feeds raw input, reads {@link pending} for the
  * which-key footer hint, and dispatches activated actions.
- * @module @xmoon76/dsh-pi-tui/keybindings/leader
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/leader
  */
 
 import { isKeyRelease, isKeyRepeat, matchesKey, parseKey } from '@xmoon76/pi-tui'

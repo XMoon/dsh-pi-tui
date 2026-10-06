@@ -8,10 +8,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveKeybindingContext } from '../src/keybindings/context.ts'
-import { EffectiveKeymap } from '../src/keybindings/effective-keymap.ts'
-import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
-import { scopesOverlap } from '../src/keybindings/conflicts.ts'
+import { deriveKeybindingContext } from '../src/tui/keybindings/context.ts'
+import { EffectiveKeymap } from '../src/tui/keybindings/effective-keymap.ts'
+import { APP_KEYBINDINGS } from '../src/tui/keybindings/definitions.ts'
+import { scopesOverlap } from '../src/tui/keybindings/conflicts.ts'
 
 const editorContext = deriveKeybindingContext({ focusedSeat: 'editor' })
 

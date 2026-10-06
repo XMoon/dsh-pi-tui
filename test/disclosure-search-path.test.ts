@@ -16,7 +16,7 @@ import type { TurnActivity, TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/display-preset.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()

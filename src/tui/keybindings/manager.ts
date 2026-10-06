@@ -9,7 +9,7 @@
  *
  * The manager NEVER executes business behavior — it only resolves keys to
  * semantic actions. Execution lives in the AppActionDispatcher.
- * @module @xmoon76/dsh-pi-tui/keybindings/manager
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/manager
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'

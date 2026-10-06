@@ -24,7 +24,7 @@
  *
  * Fail-soft (plan §16): a malformed entry is a diagnostic + ignore; it
  * never disables the whole map and never prevents the TUI from starting.
- * @module @xmoon76/dsh-pi-tui/keybindings/config
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/config
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'

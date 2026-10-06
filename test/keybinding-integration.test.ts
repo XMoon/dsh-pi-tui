@@ -10,8 +10,8 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../src/editor-registry.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 

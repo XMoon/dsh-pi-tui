@@ -7,12 +7,12 @@
  * without guessing from effective keys alone.
  */
 
-import { APP_KEYBINDINGS } from '../keybindings/definitions.ts'
-import { formatKeyId, formatLeaderSequence } from '../keybindings/hints.ts'
-import type { HostKeybindingManager } from '../keybindings/manager.ts'
-import type { ParsedUserKeybindings } from '../keybindings/config.ts'
+import { APP_KEYBINDINGS } from '../definitions.ts'
+import { formatKeyId, formatLeaderSequence } from '../hints.ts'
+import type { HostKeybindingManager } from '../manager.ts'
+import type { ParsedUserKeybindings } from '../config.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import type { AppKeybindingDefinition, AppKeybindingId, KeybindingSource } from '../keybindings/types.ts'
+import type { AppKeybindingDefinition, AppKeybindingId, KeybindingSource } from '../types.ts'
 
 export type KeybindingEditorBindingKind = 'direct' | 'leader'
 

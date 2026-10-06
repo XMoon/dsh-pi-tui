@@ -24,7 +24,7 @@ import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
+import { APP_KEYBINDINGS } from '../src/tui/keybindings/definitions.ts'
 import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../src/clipboard.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is

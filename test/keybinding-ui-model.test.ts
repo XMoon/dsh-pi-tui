@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
 import {
   buildKeybindingEditorModel,
   searchKeybindingRows,
-} from '../src/keybinding-ui/model.ts'
+} from '../src/tui/keybindings/ui/model.ts'
 
 function modelFor(raw: unknown) {
   const manager = new HostKeybindingManager()

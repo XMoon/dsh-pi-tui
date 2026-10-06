@@ -8,7 +8,7 @@
  *
  * Component-local printable keys (h/j/k/l/e/i/digits) stay component
  * logic — they only exist while the component owns the seat (plan §14).
- * @module @xmoon76/dsh-pi-tui/keybindings/component-keymap
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/component-keymap
  */
 
 import { matchesKey, type KeyId } from '@xmoon76/pi-tui'

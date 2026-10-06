@@ -21,7 +21,7 @@
  *   finding: the canonicalizer used to skip single-char bases, so
  *   `ctrl+A` and `ctrl+a` coexisted as "different" keys that the runtime
  *   treated as the same physical key).
- * @module @xmoon76/dsh-pi-tui/keybindings/key-identity
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/key-identity
  */
 
 import type { KeyId } from '@xmoon76/pi-tui'

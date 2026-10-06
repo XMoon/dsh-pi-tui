@@ -6,21 +6,21 @@
  * HostKeybindingManager. It never watches settings and never writes a file.
  */
 
-import { APP_KEYBINDINGS } from '../keybindings/definitions.ts'
-import { parseUserKeybindings } from '../keybindings/config.ts'
-import { formatKeyId } from '../keybindings/hints.ts'
-import type { HostKeybindingManager } from '../keybindings/manager.ts'
-import { serializeTuiSettingsMutation, type TuiSettingsDoc, type TuiSettingsConfig } from '../runtime/config-port.ts'
+import { APP_KEYBINDINGS } from '../definitions.ts'
+import { parseUserKeybindings } from '../config.ts'
+import { formatKeyId } from '../hints.ts'
+import type { HostKeybindingManager } from '../manager.ts'
+import { serializeTuiSettingsMutation, type TuiSettingsDoc, type TuiSettingsConfig } from '../../../runtime/config-port.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import type { AppKeybindingId } from '../keybindings/types.ts'
+import type { AppKeybindingId } from '../types.ts'
 import {
   buildKeybindingEditorModel,
   editorBindingsFor,
   type KeybindingEditorBinding,
   type KeybindingEditorModel,
 } from './model.ts'
-import { safeErrorMessage } from '../error-boundary.ts'
-import type { ParsedUserKeybindings } from '../keybindings/config.ts'
+import { safeErrorMessage } from '../../../error-boundary.ts'
+import type { ParsedUserKeybindings } from '../config.ts'
 
 export type KeybindingMutation =
   | {

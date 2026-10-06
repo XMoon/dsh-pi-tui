@@ -4,8 +4,8 @@
 
 import { matchesKey, truncateToWidth, wrapTextWithAnsi, type Component, type KeyId } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { color } from '../theme.ts'
-import { formatKeyId, formatLeaderSequence } from '../keybindings/hints.ts'
+import { color } from '../../../theme.ts'
+import { formatKeyId, formatLeaderSequence } from '../hints.ts'
 import type {
   KeybindingEditorBinding,
   KeybindingEditorBindingKind,

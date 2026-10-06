@@ -473,7 +473,7 @@ test('TuiApp: a key with NO active host action falls through to a plugin binding
   // the key reaches the editor (the plugin binding is consulted only for
   // keys the editor declines; Ctrl+V is editor-owned copy). The key is
   // never SWALLOWED: it reaches the editor instead of being dropped.
-  const { parseUserKeybindings } = await import('../src/keybindings/config.ts')
+  const { parseUserKeybindings } = await import('../src/tui/keybindings/config.ts')
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.clipboard.pasteMedia': 'ctrl+p' }))
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')

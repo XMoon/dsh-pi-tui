@@ -20,7 +20,7 @@
  * Conflicting rules are DEACTIVATED (fail-soft, plan §16): neither fires,
  * the diagnostic lists both, and every other rule keeps working. There is
  * deliberately NO silent last-write-wins.
- * @module @xmoon76/dsh-pi-tui/keybindings/conflicts
+ * @module @xmoon76/dsh-pi-tui/tui/keybindings/conflicts
  */
 
 import type { EffectiveBindingRule, KeybindingConflict, KeybindingScope } from './types.ts'

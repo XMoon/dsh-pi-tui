@@ -7,8 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
 
 function managerWith(config: Record<string, unknown>): HostKeybindingManager {
   const manager = new HostKeybindingManager()

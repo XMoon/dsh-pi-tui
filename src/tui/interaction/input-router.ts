@@ -65,7 +65,7 @@
 import { isKeyRelease, isKeyRepeat, matchesKey, parseKey } from '@xmoon76/pi-tui'
 import type { KeyId } from '@xmoon76/pi-tui'
 import type { NormalizedKey, TuiAction } from '../../extension/public-types.ts'
-import { isTextProducingKeyId } from '../../keybindings/key-identity.ts'
+import { isTextProducingKeyId } from '../keybindings/key-identity.ts'
 
 /** The live surface context the router reads (provided by TuiApp). */
 export interface InputRouterContext {
@@ -116,7 +116,7 @@ export interface InputRouterContext {
 
 /** The semantic actions the router's physical-key seams consult the
  * EFFECTIVE keymap for (review finding). The ids are the user-orchestrable
- * action strings (src/keybindings/definitions.ts); the router keeps them
+ * action strings (src/tui/keybindings/definitions.ts); the router keeps them
  * as plain constants so it never imports the keybindings module. */
 const TUI_ACTION_FOLD = 'app.transcript.toggleExpand'
 const TUI_ACTION_SEARCH = 'app.transcript.search'
