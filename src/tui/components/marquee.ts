@@ -18,11 +18,11 @@
  * (one marquee timer per panel, never per row), it is unref()'d, and it
  * is cleared on dispose. The window is sliced by VISIBLE CELLS (never
  * raw `string.slice`) so CJK/emoji/ZWJ never split mid-grapheme.
- * @module @xmoon76/dsh-pi-tui/marquee
+ * @module @xmoon76/dsh-pi-tui/tui/components/marquee
  */
 
 import { sliceByColumn, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { singlePhysicalLine } from './presentation-lines.ts'
+import { singlePhysicalLine } from '../../presentation-lines.ts'
 
 /** Pause before the label starts moving (ms). */
 export const MARQUEE_INITIAL_PAUSE_MS = 800

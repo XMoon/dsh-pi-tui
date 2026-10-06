@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SelectedMarquee, marqueeStateAt, MARQUEE_STEP_MS } from '../src/marquee.ts'
+import { SelectedMarquee, marqueeStateAt, MARQUEE_STEP_MS } from '../src/tui/components/marquee.ts'
 import { singlePhysicalLine } from '../src/presentation-lines.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 

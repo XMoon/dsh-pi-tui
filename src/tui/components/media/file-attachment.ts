@@ -3,11 +3,11 @@
  *
  * Only the sanitized name and byte count are rendered. The opaque attachment
  * id is not a path and is intentionally omitted from the ordinary TUI.
- * @module @xmoon76/dsh-pi-tui/components/media/file-attachment
+ * @module @xmoon76/dsh-pi-tui/tui/components/media/file-attachment
  */
 
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
-import { fileAttachmentSummary, type FileAttachmentPresentationRef } from '../../content-block-presentation.ts'
+import { fileAttachmentSummary, type FileAttachmentPresentationRef } from '../../../content-block-presentation.ts'
 
 /** The caller-owned color surface for attachment rows. */
 export interface FileAttachmentTheme {

@@ -20,7 +20,7 @@ import {
   type SessionPickerRow,
 } from '../src/sessions.ts'
 import { sessionPickerCategories } from '../src/commands.ts'
-import { MARQUEE_STEP_MS } from '../src/marquee.ts'
+import { MARQUEE_STEP_MS } from '../src/tui/components/marquee.ts'
 import type { PickerCategory } from '../src/tui-app.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
