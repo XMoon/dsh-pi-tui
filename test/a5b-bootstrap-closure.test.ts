@@ -134,6 +134,34 @@ function assertOwnerStateCategoriesAbsent(
   }
 }
 
+/**
+ * The A5b-6 composition-side forbidden owner-state/retention slots (plan
+ * §7.6.2/§17). These are NOT facade identity or legal-connector facts: the whole
+ * composition layer must be free of them, so the assertion reads the ZONE —
+ * a nested helper may not reintroduce them either. The corresponding POSITIVE
+ * late-bound connector locks stay facade-scoped.
+ */
+function assertCompositionFreeOfOwnerState(
+  zone: string,
+  names: readonly string[],
+  patterns: readonly RegExp[] = [],
+): void {
+  for (const name of names) {
+    assert.equal(
+      declares(zone, name),
+      false,
+      `the bootstrap composition zone must not declare ${name} (owner state, plan §17)`,
+    )
+  }
+  for (const pattern of patterns) {
+    assert.doesNotMatch(
+      zone,
+      pattern,
+      `the bootstrap composition zone must not name ${String(pattern)} (owner state/policy, plan §17)`,
+    )
+  }
+}
+
 test('A5b: the composition zone is one facade plus its bootstrap helpers, and nothing else', () => {
   // Plan §8.2(1), restated durably by TS2. `compositionSources()` throws when a
   // listed file is missing, so this locks the EXISTENCE of the entry and the
@@ -846,17 +874,17 @@ test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read l
   // queue resolver — the invariant (ONE published authority, published by the
   // viewer, read by the Direct runtime) is unchanged.
   const root = compositionFile('src/app/bootstrap.ts')
+  const zone = bootstrapZone()
   const viewer = ownerFile('src/app/surface/viewer-runtime.ts')
-  assert.equal(declares(root, 'viewedQueueAgent'), false,
-    'the composition root must not hold the viewed-queue viewer state (plan §7.6.2)')
+  // Composition-side negative: the slot must not exist anywhere in the zone.
+  assertCompositionFreeOfOwnerState(zone, ['viewedQueueAgent'], [/publishQueueAuthority/u])
   assert.ok(declares(viewer, 'queueAuthority'),
     'the viewer owner must hold the published queue authority slot')
   assert.match(viewer, /viewedQueueAuthority: \(\) => queueAuthority/u,
     'the viewer owner must expose a getter for the published authority')
+  // Facade-side POSITIVE: the narrow late-bound connector stays in the facade.
   assert.match(root, /getViewedQueueAgent: \(\) => viewerRef\?\.viewedQueueAuthority\(\)/u,
     'the composition connector must read the viewer-owned authority late-bound (never capture by value)')
-  assert.doesNotMatch(root, /publishQueueAuthority/u,
-    'the composition root must no longer receive the viewer publication callback')
 })
 
 test('A5b-6: the composition ZONE implements no TuiAppEvents/TuiCommandRunner literal', () => {
@@ -994,8 +1022,8 @@ test('A5b-6: the submission writer section is controller-owned and read late-bou
   // before the controller, the event adapter after it).
   const root = compositionFile('src/app/bootstrap.ts')
   const controller = ownerFile('src/app/submission/controller.ts')
-  assert.equal(declares(root, 'submissionWriterSection'), false,
-    'the composition root must not declare the submission writer section')
+  // Composition-side negative: the writer section must not exist anywhere in the zone.
+  assertCompositionFreeOfOwnerState(bootstrapZone(), ['submissionWriterSection'])
   assert.ok(declares(controller, 'withWriterSection'),
     'the submission owner must own withWriterSection')
   // The exact semantics: captureLive → reject with SessionScopeSupersededError
@@ -1017,18 +1045,14 @@ test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a 
   // It belongs to the Task-Center owner (`TaskRuntime.attachTasks`, which
   // already owns the task model); the root now supplies only the fence FACTS.
   // TS3 §34 moved that owner into `app/surface/task-runtime.ts`.
-  const root = compositionFile('src/app/bootstrap.ts')
   const owner = ownerFile('src/app/surface/task-runtime.ts')
-  // The composition root must not name a jobs-snapshot/retained-rows slot.
-  assert.equal(declares(root, 'jobSnapshot'), false,
-    'the composition root must not declare the retained jobs snapshot')
-  assert.doesNotMatch(root, /\bjobSnapshot\b|\bretainedJobsSnapshot\b/u,
-    'the composition root must not name a jobs-snapshot/retained-rows slot')
-  // The injected subagent source group no longer receives `readJobs`; it supplies
-  // the fence facts instead, so the owner can derive the session id without
-  // importing the ownership core.
-  assert.doesNotMatch(root, /readJobs/u,
-    'the composition root must not provide the jobs-read retention policy')
+  // Composition-side negative: neither the retained-snapshot slot nor the
+  // jobs-read retention policy may exist anywhere in the zone.
+  assertCompositionFreeOfOwnerState(
+    bootstrapZone(),
+    ['jobSnapshot', 'retainedJobsSnapshot'],
+    [/\bjobSnapshot\b/u, /\bretainedJobsSnapshot\b/u, /readJobs/u],
+  )
   const sourceGroup = owner.slice(
     owner.indexOf('export interface TaskSurfaceRead'),
     owner.indexOf('export interface TaskSurfaceSource'),
@@ -1059,4 +1083,38 @@ test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a 
     'the owner-side jobs read must not read the Direct attachment')
   assert.doesNotMatch(owner, /readJobs: taskRead\.readJobs/u,
     'the TaskBrowserRuntime must receive the owner-side readJobs, not a root-provided one')
+})
+
+test('A5b/TS2: legacy owner-state slots reintroduced in a NESTED helper fail the zone locks (mutation)', (t) => {
+  // Rejection proof for the A5b-6 composition-side negatives. These four slots
+  // are NOT in FINAL_FORBIDDEN_HANDLERS, EXTRACTED_DECLARATIONS or the five
+  // category rows, so their own zone assertions are the only thing that can
+  // reject a helper redeclaring them. The facade placement is the positive
+  // control that the same assertion fires for the ORIGINAL location too.
+  const names = ['viewedQueueAgent', 'submissionWriterSection', 'jobSnapshot', 'retainedJobsSnapshot'] as const
+  const patterns = [/publishQueueAuthority/u, /\bjobSnapshot\b/u, /\bretainedJobsSnapshot\b/u, /readJobs/u] as const
+  const slotSource = `${names.map(name => `let ${name}: unknown\n`).join('')}const readJobs = 1\nconst publishQueueAuthority = 1\n`
+
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-zone-legacy-state-')
+  mkdirSync(join(root, 'src', 'app', 'bootstrap', 'nested'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.ts'), 'export const entry = 1\n')
+  const facade = join(root, 'src', 'app', 'bootstrap.ts')
+  const nested = join(root, 'src', 'app', 'bootstrap', 'nested', 'legacy.ts')
+  writeFileSync(facade, 'export const bootstrap = 1\n')
+  writeFileSync(nested, 'export const harmless = 1\n')
+
+  // Clean positive: the same fixture without the slots passes.
+  assertCompositionFreeOfOwnerState(bootstrapZoneUnder(root), names, patterns)
+
+  // Nested negative: a helper at ANY depth may not reintroduce them.
+  writeFileSync(nested, slotSource)
+  assert.throws(() => assertCompositionFreeOfOwnerState(bootstrapZoneUnder(root), names, patterns),
+    'the four legacy owner-state slots must be rejected anywhere in the composition zone')
+
+  // Same-bytes facade control: the original location fires the same assertion.
+  writeFileSync(nested, 'export const harmless = 1\n')
+  writeFileSync(facade, slotSource)
+  assert.throws(() => assertCompositionFreeOfOwnerState(bootstrapZoneUnder(root), names, patterns),
+    'the same bytes in the facade must fire the same assertion')
 })
