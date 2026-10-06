@@ -93,16 +93,12 @@ export {
   transcriptContentWidth,
 } from './tui/components/transcript-leaves.ts'
 import {
-  ApprovalDialogSurface,
-  approvalOverlayGeometry,
-  capWrappedToHeight,
-  capWrappedToMarker,
   type ApprovalOutcome,
-  type ApprovalOverlayGeometry,
   type ApprovalPromptRequest,
 } from './tui/panels/approval-dialog.ts'
 // The approval presentation contract stays importable from this facade (TS4
-// plan §26); the approval LIFECYCLE stays in TuiApp for TS5.
+// plan §26); the approval LIFECYCLE is owned by
+// `tui/interaction/approval-runtime.ts` (TS5 §8.3).
 export {
   approvalOverlayGeometry,
   capWrappedToHeight,
@@ -195,6 +191,7 @@ import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './history-search.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
+import { ApprovalRuntime } from './tui/interaction/approval-runtime.ts'
 import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
 // The interaction owners' app-facing structural types stay reachable through
 // this root facade: `app/**` owners consume the stable contract here rather
@@ -1504,18 +1501,6 @@ export interface PendingInputPresentation {
   running: boolean
 }
 
-/** One queued prompt awaiting the user's y/n/esc decision. */
-interface PendingApproval {
-  request: ApprovalPromptRequest
-  resolve: (outcome: ApprovalOutcome) => void
-  handle?: OverlayHandle
-  /** The live geometry wrapper behind the current approval handle. */
-  responsiveFrame?: ResponsiveOverlayFrame
-  onAbort?: () => void
-  /** Settled once: an abort and a user decision must not double-resolve. */
-  settled?: boolean
-}
-
 /** Injectable TuiApp options; every field is optional. */
 export interface TuiAppOptions {
   /** How long a notify line stays before it auto-clears, in ms. */
@@ -2243,10 +2228,27 @@ export class TuiApp {
   private readonly widgetsAbove: Text
   private readonly widgetsBelow: Text
   private readonly events: TuiAppEvents
-  /** Prompts awaiting the user's decision; one is shown at a time. */
-  private readonly approvalQueue: PendingApproval[] = []
-  /** The prompt currently on screen, if any. */
-  private activeApproval: PendingApproval | undefined
+  /**
+   * The approval interaction owner (TS5 §8.3): the FIFO prompt queue, the ONE
+   * prompt on screen, its abort binding, the mount/rebind, the fixed-key
+   * ownership, the exactly-once settlement and the next-item scheduling. The
+   * host members below are the EXISTING TuiApp coordination primitives — the
+   * runtime holds no duplicate overlay/editor/focus truth.
+   */
+  private readonly approvals = new ApprovalRuntime({
+    isDisposed: () => this.disposed,
+    routeSettlementFailure: (label, error) => this.routeTerminalSettlementFailure(label, error),
+    cancelActiveSaveLocation: () => this.cancelSaveLocationPrompt(),
+    clearFullscreenPointerGestures: () => this.clearFullscreenPointerGestures(),
+    cancelLeader: () => this.keybindings.cancelLeader(),
+    projectActivity: () => this.projectActivity(),
+    terminalSize: () => ({ columns: this.terminal.columns, rows: this.terminal.rows }),
+    showApprovalOverlay: (frame) => this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' }, { remountable: true }),
+    setOverlayRemount: (handle, remount) => { this.overlayRemounts.set(handle, remount) },
+    clearOverlayRemount: (handle) => { this.overlayRemounts.delete(handle) },
+    rebindApprovalOverlay: (handle, frame) => this.rebindOverlayRaw(handle, frame, { width: '100%', maxHeight: '100%' }),
+    focusEditorSeat: () => this.activeScreen.setFocus(this.seatEditor().component),
+  })
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
   /**
@@ -2571,10 +2573,6 @@ export class TuiApp {
    * comes from the broker's CURRENT logical z-order, never a creation
    * ordinal. */
   private readonly overlayRemounts = new Map<OverlayHandle, () => void>()
-  /** Live approval frames: a fullscreen rebind REPLACES the frame for the
-   * same logical node, and the replaced one is disposed explicitly (the
-   * approval opts out of disposeOnHide). */
-  private readonly approvalFrames = new Set<ResponsiveOverlayFrame>()
   /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
    * resize so the plugin's render(ctx) sees the new geometry). */
   private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
@@ -3791,8 +3789,6 @@ export class TuiApp {
     this.scrollProfileOriginalWrite = undefined
     const statusStoreUnsubscribe = this.statusStoreUnsubscribe
     this.statusStoreUnsubscribe = undefined
-    const pendingApprovals = [...this.approvalQueue]
-    this.approvalQueue.length = 0
     const extensionLeases = [...this.extensionOverlayLeases]
     const advancedLeases = [...this.advancedOverlayLeases]
     const unstableLeases = [...this.unstableMountLeases]
@@ -3844,8 +3840,7 @@ export class TuiApp {
       // order would leave the user's cursor hidden after exit. Each entry is
       // an INDEPENDENT step, so one rejected prompt cannot strand its
       // siblings' promises.
-      ...pendingApprovals.map(pending => () => this.settleApproval(pending, 'cancelled')),
-      () => { if (this.activeApproval !== undefined) this.settleApproval(this.activeApproval, 'cancelled') },
+      ...this.approvals.teardownSettlementSteps(),
       () => this.disposeTrackedKeybindingEditors(),
       // Every physical overlay unmount happens BEFORE stop(): removing the
       // last overlay writes hideCursor, and stop() ends with showCursor —
@@ -4232,9 +4227,9 @@ export class TuiApp {
       this.clearExitConfirmation()
       return this.handleQuestionKey(data)
     }
-    if (this.activeApproval !== undefined) {
+    if (this.approvals.isActive()) {
       this.clearExitConfirmation()
-      return this.handleApprovalKey(data)
+      return this.approvals.handleKey(data)
     }
     // The subagent viewer input policy is MODE-AWARE:
     // - one-shot: read-only — every key except Esc (exit) and Ctrl+O (the
@@ -5013,7 +5008,7 @@ export class TuiApp {
     return deriveKeybindingContext({
       focusedSeat: keyboardOwner ? 'overlay' : 'editor',
       questionActive: this.activeQuestions !== undefined,
-      approvalActive: this.activeApproval !== undefined,
+      approvalActive: this.approvals.isActive(),
       viewerMode: this.viewerMode === undefined || keyboardOwner
         ? 'none'
         : isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access)) ? 'continuable' : 'readonly',
@@ -5034,7 +5029,7 @@ export class TuiApp {
     const keyboardOwner = this.overlayBroker.hasFocusedOverlay()
     return {
       questionActive: this.activeQuestions !== undefined,
-      approvalActive: this.activeApproval !== undefined,
+      approvalActive: this.approvals.isActive(),
       // The viewer's input mode: 'readonly' locks the editor (one-shot AND
       // nested — only an interactive direct child edits), 'continuable'
       // keeps it live (the HOST guard already consumed the parent-owned
@@ -12225,7 +12220,7 @@ export class TuiApp {
         // (question/approval, or a capturing overlay that HOLDS focus) owns
         // the seat — those flows restore their own focus and must never be
         // stolen. A nonCapturing or blurred overlay owns no keyboard.
-        if (app.activeQuestions !== undefined || app.activeApproval !== undefined
+        if (app.activeQuestions !== undefined || app.approvals.isActive()
           || app.overlayBroker.hasFocusedOverlay()) return
         app.activeScreen.setFocus(app.seatEditor().component)
       },
@@ -12664,7 +12659,7 @@ export class TuiApp {
     // (P1-06 probe would see the WRONG focused component and plugin bindings
     // would steal editor keys). A nonCapturing or blurred capturing overlay
     // has released the keyboard, so it must NOT fence the handoff.
-    if (this.activeQuestions === undefined && this.activeApproval === undefined
+    if (this.activeQuestions === undefined && !this.approvals.isActive()
       && this.activeSaveLocation === undefined
       && !this.overlayBroker.hasFocusedOverlay()) {
       this.activeScreen.setFocus(component)
@@ -15245,7 +15240,7 @@ export class TuiApp {
       }
       if (widthChanged || heightChanged) {
         this.historyResponsiveFrame?.syncGeometry()
-        this.activeApproval?.responsiveFrame?.syncGeometry()
+        this.approvals.syncGeometry()
       }
       // PR #57 review (P1): the footer's physical-line budget derives from
       // the terminal GEOMETRY, the ACTIVE SURFACE and the MEASURED chrome
@@ -15320,7 +15315,7 @@ export class TuiApp {
       this.setFocusSeat('overlay')
       return
     }
-    if (this.activeApproval !== undefined) {
+    if (this.approvals.isActive()) {
       this.setFocusSeat('overlay')
       return
     }
@@ -15604,7 +15599,7 @@ export class TuiApp {
         working: this.workingActive,
         compacting: this.compactionPhase === 'summarizing',
         applyingCompaction: this.compactionPhase === 'applying',
-        approvalOpen: this.activeApproval !== undefined,
+        approvalOpen: this.approvals.isActive(),
         questionOpen: this.activeQuestions !== undefined,
       },
       this.busy,
@@ -18110,177 +18105,20 @@ export class TuiApp {
   }
 
   /**
-   * Queue an approval prompt and resolve when the user decides. Requests
-   * queue FIFO; only one dialog is on screen at a time. An aborted signal
-   * settles the prompt `cancelled` immediately.
+   * Queue an approval prompt and resolve when the user decides (the TUI
+   * approval interaction owner; TS5 §8.3). The dialog body stays in the TS4
+   * `tui/panels/approval-dialog.ts` presentation.
    * @param request - the tool, reason, and optional abort signal.
    * @returns the user's decision.
    */
   showApprovalPrompt(request: ApprovalPromptRequest): Promise<ApprovalOutcome> {
-    // A disposed surface must never leave the caller hanging: settle
-    // cancelled immediately (M0 stale-generation contract — the runner's
-    // approval handler may fire during exit teardown).
-    if (this.disposed) return Promise.resolve('cancelled')
-    return new Promise<ApprovalOutcome>((resolve) => {
-      const pending: PendingApproval = { request, resolve }
-      if (request.signal !== undefined) {
-        const onAbort = (): void => {
-          try {
-            this.settleApproval(pending, 'cancelled')
-          } catch (error) {
-            this.routeTerminalSettlementFailure('approval abort settlement', error)
-          }
-        }
-        pending.onAbort = onAbort
-        request.signal.addEventListener('abort', onAbort, { once: true })
-        if (request.signal.aborted) {
-          this.settleApproval(pending, 'cancelled')
-          return
-        }
-      }
-      this.approvalQueue.push(pending)
-      this.showNextApproval()
-    })
-  }
-
-  /** Render the next queued prompt, if any and none is showing. */
-  private showNextApproval(): void {
-    if (this.activeApproval !== undefined || this.approvalQueue.length === 0) return
-    const pending = this.approvalQueue.shift()
-    if (pending === undefined) return
-    // A signal that aborted while the prompt was queued (e.g. a turn cancel
-    // aborts every in-flight request) must never reach the screen: settle it
-    // cancelled right away instead of popping a stale dialog.
-    if (pending.request.signal?.aborted === true) {
-      this.settleApproval(pending, 'cancelled')
-      return
-    }
-    // A Host approval is authoritative over a Client-local Save Location
-    // prompt: showing the approval settles the prompt as cancelled (the
-    // caller's owned workflow classifies it and notifies nothing) — the
-    // approval must never be left unanswerable behind the prompt's input
-    // routing (the same rule as presentQuestion).
-    if (this.activeSaveLocation !== undefined) {
-      this.settleSaveLocation(this.activeSaveLocation, { kind: 'cancelled' })
-    }
-    this.clearFullscreenPointerGestures()
-    this.renderApprovalDialog(pending)
-    this.activeApproval = pending
-    // M6: a capturing surface owns the input now — any pending leader
-    // sequence is cancelled (focus-transition cancellation).
-    this.keybindings.cancelLeader()
-    this.projectActivity()
-  }
-
-  /** Build and mount the approval dialog for one prompt on the active screen. */
-  private renderApprovalDialog(pending: PendingApproval): void {
-    const frame = this.createApprovalFrame(pending)
-    pending.responsiveFrame = frame
-    // The approval is REMOUNTABLE like every other managed overlay: a
-    // fullscreen swap rebinds the SAME logical node (with a fresh surface), so
-    // the overlays it suppresses stay suppressed and never get revealed/
-    // focused/re-hidden (no fabricated focus transition).
-    const handle = this.showOverlayOnHost(
-      frame,
-      { width: '100%', maxHeight: '100%' },
-      { remountable: true },
-    )
-    pending.handle = handle
-    this.overlayRemounts.set(handle, () => {
-      if (this.activeApproval !== pending) return
-      const previous = pending.responsiveFrame
-      const next = this.createApprovalFrame(pending)
-      pending.responsiveFrame = next
-      this.rebindOverlayRaw(handle, next, { width: '100%', maxHeight: '100%' })
-      // The old frame's raw projection was detached with the old screen and
-      // the overlay opted out of disposeOnHide: dispose it explicitly so a
-      // repeated swap never leaks approval frames/surfaces.
-      previous?.dispose()
-    })
-  }
-
-  /** Build the responsive approval frame (surface + geometry) without mounting
-   * it, so a fullscreen rebind can re-create it for the same logical node. */
-  private createApprovalFrame(pending: PendingApproval): ResponsiveOverlayFrame {
-    const geometryOf = (): ApprovalOverlayGeometry => approvalOverlayGeometry(
-      this.terminal.columns,
-      this.terminal.rows,
-    )
-    const surface = new ApprovalDialogSurface(
-      pending.request,
-      geometryOf,
-      (request, geometry) => this.buildApprovalDialog(request, geometry),
-    )
-    const frame: ResponsiveOverlayFrame = new ResponsiveOverlayFrame(surface, () => {
-      const geometry = geometryOf()
-      return {
-        width: geometry.width,
-        maxHeight: geometry.maxHeight,
-        // Raw terminal dims keep the key resize-sensitive once the approval
-        // geometry caps are reached (last-painted-geometry mouse fence).
-        key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
-      }
-    }, undefined, () => this.approvalFrames.delete(frame))
-    this.approvalFrames.add(frame)
-    return frame
+    return this.approvals.showPrompt(request)
   }
 
   /** Headless-test hook: the number of live approval frames (a fullscreen
    * swap must replace, not accumulate, them). */
   ownedApprovalFramesForTest(): number {
-    return this.approvalFrames.size
-  }
-
-  /** Build approval content for the current geometry without mounting it. */
-  private buildApprovalDialog(request: ApprovalPromptRequest, geometry: ApprovalOverlayGeometry): Component {
-    const { maxHeight, contentWidth } = geometry
-    // Height budget in WRAPPED rows: the dialog must NEVER lose the key
-    // hints or the bottom border to the maxHeight slice. The title and the
-    // danger banner are width-cropped so each is exactly ONE display row;
-    // the hints row wraps naturally and its WRAPPED height is counted
-    // (shrunk when the terminal is too small for it). Fixed chrome = 1
-    // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
-    // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
-    const titleShown = truncateToWidth(`Approve ${request.toolName}?`, contentWidth, '…')
-    const dangerShown = request.danger === true
-      ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
-      : ''
-    const HINTS = '[y] allow once   [n] reject   [esc/ctrl+c] cancel'
-    const hintBudget = Math.max(0, maxHeight - (1 + (dangerShown === '' ? 0 : 1) + 1 + 2 + 2))
-    const hintShown = capWrappedToHeight(HINTS, contentWidth, hintBudget).text
-    const hintWrapped = hintShown === '' ? 0 : wrapTextWithAnsi(hintShown, contentWidth).length
-    const chrome = 1 + (dangerShown === '' ? 0 : 1) + 1 + hintWrapped + 2 + 2
-    // The reason and the argument preview share what the chrome leaves:
-    // BOTH capped by their wrapped height, because a single long line can
-    // wrap across many display rows (a raw-line count under-budgets). A cut
-    // section ends in a `... N more` marker row that rides inside its
-    // budget, so the dialog tells the user what was dropped.
-    const reasonBudget = Math.max(0, maxHeight - chrome)
-    const reasonRaw = request.reason ?? ''
-    const reasonShown = capWrappedToMarker(reasonRaw, contentWidth, reasonBudget).text
-    const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
-    const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
-    const dialog = new Box(1, 1)
-    dialog.addChild(new Text(titleShown, 1, 0))
-    if (dangerShown !== '') {
-      dialog.addChild(new Text(color.error(dangerShown), 1, 0))
-    }
-    if (request.arguments !== undefined && request.arguments !== '' && previewBudget > 0) {
-      // Preview the first six argument lines; the marker helper owns ALL
-      // truncation (a separate 240-char '…' pre-cap left an uncounted cut
-      // when the capped string still fit the budget).
-      const sixLines = request.arguments.split('\n').slice(0, 6).join('\n')
-      const previewShown = capWrappedToMarker(sixLines, contentWidth, previewBudget).text
-      if (previewShown !== '') {
-        dialog.addChild(new Text(color.textDim(previewShown), 1, 0))
-      }
-    }
-    if (reasonShown !== '') {
-      dialog.addChild(new Text(reasonShown, 1, 0))
-    }
-    dialog.addChild(new Text(' ', 1, 0))
-    dialog.addChild(new Text(hintShown, 1, 0))
-    return dialog
+    return this.approvals.ownedFramesForTest()
   }
 
   /**
@@ -18290,10 +18128,10 @@ export class TuiApp {
    * inspection remaps; no generic Host shortcut ladder runs behind the modal.
    */
   private handleModalInspectionAction(data: string): TuiInputListenerResult | undefined {
-    if (this.activeQuestions === undefined && this.activeApproval === undefined) return undefined
+    if (this.activeQuestions === undefined && !this.approvals.isActive()) return undefined
     const leader = this.keybindings.leaderMachine()
     if (this.activeQuestions?.flow.ownsFixedKey(data) === true
-      || (this.activeApproval !== undefined && this.approvalOwnsFixedKey(data))) {
+      || (this.approvals.isActive() && this.approvals.ownsFixedKey(data))) {
       // A modal response key wins over both a leader prefix and a leader
       // completion, then continues through the component's normal handler.
       this.keybindings.cancelLeader()
@@ -18335,80 +18173,6 @@ export class TuiApp {
     return undefined
   }
 
-  /** Approval's fixed response keys must beat a conflicting inspection remap. */
-  private approvalOwnsFixedKey(data: string): boolean {
-    return matchesKey(data, 'y')
-      || matchesKey(data, 'n')
-      || matchesKey(data, 'escape')
-      || matchesKey(data, 'ctrl+c')
-  }
-
-  /** Route a key while a prompt is showing; every key except the explicit
-   * inspection-safe whitelist is consumed. */
-  private handleApprovalKey(data: string): TuiInputListenerResult {
-    const pending = this.activeApproval
-    if (pending === undefined) return undefined
-    if (matchesKey(data, 'y')) this.settleApproval(pending, 'allowed-once')
-    else if (matchesKey(data, 'n')) this.settleApproval(pending, 'rejected')
-    else if (matchesKey(data, 'escape')) this.settleApproval(pending, 'cancelled')
-    else if (matchesKey(data, 'ctrl+c')) this.settleApproval(pending, 'cancelled')
-    return { consume: true }
-  }
-
-  /**
-   * Resolve one prompt and hide its dialog. The prompt may be on screen
-   * (active), queued behind another, or never queued at all (its signal was
-   * already aborted on arrival) — every state must settle the promise
-   * exactly once and never leave a cancelled prompt in the queue.
-   */
-  private settleApproval(pending: PendingApproval, outcome: ApprovalOutcome): void {
-    if (pending.settled === true) return
-    pending.settled = true
-    // M3-6 PR3: the presentation cleanup is NON-TRUNCATING and the caller's
-    // promise settlement is an OBLIGATION that no cleanup throw may skip. The
-    // committed `settled` latch makes this the only settlement attempt.
-    const steps: Array<() => void> = this.activeApproval === pending
-      ? [
-        () => this.keybindings.cancelLeader(),
-        () => this.clearFullscreenPointerGestures(),
-        () => { this.activeApproval = undefined },
-        // Fallback: if nothing is restored beneath the approval, input returns
-        // to the editor.
-        () => this.activeScreen.setFocus(this.seatEditor().component),
-        // Closing the approval restores every overlay it hid (Quick, Settings,
-        // any capturing overlay). pi-tui focuses a restored capturing overlay
-        // on setHidden(false), overriding the editor fallback above, and the
-        // broker's tracked close re-derives the final seat from that live
-        // surface (the shared close contract — no approval-specific publish).
-        () => { if (pending.handle !== undefined) this.overlayRemounts.delete(pending.handle) },
-        () => pending.handle?.hide(),
-        // A remountable overlay opts out of disposeOnHide: the final close owns
-        // the frame/surface lifecycle explicitly.
-        () => pending.responsiveFrame?.dispose(),
-        () => { pending.responsiveFrame = undefined },
-        () => this.projectActivity(),
-      ]
-      : [
-        () => {
-          const queued = this.approvalQueue.indexOf(pending)
-          if (queued !== -1) this.approvalQueue.splice(queued, 1)
-        },
-      ]
-    steps.push(() => {
-      if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
-        pending.request.signal.removeEventListener('abort', pending.onAbort)
-      }
-    })
-    // The interaction settlement is an OBLIGATION step of the SAME
-    // non-truncating batch: no cleanup failure may skip it, and every collected
-    // failure — including a legitimately thrown `undefined` (rethrown by
-    // identity) and a `showNextApproval` failure — surfaces in execution order.
-    runSyncDisposalSteps('approval settlement', [
-      ...steps,
-      () => pending.resolve(outcome),
-      () => { if (this.activeApproval === undefined) this.showNextApproval() },
-    ])
-  }
 
   /**
    * Ask the user one or more questions through the dialog overlay. One
@@ -18748,7 +18512,7 @@ export class TuiApp {
       // is refused — the prompt must never replace a Host modal's seat and
       // leave it pending behind the prompt's input routing (the Host modal
       // wins; the caller notifies).
-      if (this.activeQuestions !== undefined || this.activeApproval !== undefined) {
+      if (this.activeQuestions !== undefined || this.approvals.isActive()) {
         reject(cancellationError('a host question or approval is active'))
         return
       }
