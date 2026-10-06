@@ -50,7 +50,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   selectApplicationRuntime,
   __setApplicationRuntimeLoaderForTests,
-} from '../src/app/bootstrap.ts'
+} from '../src/app/bootstrap/runtime-selection.ts'
 import type { ApplicationRuntimeSelection } from '../src/app/application-runtime.ts'
 import {
   createRemoteApplicationHostFixture,
@@ -210,15 +210,15 @@ test('the production bootstrap calls the seam with the Direct branch only (no us
 })
 
 test('the seam reaches the Remote aggregate ONLY through the backend-loader boundary (source-locked)', async () => {
-  const bootstrapSource = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
-  assert.ok(bootstrapSource.includes("import { loadRemoteApplicationRuntime } from '../runtime/backend-loader.ts'"),
-    'the bootstrap statically imports the loader (the sanctioned bootstrap -> backend-loader edge)')
-  assert.ok(bootstrapSource.includes('await loadRemoteApplicationRuntimeForSelection()'),
+  const selectionSource = readFileSync(new URL('../src/app/bootstrap/runtime-selection.ts', import.meta.url), 'utf8')
+  assert.ok(selectionSource.includes("import { loadRemoteApplicationRuntime } from '../../runtime/backend-loader.ts'"),
+    'the selection seam statically imports the loader (the sanctioned bootstrap -> backend-loader edge)')
+  assert.ok(selectionSource.includes('await loadRemoteApplicationRuntimeForSelection()'),
     'the seam loads the Remote aggregate through the loader binding (the production binding is the backend-loader boundary)')
-  assert.ok(bootstrapSource.includes('let loadRemoteApplicationRuntimeForSelection = loadRemoteApplicationRuntime'),
+  assert.ok(selectionSource.includes('let loadRemoteApplicationRuntimeForSelection = loadRemoteApplicationRuntime'),
     'the production loader binding IS the backend-loader boundary function (no product re-binding)')
-  assert.ok(!/from '\.\.\/app\/remote\//.test(bootstrapSource) && !/from '\.\.\/runtime\/remote\//.test(bootstrapSource),
-    'the bootstrap holds no static Remote composition edge of its own')
+  assert.ok(!/from '\.\.\/app\/remote\//.test(selectionSource) && !/from '\.\.\/runtime\/remote\//.test(selectionSource),
+    'the selection seam holds no static Remote composition edge of its own')
   const loaderSource = readFileSync(new URL('../src/runtime/backend-loader.ts', import.meta.url), 'utf8')
   assert.ok(loaderSource.includes("import('../app/remote/runtime.ts')"),
     'the loader owns the ONE dynamic edge into the entry module')
@@ -277,11 +277,11 @@ test('the extension service selection is branch-exclusive with NO Host fallback 
 })
 
 test('the canonical Remote selection forwards the clientUiStartup facts (source-locked, M3-6 PR1)', async () => {
-  const bootstrapSource = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  const selectionSource = readFileSync(new URL('../src/app/bootstrap/runtime-selection.ts', import.meta.url), 'utf8')
   // The seam's Remote branch forwards the selection's REQUIRED startup
   // facts to `createRemoteApplicationRuntime` — no default, no omission.
   assert.match(
-    bootstrapSource,
+    selectionSource,
     /clientUiStartup: selection\.remote\.clientUiStartup,/,
     'the Remote selection must forward the exact Client UI startup facts',
   )

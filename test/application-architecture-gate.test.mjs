@@ -131,17 +131,30 @@ test('only the composition owners may import Direct wiring', () => {
   }
 })
 
-test('application owners importing app/bootstrap are rejected (index -> bootstrap -> owners)', () => {
+test('application owners importing the bootstrap composition zone are rejected (index -> bootstrap -> owners)', () => {
+  // TS2: the forbidden target is the WHOLE composition zone — the facade
+  // (`app/bootstrap.ts`) and the cohesive wiring helpers (`app/bootstrap/**`).
+  // Importing either form inverts the dependency exactly the same way.
   // Canonicalization resolves every legal NodeNext spelling against the scanned
   // target, so the emitted-extension (`.js`) and extensionless spellings cannot
   // bypass the rule. The target must be in the scanned set for that to work.
-  const bootstrapTarget = entry('app/bootstrap.ts', 'export const bootstrap = 1\n')
+  const zoneTargets = [
+    'app/bootstrap',
+    'app/bootstrap/event-wiring',
+    'app/bootstrap/lifecycle',
+  ]
+  const scanned = [
+    entry('app/bootstrap.ts', 'export const bootstrap = 1\n'),
+    entry('app/bootstrap/event-wiring.ts', 'export const wiring = 1\n'),
+    entry('app/bootstrap/lifecycle.ts', 'export const lifecycle = 1\n'),
+  ]
   const spellings = ['.ts', '.js', '']
   for (const file of [
     'app/surface/runtime.ts',
     'app/command/surface.ts',
     'app/submission/controller.ts',
     'app/session/runtime.ts',
+    'app/plugin-manager/controller.ts',
     'tui-app.ts',
     'transcript.ts',
   ]) {
@@ -150,21 +163,31 @@ test('application owners importing app/bootstrap are rejected (index -> bootstra
     // package specifier, not a relative import, and would pass for the wrong
     // reason (the old test used exactly that bare form for `tui-app.ts`).
     const prefix = depth === 0 ? './' : '../'.repeat(depth)
-    for (const ext of spellings) {
-      const specifier = `${prefix}app/bootstrap${ext}`
-      const violations = findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), bootstrapTarget])
-      assert.equal(violations.length, 1, `${file} -> ${specifier} must be rejected`)
-      assert.equal(violations[0].rule, 'owner-imports-bootstrap')
+    for (const target of zoneTargets) {
+      for (const ext of spellings) {
+        const specifier = `${prefix}${target}${ext}`
+        const violations = findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), ...scanned])
+        assert.equal(violations.length, 1, `${file} -> ${specifier} must be rejected`)
+        assert.equal(violations[0].rule, 'owner-imports-bootstrap')
+      }
     }
   }
   // The composition direction itself is the ONE allowed exception: the entry
-  // imports bootstrap, and bootstrap may name its own module.
-  for (const file of ['index.ts', 'app/bootstrap.ts']) {
-    const target = file === 'index.ts' ? 'app/bootstrap' : 'bootstrap'
+  // imports bootstrap, the facade names its own module, and bootstrap helpers
+  // may import sibling helpers (they are inside the zone).
+  const allowed = [
+    { file: 'index.ts', target: 'app/bootstrap' },
+    { file: 'app/bootstrap.ts', target: 'bootstrap' },
+    { file: 'app/bootstrap/runtime-selection.ts', target: 'app/bootstrap/lifecycle' },
+    { file: 'app/bootstrap/lifecycle.ts', target: 'app/bootstrap' },
+  ]
+  for (const { file, target } of allowed) {
+    const depth = file.split('/').length - 1
+    const prefix = depth === 0 ? './' : '../'.repeat(depth)
     for (const ext of spellings) {
-      const specifier = `./${target}${ext}`
+      const specifier = `${prefix}${target}${ext}`
       assert.deepEqual(
-        findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), bootstrapTarget]),
+        findViolations([entry(file, `import { bootstrap } from '${specifier}'\n`), ...scanned]),
         [],
         `${file} must stay allowed to import ${specifier}`,
       )
@@ -173,11 +196,41 @@ test('application owners importing app/bootstrap are rejected (index -> bootstra
   // A type-only import is still an inverted dependency.
   for (const ext of spellings) {
     assert.equal(
-      findViolations([entry('app/surface/runtime.ts', `import type { B } from '../bootstrap${ext}'\n`), bootstrapTarget]).length,
+      findViolations([entry('app/surface/runtime.ts', `import type { B } from '../../app/bootstrap/event-wiring${ext}'\n`), ...scanned]).length,
       1,
-      `a type-only owner -> bootstrap${ext} import must be rejected`,
+      `a type-only owner -> helper${ext} import must be rejected`,
     )
   }
+})
+
+test('the bootstrap composition zone may construct Direct wiring (TS2)', () => {
+  // TS2 composition helpers may select/construct Direct adapters, exactly like
+  // the facade: the allowance is the ZONE, not an allowlist of helper names.
+  const zoneFiles = [
+    'app/bootstrap.ts',
+    'app/bootstrap/runtime-selection.ts',
+    'app/bootstrap/task-source.ts',
+    'app/bootstrap/presentation-bridge.ts',
+  ]
+  for (const file of zoneFiles) {
+    for (const target of ['app/direct/runtime.ts', 'runtime/direct/task-read-direct.ts']) {
+      const depth = file.split('/').length - 1
+      const up = '../'.repeat(depth)
+      assert.deepEqual(
+        findViolations([entry(file, `import { direct } from '${up}${target}'\n`)]),
+        [],
+        `${file} must be allowed to import ${target}`,
+      )
+    }
+    assert.equal(isDirectCompositionFile(file), true, `${file} belongs to the Direct composition zone`)
+  }
+  // A new helper module is recognized by DIRECTORY, so an extraction cannot
+  // escape the zone rules by choosing a new file name.
+  assert.equal(isDirectCompositionFile('app/bootstrap/brand-new-helper.ts'), true)
+  // Outside the zone the rule is unchanged.
+  assert.equal(isDirectCompositionFile('app/surface/runtime.ts'), false)
+  assert.equal(isDirectCompositionFile('app/bootstrap-like.ts'), false)
+  assert.equal(isDirectCompositionFile('bootstrap.ts'), false)
 })
 
 test('the only non-composition Direct import is the allowlisted legacy settings TYPE import', () => {
@@ -750,18 +803,20 @@ test('the M3-4 application-runtime aggregate joins through the SINGLE dynamic en
   assert.equal(other[0].rule, 'remote-dynamic-import-owner')
 })
 
-test('the REAL production tree carries the bootstrap -> backend-loader edge, ONE dynamic target, and stays Remote-clean (M3-4 PR1)', () => {
-  // The M3-4 selection seam is not a synthetic allowance: the real
-  // `app/bootstrap.ts` statically imports the loader, the loader owns the
-  // only dynamic edge into app/remote/**, and the whole production tree stays
-  // violation-free (the startup graph included — verified by the full
+test('the REAL production tree carries the bootstrap composition zone -> backend-loader edge, ONE dynamic target, and stays Remote-clean (M3-4 PR1 / TS2)', () => {
+  // The M3-4 selection seam is not a synthetic allowance: the TS2 composition
+  // zone statically imports the loader — the facade re-exports nothing, the
+  // `app/bootstrap/runtime-selection.ts` helper owns the reach — the loader owns
+  // the only dynamic edge into app/remote/**, and the whole production tree
+  // stays violation-free (the startup graph included — verified by the full
   // findViolations scan in the other real-tree tests).
-  const bootstrap = collectSourceEntries().find(e => e.rel === 'app/bootstrap.ts')
-  assert.ok(bootstrap !== undefined, 'app/bootstrap.ts must exist in the scanned tree')
-  const edges = parseImportSpecifiers(bootstrap.source)
-    .map(spec => resolveRelativeImport('app/bootstrap.ts', spec.specifier))
+  const selectionRel = 'app/bootstrap/runtime-selection.ts'
+  const selection = collectSourceEntries().find(e => e.rel === selectionRel)
+  assert.ok(selection !== undefined, `${selectionRel} must exist in the scanned tree`)
+  const edges = parseImportSpecifiers(selection.source, selectionRel)
+    .map(spec => resolveRelativeImport(selectionRel, spec.specifier))
     .filter(resolved => resolved === 'runtime/backend-loader.ts')
-  assert.equal(edges.length, 1, 'the real bootstrap statically imports runtime/backend-loader.ts exactly once (the M3-4 selection seam reach)')
+  assert.equal(edges.length, 1, `the real selection seam statically imports runtime/backend-loader.ts exactly once (the M3-4 seam reach)`)
   const loader = collectSourceEntries().find(e => e.rel === REMOTE_DYNAMIC_IMPORT_OWNER)
   assert.ok(loader !== undefined, 'runtime/backend-loader.ts must exist in the scanned tree')
   const dynamicTargets = parseValueDynamicImports(loader.source)
