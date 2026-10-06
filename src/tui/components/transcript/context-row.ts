@@ -2,7 +2,7 @@
  * Form-aware standalone Context rows: notice, relay and session recall.
  *
  * A producer-declared Context form decides how one injected row is presented
- * (see `context-presentation.ts`). `notice` is a one-off account whose
+ * (see `domain/transcript/context-semantics.ts`). `notice` is a one-off account whose
  * producer-authored `summary` is shown below the header at NORMAL brightness
  * and wrapped naturally — the TUI never invents a head/row preview from the
  * payload. `relay` is another Agent's authored message: its sender is named

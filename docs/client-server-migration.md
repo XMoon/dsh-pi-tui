@@ -939,7 +939,7 @@ adapter's job is transport mapping, not reimplementation.
 - **Preset / plugin diagnostics** — use `agentPresets.compositionInventory()`
   instead of parsing `agent.cordis.yml` by hand. It is a diagnostic surface,
   never a substitute for a real Agent mount smoke.
-- **Transcript window** — `transcript-window` is CLIENT render retention
+- **Transcript window** — `domain/transcript/window` is CLIENT render retention
   only. It owns none of: history authority, transport cursor, gap repair
   protocol, projection fold, durability, or reconnect generation.
 
@@ -1029,7 +1029,7 @@ Client
     ↓
   official Session client loads required history
     ↓
-  TUI transcript-window anchors presentation
+  TUI domain/transcript window anchors presentation
 ```
 
 `turnOutline` is the official whole-log turn index (`@deepseek-ai/dsh-session-turn-outline`):
@@ -1055,7 +1055,7 @@ projection unit, so M3-1's dynamic `RemoteHostRuntime` mounts
 `@deepseek-ai/dsh-session-turn-outline` beside `dsh-session-stats`; the ordinary
 `cordis.patch.yml` remains unchanged.
 
-`transcript-window` remains only Client presentation/window state. It owns
+`domain/transcript/window` remains only Client presentation/window state. It owns
 none of: history authority, paging cursor, reconnect, gap repair, or session
 projection folding.
 
@@ -3029,7 +3029,7 @@ still reaches the Remote graph only through the dynamic
   settle/teardown. It layers AROUND the unchanged `QuestionFlow` (no fork, no
   second draft store, reentrancy fences intact).
 - `src/tui-app.ts` gained a caller-owned status line on the flow and carries
-  the primary `callId` on a settled tool card (`src/transcript.ts`), so
+  the primary `callId` on a settled tool card (`src/domain/transcript/folder.ts`), so
   `present.ts`'s existing summary/answer-line renderer is fed the
   authoritative `userQuestions.settled` batch — a presentation enrichment over
   the unchanged durable transcript event (no synthetic tool result).
