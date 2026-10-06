@@ -2,7 +2,7 @@
  * The goal badge fold (status derives): the active goal text a session log
  * implies, read structurally so no Host session type enters the presentation
  * layer.
- * @module @xmoon76/dsh-pi-tui/status/derive-goal
+ * @module @xmoon76/dsh-pi-tui/domain/status/derive-goal
  */
 
 /**

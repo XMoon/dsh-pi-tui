@@ -4,7 +4,7 @@
  * to the viewed child. This module resolves the current display subject from
  * the mounted viewer's identity — the ONE selector StatusRuntime's
  * display-subject derivation uses (M3-5 PR1).
- * @module @xmoon76/dsh-pi-tui/status/resolve-subject
+ * @module @xmoon76/dsh-pi-tui/domain/status/resolve-subject
  */
 
 import type { ViewStatus } from './types.ts'

@@ -23,7 +23,7 @@
  * stays dirty, so the next lifecycle trigger retries. A session identity
  * change clears the old session's value — the new session can never inherit
  * the old measurement.
- * @module @xmoon76/dsh-pi-tui/status/context-measurement
+ * @module @xmoon76/dsh-pi-tui/domain/status/context-measurement
  */
 
 /** Why the runner is (re)measuring context — informational today, the seam

@@ -4,7 +4,7 @@
  * the app's projections mint fresh objects on every call, so a
  * same-value refresh must never churn the store's revision, notify
  * listeners, or wake the command runner's refresh.
- * @module @xmoon76/dsh-pi-tui/status/equal
+ * @module @xmoon76/dsh-pi-tui/domain/status/equal
  */
 
 /** Whether two plain-data values are deeply equal (undefined-safe). */

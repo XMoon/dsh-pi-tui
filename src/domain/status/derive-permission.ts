@@ -6,7 +6,7 @@
  * publish a stale permission to the extension snapshot. Pure module so
  * the runner-level regression is testable without importing the bundle
  * entry.
- * @module @xmoon76/dsh-pi-tui/status/derive-permission
+ * @module @xmoon76/dsh-pi-tui/domain/status/derive-permission
  */
 
 /** The permission-preset service surface (structural; alpha.4's
