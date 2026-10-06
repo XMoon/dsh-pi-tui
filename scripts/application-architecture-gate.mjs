@@ -209,6 +209,8 @@ const TRANSCRIPT_CORE_OWN_SUBTREE = 'tui/transcript/'
 const TRANSCRIPT_CORE_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
 
 const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
+  // The TUI command facade/coordinator (the command layer's transitional root).
+  'commands.ts',
   'tui-app.ts',
   'theme.ts',
   'icons.ts',
