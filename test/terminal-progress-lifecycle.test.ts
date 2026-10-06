@@ -100,17 +100,45 @@ test('a plain stop/start round-trip restores a still-running progress state', ()
   }
 })
 
-test('a fresh TuiApp claims the terminal progress state once at mount', () => {
+test('every terminal acquisition asserts the desired progress state', () => {
   const { app, progress } = mountApp()
   try {
-    // The pane's progress indicator is terminal-side state that can outlive a
-    // process: Tern paints a pane "running" while a foreground command runs
-    // (and `dsh` itself is that command), and a killed process can leave
-    // OSC 9;4;3 behind. The mount must therefore assert the desired state.
+    // The pane's progress indicator is terminal-side state that outlives an
+    // ownership window: Tern paints a pane "running" while a foreground command
+    // runs (and `dsh` itself is that command), a killed process can leave
+    // OSC 9;4;3 behind, and an $EDITOR round-trip hands the PTY to another
+    // program. Each acquisition therefore re-asserts the CURRENT desired state.
     assert.deepEqual(progress, [false], 'the mount asserts the idle state (clearing any stale pane busy)')
     app.stop()
     app.start()
-    assert.deepEqual(progress, [false], 'a later restart re-asserts only a DESIRED busy state')
+    assert.deepEqual(progress, [false, false], 'an idle reacquisition re-asserts idle (the terminal may have changed)')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a reacquisition overwrites a progress state changed while the TUI was stopped', () => {
+  const vt = new VirtualTerminal(80, 24)
+  // The terminal's PHYSICAL state, as an external owner would leave it.
+  let physical: boolean | undefined
+  vt.setProgress = (active: boolean) => { physical = active }
+  const stop = vt.stop.bind(vt)
+  // The real ProcessTerminal.stop() clears an active indicator and its
+  // keepalive; the virtual stand-in must model that for the tracked physical
+  // state to be faithful.
+  vt.stop = () => { stop(); physical = undefined }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  try {
+    assert.equal(physical, false, 'the mount claims idle')
+    app.stop()
+    assert.equal(physical, undefined, 'the stop cleared the indicator')
+    // While dsh does not own the PTY, another program paints it busy and dies
+    // without clearing — the same stale terminal-side state this change fixes.
+    physical = true
+    app.start()
+    assert.equal(physical, false, 'the reacquisition overwrites the foreign busy state with the desired idle state')
   } finally {
     app.dispose()
   }
@@ -156,6 +184,37 @@ test('a $EDITOR-suspended TuiApp folds status changes and projects once on resum
     release('edited')
     await pending
     assert.deepEqual(progress, [false, true, true], 'the resume projects the latest desired state exactly once')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a $EDITOR round-trip returning on an idle Agent re-claims idle on resume', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const progress: boolean[] = []
+  let physical: boolean | undefined
+  vt.setProgress = (active: boolean) => { progress.push(active); physical = active }
+  let release!: (text: string) => void
+  const gate = new Promise<string>(resolve => { release = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: () => gate,
+    runOwned: () => {},
+  })
+  app.start()
+  startedApps.add(app)
+  try {
+    assert.deepEqual(progress, [false], 'the mount claims idle')
+    const pending = app.launchExternalEditor()
+    assert.deepEqual(progress, [false], 'the suspend writes nothing')
+    // The PTY belongs to $EDITOR: it (or a program it runs) paints the pane busy
+    // and exits without clearing — exactly the stale state this change fixes.
+    physical = true
+    release('edited')
+    await pending
+    assert.deepEqual(progress, [false, false], 'the resume re-claims the idle state with ONE write')
+    assert.equal(physical, false, 'the foreign busy state is overwritten on reacquisition')
   } finally {
     app.dispose()
   }

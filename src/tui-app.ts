@@ -2242,10 +2242,6 @@ export class TuiApp {
    * re-asserts it.
    */
   private terminalPresentationActive = false
-  /** Whether this surface has already asserted its desired progress state on
-   *  the terminal (see {@link enterTerminalPresentation}): exactly ONE
-   *  unconditional claim per TuiApp lifetime. */
-  private terminalProgressClaimed = false
   /** Re-vendor lifecycle follow-up P3: whether this surface currently
    * holds the process's single live-TUI slot (claimed at the first
    * successful start, released only by the FINAL dispose — never by
@@ -3849,26 +3845,21 @@ export class TuiApp {
 
   /**
    * Claim terminal presentation ownership for progress projection. Called
-   * immediately after EVERY TuiApp-owned screen start (plan §7):
-   * `ProcessTerminal.stop()` cleared the physical indicator, so a still
-   * desired busy state is re-asserted here.
+   * immediately after EVERY TuiApp-owned screen start (plan §7).
    *
-   * The FIRST claim additionally WRITES the desired state unconditionally. The
-   * progress indicator is terminal-side state that outlives a process, and a
-   * terminal may paint it for reasons that have nothing to do with the agent:
-   * Tern marks a pane "running" while a foreground command runs — and `dsh`
-   * itself is such a command — while a crashed/killed process can leave
-   * `OSC 9;4;3` behind. Asserting the desired state once makes the indicator
-   * authoritative from the mount on, exactly as `CSI ? 1004` focus reporting is
-   * asserted at mount and released on every exit.
+   * EVERY acquisition asserts the current DESIRED state — not just the first
+   * one. The progress indicator is terminal-side state that outlives an
+   * ownership window and can be changed while this TuiApp does not own the
+   * terminal: Tern marks a pane "running" while a foreground command runs (and
+   * `dsh` itself is such a command), and during an `$EDITOR` round-trip the
+   * editor — or a crashed process, before this one — can leave `OSC 9;4;3`
+   * behind. Re-asserting on each acquisition makes the indicator authoritative
+   * for the whole ownership window, exactly as `CSI ? 1004` focus reporting is
+   * asserted at mount and released on every exit; the writes stay on ownership
+   * boundaries only, never on the status/repaint hot path.
    */
   private enterTerminalPresentation(): void {
     this.terminalPresentationActive = true
-    if (this.terminalProgressClaimed) {
-      this.restoreTerminalProgress()
-      return
-    }
-    this.terminalProgressClaimed = true
     this.writeTerminalProgress(this.terminalProgressActive)
   }
 
@@ -3880,17 +3871,6 @@ export class TuiApp {
    */
   private leaveTerminalPresentation(): void {
     this.terminalPresentationActive = false
-  }
-
-  /**
-   * Re-assert the DESIRED progress state after a TuiApp-owned screen (re)start
-   * (plan §7): `ProcessTerminal.stop()` clears OSC 9;4 and its keepalive, so
-   * every stop/start round-trip — the external-editor suspend, a fullscreen
-   * swap, a plain stop()/start() — must restore a still-desired busy state.
-   */
-  private restoreTerminalProgress(): void {
-    if (!this.terminalProgressActive) return
-    this.writeTerminalProgress(true)
   }
 
   /** Write one progress hint through the injected terminal, containing a
