@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
-import { classifyTranscriptMessage, isSurfacedContext } from '../src/transcript-semantics.ts'
+import { classifyTranscriptMessage, isSurfacedContext } from '../src/domain/transcript/semantics.ts'
 import { isTranscriptWorkMember } from '../src/tui/transcript/structure.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
