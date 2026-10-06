@@ -383,8 +383,11 @@ export const ARCHITECTURE_RULES = [
     // A literal `await import('...')` reaches the same module as a static
     // import; a rule that only consumed `parseImportSpecifiers()` would leave
     // an escape hatch for both the relative component target and the bare
-    // package specifier.
+    // package specifier. `checksBareDynamicImport` is therefore opted into here
+    // and NOWHERE else: the older rules keep their exact baseline scope, where a
+    // non-relative dynamic specifier was never resolved into a target.
     checksValueDynamicImport: true,
+    checksBareDynamicImport: true,
   },
 ]
 
@@ -788,11 +791,16 @@ export function findViolations(entries, options = {}) {
     // `parseValueDynamicImports()` too, with the same canonicalized target: a
     // relative specifier canonicalizes to its on-disk target, a bare package
     // specifier keeps its bare text (the same convention the static loop uses).
+    // A rule sees a BARE specifier only when it opts into
+    // `checksBareDynamicImport`: the older rules must keep their exact baseline
+    // scope, where a non-relative dynamic specifier was never a target (a bare
+    // `tui/widget` is an npm package/subpath, not `src/tui/**`).
     for (const rule of ARCHITECTURE_RULES) {
       if (rule.checksValueDynamicImport !== true) continue
       if (!rule.applies(rel)) continue
       for (const { specifier, line } of parseValueDynamicImports(sourceByRel.get(rel), rel)) {
         const dynamicRelative = resolveRelativeImport(rel, specifier)
+        if (dynamicRelative === undefined && rule.checksBareDynamicImport !== true) continue
         const target = dynamicRelative === undefined
           ? specifier
           : staticImportCandidates(dynamicRelative).find(candidate => known.has(candidate)) ?? dynamicRelative
