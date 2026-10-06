@@ -909,8 +909,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // Virtual history boundaries preserve the rendered overlap anchor;
   // paging changes only the presentation window, never the fold.
   const transcriptMoveOlder = (): boolean => {
-    const live = mounted()
-    const anchor = live.captureTranscriptViewportAnchor()
     const controller = activeWindow()
     // M3-4 PR2: a bounded reader window (Remote) may still have OFFICIAL
     // older history (`hasMore`). When the virtual window reaches its loaded
@@ -920,6 +918,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     if (!controller.moveOlder()) {
       return routing().extendLoadedHistory()
     }
+    // Perf: the movement is known to change the window BEFORE the expensive
+    // anchor capture runs. The anchor belongs to the MOUNTED presentation, and
+    // nothing has repainted yet, so this still captures the old projection.
+    const live = mounted()
+    const anchor = live.captureTranscriptViewportAnchor()
     repaintTarget(activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
     // Preserve the old top edge at the same rendered row in the overlap.
     if (anchor === undefined) live.scrollToBottom({ disableFollow: true })
@@ -948,10 +951,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     return true
   }
   const transcriptMoveNewer = (): boolean => {
-    const live = mounted()
-    const anchor = live.captureTranscriptViewportAnchor()
     const controller = activeWindow()
     if (!controller.moveNewer()) return false
+    // Perf: capture the OLD mounted projection only after the movement is
+    // known to be real (see transcriptMoveOlder).
+    const live = mounted()
+    const anchor = live.captureTranscriptViewportAnchor()
     repaintTarget(activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
     if (controller.isLatest()) live.scrollToBottom()
     else if (anchor === undefined) live.scrollToTop({ disableFollow: true })

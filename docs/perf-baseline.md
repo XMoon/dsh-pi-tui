@@ -320,11 +320,13 @@ referenced above.
 > Local measurement probes (untracked, not part of the product):
 > `temp/tern/frame-cost-probe.mts` — per-frame CPU/wall inside `TuiAltScreen.doRender`;
 > `temp/tern/frame-profile-probe.mts` — per-class render attribution.
+> `temp/tern/boundary-cost-probe.mts` — the per-event boundary work on a bare `TuiApp`.
 > All probe-side prototype hooks are disabled for every figure below.
 >
 > ```sh
 > node --import tsx/esm temp/tern/frame-cost-probe.mts
 > for p in compact focus full; do PRESET=$p node --import tsx/esm temp/tern/frame-profile-probe.mts; done
+> node --import tsx/esm temp/tern/boundary-cost-probe.mts
 > ```
 > Figures are **frame CPU** p50 / p95 (`frameCpuMs`, measured inside `TuiAltScreen.doRender`),
 > not wall time (20 warm frames per preset).
@@ -352,21 +354,60 @@ The delivered commits keep byte-identical `src` trees — `src` tree
 the figures transfer to the delivered commits. The delivered commit ids — which change on every
 rebase/amend — are pinned in the PR body.
 
-| metric | A baseline | B after Commit 1 | C after Commit 2 | A→B |
-|---|---:|---:|---:|---:|
-| compact frame CPU p50 | 97.47 ms | 17.74 ms | — | −79.73 ms (−82%) |
-| focus frame CPU p50 | 85.41 ms | 7.81 ms | — | −77.60 ms (−91%) |
-| full frame CPU p50 | 92.85 ms | 11.73 ms | — | −81.12 ms (−87%) |
-| compact frame CPU p95 | 150.51 ms | 32.62 ms | — | −117.89 ms |
-| focus frame CPU p95 | 98.11 ms | 18.60 ms | — | −79.51 ms |
-| full frame CPU p95 | 121.26 ms | 16.48 ms | — | −104.78 ms |
-| `RelayContextRow` attributed ms/frame (compact) | 81.25 ms | 0.00 ms | — | −81.25 ms |
-| `RelayContextRow` attributed ms/frame (focus) | 84.21 ms | 0.00 ms | — | −84.21 ms |
-| `RelayContextRow` attributed ms/frame (full) | 68.23 ms | 0.01 ms | — | −68.22 ms |
-| `RelayContextRow` render calls/frame | 5 | 5 | 5 | 0 |
-| boundary no-op capture + remeasure per event | 82.24 ms | 2.60 ms | — | −79.64 ms |
+| metric | A baseline | B after Commit 1 | C after Commit 2 | A→B | B→C | A→C |
+|---|---:|---:|---:|---:|---:|---:|
+| compact frame CPU p50 | 97.47 ms | 17.74 ms | 16.32 ms | −79.73 ms | −1.42 ms | −81.15 ms (−83%) |
+| focus frame CPU p50 | 85.41 ms | 7.81 ms | 7.73 ms | −77.60 ms | −0.08 ms | −77.68 ms (−91%) |
+| full frame CPU p50 | 92.85 ms | 11.73 ms | 10.71 ms | −81.12 ms | −1.02 ms | −82.14 ms (−88%) |
+| compact frame CPU p95 | 150.51 ms | 32.62 ms | 31.34 ms | −117.89 ms | −1.28 ms | −119.17 ms |
+| focus frame CPU p95 | 98.11 ms | 18.60 ms | 14.18 ms | −79.51 ms | −4.42 ms | −83.93 ms |
+| full frame CPU p95 | 121.26 ms | 16.48 ms | 14.90 ms | −104.78 ms | −1.58 ms | −106.36 ms |
+| `RelayContextRow` attributed ms/frame (compact) | 81.25 ms | 0.00 ms | 0.01 ms | −81.25 ms | 0 | −81.24 ms |
+| `RelayContextRow` attributed ms/frame (focus) | 84.21 ms | 0.00 ms | 0.00 ms | −84.21 ms | 0 | −84.21 ms |
+| `RelayContextRow` attributed ms/frame (full) | 68.23 ms | 0.01 ms | 0.01 ms | −68.22 ms | 0 | −68.22 ms |
+| `RelayContextRow` render calls/frame | 5 | 5 | 5 | 0 | 0 | 0 |
+| local boundary no-op anchor captures / event | 1 | 1 | 0 | 0 | −1 | −1 |
+| boundary no-op capture + remeasure per event | 82.24 ms | 2.60 ms | 0 ms (2.24 ms of work removed) | −79.64 ms | −2.60 ms | −82.24 ms |
 
-The C column and the boundary ordering record land with Commit 2.
+Commit 2 is a boundary-path change, so B→C is near-flat on the steady frames (the −0.08 … −1.42 ms
+spread is run-to-run noise on the same machine; C was measured on the same corpus, terminal and probe
+invocation). Its effect is the removed per-event work below. The two commits also interact: Commit 1
+makes ANY full mounted remeasure ~30× cheaper (the relay body is no longer re-wrapped), which is why
+the same boundary no-op capture drops from 82.24 ms/event to 2.60 ms/event before Commit 2 removes the
+capture entirely.
+
+### Boundary no-op cost removed by Commit 2
+
+`temp/tern/boundary-cost-probe.mts` is a bare-`TuiApp` probe (it does NOT mount the surface runtime).
+On the same corpus (160x45, compact, 200 no-op wheel-down events at the tail bottom) it measures the
+fork input path alone and the same path with one mounted `captureTranscriptViewportAnchor()` per event
+(a full `remeasureTranscriptBlocks` over every mounted block):
+
+```text
+A (clean next):   input only 103.9 us/event, 0 remeasures | with one capture/event 82,348 us/event, 200 remeasures
+B (Commit 1):     input only  78.4 us/event, 0 remeasures | with one capture/event  2,678 us/event, 200 remeasures
+C (Commit 2):     input only  67.2 us/event, 0 remeasures | the production fast-path performs ZERO captures
+                  (replaying the removed work still measures 2,309 us/event, 200 remeasures)
+```
+
+The durable regression gate is the **ordered production call trace**, not a timing threshold:
+`test/transcript-history-extension.test.ts` mounts the real `createSurfaceRuntime` over a virtual
+`ProcessTerminal` (routing source: the test-owned `TranscriptFolder` + `TranscriptWindowController` +
+an `extendLoadedHistory()` recorder), instruments the mounted app and the controller, and drives the
+real page gestures through the fork. The asserted traces:
+
+| boundary case | asserted production trace (C) | A/B production order |
+|---|---|---|
+| local newer no-op (live tail) | `moveNewer` — 0 capture, 0 repaint, 0 restore | capture 1 → remeasure → return |
+| local older no-op, no Remote page | `moveOlder`, `extendLoadedHistory` (exactly 1) — 0 capture, 0 repaint | capture 1 → remeasure → extend 1 |
+| local older no-op, Remote page available | same trace; the extension answer is still returned | capture 1 → remeasure → extend 1 |
+| successful local older page move | `moveOlder`, `capture`, `repaint`, `restore:top` (capture once, BEFORE the repaint) + the old top row still visible | capture 1 → move → repaint → restore top |
+| successful newer move that STAYS in history | `moveNewer`, `capture`, `repaint`, `restore:bottom` (capture once, BEFORE the repaint) + the old bottom row still visible | capture 1 → move → repaint → restore bottom |
+| successful newer move from history@newest | `moveNewer`, `capture`, `repaint`, `scrollToBottom` (capture once, BEFORE the repaint) | capture 1 → move → repaint → latest fallback |
+
+The ordering assertions were mutation-verified: moving the older capture back before the movement
+decision, adding a second newer capture after the repaint, or swapping either restore edge (`'top'` / `'bottom'`) each
+make the suite fail (5 / 3 / 3 failing tests). No wall-clock threshold is asserted anywhere in CI.
 
 ### Commit 1 — `RelayContextRow` renders once per width
 

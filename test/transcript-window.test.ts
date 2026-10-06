@@ -223,3 +223,16 @@ test('older boundary: a window that just reached the oldest turn stops paging', 
   assert.deepEqual(controller.state(), before, 'a failed moveOlder must not mutate the controller state')
   assert.equal(controller.endTurn(), 15, 'the history anchor must stay at the oldest reachable page')
 })
+
+test('a history window anchored at the newest turn still moves newer (hasNewer is not the predicate)', () => {
+  const controller = new TranscriptWindowController({ windowTurns: 3, stepTurns: 2, turns: [1, 2, 3, 4, 5] })
+  assert.equal(controller.isLatest(), true, 'a fresh controller follows the live tail')
+  assert.equal(controller.moveOlder(), true, 'a page into history')
+  assert.equal(controller.turnNewer(), true, 'single-turn navigation reaches turn 4')
+  assert.equal(controller.turnNewer(), true, 'single-turn navigation reaches the newest turn 5')
+  assert.equal(controller.isLatest(), false, 'the window is still a HISTORY window')
+  assert.equal(controller.snapshot().hasNewer, false, 'the local view already reaches the newest turn')
+  assert.equal(controller.moveNewer(), true,
+    'history@newest -> latest is a REAL semantic movement; a caller must not substitute snapshot().hasNewer')
+  assert.equal(controller.isLatest(), true, 'the successful move switched the semantic mode to latest')
+})
