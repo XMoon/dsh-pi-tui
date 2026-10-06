@@ -923,10 +923,11 @@ test('A5b-6: the submission writer section is controller-owned and read late-bou
 test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a root cache', () => {
   // Finding (P2): the composition root held the retained jobs snapshot and the
   // session/generation fence — a small state machine, not composition wiring.
-  // It belongs to the Task-Center owner (`SurfaceRuntime.attachTasks`, which
+  // It belongs to the Task-Center owner (`TaskRuntime.attachTasks`, which
   // already owns the task model); the root now supplies only the fence FACTS.
+  // TS3 §34 moved that owner into `app/surface/task-runtime.ts`.
   const root = compositionFile('src/app/bootstrap.ts')
-  const owner = ownerFile('src/app/surface/runtime.ts')
+  const owner = ownerFile('src/app/surface/task-runtime.ts')
   // The composition root must not name a jobs-snapshot/retained-rows slot.
   assert.equal(declares(root, 'jobSnapshot'), false,
     'the composition root must not declare the retained jobs snapshot')

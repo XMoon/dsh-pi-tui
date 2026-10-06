@@ -9,12 +9,13 @@
  * notification-runtime.ts     completion notification + terminal focus (§31)
  * extension-runtime.ts        extension host/hook/keybinding/attachment seams (§32)
  * plugin-manager-runtime.ts   the ONE PluginManagerController + both entries (§33)
+ * task-runtime.ts             Task Center + Job viewer state machine (§34)
  * interaction-runtime.ts      approval/question attachment + attention (§35)
+ * event-routing.ts            application-level presentation event routing (§36)
  * ```
  *
- * `task-runtime.ts` and `event-routing.ts` follow in TS3 commit 7. The aggregate
- * keeps the cross-sub-owner wiring and the ordered teardown, and it stays the
- * mounted-app owner.
+ * The aggregate keeps the cross-sub-owner wiring and the ordered teardown, and it
+ * stays the mounted-app owner.
  *
  * Ownership kept here (plan §7/§11/§12/§37):
  *
@@ -35,21 +36,15 @@
  *   the transcript-navigation / Ctrl+R search presentation callback wiring live
  *   here (A4-8, plan §17). The runner keeps the transcript/search/viewport
  *   ALGORITHMS (`transcript.ts`, `search-overlay.ts`, `transcript-window.ts`)
- *   and the state INSTANCES, injected through the routing source;
- * - the Task Center (`TaskBrowserRuntime` + the browser state/panels + the Job
- *   viewer/observer) still lives here and moves to `task-runtime.ts` in TS3
- *   commit 7;
- * - the approval/question presentation is delegated to `interaction-runtime.ts`
- *   (§35): the aggregate only forwards the attach call;
- * - the presentation event ROUTING lives here (A4-7): `session/event` (opening
- *   journal, opening-viewer buffer, viewed-child vs main owner, every
- *   same-session/exact-owner/cleanup fence and the per-target apply/paint
- *   calls), the assistant-stream neutral input routing, the subagent lifecycle
- *   / `agent/status` presentation triggers and the provider/settings/credential
- *   surface refresh routing. The runner keeps the Cordis registrations as thin
- *   delegations, the Direct assistant-stream INSTALL, the Direct/domain
- *   bookkeeping and the presentation-target instances, injected through the
- *   narrow `SurfaceEventRoutingSource` bundle;
+ *   and the state INSTANCES, injected through the routing source; moving that
+ *   view ownership to `tui/**` is TS6;
+ * - the Task Center / Job viewer state machine is delegated to `task-runtime.ts`
+ *   (§34) and the presentation event ROUTING to `event-routing.ts` (§36): the
+ *   aggregate forwards the attach/acquire calls and the routing entries, and
+ *   wires each sub-owner's cross-owner callbacks. The runner still keeps the
+ *   Cordis registrations as thin delegations, the Direct assistant-stream
+ *   INSTALL, the Direct/domain bookkeeping and the presentation-target
+ *   instances, injected through the narrow `SurfaceEventRoutingSource` bundle;
  * - the runner still owns the application input contract: it hands the
  *   `TuiAppEvents` table in at `start()`, because that table is the
  *   session/submission/command owners' contract with the surface (A5 moves the
@@ -76,9 +71,9 @@
  * | plugin keybinding sync | `bindPluginKeybinds()` | `extension.dispose()` |
  * | question controller + attention subscription | `attachInteraction()` | `interaction.dispose()` |
  * | mounted `TuiApp` | `start()` | `dispose()` |
- * | jobs-event subscription | `attachTasks()` | `disposeJobEvents()` |
- * | Job observer + viewer | `openJobView()`/`openJobStatusViewer()` | `disposeJobObservation()` |
- * | task browser handle/token/rows/scope | `openTasksBrowser()` | `disposeTaskBrowser()` |
+ * | jobs-event subscription | `attachTasks()` | `task.disposeJobEvents()` |
+ * | Job observer + viewer | `openJobView()`/`openJobStatusViewer()` | `task.disposeJobObservation()` |
+ * | task browser handle/token/rows/scope | `openTasksBrowser()` | `task.disposeTaskBrowser()` |
  *
  * `disposePluginManager()` and `dispose()` are idempotent, and every release
  * hook is safe before its acquire ran (the slots are optional). Teardown order
@@ -87,12 +82,12 @@
  * keybinding sync, theme-unload hook, extension surface detach — the runner's
  * original order) while `disposePluginManager()` releases the Plugin Manager
  * subscription at its original EARLY position, and the Task Center hooks run in
- * the original `jobsEvents -> jobObservation -> taskBrowser` order. The
- * remaining interleaved runner-owned steps stay with their owners and the runner
- * orchestrates them around these hooks. There is deliberately NO
- * partial-acquire rollback beyond that: `start()` is the last acquire and a
- * throwing mount leaves the process on the runner's fatal path, which runs the
- * same ordered cleanup.
+ * the original `jobsEvents -> jobObservation -> taskBrowser` order (each one
+ * releasing only its own slot). The remaining interleaved runner-owned steps stay
+ * with their owners and the runner orchestrates them around these hooks. There is
+ * deliberately NO partial-acquire rollback beyond that: `start()` is the last
+ * acquire and a throwing mount leaves the process on the runner's fatal path,
+ * which runs the same ordered cleanup.
  *
  * Host coupling: this module reads NO Host business service and imports NO
  * Direct wiring (plan §4.3). Everything it needs arrives as a narrow injected
@@ -106,7 +101,6 @@ import {
   type DisplaySubjectPresentation,
   type StatusData,
   type StreamingToolPreview,
-  type TodoItem,
   type TranscriptSearchCloseReason,
   type TranscriptSearchPresentation,
   type TranscriptSearchPresentationTarget,
@@ -114,42 +108,12 @@ import {
   type TuiAppEvents,
   type TuiAppOptions,
 } from '../../tui-app.ts'
-import type { Diag } from '../../diag.ts'
 import { color } from '../../theme.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import { runOwned } from '../../detached.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
-import {
-  buildTaskRows,
-  isActiveJobStatus,
-  isSubagentRowInterruptible,
-  rowGroup,
-  subagentInterruptParent,
-  taskRowLabel,
-  taskTreePrefix,
-  viewerAccessHint,
-  viewerAccessOf,
-  workflowMemberViewerTarget,
-  type TaskBrowserJobInput,
-  type TaskBrowserRow,
-} from '../../tasks-browser.ts'
-import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from '../../task-browser-runtime.ts'
-import type { TaskBrowserViewState, TaskPanelItem } from '../../task-panel.ts'
-import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from '../../task-center-attention.ts'
-import type { TaskBrowserHandle, WorkflowAction } from '../../tui-app.ts'
+import type { TaskBrowserDatasetScope } from '../../task-browser-runtime.ts'
+import type { TaskBrowserViewState } from '../../task-panel.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
-import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
-import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import type { SubmitLatencyPhase } from '../../submit-latency.ts'
-import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
-import {
-  busyAfterTurnBoundary,
-  contextRefreshKind,
-  foldCompactionEvent,
-  settleCompactionSurface,
-} from '../../compaction-presentation.ts'
-import type { SessionSubject } from '../session/subject.ts'
 import { ImageLoader } from '../../image/loader.ts'
 import type { ImageAttachmentRefLike } from '../../image/admission.ts'
 import { StatusStore } from '../../domain/status/store.ts'
@@ -159,14 +123,13 @@ import type { TranscriptFolder, TranscriptMessage, TranscriptSearchMatch } from 
 import type { TranscriptWindowController } from '../../transcript-window.ts'
 import { streamingToolPreviewSnapshot } from '../../streaming-tool-preparing.ts'
 import { buildPendingPresentation } from '../../pending-presentation.ts'
-import type { PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
-import type { SubmissionPresentationItem } from '../../submission-presentation.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../../search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from '../../search-profile.ts'
 import type { TerminalNotifierWriter } from '../../notification/terminal-notifier.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
-// TS3 §31-§35: the surface's independent application-level owners. Each is
-// constructed exactly once here; none of them imports this aggregate.
+// TS3 §31-§36: the surface's independent application-level owners. Each is
+// constructed exactly once here; none of them imports this aggregate's value
+// implementation (only its cross-owner facade types).
 import { createNotificationRuntime, type AgentLifecycleStatus } from './notification-runtime.ts'
 import {
   createExtensionRuntime,
@@ -176,26 +139,37 @@ import {
 } from './extension-runtime.ts'
 import { createPluginManagerRuntime, type PluginManagerAttachDeps, type SurfacePluginManager } from './plugin-manager-runtime.ts'
 import { createInteractionRuntime, type SurfaceInteractionDeps } from './interaction-runtime.ts'
+import {
+  createTaskRuntime,
+  type TaskSurfaceDeps,
+  type TaskSurfaceRead,
+  type TaskSurfaceSource,
+} from './task-runtime.ts'
+import {
+  createEventRouting,
+  type RoutedSessionEvent,
+  type SurfaceEventRoutingSource,
+} from './event-routing.ts'
 
 // The moved public/internal surface types stay importable from this exact path
 // (the aggregate remains the stable entry for its consumers).
+export { jobStopNotice } from './task-runtime.ts'
 export type { AgentLifecycleStatus } from './notification-runtime.ts'
 export type { OptionCapability, SurfaceExtensionService, SurfaceSeamDeps } from './extension-runtime.ts'
 export type { PluginManagerAttachDeps, SurfacePluginManager } from './plugin-manager-runtime.ts'
 export type { SurfaceInteractionDeps } from './interaction-runtime.ts'
+export type { TaskSurfaceDeps, TaskSurfaceJobs, TaskSurfaceRead, TaskSurfaceSource } from './task-runtime.ts'
+export type {
+  RoutedSessionEvent,
+  SurfaceEventRoutingSource,
+  SurfaceEventSink,
+  SurfaceMainEventObservation,
+  SurfaceMainPresentation,
+  SurfaceViewedChildPresentation,
+} from './event-routing.ts'
 
 /** Coalesced repaint interval for streaming events, in ms (A4-8, plan §17). */
 const REPAINT_FLUSH_MS = 50
-
-/**
- * Whether the opt-in Task Center catalog refresh profiler is enabled for this
- * process (`DSH_TUI_TASK_REFRESH_PROFILE=1`). Off by default: the coalescing
- * gate then emits no diagnostics, so the TUI log stays clean.
- */
-function taskCatalogRefreshProfilingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.DSH_TUI_TASK_REFRESH_PROFILE === '1'
-}
-
 /** The capabilities the mount needs; each is resolved by the runner/bootstrap. */
 export interface SurfaceMountDeps {
   /** The application input contract (session/submission/command owners). */
@@ -242,382 +216,6 @@ export interface SurfaceMountDeps {
   readonly openExternalUrl: OptionCapability<'openExternalUrl'>
   /** Right-click clipboard read (the runner owns the platform policy). */
   readonly readClipboardText: OptionCapability<'readClipboardText'>
-}
-
-/**
- * The roster-feed capability the Task Center consumes (A4-6, plan §15; M3-5
- * PR2/PR3). Optional: a composition without a roster source has no dock roster
- * feed and no Job viewer. The runner keeps the selected backend-specific read
- * (Direct maps it to the Host JobRegistry `ctx.jobs`; Remote to the official
- * Client Jobs via `remoteSources.task.jobs()`) plus the `JobId`/`SessionId`
- * casts; the surface never imports the Host service or learns which backend
- * produced the rows. The retained-snapshot fence for a transient read failure
- * is owned here, in {@link SurfaceRuntime.attachTasks}.
- *
- * `list`/`subscribe` are ONLY the roster feed. The selected-Job detail/Stop
- * capability is `jobObservation` (both backends), so this interface never
- * carries a backend-specific detail/kill read: the neutral Task/Job UI has no
- * backend-specific Job authority (M3-5 PR3).
- */
-export interface TaskSurfaceJobs {
-  /** A FRESH roster read of the current root's roster (the selected source's
-   *  `list` contract; throws on a failed read). */
-  list(sessionId: string | undefined): readonly TaskBrowserJobInput[]
-  /** Subscribe to scope-owned roster/runtime events (the `owners: 'scope'`
-   *  filter). */
-  subscribe(listener: (event: { readonly type: string }) => void): () => void
-}
-
-/**
- * The selected Task read capability the Task Center consumes (plan §15.2): the
- * full semantic Task read plus the two live facts the coordinator needs at
- * commit time. The runner supplies it from the SELECTED application runtime
- * (Direct maps it to the Host Agent registry/catalog, Remote to the official
- * Client projections/Session list), so the surface never learns which backend
- * produced the rows.
- */
-export interface TaskSurfaceRead {
-  currentKey: TaskBrowserRuntimeHooks['currentKey']
-  currentSessionId(): string | undefined
-  /** The selected Task semantic read (descendant tree + root Job roster). */
-  readTask: TaskBrowserRuntimeHooks['readTask']
-  /** The selected current-activity read of one child, at commit time. */
-  activityOf: TaskBrowserRuntimeHooks['activityOf']
-}
-
-/**
- * The narrow production capability the Task Browser / Job viewer need
- * (plan §15.2). Injected by the runner; no Backend port is added for
- * symmetry. The `jobs`/`taskRead` halves are independently optional (the
- * corresponding selected source), mirroring the runner's two original
- * conditional wiring blocks.
- */
-export interface TaskSurfaceSource {
-  /** The live root session id (undefined = no live agent). */
-  sessionId(): string | undefined
-  /** Capture the exact ownership subject for the destructive-intent fence. */
-  captureSubject(): SessionSubject | undefined
-  /** Whether a captured subject is still the current owner generation. */
-  subjectMatches(subject: SessionSubject | undefined): boolean
-  /** Open the child transcript viewer (session-owned, async hydration). */
-  enterView(
-    childId: string,
-    label: string | undefined,
-    mode: 'one-shot' | 'continuable',
-    parentSessionId: string,
-    activity: 'running' | 'inactive',
-    depth?: number,
-  ): Promise<void>
-  /** Stop one continuable child through the session writer admission. */
-  interruptSubagent(parentSessionId: string, childSessionId: string): Promise<SubagentInterruptOutcome>
-  /** The root row-selection disposition helper (public root seam). */
-  rowSelectionDisposition(
-    row: { readonly kind: 'job' | 'subagent' } | undefined,
-    jobDetail: 'close' | 'keep-open',
-  ): 'close' | 'keep-open'
-  /** The subagent-job child-session-id probe (public root seam). */
-  subagentJobTranscriptId(snapshot: unknown): string | undefined
-  /** The subagent-job viewer body hint (public root seam). */
-  subagentJobViewHint(status: string, detail: string | undefined): string
-  /** The selected-Job observation port (`backend.jobObservation`). */
-  readonly jobObservation: JobObservationPort
-  readonly jobs?: TaskSurfaceJobs
-  readonly taskRead?: TaskSurfaceRead
-}
-
-/** The task-center lifetime inputs the surface borrows from the runner. */
-export interface TaskSurfaceDeps {
-  /** The runner's diagnostics channel for the owned async flows. */
-  readonly diag: Diag
-  /** The runner's cleanup latch: the ORIGINAL `cleanedUp` fence. A late async
-   *  result or a teardown-triggered refresh must stop touching the surface the
-   *  moment the runner begins teardown, before `surface.dispose()`. */
-  readonly isCleanedUp: () => boolean
-}
-
-/**
- * The structural session-event shape the A4-7 routing reads: the discriminant
- * and the per-type payload. The runner's Host `SessionEvent` satisfies it; the
- * surface never imports the Host session type. `data` stays `unknown` and the
- * routing mirrors the runner's own structural reads at the few call sites that
- * inspect it.
- */
-export interface RoutedSessionEvent {
-  readonly type: string
-  readonly data: unknown
-}
-
-/** One transcript/stats fold sink. The concrete `TranscriptFolder`/`StatsFolder`
- *  implementations stay runner-owned (plan §17); the surface only calls their
- *  `apply`. */
-export interface SurfaceEventSink<Event> {
-  apply(events: readonly Event[]): void
-}
-
-/**
- * The main-owner presentation target (plan §16.1): the live main folder/stats
- * and the transient main tool-preview projection. Read through a live accessor
- * because a session commit swaps the hydrated folder/stats instances.
- */
-export interface SurfaceMainPresentation<Event> {
-  readonly folder: SurfaceEventSink<Event>
-  readonly stats: SurfaceEventSink<Event>
-  /** The main window controller (live accessor: a session commit swaps it). */
-  readonly window: TranscriptWindowController
-  /** The main transient streaming-preview map (live accessor). */
-  readonly previews: Map<string, StreamingToolPreview>
-  /** Apply one event to the main streaming tool-preview projection. */
-  applyToolPreview(event: Event): void
-  /**
-   * F1 (PR5 §3.2): let the recent-performance availability bit follow the
-   * SAME fold this sink just mutated. Called by the live ingress after the
-   * stats append; the owner decides whether the predicate is now proven and
-   * re-derives the status when it flips.
-   */
-  refreshRecentPerformanceAvailability(): void
-}
-
-/**
- * The viewed-child presentation target (plan §16.1): the child folder/stats/
- * previews plus the viewer's own activity/footer state. Valid only while a
- * viewer is mounted (the routing checks {@link SurfaceEventRoutingSource.viewedChildId}).
- */
-export interface SurfaceViewedChildPresentation<Event> {
-  readonly id: string
-  readonly folder: SurfaceEventSink<Event>
-  readonly stats: SurfaceEventSink<Event>
-  /** The child window controller (valid only while the viewer is mounted). */
-  readonly window: TranscriptWindowController
-  /** The child transient streaming-preview map. */
-  readonly previews: Map<string, StreamingToolPreview>
-  applyToolPreview(event: Event): void
-  /** turn/start: the child is live again (rebinds the exact Agent + queue subject). */
-  beginTurn(): void
-  /** turn/end: the child parks. */
-  endTurn(): void
-  /** Push the child's own turns/steps/stats into the footer. */
-  refreshFooter(): void
-}
-
-/**
- * The A4-7 presentation event routing source (plan §16/§4.3): the runner-owned
- * facts, Direct/domain bookkeeping and presentation targets the surface routing
- * consumes. A narrow injected capability bundle in the `TaskSurfaceSource`
- * style — never a Host service lookup and never a Direct import.
- *
- * The boundary (owner-refined): the runner owns Host registration, the Direct
- * assistant-stream INSTALL, and all Direct/domain bookkeeping (model-selection
- * observation, the request-header consume, the call-args / pending-subagent /
- * viewed-child maps, the exact Agent lookup); the surface owns every routing
- * decision, the transcript/stats/preview APPLICATION calls, and the repaint /
- * refresh coordination.
- */
-
-/** The presentation intents one main-owner event observation reports (A4-7):
- *  the Direct bookkeeping stays with the runner; the surface routing performs
- *  the refresh calls. */
-export interface SurfaceMainEventObservation {
-  /** The settled viewed-child id for a `tool/result` (`viewCallToChild`). */
-  readonly settledViewChildId?: string
-  /** A `subagent*` `tool/call` was observed: the surface routing refreshes the
-   *  subagent catalog — the same presentation trigger as `subagent/start|end`. */
-  readonly refreshAgents: boolean
-}
-export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
-  // ── fences + identity (Direct ownership + Host attachment) ──────────────
-  /** The runner's cleanup latch (the ORIGINAL `cleanedUp` fence). */
-  isCleanedUp(): boolean
-  /** The attached-session fence: the runtime still owns the EXACT object for
-   *  this session id (the original `sessions.get(session.id)` comparison). */
-  isAttachedSession(session: { readonly id: string }): boolean
-  /** The live owner session id (the ownership-core read). */
-  currentSessionId(): string | undefined
-  /** Whether a live Direct Agent exists (the original `agentNow()` guard). */
-  hasLiveAgent(): boolean
-  /** The exact completion-owner Agent id, or undefined (`agent/status` fence). */
-  completionOwnerId(): string | undefined
-
-  // ── Direct/domain bookkeeping (stays runner-owned) ──────────────────────
-  /** Feed one main-owner event to the Direct bookkeeping (model-selection
-   *  observation, request-header selection consume, the call-args cache, the
-   *  pending-subagent feed and the viewed-child settle map) and REPORT the
-   *  presentation intents; the surface routing performs the refresh calls. */
-  observeMainEvent(sessionId: string, event: Event): SurfaceMainEventObservation
-  /** Append to the opening viewer's child-event buffer when the event belongs
-   *  to the open viewer child (the token fence + child match); true when
-   *  consumed. */
-  appendOpeningViewerEvent(sessionId: string, event: Event): boolean
-
-  // ── presentation targets (runner-owned instances) ───────────────────────
-  main(): SurfaceMainPresentation<Event>
-  viewedChildId(): string | undefined
-  viewedChild(): SurfaceViewedChildPresentation<Event>
-  /** The concrete main transcript folder the repaint/search glue reads (the
-   *  event APPLICATION stays on the structural sink above). */
-  mainFolder(): TranscriptFolder
-  /** The concrete viewed-child transcript folder while its viewer is mounted. */
-  viewedChildFolder(): TranscriptFolder
-
-  // ── A4-8 pending-input presentation (plan §13.2) ────────────────────────
-  /** The active pending subject: the interactive continuable child while its
-   *  viewer is mounted, else the live main session; undefined when the surface
-   *  has no queue subject. */
-  pendingSubjectId(): string | undefined
-  /** The semantic pending-input read (`backend.pendingInputReader.snapshot`). */
-  pendingSnapshot(sessionId: string): PendingInputSnapshot | undefined
-  /** The client-local submission echoes (`submissionPresentation.snapshot`). */
-  submissionEchoes(sessionId: string | undefined): readonly SubmissionPresentationItem[] | undefined
-  /** One occurrence's content projection as the pane's single-line text. */
-  queueTextOf(content: readonly unknown[]): string
-
-  // ── projection/refresh coordination ─────────────────────────────────────
-  /** Leave the viewed-child transcript back to the main surface. */
-  exitView(): void
-  refreshStatusCheap(): void
-  refreshStatusAndWelcome(): void
-  /** Fold one `goal/change` into the runner's status goal text. */
-  applyGoalChange(event: Event): void
-  /** The session title one `session/title` event implies. */
-  sessionTitleOf(event: Event): string | undefined
-  /**
-   * M3-4 PR2: extend the LOADED history by one official older page
-   * (`PresentationReader.loadOlder`) when the active window has more
-   * (bounded reader windows). Returns whether an extension was dispatched;
-   * Direct always returns false (the fold already holds the full log).
-   */
-  extendLoadedHistory(): boolean
-  settleLocalSubmitAck(reason: string): void
-  markSubmitLatency(sessionId: string | undefined, phase: SubmitLatencyPhase): void
-  observeDurableSubmission(rpcId: string): void
-  markContextDirty(): void
-  refreshContextMeasurement(reason: ContextMeasureReason): void
-  /** Whether the CURRENT live agent's log ends mid-turn (the compaction
-   *  settle's working-from-log read over the live session log). */
-  currentWorkingFromLog(): boolean
-  /** Persist the completed turn (`runDetached('turn flush', …)`). */
-  flushTurn(): void
-
-  // ── assistant-stream identity facts + neutral input targets ─────────────
-  /** The registry hosts EXACTLY this Agent object for the session id. */
-  registeredAgentIs(sessionId: string, agent: object): boolean
-  /** The exact current owner Agent object. */
-  isCurrentOwnerAgent(agent: object): boolean
-  viewedChildAgent(): object | undefined
-  setViewedChildAgent(agent: object): void
-  setViewedQueueAgent(agent: object): void
-  /** The registry's live Agent for a session id (the rollover comparison). */
-  agentForSession(sessionId: string): object | undefined
-  applyViewedChildAssistantInput(input: AssistantLiveInput): void
-  applyMainAssistantInput(input: AssistantLiveInput, sessionId: string): void
-}
-
-/**
- * The task-browser row → panel-item projection (moved with the Task Center
- * wiring, A4-6). JOB rows keep their status/detail; SUBAGENT rows carry the
- * projected runtime activity as the status word, the durable mode as the
- * non-truncatable suffix, and the tree connector from the catalog depth.
- * `canStop` is advertised ONLY for a continuable child with a LIVE running
- * driver — an idle continuable has no driver to stop.
- *
- * JOB rows are openable/stop-capable on BOTH backends: the selected-Job detail
- * and Stop come from the semantic `jobObservation` port the selected backend
- * always provides (M3-5 PR3), never from a backend-specific registry read.
- */
-function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
-  const labels = new Map<string, string>()
-  for (const row of target) {
-    if (row.kind === 'subagent') labels.set(row.childId, row.label)
-  }
-  return target.map(row => row.kind === 'job'
-    ? {
-        value: row.value,
-        // A `subagent`-kind job is the registry's reliable contract
-        // for a background one-shot delegation: its `one-shot` mode
-        // rides as the non-truncatable suffix, like the child rows.
-        label: row.jobKind === 'subagent' ? `subagent job · ${row.label}` : taskRowLabel(row),
-        suffix: row.jobKind === 'subagent' ? 'one-shot' : undefined,
-        status: row.status,
-        detail: row.detail,
-        startedAt: row.startedAt,
-        finishedAt: row.finishedAt,
-        group: rowGroup(row),
-        source: 'job' as const,
-        active: isActiveJobStatus(row.status),
-        attention: row.attention ?? (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'),
-        canOpen: true,
-        canStop: isActiveJobStatus(row.status),
-        // The Tab type filter: job rows filter by their job kind.
-        type: row.jobKind,
-      }
-    : {
-        value: row.value,
-        // The mode rides as the panel's non-truncatable SUFFIX
-        // (`subagent · <label> · continuable`): the label itself may
-        // truncate on a narrow screen, the mode never silently does.
-        label: `subagent · ${row.label}`,
-        suffix: row.mode,
-        status: row.activity,
-        group: rowGroup(row),
-        source: 'subagent' as const,
-        type: 'subagent',
-        active: row.activity === 'running',
-        canOpen: true,
-        // Only a continuable row with a LIVE running driver is Stop-capable
-        // (one-shot ids are accepted no-ops for the interrupt transport; an
-        // idle continuable has no driver to stop — the UI must not advertise
-        // a dead stop verb).
-        canStop: isSubagentRowInterruptible(row),
-        parentId: row.parentId === '' ? undefined : `agent:${row.parentId}`,
-        parentLabel: row.parentId === '' ? undefined : labels.get(row.parentId),
-        depth: row.depth,
-        hasChildren: row.hasChildren,
-        mode: row.mode,
-        access: viewerAccessHint(row.mode, viewerAccessOf(row)),
-        // The durable descendant tree connector: indentation + branch
-        // glyph from the catalog's `depth` (plan §6.7) — a fixed
-        // region that never scrolls with the selected label.
-        treePrefix: taskTreePrefix(row.depth),
-      })
-}
-
-/** One-line viewer hint for a job state (never touches the read cursor). */
-function jobStatusHint(status: string, detail: string | undefined): string {
-  const tail = status === 'running' || status === 'stopping'
-    ? ' — opening the non-consuming retained-output stream…'
-    : ` — final output is delivered to the agent via job_output${detail === undefined ? '' : ` (${detail})`}`
-  return `${status}${tail}`
-}
-
-/** The Job detail body from the detached observation (never a Host read). */
-function formatJobObservation(observed: JobObservedSnapshot): string {
-  const lines: string[] = [observed.status]
-  if (observed.progress !== undefined) lines.push(`progress: ${observed.progress}`)
-  if (observed.detail !== undefined) lines.push(`detail: ${observed.detail}`)
-  if (observed.gapBefore) lines.push('note: earlier output was evicted before this retained preview')
-  if (observed.error !== undefined) lines.push(`follow error: ${observed.error}`)
-  lines.push('', 'best-effort retained output preview (not a complete transcript):', '', observed.text)
-  return lines.join('\n')
-}
-
-/**
- * The ONE user-facing settlement of a Job Stop (plan J2). It preserves the
- * certainty distinction: an unproven `indeterminate` settlement is never
- * reported as "not stopped" and is never replayed — the authoritative Job
- * streams decide.
- */
-export function jobStopNotice(outcome: JobStopOutcome, label: string): { message: string; level: 'info' | 'error' } {
-  switch (outcome.kind) {
-    case 'requested':
-      return { message: `stopping ${label}`, level: 'info' }
-    case 'already-finished':
-      return { message: `${label} already finished`, level: 'info' }
-    case 'not-found':
-      return { message: `${label} is no longer active`, level: 'info' }
-    case 'rejected':
-      return { message: `could not stop ${label}: ${outcome.message}`, level: 'error' }
-    case 'indeterminate':
-      return { message: `could not confirm stopping ${label} — the state will decide`, level: 'error' }
-  }
 }
 
 /** The creation options: the early surface state + the Client-local sinks. */
@@ -842,54 +440,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     mounted: () => mounted(),
     service: () => extension.service(),
   })
-  // The Task Center / Job viewer resources (A4-6); each has exactly one
-  // acquire point (`attachTasks`) and one release owner (`disposeJobEvents` /
-  // `disposeJobObservation` / `disposeTaskBrowser` / `dispose`). The runner's
-  // own `cleanedUp` latch stays the fence for the moved bodies (a teardown
-  // that starts before `surface.dispose()` must already stop repainting).
-  let taskSource: TaskSurfaceSource | undefined
-  let taskDeps: TaskSurfaceDeps | undefined
-  let refreshTasks: () => void = () => {}
-  let refreshAgents: () => void = () => {}
-  let refreshAgentRuntimeOnly: () => void = () => {}
-  let taskBrowserRows: TaskBrowserRow[] = []
-  let taskRuntime: TaskBrowserRuntime | undefined
-  let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
-  let quickTaskState: TaskBrowserViewState | undefined
-  let activeTaskBrowser: TaskBrowserHandle | undefined
-  let activeTaskBrowserToken: object | undefined
-  /** The open browser's mode: Question attention rows are mode-dependent
-   *  (Quick lists parked ones only, Full lists every actionable one). */
-  let activeTaskBrowserMode: 'quick' | 'full' | undefined
-  let activeJobViewerClose: (() => void) | undefined
-  /**
-   * The CURRENT selected-Job viewer instance. The ownership SessionSubject is
-   * NOT viewer currentness: a Job viewer is an overlay that never changes the
-   * main owner/generation, so a Stop settlement that resolves after THIS
-   * viewer was closed or replaced must be dropped by instance identity.
-   */
-  let activeJobViewerToken: object | undefined
-  let jobsEventsDispose: (() => void) | undefined
-  // The surface-owned CATALOG refresh GATE (coalescing): every production Task
-  // Center catalog invalidation funnels through `refreshAgents()`, which starts
-  // at most ONE coordinator catalog read at a time and records any
-  // invalidation arriving mid-flight as `dirty`. When the current traversal
-  // settles, a single trailing refresh re-reads the latest membership; a
-  // session-generation bump resets the whole gate. The runtime epoch/committed
-  // fence stays the OVERLAP-correctness authority; this gate is the performance
-  // (single-flight) authority.
-  let taskCatalogRefreshGeneration = 0
-  let taskCatalogRefreshInFlight = false
-  let taskCatalogRefreshDirty = false
-  let taskCatalogRefreshPendingInvalidations = 0
-  /** The GLOBAL durable descendant count of the last committed catalog (NOT the
-   *  scope-filtered presentation rows): profiler-only instrumentation state. */
-  let taskCatalogDescendants = 0
-  // A4-7 presentation event routing (plan §16): the injected routing source and
-  // the surface-owned compaction fold id. The `compactingId` is routing state
-  // (which compaction bracket is live for the presentation), not Direct state.
+  // A4-7 presentation event routing (plan §16): the injected routing source the
+  // router and this aggregate's own pending-input/search coordination read. The
+  // routing-local `compactingId` lives with the router.
   let routingSource: SurfaceEventRoutingSource<Event> | undefined
-  let compactingId: string | undefined
 
   /** The injected event-routing source; only reachable while attached. */
   const routing = (): SurfaceEventRoutingSource<Event> => {
@@ -897,8 +451,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     return routingSource
   }
 
-  /** The runner's cleanup latch for the moved bodies (see `TaskSurfaceDeps`). */
-  const isCleanedUp = (): boolean => taskDeps?.isCleanedUp() === true
+  /** The runner's cleanup latch for the aggregate's own moved bodies (the Task
+   *  Center owner holds the SAME injected latch for its flows). */
+  const isCleanedUp = (): boolean => task.isCleanedUp()
 
   /** The mounted app for a callback that can only run while the surface is
    *  live (the original wiring read the runner's `app` binding directly). */
@@ -911,18 +466,51 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // `QuestionSurfaceController` plus its attention subscription. The attention
   // publication stays a PRESENTATION-only refresh: the count goes to the app
   // chrome and the Task Center (commit 7 moves the latter into its own owner).
+  // The Task Center / Job viewer owner (TS3 §34) holds the ONE
+  // `TaskBrowserRuntime`, the browser/viewer state and the catalog refresh gate.
+  // Question attention crosses as an injected read/subscription only (the
+  // controller stays with its own owner below).
+  const task = createTaskRuntime({
+    mounted: () => mounted(),
+    isCleanedUp: () => isCleanedUp(),
+    attention: {
+      rows: () => interaction.attentionRows(),
+      reconcile: () => interaction.controller()?.reconcile(),
+      publish: () => interaction.publishAttention(),
+      reopen: (sessionId, callId) => interaction.controller()?.reopen(sessionId, callId) ?? false,
+    },
+  })
+
+  // The approval/question presentation owner (TS3 §35) holds the ONE
+  // `QuestionSurfaceController` plus its attention subscription. The attention
+  // publication stays a PRESENTATION-only refresh: the count goes to the app
+  // chrome and the OPEN Task Center browser repaints through its own owner.
   const interaction = createInteractionRuntime({
     mounted: () => mounted(),
     liveApp: () => app,
     currentSessionId: () => routingSource?.currentSessionId(),
     schedulePaint: () => schedulePaint(),
-    diag: () => taskDiag(),
+    diag: () => task.diag(),
     isCleanedUp: () => isCleanedUp(),
     setQuestionAttention: (parkedCount) => mounted().setQuestionAttention(parkedCount),
-    onAttentionChanged: () => {
-      if (isCleanedUp() || activeTaskBrowserMode === undefined) return
-      activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
-    },
+    onAttentionChanged: () => task.refreshAttentionRows(),
+  })
+
+  // The application-level presentation event router (TS3 §36) owns the routing
+  // decisions/fences and the routing-local compaction fold id; every target and
+  // cross-owner effect arrives as an injected callback.
+  const eventRouting = createEventRouting<Event>({
+    source: () => routing(),
+    mounted: () => mounted(),
+    openingJournal,
+    reconcileQuestions: () => interaction.controller()?.reconcile(),
+    refreshAgents: () => task.refreshAgents(),
+    refreshAgentRuntimeOnly: () => task.refreshAgentRuntimeOnly(),
+    hasTaskChild: (childId) => task.hasTask(childId),
+    feedCompletionStatus: (agentId, status) => notification.onAgentStatus(agentId, status),
+    refreshPendingInput: () => refreshPendingInput(),
+    schedulePaint: () => schedulePaint(),
+    paintNow: () => paintNow(),
   })
 
   // ── A4-4/A4-8 presentation coordination (plan §13/§17) ──────────────────
@@ -1533,1043 +1121,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // PR2: the semantic Workflow card actions (member open / scoped agent
     // browse). A4-6 moved the handler into the surface owner (it reads the
     // browser's row-identity source); the closure only runs on a user click.
-    onWorkflowAction: action => handleWorkflowAction(action),
+    onWorkflowAction: action => task.handleWorkflowAction(action),
   })
-
-  // A4-6: the Task Browser + Job viewer application wiring (plan §15). Every
-  // body below moved VERBATIM from the runner's task/job closure; only the
-  // Host/Direct facts (session id, jobs registry, Agent registry, ownership
-  // subject, writer admission, child viewer, root helpers) arrive through the
-  // injected `TaskSurfaceSource`, and the mounted app is reached through
-  // `mounted()`.
-  /** The injected task capability; only reachable while attached. */
-  const taskCenter = (): TaskSurfaceSource => {
-    if (taskSource === undefined) throw new Error('the task center is not attached')
-    return taskSource
-  }
-  /** The runner diagnostics channel for the owned async flows. */
-  const taskDiag = (): Diag => {
-    if (taskDeps === undefined) throw new Error('the task center is not attached')
-    return taskDeps.diag
-  }
-  /**
-   * Start exactly ONE Task Center catalog traversal. Ownership state is
-   * committed BEFORE `runOwned` invokes the factory: `refreshCatalog()` runs
-   * synchronously up to its first await (it emits the loading state
-   * immediately), so a re-entrant invalidation from there must already see
-   * `inFlight = true`. `trailing` records whether this read was scheduled by a
-   * settle (a coalesced trailing read) rather than by a direct invalidation.
-   */
-  const startTaskCatalogRefresh = (trailing: boolean): void => {
-    if (isCleanedUp()) return
-    const generation = taskCatalogRefreshGeneration
-    taskCatalogRefreshInFlight = true
-    taskCatalogRefreshDirty = false
-    const invalidations = Math.max(1, taskCatalogRefreshPendingInvalidations)
-    taskCatalogRefreshPendingInvalidations = 0
-    const startedAt = Date.now()
-    runOwned('task browser agents refresh', () => taskRuntime!.refreshCatalog(), {
-      diag: taskDiag(),
-      sessionId: () => taskCenter().sessionId(),
-      onResult: () => settleTaskCatalogRefresh(generation, invalidations, trailing, startedAt, 'ok'),
-      onCancel: () => settleTaskCatalogRefresh(generation, invalidations, trailing, startedAt, 'cancelled'),
-      onError: () => settleTaskCatalogRefresh(generation, invalidations, trailing, startedAt, 'error'),
-    })
-  }
-  /**
-   * Release the gate after ONE traversal settles. A settled refresh of a
-   * SUPERSEDED generation (a session switch happened mid-flight) is a gate
-   * no-op: the new generation owns the gate, and the old traversal must neither
-   * clear the new session's in-flight mark nor schedule a trailing read. (It is
-   * still profiled, with only its own start-time facts.) Otherwise the gate is
-   * released and, when any invalidation arrived while the traversal was in
-   * flight, EXACTLY ONE trailing refresh starts.
-   */
-  const settleTaskCatalogRefresh = (
-    generation: number,
-    invalidations: number,
-    trailing: boolean,
-    startedAt: number,
-    outcome: 'ok' | 'cancelled' | 'error',
-  ): void => {
-    const superseded = generation !== taskCatalogRefreshGeneration
-    if (taskCatalogRefreshProfilingEnabled()) {
-      // Opt-in profile (default off): one line per REAL started traversal —
-      // including one of a SUPERSEDED generation, whose result never commits.
-      // A superseded line carries ONLY the facts captured when the read
-      // started; the current gate/catalog state belongs to the new session and
-      // must not be attributed to the old read. Never records session ids,
-      // prompts or child labels.
-      const fields: Record<string, unknown> = {
-        elapsedMs: Date.now() - startedAt,
-        invalidations,
-        trailing,
-        outcome,
-        generation,
-        superseded,
-      }
-      if (!superseded) {
-        fields.dirtyAtSettle = taskCatalogRefreshDirty
-        // Only an `ok` read COMMITTED a catalog: a failed/cancelled read leaves
-        // the previous membership in place, so the last committed count must
-        // not be reported as this traversal's descendant scale.
-        if (outcome === 'ok') fields.descendants = taskCatalogDescendants
-      }
-      taskDiag().info('task catalog refresh profile', fields)
-    }
-    if (superseded) return
-    taskCatalogRefreshInFlight = false
-    if (!taskCatalogRefreshDirty) return
-    taskCatalogRefreshDirty = false
-    startTaskCatalogRefresh(true)
-  }
-  /** Reset the task-browser dataset scope to the global dataset (PR2 plan
-   *  §10.8): every close path (Esc, row selection) clears the scope so the
-   *  next ordinary `/tasks` / ↓ Task Center sees `all` again. */
-  const resetTaskBrowserScope = (): void => {
-    taskBrowserScope = { kind: 'all' }
-    taskRuntime?.setScope({ kind: 'all' })
-  }
-  // The four coordinator commits: the row-identity source for the open
-  // browser's select path always reflects the latest commit, and the repaint
-  // targets ONLY the open handle. Every commit keeps the runner's `cleanedUp`
-  // fence.
-  /**
-   * Task Center rows = Question attention ABOVE the work rows (§7.2/§9.3).
-   * Attention is composed from the controller's detached presentation model
-   * only — Task Center never reads the Question projection or the Inbox — and
-   * it is composed BEFORE the first frame so a work-only list never flashes.
-   */
-  /**
-   * Publish how many PARKED actionable Questions exist, so the footer's ↓
-   * trigger and the Quick Task Center stay reachable for a Questions-only
-   * session (addendum §11). A visible Question is not counted: it already owns
-   * the editor seat. This never touches the active-work counts.
-   */
-  const taskPanelItemsWithAttention = (
-    rows: readonly TaskBrowserRow[],
-    mode: 'quick' | 'full',
-  ): TaskPanelItem[] => {
-    const attention = interaction.attentionRows()
-    const questionItems = mode === 'quick' ? quickQuestionRows(attention) : fullQuestionRows(attention)
-    return [...questionItems, ...taskPanelItems(rows)]
-  }
-
-  const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string): void => {
-    if (isCleanedUp()) return
-    taskBrowserRows = [...rows]
-    if (activeTaskBrowserMode === undefined) {
-      // No browser open: only the select-path identity source is updated.
-      return
-    }
-    activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows, activeTaskBrowserMode), preferred)
-  }
-  const commitBadge = (running: ReadonlyArray<{ id: string; label: string }>): void => {
-    if (isCleanedUp()) return
-    mounted().setAgents(running.map(entry => ({
-      id: entry.id,
-      label: entry.label,
-      activity: 'running',
-    })))
-  }
-  const commitSummary = (summary: TaskBrowserSummary): void => {
-    // Profiler-only: remember the GLOBAL durable descendant count of this
-    // commit. `summary.totalAgents` is projected before the browser's dataset
-    // scope filters the rows, so it stays the catalog scale for a scoped
-    // browser too — and it excludes the Job rows that `rows()` carries.
-    taskCatalogDescendants = summary.totalAgents
-    if (isCleanedUp()) return
-    mounted().setTaskSummary(summary)
-  }
-  const commitRefreshState = (state: 'loading' | 'ready' | 'stale', error?: string): void => {
-    if (isCleanedUp()) return
-    activeTaskBrowser?.setRefreshState?.(state, error)
-  }
-
-  /**
-   * Open the selected-Job status viewer. Its facts are backend-neutral: the
-   * opening Task row is the fallback until the FIRST observed snapshot, and
-   * from then on the viewer repaints the LATEST local observation — its timer
-   * never reads Host/Client Job output. `jobObservation.stop` is the one Stop
-   * mutation, fenced by the viewer's captured subject + the latest active
-   * status.
-   */
-  const openJobStatusViewer = (
-    jobId: string,
-    title: string,
-    row: { readonly jobKind: string; readonly label: string; readonly status: string; readonly detail?: string },
-  ): void => {
-    const source = taskCenter()
-    // One viewer at a time, and a fresh selection replaces the previous.
-    activeJobViewerClose?.()
-    const ownerSessionId = source.sessionId()
-    if (ownerSessionId === undefined) return
-    // The destructive-intent fence is captured at OPEN time (like the browser
-    // fence): a Stop confirmed later belongs to THIS viewer's subject.
-    const viewerSubject = source.captureSubject()
-    // …and the viewer INSTANCE token is the currentness fence: the ownership
-    // subject alone stays current across a same-Session Job A -> Job B
-    // replacement, so a stale settlement is dropped by identity.
-    const viewerToken = {}
-    activeJobViewerToken = viewerToken
-    const viewerCurrent = (): boolean => activeJobViewerToken === viewerToken
-    const fallbackText = row.jobKind === 'subagent'
-      ? source.subagentJobViewHint(row.status, row.detail)
-      : jobStatusHint(row.status, row.detail)
-    // The selected Job is the ONLY observed Job (P1-B1). The observer is
-    // event-driven at its data source: the official follow stream updates
-    // this local snapshot and the viewer's existing refresh timer merely
-    // repaints it — the tick never reads Host output.
-    let observed: JobObservedSnapshot | undefined
-    let observationError: string | undefined
-    let closeObserver: () => void = () => {}
-    try {
-      closeObserver = source.jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
-    } catch (error) {
-      // A composition without the official job-controller row (the injected
-      // production row guarantees it) degrades to the status-only detail —
-      // the documented safety valve — and says so explicitly.
-      observationError = safeErrorMessage(error)
-    }
-    const refreshBody = (): string => {
-      if (observed !== undefined) return formatJobObservation(observed)
-      // Only the opening row projection before the first observed snapshot:
-      // never a registry/roster re-read on the timer.
-      return observationError === undefined
-        ? fallbackText
-        : `${fallbackText}\nlive observation unavailable: ${observationError}`
-    }
-    // The Stop key and its hint share ONE live capability source: THIS viewer
-    // instance still current, the captured subject still current, and the
-    // latest OBSERVED status (the opening row before the first snapshot).
-    const activeForStop = (): boolean =>
-      viewerCurrent()
-      && source.subjectMatches(viewerSubject)
-      && isActiveJobStatus(observed?.status ?? row.status)
-    activeJobViewerClose = mounted().openOutputViewer({
-      title,
-      initial: fallbackText,
-      refresh: refreshBody,
-      onStop: () => {
-        // Re-check both fences at dispatch: a stale viewer/session
-        // confirmation dispatches nothing.
-        if (!activeForStop()) return
-        runOwned('job stop', () => source.jobObservation.stop(ownerSessionId, jobId), {
-          diag: taskDiag(),
-          sessionId: () => ownerSessionId,
-          onResult: (outcome) => {
-            if (isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
-            const notice = jobStopNotice(outcome, row.label)
-            mounted().notify(notice.message, notice.level)
-          },
-          onError: (error) => {
-            if (isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
-            mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        // No optimistic local mutation: the official roster/observation
-        // streams converge on their own.
-      },
-      canStop: activeForStop,
-      // The viewer was opened from the Task Center browser: Esc returns
-      // to the parent browser, not to the editor.
-      closeHint: 'back',
-      onClose: () => {
-        // Invalidate THIS viewer's instance fence BEFORE releasing, so a Stop
-        // settlement still in flight can never notify a replacement surface.
-        if (activeJobViewerToken === viewerToken) activeJobViewerToken = undefined
-        // Closing the viewer always releases the observer (Esc, the parent
-        // browser closing, a session transition, or surface teardown).
-        closeObserver()
-        activeJobViewerClose = undefined
-        refreshTasks()
-      },
-    })
-  }
-
-  /**
-   * Open one job from the task browser from its CURRENT row projection: an
-   * ordinary Job opens the backend-neutral selected-Job viewer, whose facts
-   * come from `jobObservation` (never `jobs.read()`); a subagent job whose
-   * stable child session id is unknown shows the same Job detail with a /tasks
-   * hint. The row projection is the row identity + opening-metadata authority
-   * — never a fresh registry read. Returns the navigation disposition for the
-   * selecting browser: the transcript path REPLACES the Task Center
-   * (`'close'`); a Job detail is a child overlay of it (`'keep-open'`).
-   */
-  const openJobView = (jobId: string): 'close' | 'keep-open' => {
-    const source = taskCenter()
-    const ownerSessionId = source.sessionId()
-    if (ownerSessionId === undefined) return 'keep-open'
-    const row = taskBrowserRows.find(
-      (candidate): candidate is Extract<TaskBrowserRow, { readonly kind: 'job' }> =>
-        candidate.kind === 'job' && candidate.jobId === jobId,
-    )
-    if (row === undefined) return 'keep-open'
-    if (row.jobKind === 'subagent') {
-      const childSessionId = source.subagentJobTranscriptId(row)
-      if (childSessionId !== undefined) {
-        // The registry's `subagent` kind IS the reliable contract
-        // for a background ONE-SHOT delegation (the registry never
-        // records continuable children): the transcript viewer opens
-        // read-only. The parent is the job owner.
-        runOwned('subagent view from tasks', () => source.enterView(
-          childSessionId, row.label, 'one-shot', ownerSessionId, 'inactive',
-        ), {
-          diag: taskDiag(),
-          sessionId: () => ownerSessionId,
-          onError: (error) => {
-            if (isCleanedUp()) return
-            mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        // The transcript viewer is a session surface, not a Job child
-        // overlay: it keeps its own Esc semantics (browser closed).
-        return 'close'
-      }
-      // The rc.2 Job row carries no stable child id. Use the reliable status
-      // fallback and let /tasks (which owns child identities through
-      // the merged browser) perform transcript selection; never substitute
-      // label/order/time matching.
-      openJobStatusViewer(jobId, `subagent ${row.jobId} · ${row.label}`, row)
-      return 'keep-open'
-    }
-    openJobStatusViewer(jobId, `${row.jobKind} ${row.jobId} · ${row.label}`, row)
-    return 'keep-open'
-  }
-
-  /**
-   * Open the Task Browser. `quick` is the ↓ trigger, `full` is the `/tasks`
-   * surface; the SAME browser serves both.
-   */
-  const openTasksBrowser = (
-    viewMode: 'quick' | 'full',
-    restoreState?: TaskBrowserViewState,
-    scope?: TaskBrowserDatasetScope,
-    header?: string,
-  ): void => {
-    const source = taskCenter()
-    const browserSessionId = source.sessionId()
-    if (isCleanedUp() || browserSessionId === undefined) return
-    // PR2 plan §10.5/§10.8: an EXPLICIT scope (a Workflow phase/run
-    // dataset) becomes the browser's dataset scope; a transition
-    // (Quick→Full / Full→Quick) without one keeps the current scope; a
-    // fresh ordinary open after a close always starts from `all` (the
-    // close paths reset it). The scope applies at EVERY runtime commit.
-    if (scope !== undefined) taskBrowserScope = scope
-    taskRuntime?.setScope(taskBrowserScope)
-    // The destructive-intent fence is captured at OPEN time: a Stop
-    // confirmed later belongs to THIS surface's session. Comparing the
-    // generation/session AT dispatch against values captured AT dispatch
-    // (as in an earlier revision) could never fail — the intent must be
-    // bound to the browser that hosted the confirmation (PR review P1).
-    const browserSubject = source.captureSubject()
-    const browserToken = {}
-    activeTaskBrowserToken = browserToken
-    let jobSnapshots: readonly TaskBrowserJobInput[] = []
-    const jobs = source.jobs
-    if (jobs !== undefined) {
-      try {
-        // Job ownership is the Session id (DSH 0.1.7 JobRegistry): the
-        // live session id is only the id source here.
-        jobSnapshots = jobs.list(browserSessionId)
-      } catch {
-        // The registry read is best-effort; the jobs half stays empty.
-      }
-    }
-    // The trigger only fires while something is ACTIVE (jobs or live
-    // children), so an empty jobs half is NOT an empty browser: the
-    // children half enriches below. Never early-return on row count —
-    // a children-only session would never open the browser. The row
-    // identity source is the SURFACE-level `taskBrowserRows` (kept fresh
-    // by every coordinator commit), so the select/action paths below
-    // never contradict a runtime refresh that already repainted.
-    //
-    // FIRST FRAME: seed from the coordinator's CURRENT state instead of
-    // flashing a jobs-only list — refreshRuntime() is synchronous, never
-    // touches persistence, reuses the cached catalog and re-reads the
-    // current jobs + registry statuses (activeTaskBrowser is not set
-    // yet, so it only seeds taskBrowserRows + the badge). The badge and
-    // the panel therefore agree from the first frame, and a FAILED fresh
-    // listing below cannot leave a panel that contradicts the badge.
-    // Without the runtime (no subagents service) the jobs-only fallback
-    // applies.
-    const runtime = taskRuntime
-    if (runtime !== undefined) {
-      runtime.refreshRuntime()
-      taskBrowserRows = [...runtime.rows()]
-    } else {
-      taskBrowserRows = buildTaskRows(jobSnapshots, [])
-    }
-    const selectRow = (value: string): 'close' | 'keep-open' => {
-      if (isCleanedUp()) return 'close'
-      // A Question attention row is NOT a Job: it never enters the Job
-      // stop/detail paths. Enter reopens the SAME controller entry, and a row
-      // that went stale between rendering and selection (another client
-      // queued/settled the call) fails closed and keeps the browser usable.
-      const questionIdentity = questionIdentityOf(value)
-      if (questionIdentity !== undefined) {
-        const reopened = interaction.controller()?.reopen(questionIdentity.sessionId, questionIdentity.callId) ?? false
-        return reopened ? 'close' : 'keep-open'
-      }
-      const row = taskBrowserRows.find(candidate => candidate.value === value)
-      if (row === undefined) return source.rowSelectionDisposition(undefined, 'keep-open')
-      if (row.kind === 'subagent') {
-        // The viewer target carries the row's OWN parent (plan §6.10:
-        // childId + parentId + depth + mode + activity — never just
-        // childId + mode). A nested row's durable parent is the exact
-        // direct parent recorded by DSH; only a direct child falls back
-        // to the browser root (the live main session).
-        const parentSessionId = row.parentId !== '' ? row.parentId : source.sessionId()
-        if (parentSessionId === undefined) return 'close'
-        // The row carries the catalog MODE + projected activity + DEPTH:
-        // the viewer target is pinned to them (continuable → interactive
-        // editor only at depth 1, one-shot → read-only, depth > 1 →
-        // nested read-only), and the follow-up write path to the exact
-        // parent.
-        runOwned('subagent view from tasks', () => source.enterView(
-          row.childId, row.label, row.mode, parentSessionId, row.activity, row.depth,
-        ), {
-          diag: taskDiag(),
-          sessionId: () => source.sessionId(),
-          onError: (error) => {
-            if (isCleanedUp()) return
-            mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        // The subagent transcript is a session/viewer surface, not a
-        // child overlay of the browser: it REPLACES the Task Center and
-        // keeps its own Esc semantics.
-        return source.rowSelectionDisposition(row, 'keep-open')
-      }
-      // A Job View is the selected row's DETAIL: it opens as a child
-      // overlay (hiding this browser, not destroying it) and returns to
-      // the exact browser state on Esc. A job that has already vanished
-      // simply opens nothing — the parent stays usable either way.
-      return source.rowSelectionDisposition(row, openJobView(row.jobId))
-    }
-    const stopRow = (value: string): void => {
-      if (isCleanedUp()) return
-      const row = taskBrowserRows.find(candidate => candidate.value === value)
-      if (row === undefined) return
-      const actionBrowserToken = activeTaskBrowserToken
-      if (actionBrowserToken !== browserToken) return
-      // The SURFACE fence: the user's destructive intent is bound to the
-      // session that owned this browser when it opened. A session that
-      // switched after the browser opened (or while a confirmation was
-      // pending) must never be stopped by the stale confirmation — the
-      // captured browser values, not the dispatch-time values, are the
-      // comparison side that can actually fail.
-      if (!source.subjectMatches(browserSubject)) return
-      if (row.kind === 'subagent') {
-        if (!isSubagentRowInterruptible(row)) return
-        // Re-read the live driver at confirmation time; the panel row is
-        // only a snapshot and may have become idle since it was rendered.
-        if (source.taskRead?.activityOf(row.childId) !== 'running') return
-        // The interrupt authority names the child's DURABLE DIRECT parent;
-        // deep descendants must not be addressed through the main root.
-        const interruptParent = subagentInterruptParent(row, browserSessionId)
-        // The scope-bound writer admission (A3-4): the Task-Center subagent
-        // interrupt is NOT a submission write, so its business ownership
-        // stays in the runner — only the admission moves through
-        // SessionRuntime.withWriter. The surface calls the injected op.
-        runOwned('subagent interrupt', function () {
-          return source.interruptSubagent(interruptParent, row.childId)
-        }, {
-          diag: taskDiag(),
-          sessionId: () => browserSessionId,
-          onResult: (outcome) => {
-            if (isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
-            if (outcome.kind === 'committed') {
-              mounted().notify(`stopping ${row.label}`, 'info')
-              return
-            }
-            if (outcome.kind === 'indeterminate') {
-              // A dispatched interrupt whose settlement is unknown must not
-              // be reported as "not stopped"; the authoritative task/read
-              // state decides and no automatic replay happens.
-              mounted().notify(`could not confirm stopping ${row.label} — the session state will decide`, 'error')
-              return
-            }
-            const reason = outcome.reason.kind === 'error'
-              ? outcome.reason.message
-              : outcome.reason.message ?? (outcome.reason.kind === 'unauthorized'
-                ? 'subagent interrupt unauthorized'
-                : 'subagent service unavailable')
-            mounted().notify(`could not stop ${row.label}: ${reason}`, 'error')
-          },
-          onError: (error) => {
-            if (isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
-            mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        return
-      }
-      // Job Stop uses the SAME semantic operation as the viewer on BOTH
-      // backends: the browser/subject fence above already bound the intent,
-      // the CURRENT projection row must still be active, then the ONE
-      // `jobObservation.stop` is dispatched. No optimistic local mutation —
-      // the authoritative roster/observation streams converge the row.
-      if (!isActiveJobStatus(row.status)) return
-      runOwned('job stop from tasks', () => taskCenter().jobObservation.stop(browserSessionId, row.jobId), {
-        diag: taskDiag(),
-        sessionId: () => browserSessionId,
-        onResult: (outcome) => {
-          if (isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
-          const notice = jobStopNotice(outcome, row.label)
-          mounted().notify(notice.message, notice.level)
-        },
-        onError: (error) => {
-          if (isCleanedUp() || activeTaskBrowserToken !== actionBrowserToken || !source.subjectMatches(browserSubject)) return
-          mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-        },
-      })
-    }
-    // Read Question authority BEFORE composing the first frame: the attention
-    // rows Task Center shows must reflect the current projection, never only
-    // whatever the last routed event happened to reconcile (addendum §9.3).
-    interaction.controller()?.reconcile()
-    // Re-publish the parked count with the same fresh authority: the footer
-    // affordance must never lag a Question that is already known to be pending.
-    interaction.publishAttention()
-    const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
-    const initialQuery = restoreState?.searchQuery ?? ''
-    const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
-    const initialPreferred = initialSelected
-      ?? taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
-      ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
-    const handle = mounted().openTaskBrowser(
-      taskPanelItemsWithAttention(taskBrowserRows, viewMode),
-      // Selection disposition decides whether the browser survives: a Job
-      // detail keeps it MOUNTED underneath (the overlay stack hides and
-      // restores the exact instance/state on Esc); a terminal navigation
-      // (subagent transcript, row left the dataset) drops the
-      // active-handle reference so a later runtime refresh cannot repaint
-      // a closed browser, and resets the dataset scope (PR2 plan §10.8 —
-      // the next ordinary Task Center must see the global dataset).
-      (value) => {
-        if (isCleanedUp()) return 'close'
-        const disposition = selectRow(value)
-        if (disposition === 'keep-open') return 'keep-open'
-        activeTaskBrowser = undefined
-        activeTaskBrowserToken = undefined
-        activeTaskBrowserMode = undefined
-        resetTaskBrowserScope()
-        return 'close'
-      },
-      () => {
-        if (isCleanedUp()) return
-        const current = activeTaskBrowser?.getViewState?.()
-        activeTaskBrowser = undefined
-        activeTaskBrowserToken = undefined
-        activeTaskBrowserMode = undefined
-        resetTaskBrowserScope()
-        if (viewMode === 'full' && restoreState !== undefined) {
-          // Esc from a promoted full view returns to Quick with the latest
-          // shared context, not the state from the promotion moment.
-          const state = current ?? quickTaskState ?? restoreState
-          openTasksBrowser('quick', state)
-        }
-      },
-      {
-        header: header ?? 'Tasks',
-        enableSearch: true,
-        mode: viewMode,
-        openedFrom: viewMode === 'full' && restoreState !== undefined ? 'quick' : 'command',
-        scope: initialScope,
-        typeFilter: restoreState?.typeFilter,
-        initialQuery,
-        initialSearchMode: restoreState?.searchMode,
-        expandedIds: [...(restoreState?.expandedIds ?? [])],
-        collapsedIds: [...(restoreState?.collapsedIds ?? [])],
-        selectedId: initialSelected,
-        preferredValue: initialPreferred,
-        maxVisible: viewMode === 'quick' ? 8 : 18,
-        loading: runtime !== undefined && taskBrowserRows.length === 0,
-        groupLabels: true,
-        onRefresh: () => {
-          if (isCleanedUp()) return
-          if (runtime === undefined) {
-            refreshTasks()
-            return
-          }
-          // R routes through the coalesced catalog gate: an invalidation while
-          // a traversal is in flight marks the gate dirty, and the current read
-          // settles into ONE trailing refresh that reads the latest membership
-          // — instead of racing a second full descendant traversal. Refresh
-          // state stays SINGLE-OWNER: only the coordinator's
-          // commitRefreshState (fenced by session key + request epoch) may set
-          // loading/ready/stale on the presentation. The surface must never
-          // touch setRefreshState directly — an unfenced onError could mark a
-          // NEW session's browser as failed when the OLD session's listing
-          // rejects (PR review P1).
-          refreshAgents()
-        },
-        onViewFull: state => {
-          if (isCleanedUp()) return
-          activeTaskBrowser = undefined
-          activeTaskBrowserToken = undefined
-          activeTaskBrowserMode = undefined
-          quickTaskState = state
-          openTasksBrowser('full', state)
-        },
-        onStop: stopRow,
-        onViewportExpose: ids => { if (!isCleanedUp()) runtime?.acknowledge(ids) },
-      },
-    )
-    activeTaskBrowser = handle
-    activeTaskBrowserMode = viewMode
-    // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
-    // panel reports each attention row the first time it enters the
-    // open viewport (first frame AND every later scroll/page/jump), and
-    // the runtime acknowledges exactly those ids (PR review P1/P2). Only
-    // rows the user can actually see lose their footer attention;
-    // Quick's Active scope leaves terminal failures pending while live
-    // work is present, so its badge stays useful.
-    // The open routes through the SAME coalesced catalog gate as every other
-    // invalidation (membership may have drifted since the last listing): a
-    // traversal already in flight is never duplicated — opening only marks the
-    // gate dirty and the current read settles into ONE trailing refresh. The
-    // coordinator fences that read against a session switch and commits through
-    // the ACTIVE handle, so a browser closed while it is in flight is never
-    // repainted; the first frame above already painted cached membership +
-    // fresh runtime status. Refresh state is single-owner: the coordinator's
-    // fenced commitRefreshState is the ONLY path that sets loading/ready/stale
-    // (an unfenced error path could mark a new session's browser failed when an
-    // old session's listing rejects — PR review P1).
-    refreshAgents()
-  }
-
-  /** The Workflow card action sink (PR2 plan §9/§10/§14.5): the TUI emits
-   *  semantic intents; THIS handler resolves them against the real Task Center
-   *  / Subagent catalog and opens the existing surfaces — never a
-   *  Workflow-specific viewer or browser. */
-  const handleWorkflowAction = (action: WorkflowAction): void => {
-    const source = taskCenter()
-    const sessionId = source.sessionId()
-    if (sessionId === undefined) return
-    switch (action.kind) {
-      case 'open-member': {
-        // Direct member navigation (plan §9.2): the SINGLE authority
-        // resolver checks the catalog facts (row exists, subagent,
-        // direct child of the current session, driver running) — the
-        // model-side `member.status === running` was already verified by
-        // the app at click time. A missing catalog row (agent-start
-        // before the listing) or any failed condition is a no-op — the
-        // row simply does not open (plan §9.5).
-        const row = taskBrowserRows.find(candidate =>
-          candidate.kind === 'subagent' && candidate.childId === action.childId)
-        const target = workflowMemberViewerTarget(
-          { status: 'running', childId: action.childId },
-          row,
-          sessionId,
-        )
-        if (target === undefined) return
-        runOwned('workflow member view', () => source.enterView(
-          target.childSessionId,
-          target.label,
-          target.mode,
-          target.parentSessionId,
-          target.activity,
-          target.depth,
-        ), {
-          diag: taskDiag(),
-          sessionId: () => source.sessionId(),
-          onError: (error) => {
-            if (isCleanedUp()) return
-            mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        return
-      }
-      case 'open-phase-agents':
-      case 'open-run-agents': {
-        // Scoped Task Viewer (plan §10): the EXACT workflow child-id set
-        // becomes the browser's dataset scope; the existing Task Center
-        // provides search/filter/browse and the existing cold-view
-        // semantics for terminal children (plan §10.7).
-        if (taskRuntime === undefined) return
-        const count = action.childIds.length
-        const header = action.kind === 'open-phase-agents'
-          ? `Workflow · ${action.name} · ${action.phaseLabel} · ${count} agent${count === 1 ? '' : 's'}`
-          : `Workflow · ${action.name} · ${count} agent${count === 1 ? '' : 's'}`
-        openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }, header)
-        return
-      }
-    }
-  }
-
-  // ── A4-7 presentation event routing (plan §16) ─────────────────────────
-  // The routing decisions and fences live here; the runner-owned facts,
-  // Direct/domain bookkeeping and presentation targets arrive through the
-  // injected `SurfaceEventRoutingSource` bundle. The bodies below are the
-  // runner's original routing bodies with the apply/paint calls against the
-  // injected targets.
-
-  /** Whether one child id is a member of the cached descendant catalog. */
-  const taskHasChild = (childId: string): boolean => taskRuntime?.has(childId) === true
-
-  /** The completion-controller feed (`agent/status` main branch): the ONLY
-   *  path to the controller, shared by the routing and the public entry. */
-  const feedCompletionStatus = (agentId: string, status: AgentLifecycleStatus): void => {
-    notification.onAgentStatus(agentId, status)
-  }
-
-  const routeSessionEvent = (session: { readonly id: string }, event: Event): void => {
-    const source = routing()
-    if (source.isCleanedUp()) return
-    if (!source.isAttachedSession(session)) return
-    // Opening journals fence presentation only. Runtime bookkeeping must
-    // continue to observe the target for selections, approvals, and cleanup.
-    const openingTarget = openingJournal.isOpening(session.id)
-    // The retiring committed Agent remains authoritative until quiesce
-    // completes; the published opening target may also emit before commit.
-    const mainEvent = session.id === source.currentSessionId() || openingTarget
-    let settledViewChildId: string | undefined
-    if (mainEvent) {
-      const observed = source.observeMainEvent(session.id, event)
-      settledViewChildId = observed.settledViewChildId
-      // M3-3B continued-question reachability: any activity on the current
-      // Session re-derives answerability from the authoritative projection
-      // (never from a local timer or the transcript). Mounting only happens
-      // when a continued call is actually awaiting an answer.
-      interaction.controller()?.reconcile()
-      // The subagent tool/call refresh is a surface-owned presentation
-      // decision; the runner only reports the intent (A4-7 P2).
-      if (observed.refreshAgents) refreshAgents()
-    }
-    const viewedId = source.viewedChildId()
-    if (openingTarget && (viewedId === undefined || viewedId !== session.id)) {
-      openingJournal.record(session.id, event)
-      return
-    }
-    if (source.appendOpeningViewerEvent(session.id, event)) return
-    if (!source.hasLiveAgent()) return
-    const ownerSessionId = source.currentSessionId()
-    if (viewedId !== undefined) {
-      if (session.id === viewedId) {
-        const viewer = source.viewedChild()
-        viewer.applyToolPreview(event)
-        viewer.folder.apply([event])
-        viewer.stats.apply([event])
-        // The store-activity snapshot moves with the child's own
-        // lifecycle: a turn starting means the child is live again
-        // (cold resume), a turn ending parks it. The footer's activity
-        // field follows, so an inactive child that cold-resumes shows
-        // running while it streams.
-        if (event.type === 'turn/start') {
-          viewer.beginTurn()
-        } else if (event.type === 'turn/end') viewer.endTurn()
-        schedulePaint()
-        // The display subject's Session-owned facts all come from the official
-        // Session projections, and ANY durable event of the viewed Session can
-        // move one of them: `model/selection` + `request/header` (modelSelection),
-        // `agent-preset/selected` (agentPreset), `request/context` (context
-        // window), usage-bearing `assistant/message`/`assistant/attempt`
-        // (tokenUsage/pressure), the `surfaceOp` message/tool-result family
-        // (contextPressure/contextBreakdown), `todo/write`/`session/title`/
-        // `goal/change`, the permission knobs, the turn/step counters and the
-        // child's own compaction. Enumerating that family set proved fragile
-        // (three separate projection-moving folds were missed), so the viewed
-        // child re-derives its display subject on EVERY durable event — the
-        // projections are cache reads, cheap beside the transcript fold applied
-        // just above, and both stores keep their content-equality no-notify
-        // discipline. Transient assistant-stream frames never reach this durable
-        // path at all, so no per-token work is added.
-        viewer.refreshFooter()
-        if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced') queueMicrotask(() => refreshPendingInput())
-        if (event.type === 'turn/end') paintNow()
-        return
-      }
-      // Any OTHER session's events (the live agent's) keep routing to the
-      // main folder below — the viewer never starves the main transcript.
-    }
-    if (session.id !== ownerSessionId) return
-    const main = source.main()
-    main.applyToolPreview(event)
-
-    if (event.type === 'tool/result') {
-      const childId = settledViewChildId
-      const popAfterApply = childId !== undefined && viewedId !== undefined && viewedId === childId
-      if (popAfterApply) {
-        // The event below lands in the main folder FIRST so the pop shows
-        // the settled card, not the running one.
-        main.folder.apply([event])
-        main.stats.apply([event])
-        main.refreshRecentPerformanceAvailability()
-        source.exitView()
-        return
-      }
-    }
-    main.folder.apply([event])
-    main.stats.apply([event])
-    // F1 (PR5 §3.2): the appended event may be exactly the sample that
-    // completes the recent-performance window — re-answer the availability
-    // predicate off the fold that append just updated, so the footer/`/status`
-    // stop omitting the recent figures without waiting for a `loadOlder`.
-    main.refreshRecentPerformanceAvailability()
-    // The goal badge folds incrementally: the newest goal/change event
-    // decides, so one event is enough (clear/completed hide the badge).
-    if (event.type === 'goal/change') source.applyGoalChange(event)
-    // Permission knob events (preset/policy/mode) carry no transcript
-    // content, so they must not schedule a repaint: the repaint would call
-    // setTranscript and wipe an in-flight notify (e.g. the
-    // "permission: …" notice) ~REPAINT_FLUSH_MS after the switch, making
-    // it flash. The footer badge refresh below repaints the status line
-    // instead, and the next real session event repaints the transcript.
-    const isKnob = event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode'
-    if (!isKnob) schedulePaint()
-    if (event.type === 'todo/write') mounted().setTodoSummary((event.data as { readonly todos: readonly TodoItem[] }).todos)
-    if (event.type === 'plan/mode') mounted().setPlanMode((event.data as { readonly active: boolean }).active)
-    if (event.type === 'session/title') mounted().setSessionTitle(source.sessionTitleOf(event))
-    // A permission switch (command, Shift+Tab, settings panel) lands as
-    // knob events between turns: refresh the footer mode badge right away
-    // instead of waiting for the next step/turn boundary.
-    //
-    // While a CHILD viewer is displayed, every durable LIVE-session event must
-    // refresh the status too (M3-5 PR1 review R9): the extension's v2
-    // live-session snapshot is derived from the same status refresh, and a cheap
-    // event such as `step/end` advances the live fold without any other refresh
-    // path. With a child mounted that refresh writes the child's store sections
-    // (content-equal → no publish), the display-subject presentation and the LIVE
-    // legacy slot — it never re-projects the live sections into the child store.
-    // The store's content-equality discipline suppresses churn on the extra
-    // derives (measure-kind events refresh again through the context path below).
-    if (isKnob || viewedId !== undefined) {
-      // Knob events are UI-only: the permission badge repaints from
-      // cached facts — never a context measurement.
-      source.refreshStatusCheap()
-    }
-    // Every durable inbox mutation (followup, steer, splice) commits
-    // an agent/inbox/spliced event. The upstream Inbox commits the event
-    // BEFORE its live projection mutates (synchronous observers see the
-    // pre-splice lists), so the pane must read the inbox on the next
-    // microtask — after the splice has actually landed. This is also the
-    // FIRST authoritative signal a submission reached the session: the
-    // local ack row and the latency timeline settle here.
-    if (event.type === 'agent/inbox/spliced') {
-      source.settleLocalSubmitAck('inbox inserted')
-      source.markSubmitLatency(ownerSessionId, 'inbox.inserted')
-      queueMicrotask(() => refreshPendingInput())
-    }
-    // The user message committing to the session is the ack row's
-    // AUTHORITATIVE clear (the host pre-step can delay it well past the
-    // inbox insert); the first assistant chunk stamps the provider's
-    // first-token latency once per turn.
-    if (event.type === 'user/message') {
-      source.settleLocalSubmitAck('user message')
-      source.markSubmitLatency(ownerSessionId, 'user.message')
-      // The durable human prompt is now applied to the transcript folder:
-      // retire the matching local submission echo by identity. The `source`
-      // is read structurally here and never routed into the shared
-      // presentation port.
-      const origin = (event.data as { readonly source?: unknown }).source as
-        | { readonly kind?: unknown; readonly rpcId?: unknown }
-        | undefined
-      if (origin?.kind === 'user' && typeof origin.rpcId === 'string') {
-        source.observeDurableSubmission(origin.rpcId)
-        // Paint the durable replacement into the message tree FIRST, then
-        // retire the local echo in the same frame: removing the lane before
-        // the durable row is paintable would leave one blank frame.
-        paintNow()
-        refreshPendingInput()
-      }
-    }
-    // Compaction lifecycle (dsh-compaction is not a peer — the event
-    // data is read structurally): the working row advertises the
-    // compaction phase (summarizing → applying), the busy flag covers
-    // the single-Esc cancel (pi parity), and the settle notifies. The
-    // compactionId pairs start/end so a stale end can never clear a
-    // NEWER compaction's state (foldCompactionEvent).
-    const compacted = foldCompactionEvent({ id: compactingId }, event as never)
-    compactingId = compacted.id
-    if (compacted.phase === 'summarizing') {
-      mounted().setCompactionPhase('summarizing')
-      // Busy while compacting: a single Esc cancels the compaction (pi
-      // parity — compaction rides the turn signal).
-      mounted().setBusy(true)
-    }
-    if (compacted.phase === 'applying') {
-      mounted().setCompactionPhase('applying')
-    }
-    if (compacted.clear) {
-      // The compacted replacement has committed to the live session
-      // surface: re-measure context immediately so the footer reflects
-      // the new surface without waiting for the next step/start or
-      // turn/end. The working row hands back to the turn state: a
-      // turn-enclosed compaction keeps the turn animation, a standalone
-      // one clears.
-      // Compaction rewrites the model-visible surface: re-measure NOW
-      // (the footer would otherwise show stale pressure until the next
-      // step/start or turn/end).
-      settleCompactionSurface(mounted(), () => {
-        source.markContextDirty()
-        source.refreshContextMeasurement('compaction-end')
-      }, source.currentWorkingFromLog())
-    }
-    if (compacted.notify !== undefined) mounted().notify(compacted.notify.text, compacted.notify.kind)
-    // PR D2: route the context re-measure decision through the single
-    // classifier (test seam). compaction/end is NOT routed here — its
-    // re-measure is driven by the MATCHED compaction fold above (a stale
-    // compaction/end must never re-measure).
-    const eventType = String(event.type)
-    if (eventType !== 'compaction/end' && contextRefreshKind(eventType) === 'measure') {
-      source.markContextDirty()
-      source.refreshContextMeasurement(eventType === 'turn/end' ? 'turn-end' : 'step-start')
-    }
-    // Persist each completed turn so a crash loses at most the live turn.
-    // The busy indicator follows turn boundaries: on from the moment a
-    // turn starts (model wait + tool calls), off when it ends.
-    if (event.type === 'turn/start') {
-      // The turn is live: the Working row takes over the feedback surface
-      // and the submit timeline stamps the turn boundary.
-      source.settleLocalSubmitAck('turn started')
-      source.markSubmitLatency(ownerSessionId, 'turn.start')
-      mounted().setWorking(true)
-      mounted().setBusy(true)
-    } else if (event.type === 'turn/end') {
-      mounted().setWorking(false)
-      // NOTE: the submit-latency timeline is deliberately NOT reset on
-      // turn/end — a submission accepted while this turn was running
-      // (busy/queue) is processed by the NEXT turn, and resetting here
-      // would erase exactly the T1→T4/T4→T5 journey Phase E exists to
-      // measure. The baseline ends only on: the next accept (rebase),
-      // the assistant.first auto-complete, a terminal non-delivery exit
-      // (token-scoped settle) or a session switch.
-      // A turn end must not clear the busy flag while a compaction is
-      // still in flight (an interrupted turn can close before its
-      // compaction settles) — the single-Esc cancel stays armed.
-      mounted().setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
-      paintNow()
-      // Persist each completed turn so a crash loses at most the live
-      // turn. Detached: a flush rejection must never surface as an
-      // unhandled rejection in the event firehose. An ENOENT flush (the
-      // log was removed externally) is user-recoverable: notify with the
-      // actionable hint — the session keeps working in memory, but
-      // persistence cannot resume until restart.
-      source.flushTurn()
-    }
-  }
-
-  const routeSubagentLifecycle = (): void => {
-    const source = routing()
-    // Subagent lifecycle events drive the continuable-children half of the
-    // dock badge (they never register jobs). These are CATALOG events:
-    // membership/tree may have changed, so they re-list.
-    refreshAgents()
-    queueMicrotask(() => refreshPendingInput())
-  }
-
-  const routeAgentStatus = (agentId: string, status: AgentLifecycleStatus): void => {
-    const source = routing()
-    if (source.isCleanedUp()) return
-    const currentAgentId = source.completionOwnerId()
-    // `agent/status` is the LIVE runtime channel: a child's driver
-    // transition (running ↔ idle) must repaint the task browser and the
-    // badge WITHOUT a re-listing — membership changes come only from the
-    // lifecycle events, and `listDescendants().activity` is
-    // store-presence, never execution state.
-    // The membership gate keeps this cheap and safe: only flips of children
-    // in the CACHED catalog refresh the task surface — the MAIN agent's own
-    // per-turn flips (and any stale post-switch event) do not re-list it.
-    if (currentAgentId !== undefined && agentId === currentAgentId) {
-      feedCompletionStatus(agentId, status)
-      queueMicrotask(() => refreshPendingInput())
-      return
-    }
-    if (!taskHasChild(agentId)) return
-    refreshAgentRuntimeOnly()
-    if (source.viewedChildId() === agentId) queueMicrotask(() => refreshPendingInput())
-  }
-
-  // Provider-topology and credential events refresh the footer model row
-  // and the welcome card: a /login /logout /add-provider (or an external
-  // settings.yaml / .credentials.yaml edit) changes the live provider /
-  // model surface, and the status line must not keep showing a stale
-  // selection. Both are capability-optional: an absent llm / settings /
-  // credentials service never mounts them, and a throwing listener is
-  // contained by the event bus (the refresh is best-effort). The credential
-  // update surface has reference and durable-record events; both change the
-  // same footer/welcome state, so they share one refresh callback.
-  const routeProviderRefresh = (): void => {
-    const source = routing()
-    if (source.isCleanedUp()) return
-    source.refreshStatusAndWelcome()
-  }
-
-  const routeSettingsRefresh = (namespace: string): void => {
-    const source = routing()
-    if (source.isCleanedUp()) return
-    if (namespace === 'llm-pi-ai' || namespace === 'llm-deepseek') {
-      source.refreshStatusAndWelcome()
-    }
-  }
-
-  const isCurrentAssistantAgent = (agent: unknown): boolean => {
-    const source = routing()
-    // EXACT Agent object identity (master's own headless consumer
-    // compares `subject !== agent` the same way): a stale stream from
-    // a retired agent must never reach the presentation, even when the
-    // replacement agent drives the SAME session.
-    if (typeof agent !== 'object' || agent === null) return false
-    const subject = agent as object
-    const candidateId = (subject as { session?: { id?: unknown } }).session?.id
-    if (typeof candidateId !== 'string' || !source.registeredAgentIs(candidateId, subject)) return false
-    if (source.isCurrentOwnerAgent(subject)) return true
-    // The adapter accepts every registered live Agent so an unviewed child
-    // can retain its transient baseline without entering the main surface.
-    const viewedId = source.viewedChildId()
-    if (viewedId === undefined) return true
-    if (candidateId !== viewedId) return false
-    // The viewed child follows one exact Agent object at a time. A same-session
-    // cold-resume replaces a disposed Agent; the registry
-    // identity change is the lifecycle rollover edge for this viewer.
-    const viewedAgent = source.viewedChildAgent()
-    if (viewedAgent !== undefined) {
-      if (viewedAgent === subject) return true
-      if (source.agentForSession(viewedId) !== viewedAgent) {
-        source.setViewedChildAgent(subject)
-        source.setViewedQueueAgent(subject)
-        queueMicrotask(() => refreshPendingInput())
-        return true
-      }
-      return false
-    }
-    source.setViewedChildAgent(subject)
-    source.setViewedQueueAgent(subject)
-    queueMicrotask(() => refreshPendingInput())
-    return true
-  }
-
-  const applyAssistantInput = (input: AssistantLiveInput): void => {
-    const source = routing()
-    // The preview projection keeps the durable completed-turn guard:
-    // a late live chunk for a completed turn is a replay artifact and must
-    // not resurrect a preview. The folder/stats folds carry their own
-    // gates. A FAILED attempt (abandoned end or a committed `assistant/attempt`
-    // settlement) clears the step's tool previews — its deltas never
-    // materialized into durable calls.
-    const viewedId = source.viewedChildId()
-    if (openingJournal.isOpening(input.sessionId) && (viewedId === undefined || viewedId !== input.sessionId)) return
-    if (viewedId !== undefined && input.sessionId === viewedId) {
-      source.applyViewedChildAssistantInput(input)
-      schedulePaint()
-      return
-    }
-    const sessionId = source.currentSessionId()
-    if (sessionId === undefined || input.sessionId !== sessionId) return
-    source.applyMainAssistantInput(input, sessionId)
-    schedulePaint()
-  }
-
-  const applyResumedCompaction = (id: string | undefined, active: boolean): void => {
-    compactingId = id
-    mounted().setCompactionPhase(active ? 'summarizing' : 'idle')
-    if (active) {
-      mounted().setBusy(true)
-      mounted().setWorking(true)
-    }
-  }
 
   return {
     get app(): TuiApp {
@@ -2621,192 +1174,28 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       extension.attachSeams(deps)
     },
     attachTasks(source, deps) {
-      taskSource = source
-      taskDeps = deps
-      // The last SUCCESSFUL jobs read, FENCED to the session identity: a
-      // transient registry failure must keep the retained Job rows, but a
-      // switched-in session must never inherit the old session's rows.
-      let retainedJobsSnapshot: { key: string; rows: readonly TaskBrowserJobInput[] } | undefined
-      // The jobs half: the dock roster feed + the scope-owned event
-      // subscription. Absent service = no jobs surface (the original two
-      // conditional blocks are preserved).
-      const jobs = source.jobs
-      if (jobs !== undefined) {
-        refreshTasks = (): void => {
-          if (isCleanedUp()) return
-          let snapshots: readonly TaskBrowserJobInput[]
-          try {
-            // Keep terminal records in the catalog — the registry IS the
-            // membership authority, and TRACKED is its current roster.
-            // Job ownership is the Session id; without a live agent the
-            // registry read is the unowned-only view (caller omitted).
-            snapshots = jobs.list(source.sessionId())
-          } catch {
-            // Best-effort: a failed registry read is NOT an authoritative
-            // empty catalog. Keeping the previous snapshot matters most for
-            // a Job detail's retained parent browser — the close-time
-            // refresh must not blank the rows/selection it restores.
-            return
-          }
-          const tasks = snapshots.map(job => ({
-            id: job.id,
-            label: job.label,
-            status: job.status,
-            kind: job.kind,
-            startedAt: job.startedAt,
-            finishedAt: job.finishedAt,
-          }))
-          mounted().setTasks(tasks)
-          // A jobs-only session has no catalog coordinator, so this is the
-          // ONLY refresh channel for an OPEN browser. Keep it in step with
-          // the registry, or a Job detail's hidden parent returns with stale
-          // status (the subagents path commits through TaskBrowserRuntime).
-          if (taskRuntime === undefined && activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
-            taskBrowserRows = buildTaskRows(snapshots, [])
-            activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
-          }
-        }
-        // Events route by SEMANTICS, mirroring the TaskBrowserRuntime's own
-        // catalog/runtime split:
-        // - `output` is a ring APPEND and changes no roster/status fact;
-        // - `progress` / `stopping` change only JobView runtime facts (the
-        //   runtime-only refresh re-projects from the cached catalog);
-        // - everything else may move membership: the full catalog refresh.
-        jobsEventsDispose = jobs.subscribe((event) => {
-          switch (event.type) {
-            case 'output':
-              return
-            case 'progress':
-            case 'stopping':
-              refreshTasks()
-              refreshAgentRuntimeOnly()
-              return
-            default:
-              refreshTasks()
-              refreshAgents()
-          }
-        })
-        refreshTasks()
-      }
-      // The subagent half: the TaskBrowserRuntime coordinator owns the
-      // catalog-vs-runtime split (see task-browser-runtime.ts). Its Task
-      // dataset arrives through the SELECTED semantic read source, so the
-      // Remote branch never reaches the process-local Host services.
-      const taskRead = source.taskRead
-      if (taskRead !== undefined) {
-        taskRuntime = new TaskBrowserRuntime({
-          currentKey: taskRead.currentKey,
-          readTask: taskRead.readTask,
-          // The merged rows re-read the CURRENT jobs snapshot at every commit,
-          // so a job settlement repaints an open browser too.
-          readJobs: () => {
-            const key = taskRead.currentKey()
-            const sessionId = taskRead.currentSessionId()
-            if (jobs === undefined || key === undefined || sessionId === undefined) return []
-            try {
-              const rows = jobs.list(sessionId)
-              retainedJobsSnapshot = { key, rows }
-              return rows
-            } catch {
-              // The registry read is best-effort: a failed read is NOT an
-              // authoritative empty catalog. Returning the last successful
-              // snapshot preserves the retained Job rows — but ONLY for the same
-              // session identity, so a switched-in session never inherits the
-              // old session's rows.
-              return retainedJobsSnapshot?.key === key ? retainedJobsSnapshot.rows : []
-            }
-          },
-          activityOf: taskRead.activityOf,
-          commitRows,
-          commitBadge,
-          commitSummary,
-          commitRefreshState,
-        })
-        // Seed the summary synchronously from jobs before the durable
-        // catalog listing lands; this prevents a terminal/jobs-only first
-        // frame from claiming every record is still running.
-        taskRuntime.refreshRuntime()
-        // The single production CATALOG invalidation entry: every trigger
-        // (attach seed, subagent lifecycle, tool fallback, Job membership,
-        // browser open, Full Task Center R) funnels here. An in-flight
-        // traversal absorbs any number of invalidations as `dirty`; its settle
-        // then starts exactly one trailing read.
-        refreshAgents = (): void => {
-          if (isCleanedUp()) return
-          if (source.sessionId() === undefined) {
-            mounted().setAgents([])
-            return
-          }
-          taskCatalogRefreshPendingInvalidations += 1
-          if (taskCatalogRefreshInFlight) {
-            taskCatalogRefreshDirty = true
-            return
-          }
-          startTaskCatalogRefresh(false)
-        }
-        refreshAgentRuntimeOnly = (): void => {
-          if (isCleanedUp()) return
-          if (source.sessionId() === undefined) {
-            mounted().setAgents([])
-            return
-          }
-          taskRuntime!.refreshRuntime()
-        }
-        refreshAgents()
-      }
+      task.attachTasks(source, deps)
     },
     refreshTasks() {
-      refreshTasks()
+      task.refreshTasks()
     },
     refreshAgents() {
-      refreshAgents()
+      task.refreshAgents()
     },
     refreshAgentRuntimeOnly() {
-      refreshAgentRuntimeOnly()
+      task.refreshAgentRuntimeOnly()
     },
     hasTask(childId) {
-      return taskHasChild(childId)
+      return task.hasTask(childId)
     },
     resetTasks() {
-      // A session switch drops the old session's Question attention with the
-      // rest of the Task Center state: its parked count must not arm the new
-      // session's footer trigger.
-      mounted().setQuestionAttention(0)
-      // Invalidate the coalescing gate BEFORE any close/dispose that can
-      // synchronously run a callback: the old session's slow traversal must
-      // neither hold the new session's refresh back (`inFlight`) nor clear the
-      // new generation's gate when it settles (the generation fence). The
-      // runtime's own session/epoch fence remains the second protection for the
-      // catalog commit.
-      taskCatalogRefreshGeneration += 1
-      taskCatalogRefreshInFlight = false
-      taskCatalogRefreshDirty = false
-      taskCatalogRefreshPendingInvalidations = 0
-      // A new session owns the surface: close the Job child overlay FIRST
-      // (so closing the hidden parent cannot leave the child alive), then
-      // the browser, then reset the coordinator + the synchronous
-      // badge/summary/row mirrors (the new session's first listing is async
-      // and the old session's state must not hang on screen).
-      activeJobViewerClose?.()
-      activeJobViewerClose = undefined
-      activeTaskBrowser?.close()
-      activeTaskBrowser = undefined
-      activeTaskBrowserToken = undefined
-      activeTaskBrowserMode = undefined
-      taskRuntime?.reset()
-      // The dataset scope is session-scoped too: a switched-in session must
-      // never inherit a Workflow-scoped browser (PR2 plan §10.8).
-      taskBrowserScope = { kind: 'all' }
-      mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
-      mounted().setTasks([])
-      mounted().setAgents([])
-      taskBrowserRows = []
+      task.resetTasks()
     },
     openTasksBrowser(viewMode, restoreState, scope, header) {
-      openTasksBrowser(viewMode, restoreState, scope, header)
+      task.openTasksBrowser(viewMode, restoreState, scope, header)
     },
     openJobView(jobId) {
-      return openJobView(jobId)
+      return task.openJobView(jobId)
     },
     attachInteraction(port, deps) {
       interaction.attach(port, deps)
@@ -2814,14 +1203,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     attachEventRouting(source) {
       routingSource = source
     },
-    routeSessionEvent,
-    routeSubagentLifecycle,
-    routeAgentStatus,
-    routeProviderRefresh,
-    routeSettingsRefresh,
-    isCurrentAssistantAgent,
-    applyAssistantInput,
-    applyResumedCompaction,
+    routeSessionEvent: (session, event) => eventRouting.routeSessionEvent(session, event),
+    routeSubagentLifecycle: () => eventRouting.routeSubagentLifecycle(),
+    routeAgentStatus: (agentId, status) => eventRouting.routeAgentStatus(agentId, status),
+    routeProviderRefresh: () => eventRouting.routeProviderRefresh(),
+    routeSettingsRefresh: (namespace) => eventRouting.routeSettingsRefresh(namespace),
+    isCurrentAssistantAgent: (agent) => eventRouting.isCurrentAssistantAgent(agent),
+    applyAssistantInput: (input) => eventRouting.applyAssistantInput(input),
+    applyResumedCompaction: (id, active) => eventRouting.applyResumedCompaction(id, active),
     refreshPendingInput,
     resetPendingPresentation,
     schedulePaint,
@@ -2831,24 +1220,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
 
     resetSubjectStatus,
     disposeJobEvents() {
-      jobsEventsDispose?.()
-      jobsEventsDispose = undefined
+      task.disposeJobEvents()
     },
     disposeJobObservation() {
-      // Release the selected-Job follow stream explicitly: TuiApp.dispose()
-      // does not invoke the viewer's onClose, so the observer would otherwise
-      // outlive the surface.
-      activeJobViewerClose?.()
-      activeJobViewerClose = undefined
+      task.disposeJobObservation()
     },
     disposeTaskBrowser() {
-      // TuiApp.dispose() hides overlays without invoking their user cancel
-      // callbacks. Drop the browser handle and invalidate the token so an
-      // action already waiting on Direct/Host work cannot notify or repaint
-      // the dead surface after teardown.
-      activeTaskBrowser = undefined
-      activeTaskBrowserToken = undefined
-      activeTaskBrowserMode = undefined
+      task.disposeTaskBrowser()
     },
     start(deps) {
       if (disposed) throw new Error('the surface is already disposed')

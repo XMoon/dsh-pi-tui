@@ -477,17 +477,27 @@ const surfaceSource = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'runtime.ts'),
   'utf8',
 )
+// TS3 §34/§36: the Task Center + Job viewer state machine and the presentation
+// event routing moved on again, into their own surface owners.
+const taskSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'task-runtime.ts'),
+  'utf8',
+)
+const routingSource = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'app', 'surface', 'event-routing.ts'),
+  'utf8',
+)
 
 test('the runner wires agent/status to the membership-gated RUNTIME-only refresh', () => {
   // A4-7: the routing decision is surface-owned; the runner registers a thin
   // delegation.
   assert.ok(indexSource.includes("ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))"),
     'the runner must register the agent/status listener')
-  const routing = surfaceSource.slice(
-    surfaceSource.indexOf('const routeAgentStatus = '),
-    surfaceSource.indexOf('const routeProviderRefresh = '),
+  const routing = routingSource.slice(
+    routingSource.indexOf('const routeAgentStatus = '),
+    routingSource.indexOf('const routeProviderRefresh = '),
   )
-  assert.ok(routing.includes('if (!taskHasChild(agentId)) return'),
+  assert.ok(routing.includes('if (!options.hasTaskChild(agentId)) return'),
     'the listener must be membership-gated (main-agent flips must never repaint)')
   // The handler must route to the runtime-only refresh — a re-listing
   // here would defeat the whole split (and the membership gate).
@@ -499,12 +509,12 @@ test('the runner wires agent/status to the membership-gated RUNTIME-only refresh
   // controller (the settled boundary) BEFORE the child membership gate —
   // children still never repaint and never notify. The controller is
   // surface-owned, so the routing feeds it through the surface entry.
-  assert.ok(routing.includes('feedCompletionStatus(agentId, status)'),
+  assert.ok(routing.includes('options.feedCompletionStatus(agentId, status)'),
     'the main agent\'s status must feed the completion controller')
   // The surface-side runtime-only refresh must never re-list.
-  const runtimeOnly = surfaceSource.slice(
-    surfaceSource.indexOf('refreshAgentRuntimeOnly = ()'),
-    surfaceSource.indexOf('refreshAgentRuntimeOnly = ()') + 500,
+  const runtimeOnly = taskSource.slice(
+    taskSource.indexOf('refreshAgentRuntimeOnly = ()'),
+    taskSource.indexOf('refreshAgentRuntimeOnly = ()') + 500,
   )
   assert.ok(runtimeOnly.includes('taskRuntime!.refreshRuntime()'),
     'the surface runtime-only refresh must re-project the cached catalog')
@@ -522,7 +532,7 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   assert.ok(bumpEnd > bumpStart, 'the bump slice must end at the next owner declaration')
   const bump = presentationSource.slice(bumpStart, bumpEnd)
   assert.ok(bump.includes('surface.resetTasks()'), 'the session bump must reset the surface-owned Task Center')
-  const reset = surfaceSource.slice(surfaceSource.indexOf('resetTasks() {'))
+  const reset = taskSource.slice(taskSource.indexOf('resetTasks() {'))
   assert.ok(reset.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')
   assert.ok(reset.includes('taskRuntime?.reset()'), 'the session bump must drop the cached catalog')
   // PR review P2: the OLD session's running badge must not hang on the
@@ -535,9 +545,9 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
 })
 
 test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates interrupt execution with the SAME predicate (PR review P3)', () => {
-  const open = surfaceSource.slice(
-    surfaceSource.indexOf('const openTasksBrowser = ('),
-    surfaceSource.indexOf('const handleWorkflowAction'),
+  const open = taskSource.slice(
+    taskSource.indexOf('const openTasksBrowser = ('),
+    taskSource.indexOf('const handleWorkflowAction'),
   )
   // The first frame must be seeded from the coordinator's CURRENT state
   // (cached catalog + current jobs + registry statuses), never a
@@ -560,8 +570,8 @@ test('openTasksBrowser seeds the FIRST FRAME from the cached runtime and gates i
 
 test('Task Center dispatch re-validates session, driver and job state at confirm time (PR review P1)', () => {
   const marker = 'const stopRow = (value: string): void => {'
-  const start = surfaceSource.indexOf(marker)
-  const handler = surfaceSource.slice(start, start + 4000)
+  const start = taskSource.indexOf(marker)
+  const handler = taskSource.slice(start, start + 4000)
   // The STALE-CONFIRM fence must compare against values captured when the
   // browser OPENED, never against values captured at dispatch — a
   // dispatch-time capture can never differ from the current state, so the
@@ -571,7 +581,7 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
   assert.ok(handler.includes('activeTaskBrowserToken !== actionBrowserToken'),
     'a delayed result must not notify after the browser surface has been replaced or closed')
   const openMarker = 'const openTasksBrowser = ('
-  const openHead = surfaceSource.slice(surfaceSource.indexOf(openMarker), surfaceSource.indexOf(openMarker) + 2400)
+  const openHead = taskSource.slice(taskSource.indexOf(openMarker), taskSource.indexOf(openMarker) + 2400)
   assert.ok(openHead.includes('const browserSubject = source.captureSubject()'),
     'the browser must capture the ownership subject (owner + generation) at open')
   assert.ok(openHead.includes('const browserSessionId = source.sessionId()'),
@@ -604,7 +614,7 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
 
 test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
   const marker = 'const openTasksBrowser = ('
-  const open = surfaceSource.slice(surfaceSource.indexOf(marker), surfaceSource.indexOf('const handleWorkflowAction'))
+  const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
   const cancelBlock = open.slice(open.indexOf("() => {"), open.indexOf('},', open.indexOf('() => {')) + 3)
   assert.ok(cancelBlock.includes("viewMode === 'full' && restoreState !== undefined"),
     'Esc must reopen Quick only when the full view was promoted from Quick')
@@ -616,7 +626,7 @@ test('Esc from a promoted full view returns to Quick ONLY for the quick-opener s
 
 test('the Task Center surface never calls the consuming jobs read API (review round)', () => {
   const marker = 'const openTasksBrowser = ('
-  const open = surfaceSource.slice(surfaceSource.indexOf(marker), surfaceSource.indexOf('const handleWorkflowAction'))
+  const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
   assert.ok(!open.includes('jobs.read('),
     'the browser must never consume the model-owned job output cursor')
   assert.ok(open.includes('jobObservation.stop(browserSessionId, row.jobId)'),
@@ -656,7 +666,7 @@ test('Case E2: the SAME session listing failure still surfaces stale (the fenced
 
 test('the surface never sets refresh state outside the runtime fence (PR review P1)', () => {
   const marker = 'const openTasksBrowser = ('
-  const open = surfaceSource.slice(surfaceSource.indexOf(marker), surfaceSource.indexOf('const handleWorkflowAction'))
+  const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
   // The open-browser body is the ONLY owner of the panel: an unfenced
   // onError calling activeTaskBrowser.setRefreshState would let a stale
   // session's failure mark a NEW session's browser — the fence must be
@@ -669,7 +679,7 @@ test('the surface never sets refresh state outside the runtime fence (PR review 
 
 test('viewport exposure drives acknowledgement continuously, never whole-projection (PR review P1/P2)', () => {
   const marker = 'const openTasksBrowser = ('
-  const open = surfaceSource.slice(surfaceSource.indexOf(marker), surfaceSource.indexOf('const handleWorkflowAction'))
+  const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
   // The surface wires the panel's first-time-viewport callback into the
   // coordinator's acknowledge — not a one-shot whole-projection read.
   assert.ok(open.includes('onViewportExpose: ids =>') && open.includes('runtime?.acknowledge(ids)'),
@@ -800,12 +810,12 @@ test('PR2 review: the surface wires onWorkflowAction through the single authorit
   // A4-6: the workflow action handler moved into the surface owner (it reads
   // the browser row-identity source); the mount options wire it as the app's
   // `onWorkflowAction` sink.
-  assert.ok(surfaceSource.includes('onWorkflowAction: action => handleWorkflowAction(action)'),
+  assert.ok(surfaceSource.includes('onWorkflowAction: action => task.handleWorkflowAction(action)'),
     'the surface mount options must wire the workflow action sink to the single authority resolver')
   const marker = 'const handleWorkflowAction = (action: WorkflowAction): void => {'
-  const start = surfaceSource.indexOf(marker)
+  const start = taskSource.indexOf(marker)
   assert.ok(start >= 0, 'the surface must define handleWorkflowAction')
-  const handler = surfaceSource.slice(start, start + 3000)
+  const handler = taskSource.slice(start, start + 3000)
   // The authority conditions live in ONE resolver — never copied in the surface.
   assert.ok(handler.includes('workflowMemberViewerTarget('),
     'the member open path must use the single authority resolver')
@@ -817,7 +827,7 @@ test('PR2 review: the surface wires onWorkflowAction through the single authorit
 
 test('PR2 review: every task-browser close path resets the dataset scope', () => {
   const marker = 'const openTasksBrowser = ('
-  const open = surfaceSource.slice(surfaceSource.indexOf(marker), surfaceSource.indexOf('const handleWorkflowAction'))
+  const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
   // Both close paths (row selection and Esc) must reset the scope so the
   // next ordinary Task Center sees the global dataset (plan §10.8).
   const selectBlock = open.slice(open.indexOf('(value) => {'), open.indexOf('},', open.indexOf('(value) => {')) + 3)
@@ -866,13 +876,13 @@ test('the surface coalesces every production catalog refresh through one gate', 
   // Exactly ONE production start point: the surface-owned coalescing gate.
   // Any other direct `refreshCatalog()` call in the surface is a bypass that
   // restores the refresh storm (N invalidations -> N full descendant reads).
-  const starts = surfaceSource.split('.refreshCatalog()').length - 1
+  const starts = taskSource.split('.refreshCatalog()').length - 1
   assert.equal(starts, 1,
     `the surface must have exactly one refreshCatalog() start point (the gate); found ${starts}`)
-  const gateStart = surfaceSource.indexOf('const startTaskCatalogRefresh = ')
-  const gateEnd = surfaceSource.indexOf('const settleTaskCatalogRefresh = ')
+  const gateStart = taskSource.indexOf('const startTaskCatalogRefresh = ')
+  const gateEnd = taskSource.indexOf('const settleTaskCatalogRefresh = ')
   assert.ok(gateStart >= 0 && gateEnd > gateStart, 'the surface must define the coalescing gate')
-  const gate = surfaceSource.slice(gateStart, gateEnd)
+  const gate = taskSource.slice(gateStart, gateEnd)
   // Ownership state must be committed BEFORE the synchronous factory runs: a
   // re-entrant invalidation from the loading commit has to observe in-flight.
   assert.ok(gate.includes('taskCatalogRefreshInFlight = true'),
@@ -881,9 +891,9 @@ test('the surface coalesces every production catalog refresh through one gate', 
     'in-flight must be set before runOwned invokes the factory')
   // The browser open and the Full Task Center R path must both route through
   // the gate, never a direct bypass.
-  const open = surfaceSource.slice(
-    surfaceSource.indexOf('const openTasksBrowser = ('),
-    surfaceSource.indexOf('const handleWorkflowAction'),
+  const open = taskSource.slice(
+    taskSource.indexOf('const openTasksBrowser = ('),
+    taskSource.indexOf('const handleWorkflowAction'),
   )
   assert.ok(!open.includes('refreshCatalog'),
     'browser open / R must never call refreshCatalog() directly')
@@ -891,16 +901,16 @@ test('the surface coalesces every production catalog refresh through one gate', 
     'browser open / R must invalidate through the coalesced gate')
   // The session-generation reset must invalidate the gate: an old session's
   // slow traversal may not hold back (or clear) the new session's gate.
-  const reset = surfaceSource.slice(surfaceSource.indexOf('resetTasks() {'))
+  const reset = taskSource.slice(taskSource.indexOf('resetTasks() {'))
   assert.ok(reset.includes('taskCatalogRefreshGeneration += 1'),
     'a session-generation bump must invalidate the coalescing gate')
   // `agent/status` stays runtime-only: it must never enter the catalog gate.
   // (`the runner wires agent/status to the membership-gated RUNTIME-only
   // refresh` above locks the full routing; this keeps the coalescing guard
   // self-contained.)
-  const agentStatus = surfaceSource.slice(
-    surfaceSource.indexOf('const routeAgentStatus = '),
-    surfaceSource.indexOf('const routeProviderRefresh = '),
+  const agentStatus = routingSource.slice(
+    routingSource.indexOf('const routeAgentStatus = '),
+    routingSource.indexOf('const routeProviderRefresh = '),
   )
   assert.ok(!agentStatus.includes('refreshAgents()'),
     'agent/status must never trigger a catalog refresh through the coalescing gate')

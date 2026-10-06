@@ -19,8 +19,9 @@ const retirementSource = readFileSync(new URL('../src/app/direct/owner-retiremen
 const sessionRuntimeSource = readFileSync(new URL('../src/app/session/runtime.ts', import.meta.url), 'utf8')
 // A4-7: the presentation event routing moved into the surface owner, so the
 // currentness locks below are anchored to the surface routing bodies and the
-// runner's injected core read.
-const surfaceSource = readFileSync(new URL('../src/app/surface/runtime.ts', import.meta.url), 'utf8')
+// runner's injected core read. TS3 §36 moved those routing bodies on again, from
+// the aggregate into `app/surface/event-routing.ts`.
+const routingSource = readFileSync(new URL('../src/app/surface/event-routing.ts', import.meta.url), 'utf8')
 // A5b-4: the submission admission fences + the param-agent interrupt fences
 // moved into the submission owners, so the currentness locks below read the
 // OWNER modules explicitly (never a glob).
@@ -151,7 +152,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
   // session/event main routing (A4-7): the gate moved into the surface owner;
   // the runner injects the core session id. Gate + injection in ONE assertion
   // each, so neither side can drift.
-  const eventRouting = spanOf(surfaceSource, 'const ownerSessionId = source.currentSessionId()',
+  const eventRouting = spanOf(routingSource, 'const ownerSessionId = source.currentSessionId()',
     'main.applyToolPreview(event)')
   assert.ok(eventRouting.includes('if (session.id !== ownerSessionId) return'),
     'the main routing gate uses the injected session id')
@@ -162,7 +163,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
 
   // assistant-stream input gate (A4-7): the surface owns the routing; source +
   // gate in ONE span.
-  const onInput = spanOf(surfaceSource, 'const applyAssistantInput = ', 'const applyResumedCompaction = ')
+  const onInput = spanOf(routingSource, 'const applyAssistantInput = ', 'const applyResumedCompaction = ')
   assert.ok(onInput.includes('const sessionId = source.currentSessionId()'),
     'the assistant-stream input takes its session id from the injected core read')
   assert.ok(onInput.includes('if (sessionId === undefined || input.sessionId !== sessionId) return'),
@@ -170,7 +171,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
   assert.ok(!onInput.includes('agentNow('), 'the assistant-stream input gate must not read the Direct attachment')
 
   // exact-Agent identity helper + assistant-stream current check
-  assert.ok(surfaceSource.includes('if (source.isCurrentOwnerAgent(subject)) return true'),
+  assert.ok(routingSource.includes('if (source.isCurrentOwnerAgent(subject)) return true'),
     'the exact-Agent main-surface check resolves the identity through the injected helper')
   const helper = span('const isCurrentOwnerAgent = ', '// The semantic backend')
   assert.ok(helper.includes('const owner = ownership.owner()') && helper.includes('attachmentOf(owner)?.agent === candidate'),
@@ -180,7 +181,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
 
   // agent/status ownership (A4-7): owner + completion identity in ONE span in
   // the surface; the runner injects the core-derived completion identity.
-  const agentStatus = spanOf(surfaceSource, 'const routeAgentStatus = ', 'const routeProviderRefresh = ')
+  const agentStatus = spanOf(routingSource, 'const routeAgentStatus = ', 'const routeProviderRefresh = ')
   assert.ok(agentStatus.includes('const currentAgentId = source.completionOwnerId()'),
     'the agent/status ownership check resolves the injected completion identity')
   assert.ok(agentStatus.includes('agentId === currentAgentId'),

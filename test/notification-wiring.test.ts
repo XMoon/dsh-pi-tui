@@ -27,6 +27,8 @@ const surfaceSource = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.
 // so the focus/feed locks read that module. The aggregate only FORWARDS the
 // delegate calls; the runner still never reaches the controller.
 const notificationSource = readFileSync(join(root, 'src', 'app', 'surface', 'notification-runtime.ts'), 'utf8')
+// TS3 §36: the presentation event routing moved into its own surface owner.
+const routingSource = readFileSync(join(root, 'src', 'app', 'surface', 'event-routing.ts'), 'utf8')
 // A5b-5: the TuiApp event adapter (onUserInput / onTerminalFocus / ...) moved
 // into its owner, so the per-method wiring locks read the owner module.
 const eventsSource = readFileSync(join(root, 'src', 'app', 'surface', 'application-events.ts'), 'utf8')
@@ -83,15 +85,16 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
   const marker = "ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))"
   assert.ok(indexSource.includes(marker),
     'the agent/status handler must delegate to the surface routing')
-  const routing = surfaceSource.slice(
-    surfaceSource.indexOf('const routeAgentStatus = '),
-    surfaceSource.indexOf('const routeProviderRefresh = '),
+  // TS3 §36: the routing body moved into the presentation event router owner.
+  const routing = routingSource.slice(
+    routingSource.indexOf('const routeAgentStatus = '),
+    routingSource.indexOf('const routeProviderRefresh = '),
   )
-  assert.ok(routing.includes('feedCompletionStatus(agentId, status)'),
+  assert.ok(routing.includes('options.feedCompletionStatus(agentId, status)'),
     'the agent/status handler must route the main agent to the controller')
-  assert.ok(routing.includes('if (!taskHasChild(agentId)) return'),
+  assert.ok(routing.includes('if (!options.hasTaskChild(agentId)) return'),
     'the child membership gate must stay (children never notify and never repaint)')
-  assert.ok(routing.includes('refreshAgentRuntimeOnly()'),
+  assert.ok(routing.includes('options.refreshAgentRuntimeOnly()'),
     'the child runtime refresh must stay')
 })
 
