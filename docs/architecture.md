@@ -42,8 +42,11 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/extension/**` | extension service/Client-local extension ownership |
 | `src/keybindings/**` | keybinding definitions/dispatch machinery |
 | `src/footer/**` | footer composition/configuration |
-| `src/plugin-manager/panel.ts` | the one historically-rooted TUI panel, deliberately pending TS4 |
-| remaining historical feature dirs (`image/`, `attachment/`, `notification/`, `file-completion/`, `keybinding-ui/`, `components/`, …) | keep domain ownership until their assigned stage |
+| `src/tui/components/**` | generic TUI leaf components (frames, transcript leaves, media, marquee) |
+| `src/tui/panels/**` | TUI panels (task browser, history, approval dialog, output viewer) |
+| `src/tui/pickers/**` | TUI pickers, the picker adapters and the marquee/filter seam |
+| `src/tui/plugin-manager/panel.ts` | the concrete Plugin Manager terminal panel (TS4) |
+| remaining historical feature dirs (`image/`, `attachment/`, `notification/`, `file-completion/`, `keybinding-ui/`, …) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` and `src/transcript.ts` are still the large owners of their
 domains. That size is structural debt, not an invitation to move their semantics
@@ -75,8 +78,8 @@ A domain may appear in multiple layers when the responsibilities differ:
 src/app/command/**   application command authority / lifecycle / execution
 src/tui/commands/**  terminal slash-command definition / presentation
 
-src/app/plugin-manager/**   Plugin Manager application state/policy/controller
-src/plugin-manager/panel.ts concrete terminal panel (TS4 -> src/tui/plugin-manager/**)
+src/app/plugin-manager/**       Plugin Manager application state/policy/controller
+src/tui/plugin-manager/panel.ts concrete terminal panel (TS4), injected as a factory
 
 src/app/surface/**    application surface owner coordinating the mounted surface
 src/domain/status/**  the transport/UI-neutral status primitives it coordinates
@@ -114,10 +117,24 @@ The load-bearing rules:
 src/runtime/** never imports src/app/**
 src/runtime/** never imports src/tui/**
 application owners never import the bootstrap composition zone (facade or helper)
+application owners never import src/tui/** implementation
 src/domain/** never imports src/app/**, src/tui/** or experimental Remote composition
 Remote is reached through one sanctioned lazy boundary
 Direct remains the production/default backend
 ```
+
+The application/TUI direction (TS4) is one-way at the implementation level:
+
+```text
+src/app/** owners            !-> src/tui/**
+src/app/bootstrap.ts + src/app/bootstrap/**  may wire src/tui/** (composition)
+src/tui/**                   may import application-facing contracts
+```
+
+Only the bootstrap composition zone selects a concrete TUI implementation and
+injects it into an application owner through a narrow structural seam (the Plugin
+Manager panel factory is the first such seam). The direction is enforced by the
+architecture gate for value AND type-only imports, with no allowlist.
 
 The TUI layer follows the same direction:
 
@@ -132,9 +149,10 @@ src/tui/**
 facade/coordinator (it owns the dynamic skill wrappers and the catalog
 coordinator for the same definitions). `src/tui/**` is the Client terminal
 presentation layer: `src/tui-app.ts` plus the extracted presentation owners
-(`src/tui/commands/**` today; components, interaction and transcript view owners
-in TS4–TS6). It is not an application or Host layer — application
-lifecycle/orchestration stays in `src/app/**`.
+(`src/tui/commands/**` from TS1; `src/tui/components/**`, `src/tui/panels/**`,
+`src/tui/pickers/**` and `src/tui/plugin-manager/**` from TS4; interaction and
+transcript-view owners in TS5–TS6). It is not an application or Host layer —
+application lifecycle/orchestration stays in `src/app/**`.
 
 ## Source placement and the root ledger
 
@@ -164,12 +182,12 @@ owners:
 
 | Directory | Target owner | Stage |
 |---|---|---|
-| `components/` | `tui/components/` | TS4 |
+| `components/` | `tui/components/` (DONE — `src/components/` is absent) | TS4 DONE |
 | `keybinding-ui/` | `tui/keybindings/ui/` | TS5 |
 | `keybindings/` | `tui/keybindings/` | TS5 |
 | `footer/` | `domain/footer/` + `tui/footer/` | TS5 |
 | `notification/` | `domain/notification/` + `tui/notification/` | TS5 |
-| `plugin-manager/` | `app/plugin-manager/` (DONE) + `tui/plugin-manager/**` for `panel.ts` | TS3 DONE / TS4 panel move |
+| `plugin-manager/` | `app/plugin-manager/` + `tui/plugin-manager/panel.ts` (DONE — `src/plugin-manager/` is absent) | TS3 + TS4 DONE |
 | `status/` | `domain/status/` (DONE — `src/status/` is absent) | TS3 DONE |
 | `image/` | `client/media/image/` | TS8 |
 | `attachment/` | `client/media/attachment/` | TS8 |
@@ -348,8 +366,10 @@ through them in ownership-first order:
 ```text
 TS0  architecture authority + long-lived gate refresh          DONE
 TS1  TUI command layer + source placement policy                DONE
-TS2 + TS3  app/bootstrap + app/surface composition convergence  CURRENT
-TS4–TS8  TuiApp / transcript / residual closure                 NOT STARTED
+TS2 + TS3  app/bootstrap + app/surface composition convergence  DONE
+TS4  TUI leaf / component / panel / picker convergence          CURRENT
+TS5  TuiApp interaction / overlay / editor convergence          NEXT
+TS6–TS8  transcript / residual closure                          NOT STARTED
 
 TS4      TuiApp leaf / component extraction
 TS5      TuiApp interaction / overlay / editor convergence
@@ -362,9 +382,32 @@ TS2 split the application composition root into the facade plus six wiring helpe
 (`runtime-selection`, `presentation-bridge`, `task-source`, `event-wiring`,
 `lifecycle`, `session-startup`); TS3 moved `src/status/**` to `src/domain/status/**`,
 normalized the Plugin Manager application ownership to `src/app/plugin-manager/**`
-(leaving only the concrete panel at `src/plugin-manager/panel.ts` for TS4) and split
-`src/app/surface/runtime.ts` into explicit application-level surface owners while
-`createSurfaceRuntime()` stays the one aggregate.
+and split `src/app/surface/runtime.ts` into explicit application-level surface
+owners while `createSurfaceRuntime()` stays the one aggregate.
+
+TS4 finished that Plugin Manager relocation in both directions — the concrete
+terminal panel is now `src/tui/plugin-manager/panel.ts`, injected into the
+application through the narrow `PluginManagerPanelFactory` seam — retired
+`src/components/**` into `src/tui/components/**`, and moved the seven remaining
+historical root TUI modules to their canonical layer paths:
+
+```text
+src/marquee.ts             -> src/tui/components/marquee.ts
+src/searchable-picker.ts   -> src/tui/pickers/searchable-picker.ts
+src/model-picker.ts        -> src/tui/pickers/model-picker.ts
+src/subagent-model-menu.ts -> src/tui/pickers/subagent-model-menu.ts
+src/theme-menu.ts          -> src/tui/pickers/theme-menu.ts
+src/history-panel.ts       -> src/tui/panels/history-panel.ts
+src/task-panel.ts          -> src/tui/panels/task-panel.ts
+```
+
+It also extracted the low-risk TuiApp leaves into `src/tui/components/frame.ts`,
+`src/tui/components/welcome-card.ts`, `src/tui/components/transcript-leaves.ts`,
+`src/tui/pickers/picker-adapters.ts`, `src/tui/panels/approval-dialog.ts` and
+`src/tui/panels/output-viewer-panel.ts`. `TaskBrowserViewState` became an
+application-owned type in `src/app/surface/task-runtime.ts` (the owner that stores
+`quickTaskState`/`restoreState`), so the TUI panel consumes it as a type instead
+of owning it.
 
 Each PR that introduces a new architectural zone extends the architecture gate
 for that zone; the gate deliberately enforces only the zones that exist today.

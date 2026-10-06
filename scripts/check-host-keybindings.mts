@@ -32,16 +32,17 @@ import { listSourceFilesUnder } from './application-architecture-gate.mjs'
 const SCANNED_FILES = ['src/tui-app.ts']
 
 /**
- * The command-layer user-facing string files: the stable facade plus EVERY
- * `src/tui/commands/**` domain module, recursively, over the same four
- * production extensions (TS1 §22 zone = the whole subtree). The shared
- * enumeration is deterministic (sorted) so a future command module is covered
- * automatically instead of silently escaping the chord-label gate.
+ * The TUI user-facing string files (TS4 §44): EVERY production source file
+ * recursively under `src/tui/**` — commands, components, panels, pickers and
+ * plugin-manager — over the same four production extensions the architecture
+ * gate scans. TS4 moved substantial user-facing strings out of the root panel
+ * and picker modules into this tree, so the command-only coverage of TS1 is
+ * replaced by full TUI coverage: a user-facing string (or a hard-coded chord)
+ * that lands in a moved panel/picker/leaf stays covered instead of silently
+ * escaping the chord-label gate. The shared enumeration is deterministic
+ * (sorted) and already subsumes `src/tui/commands/**`, which is NOT re-added.
  */
-const COMMAND_STRING_FILES = [
-  'src/commands.ts',
-  ...listSourceFilesUnder(join(process.cwd(), 'src/tui/commands')).map(rel => `src/tui/commands/${rel}`),
-]
+const TUI_STRING_FILES = listSourceFilesUnder(join(process.cwd(), 'src/tui')).map(rel => `src/tui/${rel}`)
 
 /**
  * The application composition zone's user-facing strings (TS2 §21): the facade
@@ -64,7 +65,8 @@ const BOOTSTRAP_STRING_FILES = [
 const SCANNED_STRING_FILES = [
   'src/index.ts',
   ...BOOTSTRAP_STRING_FILES,
-  ...COMMAND_STRING_FILES,
+  'src/commands.ts',
+  ...TUI_STRING_FILES,
   'src/tui-app.ts',
   'src/local-shell-card.ts',
   'src/footer/instruction.ts',

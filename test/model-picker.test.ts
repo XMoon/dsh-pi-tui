@@ -1,5 +1,6 @@
 /**
- * Headless tests for the `/model` inline-effort picker (src/model-picker.ts):
+ * Headless tests for the `/model` inline-effort picker
+ * (src/tui/pickers/model-picker.ts):
  * the pure directory projection, the immediate loading panel + in-place
  * hydration, the provider-grouped model list, the hidden description/id, the
  * per-model inline effort (`←`/`→`) and its submit payload, plus write
