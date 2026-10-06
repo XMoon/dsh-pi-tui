@@ -1171,6 +1171,17 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
   ])
   assert.equal(dynamicPackage.length, 1, 'a bare renderer-package dynamic import must be rejected')
   assert.equal(dynamicPackage[0].rule, 'tui-transcript-imports-renderer-mechanics')
+  // …and this bare-specifier handling belongs to THIS rule alone. An older rule
+  // must keep its exact baseline scope: a non-relative dynamic specifier was
+  // never resolved into a target, so an npm package/subpath that merely starts
+  // with `tui/` is not an `app -> src/tui/**` edge. (The static spelling of that
+  // specifier is reported at baseline; the asymmetry is pre-existing and out of
+  // TS6 scope — the dynamic spelling must not be retro-fitted onto that rule.)
+  assert.deepEqual(
+    findViolations([entry('app/surface/x.ts', "const m = await import('tui/widget')\n")]),
+    [],
+    'a bare external tui/* dynamic specifier must not be read as src/tui/** by app-imports-tui',
+  )
   // Positive controls: the TS6 transitional semantic roots, the pure
   // application-facing policy and every intra-core module stay open.
   const allowed = [
