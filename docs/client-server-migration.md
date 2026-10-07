@@ -1562,7 +1562,7 @@ without putting `steering`/`context` back into the queue pane and without Direct
 - Ordinary Direct human prompts mint a request id before their first async
   preparation await and persist it on the Direct user-message source as `rpcId`.
   Injected context, Host commands and non-prompt workflows do not.
-- A new Client-local ledger (`src/pending-submission.ts`, zero Host coupling)
+- A new Client-local ledger (`src/app/submission/pending-submission.ts`, zero Host coupling)
   holds one echo per in-flight human submission, keyed by request id and
   insertion-ordered. It is presentation-only; the durable transcript stays the
   sole record. Same-text submissions stay distinct because their ids differ.
@@ -1721,14 +1721,14 @@ correct presentation.
   official order, detached/frozen content, and a Connection generation fence. It never reads Direct `nextTurn`/`nextStep` names and never
   derives placement from `running`.
 - `RemoteSubmissionPresentation` is the Remote half of the client-local
-  submission-presentation seam (`src/submission-presentation.ts`): production
+  submission-presentation seam (`src/app/submission/presentation.ts`): production
   Direct wires the existing ledger, and the experimental Remote assembly
   (tests/smoke) reads the official `SessionSnapshot.pendingSubmissions`, so the
   Remote path never runs a second optimistic identity beside the official echo.
   D2.2 has no production Remote backend, so the runner intentionally has no
   source-injection point yet — the complete Remote backend assembly (M3) is what
   injects the Remote source in place of the Direct ledger. The presentation join
-  (`src/pending-presentation.ts`) correlates by request/rpc identity only —
+  (`src/app/surface/pending-presentation.ts`) correlates by request/rpc identity only —
   never by text — and renders an official echo's structured attachments as
   stable markers, so an image-only echo is never a blank row.
 - `RemoteHostCommandPort` uses the official generated
@@ -1762,7 +1762,7 @@ correct presentation.
   state decides, with no automatic replay. A committed interrupt admission is
   likewise never presented as a durably stopped child.
 - Ctrl+S already converges on official per-occurrence `updateQueue({kind:'steer'})`
-  choreography from D2.1 (`src/steer.ts`): FIFO best-effort, partial progress is
+  choreography from D2.1 (`src/app/submission/steer.ts`): FIFO best-effort, partial progress is
   real, no fake rollback, and the authoritative snapshot reconciles the
   remaining rows. The Remote adapter plugs into that same orchestration.
 
@@ -2595,7 +2595,7 @@ the composition and presentation.
   seam — restores the deferred recalls through ONE settle authority instead
   of per-branch restores, because the gate was held and a finishing writer
   may have deferred a queue recall against it.
-- `src/session-fork.ts` / `src/app/session/ownership-core.ts` — the fork/
+- `src/app/session/navigation-identity.ts` / `src/app/session/ownership-core.ts` — the fork/
   rewind navigation identity (`RewindNavigationIdentity`, renamed from
   `RewindLiveIdentity`) is now session id + navigation epoch ONLY: the
   surface `generation` is removed from it at the type level. Mirroring the
@@ -3733,7 +3733,7 @@ longer resolves the Host tools registry outside the Direct branch.
   AND an unknown tool's bounded generic fallback, both from raw durable facts).
 - Machine-checkable guards: `test/m3-4-pr4-guards.test.ts` (§18.1–§18.4 plus
   the structural §7.5 negative locks) and `scripts/client-boundary-gate.mjs`
-  (green at 28 files: the `skill-catalog-refresh.ts` `import:dsh-agent`
+  (green at 28 files: the `app/command/catalog-refresh.ts` `import:dsh-agent`
   baseline entry was REMOVED by the §2.3 branch-opaque target relocation).
 
 ### Boundaries (intentional, still open)
@@ -4141,7 +4141,7 @@ is MERGED into `next` as the merged HEAD `e520c016` (the PR's final branch HEAD
   wiring defect. (2) The local fake's `agent.cancel` required an `options`
   object and read `options.keepInbox` unconditionally, while the Direct
   retirement's pre-cancel deliberately calls it with no knobs (the port
-  hides them) and `src/interrupt.ts` declares them optional — a
+  hides them) and `src/app/session/interrupt.ts` declares them optional — a
   PRE-EXISTING fixture gap (both sides identical at the round-6 snapshot),
   fixed by matching the official optional shape. No product fallback was
   added for it.
@@ -4709,7 +4709,7 @@ end of this file).
   Session's official page. The in-flight latch is subject-scoped, and a child
   page that settles after a viewer switch/exit is dropped. Direct keeps full
   coverage (no-op).
-- **The child queued-occurrence steer is transport-neutral** (`src/steer.ts` +
+- **The child queued-occurrence steer is transport-neutral** (`src/app/submission/steer.ts` +
   `src/app/surface/application-events.ts`). `SteerAgentLike`/`currentAgent()`
   became `SteerSubjectLike`/`currentSubject()`: the helper's real question is
   "is this exact writer subject still the one that admitted the gesture?".

@@ -32,7 +32,7 @@ deleted). The cold surface is instead read through a **standing scope**:
 and returns its `ScopeKey` without creating an Agent, a session or a turn —
 so the sessionless catalog read is zero-event by construction. If an
 upstream change ever removes `standingKeyFor()`/`snapshot()`, the adapter
-degrades (see `src/skill-catalog.ts` and `docs/README.md`): the affected
+degrades (see `src/runtime/direct/skill-catalog.ts` and `docs/README.md`): the affected
 commands are merely absent, the TUI never fails to start.
 
 ## The design
@@ -89,9 +89,13 @@ follow-up read always observes the current ownership.
 
 | File | Responsibility |
 |---|---|
-| `src/surface-catalog.ts` | Frozen snapshot types; `readSurfaceCatalog(agent, signal, ctx)` — the LIVE collector (prefetch, first session, switches); scoped-override derivation; `isUserInvocable` filter; detached issues |
-| `src/skill-catalog.ts` | The single narrow seam to dsh services (plan appendix B): structural `SkillRegistryLike`/`AgentPresetsLike`, `readHumanSkillCatalog()` (snapshot-first, `list()` fallback, policy filter, freeze), `resolveColdSkillTarget()` (standing → rosterless global → degraded global + notice), `resolveLiveSkillTarget()` |
-| `src/skill-catalog-refresh.ts` | `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; target-change transitions; same-target retention; standing degradation notices; dispose cancellation) and `CoalescingRefreshGate` |
+| `src/domain/catalog/surface.ts` | The neutral frozen snapshot DTOs (`SurfaceCommandSummary`, `SurfaceCatalogIssue`, `SurfaceCatalogSnapshot`, `InitialCatalogResolution`) and the pure `commandSummaryOf` descriptor→summary projection (shared by the Direct Host read and the Client registry) |
+| `src/domain/catalog/skill.ts` | The neutral human skill vocabulary (`HumanSkillSummary`, `HumanSkillCatalog`, `SkillSummaryLike`) and the official `isUserInvocableSkill` policy guard |
+| `src/runtime/direct/surface-catalog.ts` | The Direct effective read: `readSurfaceCatalog(agent, signal, ctx)` — the LIVE collector (prefetch, first session, switches); scoped-override derivation; `listGlobalCommands` (the in-process `commands.list(undefined)` global layer); the structural Direct command-service faces |
+| `src/runtime/direct/skill-catalog.ts` | The single narrow seam to dsh services (plan appendix B): structural `SkillRegistryLike`/`AgentPresetsLike`, `readHumanSkillCatalog()` (snapshot-first, `list()` fallback, policy filter, freeze), `resolveColdSkillTarget()` (standing → rosterless global → degraded global + notice), `resolveLiveSkillTarget()` |
+| `src/app/direct/initial-catalog.ts` | The pre-mount resolution (`resolveInitialCatalog` implementation): resume prefetch or the cold standing-scope skill read, with their one-shot degradation notices |
+| `src/runtime/catalog-port.ts` | The semantic catalog port; owns the `StandingSkillRead` result type beside the `SkillCatalogCapability` that returns it |
+| `src/app/command/catalog-refresh.ts` | `CatalogRefreshCoordinator` (epoch + abort + latest-only commit; target-change transitions; same-target retention; standing degradation notices; dispose cancellation) and `CoalescingRefreshGate` |
 | `src/skill-reference-completion.ts` | The pure Client-local inline skill reference grammar: `extractInlineSkillPrefix()` (whitespace-boundary `/name` token classification, first-line command seat excluded) and `applyInlineSkillReference()` (replace `/query` with `/name `, one separator, cursor on it). No Context/Agent/Session/registry/Remote access |
 | `src/tui/interaction/autocomplete/provider.ts` | `MentionProvider` inline skill source: prompt-mode routing, fuzzy candidates from the detached `HumanSkillSummary[]`, query-part prefix (never `/`-prefixed), strict snapshot fence, catalog-guarded apply |
 | `src/tui/interaction/tui-editor.ts` | The consumer-side natural trigger: the vendored editor rejects `/` as a trigger character, so the host editor re-triggers the provider on the pure classifier (same pattern as the `@`-mention trigger) |

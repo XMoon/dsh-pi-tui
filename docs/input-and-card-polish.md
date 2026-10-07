@@ -33,7 +33,7 @@ maintaining a parallel command database.
 
 ### Design
 
-New module `src/shell-completion.ts`, consumed by `MentionProvider`
+New module `src/client/shell/compgen.ts`, consumed by `MentionProvider`
 (`src/tui/interaction/autocomplete/provider.ts`). The provider detects a `!`-prefixed line and delegates to
 the shell bridge; every other line keeps the current behavior.
 
@@ -96,7 +96,7 @@ Decisions that matter:
 
 **Touch points**
 
-- `src/shell-completion.ts` — new module (bridge + cache + subcommand table).
+- `src/client/shell/compgen.ts` — new module (bridge + cache + subcommand table).
 - `src/tui/interaction/autocomplete/provider.ts` — `MentionProvider.getSuggestions` branches on a
   `!`-line; `applyCompletion` routes command-name items.
 - `src/tui/interaction/tui-editor.ts` — no change needed (the fork's autocomplete machinery
@@ -449,7 +449,7 @@ result text verbatim — **no JSON beautification on the web either**.
 The editor used to keep the literal shell prefix in the draft (`!git status`).
 The prefix is presentation + state, not text: it must never be part of the
 document (no cursor-offset/render hacks, no debounce to distinguish `!` from
-`!!`), and the shell business layer (`src/shell-context.ts`) must keep
+`!!`), and the shell business layer (`src/app/submission/shell-context.ts`) must keep
 receiving the exact same wire text as before. kimi's `CustomEditor` stores
 `inputMode: 'prompt' | 'bash'` and never puts the `!` in the buffer; this
 extends that two-state model to dsh-pi-tui's two-shell-semantics (`!` =
@@ -493,7 +493,7 @@ pre-mode behavior).
   (`!!` before `!`); `onHistoryDraftSave`/`onHistoryDraftRestore` keep the
   mode across ↑/↓ browsing.
 - **Completion** — `MentionProvider` synthesizes a VIRTUAL `!`/`!!` line for
-  the shell grammar (`src/shell-completion.ts` untouched); the applied
+  the shell grammar (`src/tui/interaction/autocomplete/shell.ts` untouched); the applied
   completion never writes the synthetic prefix into the buffer. In a shell
   mode a leading `/` is a PATH, never a slash command: natural triggers stay
   quiet and Tab forces path completion (the fork's `handleTabCompletion`

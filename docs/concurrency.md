@@ -107,7 +107,7 @@ overlap across their awaits:
 
 ### SessionTransitionGate — one transition at a time
 
-`src/transition-gate.ts` is a **process-local single-writer queue**: ordinary
+`src/app/session/transition-gate.ts` is a **process-local single-writer queue**: ordinary
 session transitions run inside `SessionTransitionGate.run`, held from BEFORE
 the child create or Direct `resume` until the transaction settles. Host fork
 dispatch is intentionally outside this destructive transition queue; only a
@@ -118,7 +118,7 @@ is refused loudly (AsyncLocalStorage detects it — re-entry would deadlock
 the queue). The runner exposes the gate as `runner.withSessionTransition(task)`.
 
 On top of the gate, ordinary session transitions share ONE transaction shape
-(`runner.transitionTo`), whose phase order — fixed in `src/transition.ts`
+(`runner.transitionTo`), whose phase order — fixed in `src/app/session/transition.ts`
 (`runTransitionTo`, unit-tested) — is the whole point:
 
 1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. (A `/new`

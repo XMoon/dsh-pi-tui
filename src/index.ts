@@ -59,7 +59,7 @@ export type { InitialCatalogResolution } from './domain/catalog/surface.ts'
  * The public declaration stays here (A5a review P1): `liveAgent` keeps the Host
  * `Agent` type it has always had, so consumers that READ the property keep
  * compiling. The implementation consumes the structural
- * `SurfaceCatalogResolutionOptions` in `surface-catalog.ts`.
+ * `SurfaceCatalogResolutionOptions` in `app/direct/initial-catalog.ts`.
  */
 export interface ResolveInitialCatalogOptions {
   /** The resumed live agent, if any (prefetch path). */
@@ -84,8 +84,8 @@ export interface ResolveInitialCatalogOptions {
  * prefetches the resumed agent's effective catalog; the deferred start reads the
  * cold HUMAN SKILL catalog through the preset's STANDING SCOPE — no Agent, no
  * session, no turn — so the first input sees human-invocable skills without any
- * durable side effect. The implementation and its failure taxonomy live in
- * `surface-catalog.ts`.
+ * durable side effect. The implementation and its pre-mount failure taxonomy
+ * live in `app/direct/initial-catalog.ts`.
  * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
  * @returns the snapshot / skill catalog to install and an optional notice.
  */

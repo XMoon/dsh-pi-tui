@@ -290,7 +290,7 @@ Host code must not hard-code physical keys in a way that can drift from
 the user's live bindings:
 
 - **The single source of truth for DEFAULT keys is `definitions.ts`**
-  (plus the `RESERVED_HOST_KEYS` inventory in keybinding-registry.ts).
+  (plus the `RESERVED_HOST_KEYS` inventory in `extension/internal/keybinding-registry.ts`).
   `src/tui-app.ts` and `src/index.ts` carry a header note pointing here.
 - **Keyboard exit requests use same-key confirmation.** Every effective exit
   request that reaches the Host — including full `<leader>X` sequences — arms
