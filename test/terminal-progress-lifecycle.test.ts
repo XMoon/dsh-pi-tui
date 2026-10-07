@@ -736,9 +736,10 @@ test('a CLIENT-LOCAL question never pauses the Tern pane (the /login authorizati
     assert.deepEqual(h.progressStates, ['indeterminate'])
 
     // `src/authorization.ts` / the `/login` command ask through the SAME
-    // `TuiApp.askQuestions` entry point, with the fail-closed `'local'` origin:
-    // the canonical phase still becomes `waiting-question` (footer/Focus keep
-    // their authority) but the main Agent is NOT waiting for the user.
+    // `TuiApp.askQuestions` entry point, with the fail-closed `agentInputWait =
+    // false` default: the canonical phase still becomes `waiting-question`
+    // (footer/Focus keep their authority) but the main Agent is NOT blocked on
+    // this input.
     const controller = new AbortController()
     const answer = h.app.askQuestions(
       [{ id: 'auth', question: 'API key', masked: true }],
@@ -867,7 +868,7 @@ test('a question FIFO handover from a LOCAL flow to an AGENT flow pauses the pan
     assert.deepEqual(h.progressStates, ['indeterminate'], 'a Client-local wait is not Agent waiting_input')
 
     // The Agent question queues BEHIND the local one: the seat is occupied, so
-    // its own origin must not move the pane yet.
+    // its own agentInputWait must not move the pane yet.
     const agent = new AbortController()
     const agentAnswer = h.agentQuestion(agent.signal)
     await drain()
@@ -876,7 +877,7 @@ test('a question FIFO handover from a LOCAL flow to an AGENT flow pauses the pan
 
     // Settle the local flow: the seat hands over to the Agent question while the
     // canonical phase stays `waiting-question`, so ONLY a re-projection of the new
-    // flow's origin can flip the pane.
+    // flow's agentInputWait can flip the pane.
     local.abort()
     await localAnswer.catch(() => {})
     await drain()

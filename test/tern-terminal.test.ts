@@ -61,8 +61,8 @@ test('an unusable cwd yields no sequence (no Client-cwd / root substitute)', () 
 test('the Tern progress state needs BOTH a wait phase and a proven Agent-blocking wait (plan §6.2)', () => {
   const waitPhases = ['waiting-approval', 'waiting-question'] as const
   const busyPhases = ['idle', 'working', 'compacting', 'applying-compaction'] as const
-  // Idle wins over EVERY (phase, origin) pair: a stale phase can never keep a
-  // retired owner busy on the pane.
+  // Idle wins over EVERY (phase, agentInputWait) pair: a stale phase can never
+  // keep a retired owner busy on the pane.
   for (const phase of [...waitPhases, ...busyPhases] as const) {
     for (const agentInputWait of [true, false]) {
       assert.equal(ternProgressState(false, phase, agentInputWait), 'clear',
@@ -78,7 +78,7 @@ test('the Tern progress state needs BOTH a wait phase and a proven Agent-blockin
     assert.equal(ternProgressState(true, phase, false), 'indeterminate',
       `an unproven/local/continued ${phase} is NOT Agent waiting_input`)
   }
-  // Every other busy phase keeps Tern's working state, whatever the origin flag.
+  // Every other busy phase keeps Tern's working state, whatever the flag says.
   for (const phase of busyPhases) {
     assert.equal(ternProgressState(true, phase, true), 'indeterminate')
     assert.equal(ternProgressState(true, phase, false), 'indeterminate')

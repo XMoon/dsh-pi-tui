@@ -2257,9 +2257,9 @@ export class TuiApp {
   private disposed = false
   /**
    * The authoritative main-Agent RUNNING truth (OSC 9;4 — plan §6). It is the
-   * one semantic input of the pane projection and the fence that keeps a
-   * retired/child Agent from ever showing progress; {@link
-   * reconcileTerminalProgress} turns it into the effective state.
+   * fence that keeps a retired/child Agent from ever showing progress, and one
+   * of the THREE inputs {@link reconcileTerminalProgress} combines (this truth,
+   * the canonical `RunPhase` and the lifecycle-owned `agentInputWait` fact).
    * Presentation state only, never a second Agent lifecycle authority: it
    * survives a stop() because ProcessTerminal.stop() clears the physical
    * indicator and its keepalive, and every TuiApp-owned screen (re)start
@@ -2268,11 +2268,13 @@ export class TuiApp {
   private terminalProgressActive = false
   /**
    * The EFFECTIVE terminal progress state (OSC 9;4 — plan §9). For a Tern
-   * terminal it is the main-running truth WIDENED by the canonical RunPhase
-   * (a user-blocked phase becomes `paused`); every other terminal only ever
-   * sees the PR #230 clear/indeterminate pair. Deduping on this field keeps
-   * both the byte stream and the phase-driven reconcile write-free when
-   * nothing effective changed.
+   * terminal it is the main-running truth narrowed to an Agent-BLOCKING wait:
+   * `paused` requires a wait phase AND the lifecycle-owned `agentInputWait`
+   * fact, never the phase alone (a Client-local dialog or a CONTINUED
+   * late-answer form stays `indeterminate`). Every other terminal only ever sees
+   * the PR #230 clear/indeterminate pair. Deduping on this field keeps both the
+   * byte stream and the phase-driven reconcile write-free when nothing effective
+   * changed.
    */
   private terminalProgressState: TerminalProgressState = 'clear'
   /**
