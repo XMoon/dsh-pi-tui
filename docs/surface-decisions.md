@@ -164,10 +164,10 @@ Owner: Post-M3 Q1.
 ### Remote presentation keeps exactly one optimistic identity
 
 D2.2 makes the client-local optimistic-echo source a seam
-(`src/submission-presentation.ts`): production Direct reads the existing
+(`src/app/submission/presentation.ts`): production Direct reads the existing
 `PendingSubmissions` ledger; the experimental Remote path reads the official
 `SessionSnapshot.pendingSubmissions`. The single join
-(`src/pending-presentation.ts`) correlates authoritative occurrences with local
+(`src/app/surface/pending-presentation.ts`) correlates authoritative occurrences with local
 echoes by request/rpc identity only and routes `queued` to the queue pane and
 `steering`/`transcript` to the conversation-tail lane; a non-user `context`
 occurrence renders in the same ordered tail with its generic non-user Context

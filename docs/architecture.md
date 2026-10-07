@@ -271,7 +271,10 @@ is unknown. The gate never auto-writes or auto-accepts a baseline entry. During
 TS5–TS8 a move deletes the corresponding `legacy` entry in the same PR; an
 ordinary new root module is never allowed. TS5 retired the nine frozen root
 interaction modules (`119 -> 110`); TS6 retired the nine frozen root transcript
-presentation modules (`110 -> 101`).
+presentation modules (`110 -> 101`). TS8-E closed the extension/theme/stateful
+residual owners and reclassified the published `src/extensions.ts` entry stable,
+reaching `stable = 6 / legacy = 49` (the TS8-E root scope no longer exists at the
+source root).
 
 ## Existing directory convergence
 
@@ -611,6 +614,44 @@ text / context), `domain/status/stats.ts`, `domain/display/**` and
 semantic re-export facade. The dead `StatusData.statsLine` / `formatStats`
 compatibility string path was removed, and the domain/transcript closed-world
 gate admits only its own siblings and the two TYPE-ONLY edges.
+
+TS8-E closed the extension / theme / stateful residual owners (legacy
+`59 -> 49`, stable `5 -> 6`):
+
+- the seven concrete extension registries live under `src/extension/internal/**`
+  (unpublished implementation); `src/extensions.ts` is the deliberate stable
+  public `./extensions` package entry, not a legacy feature root;
+- the theme ownership split by layer: neutral palette vocabulary
+  (`domain/display/theme.ts`), Client-local custom-theme files + environment
+  (`client/theme/**`), the live terminal palette/ANSI themes
+  (`tui/theme/runtime.ts`), the persisted identity grammar
+  (`domain/display/theme-selection.ts`) and the cross-source composition
+  (`app/surface/theme-selection.ts`); `app/surface/**` no longer value-imports
+  `tui/theme/**` (the composition zone injects the image fallback colour);
+- session/submission/currentness state lives under `app/**`, the neutral
+  model-selection fold under `domain/session/**`, rewind's candidate fold /
+  picker item / Direct outline fold under `domain/session/**`,
+  `tui/pickers/**` and `runtime/direct/**`, and the pending-input row/presentation
+  DTOs under `app/surface/pending-presentation.ts` (consumed by TuiApp);
+- Client history IO lives under `client/history/**` (ordering policy stays in
+  `app/submission/history-persist.ts`); neutral catalog DTOs under
+  `domain/catalog/**`, Direct Host catalog reads under `runtime/direct/**` and
+  refresh currentness under `app/command/catalog-refresh.ts`;
+- the Client `compgen` capability lives under `client/shell/**`, the editor
+  completion grammar under `tui/interaction/autocomplete/shell.ts` and shell
+  submission orchestration under `app/submission/shell-context.ts`.
+
+No forwarding shim was kept; the Direct catalog reads stay the single authority
+and reach `app/command/**`/`commands.ts` only through composition-injected
+neutral-DTO operations.
+
+The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
+implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1
+Host-side construction bridge
+(`runtime/remote/pi-tui-file-reference-host-bridge.ts` → `runtime/direct/*`,
+documented in `docs/client-server-coupling.md`) is an approved exception that
+shares the existing Host authority; TS8-E adds no new Remote→Direct edge, so no
+blanket Remote→Direct gate is added (it would flag that legitimate bridge).
 
 Each PR that introduces a new architectural zone extends the architecture gate
 for that zone; the gate deliberately enforces only the zones that exist today.

@@ -258,7 +258,7 @@ Validation mechanics for this toolchain:
   the public entry (`src/index.ts`) or an existing documented facade. Do not create a
   new root `src/*.ts` module merely to satisfy declaration bundling. The legacy
   top-level public helpers (`src/compaction-presentation.ts`,
-  `src/pending-presentation.ts`, ...) keep working until their own TS stage moves them,
+  `src/subagent-viewer.ts`, ...) keep working until their own TS stage moves them,
   but they are not a template for new modules. If the declaration/tarball boundary
   cannot expose the canonical nested owner, STOP and report the packaging constraint
   instead of growing the root baseline.

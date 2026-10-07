@@ -101,7 +101,7 @@ can never claim it). It is "find and EDIT", never "find and run":
   the cwd from a v2 row that validates the file hash (Rule 1) or a
   known-cwd identity map (Rule 2). Unresolved legacy files are excluded
   from `All directories` (Rule 3 — never a guessed directory).
-- **Search source**: `src/history-search.ts` (replaceable; a SQLite/FTS
+- **Search source**: `src/client/history/search.ts` (replaceable; a SQLite/FTS
   backend can swap in without touching the panel) and
   `src/tui/panels/history-panel.ts` (the overlay).
 
@@ -115,13 +115,13 @@ row written before creation would carry no sessionId and vanish from
 `Current session`. Sessionless submissions (`/help`, `/settings`,
 `/sessions`, `!!` shells) persist with `sessionId: undefined` and stay
 visible in `Current directory` / `All directories`. The ordering contract
-lives in `src/history-persist.ts` (`persistAfterSession`), pinned by
+lives in `src/app/submission/history-persist.ts` (`persistAfterSession`), pinned by
 `test/history-persist.test.ts` (the merge gate).
 
 ### Bounded recent-first scanning (the perf contract)
 
 The search never parses a whole history file. Every call reads the JSONL
-store from the tail backwards through `src/history-reverse-reader.ts`
+store from the tail backwards through `src/client/history/reverse-reader.ts`
 (fixed-size chunks, lines reassembled across chunk boundaries, UTF-8 safe)
 and consumes a GLOBAL scan budget — `HISTORY_SEARCH_SCAN_LIMIT` (5000)
 physical lines across ALL files per call, never per file. The `All
@@ -174,7 +174,7 @@ first session is born (and on every session switch).
 
 The EDITOR's ↑/↓ recall is session-scoped once a live session exists:
 `initLiveSession` seeds it with **only the rows whose `sessionId` matches
-the live session** (`recallHistoryForSession` in `src/history.ts`) —
+the live session** (`recallHistoryForSession` in `src/client/history/store.ts`) —
 resuming session A in a shared cwd never recalls session B's inputs. With
 no live session (fresh/deferred start) the recall pool is the whole cwd
 file, v1 legacy rows included. Explicitly **no automatic fallback**: when
@@ -221,17 +221,17 @@ unwritten entries.
 
 ## Where the code lives
 
-- `src/history.ts` — the pure store: pathing (`historyFilePath`), parsing
+- `src/client/history/store.ts` — the pure store: pathing (`historyFilePath`), parsing
   (`parseHistoryLines` / `parseHistoryRecords`), read-only load
   (`loadHistoryFile` / `loadHistoryRecords` / `loadRecallHistory`), append
   rules (`appendHistoryLine` v1 / `appendHistoryRecord` v2). Pinned by
   `test/history.test.ts`.
-- `src/history-search.ts` — the Ctrl+R search source (`HistorySearchSource`
+- `src/client/history/search.ts` — the Ctrl+R search source (`HistorySearchSource`
   seam + `FileHistorySearchSource`): scope, bounded recent-first reverse
   scanning, the global scan budget, the page/continuation contract, legacy
   cwd recovery, matching, ordering, dedupe, cancellation. Pinned by
   `test/history-search.test.ts`.
-- `src/history-reverse-reader.ts` — the reverse JSONL batch reader
+- `src/client/history/reverse-reader.ts` — the reverse JSONL batch reader
   (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-
   bound continuation cursors, abort). Pinned by
   `test/history-reverse-reader.test.ts`.
@@ -239,7 +239,7 @@ unwritten entries.
   tabs, list, details, responsive layout). Pinned by
   `test/history-panel.test.ts` and the `test/ctrl-r.test.ts` integration
   suite.
-- `src/history-persist.ts` — the session-scope persist gate: the pure
+- `src/app/submission/history-persist.ts` — the session-scope persist gate: the pure
   persist decision (`persistHistoryRecord`) and the deferred-start
   ordering contract (`persistAfterSession`). Pinned by
   `test/history-persist.test.ts`.
