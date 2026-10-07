@@ -100,6 +100,11 @@
  *      and a domain module needing a renderer/application fact means the fact was
  *      misclassified and must be split, never allowlisted. `app/remote/**` and
  *      `runtime/remote/**` are covered by this rule for the subtree.
+ *  10. (TS8-A) `src/domain/**` must not import `src/client/**`: the Client-local
+ *      capability is the INNER platform layer, exactly like `app/`/`tui/`.
+ *  11. (TS8-A) `src/client/**` must not import experimental Remote composition:
+ *      Client-local state never depends on the Host transport. The Direct side
+ *      is already closed by rule 2.
  *
  * Root source placement (plan §20.3): `scripts/source-root-baseline.json` is a
  * shrinking ledger of the ROOT production modules. A new root module
@@ -108,6 +113,11 @@
  * `extension`) instead; a `legacy` entry that no longer exists, a missing
  * `stable` facade, a duplicate entry, or an unknown schema fails closed. The
  * gate never writes or accepts a new baseline entry.
+ *
+ * Retired feature directories ({@link RETIRED_SOURCE_DIRECTORIES}) are the
+ * directory-level companion: a historical feature directory retired by a
+ * completed ownership stage (TS8-A: `src/file-completion/**`) must not
+ * reappear — new code belongs to the canonical layer that now owns it.
  *
  * Existing historical exceptions, when a phase proves one, are recorded in
  * {@link ARCHITECTURE_ALLOWLIST} (file + resolved target, TYPE-ONLY only); new
@@ -373,6 +383,30 @@ export const ARCHITECTURE_RULES = [
     id: 'domain-imports-remote-composition',
     message: 'src/domain/** must not import experimental Remote composition (domain primitives stay transport-neutral)',
     applies: (srcRel) => srcRel.startsWith('domain/') && !isDomainTranscriptSubtree(srcRel),
+    forbids: (resolved, specifier) => isRemoteComposition(resolved, specifier),
+  },
+  {
+    // TS8-A creates the canonical `src/client/**` capability layer (the
+    // Client-local, non-TUI platform capability). It is the INNER layer: the
+    // neutral domain never depends on it, exactly like it never depends on
+    // app/ or tui/. `domain/transcript/**` keeps its own closed-world rule.
+    id: 'domain-imports-client',
+    message:
+      'src/domain/** must not import src/client/** (the neutral domain layer never depends on '
+      + 'Client-local platform capability)',
+    applies: (srcRel) => srcRel.startsWith('domain/') && !isDomainTranscriptSubtree(srcRel),
+    forbids: (resolved) => resolved.startsWith('client/'),
+  },
+  {
+    // TS8-A makes the Client-local capability an explicit layer: Client-local
+    // state never owns Host business authority and never reaches into the
+    // Host transport/composition. `runtime/direct/**` is already closed by the
+    // Direct rule below; this rule closes the Remote side.
+    id: 'client-imports-remote-composition',
+    message:
+      'src/client/** is Client-local platform capability and must not import experimental Remote composition '
+      + '(Client-local state never depends on the Host transport)',
+    applies: (srcRel) => srcRel.startsWith('client/'),
     forbids: (resolved, specifier) => isRemoteComposition(resolved, specifier),
   },
   {
@@ -1029,9 +1063,46 @@ export function findSourceRootViolations(baseline, currentRootFiles) {
   return violations
 }
 
+/**
+ * Historical feature directories retired by a completed ownership stage. TS8-A
+ * retires the mixed `src/file-completion/**` directory: its single owners are
+ * now canonical — `domain/file-completion/**` (neutral query/ranking/discovery
+ * policy), `client/file-completion/**` (Client-local filesystem completion),
+ * `tui/file-completion/**` (trigger + presentation) and
+ * `runtime/direct/file-completion/**` (Direct WORKSPACE compatibility IO). New
+ * completion code belongs to its canonical layer; recreating the old mixed
+ * directory fails closed. Each later TS8 stage adds its own entry as it
+ * retires the next historical directory.
+ */
+export const RETIRED_SOURCE_DIRECTORIES = ['file-completion']
+
+/** Every directory directly under `src/`, sorted (the placement layer's own walk). */
+export function listSourceRootDirectories(dir = SRC) {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .map(entry => entry.name)
+    .sort()
+}
+
+/**
+ * Fail-closed retired-directory check: a historical feature directory retired
+ * by a completed stage must not reappear under `src/`. This is the
+ * directory-level companion of {@link findSourceRootViolations} — the root
+ * ledger governs root MODULES, this governs the retired SUBTREE placements, so
+ * neither can be bypassed by choosing the other shape.
+ */
+export function findRetiredSourceDirectoryViolations(directories = listSourceRootDirectories()) {
+  const present = new Set(directories)
+  return RETIRED_SOURCE_DIRECTORIES
+    .filter(name => present.has(name))
+    .map(name => `src/${name}/ is a retired historical feature directory — its owners are canonical `
+      + '(domain/client/tui/runtime/direct); place new code in its canonical layer instead')
+}
+
 function main() {
   const entries = collectSourceEntries()
   const rootViolations = findSourceRootViolations(readSourceRootBaseline(), listSourceRootFiles())
+  const retiredViolations = findRetiredSourceDirectoryViolations()
   if (process.argv.includes('--report')) {
     console.log(`application-architecture-gate: scanned ${entries.length} src file(s)`)
     for (const rule of ARCHITECTURE_RULES) console.log(`  rule ${rule.id}`)
@@ -1041,9 +1112,16 @@ function main() {
     console.log('  composition zone: app/bootstrap.ts + app/bootstrap/**')
     const baseline = readSourceRootBaseline()
     console.log(`  source-root baseline: ${baseline.stable.length} stable + ${baseline.legacy.length} legacy root module(s)`)
+    console.log(`  retired feature directories: ${RETIRED_SOURCE_DIRECTORIES.join(', ')}`)
     return
   }
   const violations = findViolations(entries)
+  if (retiredViolations.length > 0) {
+    console.error('application-architecture-gate: retired source directory recreated:')
+    for (const detail of retiredViolations) console.error(`  ${detail}`)
+    console.error('\nSee docs/architecture.md (source module placement).')
+    process.exit(1)
+  }
   if (rootViolations.length > 0) {
     console.error('application-architecture-gate: source-root placement violated:')
     for (const detail of rootViolations) console.error(`  ${detail}`)

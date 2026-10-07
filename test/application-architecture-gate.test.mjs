@@ -24,11 +24,13 @@ import {
   collectSourceEntries,
   findDirectAdapterConstructions,
   findRemoteDynamicImportViolations,
+  findRetiredSourceDirectoryViolations,
   findSourceRootViolations,
   findViolations,
   isBootstrapCompositionFile,
   isDirectCompositionFile,
   isRemoteComposition,
+  listSourceRootDirectories,
   listSourceRootFiles,
   parseImportSpecifiers,
   parseValueDynamicImports,
@@ -37,6 +39,7 @@ import {
   REMOTE_DYNAMIC_IMPORT_OWNER,
   REMOTE_DYNAMIC_IMPORT_TARGET,
   resolveRelativeImport,
+  RETIRED_SOURCE_DIRECTORIES,
   scriptKindOf,
   SOURCE_EXTENSIONS,
   STARTUP_REMOTE_COMPOSITION_RULE,
@@ -96,7 +99,7 @@ test('presentation/adjacent modules importing Direct wiring are rejected (enumer
     // TS6 moved the rendered-search mechanics under the PiTui component tree;
     // the rule is enumeration-free, so the sample follows the real owner.
     'tui/components/transcript/search-presentation.ts',
-    'file-completion/presentation.ts',
+    'tui/file-completion/presentation.ts',
     'components/media/file-attachment.ts',
     'footer/status-line.ts',
   ]) {
@@ -388,25 +391,27 @@ test('a .mjs specifier resolving to a .d.mts declaration file is part of the sta
 })
 
 test('a .tsx module reached through a legal .js/.jsx spelling stays in the startup static graph (TS1)', () => {
-  // TypeScript NodeNext resolves `./client/bridge.js` AND `./client/bridge.jsx`
-  // to `client/bridge.tsx`; the gate must resolve the same edge, or the startup
+  // TypeScript NodeNext resolves `./compat/bridge.js` AND `./compat/bridge.jsx`
+  // to `compat/bridge.tsx`; the gate must resolve the same edge, or the startup
   // compatibility island could re-enter Remote composition through a TSX file.
-  for (const spelling of ['./client/bridge.js', './client/bridge.jsx']) {
+  // The fixture deliberately avoids a layer directory that owns its own rules
+  // (e.g. `client/**`), so this case reports the startup rule and nothing else.
+  for (const spelling of ['./compat/bridge.js', './compat/bridge.jsx']) {
     const entries = [
       entry('startup.ts', `export { bridge } from '${spelling}'\n`),
-      entry('client/bridge.tsx', "export { remote } from '../app/remote/runtime.ts'\n"),
+      entry('compat/bridge.tsx', "export { remote } from '../app/remote/runtime.ts'\n"),
       entry('app/remote/runtime.ts', 'export const remote = 1\n'),
     ]
-    assert.deepEqual([...buildStaticEdges(entries).get('startup.ts')], ['client/bridge.tsx'], spelling)
+    assert.deepEqual([...buildStaticEdges(entries).get('startup.ts')], ['compat/bridge.tsx'], spelling)
     const violations = findViolations(entries)
     assert.equal(violations.length, 1, spelling)
-    assert.equal(violations[0].file, 'client/bridge.tsx')
+    assert.equal(violations[0].file, 'compat/bridge.tsx')
     assert.equal(violations[0].rule, STARTUP_REMOTE_COMPOSITION_RULE.id)
   }
   // Positive control: the explicit `.tsx` spelling reports the same violation.
   const control = findViolations([
-    entry('startup.ts', "export { bridge } from './client/bridge.tsx'\n"),
-    entry('client/bridge.tsx', "export { remote } from '../app/remote/runtime.ts'\n"),
+    entry('startup.ts', "export { bridge } from './compat/bridge.tsx'\n"),
+    entry('compat/bridge.tsx', "export { remote } from '../app/remote/runtime.ts'\n"),
     entry('app/remote/runtime.ts', 'export const remote = 1\n'),
   ])
   assert.equal(control.length, 1)
@@ -929,6 +934,13 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     ['domain/status/foo.ts', '../../tui/commands/status.ts', ['domain-imports-tui']],
     ['domain/status/foo.ts', '../../app/remote/runtime.ts', ['domain-imports-remote-composition']],
     ['domain/status/foo.ts', '../../runtime/remote/session-reader-remote.ts', ['domain-imports-remote-composition']],
+    // TS8-A: the Client-local capability is the inner layer and the neutral
+    // domain never depends on it; the Client never reaches into Host
+    // transport/composition (Direct is closed by its own rule below).
+    ['domain/file-completion/query.ts', '../../client/file-completion/local-discovery.ts', ['domain-imports-client']],
+    ['client/file-completion/local-discovery.ts', '../../runtime/remote/session-reader-remote.ts', ['client-imports-remote-composition']],
+    ['client/file-completion/local-discovery.ts', '../../app/remote/runtime.ts', ['client-imports-remote-composition']],
+    ['client/file-completion/local-discovery.ts', '../../runtime/direct/file-completion/workspace-discovery.ts', ['direct-import-outside-composition']],
     ['app/plugin-manager/controller.ts', '../../runtime/direct/plugin-manager-direct.ts', ['direct-import-outside-composition']],
     ['app/session/foo.ts', '../bootstrap/lifecycle.ts', ['owner-imports-bootstrap']],
     ['app/surface/foo.ts', '../bootstrap/event-wiring.ts', ['owner-imports-bootstrap']],
@@ -950,6 +962,13 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     ['app/plugin-manager/controller.ts', '../../runtime/plugin-manager-port.ts'],
     // The neutral domain layer may consume neutral runtime port contracts.
     ['domain/status/foo.ts', '../../runtime/session-reader-port.ts'],
+    // TS8-A: the canonical file-completion directions — Client/TUI consume the
+    // neutral domain policy, the application owner consumes the Client
+    // capability, and the Direct adapter consumes the same neutral domain.
+    ['client/file-completion/directory-completion.ts', '../../domain/file-completion/query.ts'],
+    ['app/command/artifacts.ts', '../../client/file-completion/directory-completion.ts'],
+    ['tui/file-completion/local-path-completion.ts', '../../domain/file-completion/discovery-policy.ts'],
+    ['runtime/direct/file-completion/workspace-discovery.ts', '../../../domain/file-completion/ranking.ts'],
   ]
   for (const [file, specifier] of allowed) {
     // Each positive control is anchored by a NEGATIVE case above, so "allowed"
@@ -1515,4 +1534,27 @@ test('the source-root baseline accepts the exact captured tree and fails closed 
   assert.throws(() => readSourceRootBaseline(badSchema), /unsupported source-root baseline schema/)
   writeFileSync(badSchema, JSON.stringify({ version: 1, stable: ['index.ts'], legacy: [7] }))
   assert.throws(() => readSourceRootBaseline(badSchema), /unsupported source-root baseline schema/)
+})
+
+test('a retired historical feature directory must not reappear (TS8-A)', () => {
+  // The directory-level companion of the root ledger: TS8-A retires the mixed
+  // `src/file-completion/**` directory, so the real tree must no longer have it
+  // and every retired entry must fail closed when it is recreated.
+  assert.ok(RETIRED_SOURCE_DIRECTORIES.includes('file-completion'),
+    'the retired ledger must track the TS8-A directory')
+  const directories = listSourceRootDirectories()
+  assert.deepEqual(findRetiredSourceDirectoryViolations(directories), [],
+    'the real production tree must not contain a retired feature directory')
+  assert.equal(directories.includes('file-completion'), false,
+    'src/file-completion/ must be gone after TS8-A')
+  for (const name of RETIRED_SOURCE_DIRECTORIES) {
+    assert.match(
+      findRetiredSourceDirectoryViolations([...directories, name]).join('\n'),
+      new RegExp(`src/${name}/ is a retired historical feature directory`),
+      `recreating src/${name}/ must FAIL`,
+    )
+  }
+  // A brand-new unrelated directory is not this rule's business (the root
+  // ledger governs modules; this rule governs retired subtree placements).
+  assert.deepEqual(findRetiredSourceDirectoryViolations([...directories, 'brand-new-feature']), [])
 })

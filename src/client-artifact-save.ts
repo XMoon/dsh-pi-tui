@@ -19,9 +19,9 @@
 import { randomUUID } from 'node:crypto'
 import { lstatSync, statSync } from 'node:fs'
 import { link, open, rename, rm, unlink } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { isAbsolute, join, win32 } from 'node:path'
 import type { FileHandle } from 'node:fs/promises'
-import { expandHomeToken } from './file-completion/query.ts'
 import { cancellationError } from './detached.ts'
 
 /** A collision-resistant temp path in the target's directory. */
@@ -121,12 +121,27 @@ async function commitRename(tempPath: string, target: string, overwrite: boolean
   }
 }
 
+/** Expand a leading `~` in the typed directory against the CLIENT process's
+ * own home directory (other inputs unchanged). This sink is already a
+ * Client-local platform owner, so it keeps its own expansion rather than
+ * borrowing the neutral path-query environment of the completion domain. */
+function expandClientHomeToken(token: string): string {
+  if (token === '~') return homedir()
+  if (token.startsWith('~/') || token.startsWith('~\\')) {
+    // Resolve a Windows-looking home token on POSIX too: this sink owns the
+    // real Client filesystem path, while the raw token keeps its original
+    // separator for presentation.
+    return join(homedir(), token.slice(2).replace(/\\/g, '/'))
+  }
+  return token
+}
+
 /** Resolve the typed directory against the Client cwd: `~`/`~/` expand
- * through the shared path engine, relative forms resolve against the Client
- * process cwd (never the Host/session cwd), absolute forms (POSIX and
- * Windows dialect) pass through. */
+ * through the CLIENT process's home directory, relative forms resolve against
+ * the Client process cwd (never the Host/session cwd), absolute forms (POSIX
+ * and Windows dialect) pass through. */
 export function resolveClientDirectory(input: string, cwd: string): string {
-  const expanded = expandHomeToken(input)
+  const expanded = expandClientHomeToken(input)
   if (isAbsolute(expanded)) {
     // POSIX: backslashes are the user's dialect, not filesystem separators —
     // normalize them in POSIX-ABSOLUTE paths too (a completion-suggested

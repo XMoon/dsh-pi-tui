@@ -43,9 +43,16 @@ Before adding a production module, identify the layer that owns its state/lifeti
 - `src/runtime/**` — semantic ports/contracts plus Direct/Remote backend adapters.
 - `src/domain/**` — transport/UI-neutral semantic models, policies, folds and derived state.
 - `src/client/**` — Client-local non-TUI platform capabilities such as local media,
-  clipboard and artifact IO.
+  clipboard, artifact IO and Client-local path completion.
 - `src/tui/**` — terminal rendering, pickers, panels, commands and interaction.
 - `src/extension/**` — public extension compatibility boundary.
+
+A feature may span several layers when the responsibilities differ: file completion
+owns neutral query/ranking/discovery policy in `domain/file-completion/**`, the
+Client-local filesystem capability in `client/file-completion/**`, the terminal
+trigger/presentation in `tui/file-completion/**` and the Direct Host WORKSPACE
+compatibility IO in `runtime/direct/file-completion/**`. Do not recreate the retired
+mixed `src/file-completion/**` directory.
 
 Do not add an ordinary new root feature/helper (`src/*.ts`, `*.tsx`, `*.mts`,
 `*.cts`). Root modules are limited to documented entries/facades/compatibility

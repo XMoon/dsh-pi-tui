@@ -2778,18 +2778,25 @@ the final complete Remote Backend assembly.
   PRESENTATION-ONLY (quoting, `@` shape, labels, directory continuation)
   and never re-ranks or re-filters, so a Host-returned subsequence match
   can never be dropped by a second client-side scorer (regression-locked);
-  the workspace compatibility path completes the legacy ranking INSIDE its
-  adapter (the pure local `rankDiscovery`) to honor the same contract. The
+  the workspace compatibility path completes the neutral ranking INSIDE its
+  adapter (`domain/file-completion/ranking.ts` `rankPathCandidates`) to honor
+  the same contract. The
   mention VALUE is the OFFICIAL shared grammar's (`formatFileMention` —
   quoting rules and safety refusals; a quoted directory keeps its quote
   open). The completion TRIGGER keeps the official `activeAtToken`
   baseline (start-of-line/whitespace only) plus FOUR INTENTIONAL TUI
   trigger extensions — CJK-glued mentions and `"`, `'`, `=` boundaries —
-  documented in `src/file-completion/context.ts`; they only widen when
+  documented in `src/tui/file-completion/context.ts`; they only widen when
   the dropdown opens, never the Host query or the serialization.
-  The WORKSPACE scope keeps the legacy fd/fdfind scanner as a Direct-only
+  The WORKSPACE scope keeps the fd/fdfind scanner as a Direct-only
   sessionless compatibility path with no official carrier (the wire answers
-  `unavailable`); it must not define the session semantics.
+  `unavailable`); it must not define the session semantics. TS8-A split the
+  historical mixed `src/file-completion/**` directory into the four canonical
+  owners: `domain/file-completion/**` (pure query/ranking/discovery policy with
+  an explicit `PathQueryEnvironment`), `client/file-completion/**` (Client-local
+  filesystem discovery + directory completion), `tui/file-completion/**`
+  (trigger grammar, presentation, local pipeline) and
+  `runtime/direct/file-completion/**` (Direct Host WORKSPACE IO).
   MENTIONS STAY LITERAL ON BOTH BACKENDS — and that is not a missing-carrier
   fallback but the OFFICIAL client contract itself (the official codec is
   `serialize: ref => ref`; the Host's `FILE_REFERENCE_PROMPT` — installed
