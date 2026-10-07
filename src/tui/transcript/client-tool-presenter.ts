@@ -18,7 +18,7 @@
  *   `undefined` — the SAME precedence the plan freezes:
  *   extension renderer -> Client specialized -> static known -> generic.
  *
- * @module @xmoon76/dsh-pi-tui/tool-presentation-client
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/client-tool-presenter
  */
 
 import type {
@@ -26,7 +26,7 @@ import type {
   TerminalCallView,
   ToolCallView,
 } from '@deepseek-ai/dsh-tools'
-import type { ToolPresenter } from './tui/transcript/tool-presentation.ts'
+import type { ToolPresenter } from './tool-presentation.ts'
 
 /** Parse one tool-call args JSON payload (undefined when malformed). */
 function parseArgs(argsRaw: string): Record<string, unknown> | undefined {

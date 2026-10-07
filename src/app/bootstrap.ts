@@ -65,7 +65,7 @@ import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from 
 import { createDirectChildViewSource } from './direct/child-view.ts'
 import { toolPresenterFrom, toolSummaryKeys, type ToolDefinitionLike } from '../tui/transcript/tool-presentation.ts'
 import { setTerminalTitle, terminalTitleOf } from '../tui/terminal/title.ts'
-import { createClientToolPresenter } from '../tool-presentation-client.ts'
+import { createClientToolPresenter } from '../tui/transcript/client-tool-presenter.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../domain/communication/policy.ts'
 import { parseGitAttributionMode, type GitAttributionState } from '../domain/communication/git-attribution.ts'
 import { resolveDisplayPreset, type DisplayState } from '../domain/display/preset.ts'
