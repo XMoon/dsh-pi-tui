@@ -37,7 +37,7 @@ import type { RemoteLifecycleSessions, RemoteLifecycleSessionRemotes } from '../
 import type { RemoteSubagentSource } from '../../runtime/remote/subagent-remote.ts'
 import type { RemotePresetRemotes } from '../../runtime/remote/preset-remote.ts'
 import type { RemoteSkillRemotes } from '../../runtime/remote/skill-remote.ts'
-import type { RemoteHostFileRemotes } from '../../runtime/remote/host-file-remote.ts'
+import type { RemotePiTuiFileReferenceRemotes } from '../../runtime/remote/host-file-remote.ts'
 import type { RemoteCommandsSource } from '../../runtime/remote/host-command-remote.ts'
 import type { RemotePresentationSessionsSource } from '../../runtime/remote/presentation-read-remote.ts'
 import type { RemoteInteractionRuntimeSource } from '../../runtime/remote/interaction-remote.ts'
@@ -115,7 +115,10 @@ export interface RemoteM3ARuntimeSource {
     readonly llm: RemoteLlmRemotes
     readonly agentPresets: RemotePresetRemotes
     readonly skills: RemoteSkillRemotes
-    readonly fileReferences: RemoteHostFileRemotes
+    /** The PRIVATE pi-tui Host augmentation namespace (TS8-HF1): the Session
+     *  `@` source. The official `fileReferences` namespace stays mounted but is
+     *  consumed only by the Host-side bare-query delegation. */
+    readonly piTuiFileReferences: RemotePiTuiFileReferenceRemotes
     readonly commands: RemoteCommandsSource
     readonly subagents: RemoteSubagentSource
     /** The rc.2 generated `userQuestions` namespace + the forwarded
@@ -178,7 +181,7 @@ export function createRemoteM3ASemantics(
       presets: presetCatalog,
       skills: new RemoteSkillCatalog(remote.skills, generation),
     },
-    hostFile: new RemoteHostFilePort(remote.fileReferences, generation),
+    hostFile: new RemoteHostFilePort(remote.piTuiFileReferences, generation),
     hostCommand: new RemoteHostCommandPort(remote.commands),
     presentationReader: new RemotePresentationReader(sessions, generation),
     interaction,

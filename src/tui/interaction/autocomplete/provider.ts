@@ -1,14 +1,16 @@
 /**
  * The editor autocomplete provider (TS8-B, moved out of the historical root
  * mentions module): `@` mentions through the Host-file port — the SESSION
- * scope maps the OFFICIAL Host discovery authority (`ctx.fileReferences` /
- * the wire), whose candidates arrive already filtered, ranked and bounded;
- * the Direct WORKSPACE scope keeps the legacy scanner as a sessionless
- * compatibility path — plus the fork's usual slash-command completion and the
- * CLIENT-local `/attach` + `/image` path-argument completion. The
- * FILE-COMPLETION CONTEXT classifier (`tui/file-completion/context.ts`) is the
- * ONE gate: file completion opens ONLY on `@...`, `/attach ...` and
- * `/image ...`.
+ * scope routes by the typed token (TS8-HF1): a bare workspace fuzzy query maps
+ * the OFFICIAL Host discovery authority (`ctx.fileReferences` / the wire),
+ * whose candidates arrive already filtered, ranked and bounded, while an
+ * explicit path scope (`@src/`, `@../`, `@/abs`, `@~/`) maps the Host scoped
+ * discovery through the SAME port. The Direct WORKSPACE scope keeps the legacy
+ * scanner as a sessionless compatibility path — plus the fork's usual
+ * slash-command completion and the CLIENT-local `/attach` + `/image`
+ * path-argument completion. The FILE-COMPLETION CONTEXT classifier
+ * (`tui/file-completion/context.ts`) is the ONE gate: file completion opens
+ * ONLY on `@...`, `/attach ...` and `/image ...`.
  * @module @xmoon76/dsh-pi-tui/tui/interaction/autocomplete/provider
  */
 
@@ -67,11 +69,12 @@ function sameHostFileScope(left: HostFileScope, right: HostFileScope): boolean {
 
 /**
  * The editor's autocomplete provider: `@` mentions through the Host-file
- * port (the SESSION scope maps the OFFICIAL Host discovery authority —
- * `ctx.fileReferences` / the wire — whose candidates arrive already
- * filtered, ranked and bounded; the Direct WORKSPACE scope keeps the
- * legacy scanner as a sessionless compatibility path) plus the fork's
- * usual slash-command and path completion (client-local editor
+ * port (the SESSION scope's Host router answers a bare query from the
+ * OFFICIAL `ctx.fileReferences` authority — `ctx.fileReferences` / the wire —
+ * whose candidates arrive already filtered, ranked and bounded, and an
+ * explicit path scope from the Host scoped scanner; the Direct WORKSPACE
+ * scope keeps the legacy scanner as a sessionless compatibility path) plus
+ * the fork's usual slash-command and path completion (client-local editor
  * machinery). The FILE-COMPLETION CONTEXT classifier (plan §4) drives
  * which positions ever complete files.
  */

@@ -41,6 +41,7 @@ import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
+import { PI_TUI_FILE_REFERENCES_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { mergeCause, type InProcessHostCarrier } from './host-runtime.ts'
 
 type TypertClientModule = typeof typertRegistryClient
@@ -308,9 +309,10 @@ export async function disposeRemoteContributions(
 /**
  * Compose one fresh official Client `Context` over the Host carrier:
  * typert -> Connection (explicit transport) -> Gateway -> the eleven explicit
- * `/remote` contributions -> fileUpload -> Sessions -> Jobs, then wait for
- * initial readiness. On construction failure the partial composition unwinds
- * immediately; the loader shim is never active during plugin execution.
+ * `/remote` contributions -> the private pi-tui contribution (TS8-HF1) ->
+ * fileUpload -> Sessions -> Jobs, then wait for initial readiness. On
+ * construction failure the partial composition unwinds immediately; the
+ * loader shim is never active during plugin execution.
  */
 export async function createRemoteClientRuntime(options: RemoteClientRuntimeOptions): Promise<RemoteClientRuntime> {
   const modules = await loadOfficialClientModulesOnce()
@@ -389,6 +391,12 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     for (const contribution of REMOTE_CONTRIBUTIONS) {
       contributionDisposers.push(await context.remote.$mount(contribution))
     }
+    // 4b. The private pi-tui contribution (TS8-HF1): mounted explicitly,
+    //     AFTER the official generated contributions and deliberately kept
+    //     separate from that list. It adds the `piTuiFileReferences`
+    //     augmentation namespace only — the official `fileReferences`
+    //     namespace stays mounted and authoritative for bare queries.
+    contributionDisposers.push(await context.remote.$mount(PI_TUI_FILE_REFERENCES_CLIENT_CONTRIBUTION))
     // 5./6./7. Domain Clients - fileUpload before Sessions is contractual
     // (the Session Client injects `fileUpload`).
     fileUploadFiber = context.plugin(modules.fileUpload)

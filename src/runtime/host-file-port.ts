@@ -32,12 +32,23 @@
  * completion facts are Host-derived (and unavailable under Remote attach,
  * never silently faked).
  *
- * Wire mapping: the official fileReferences Remote seam
- * (`fileReferences/list(agentId, query, signal)` → path-only candidates,
- * Session scope only). The Direct adapter's in-process discovery remains
- * the interim same-machine implementation behind the same contract; the
- * official `dsh-file-reference-local` provider (mounted by the TUI's
- * composition) is the Host-side authority the wire forwards to.
+ * SESSION ROUTING (TS8-HF1): the Session scope has ONE Host-side router
+ * (Direct and Remote share it): a BARE workspace fuzzy query (`@foo`,
+ * `@.env`) delegates the official `ctx.fileReferences` provider — whose
+ * workspace index, ranking, bounds, exclusions and cache stay
+ * authoritative — while an EXPLICIT path scope the user typed (`@src/`,
+ * `@../x`, `@/abs`, `@~/Down`, Windows drive/UNC) runs the dsh-pi-tui Host
+ * scoped discovery against exactly that scope. An authoritative official
+ * `[]` never falls back to the scanner, and the scoped route never consults
+ * the official provider. The accepted home-shorthand value is an ABSOLUTE
+ * Host path (DSH performs no `~` expansion).
+ *
+ * Wire mapping: the PRIVATE `piTuiFileReferences/list(sessionId, query,
+ * signal)` Remote (TS8-HF1), whose Host side is the same router; the
+ * official `fileReferences` namespace stays mounted and authoritative for
+ * bare queries (the Host-side bare route delegates to it). The official
+ * `dsh-file-reference-local` provider (mounted by the TUI's composition) is
+ * the Host-side authority that delegation reaches.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/host-file-port

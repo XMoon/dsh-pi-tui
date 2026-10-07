@@ -1,17 +1,22 @@
 /**
- * Remote implementation of the semantic `HostFilePort` (M3-3A).
+ * Remote implementation of the semantic `HostFilePort` (M3-3A; TS8-HF1 routes
+ * the SESSION scope through the private `piTuiFileReferences` endpoint).
  *
- * The SESSION scope maps to the official Session-scoped
- * `fileReferences/list(agentId, query, signal)` Remote — the Host owns the
- * Session/Agent lookup, so the exact `sessionId` (including a viewed child
- * Session) is the only locality fact that crosses. The adapter performs no
- * Client-filesystem discovery of its own (no cwd/home guess, no local file
- * source, no stat probes).
+ * The SESSION scope maps to the PRIVATE Host augmentation Remote
+ * (`piTuiFileReferences/list(sessionId, query, signal)`, see
+ * `runtime/remote/pi-tui-file-reference-contract.ts`): the Host owns the
+ * Session/Agent lookup AND the bare-vs-explicit `@` route — a bare query
+ * delegates the official `ctx.fileReferences` provider, an explicit path scope
+ * runs the Host's own scoped discovery. The Client sends only the exact
+ * `sessionId` (including a viewed child Session), the official query form and
+ * its cancellation; it never discovers a file itself (no cwd/home guess, no
+ * local file source, no stat probes) and never re-ranks or re-slices what the
+ * Host returned.
  *
- * Explicitly unsupported (requalified
- * through 0.2.0-rc.2): the WORKSPACE/sessionless scope (every file endpoint is
- * Session-scoped) and existence probing (no public existence verb —
- * `fileReferences/list` is discovery only). Both are returned as
+ * Explicitly unsupported (requalified through 0.2.0-rc.2): the
+ * WORKSPACE/sessionless scope (every private endpoint is Session-scoped) and
+ * existence probing (no public existence verb —
+ * `piTuiFileReferences/list` is discovery only). Both are returned as
  * `unavailable` with a reason, never as an authoritative empty list or a
  * proven `missing`. Submitted mentions stay literal — which is not a
  * fallback at all but the official client contract itself.
@@ -33,28 +38,23 @@ import type {
   RemoteReadResult,
 } from './session-reader-remote.ts'
 
-/** One wire candidate of the official `fileReferences/list` value (the
- * upstream `FileReferenceCandidate` shape: path + kind). */
-export interface RemoteFileReferenceCandidate {
-  readonly path: string
-  readonly kind: 'file' | 'directory'
-}
-
-/** The official generated `fileReferences` Remote namespace. */
-export interface RemoteHostFileRemotes {
+/** The private Host augmentation Remote namespace (`piTuiFileReferences`).
+ *  Its value is the Host router's own `HostFileListResult`: an `unavailable`
+ *  business value (an unresolvable Session) is NOT a transport failure. */
+export interface RemotePiTuiFileReferenceRemotes {
   list(
-    agentId: string,
+    sessionId: string,
     query: string,
     signal?: AbortSignal,
-  ): Promise<RemoteReadResult<readonly RemoteFileReferenceCandidate[]>>
+  ): Promise<RemoteReadResult<HostFileListResult>>
 }
 
-/** The Remote Host-file port: official Session-scoped discovery only. */
+/** The Remote Host-file port: the private Session-scoped discovery only. */
 export class RemoteHostFilePort implements HostFilePort {
-  private readonly fileReferences: RemoteHostFileRemotes
+  private readonly fileReferences: RemotePiTuiFileReferenceRemotes
   private readonly generation: RemoteConnectionGenerationSource
 
-  constructor(fileReferences: RemoteHostFileRemotes, generation: RemoteConnectionGenerationSource) {
+  constructor(fileReferences: RemotePiTuiFileReferenceRemotes, generation: RemoteConnectionGenerationSource) {
     this.fileReferences = fileReferences
     this.generation = generation
   }
@@ -70,8 +70,8 @@ export class RemoteHostFilePort implements HostFilePort {
     const signal = options?.signal
     signal?.throwIfAborted()
     if (scope.kind !== 'session') {
-      // No official workspace/sessionless carrier exists: an explicit
-      // unavailable, never a Client fs scan and never a fake empty success.
+      // No sessionless carrier exists: an explicit unavailable, never a
+      // Client fs scan and never a fake empty success.
       return {
         kind: 'unavailable',
         reason: 'workspace-scoped Host file discovery has no official Remote carrier',
@@ -82,8 +82,9 @@ export class RemoteHostFilePort implements HostFilePort {
       return { kind: 'unavailable', reason: 'the Remote connection is not connected' }
     }
     // The exact sessionId (a viewed child included) is the only locality
-    // fact: the Host endpoint owns the Session/Agent lookup semantics.
-    let result: RemoteReadResult<readonly RemoteFileReferenceCandidate[]>
+    // fact: the Host endpoint owns the Session/Agent lookup semantics AND the
+    // bare-vs-explicit route decision for the query.
+    let result: RemoteReadResult<HostFileListResult>
     try {
       result = await this.fileReferences.list(scope.sessionId, query, signal)
       signal?.throwIfAborted()
@@ -99,10 +100,13 @@ export class RemoteHostFilePort implements HostFilePort {
     if (!Object.is(capturedGeneration, this.generation.getSnapshot())) {
       return { kind: 'unavailable', reason: 'the Remote connection was replaced during discovery' }
     }
-    if (!result.ok) throw new Error(`fileReferences/list failed: ${remoteFailureMessage(result.error)}`)
-    // Detached path-only candidates: the Client presentation (ranking,
-    // quoting, the `@`-insertion value) is this side's own policy.
-    const items: HostFileCandidate[] = result.value.map(candidate => ({
+    if (!result.ok) throw new Error(`piTuiFileReferences/list failed: ${remoteFailureMessage(result.error)}`)
+    // A Host-business unavailable (an unresolvable Session) crosses as the
+    // same port outcome; the Host's own candidates are detached path-only DTOs.
+    if (result.value.kind === 'unavailable') {
+      return { kind: 'unavailable', reason: result.value.reason }
+    }
+    const items: HostFileCandidate[] = result.value.items.map(candidate => ({
       path: candidate.path,
       kind: candidate.kind,
     }))
@@ -122,7 +126,7 @@ export class RemoteHostFilePort implements HostFilePort {
     // `missing` (which would assert the Host checked and the path is gone).
     return {
       kind: 'unavailable',
-      reason: 'Host file existence probing has no official Remote carrier',
+      reason: 'Host file existence probing has no Remote carrier',
     }
   }
 
