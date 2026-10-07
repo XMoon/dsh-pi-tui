@@ -10,7 +10,7 @@ import test from 'node:test'
 import { StringDecoder } from 'node:string_decoder'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseShellWords } from '../src/shell-words.ts'
+import { parseShellWords } from '../src/client/shell/words.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   createBoundedOutput,

@@ -5,7 +5,7 @@
  * stay Session/model-excluded — presentation-only, no session write, no
  * model visibility (pi's excluded-from-context semantics); execution is
  * still Host-side on both gestures (M3-4 PR3). Extracted from the runner
- * so the TOCTOU races are testable headless, exactly like steer.ts:
+ * so the TOCTOU races are testable headless, exactly like app/submission/steer.ts:
  *
  * - The agent/generation identity is captured BEFORE the awaited write
  *   window.
@@ -13,14 +13,14 @@
  *   object, same session generation. A switch mid-send aborts
  *   (`stale`) — the output is never written to a session the identity
  *   did not verify.
- * @module @xmoon76/dsh-pi-tui/shell-context
+ * @module @xmoon76/dsh-pi-tui/app/submission/shell-context
  */
 
-import { cancellationError } from './detached.ts'
-import { sessionUnchanged } from './app/submission/steer.ts'
-import type { SessionWriter } from './runtime/session-writer-port.ts'
-import { TransitionInProgressError } from './app/session/operation-barrier.ts'
-import { SessionScopeSupersededError } from './app/session/scope.ts'
+import { cancellationError } from '../../detached.ts'
+import { sessionUnchanged } from './steer.ts'
+import type { SessionWriter } from '../../runtime/session-writer-port.ts'
+import { TransitionInProgressError } from '../session/operation-barrier.ts'
+import { SessionScopeSupersededError } from '../session/scope.ts'
 
 /** The minimal agent surface the shell submit needs (the runner's live agent). */
 export interface ShellSubmitAgentLike {
