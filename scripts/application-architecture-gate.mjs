@@ -226,11 +226,14 @@ export function isRemoteComposition(resolved, specifier) {
  * `disposal`, `errors`). It may use Node process/platform primitives, but it is
  * the INNERMOST runtime layer — never application ownership, terminal
  * presentation, Client-local capability or the Direct/Remote transport
- * adapters. Its edges are owned by the two `runtime-process-*` rules below so
- * each violation keeps exactly one rule id (the generic `runtime-imports-app|tui|client`
- * rules carve this subtree out; `direct-import-outside-composition` never applied
- * to `runtime/**`, so the process rule is what closes `runtime/process/**` ->
- * `runtime/direct|remote/**`).
+ * adapters. Its edges are owned by the two `runtime-process-*` rules below: the
+ * generic `runtime-imports-app|tui|client` rules carve this subtree out, and
+ * `direct-import-outside-composition` never applied to `runtime/**`, so the
+ * process rule is what closes `runtime/process/**` -> `runtime/direct|remote/**`.
+ * The carve-out is scoped to those generic runtime-layer rules only: an
+ * INDEPENDENT contract (the bootstrap-composition rule, the Remote dynamic
+ * lazy-boundary rule, …) may still report the same file under its own rule id,
+ * which is not a double-report of the same invariant.
  */
 export function isRuntimeProcessSubtree(srcRel) {
   return srcRel.startsWith('runtime/process/')
@@ -626,8 +629,10 @@ export const ARCHITECTURE_RULES = [
     // capability and the Direct/Remote transport adapters are all off limits.
     // A process primitive that needs one of them means the fact was
     // misclassified and must be split, never allowlisted. The generic
-    // `runtime-imports-app|tui|client` rules carve this subtree out, so each edge
-    // has exactly one owning rule id.
+    // `runtime-imports-app|tui|client` rules carve this subtree out so the
+    // runtime-layer direction has one coherent rule id here; independent
+    // contracts (bootstrap composition, the Remote lazy boundary) can still
+    // report the same file separately.
     id: 'runtime-process-imports-inner-layers',
     message:
       'src/runtime/process/** is the low-level process-lifetime layer: it must not import application ownership (app/**), '
@@ -642,17 +647,20 @@ export const ARCHITECTURE_RULES = [
     checksValueDynamicImport: true,
   },
   {
-    // TS8-F: the process layer owns no DSH business/service fact. A structural
-    // TYPE-ONLY face of an official DSH package is allowed (mirroring the
-    // type-only discriminator the other rules carry); an implementation VALUE
-    // import is not — consuming the implementation would make this low-level
-    // layer a business owner. Node standard library imports stay allowed.
+    // TS8-F: the process layer owns no DSH business/service fact. A FULLY
+    // ERASED structural type face (`import type` / `export type`) of an official
+    // DSH package is allowed; anything that still loads the module at runtime is
+    // not. Under this repo's `verbatimModuleSyntax: true` an inline
+    // `import { type X } from '@deepseek-ai/dsh-agent'` emits a runtime
+    // side-effect module load, so `typeOnly` (binds-no-value) is NOT sufficient
+    // here — the rule uses `moduleTypeOnly` (declaration fully erased).
     id: 'runtime-process-imports-dsh-implementation',
     message:
-      'src/runtime/process/** is the low-level process-lifetime layer and must not VALUE-import a DSH business/service '
-      + 'implementation package (@deepseek-ai/dsh-*); a TYPE-ONLY structural face is allowed and Node standard library imports stay allowed',
+      'src/runtime/process/** is the low-level process-lifetime layer and must not load a DSH business/service '
+      + 'implementation package (@deepseek-ai/dsh-*): only a FULLY ERASED type face (import type / export type) is allowed — '
+      + 'an inline-type import still emits a runtime module load under verbatimModuleSyntax, and Node standard library imports stay allowed',
     applies: (srcRel) => isRuntimeProcessSubtree(srcRel),
-    forbids: (resolved, specifier, meta) => isDshImplementationPackage(specifier) && meta?.typeOnly !== true,
+    forbids: (resolved, specifier, meta) => isDshImplementationPackage(specifier) && meta?.moduleTypeOnly !== true,
     // A literal VALUE dynamic import reaches the same implementation package as
     // a static one; without both opt-ins `await import('@deepseek-ai/dsh-agent')`
     // would be an equivalent spelling that enters the layer with a green gate.
@@ -745,9 +753,23 @@ function unwrapExpression(expr) {
  * `require('...')` string argument, so no wrapper can appear in them: both
  * `import(('./a.ts')).T` and `import x = require(('./a.ts'))` are
  * `TS1141 String literal expected` and cannot compile.
+ *
+ * TWO type-only discriminators travel with each edge, because they answer
+ * different questions:
+ * - `typeOnly` — the edge binds/types only (no VALUE binding). This is the
+ *   historical allowance discriminator (the allowlist and the TS7 type-only
+ *   edges use it): `import { type X }` counts, because no value is bound.
+ * - `moduleTypeOnly` — the edge is FULLY ERASED at runtime, i.e. the whole
+ *   declaration is type-only (`import type {...}` / `export type {...}` /
+ *   an `import('...')` type query). Under this repo's
+ *   `verbatimModuleSyntax: true` (tsconfig.base.json) an all-inline-type
+ *   `import { type X } from 'pkg'` still emits a runtime module load
+ *   (`import {} from 'pkg'`), so it is a real runtime edge even though
+ *   `typeOnly` is true. A rule whose contract is "must not load this
+ *   implementation module" MUST use `moduleTypeOnly`, not `typeOnly`.
  * @param {string} source file contents
  * @param {string} [rel] src-relative path (drives the parser kind)
- * @returns {Array<{ specifier: string, line: number, typeOnly: boolean }>}
+ * @returns {Array<{ specifier: string, line: number, typeOnly: boolean, moduleTypeOnly: boolean }>}
  */
 export function parseImportSpecifiers(source, rel = 'module.ts') {
   const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, false, scriptKindOf(rel))
@@ -773,19 +795,34 @@ export function parseImportSpecifiers(source, rel = 'module.ts') {
     if (bindings === undefined || !ts.isNamedImports(bindings)) return false
     return bindings.elements.length > 0 && bindings.elements.every(element => element.isTypeOnly)
   }
+  /** True when the declaration is FULLY ERASED at runtime: only `import type`
+   *  erases the whole import declaration; an all-inline-type `import { type X }`
+   *  still emits a runtime side-effect module load under verbatimModuleSyntax. */
+  const isModuleTypeOnlyImport = (node) => node.importClause?.isTypeOnly === true
   const visit = (node) => {
     if (ts.isImportDeclaration(node)) {
       const spec = node.moduleSpecifier
-      if (ts.isStringLiteral(spec)) out.push({ specifier: spec.text, line: lineOf(node), typeOnly: isTypeOnlyImport(node) })
+      if (ts.isStringLiteral(spec)) {
+        out.push({
+          specifier: spec.text,
+          line: lineOf(node),
+          typeOnly: isTypeOnlyImport(node),
+          moduleTypeOnly: isModuleTypeOnlyImport(node),
+        })
+      }
     } else if (ts.isExportDeclaration(node)) {
       const spec = node.moduleSpecifier
-      if (spec !== undefined && ts.isStringLiteral(spec)) out.push({ specifier: spec.text, line: lineOf(node), typeOnly: node.isTypeOnly })
+      if (spec !== undefined && ts.isStringLiteral(spec)) {
+        out.push({ specifier: spec.text, line: lineOf(node), typeOnly: node.isTypeOnly, moduleTypeOnly: node.isTypeOnly })
+      }
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       const expr = node.moduleReference.expression
-      if (expr !== undefined && ts.isStringLiteral(expr)) out.push({ specifier: expr.text, line: lineOf(node), typeOnly: false })
+      if (expr !== undefined && ts.isStringLiteral(expr)) {
+        out.push({ specifier: expr.text, line: lineOf(node), typeOnly: false, moduleTypeOnly: false })
+      }
     } else if (ts.isImportTypeNode(node)) {
       const spec = importTypeArgument(node)
-      if (spec !== undefined) out.push({ specifier: spec, line: lineOf(node), typeOnly: true })
+      if (spec !== undefined) out.push({ specifier: spec, line: lineOf(node), typeOnly: true, moduleTypeOnly: true })
     }
     ts.forEachChild(node, visit)
   }
@@ -1036,7 +1073,7 @@ export function findViolations(entries, options = {}) {
   const known = new Set(entries.map(entry => entry.rel))
 
   for (const { rel } of entries) {
-    for (const { specifier, line, typeOnly } of imports.get(rel)) {
+    for (const { specifier, line, typeOnly, moduleTypeOnly } of imports.get(rel)) {
       // Canonicalize to the REAL on-disk source target from the scanned set, so
       // every legal NodeNext spelling of the same module (`../bootstrap.ts`,
       // `../bootstrap.js`, `../bootstrap`) is evaluated identically by
@@ -1050,10 +1087,13 @@ export function findViolations(entries, options = {}) {
       for (const rule of ARCHITECTURE_RULES) {
         if (!rule.applies(rel)) continue
         // The edge kind travels with the resolved target so a rule can draw a
-        // type-only line (e.g. the TS7 domain's `domain/display/icons.ts` /
+        // TYPE-ONLY line (e.g. the TS7 domain's `domain/display/icons.ts` /
         // `assistant-stream-port.ts` allowances) instead of allowlisting the
-        // target wholesale for value imports too.
-        if (!rule.forbids(target, specifier, { typeOnly })) continue
+        // target wholesale for value imports too. `typeOnly` answers "binds no
+        // value" (the historical allowance discriminator); `moduleTypeOnly`
+        // answers "the whole declaration is erased at runtime" and is the one a
+        // rule must use to forbid a runtime module load under verbatimModuleSyntax.
+        if (!rule.forbids(target, specifier, { typeOnly, moduleTypeOnly })) continue
         // An allowlist entry excuses ONLY a type-only import of that target.
         if (typeOnly && allowlist.has(`${rel}:${target}`)) continue
         violations.push({ file: rel, line, rule: rule.id, detail: `${rule.message} (${specifier})` })
