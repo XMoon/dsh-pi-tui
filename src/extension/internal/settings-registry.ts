@@ -14,10 +14,10 @@
  *   and MAY reject it (returning false keeps the previous value);
  * - values are STRINGS only — no component, no raw ANSI, no terminal
  *   escape can enter through this seam.
- * @module @xmoon76/dsh-pi-tui/settings-registry
+ * @module @xmoon76/dsh-pi-tui/extension/internal/settings-registry
  */
 
-import type { TuiSettingContribution, TuiSettingHandle, TuiSettingsRegistrySnapshot } from './extension/public-types.ts'
+import type { TuiSettingContribution, TuiSettingHandle, TuiSettingsRegistrySnapshot } from '../public-types.ts'
 
 /** The detailed outcome of one settings apply. 'stale' and 'gone' are
  * NOT plugin rejections (a newer apply superseded this one, or the row

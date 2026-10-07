@@ -34,10 +34,10 @@
  *   owns is NOT visible here: that collision is caught at candidate
  *   synthesis, which fails the whole pass (see `mergeContributions` in
  *   commands.ts).
- * @module @xmoon76/dsh-pi-tui/command-bridge
+ * @module @xmoon76/dsh-pi-tui/extension/internal/command-bridge
  */
 
-import type { TuiCommandContribution, TuiCommandHandle, TuiLocalCommandHandler, TuiCommandBridgeSnapshot } from './extension/public-types.ts'
+import type { TuiCommandContribution, TuiCommandHandle, TuiLocalCommandHandler, TuiCommandBridgeSnapshot } from '../public-types.ts'
 
 /** One client command contribution: a slash name the client owns. */
 

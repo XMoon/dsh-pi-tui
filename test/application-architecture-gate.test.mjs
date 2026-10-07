@@ -1227,6 +1227,9 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     // NON-core directory is still mechanics.
     ['../../tui/transcript-legacy/x.ts', 'tui/transcript-legacy/x.ts'],
     ['../../renderer-registry.ts', 'renderer-registry.ts'],
+    // TS8-E: the canonical concrete renderer registry ownership is under the
+    // extension boundary and stays forbidden to the core too.
+    ['../../extension/internal/renderer-registry.ts', 'extension/internal/renderer-registry.ts'],
     // TS7: the core reads the canonical `domain/transcript/**` owners directly;
     // the stable facade and the three retired semantic roots are never inputs.
     ['../../transcript.ts', 'transcript.ts'],
@@ -1561,7 +1564,7 @@ test('the source-root baseline accepts the exact captured tree and fails closed 
     'the checked-in baseline must match the exact current root module set')
   // The stable set is the deliberate root facade contract; legacy is the
   // mechanically generated remainder (no hand selection).
-  assert.deepEqual(baseline.stable, ['commands.ts', 'index.ts', 'startup.ts', 'transcript.ts', 'tui-app.ts'])
+  assert.deepEqual(baseline.stable, ['commands.ts', 'extensions.ts', 'index.ts', 'startup.ts', 'transcript.ts', 'tui-app.ts'])
   assert.deepEqual(baseline.legacy, current.filter(name => !baseline.stable.includes(name)))
   assert.equal(baseline.legacy.length > 0, true, 'legacy entries exist during the train')
   // Mutation fixtures: never touch the real baseline.
@@ -1620,4 +1623,33 @@ test('a retired historical feature directory must not reappear (TS8-A/TS8-C)', (
   // A brand-new unrelated directory is not this rule's business (the root
   // ledger governs modules; this rule governs retired subtree placements).
   assert.deepEqual(findRetiredSourceDirectoryViolations([...directories, 'brand-new-feature']), [])
+})
+
+test('TS8-E: the Stable extension public declaration sources reject TUI implementation imports', () => {
+  // Plan §21 #5: a published plugin type must be nameable without the project's
+  // TUI implementation. Both the type-only and the value spelling fail.
+  const sources = [
+    ['extensions.ts', './tui-app.ts'],
+    ['extension/public-types.ts', '../tui-app.ts'],
+    ['extension/advanced.ts', '../tui-app.ts'],
+    ['extension/advanced-types.ts', '../tui-app.ts'],
+    ['extension/unstable.ts', '../tui-app.ts'],
+    ['extension/unstable-types.ts', '../tui-app.ts'],
+  ]
+  for (const [rel, specifier] of sources) {
+    for (const kind of ['import type', 'import']) {
+      const violations = findViolations([
+        entry(rel, `${kind} { TuiApp } from '${specifier}'\n`),
+        entry('tui-app.ts', 'export class TuiApp {}\n'),
+      ])
+      assert.equal(violations.length, 1, `${rel} -> tui-app.ts (${kind}) must be rejected`)
+      assert.equal(violations[0].rule, 'extension-public-declaration-imports-tui')
+    }
+  }
+  // The concrete registries under extension/internal/** keep their reviewed
+  // adapter edges — the public-source rule must not govern them.
+  assert.deepEqual(findViolations([
+    entry('extension/internal/keybinding-registry.ts', "import { canonicalizeKeyId } from '../../tui/keybindings/key-identity.ts'\n"),
+    entry('tui/keybindings/key-identity.ts', 'export const canonicalizeKeyId = (value) => value\n'),
+  ]), [])
 })

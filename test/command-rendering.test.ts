@@ -16,7 +16,7 @@ import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { TranscriptCommandMessage, TranscriptMessage, TranscriptSearchMatch } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { RendererRegistry } from '../src/renderer-registry.ts'
+import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

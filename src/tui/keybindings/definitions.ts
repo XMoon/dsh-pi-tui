@@ -3,7 +3,7 @@
  * Every default key here MUST match the pre-migration behavior — M0's
  * gate is "no production behavior change" (plan §20 M0). When a new host
  * shortcut lands, extend THIS table in the same commit (and the
- * RESERVED_HOST_KEYS plugin-registration guard in keybinding-registry.ts
+ * RESERVED_HOST_KEYS plugin-registration guard in extension/internal/keybinding-registry.ts
  * if plugins must not claim the new default — that list is NOT the
  * runtime authority; the effective keymap and the action-driven
  * hostResolves reservation are).

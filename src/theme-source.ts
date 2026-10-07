@@ -25,7 +25,7 @@
 
 import type { ColorPalette } from './theme.ts'
 import { loadCustomTheme, customThemeNames, isSafeCustomThemeName } from './theme.ts'
-import type { ThemeRegistry } from './theme-registry.ts'
+import type { ThemeRegistry } from './extension/internal/theme-registry.ts'
 
 /** The source-qualified prefix for custom-theme files. */
 const FILE_PREFIX = 'file:'

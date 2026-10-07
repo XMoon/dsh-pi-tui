@@ -411,7 +411,7 @@ test('the viewer generation bumps on open/close/switch (the stale-guard anchor)'
 })
 
 test('a replacement (plugin) editor receives the child draft and the follow-up target', async () => {
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   let pluginText = ''
@@ -459,7 +459,7 @@ test('a replacement editor submit clears the child slot EXPLICITLY (no resurrect
   // replacement editor occupies the seat: an accepted submission must
   // clear the child's SLOT directly, or a reopened viewer would show
   // already-delivered text.
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   let pluginText = ''
@@ -514,7 +514,7 @@ test('a replacement editor that edits through its OWN handleInput submits the LA
   // per-child slot lags. getDraft() must read the VISIBLE editor as the
   // authority, or a submit would send the stale slot text and lose the
   // user's latest input (round-3 finding 1).
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   let pluginText = ''
@@ -565,7 +565,7 @@ test('parking keeps NEW replacement-editor text even when it is a SUBSTRING of t
   // The plugin edited the draft down (abcdef → cdef) without the host
   // onChange mirror: parking must keep the CURRENT text, not classify it
   // as "already known" because it is a substring of the slotted value.
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   let pluginText = ''

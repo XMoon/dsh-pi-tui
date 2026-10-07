@@ -35,14 +35,14 @@
  * actions, which the runner routes through the host's own execution
  * paths (round-12 finding). The protected set is what the USER-config
  * surface and the viewer guard use.
- * @module @xmoon76/dsh-pi-tui/keybinding-registry
+ * @module @xmoon76/dsh-pi-tui/extension/internal/keybinding-registry
  */
 
-import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from './extension/public-types.ts'
+import { describeKey, type NormalizedKey, type TuiAction, type TuiKeybindingContribution, type TuiKeybindingHandle, type TuiKeybindingRegistrySnapshot } from '../public-types.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
-import { canonicalizeKeyId, isEditorOwnedKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from './tui/keybindings/key-identity.ts'
-import { isTerminalAmbiguousKeyId } from './tui/keybindings/config.ts'
-import { PROTECTED_HOST_ACTIONS } from './tui/keybindings/definitions.ts'
+import { canonicalizeKeyId, isEditorOwnedKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isValidKeyId } from '../../tui/keybindings/key-identity.ts'
+import { isTerminalAmbiguousKeyId } from '../../tui/keybindings/config.ts'
+import { PROTECTED_HOST_ACTIONS } from '../../tui/keybindings/definitions.ts'
 
 export { PROTECTED_HOST_ACTIONS }
 

@@ -736,13 +736,13 @@ export interface TuiCommandRunner {
    * degrades to the host-only surface.
    */
   readonly extensions: {
-    readonly commands: import('./command-bridge.ts').CommandBridge
-    readonly themes: import('./theme-registry.ts').ThemeRegistry
-    readonly settings: import('./settings-registry.ts').SettingsRegistry
-    readonly autocomplete: import('./autocomplete-registry.ts').AutocompleteRegistry
-    readonly keybindings: import('./keybinding-registry.ts').KeybindingRegistry
-    readonly renderers: import('./renderer-registry.ts').RendererRegistry
-    readonly editors: import('./editor-registry.ts').EditorRegistry
+    readonly commands: import('./extension/internal/command-bridge.ts').CommandBridge
+    readonly themes: import('./extension/internal/theme-registry.ts').ThemeRegistry
+    readonly settings: import('./extension/internal/settings-registry.ts').SettingsRegistry
+    readonly autocomplete: import('./extension/internal/autocomplete-registry.ts').AutocompleteRegistry
+    readonly keybindings: import('./extension/internal/keybinding-registry.ts').KeybindingRegistry
+    readonly renderers: import('./extension/internal/renderer-registry.ts').RendererRegistry
+    readonly editors: import('./extension/internal/editor-registry.ts').EditorRegistry
     /** The live extension API info (capabilities + deprecations — M11). */
     readonly api: (() => import('./extension/public-types.ts').PiTuiApiInfo) | undefined
     /** P1-08: the live contribution-health snapshot (failed/shadowed

@@ -20,7 +20,7 @@
  *   message cache embeds rendererId + rendererRevision in its identity, so
  *   an HMR/unload rebuilds exactly the affected components (plan §12.1);
  * - unload removes the renderer (fiber-bound).
- * @module @xmoon76/dsh-pi-tui/renderer-registry
+ * @module @xmoon76/dsh-pi-tui/extension/internal/renderer-registry
  */
 
 import type {
@@ -31,7 +31,7 @@ import type {
   TuiRendererHandle,
   TuiRendererRegistrySnapshot,
   TuiToolRendererContribution,
-} from './extension/public-types.ts'
+} from '../public-types.ts'
 
 /** Internal message-renderer record. */
 interface MessageRendererRecord {

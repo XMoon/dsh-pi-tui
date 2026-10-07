@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { RendererRegistry } from '../src/renderer-registry.ts'
+import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

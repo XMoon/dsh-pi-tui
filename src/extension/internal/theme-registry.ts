@@ -1,7 +1,7 @@
 /**
  * The theme registry (M5, plan §10 item 4): plugins register named color
  * palettes into the host's theme picker. The registry holds SEMANTIC
- * palettes (the same ColorPalette shape the host's custom theme files
+ * palettes (the same TuiColorPalette shape the host's custom theme files
  * resolve to) — never raw ANSI or terminal escapes. The host owns palette
  * application (themeRevision bump + repaint); the registry only decides
  * WHICH palettes are selectable and what happens when the selected one
@@ -31,11 +31,10 @@
  * percent-encoded (an injective encoding: a literal `~` owner can never
  * collide with an encoded slash owner). The DISPLAYED name is still the
  * contribution name; the selectable value is the identity.
- * @module @xmoon76/dsh-pi-tui/theme-registry
+ * @module @xmoon76/dsh-pi-tui/extension/internal/theme-registry
  */
 
-import type { ColorPalette } from './theme.ts'
-import type { TuiThemeContribution, TuiThemeHandle, TuiThemeRegistrySnapshot } from './extension/public-types.ts'
+import type { TuiColorPalette, TuiThemeContribution, TuiThemeHandle, TuiThemeRegistrySnapshot } from '../public-types.ts'
 
 /** Host-reserved theme names: the /settings picker dispatches these to
  * the builtin branches BEFORE the plugin branch, so a plugin theme with
@@ -50,7 +49,7 @@ const PLUGIN_SELECTABLE_PREFIX = 'plugin:'
 interface ThemeRecord {
   readonly id: string
   readonly name: string
-  readonly palette: ColorPalette
+  readonly palette: TuiColorPalette
   readonly description: string | undefined
   /** The registration owner (`uid:name` — unique per fiber instance). */
   readonly owner: string
@@ -228,7 +227,7 @@ export class ThemeRegistry {
   }
 
   /** The palette for one source-qualified selectable value, or undefined. */
-  paletteForSelectable(value: string): ColorPalette | undefined {
+  paletteForSelectable(value: string): TuiColorPalette | undefined {
     return this.bySelectable(value)?.palette
   }
 
@@ -245,7 +244,7 @@ export class ThemeRegistry {
 
   /** The palette for one selectable NAME (internal diagnostics — the
    * apply path must use paletteForSelectable, never a name). */
-  paletteFor(name: string): ColorPalette | undefined {
+  paletteFor(name: string): TuiColorPalette | undefined {
     return this.byName(name)?.palette
   }
 

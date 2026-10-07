@@ -16,7 +16,7 @@ import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/tui/transcript/tool-presentation.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
-import { RendererRegistry } from '../src/renderer-registry.ts'
+import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
 import { iconFor } from '../src/tui/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'

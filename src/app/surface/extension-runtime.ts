@@ -26,7 +26,7 @@ import { Text } from '@xmoon76/pi-tui'
 import type { PiTuiExtensionService } from '../../extensions.ts'
 import { SurfaceHost } from '../../extension/internal/surface-host.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
-import type { KeybindingRegistry } from '../../keybinding-registry.ts'
+import type { KeybindingRegistry } from '../../extension/internal/keybinding-registry.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { TuiApp, TuiAppOptions } from '../../tui-app.ts'
 

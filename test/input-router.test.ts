@@ -484,7 +484,7 @@ test('TuiApp: a key with NO active host action falls through to a plugin binding
 test('TuiApp: a plugin binding NEVER steals a key the focused editor owns (P1-06)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
   const submitted: string[] = []

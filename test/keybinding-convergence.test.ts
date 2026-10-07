@@ -419,7 +419,7 @@ test('4.9a a declined host action is not re-reserved (reaches the plugin)', asyn
 })
 
 test('4.9b a declined host action reaches a REPLACEMENT editor', async () => {
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
   const registry = new EditorRegistry()
@@ -476,7 +476,7 @@ test('4.11 reserved session/model actions are not user-configurable', () => {
 // ── 5.x remapped interrupt: semantic core, double-action, no editor steal ──
 
 test('5.1 a remapped interrupt (ctrl+x) does NOT enter the physical-Escape editor seams', async () => {
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const cancels: number[] = []
   const registry = new EditorRegistry()
@@ -724,7 +724,7 @@ test('5.6 a plugin cannot bind the space key (it would swallow typing)', () => {
 // ── dynamic plugin keybinding lifecycle (full-review finding) ─────────────
 
 test('5.7 the registry notifies subscribers on register/dispose (dynamic sync)', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   let notified = 0
   const unsubscribe = registry.subscribe(() => { notified += 1 })
@@ -785,7 +785,7 @@ test('5.9 a plugin rule id cannot shadow-deactivate a HOST rule', () => {
 })
 
 test('5.10 the registry canonicalizes modifier-order keys and named-key casing', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   // Register ctrl+shift+p; look up by shift+ctrl+p (modifier order
   // canonicalizes to one identity).
@@ -810,7 +810,7 @@ test('5.10 the registry canonicalizes modifier-order keys and named-key casing',
 })
 
 test('5.11 a reserved key ALIAS (esc/return) is rejected at registration', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   // Registering the alias spelling of a reserved key must be rejected
   // AFTER canonicalization (convergence finding — the reserved check ran
@@ -1276,7 +1276,7 @@ test('6.6 a conditional top rule does not permanently hide the fallback in the r
 // ── 7.x Stable plugin boundary + legacy C0 inventory (round-12 findings) ───
 
 test('7.1 the registry REJECTS a non-public action string (runtime whitelist)', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   // A public TuiAction registers fine.
   registry.register(
@@ -1349,7 +1349,7 @@ test('7.2b a legit plugin action still executes through the Stable remainder', a
 })
 
 test('7.3 the registry rejects plain printable keys (space/letters) at registration', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   // The router keeps printable keys with the editor's text entry, so a
   // plugin binding on one can never fire — the registration must be
@@ -1423,7 +1423,7 @@ test('7.5b the C0 byte premise: raw \\t / \\x08 / \\x1f are the legacy spellings
 })
 
 test('7.6 the registry REJECTS legacy C0 alias keys (ctrl+i / ctrl+h / ctrl+_ / ctrl+-)', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   // On a legacy terminal the registry key `ctrl+i` is the Tab byte: the
   // EffectiveKeymap resolves it (matchesKey('\t','ctrl+i') is true), but
@@ -1460,7 +1460,7 @@ test('7.6 the registry REJECTS legacy C0 alias keys (ctrl+i / ctrl+h / ctrl+_ / 
 })
 
 test('7.7 the registry rejects SHIFT-only text keys and non-grammar key names', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   // Shift+A is TEXT on every protocol: legacy terminals deliver the raw
   // 'A' byte, Kitty CSI-u normalizes it to 'a'+shift — either way the
@@ -1534,7 +1534,7 @@ test('7.7c shift-only text keys are rejected for USER configs and leaders too', 
 })
 
 test('7.8 the registry rejects fork EDITOR-owned keys (no advertised-but-dead rules)', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   // The focused editor consumes these keys BEFORE the plugin stage (the
   // InputRouter's editorAccepts probe claims the whole fork editor
@@ -1616,7 +1616,7 @@ test('7.9 ctrl+backspace is terminal-ambiguous: rejected for user configs', () =
 })
 
 test('7.9b the registry rejects ctrl+backspace too', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   assert.throws(() => registry.register(
     { id: 'ctrl-bs', key: { key: 'backspace', ctrl: true, alt: false, shift: false, super: false }, action: 'open-search', description: 'x' },
@@ -1684,7 +1684,7 @@ test('7.10 runtime-bindable gate: modified F-keys and modified Escape are reject
 })
 
 test('7.10b the registry applies the runtime-bindable gate too', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   for (const key of [
     { key: 'f5', ctrl: false, alt: false, shift: true, super: false },
@@ -1740,7 +1740,7 @@ test('7.11 modified Clear is runtime-unbindable beyond shift/ctrl (USER config)'
 })
 
 test('7.11b the registry applies the modified-Clear gate too', async () => {
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const registry = new KeybindingRegistry()
   for (const key of [
     { key: 'clear', ctrl: false, alt: true, shift: false, super: false },

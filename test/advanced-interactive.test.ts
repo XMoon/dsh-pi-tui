@@ -500,7 +500,7 @@ test('a blurred capturing overlay stays blurred through an approval round-trip',
 test('a blurred dependent restore focuses the CURRENT seat owner after a mid-overlay handoff', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -555,7 +555,7 @@ test('a blurred dependent restore focuses the CURRENT seat owner after a mid-ove
 test('a blurred dependent restore focuses the CURRENT host editor after a plugin unload', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })

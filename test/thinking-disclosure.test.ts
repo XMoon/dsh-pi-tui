@@ -1028,7 +1028,7 @@ test('P2e: the compact card survives the 100 → 8 → 100 resize matrix inside 
 })
 
 test('L3: an Alt+T expanded transition rebuilds the plugin-rendered component too', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const calls: string[] = []
   const registry = new RendererRegistry()
   registry.registerMessageRenderer({

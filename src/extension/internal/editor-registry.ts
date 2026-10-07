@@ -10,10 +10,10 @@
  * - creation is atomic: `create()` runs BEFORE anything is transferred —
  *   a throw keeps the current editor working;
  * - the registry never touches the seat — the host performs the handoff.
- * @module @xmoon76/dsh-pi-tui/editor-registry
+ * @module @xmoon76/dsh-pi-tui/extension/internal/editor-registry
  */
 
-import type { EditorContribution, EditorHandle, EditorHost } from './extension/public-types.ts'
+import type { EditorContribution, EditorHandle, EditorHost } from '../public-types.ts'
 
 /** Internal record. */
 interface EditorRecord {
@@ -21,7 +21,7 @@ interface EditorRecord {
   readonly priority: number
   readonly description: string | undefined
   readonly owner: string
-  readonly create: (host: EditorHost) => import('./extension/public-types.ts').ExtensionEditor
+  readonly create: (host: EditorHost) => import('../public-types.ts').ExtensionEditor
   disposed: boolean
 }
 
