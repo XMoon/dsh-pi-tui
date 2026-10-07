@@ -11,7 +11,8 @@ import { StatsFolder } from '../../src/domain/status/stats.ts'
 import { StatusStore } from '../../src/domain/status/store.ts'
 import type { StatusSnapshot } from '../../src/domain/status/types.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
-import { TuiApp, type DisplaySubjectPresentation, type StatusData, type StreamingToolPreview } from '../../src/tui-app.ts'
+import { TuiApp, type DisplaySubjectPresentation, type StatusData } from '../../src/tui-app.ts'
+import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import type { RunnerHarness } from './runner-harness.ts'
 
 /** One Session v2 live assistant-stream frame (the transient plane

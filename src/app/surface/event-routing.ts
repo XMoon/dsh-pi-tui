@@ -21,7 +21,8 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/event-routing
  */
 
-import type { StreamingToolPreview, TodoItem, TuiApp } from '../../tui-app.ts'
+import type { TodoItem, TuiApp } from '../../tui-app.ts'
+import type { StreamingToolPreview } from './streaming-tool-preparing.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'

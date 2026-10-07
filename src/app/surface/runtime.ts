@@ -100,7 +100,6 @@ import {
   startProcessTui,
   type DisplaySubjectPresentation,
   type StatusData,
-  type StreamingToolPreview,
   type TranscriptSearchCloseReason,
   type TranscriptSearchPresentation,
   type TranscriptSearchPresentationTarget,
@@ -122,7 +121,7 @@ import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 import type { TranscriptSearchMatch } from '../../domain/transcript/search.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'
-import { streamingToolPreviewSnapshot } from '../../streaming-tool-preparing.ts'
+import { streamingToolPreviewSnapshot, type StreamingToolPreview } from './streaming-tool-preparing.ts'
 import { buildPendingPresentation } from './pending-presentation.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from './search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'

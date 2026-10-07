@@ -233,6 +233,7 @@ import { createTranscriptRenderProfiler } from './tui/diagnostics/transcript-ren
 import { createScrollRenderProfiler } from './tui/diagnostics/scroll-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'
 import type { CompactionPhase } from './app/surface/compaction-presentation.ts'
+import type { StreamingToolPreview } from './app/surface/streaming-tool-preparing.ts'
 import { projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
@@ -591,28 +592,6 @@ function sameSearchTarget(left: TranscriptSearchPresentationTarget | undefined, 
  * being committed). Derived by the runner from compaction/start →
  * compaction/summary → compaction/end (foldCompactionEvent). */
 export type { CompactionPhase }
-
-/** One live, ephemeral preview of a tool call whose arguments are still
- * streaming. This presentation state is deliberately separate from the
- * durable TranscriptMessage/TurnActivity model. */
-export interface StreamingToolPreview {
-  readonly callId: string
-  readonly turn: number
-  readonly step: number
-  readonly index: number
-  readonly name?: string
-  /** Total UTF-8 bytes received through argumentsDelta. */
-  readonly argumentBytes: number
-  /** Early human identity extracted from bounded partial args. */
-  readonly summary?: string
-  /** Bounded partial args retained until summary is found or a known-name scan reaches the cap. */
-  readonly scanPrefix?: string
-  /** The first streamed delta's time (post-F6 plan §12.14). The durable
-   * elapsed-time continuity across the Preparing → durable handoff is owned
-   * by the transcript's own preparing-start sidecar (first delta per call
-   * identity); the fail-open Preparing row renders no elapsed time. */
-  readonly startedAt?: number
-}
 
 /** The indeterminate progress-bar frames shown while a compaction runs:
  * width 12 / block 3, the same visual weight as the footer context bar. */
