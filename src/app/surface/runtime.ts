@@ -109,7 +109,7 @@ import {
   type TuiAppOptions,
 } from '../../tui-app.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
-import type { TaskBrowserDatasetScope } from '../../task-browser-runtime.ts'
+import type { TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { TaskBrowserViewState } from './task-runtime.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'

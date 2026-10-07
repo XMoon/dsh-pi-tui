@@ -123,7 +123,7 @@ import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './rem
 import { type HumanSkillCatalog } from '../domain/catalog/skill.ts'
 import { dangerCommand } from '../domain/shell/danger.ts'
 import { resolveInitialCatalog } from './direct/initial-catalog.ts'
-import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
+import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './surface/task-presentation.ts'
 import { queueTextOf } from '../app/surface/pending-presentation.ts'
 import { bundleVersion, packageVersion } from '../client/launcher/version.ts'
 import { resumeCommand } from '../client/launcher/profile.ts'

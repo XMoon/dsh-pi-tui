@@ -56,20 +56,15 @@
  *
  * Pure and injectable so row typing, ordering, tree prefixes, and
  * descriptions are unit-testable without any dsh service.
- * @module @xmoon76/dsh-pi-tui/tasks-browser
+ * @module @xmoon76/dsh-pi-tui/domain/task/browser
  */
 
-import type { WorkflowRunStatus } from './transcript.ts'
+import type { WorkflowRunStatus } from '../transcript/workflow-projection.ts'
 
 /** Picker-value prefix for a subagent row. */
 export const AGENT_ROW_PREFIX = 'agent:'
 /** Picker-value prefix for a job row. */
 export const JOB_ROW_PREFIX = 'job:'
-/** Picker group label for continuable subagents. */
-export const SUBAGENT_GROUP = 'subagents'
-/** Picker group label for jobs. */
-export const JOB_GROUP = 'jobs'
-
 /** Structural job input (a projection of dsh's JobSnapshot). */
 export interface TaskBrowserJobInput {
   readonly id: string
@@ -255,52 +250,6 @@ export function isSubagentRowInterruptible(
   return row.mode === 'continuable' && row.activity === 'running'
 }
 
-/**
- * The tree connector prefix for one subagent row: indentation by depth
- * (the browser's root is depth 1) plus a stable `├─ ` branch connector.
- * The connector is a fixed layout region (plan §6.7) — it never scrolls
- * with the selected label (M4 marquee) and never carries label text, so
- * the marquee's moving window starts after it.
- */
-export function taskTreePrefix(depth: number): string {
-  const safe = Math.max(1, Math.floor(depth))
-  return `${'  '.repeat(safe - 1)}├─ `
-}
-
-/** The one-line picker label for a row. The subagent label CARRIES the
- * mode as its final segment (never inferred from running/inactive): the
- * user must know before entering a viewer whether it is interactive. A
- * JOB row whose kind is `subagent` is the jobs registry's reliable
- * contract for a background ONE-SHOT subagent job (continuable children
- * never register jobs), so it carries `one-shot` too; any other job kind
- * keeps its own semantics (no fabricated mode). */
-export function taskRowLabel(row: TaskBrowserRow): string {
-  if (row.kind === 'job') {
-    return row.jobKind === 'subagent'
-      ? `subagent job · ${row.label} · one-shot`
-      : `${row.jobKind} · ${row.label}`
-  }
-  return `subagent · ${row.label} · ${row.mode}`
-}
-
-/** The picker group a row belongs to. */
-export function rowGroup(row: TaskBrowserRow): string {
-  return row.kind === 'job' ? JOB_GROUP : SUBAGENT_GROUP
-}
-
-/** The picker description line for a row. The subagent line carries the
- * PROJECTED runtime activity only — `has children` is deliberately NOT
- * shown: the tree connector already expresses parenthood, so the text
- * would duplicate the structure (the `hasChildren` data fact stays on
- * the row for future fold/disclosure work). */
-export function describeTaskRow(row: TaskBrowserRow, now: number): string {
-  if (row.kind === 'job') {
-    const elapsed = Math.max(0, Math.floor((now - row.startedAt) / 1000))
-    return `${row.status}${row.detail === undefined ? '' : ` — ${row.detail}`} · ${elapsed}s`
-  }
-  return `${row.activity}${row.depth > 1 ? ` · depth ${row.depth}` : ''}`
-}
-
 /** The viewer's interaction authority for one row (plan §6.10): mode is
  * the DURABLE semantic, access is the CURRENT surface authority. A direct
  * (depth 1) continuable child is interactive from the root; every other
@@ -336,22 +285,6 @@ export function resolveViewerAccess(
  * interactive direct child does, plan §6.10). */
 export function isViewerAccessInteractive(access: ViewerAccess): boolean {
   return access === 'interactive-direct-child'
-}
-
-/** The viewer header hint for one access (plan §6.10: the UI shows the
- * REAL mode and states the surface authority explicitly — a nested
- * continuable child is never relabeled one-shot to borrow read-only
- * logic, and a nested ONE-SHOT child keeps its own mode too). MODE is
- * the durable semantic, ACCESS the surface authority — the hint must
- * render BOTH truthfully, so it takes the mode alongside the access: a
- * nested one-shot row reads `one-shot · nested · read-only from this
- * parent`, never `continuable · …` (review P2). */
-export function viewerAccessHint(mode: 'one-shot' | 'continuable', access: ViewerAccess): string {
-  switch (access) {
-    case 'interactive-direct-child': return 'continuable · interactive'
-    case 'readonly-one-shot': return 'one-shot · read-only'
-    case 'readonly-nested': return `${mode} · nested · read-only from this parent`
-  }
 }
 
 /** The interrupt authority for one subagent row (review P1): DSH's

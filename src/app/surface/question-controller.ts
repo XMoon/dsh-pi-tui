@@ -43,7 +43,17 @@ import { runDetached } from '../../runtime/process/tasks.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { QuestionFlowDraft, TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
 
-import type { QuestionAttentionRow } from '../../task-center-attention.ts'
+/** The controller's projection of ONE answerable continued Question (TS8-F4:
+ * owned here — the application question authority — and consumed by the Task
+ * Center adapter, which maps this detached presentation model onto panel rows).
+ */
+export interface QuestionAttentionRow {
+  readonly sessionId: string
+  readonly callId: string
+  readonly questions: readonly AskUserQuestionItem[]
+  /** Local presentation only: `visible` owns the editor seat, `parked` does not. */
+  readonly presentation: 'visible' | 'parked'
+}
 
 /** Client rejection codes the forwarded waterfall preserves across the wire. */
 export const ASK_ABORTED = 'ASK_ABORTED'

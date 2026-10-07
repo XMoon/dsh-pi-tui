@@ -24,20 +24,20 @@
  * The coordinator never imports the runner or the app; every dependency
  * arrives as an injected hook, and the Task dataset itself arrives through
  * the shared semantic read port (never a Host service type).
- * @module @xmoon76/dsh-pi-tui/task-browser-runtime
+ * @module @xmoon76/dsh-pi-tui/app/surface/task-browser-runtime
  */
 
 import type {
   TaskReadSnapshot,
   TaskSubagentEntry,
-} from './runtime/task-read-port.ts'
+} from '../../runtime/task-read-port.ts'
 import {
   buildTaskRows,
   isActiveJobStatus,
   projectSubagentActivity,
   type TaskBrowserJobInput,
   type TaskBrowserRow,
-} from './tasks-browser.ts'
+} from '../../domain/task/browser.ts'
 
 /** The separate job/agent counts and unacknowledged failure attention. */
 export interface TaskBrowserSummary {

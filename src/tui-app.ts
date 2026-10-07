@@ -129,9 +129,9 @@ import { detectThemeFromColorFgBg, themeOptOut } from './client/theme/environmen
 import { isDiffResult, renderDiffLines, renderDiffView, summarizeDiffs } from './diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
-import type { TaskPanelItem } from './task-presentation.ts'
+import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { TaskBrowserViewState } from './app/surface/task-runtime.ts'
-import type { TaskBrowserSummary } from './task-browser-runtime.ts'
+import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
 import type { StatusStore } from './domain/status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
 import { displayPolicyFor } from './tui/transcript/display-policy.ts'
@@ -152,7 +152,8 @@ import { createFooterRuntime, type FooterRuntime } from './tui/footer/runtime.ts
 import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './tui/footer/presentation-types.ts'
 import type { FooterCommandConfig } from './domain/footer/command-config.ts'
 import type { FooterCustomCommandItemSettings } from './domain/footer/custom-items.ts'
-import { isViewerAccessInteractive, resolveViewerAccess, viewerAccessHint, type ViewerAccess } from './tasks-browser.ts'
+import { isViewerAccessInteractive, resolveViewerAccess, type ViewerAccess } from './domain/task/browser.ts'
+import { viewerAccessHint } from './app/surface/task-presentation.ts'
 import { SelectedMarquee } from './tui/components/marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
@@ -222,7 +223,7 @@ import {
   workflowRunViewAllVisible,
   workflowStatusCounts,
   type WorkflowPhasePresentation,
-} from './workflow-presentation.ts'
+} from './tui/transcript/workflow-presentation.ts'
 import { finalizedBlockFallbackText, openOpaqueBlockFallbackText } from './domain/transcript/content-blocks.ts'
 import { latestLine } from './domain/transcript/text.ts'
 import { fileAttachmentSummary } from './domain/media/file-summary.ts'

@@ -12,7 +12,7 @@ import {
   buildTaskRows,
   type TaskBrowserAgentInput,
   type TaskBrowserRow,
-} from '../../tasks-browser.ts'
+} from '../../domain/task/browser.ts'
 import type {
   TaskJobEntry,
   TaskReader,

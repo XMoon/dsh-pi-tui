@@ -8,20 +8,11 @@
  * exposes its detached presentation model; Task Center only maps that model
  * onto panel rows.
  *
- * @module @xmoon76/dsh-pi-tui/task-center-attention
+ * @module @xmoon76/dsh-pi-tui/app/surface/task-attention
  */
 
-import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
+import type { QuestionAttentionRow } from './question-controller.ts'
 import type { TaskPanelItem } from './task-presentation.ts'
-
-/** The controller's projection of ONE answerable continued Question. */
-export interface QuestionAttentionRow {
-  readonly sessionId: string
-  readonly callId: string
-  readonly questions: readonly AskUserQuestionItem[]
-  /** Local presentation only: `visible` owns the editor seat, `parked` does not. */
-  readonly presentation: 'visible' | 'parked'
-}
 
 /** The panel group label for human-required Question attention. */
 export const QUESTION_ATTENTION_GROUP = 'Needs attention'
@@ -58,7 +49,7 @@ function singlePhysicalRow(text: string): string {
  * The compact label (§7.4): the first question's header/text, or a count when
  * the call carries several questions. Raw arguments JSON is never dumped.
  */
-export function questionAttentionLabel(questions: readonly AskUserQuestionItem[]): string {
+export function questionAttentionLabel(questions: QuestionAttentionRow['questions']): string {
   if (questions.length > 1) return `${questions.length} questions awaiting answer`
   const first = questions[0]
   const text = first === undefined ? '' : singlePhysicalRow(first.header ?? first.question)

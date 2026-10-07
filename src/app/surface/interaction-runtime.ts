@@ -28,7 +28,7 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
-import type { QuestionAttentionRow } from '../../task-center-attention.ts'
+import type { QuestionAttentionRow } from './question-controller.ts'
 import { QuestionSurfaceController } from './question-controller.ts'
 
 /** The approval/question presentation inputs (A4-7, plan §13.3/§16). */
