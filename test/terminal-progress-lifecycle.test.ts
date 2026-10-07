@@ -616,9 +616,23 @@ test('disposal clears the REAL OSC 9;4 indicator and stops its keepalive (plan Â
   }
   const activeWrites = (): number => writes.filter(write => write === '\x1b]9;4;3\x07').length
   const clearWrites = (): number => writes.filter(write => write === '\x1b]9;4;0\x07').length
+  // X059: only a terminal known to expire OSC 9;4 state owns the 1 s heartbeat,
+  // and the policy is snapshotted when `ProcessTerminal` is constructed inside
+  // mountSurface. Pin Ghostty so this case keeps proving the REAL interval and
+  // its teardown; the persistent-terminal one-shot path (Tern) is covered by
+  // packages/pi-tui/test/terminal.test.ts.
+  const previousTermProgram = process.env.TERM_PROGRAM
+  process.env.TERM_PROGRAM = 'ghostty'
   // The MOUNT is itself a capture window: the very first real byte is the
   // claim clear (see below) and must not leak into the report.
-  const h = captured(() => mountSurface((controls) => controls.setOwner('main'), { realProgress: true }))
+  const h = (() => {
+    try {
+      return captured(() => mountSurface((controls) => controls.setOwner('main'), { realProgress: true }))
+    } finally {
+      if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM
+      else process.env.TERM_PROGRAM = previousTermProgram
+    }
+  })()
   try {
     // The mount CLAIM is the first real byte: the fresh TuiApp asserts the idle
     // state, which is what clears a pane the terminal had already painted busy

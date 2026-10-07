@@ -4913,7 +4913,7 @@ The host transcript-search box is a capturing overlay: it must keep KEYBOARD foc
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream blocks wheel, PageUp/PageDown, the scrollbar and the selection anchor under ANY visible overlay; the fork adds one optional passthrough keyed on the focused opted-in overlay with no other blocking overlay.
 
-### X059 — Stateful OSC 9;4 projection (paused / waiting_input)
+### X059 — Stateful OSC 9;4 projection and terminal-specific heartbeat
 
 - Status: `ACTIVE`
 - Category: `HARD_HOST_API`
@@ -4924,15 +4924,17 @@ The host transcript-search box is a capturing overlay: it must keep KEYBOARD foc
 
 #### Why it exists
 
-Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which the boolean Terminal.setProgress(active) cannot express: false means idle, so a host that wants to show a user-blocked wait would have to write a clear first (a visible working -> idle -> waiting_input blink), and ProcessTerminal.stop() would not know that a physical state is still on the pane. The fork therefore keeps the boolean contract as-is and adds one optional stateful projection whose physical state is tracked independently of the keepalive timer.
+Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which the boolean Terminal.setProgress(active) cannot express: false means idle, so a host that wants to show a user-blocked wait would have to write a clear first (a visible working -> idle -> waiting_input blink), and ProcessTerminal.stop() would not know that a physical state is still on the pane. The fork therefore keeps the boolean contract as-is and adds one optional stateful projection whose physical state is tracked independently of the keepalive timer. The same physical state machine also owns the indeterminate heartbeat: indefinite progress is always projected as OSC 9;4;3, but the periodic refresh is only required by terminals known to expire that state; repeating it on a persistent terminal is unnecessary and may restart their native indeterminate animation.
 
 #### Changed surface
 
 - TerminalProgressState = 'clear' | 'indeterminate' | 'paused' (exported): the physical OSC 9;4 states this terminal can own.
 - Terminal.setProgressState?(state) — optional and additive; an implementation that does not provide it keeps the boolean contract unchanged.
-- ProcessTerminal.setProgressState: 'indeterminate' writes OSC 9;4;3 and starts the existing 1 s keepalive when absent; 'paused' stops the keepalive and writes OSC 9;4;4 with NO intermediate 9;4;0; 'clear' stops the keepalive and writes OSC 9;4;0.
-- ProcessTerminal.setProgress(active) delegates to the stateful primitive (true -> indeterminate, false -> clear) and keeps its exact bytes, timer ownership and dedupe behavior.
-- ProcessTerminal.stop() clears EVERY non-clear physical progress state, not only a keepalive-backed one, so a paused state cannot leak into the shell or an $EDITOR that takes the terminal next.
+- ProcessTerminal.setProgressState: 'indeterminate' ALWAYS writes OSC 9;4;3 once per explicit projection and starts the 1 s heartbeat only on a terminal known to expire OSC 9;4 state (currently Ghostty / Monstar); 'paused' stops the heartbeat and writes OSC 9;4;4 with NO intermediate 9;4;0; 'clear' stops the heartbeat and writes OSC 9;4;0.
+- shouldKeepTerminalProgressAlive(env) is the positive allowlist for that heartbeat, snapshotted once at ProcessTerminal construction; persistent terminals (Tern, Kitty, WezTerm, Windows Terminal, unknown) receive no periodic 9;4;3 refresh.
+- A repeated explicit projection still writes its own bytes and starts no second interval.
+- ProcessTerminal.setProgress(active) delegates to the stateful primitive (true -> indeterminate, false -> clear) and keeps its exact per-explicit-call bytes, timer ownership and dedupe behavior; paused -> indeterminate resumes the heartbeat only where the terminal requires it.
+- ProcessTerminal.stop() clears EVERY non-clear physical progress state, not only a heartbeat-backed one, so a paused state cannot leak into the shell or an $EDITOR that takes the terminal next.
 - Host: src/tui-app.ts reconciles the effective pane state from THREE inputs — the authoritative main-Agent running truth, the canonical RunPhase, and the lifecycle-owned agentInputWait fact (whether the Agent is BLOCKED on the presented wait); only a Tern terminal consumes setProgressState (every other terminal keeps the plain boolean projection).
 
 #### Dependency map
@@ -4940,8 +4942,10 @@ Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which
 **Vendor internal**
 - The physical progress state is tracked next to (never derived from) the keepalive interval, because 'paused' is a real state with no interval; stop()'s clear predicate reads that field.
 - clearProgressInterval() remains the single timer-ownership point; setProgressState('indeterminate') reuses it and never starts a second interval.
-- The boolean setProgress and the host-visible sequence bytes are preserved: the new branch is additive and every pre-existing call path keeps its output.
-- Audit note: The only behavior change for an existing caller is stop() also clearing a physically paused state, which the boolean API could never leave behind.
+- shouldKeepTerminalProgressAlive(env) decides whether indeterminate owns a 1 s refresh interval; the policy is snapshotted once at construction, so a later env mutation cannot flip a live terminal's timer policy.
+- An explicit indeterminate projection always writes one OSC 9;4;3 regardless of the heartbeat policy.
+- Repeated explicit setProgress(true) / setProgressState('indeterminate') must not create a second interval.
+- Audit note: The only behavior changes for an existing caller are stop() also clearing a physically paused state (which the boolean API could never leave behind) and the 1 s indeterminate refresh narrowing to terminals that expire OSC 9;4 state; every explicit projection keeps its exact bytes.
 
 **Inheritance / structural**
 - ProcessTerminal implements the Terminal interface; the new member is optional, so structural/test implementations that only provide setProgress stay assignable.
@@ -4961,22 +4965,34 @@ Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which
 - Audit note: Absent method = upstream behavior.
 
 **Behavioral coupling**
-- indeterminate -> paused stops the keepalive and writes paused directly, with no OSC 9;4;0 between the two states.
-- paused -> indeterminate resumes the keepalive; paused -> clear writes the clear sequence; paused -> stop() writes the clear sequence exactly once and leaves no timer.
-- setProgress(true/false) keeps its exact bytes and keepalive, and a repeated boolean active starts no second interval.
-- A host screen restart while paused re-asserts paused on the new screen, and a stop() after an explicit clear writes no second clear.
-- Audit note: Guarded by packages/pi-tui/test/terminal.test.ts (X059) plus the host terminal-progress lifecycle regressions.
+- indeterminate always emits one OSC 9;4;3, and Ghostty / Monstar keep refreshing it every 1 s.
+- Tern and other persistent terminals receive no periodic 9;4;3 refresh, and a repeated explicit active starts no second interval.
+- indeterminate -> paused stops any heartbeat and writes 9;4;4 directly, with no 9;4;0 between them.
+- paused -> indeterminate writes 9;4;3 and resumes the heartbeat only where the terminal requires it; paused -> clear writes 9;4;0.
+- paused / indeterminate -> stop() writes 9;4;0 exactly once and leaves no timer; a stop() after an explicit clear writes no second clear.
+- boolean setProgress(true/false) preserves its true->indeterminate / false->clear mapping and per-explicit-call OSC bytes.
+- A host screen restart while paused re-asserts paused on the new screen; heartbeat policy does not change host ownership semantics.
+- Audit note: Guarded by packages/pi-tui/test/terminal.test.ts (X059) plus the host terminal-progress lifecycle regressions (the real-OSC disposal case pins Ghostty for the heartbeat + teardown evidence).
 
 #### Guarding tests
 
+- packages/pi-tui/test/terminal.test.ts: shouldKeepTerminalProgressAlive is a Ghostty/Monstar allowlist and denies persistent/unknown terminals (X059)
+- packages/pi-tui/test/terminal.test.ts: a persistent terminal's indeterminate writes ONE 9;4;3 and starts no heartbeat (X059)
+- packages/pi-tui/test/terminal.test.ts: the heartbeat policy is snapshotted at construction and a later env change cannot flip it (X059)
+- packages/pi-tui/test/terminal.test.ts: Ghostty keeps the 1 s indeterminate heartbeat and starts no second interval (X059)
+- packages/pi-tui/test/terminal.test.ts: indeterminate -> paused on Ghostty stops the heartbeat and writes paused directly (X059)
+- packages/pi-tui/test/terminal.test.ts: a persistent terminal's indeterminate -> paused has no heartbeat and no intermediate clear (X059)
+- packages/pi-tui/test/terminal.test.ts: Ghostty's paused -> indeterminate resumes the 1 s heartbeat (X059)
+- packages/pi-tui/test/terminal.test.ts: a persistent terminal's paused -> indeterminate writes one 9;4;3 and starts no heartbeat (X059)
+- packages/pi-tui/test/terminal.test.ts: setProgress(true/false) keeps its exact per-call bytes on a persistent terminal (X059)
 - packages/pi-tui/test/terminal.test.ts: writes OSC 9;4;4 for paused with no intermediate clear (X059)
-- packages/pi-tui/test/terminal.test.ts: indeterminate -> paused stops the keepalive and writes paused directly (X059)
-- packages/pi-tui/test/terminal.test.ts: paused -> indeterminate resumes the active keepalive (X059)
 - packages/pi-tui/test/terminal.test.ts: paused -> clear writes the clear sequence and stops every timer (X059)
-- packages/pi-tui/test/terminal.test.ts: stop() clears a PHYSICALLY paused state exactly once (X059)
-- packages/pi-tui/test/terminal.test.ts: setProgress(true/false) keeps its exact bytes and keepalive (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() clears a PHYSICALLY paused state exactly once and leaves no keepalive (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() clears a one-shot indeterminate state and leaves no timer (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() clears an ACTIVE heartbeat state and leaves no interval (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() after an explicit clear writes no second clear (X059)
 - test/tern-terminal.test.ts: the Tern progress state needs a wait phase AND a proven Agent-blocking wait
-- test/terminal-progress-lifecycle.test.ts: the Tern waiting_input section (real Agent approval/question positives, plan review, parked attention, the /login local negative, the CONTINUED live->continued handover negative, the FIFO handover flips, owner fence, stop/$EDITOR/fullscreen restores)
+- test/terminal-progress-lifecycle.test.ts: the Tern waiting_input section (real Agent approval/question positives, plan review, parked attention, the /login local negative, the CONTINUED live->continued handover negative, the FIFO handover flips, owner fence, stop/$EDITOR/fullscreen restores) and the real-OSC disposal case pinned to Ghostty (heartbeat interval + teardown)
 
 #### Upstream comparison
 
@@ -4987,7 +5003,7 @@ Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which
 - packages/tui/src/terminal.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream's Terminal exposes only setProgress(active) over OSC 9;4 clear/indeterminate, and its stop() clears progress only when the keepalive interval was running. The fork adds one optional stateful projection ('paused' = OSC 9;4;4 without a transient clear), tracks the physical state separately from the keepalive, and makes stop() clear any non-clear state. Every existing call path is byte-for-byte unchanged.
+- Remaining semantic delta: Upstream's Terminal exposes only setProgress(active) over OSC 9;4 clear/indeterminate and refreshes indeterminate periodically; its stop() clears progress only when the keepalive interval was running. The fork adds one optional stateful projection ('paused' = OSC 9;4;4 without a transient clear), tracks the physical state separately from the keepalive, makes stop() clear any non-clear state, and restricts the 1 s indeterminate heartbeat to terminals known to expire OSC 9;4 state. Explicit true/false state mapping and per-call OSC bytes remain compatible.
 
 #### Retirement conditions
 
@@ -5004,4 +5020,4 @@ Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Audited the whole progress state machine against the pinned baseline: the boolean contract and its keepalive are unchanged, the new state is optional and consumed by the Tern ANSI path only, and the only widened lifecycle rule is stop() clearing a physically paused state. The host-side consumer contract is THREE inputs (main-Agent running + canonical RunPhase + the lifecycle-owned agentInputWait); a re-vendor or retirement audit must keep the third input, never collapse it back to the phase alone.
+- Notes: Re-audited the whole OSC 9;4 physical state machine after the heartbeat convergence. The three-state projection remains unchanged: the boolean contract keeps its per-call bytes, the paused state is optional and consumed by the Tern ANSI path only, and the widened lifecycle rule (stop() clearing a physically paused state) is unchanged. The previous universal 1 s indeterminate refresh was narrowed to terminals known to expire OSC 9;4 state (Ghostty / Monstar); persistent terminals including Tern are one-shot. The host-side consumer contract is THREE inputs (main-Agent running + canonical RunPhase + the lifecycle-owned agentInputWait); a re-vendor or retirement audit must keep the third input, never collapse it back to the phase alone.
