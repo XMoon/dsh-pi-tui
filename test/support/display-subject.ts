@@ -169,7 +169,6 @@ export function exitChildDisplaySubject(
       goal: undefined,
       turns: main.turns ?? 0,
       steps: main.steps ?? 0,
-      statsLine: '',
       permission: main.permission,
       contextTokens: undefined,
       contextWindow: undefined,

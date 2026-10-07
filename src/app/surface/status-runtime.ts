@@ -29,7 +29,7 @@ import { bundleVersion, dshVersion, versionDisplay } from '../../dsh-version.ts'
 import { gitBranch } from '../../git-branch.ts'
 import type { ModelSelectionValue } from '../../model-selection.ts'
 import { contextPressureOccupancy } from '../../runtime/session-reader-port.ts'
-import { formatStats, StatsFolder } from '../../stats.ts'
+import { StatsFolder } from '../../domain/status/stats.ts'
 import { ContextMeasurementCoordinator, deferInitialContextMeasure, type ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import { deriveAccessStatus, type AccessDeriveDeps } from '../../domain/status/derive-access.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
@@ -798,10 +798,6 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         goal: goalText,
         turns: stats.turns,
         steps: stats.steps,
-        // PR5 (plan §3.2): the legacy line shares the availability rule with
-        // the structured usage section (the main-subject branch only — a
-        // viewer child's own fold stays numeric).
-        statsLine: formatStats(stats, deps.presentation.mainRecentPerformanceAvailable?.() ?? true),
         // EXPLICITLY clear the permission when the service/agent is
         // unavailable: the legacy merge keeps the old value otherwise,
         // and syncExtensionState would publish a STALE permission to the

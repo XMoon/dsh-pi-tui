@@ -16,7 +16,7 @@ import {
   type RemoteFactsReader,
 } from '../src/app/remote/session-facts-compose.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
-import { RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../src/stats.ts'
+import { RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../src/domain/status/stats.ts'
 
 /** One window event builder (durable entries only). */
 function events(...specs: Array<[string, unknown]>): Array<Record<string, unknown> & { type: string; seq: number; time: number }> {
@@ -257,7 +257,7 @@ test('§3.3/F3 stats: a NEVER-satisfied window pages to the history start and eq
   assert.equal(loadOlderCalls, TURNS / 5 - 1, 'paging ran to the history start (every page, no cap)')
   // The whole-log reference: the same all-invalid log folds to 0/0 — so the
   // composed figures are the WHOLE-LOG TRUTH here (not a partial artifact).
-  const wholeLog = await import('../src/stats.ts').then(m => m.computeStats(allInvalid as never))
+  const wholeLog = await import('../src/domain/status/stats.ts').then(m => m.computeStats(allInvalid as never))
   assert.equal(stats.recent?.firstTokenMsAvg, wholeLog.firstTokenMsAvg)
   assert.equal(stats.recent?.tokensPerSec, wholeLog.tokensPerSec)
 })

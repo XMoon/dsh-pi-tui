@@ -43,7 +43,6 @@ const RICH_STATUS: StatusData = {
   branch: 'feat/narrow-footer',
   turns: 3,
   steps: 7,
-  statsLine: '3 turns · 7 steps · 12.3s',
   permission: 'workspace-write',
   contextTokens: 1000,
   contextWindow: 10000,

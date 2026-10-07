@@ -238,7 +238,7 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
 
     // State change: the host-native item re-composes from the projected
     // usage facts.
-    app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 3, steps: 7, statsLine: '' })
+    app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 3, steps: 7 })
     await settle()
     await vt.waitForRender()
     view = vt.getViewport().join('\n')

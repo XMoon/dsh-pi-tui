@@ -71,7 +71,7 @@ test('extension badges/dock/footer render into the TuiApp chrome', async () => {
   host.refreshOutlets()
   // The host re-renders its chrome rows after extension content changes.
   app.refreshChrome()
-  app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 1, steps: 1, statsLine: '' })
+  app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 1, steps: 1 })
   await vt.waitForRender()
 
   const view = vt.getViewport().join('\n')
@@ -90,7 +90,7 @@ test('extension state setters mirror into immutable snapshots', async () => {
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
   app.refreshChrome()
-  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: 'workspace-write' })
+  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, permission: 'workspace-write' })
   app.setTasks([{ id: 't1', label: 'build', status: 'running', kind: 'bash' }])
   app.setAgents([{ id: 'a1', label: 'child', activity: 'running' }])
   app.setQueueItems([{ id: 'q1', text: 'follow up', mode: 'followup' }])
@@ -306,7 +306,7 @@ test('a Cordis plugin registering through the real service renders into the surf
     })
     app.refreshChrome()
     host.refreshOutlets()
-    app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 0, steps: 0, statsLine: '' })
+    app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 0, steps: 0 })
     await vt.waitForRender()
     const view = vt.getViewport().join('\n')
     assert.ok(view.includes('cordis-badge'), `cordis-registered badge missing:\n${view}`)
@@ -542,13 +542,13 @@ test('an EXPLICIT stale permission clears the extension snapshot (no stale badge
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
   app.refreshChrome()
-  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: 'workspace-write' })
+  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, permission: 'workspace-write' })
   await settle()
   assert.equal(host.state().session.permission, 'workspace-write', 'the permission must be set first')
   // The runner's refreshStatus passes permission: undefined when the
   // permission service/agent is unavailable — the extension snapshot must
   // CLEAR the permission, never keep the stale value.
-  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'm1', cwd: '/ws', branch: 'main', turns: 2, steps: 3, permission: undefined })
   await settle()
   assert.equal(host.state().session.permission, undefined, 'a cleared permission must not stay in the extension snapshot')
   app.stop()
@@ -569,10 +569,10 @@ test('whole-PR F3: a known -> missing model CLEARS the extension session snapsho
   })
   // Writer 1 (the live status sync): the model is known, then missing.
   app.refreshChrome()
-  app.setStatus({ model: 'known-model', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'known-model', cwd: '/ws', branch: 'main', turns: 2, steps: 3, permission: undefined })
   await settle()
   assert.equal(host.state().session.model, 'known-model', 'the model must be set first')
-  app.setStatus({ model: '', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setStatus({ model: '', cwd: '/ws', branch: 'main', turns: 2, steps: 3, permission: undefined })
   await settle()
   assert.equal(host.state().session.model, undefined,
     'a missing model must not keep the previous value in the extension snapshot')
@@ -604,11 +604,11 @@ test('whole-PR F3 sibling: an emptied cwd/branch CLEARS the extension snapshot (
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
   app.refreshChrome()
-  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, permission: undefined })
   await settle()
   assert.equal(host.state().session.cwd, '/repo/a')
   assert.equal(host.state().session.branch, 'main')
-  app.setStatus({ model: 'm1', cwd: '', branch: '', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'm1', cwd: '', branch: '', turns: 2, steps: 3, permission: undefined })
   await settle()
   assert.equal(host.state().session.cwd, '',
     'an emptied cwd must not leave the previous directory in the extension snapshot')
@@ -630,13 +630,13 @@ test('whole-PR R15-2: a session SWITCH keeps the NEW subject branch (the later i
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
   app.refreshChrome()
-  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, permission: undefined })
   app.setWelcomeCard({ cwd: '/repo/a', sessionId: 'session-a', model: 'model-a', version: '0.0.0' })
   await settle()
   assert.equal(host.state().session.sessionId, 'session-a')
   assert.equal(host.state().session.branch, 'main')
   // B's STATUS commit first (the production order), then B's identity commit.
-  app.setStatus({ model: 'm2', cwd: '/repo/b', branch: 'feature-b', turns: 1, steps: 1, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'm2', cwd: '/repo/b', branch: 'feature-b', turns: 1, steps: 1, permission: undefined })
   app.setWelcomeCard({ cwd: '/repo/b', sessionId: 'session-b', version: '0.0.0' })
   await settle()
   assert.equal(host.state().session.sessionId, 'session-b', 'the switch took effect')
@@ -658,11 +658,11 @@ test('whole-PR R15-2 control: a switch to a subject whose branch is ABSENT clear
     focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
   })
   app.refreshChrome()
-  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'm1', cwd: '/repo/a', branch: 'main', turns: 2, steps: 3, permission: undefined })
   app.setWelcomeCard({ cwd: '/repo/a', sessionId: 'session-a', model: 'model-a', version: '0.0.0' })
   await settle()
   assert.equal(host.state().session.branch, 'main')
-  app.setStatus({ model: 'm2', cwd: '/repo/b', branch: '', turns: 1, steps: 1, statsLine: '', permission: undefined })
+  app.setStatus({ model: 'm2', cwd: '/repo/b', branch: '', turns: 1, steps: 1, permission: undefined })
   app.setWelcomeCard({ cwd: '/repo/b', sessionId: 'session-b', version: '0.0.0' })
   await settle()
   assert.equal(host.state().session.sessionId, 'session-b')
@@ -705,7 +705,7 @@ test('M3-5 PR1: the extension snapshot keeps v2 live-session semantics and publi
   host.subscribeState(state => { published.push(state) })
 
   app.refreshChrome()
-  app.setStatus({ model: 'parent-model', cwd: '/parent', branch: 'main', turns: 2, steps: 3, statsLine: '', permission: 'danger-full-access' })
+  app.setStatus({ model: 'parent-model', cwd: '/parent', branch: 'main', turns: 2, steps: 3, permission: 'danger-full-access' })
   app.setTodoSummary([{ content: 'parent todo', status: 'in_progress' }])
   app.setSessionTitle('parent title')
   app.setWelcomeCard({ cwd: '/parent', sessionId: 'session-main', model: 'parent-model', version: '0.0.0' })

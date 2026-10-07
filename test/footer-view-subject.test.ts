@@ -266,7 +266,7 @@ test('a legacy parent setStatus while viewing never clobbers the child subject',
   })
   // Then the legacy parent-status update (the runner's setStatus): the
   // parent's cwd/model must NOT clobber the child's subject.
-  app.setStatus({ model: 'p/m', cwd: '/parent-ws', branch: 'main', turns: 2, steps: 3, statsLine: 'x' })
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', branch: 'main', turns: 2, steps: 3 })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('child-ws'), `the child workspace must stay:\n${view}`)
@@ -286,7 +286,7 @@ test('absent child usage never leaks the PARENT token figures into the child sta
   startedApps.add(app)
   // Paint the parent's STRUCTURED usage facts first (real token figures) —
   // these are what the stats-line item composes from.
-  app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3, statsLine: 'x', usage: {
+  app.setStatus({ model: 'p/m', cwd: '/parent-ws', turns: 2, steps: 3, usage: {
     tokens: { input: 9999, output: 8888, cacheRead: 0, cacheWrite: 0 },
     performance: { llmMs: 120000, firstTokenMs: 2000, tokensPerSec: 40 },
     turns: 2,

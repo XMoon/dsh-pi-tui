@@ -1398,7 +1398,7 @@ test('the transcript semantic domain is a closed-world purity contract (TS7)', (
     'a bare renderer-package dynamic import must be rejected',
   )
 
-  // 4. Positive controls: domain siblings, the five frozen transitional pure root
+  // 4. Positive controls: domain siblings, the four frozen transitional pure root
   // VALUES, official DSH semantic packages, and the correct
   // `tui/transcript -> domain/transcript` direction stay open.
   const allowed = [
@@ -1408,7 +1408,6 @@ test('the transcript semantic domain is a closed-world purity contract (TS7)', (
     ['../../content-block-presentation.ts', 'content-block-presentation.ts'],
     ['../../failure-presentation.ts', 'failure-presentation.ts'],
     ['../../present.ts', 'present.ts'],
-    ['../../token-usage.ts', 'token-usage.ts'],
     ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-llm'],
     ['@deepseek-ai/dsh-tool-workflow/types', '@deepseek-ai/dsh-tool-workflow/types'],
   ]

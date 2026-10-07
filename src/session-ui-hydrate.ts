@@ -9,7 +9,7 @@
  * @module @xmoon76/dsh-pi-tui/session-ui-hydrate
  */
 
-import { StatsFolder } from './stats.ts'
+import { StatsFolder } from './domain/status/stats.ts'
 import { TranscriptFolder } from './domain/transcript/folder.ts'
 
 type SessionEvents = Parameters<TranscriptFolder['apply']>[0]

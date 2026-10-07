@@ -40,11 +40,23 @@
     "import:dsh-agent",
     "import:dsh-session"
   ],
+  "domain/status/stats.ts": [
+    "import:dsh-session"
+  ],
+  "domain/transcript/folder.ts": [
+    "import:dsh-session"
+  ],
+  "domain/transcript/types.ts": [
+    "import:dsh-session"
+  ],
   "index.ts": [
     "import:dsh-agent"
   ],
   "rewind.ts": [
     "import:dsh-session"
+  ],
+  "runtime/direct/backend-direct.ts": [
+    "shell"
   ],
   "runtime/direct/catalog-direct.ts": [
     "agentDefaultModel",
@@ -125,22 +137,10 @@
     "agentPresets",
     "skills"
   ],
-  "stats.ts": [
-    "import:dsh-session"
-  ],
   "surface-catalog.ts": [
     "commands"
   ],
-  "domain/transcript/folder.ts": [
-    "import:dsh-session"
-  ],
-  "domain/transcript/types.ts": [
-    "import:dsh-session"
-  ],
   "transcript.ts": [
     "import:dsh-session"
-  ],
-  "runtime/direct/backend-direct.ts": [
-    "shell"
   ]
 }

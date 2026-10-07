@@ -42,7 +42,8 @@ function actionStatsOf(total: number, types: Record<string, number> = {}): Compa
   return { total, types: new Map(Object.entries(types)) }
 }
 import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/present.ts'
-import { formatTokens, totalTokens } from '../src/token-usage.ts'
+import { totalTokens } from '../src/domain/transcript/usage.ts'
+import { formatTokens } from '../src/tui/token-format.ts'
 import { FocusTimingStore } from '../src/focus-timing.ts'
 import type { RunPhase } from '../src/domain/status/types.ts'
 

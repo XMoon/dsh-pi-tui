@@ -9,8 +9,67 @@
 
 import type { TuiCommandRunner, RegisterOne } from '../../commands.ts'
 import { color } from '../../theme.ts'
-import { formatStatsFacts } from '../../stats.ts'
+import type { SessionStatsFacts } from '../../domain/status/stats.ts'
+import { formatTokens } from '../token-format.ts'
 import { displaySessionId } from './sessions.ts'
+
+/** One decimal place, dropping a redundant ".0". */
+function trimDecimal(value: number): string {
+  const text = value.toFixed(1)
+  return text.endsWith('.0') ? text.slice(0, -2) : text
+}
+
+/** Format seconds with one decimal ("8.1s"). */
+function formatSeconds(ms: number): string {
+  return `${trimDecimal(ms / 1000)}s`
+}
+
+/** Format a DURATION for the /status Stats row: `8.1s` under a minute,
+ * `27m54s` under an hour, `1h06m05s` beyond — the lifetime LLM wall grows
+ * into minutes and hours, where plain seconds stop being readable. */
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  if (totalSeconds < 60) return formatSeconds(ms)
+  const seconds = totalSeconds % 60
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes}m${String(seconds).padStart(2, '0')}s`
+  const minutes = totalMinutes % 60
+  const hours = Math.floor(totalMinutes / 60)
+  return `${hours}h${String(minutes).padStart(2, '0')}m${String(seconds).padStart(2, '0')}s`
+}
+
+/** Render the /status Stats row from the AUTHORITY-GROUPED facts (PR5 v2
+ *  §1B-2): known groups render; absent groups are omitted; NO known group
+ *  reads `unmeasured`. An authoritative zero still renders as a zero. */
+export function formatStatsFacts(facts: SessionStatsFacts): string {
+  const parts: string[] = []
+  const lifetime = facts.lifetime
+  if (lifetime !== undefined) {
+    const lifetimeParts: string[] = []
+    if (lifetime.turns !== undefined) lifetimeParts.push(`t${lifetime.turns}`)
+    if (lifetime.steps !== undefined) lifetimeParts.push(`s${lifetime.steps}`)
+    if (lifetime.llmMs !== undefined) lifetimeParts.push(`LLM ${formatDuration(lifetime.llmMs)}`)
+    if (lifetimeParts.length > 0) parts.push(lifetimeParts.join('/'))
+  }
+  const tokens = facts.tokens
+  if (tokens !== undefined) {
+    // Direct display parity: the legacy formatter's R…/W… cache token
+    // columns ride the SAME tokens group (no second stat source; an absent
+    // Remote tokenUsage group omits the whole segment).
+    const cacheParts = [
+      tokens.cacheRead > 0 ? `R${formatTokens(tokens.cacheRead)}` : '',
+      tokens.cacheWrite > 0 ? `W${formatTokens(tokens.cacheWrite)}` : '',
+      tokens.cacheRead > 0 || tokens.cacheWrite > 0 ? `CH${tokens.cacheHitPct.toFixed(1)}%` : '',
+    ].filter(part => part !== '')
+    parts.push([`↑${formatTokens(tokens.input)} ↓${formatTokens(tokens.output)}`, ...cacheParts].join(' '))
+  }
+  const recent = facts.recent
+  if (recent !== undefined) {
+    parts.push(`TTFB ${formatSeconds(recent.firstTokenMsAvg)} · ${recent.tokensPerSec} tok/s`)
+  }
+  if (parts.length === 0) return 'unmeasured'
+  return parts.join(' | ')
+}
 
 /**
  * M11: the /status extension-health rows (plan §16 — /status extension

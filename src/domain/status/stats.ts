@@ -28,20 +28,24 @@
  *   /stats and session analysis, no longer shown in the default footer;
  * - billed input = uncached + cache-read + cache-write (the Web's
  *   billedInputTokens), and the cache-hit share divides by that sum.
- * @module @xmoon76/dsh-pi-tui/stats
+ *
+ * TS8-D moved this semantic/fact authority out of the legacy root
+ * `src/stats.ts`. Presentation formatting lives elsewhere: the /status Stats
+ * row formatter is `src/tui/commands/status.ts` and the compact token-count
+ * formatter is `src/tui/token-format.ts`.
+ * @module @xmoon76/dsh-pi-tui/domain/status/stats
  */
 
 import { isReplacementSurfaceEvent, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   firstTokenTimeFromAssistantStream,
-  formatTokens,
   isAssistantTokenDelta,
   StepUsageAccumulator,
   tokenTimeRangeFromAssistantStream,
   usageFromAssistantSettlement,
   type UsageLike,
-} from './token-usage.ts'
-import type { AssistantLiveChunk, AssistantLiveInput } from './runtime/assistant-stream-port.ts'
+} from '../transcript/usage.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 
 /** Aggregated session statistics. */
 export interface SessionStats {
@@ -129,39 +133,6 @@ export function sessionStatsFactsOf(
       : { recent: { firstTokenMsAvg: stats.firstTokenMsAvg, tokensPerSec: stats.tokensPerSec } }),
     ...(stats.contextWindow === undefined ? {} : { contextWindow: stats.contextWindow }),
   }
-}
-
-/** Render the /status Stats row from the AUTHORITY-GROUPED facts (PR5 v2
- *  §1B-2): known groups render; absent groups are omitted; NO known group
- *  reads `unmeasured`. An authoritative zero still renders as a zero. */
-export function formatStatsFacts(facts: SessionStatsFacts): string {
-  const parts: string[] = []
-  const lifetime = facts.lifetime
-  if (lifetime !== undefined) {
-    const lifetimeParts: string[] = []
-    if (lifetime.turns !== undefined) lifetimeParts.push(`t${lifetime.turns}`)
-    if (lifetime.steps !== undefined) lifetimeParts.push(`s${lifetime.steps}`)
-    if (lifetime.llmMs !== undefined) lifetimeParts.push(`LLM ${formatDuration(lifetime.llmMs)}`)
-    if (lifetimeParts.length > 0) parts.push(lifetimeParts.join('/'))
-  }
-  const tokens = facts.tokens
-  if (tokens !== undefined) {
-    // Direct display parity: the legacy formatter's R…/W… cache token
-    // columns ride the SAME tokens group (no second stat source; an absent
-    // Remote tokenUsage group omits the whole segment).
-    const cacheParts = [
-      tokens.cacheRead > 0 ? `R${formatTokens(tokens.cacheRead)}` : '',
-      tokens.cacheWrite > 0 ? `W${formatTokens(tokens.cacheWrite)}` : '',
-      tokens.cacheRead > 0 || tokens.cacheWrite > 0 ? `CH${tokens.cacheHitPct.toFixed(1)}%` : '',
-    ].filter(part => part !== '')
-    parts.push([`↑${formatTokens(tokens.input)} ↓${formatTokens(tokens.output)}`, ...cacheParts].join(' '))
-  }
-  const recent = facts.recent
-  if (recent !== undefined) {
-    parts.push(`TTFB ${formatSeconds(recent.firstTokenMsAvg)} · ${recent.tokensPerSec} tok/s`)
-  }
-  if (parts.length === 0) return 'unmeasured'
-  return parts.join(' | ')
 }
 
 const EMPTY: SessionStats = {
@@ -1112,69 +1083,3 @@ export class StatsFolder {
   }
 }
 
-/** One decimal place, dropping a redundant ".0". */
-function trimDecimal(value: number): string {
-  const text = value.toFixed(1)
-  return text.endsWith('.0') ? text.slice(0, -2) : text
-}
-
-/** Format seconds with one decimal ("8.1s"). */
-function formatSeconds(ms: number): string {
-  return `${trimDecimal(ms / 1000)}s`
-}
-
-/** Format a DURATION for the detail stats surface: `8.1s` under a minute,
- * `27m54s` under an hour, `1h06m05s` beyond — the lifetime LLM wall grows
- * into minutes and hours, where plain seconds stop being readable. */
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000)
-  if (totalSeconds < 60) return formatSeconds(ms)
-  const seconds = totalSeconds % 60
-  const totalMinutes = Math.floor(totalSeconds / 60)
-  if (totalMinutes < 60) return `${totalMinutes}m${String(seconds).padStart(2, '0')}s`
-  const minutes = totalMinutes % 60
-  const hours = Math.floor(totalMinutes / 60)
-  return `${hours}h${String(minutes).padStart(2, '0')}m${String(seconds).padStart(2, '0')}s`
-}
-
-/**
- * Render the DETAILED stats line (the /status Stats row and the
- * statusLine payload) in pi abbreviation vocabulary:
- * `↑34k ↓8.1k R520k CH93.9% | LLM 27m54s · TTFB 2.6s · 51 tok/s`
- * Cost (`$0.164`) is omitted: dsh's TokenUsage carries no price data.
- * The performance tail keeps BOTH windows, each labeled: the LIFETIME
- * `LLM ...` wall (this is the detail surface that still shows it — the
- * footer's stats row dropped it) beside the RECENT TTFB and throughput.
- * Context pressure and the turn/step counters live in the FOOTER (the
- * default layout renders them on its stats row), so they are not repeated
- * here.
- * PR5 truthfulness (plan §3.2): `recentPerformanceAvailable === false`
- * (a bounded Remote window that proved neither its samples nor the history
- * start) OMITS the two recent terms — `LLM ...` (lifetime) stays — never a
- * `TTFB 0s · 0 tok/s` stand-in for unknown. Availability is a caller-owned
- * presentation fact; it is never inferred from the numeric values.
- * @param stats - the folded statistics.
- * @param recentPerformanceAvailable - whether the recent-window figures
- *  are authoritative (defaults to `true`: the fold's own complete-log
- *  semantics).
- * @returns the display line.
- */
-export function formatStats(stats: SessionStats, recentPerformanceAvailable = true): string {
-  const piParts = [
-    `↑${formatTokens(stats.inputTokens)}`,
-    `↓${formatTokens(stats.outputTokens)}`,
-    stats.cacheReadTokens > 0 ? `R${formatTokens(stats.cacheReadTokens)}` : '',
-    stats.cacheWriteTokens > 0 ? `W${formatTokens(stats.cacheWriteTokens)}` : '',
-    stats.cacheReadTokens > 0 || stats.cacheWriteTokens > 0 ? `CH${stats.cacheHitPct.toFixed(1)}%` : '',
-  ].filter(part => part !== '')
-  const ownParts = [
-    `LLM ${formatDuration(stats.llmMs)}`,
-    ...(recentPerformanceAvailable
-      ? [
-          `TTFB ${formatSeconds(stats.firstTokenMsAvg)}`,
-          `${stats.tokensPerSec} tok/s`,
-        ]
-      : []),
-  ]
-  return `${piParts.join(' ')} | ${ownParts.join(' · ')}`
-}

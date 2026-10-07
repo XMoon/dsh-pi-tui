@@ -38,7 +38,7 @@ import type { SkillDefinitionResult } from '../src/runtime/catalog-port.ts'
 import type { PermissionPresetOutcome, PermissionPresetResult } from '../src/commands.ts'
 import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/skill-catalog-refresh.ts'
-import { computeStats, type SessionStats } from '../src/stats.ts'
+import { computeStats, type SessionStats } from '../src/domain/status/stats.ts'
 import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
 
 /** The subset of `TuiCommandRunner` the scope helper supplies: the CAPTURE

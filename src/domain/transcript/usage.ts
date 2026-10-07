@@ -12,7 +12,11 @@
  *   steps' current usage (provisional or authoritative) — provisional
  *   values are never committed early, so an authoritative replacement
  *   cannot double-count.
- * @module @xmoon76/dsh-pi-tui/token-usage
+ *
+ * TS8-D moved this accounting authority out of the legacy root
+ * `src/token-usage.ts`. The compact token-count FORMATTER is TUI presentation
+ * and lives in `src/tui/token-format.ts`.
+ * @module @xmoon76/dsh-pi-tui/domain/transcript/usage
  */
 
 import { expandAssistantStream } from '@deepseek-ai/dsh-llm/assistant-stream'
@@ -464,13 +468,4 @@ export class StepUsageAccumulator {
     target.cacheReadTokens -= usage.cacheReadTokens ?? 0
     target.cacheWriteTokens -= usage.cacheWriteTokens ?? 0
   }
-}
-
-/** Format a token count with pi.s footer rules: 1.5k, 190k, 1.0M, 86M. */
-export function formatTokens(count: number): string {
-  if (count < 1000) return String(count)
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`
-  if (count < 1_000_000) return `${Math.round(count / 1000)}k`
-  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`
-  return `${Math.round(count / 1_000_000)}M`
 }

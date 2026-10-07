@@ -1648,7 +1648,7 @@ test('regular mode: the root disclosure reveals the full child bodies and the ba
 test('footer preset hides the stats line in compact mode', async () => {
   const { vt, app } = startApp()
   app.setStatus({
-    model: 'm', cwd: 'c', statsLine: '5 步| LLM 8.1s',
+    model: 'm', cwd: 'c',
     // M1: the stats line composes from the structured usage facts.
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -2232,7 +2232,7 @@ test('live theme switch recolors every surface while the content stays identical
   app.start()
 
   startedApps.add(app)
-  app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: 'llm 1s' })
+  app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3 })
   app.setPlanMode(true)
   app.setTodoSummary([{ content: 'fix the theme', status: 'in_progress' }])
   app.setTasks([{ id: 'bash-1', label: 'review', status: 'running', kind: 'bash' }])
