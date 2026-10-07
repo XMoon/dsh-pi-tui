@@ -126,8 +126,21 @@ function fakeAuthorization(options: {
    *  provider that ignores its abort signal) — the runner abort must
    *  still close the prompt UI and settle the login. */
   drivePromptAndHang?: boolean
+  /** Drive the REAL Host interaction (one notice plus ordered prompts) and
+   *  settle authorized from the answers the mounted app returns — the
+   *  positive Host service -> Direct adapter -> config port -> app flow ->
+   *  question/picker/notice chain. */
+  driveInteraction?: {
+    notice: { message: string; url?: string; code?: string }
+    prompts: readonly (
+      | { kind: 'text' | 'secret'; message: string }
+      | { kind: 'select'; message: string; options: readonly { id: string; label: string; description?: string }[] }
+    )[]
+  }
 } = {}) {
   const begins: { key: string; method?: string; signal?: AbortSignal; interaction: unknown }[] = []
+  /** The answers the Host interaction itself observed, in prompt order. */
+  const promptAnswers: { kind: string; message: string; answer: string }[] = []
   const flows = options.flows ?? [
     { key: 'llm-pi-ai/anthropic', label: 'Anthropic', methods: [{ id: 'oauth', label: 'OAuth' }] },
     { key: 'llm-pi-ai/openrouter', label: 'openrouter', methods: [{ id: 'oauth', label: 'OAuth' }] },
@@ -147,7 +160,26 @@ function fakeAuthorization(options: {
       },
       begin: options.syncBeginThrow === true
         ? () => { throw new Error('wire exploded') }
-        : options.drivePromptAndHang === true
+        : options.driveInteraction !== undefined
+          ? async (request: { key: string; method?: string; interaction: unknown; signal?: AbortSignal }) => {
+              begins.push(request)
+              const interaction = request.interaction as {
+                notify: (notice: { message: string; url?: string; code?: string }) => void
+                prompt: (prompt: {
+                  kind: string
+                  message: string
+                  options?: readonly { id: string; label: string; description?: string }[]
+                  signal?: AbortSignal
+                }) => Promise<string>
+              }
+              interaction.notify(options.driveInteraction!.notice)
+              for (const prompt of options.driveInteraction!.prompts) {
+                const answer = await interaction.prompt(prompt)
+                promptAnswers.push({ kind: prompt.kind, message: prompt.message, answer })
+              }
+              return { status: 'authorized' as const }
+            }
+          : options.drivePromptAndHang === true
           ? async (request: { key: string; method?: string; interaction: unknown; signal?: AbortSignal }) => {
               begins.push(request)
               const interaction = request.interaction as {
@@ -164,6 +196,7 @@ function fakeAuthorization(options: {
             },
       cancel: () => {},
     },
+    promptAnswers,
   }
 }
 
@@ -295,6 +328,9 @@ function setup(options: {
   beginError?: Error & { code?: string }
   syncBeginThrow?: boolean
   drivePromptAndHang?: boolean
+  driveInteraction?: NonNullable<Parameters<typeof fakeAuthorization>[0]>['driveInteraction']
+  /** Ordered free-text answers the stubbed question surface returns. */
+  answers?: readonly string[]
   pick?: (items: readonly { value: string; label?: string; group?: string }[]) => string
 } = {}) {
   const ctx = new Context()
@@ -324,22 +360,42 @@ function setup(options: {
     beginError: options.beginError,
     syncBeginThrow: options.syncBeginThrow,
     drivePromptAndHang: options.drivePromptAndHang,
+    driveInteraction: options.driveInteraction,
   })
   ctx.provide('authorization', authorization.service as never)
   const runner = stubRunner(ctx, app)
   registerTuiCommandsWithDirectSeams(runner)
-  app.askQuestions = async () => [{ id: 'key', selected: [], custom: 'sk-test' }] as never
+  // The mounted question/picker surfaces are recorded so a witness can prove
+  // WHICH rows the real app flow asked and WHAT it answered with.
+  const askedQuestions: { id: string; question: string; masked?: boolean }[][] = []
+  const answers = options.answers ?? ['sk-test']
+  let answerIndex = 0
+  app.askQuestions = (async (questions: readonly { id: string; question: string; masked?: boolean }[]) => {
+    askedQuestions.push(questions.map(question => ({ ...question })))
+    const custom = answers[Math.min(answerIndex, answers.length - 1)]!
+    answerIndex += 1
+    return [{ id: 'key', selected: [], custom }] as never
+  }) as never
+  const pickedItems: { value: string; label?: string }[][] = []
   app.openPicker = ((items: readonly { value: string; label?: string; group?: string }[], onSelect: (value: string) => void) => {
+    pickedItems.push(items.map(item => ({ ...item })))
     onSelect((options.pick ?? ((rows) => rows[0]!.value))(items))
     return { close: () => {}, setItems: () => {} }
   }) as never
+  // Record every durable notice body while still calling the REAL renderer.
+  const originalOpenOutputViewer = TuiApp.prototype.openOutputViewer
+  const openedNotices: string[] = []
+  app.openOutputViewer = function (this: TuiApp, viewerOptions: Parameters<typeof originalOpenOutputViewer>[0]) {
+    openedNotices.push(viewerOptions.initial)
+    return originalOpenOutputViewer.call(this, viewerOptions)
+  } as typeof app.openOutputViewer
   const login = commands.defs.find(entry => entry.name === 'login')
   const logout = commands.defs.find(entry => entry.name === 'logout')
   assert.ok(login?.handler !== undefined, 'login handler missing')
   assert.ok(logout?.handler !== undefined, 'logout handler missing')
   const run = async <T>(def: { handler?: unknown }, rawInput: string): Promise<T> =>
     (def!.handler as (inv: CommandInvocation) => Promise<T>)(invoke(rawInput))
-  return { ctx, app, credentials, settings, authorization, runner, run, login, logout }
+  return { ctx, app, credentials, settings, authorization, runner, run, login, logout, askedQuestions, pickedItems, openedNotices }
 }
 
 function flow(key: string, label: string, methods: { id: string; label: string }[], inFlight = false) {
@@ -897,6 +953,64 @@ test('/login opens a method picker when a flow offers several methods', async ()
   assert.equal(result.kind, 'success')
   assert.equal(t.authorization.begins.length, 1)
   assert.equal(t.authorization.begins[0]!.method, 'api-key')
+  t.app.stop()
+})
+
+// ── §6.11 Host -> Direct adapter -> config port -> app flow -> surface ─────
+
+test('§6.11: a Host notice plus text/secret/select prompts answer through the real /login flow and settle authorized', async () => {
+  // ONE connected positive witness: the fake Host authorization service drives
+  // its REAL interaction (notify + prompt), the production Direct adapter maps
+  // it onto detached config-port events, the production /login consumer's
+  // flow presents the mounted question/picker surfaces, and each answer rides
+  // `respond` back to the Host, which then settles authorized.
+  const t = setup({
+    flows: [flow('llm-pi-ai/anthropic', 'Anthropic', [{ id: 'oauth', label: 'OAuth' }])],
+    driveInteraction: {
+      notice: { message: 'Open this page to continue', url: 'https://example.test/auth', code: 'AB-12' },
+      prompts: [
+        { kind: 'text', message: 'paste the code' },
+        { kind: 'secret', message: 'paste the token' },
+        {
+          kind: 'select',
+          message: 'choose the workspace',
+          options: [
+            { id: 'ws-1', label: 'Workspace one' },
+            { id: 'ws-2', label: 'Workspace two' },
+          ],
+        },
+      ],
+    },
+    answers: ['typed-code', 'typed-token'],
+    pick: () => 'ws-2',
+  })
+  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
+
+  // The /login consumer consumed the Host-driven attempt and settled authorized.
+  assert.equal(result.kind, 'success')
+  assert.ok(result.text?.startsWith('signed in to Anthropic'), result.text)
+  assert.equal(t.authorization.begins.length, 1)
+
+  // The Host's OWN interaction observed its answers, in order: the typed text,
+  // the masked secret's value, and the select option ID (never its label).
+  assert.deepEqual(t.authorization.promptAnswers, [
+    { kind: 'text', message: 'paste the code', answer: 'typed-code' },
+    { kind: 'secret', message: 'paste the token', answer: 'typed-token' },
+    { kind: 'select', message: 'choose the workspace', answer: 'ws-2' },
+  ])
+
+  // ...through the REAL app surfaces: the question rows carried the Host's
+  // messages, the secret row was masked, and the picker offered option IDs.
+  assert.deepEqual(t.askedQuestions.map(rows => rows[0]!.question), ['paste the code', 'paste the token'])
+  assert.equal(t.askedQuestions[0]![0]!.masked, undefined, 'a text prompt stays unmasked')
+  assert.equal(t.askedQuestions[1]![0]!.masked, true, 'the secret prompt must render masked')
+  assert.deepEqual(t.pickedItems[0]!.map(item => item.value), ['ws-1', 'ws-2'])
+
+  // The notice reached the ONE durable panel with the formatted body.
+  assert.equal(t.openedNotices.length, 1, 'one durable notice panel per attempt')
+  assert.ok(t.openedNotices[0]!.includes('Open this page to continue'), t.openedNotices[0])
+  assert.ok(t.openedNotices[0]!.includes('https://example.test/auth'), t.openedNotices[0])
+  assert.ok(t.openedNotices[0]!.includes('Code: AB-12'), t.openedNotices[0])
   t.app.stop()
 })
 
