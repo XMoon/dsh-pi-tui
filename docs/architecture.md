@@ -32,6 +32,7 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/app/direct/**` | Direct-only application composition/owners |
 | `src/app/remote/**` | experimental Remote composition/Client application ownership |
 | `src/runtime/**` | transport-neutral semantic ports/contracts |
+| `src/runtime/process/**` | low-level process-lifetime primitives: detached/owned task ownership, process diagnostics, synchronous disposal and total error observation (TS8-F) |
 | `src/runtime/direct/**` | Direct semantic adapters |
 | `src/runtime/remote/**` | Remote semantic adapters |
 | `src/domain/status/**` | transport/UI-neutral status model, derivations, store AND the session stats fold/facts (`stats.ts`) (TS3, TS8-D) |
@@ -140,6 +141,10 @@ The load-bearing rules:
 src/runtime/** never imports src/app/**
 src/runtime/** never imports src/tui/**
 src/runtime/** never imports src/client/**
+src/runtime/process/** never imports src/app/**, src/tui/**, src/client/** or the
+  Direct/Remote adapters (`runtime/direct|remote/**`), and takes no DSH
+  business/service implementation VALUE import (a type-only structural face and
+  the Node standard library stay allowed)
 application owners never import the bootstrap composition zone (facade or helper)
 application owners never import src/tui/** implementation
 src/domain/** never imports src/app/**, src/tui/**, src/client/** or experimental Remote composition
@@ -274,7 +279,10 @@ interaction modules (`119 -> 110`); TS6 retired the nine frozen root transcript
 presentation modules (`110 -> 101`). TS8-E closed the extension/theme/stateful
 residual owners and reclassified the published `src/extensions.ts` entry stable,
 reaching `stable = 6 / legacy = 49` (the TS8-E root scope no longer exists at the
-source root).
+source root). TS8-F continues from that ledger: F1 retires the four
+process-lifetime roots (`detached.ts`, `diag.ts`, `disposal.ts`,
+`error-boundary.ts`) into `src/runtime/process/**`, reaching
+`stable = 6 / legacy = 45`.
 
 ## Existing directory convergence
 
@@ -528,7 +536,7 @@ TS4  TUI leaf / component / panel / picker convergence          DONE
 TS5  TuiApp interaction / overlay / editor convergence          DONE
 TS6  transcript presentation core + PiTui transcript mechanics  DONE
 TS7  transcript semantic domain + ONE TranscriptFolder authority DONE
-TS8  residual source-tree / placement closure                   NOT STARTED
+TS8  residual source-tree / placement closure                   IN PROGRESS
 
 TS4      TuiApp leaf / component extraction
 TS5      TuiApp interaction / overlay / editor convergence
@@ -644,6 +652,24 @@ TS8-E closed the extension / theme / stateful residual owners (legacy
 No forwarding shim was kept; the Direct catalog reads stay the single authority
 and reach `app/command/**`/`commands.ts` only through composition-injected
 neutral-DTO operations.
+
+TS8-F (PR F1) creates the constrained `src/runtime/process/**` layer for
+low-level process-lifetime primitives and retires the four roots in the same
+change (legacy `49 -> 45`, no forwarding shim):
+
+```text
+src/detached.ts        -> src/runtime/process/tasks.ts
+src/diag.ts            -> src/runtime/process/diagnostics.ts
+src/disposal.ts        -> src/runtime/process/disposal.ts
+src/error-boundary.ts  -> src/runtime/process/errors.ts
+```
+
+The `runtime-process-imports-inner-layers` gate rule forbids `app/**`, `tui/**`,
+`client/**` and `runtime/direct|remote/**` from the subtree, and
+`runtime-process-imports-dsh-implementation` forbids a DSH business/service
+VALUE import (`@deepseek-ai/dsh-*`; a type-only structural face and Node standard
+library imports stay allowed). The generic `runtime-imports-app|tui|client` rules
+carve the subtree out, so each edge has exactly one owning rule id.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1

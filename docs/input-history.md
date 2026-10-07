@@ -43,7 +43,7 @@ dedicated data file keyed by the working directory. We adopt that shape.
 
 - File: `$DSH_HOME/user-history/<md5(cwd)>.jsonl` (`$DSH_HOME` defaults to
   `~/.dsh`, same root as the existing `$DSH_HOME/logs` diagnostics; the
-  `dshHome` helper in `src/diag.ts` is the single source of the path).
+  `dshHome` helper in `src/runtime/process/diagnostics.ts` is the single source of the path).
 - Format: one JSON object per line, submission order (oldest first).
   Multi-line submissions are one JSON line (newlines escaped by
   `JSON.stringify`), so pastes cannot corrupt the layout.

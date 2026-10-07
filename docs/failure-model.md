@@ -6,7 +6,7 @@ bare `void somePromise()` in this codebase means the failure either crashes
 nothing (silent), escapes to nowhere (unhandled rejection), or gets
 misreported as a cancellation when it was a real failure.
 
-## Diagnostics sink (`src/diag.ts`)
+## Diagnostics sink (`src/runtime/process/diagnostics.ts`)
 
 `ctx.logger` is invisible in this process (no exporter), so the TUI's own
 diagnostics go to **stderr + `$DSH_HOME/logs/pi-tui-<pid>.log`** (env
@@ -14,7 +14,7 @@ diagnostics go to **stderr + `$DSH_HOME/logs/pi-tui-<pid>.log`** (env
 lifecycle logging in diag, not just ctx.logger — a log line that only goes to
 ctx.logger is a log line that never exists here.
 
-## Detached tasks (`src/detached.ts`)
+## Detached tasks (`src/runtime/process/tasks.ts`)
 
 Rule: **never a bare `void somePromise()`**. Two entries, both taking a TASK
 FACTORY that is invoked SYNCHRONOUSLY before the helper returns:
@@ -50,7 +50,7 @@ classified like any other failure — nothing escapes classification.
    and produce zero unhandled rejections. Thrown values are never mutated:
    primitives, null and frozen errors are carried by an internal wrapper.
 
-## Error observation (`src/error-boundary.ts`)
+## Error observation (`src/runtime/process/errors.ts`)
 
 Error observation is SYNC-TOTAL: describing any legal thrown value (hostile
 Proxy/getter/coercion) can never make a chain reject. Honest limit: an
@@ -101,7 +101,7 @@ published identity rather than issuing a second attempt.
 ## The bare-`void` allowlist (and its static guard)
 
 The ONLY bare-`void` exceptions are the terminal sinks inside
-`src/detached.ts` (exempt **by filename** in `rules.test.ts` — the helpers'
+`src/runtime/process/tasks.ts` (exempt **by filename** in `rules.test.ts` — the helpers'
 own sinks need no marker) and the two lifecycle roots (startup in
 `index.ts`, exit in `exit.ts`), which carry an `allowlist` comment on the
 same line. `test/rules.test.ts` statically detects COMMON SINGLE-LINE
