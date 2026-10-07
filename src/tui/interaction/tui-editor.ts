@@ -28,7 +28,7 @@ import { color } from '../theme/runtime.ts'
 import { classifyFileCompletionContext } from '../file-completion/context.ts'
 import { FILE_ARGUMENT_COMMANDS } from '../../domain/file-completion/path-argument-commands.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
-import { extractInlineSkillPrefix } from '../../skill-reference-completion.ts'
+import { extractInlineSkillPrefix } from './autocomplete/skill-reference.ts'
 
 /** Host render-routing options for the host editor. */
 export interface TuiEditorOptions {

@@ -5,16 +5,16 @@
  * card shows at most 20 VISUAL rows — and Ctrl+O (the existing global
  * tool-output master switch) expands it to the retained buffer.
  *
- * Two layers stay separate (plan §2.1): the CAPTURE layer (bounded-output.ts
- * caps bytes/lines/disk) is untouched; this module only decides what the
- * card PRESENTS. The helpers are pure and injectable so the preview math
- * (visual rows, hidden counts, Unicode safety) is unit-testable without a
- * terminal.
- * @module @xmoon76/dsh-pi-tui/local-shell-card
+ * Two layers stay separate (plan §2.1): the CAPTURE layer
+ * (client/shell/output-capture.ts caps bytes/lines/disk) is untouched; this
+ * module only decides what the card PRESENTS. The helpers are pure and
+ * injectable so the preview math (visual rows, hidden counts, Unicode
+ * safety) is unit-testable without a terminal.
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/local-shell-card
  */
 
 import { wrapTextWithAnsi } from '@xmoon76/pi-tui'
-import type { TranscriptMessage } from './transcript.ts'
+import type { TranscriptMessage } from '../../../domain/transcript/types.ts'
 
 /** Running cards collapse to this many newest SOURCE lines (kimi
  * semantics: the running tail stays small while the log streams). */

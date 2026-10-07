@@ -24,7 +24,7 @@ import {
 } from '@xmoon76/pi-tui'
 import { shellCompletionContext, suggestShellCompletion } from './shell.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
-import { applyInlineSkillReference, extractInlineSkillPrefix } from '../../../skill-reference-completion.ts'
+import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-reference.ts'
 import type { HumanSkillSummary } from '../../../domain/catalog/skill.ts'
 import {
   classifyFileCompletionContext,

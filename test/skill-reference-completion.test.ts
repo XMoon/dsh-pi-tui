@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyInlineSkillReference, extractInlineSkillPrefix } from '../src/skill-reference-completion.ts'
+import { applyInlineSkillReference, extractInlineSkillPrefix } from '../src/tui/interaction/autocomplete/skill-reference.ts'
 
 test('extractInlineSkillPrefix finds inline skill tokens at whitespace boundaries', () => {
   // `请用 /` — the `/` after a space is an inline seat with an empty query.

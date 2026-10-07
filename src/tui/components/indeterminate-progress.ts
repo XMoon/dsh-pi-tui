@@ -3,7 +3,7 @@
  * (compaction progress): a solid block slides back and forth across a
  * track, ping-pong style — never a fake percentage. Pure and dependency
  * free so it unit-tests trivially.
- * @module @xmoon76/dsh-pi-tui/progress
+ * @module @xmoon76/dsh-pi-tui/tui/components/indeterminate-progress
  */
 
 /** The frames of an indeterminate progress bar: a `blockWidth`-wide solid

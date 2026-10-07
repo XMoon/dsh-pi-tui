@@ -254,10 +254,10 @@ import type { PendingContextRow, PendingInputPresentation, PendingTailRow, Pendi
 export type { PendingInputPresentation, PendingPresentationInput, PendingPresentationRows, PendingContextRow, PendingTailRow, PendingUserRow, QueueItem } from './app/surface/pending-presentation.ts'
 import { thinkingPreviewTail } from './tui/components/transcript/thinking-preview.ts'
 import { FocusTimingStore } from './tui/transcript/focus-timing.ts'
-import { WorkingIndicator, workingFramesFor } from './working.ts'
+import { WorkingIndicator, workingFramesFor } from './tui/components/working-indicator.ts'
 import { iconFor, iconLead, iconPrefix } from './tui/icons.ts'
 import type { IconStyle } from './domain/display/icons.ts'
-import { indeterminateProgressFrames } from './progress.ts'
+import { indeterminateProgressFrames } from './tui/components/indeterminate-progress.ts'
 import { submitAckLabel, type SubmitPendingDetail } from './app/submission/ack.ts'
 import { cancellationError, type OwnedTaskOptions } from './runtime/process/tasks.ts'
 import { safeErrorMessage } from './runtime/process/errors.ts'
@@ -279,7 +279,7 @@ import {
   localShellPreview,
   RUNNING_PREVIEW_LINES,
   SETTLED_PREVIEW_VISUAL_ROWS,
-} from './local-shell-card.ts'
+} from './tui/components/transcript/local-shell-card.ts'
 import { formatBytes } from './domain/media/format.ts'
 import type { RendererRegistry } from './extension/internal/renderer-registry.ts'
 import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
