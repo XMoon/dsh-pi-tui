@@ -1,20 +1,22 @@
 /**
- * Harness attachment admission (plan M4, §10-§11): draft segments →
+ * Direct Host attachment admission (plan M4, §10-§11; TS8-C): draft segments →
  * `ctx.attachments.saveImages()` → `ContentBlock[]`.
  *
- * The TUI NEVER re-implements normalization, transcoding or provider
- * projection — it batches the referenced images through the attachment
- * service and maps the returned refs back onto ordered content blocks.
- * Structural types keep this module testable without the dsh runtime
- * (AGENTS.md decision 7); `ImageMediaType`/`ImageAttachmentRef`/`ContentBlock`
- * shapes are verified against `@deepseek-ai/dsh-attachment` 0.1.2-alpha.4.
- * @module @xmoon76/dsh-pi-tui/image/admission
+ * This is the DIRECT-path application preparation. It never resolves `ctx`:
+ * the composition root injects the structural Host attachment service
+ * (`ctx.attachments`) and this module only invokes the already-authoritative
+ * service and maps the result. The TUI NEVER re-implements normalization,
+ * transcoding or provider projection — it batches the referenced images
+ * through the attachment service and maps the returned refs back onto ordered
+ * content blocks. Structural types keep this module testable without the dsh
+ * runtime (AGENTS.md decision 7).
+ * @module @xmoon76/dsh-pi-tui/app/submission/direct-image-admission
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { ImageAdmissionError } from '../domain/media/errors.ts'
-import type { ImageAttachmentRefLike, ImageLimitsLike, ImageMediaType } from '../domain/media/types.ts'
-import type { DraftSegment } from '../client/media/image/placeholder.ts'
+import type { DraftSegment } from '../../client/media/image/placeholder.ts'
+import { ImageAdmissionError } from '../../domain/media/errors.ts'
+import type { ImageAttachmentRefLike, ImageLimitsLike, ImageMediaType } from '../../domain/media/types.ts'
 
 /** Structural subset of `@deepseek-ai/dsh-attachment`'s `SaveImageAttachment`. */
 export interface SaveImageAttachmentLike {

@@ -26,10 +26,10 @@ import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { ImageInputError } from '../../domain/media/errors.ts'
 import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { runReservedSubmit } from '../../image/submit-flow.ts'
+import { runReservedSubmit } from './submit-flow.ts'
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments } from '../../client/media/draft-attachments.ts'
-import { prepareUserMessage, type PrepareInputDeps } from '../../image/submit.ts'
+import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
 import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
 import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
@@ -208,10 +208,10 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly model: {
     readonly selected: { readonly current: { readonly provider: string; readonly model: string } | undefined }
   }
-  /** The image submission services (read at construction, like the old site). */
+  /** The Direct submission services (read at construction, like the old site). */
   readonly image: {
-    attachments(): PrepareInputDeps['attachments']
-    llm(): PrepareInputDeps['llm']
+    attachments(): DirectPrepareInputDeps['attachments']
+    llm(): DirectPrepareInputDeps['llm']
   }
   /** The Direct TUI-settings facade (read live). */
   readonly tuiSettings: { get(): TuiSettingsDoc } | undefined
@@ -268,7 +268,7 @@ export interface SubmissionController {
   /** The client-local presentation echoes for one session. */
   snapshotEchoes(sessionId: string | undefined): readonly import('../../submission-presentation.ts').SubmissionPresentationItem[] | undefined
   /** The image submission deps the command runner consumes. */
-  prepareDeps(): PrepareInputDeps
+  prepareDeps(): DirectPrepareInputDeps
   /** Publish one local submission echo. The composition root resolves the
    *  exact Agent and reports the facts; the OWNER derives the placement. */
   beginLocalSubmission(input: {
@@ -594,11 +594,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     deps.app().notify(`${prefix}: ${message}`, 'error')
   }
 
-  /** The image submission surface (plan §13): the live attachment/llm
+  /** The Direct submission surface (plan §13): the live attachment/llm
    * services + the CURRENT provider/model, re-read at submit time (the
    * TUI supports runtime model switching — never a startup snapshot). */
   
-  const submitDeps: PrepareInputDeps = {
+  const submitDeps: DirectPrepareInputDeps = {
     attachments: deps.image.attachments(),
     get fileStore() { return deps.drafts.files },
     signal: deps.signal,
@@ -608,7 +608,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // relative-path resolution — and the seam routes through the port so a
     // future official carrier (if one ever exists) lands in one place.
     canonicalizeMentions: (text) => deps.backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: deps.liveAgent()?.session.id ?? '' }, text),
-    sessionCwd: () => deps.status.sessionCwd(),
     currentModel: () => {
       // The AUTHORITATIVE model for the next step is the mutable
       // selection's `current` (/model writes it; prompt assembly reads

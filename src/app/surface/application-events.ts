@@ -176,7 +176,9 @@ export interface ApplicationEventsDeps {
     readonly files: DraftFileStore
   }
   /** The deployment image policy (the Host attachments service `imageLimits`),
-   *  re-read per paste. */
+   *  re-read per paste. Direct only: on Remote this is `undefined`, so the
+   *  paste intake uses the Client's own caps and the exact Session's official
+   *  projection is re-applied later by the Remote serializer. */
   readonly imageLimits: () => Parameters<typeof checkImageLimits>[2] | undefined
   /** The rewind whole-log reads + the fork action (idle double-Esc /
    *  `/rewind`). M3-4 PR4 §4: the picker enumerates the official

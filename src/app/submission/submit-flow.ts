@@ -17,7 +17,7 @@
  * pin releases, so a concurrent attach-time prune cannot delete them
  * (review finding). Notifications stay OUT of this core: runOwned's
  * onError owns them.
- * @module @xmoon76/dsh-pi-tui/image/submit-flow
+ * @module @xmoon76/dsh-pi-tui/app/submission/submit-flow
  */
 
 /** One reserved submission's injectable surface. */

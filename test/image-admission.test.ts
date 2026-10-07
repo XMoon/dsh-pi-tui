@@ -10,8 +10,8 @@ import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { expandImagePlaceholders } from '../src/client/media/image/placeholder.ts'
 import {
   admitDraftImages, buildContentBlocks, imageSegmentsBytes, type AttachmentsLike,
-} from '../src/image/admission.ts'
-import { assertModelSupportsImages, modelSupportsImages, type LlmLike } from '../src/image/capability.ts'
+} from '../src/app/submission/direct-image-admission.ts'
+import { assertModelSupportsImages, modelSupportsImages, type LlmLike } from '../src/app/submission/direct-image-capability.ts'
 import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/domain/media/errors.ts'
 import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
 import type { DraftSegment } from '../src/client/media/image/placeholder.ts'

@@ -24,7 +24,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/prompt-serializer-remote
  */
 
-import type { PreparedPrompt } from '../../image/prepared-prompt.ts'
+import type { PreparedPrompt } from '../prepared-prompt.ts'
 import type {
   RemotePendingAttachment,
   RemotePromptContentPart,

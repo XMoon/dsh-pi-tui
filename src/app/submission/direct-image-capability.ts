@@ -1,17 +1,21 @@
 /**
- * Model image-capability gating (plan M5, §12).
+ * Direct model image-capability gating (plan M5, §12; TS8-C).
  *
  * The decision comes from the CURRENT live provider/model via
  * `ctx.llm.resolveModelInfo()` — never a cached agent-startup model, because
- * the TUI supports runtime model switching (/model). Semantics:
+ * the TUI supports runtime model switching (/model). This is a Direct
+ * in-process UX/preflight check; the final admission authority remains Host
+ * submission/admission. Remote MUST NOT use this module.
+ *
+ * Semantics:
  * - `inputModalities` ABSENT (undefined): capability unknown — do NOT
  *   reject client-side; the harness admission remains the authority;
  * - explicitly present WITHOUT `'image'`: a declared text-only model —
  *   reject with an actionable error, never silently drop images (§12).
- * @module @xmoon76/dsh-pi-tui/image/capability
+ * @module @xmoon76/dsh-pi-tui/app/submission/direct-image-capability
  */
 
-import { ModelImageUnsupportedError } from '../domain/media/errors.ts'
+import { ModelImageUnsupportedError } from '../../domain/media/errors.ts'
 
 /** Structural subset of `LlmResolvedModelInfo` (`@deepseek-ai/dsh-llm`). */
 export interface ResolvedModelInfoLike {

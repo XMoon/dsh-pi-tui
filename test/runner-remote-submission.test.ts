@@ -35,7 +35,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -743,4 +743,191 @@ test('L6 PR5 image resend: a SECOND submission citing the recalled durable image
     'the SECOND submission (citing the recalled durable image) re-delivered the ORIGINAL authorized bytes through the official attachment read')
   release()
   await new Promise(resolve => setTimeout(resolve, 200))
+})
+
+// ── TS8-C D12: the Remote Client intake never reads the Direct Host policy ──
+
+/** A real 1×1 PNG (the D12 locality probe): a genuine image the Direct Host
+ *  sentinel policy below (1 byte) would refuse outright. */
+async function d12PngBytes(): Promise<Uint8Array> {
+  const require = createRequire(import.meta.url)
+  const storeDir = dirname(require.resolve('@deepseek-ai/dsh-attachment-local/package.json'))
+  const sharpPath = require.resolve('sharp', { paths: [storeDir] })
+  const sharp = require(sharpPath) as { (input: unknown): { png(): { toBuffer(): Promise<Buffer> } } }
+  return new Uint8Array(await sharp({ create: { width: 1, height: 1, channels: 3, background: '#d12c0f' } }).png().toBuffer())
+}
+
+interface D12Fixture {
+  readonly probe: Pr3Fixture
+  readonly store: {
+    size(): number
+    values(): readonly { bytes: Uint8Array; source: { type: string } }[]
+  }
+  readonly pngBytes: Uint8Array
+  readonly pngPath: string
+  readonly hugePath: string
+  /** The fake `wl-paste` invocation log (installed with `clipboard: true`). */
+  readonly clipLog: string
+  /** Reads of the Direct Host image policy observed so far. */
+  reads(): number
+}
+
+/**
+ * Mount the real Remote runner with the real Direct Host attachment service
+ * present, wrapping its `imageLimits` with a COUNTED getter that returns a
+ * 1-byte policy: the illegal Direct coupling would both REFUSE a real image and
+ * leave an observable call witness (never a UI string). With `clipboard`, the
+ * real Wayland probe is made to report a PNG through a fake `wl-paste`
+ * installed first on PATH.
+ */
+async function mountD12Fixture(life: TestLifecycle, options: { clipboard: boolean }): Promise<D12Fixture> {
+  const presetId = 'm3-4-pr3-preset'
+  const sessionId = 'm3-4-pr3-d12-locality'
+  const pngBytes = await d12PngBytes()
+  const probeDir = life.tempDir('dsh-ts8c-d12-')
+  const pngPath = join(probeDir, 'd12-probe.png')
+  writeFileSync(pngPath, pngBytes)
+  // A file ABOVE the Client's own 64 MiB resident safety cap: refused by stat
+  // alone, before any read.
+  const hugePath = join(probeDir, 'd12-huge.png')
+  const hugeHandle = openSync(hugePath, 'w')
+  try {
+    ftruncateSync(hugeHandle, 64 * 1024 * 1024 + 1)
+  } finally {
+    closeSync(hugeHandle)
+  }
+
+  const clipLog = join(probeDir, 'wl-paste.log')
+  if (options.clipboard) {
+    const wlPaste = join(probeDir, 'wl-paste')
+    writeFileSync(wlPaste, [
+      '#!/bin/sh',
+      `printf '%s\\n' "$*" >> '${clipLog}'`,
+      'case "$*" in',
+      '  *--list-types*) echo image/png ;;',
+      `  *-t*image/png*) cat '${pngPath}' ;;`,
+      '  *) exit 1 ;;',
+      'esac',
+      '',
+    ].join('\n'), { mode: 0o755 })
+    const pathBefore = process.env.PATH
+    const waylandBefore = process.env.WAYLAND_DISPLAY
+    process.env.PATH = `${probeDir}:${pathBefore ?? ''}`
+    process.env.WAYLAND_DISPLAY = 'wayland-0'
+    life.defer(() => {
+      if (pathBefore === undefined) delete process.env.PATH
+      else process.env.PATH = pathBefore
+      if (waylandBefore === undefined) delete process.env.WAYLAND_DISPLAY
+      else process.env.WAYLAND_DISPLAY = waylandBefore
+    })
+  }
+
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(sessionId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  // The REAL Direct Host attachment service is present on this in-process
+  // Remote composition. Wrap its `imageLimits` with a COUNTED getter returning
+  // a 1-byte policy: under the illegal coupling a real PNG would be refused
+  // AND the read itself is observable.
+  const { symbols } = await import('@deepseek-ai/cordis')
+  const liveService = host.ctx.get('attachments') as never as Record<symbol, unknown> & { imageLimits: unknown }
+  const attachmentImpl = (liveService[symbols.original] ?? liveService) as { imageLimits: unknown }
+  const directLimits = attachmentImpl.imageLimits
+  const sentinelLimits = Object.freeze({
+    maxImageBytes: 1,
+    maxImagesPerMessage: 1,
+    maxMessageImageBytes: 1,
+    maxImagePixels: 1,
+    maxImageDimension: 1,
+    mediaTypes: Object.freeze(['image/png']) as readonly string[],
+  })
+  let hostLimitReads = 0
+  Object.defineProperty(attachmentImpl, 'imageLimits', {
+    configurable: true,
+    get() {
+      hostLimitReads += 1
+      return sentinelLimits
+    },
+  })
+  life.defer(() => {
+    Object.defineProperty(attachmentImpl, 'imageLimits', { configurable: true, writable: true, value: directLimits })
+  })
+
+  const probe = await mountPr3Runner(life, { presetId, resumeSessionId: sessionId, host })
+  await waitFor('mount paint', () => probe.vt.getViewport().join('').length > 0, 10_000)
+
+  const app = probe.runnerApp() as unknown as {
+    draftImageStoreForTest?: D12Fixture['store']
+  }
+  const store = app.draftImageStoreForTest!
+  assert.equal(store.size(), 0, 'the mounted Remote surface starts with no staged media')
+
+  // POSITIVE CONTROL: the counted Direct policy IS reachable through the live
+  // service proxy — a later zero count is evidence, never a vacuous truth.
+  const readsBeforeControl = hostLimitReads
+  assert.equal(
+    (host.ctx.get('attachments') as unknown as { imageLimits: unknown }).imageLimits,
+    sentinelLimits,
+    'the live service proxy resolves to the wrapped Direct Host policy',
+  )
+  assert.equal(hostLimitReads, readsBeforeControl + 1, 'the counted Direct Host policy is reachable')
+  hostLimitReads = 0
+
+  return { probe, store, pngBytes, pngPath, hugePath, clipLog, reads: () => hostLimitReads }
+}
+
+test('TS8-C D12 locality: Remote Client /image intake never reads the Direct Host image policy', async (t) => {
+  const life = testLifecycle(t)
+  const d12 = await mountD12Fixture(life, { clipboard: false })
+
+  // A) Client-local /image intake on the Remote composition: the Direct Host
+  // policy is 1 byte, so the illegal coupling would refuse this real PNG.
+  submitDraft(d12.probe, `/image ${d12.pngPath}`)
+  await waitFor('the /image draft is staged through the Client path', () => d12.store.size() > 0, 15_000)
+  assert.equal(d12.reads(), 0, 'Remote /image intake must never read the Direct Host image policy')
+  assert.equal(Buffer.from(d12.store.values()[0]!.bytes).toString('hex'), Buffer.from(d12.pngBytes).toString('hex'),
+    'the staged bytes are the exact local file bytes')
+
+  // B) The Client's OWN resident cap still bounds intake: a file above 64 MiB is
+  // refused by stat alone, with the CLIENT cap in the message (the Direct policy
+  // would have said "1 B"). Replacing the editor text prunes the /image
+  // placeholder, so no draft survives the refused intake.
+  submitDraft(d12.probe, `/image ${d12.hugePath}`)
+  await waitFor('the over-cap notice names the Client cap', () =>
+    d12.probe.vt.getViewport().join('').includes('current attachment limit is 64.0 MiB'), 15_000)
+  assert.equal(d12.store.size(), 0, 'the over-cap file is refused before any read or draft')
+  assert.equal(d12.reads(), 0, 'the refusal used the Client resident cap, not the Direct Host policy')
+})
+
+test('TS8-C D12 locality: Remote Ctrl+V clipboard image intake never reads the Direct Host image policy', async (t) => {
+  // The fake `wl-paste` witness is only sound where the REAL production probe
+  // routes to Wayland: darwin/win32 select the native backend and WSL selects
+  // PowerShell BEFORE the Wayland branch, and Termux is unsupported
+  // (src/client/clipboard/read.ts: isWsl/isTermux + the readClipboardImage
+  // dispatch). Otherwise the test would read the real user clipboard.
+  if (process.platform !== 'linux') {
+    t.skip('the real clipboard probe selects the native backend off Linux')
+    return
+  }
+  if (process.env.WSL_DISTRO_NAME !== undefined || process.env.WSL_INTEROP !== undefined
+    || process.env.WSLENV !== undefined) {
+    t.skip('the real clipboard probe selects the WSL PowerShell backend here')
+    return
+  }
+  if (process.env.TERMUX_VERSION !== undefined || process.env.PREFIX === '/data/data/com.termux/files/usr') {
+    t.skip('the real clipboard probe is unsupported in Termux')
+    return
+  }
+  const life = testLifecycle(t)
+  const d12 = await mountD12Fixture(life, { clipboard: true })
+
+  d12.probe.vt.sendInput('\x16')
+  await waitFor('the clipboard image draft is staged', () => d12.store.size() === 1, 15_000)
+  const draft = d12.store.values()[0]!
+  assert.equal(draft.source.type, 'clipboard', 'the paste staged a clipboard-sourced draft')
+  assert.equal(Buffer.from(draft.bytes).toString('hex'), Buffer.from(d12.pngBytes).toString('hex'),
+    'the staged clipboard bytes are the probed image bytes')
+  assert.equal(d12.reads(), 0, 'Remote clipboard image intake must never read the Direct Host image policy')
+  // The witness is the REAL probe call, not the resulting UI state.
+  assert.match(readFileSync(d12.clipLog, 'utf8'), /--list-types/, 'the real clipboard probe ran')
 })
