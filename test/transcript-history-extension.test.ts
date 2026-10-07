@@ -268,6 +268,7 @@ function mountBoundaryHarness(turns: number, options: {
     copySelection: async () => false,
     openExternalUrl: () => {},
     readClipboardText: async () => undefined,
+    imageFallbackColor: (text) => text,
   })
 
   // Test-local instrumentation of the MOUNTED production handlers.

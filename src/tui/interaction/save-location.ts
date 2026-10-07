@@ -31,7 +31,7 @@ import {
 } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 import type { DirectoryCompletionCandidate } from '../../client/file-completion/directory-completion.ts'
 
 /** What the Save Location prompt asks for. */

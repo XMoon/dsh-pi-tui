@@ -1,25 +1,30 @@
 /**
- * Unit tests for the theme module: background-based dark/light detection,
- * custom theme resolution and schema validation, and live palette tracking
- * of the settings-list theme.
+ * Unit tests for the split theme owners (TS8-E): background detection and the
+ * neutral palette vocabulary (`domain/display/theme.ts`), custom theme
+ * resolution/schema validation (`client/theme/files.ts`), environment
+ * detection (`client/theme/environment.ts`) and live palette tracking of the
+ * settings-list theme (`tui/theme/runtime.ts`).
  * @module @xmoon76/dsh-pi-tui/theme.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  currentPalette,
   darkColors,
   detectThemeFromBackground,
-  detectThemeFromColorFgBg,
   lightColors,
+  withSearchCurrentTokens,
+} from '../src/domain/display/theme.ts'
+import {
   resolveCustomTheme,
+  validateCustomTheme,
+} from '../src/client/theme/files.ts'
+import { detectThemeFromColorFgBg, themeOptOut } from '../src/client/theme/environment.ts'
+import {
+  currentPalette,
   setTheme,
   settingsListTheme,
-  themeOptOut,
-  validateCustomTheme,
-  withSearchCurrentTokens,
-} from '../src/theme.ts'
+} from '../src/tui/theme/runtime.ts'
 
 test('detectThemeFromBackground picks light for bright backgrounds', () => {
   assert.equal(detectThemeFromBackground({ r: 255, g: 255, b: 255 }), 'light')

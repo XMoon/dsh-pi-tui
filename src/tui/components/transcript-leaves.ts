@@ -18,7 +18,7 @@ import type { IconStyle } from '../../domain/display/icons.ts'
 import { longMessageDisclosureWindow } from '../../long-message-disclosure.ts'
 import { latestLine } from '../../domain/transcript/text.ts'
 import { relativizeToCwd } from '../transcript/tool-presentation.ts'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 import { thinkingPreviewTail } from '../../thinking-preview.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 

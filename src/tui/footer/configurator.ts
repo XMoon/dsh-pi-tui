@@ -42,7 +42,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { FooterComposer, renderSpans } from './composer.ts'
 import { sanitizeCommandOutput } from './ansi-sanitize.ts'

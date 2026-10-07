@@ -9,7 +9,7 @@
 
 import type { SettingItem } from '@xmoon76/pi-tui'
 import type { AppKeybindingId } from '../keybindings/types.ts'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 import type { RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 
 /** The runner operations the utility commands consume. */

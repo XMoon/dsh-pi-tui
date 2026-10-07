@@ -13,7 +13,7 @@
 
 import { dispatchMouseEvent, isFocusable, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseDispatchResult, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
 
 /**

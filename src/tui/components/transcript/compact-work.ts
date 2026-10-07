@@ -25,7 +25,7 @@ import { summarizeWorkSpan, type CompactWorkSummary } from '../../transcript/wor
 import type { TranscriptWorkSpan } from '../../transcript/structure.ts'
 import { iconLead } from '../../icons.ts'
 import { sectionDisclosureSemantic, type IconStyle } from '../../../domain/display/icons.ts'
-import { color } from '../../../theme.ts'
+import { color } from '../../theme/runtime.ts'
 
 /**
  * The one-line Activity header (post-F6 plan §6.3; addendum v2 §22): the

@@ -8,7 +8,7 @@
  */
 
 import type { TuiCommandRunner, RegisterOne } from '../../commands.ts'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 import type { SessionStatsFacts } from '../../domain/status/stats.ts'
 import { formatTokens } from '../token-format.ts'
 import { displaySessionId } from './sessions.ts'

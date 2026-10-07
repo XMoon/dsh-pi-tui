@@ -76,8 +76,6 @@
     "task-presentation.ts",
     "tasks-browser.ts",
     "terminal-title.ts",
-    "theme-source.ts",
-    "theme.ts",
     "thinking-preview.ts",
     "tool-presentation-client.ts",
     "transcript-render-profile.ts",

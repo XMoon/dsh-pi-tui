@@ -28,7 +28,8 @@ import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, typ
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
-import { normalizePersistedTheme, resolveThemeSelection } from '../../theme-source.ts'
+import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
+import { resolveThemeSelection } from './theme-selection.ts'
 import { wheelScrollLinesOf } from '../../wheel-scroll.ts'
 import type { Diag } from '../../diag.ts'
 import type { TuiApp } from '../../tui-app.ts'
@@ -44,9 +45,15 @@ export type SettingsDocLike = Parameters<typeof serializeTuiSettingsMutation>[0]
 export type FooterSettingsDoc = { readonly footer: string; readonly footerLayout?: unknown; readonly footerCustomItems?: unknown }
 
 /** The extension theme registry the boot display reads (official registry,
- *  injected so this owner never reaches the extension service itself). */
+ *  injected so this owner never reaches the extension service itself). The
+ *  NAME-addressed lookup stays a narrow structural read — never the concrete
+ *  registry class. */
 export interface BootThemeExtensions {
-  readonly themes: Parameters<typeof resolveThemeSelection>[1]
+  readonly themes: NonNullable<Parameters<typeof resolveThemeSelection>[1]> & {
+    /** The source-qualified selectable value behind one plugin display NAME
+     *  (the Phase-4 advanced host-state `setTheme(name)` contract). */
+    selectableValueForName(name: string): string | undefined
+  }
   _recordRegistryHealthRef(kind: string, id: string): unknown
   _clearRegistryError(ref: unknown): void
   _recordRegistryError(ref: unknown, error: unknown): void

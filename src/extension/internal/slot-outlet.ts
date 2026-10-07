@@ -11,7 +11,7 @@
  */
 
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { color } from '../../theme.ts'
+import { color } from '../../tui/theme/runtime.ts'
 import { ExtensionLedger } from './ledger.ts'
 import type { HeaderBadge, StyledSpan } from '../public-types.ts'
 

@@ -48,7 +48,7 @@ import type { OwnedTaskOptions } from '../../detached.ts'
 import type { ModelDirectoryDto } from '../../runtime/catalog-port.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from '../../runtime/config-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
-import { selectListTheme } from '../../theme.ts'
+import { selectListTheme } from '../theme/runtime.ts'
 
 /** The catalog surface the allowlist picker needs: the OFFICIAL grouped
  *  model directory (the runtime's model catalog port, read off the live

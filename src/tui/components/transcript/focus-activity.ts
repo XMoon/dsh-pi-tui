@@ -21,7 +21,7 @@
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
-import { color } from '../../../theme.ts'
+import { color } from '../../theme/runtime.ts'
 import { formatTokens } from '../../token-format.ts'
 import { iconFor } from '../../icons.ts'
 import type { IconSemantic, IconStyle } from '../../../domain/display/icons.ts'

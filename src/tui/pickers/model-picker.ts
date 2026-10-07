@@ -41,7 +41,7 @@ import {
 import type { OwnedTaskOptions } from '../../detached.ts'
 import type { ModelDirectoryDto, ModelSelectionDto } from '../../runtime/catalog-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
-import { selectListTheme } from '../../theme.ts'
+import { selectListTheme } from '../theme/runtime.ts'
 
 /** The semantic settlement of one applied selection, as the picker needs it:
  *  a rejected/cancelled/unsupported write never committed, so the picker stays

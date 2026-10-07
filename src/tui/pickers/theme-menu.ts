@@ -29,9 +29,10 @@
  */
 
 import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { settingsListTheme } from '../../theme.ts'
+import { settingsListTheme } from '../theme/runtime.ts'
 import type { ThemeRegistry } from '../../extension/internal/theme-registry.ts'
-import { themePickerRows, normalizePersistedTheme } from '../../theme-source.ts'
+import { themePickerRows } from '../../app/surface/theme-selection.ts'
+import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 
 /** The FRIENDLY display name of one persisted/selectable theme value:
  * builtins as-is, `file:X` → X, `custom:X` → X, a LIVE `plugin:…` → its

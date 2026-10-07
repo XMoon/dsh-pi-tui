@@ -445,6 +445,7 @@ function mountSurface(
       copySelection: async () => false,
       openExternalUrl: () => {},
       readClipboardText: async () => undefined,
+      imageFallbackColor: (text) => text,
     })
   } finally {
     if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM

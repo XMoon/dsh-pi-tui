@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { wrapTextWithAnsi, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { color } from '../src/theme.ts'
+import { color } from '../src/tui/theme/runtime.ts'
 import { FooterComposer, mergeCommandSurface } from '../src/tui/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
 import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'

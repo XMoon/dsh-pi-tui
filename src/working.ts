@@ -25,7 +25,7 @@
 import { Text } from '@xmoon76/pi-tui'
 import { iconFor } from './tui/icons.ts'
 import type { IconStyle } from './domain/display/icons.ts'
-import { color } from './theme.ts'
+import { color } from './tui/theme/runtime.ts'
 
 /** The DEFAULT animation frames for one icon style, DERIVED from the icon
  * registry — the single source of truth, so the palette's width gate also

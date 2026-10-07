@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/tui/components/transcript/context-row.ts'
-import { color } from '../src/theme.ts'
+import { color } from '../src/tui/theme/runtime.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
 /** The card-internal body indent every standalone Context body row carries
