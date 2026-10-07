@@ -142,8 +142,11 @@ Direct remains the production/default backend
 `src/client/**` is the Client-local platform capability and the INNER layer,
 exactly like `src/app/**` and `src/tui/**`: the neutral domain and the Host
 semantic/adaptor (`src/runtime/**`) layers never depend on it, and Client-local
-state never reaches the Host transport. The rule is enforced for value,
-type-only and literal value-dynamic imports, with no allowlist.
+state never reaches the Host transport. `runtime-imports-client` (the
+`src/runtime/** !-> src/client/**` rule) is enforced for value, type-only AND
+literal value-dynamic imports with no allowlist; the `domain-imports-client`
+and `client-imports-remote-composition` rules are static (value/type-only)
+rules, matching the gate exactly.
 
 The application/TUI direction (TS4) is one-way at the implementation level:
 
