@@ -5,7 +5,7 @@
  */
 
 import type { StreamingToolPreview } from './tui-app.ts'
-import { toolSummaryKeys } from './present.ts'
+import { toolSummaryKeys } from './tui/transcript/tool-presentation.ts'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
 

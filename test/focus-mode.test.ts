@@ -41,7 +41,7 @@ import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionSourceOf, compactActionS
 function actionStatsOf(total: number, types: Record<string, number> = {}): CompactActionStats {
   return { total, types: new Map(Object.entries(types)) }
 }
-import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/present.ts'
+import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/tui/transcript/tool-presentation.ts'
 import { totalTokens } from '../src/domain/transcript/usage.ts'
 import { formatTokens } from '../src/tui/token-format.ts'
 import { FocusTimingStore } from '../src/focus-timing.ts'

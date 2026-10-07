@@ -36,14 +36,14 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
 import { projectFocus } from '../src/tui/transcript/focus-projection.ts'
-import { resultTextLines, writeFoldedPreview } from '../src/present.ts'
+import { resultTextLines, writeFoldedPreview } from '../src/tui/transcript/tool-presentation.ts'
 import { collectRewindCandidates } from '../src/rewind.ts'
 import {
-  renderTranscriptMarkdown,
   transcriptSearchText,
   TranscriptFolder,
   type TranscriptMessage,
 } from '../src/transcript.ts'
+import { renderTranscriptMarkdown } from '../src/client/artifact/transcript-markdown.ts'
 import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

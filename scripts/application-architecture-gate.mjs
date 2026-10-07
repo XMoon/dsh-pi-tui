@@ -88,13 +88,13 @@
  *      that introduces each later zone.
  *   8. (TS1) `src/runtime/**` must not import `src/tui/**`: the semantic/adaptor
  *      layer never depends on terminal presentation.
- *   9. (TS7) `src/domain/transcript/**` — the ONE transport/UI-neutral
+ *   9. (TS7/TS8-D) `src/domain/transcript/**` — the ONE transport/UI-neutral
  *      transcript semantic/lifecycle authority — is CLOSED-WORLD: only its own
- *      siblings, the frozen transitional pure root VALUE helpers and two
- *      TYPE-ONLY compatibility edges (`domain/display/icons.ts`, `runtime/assistant-stream-port.ts`)
+ *      siblings and two TYPE-ONLY compatibility edges
+ *      (`domain/display/icons.ts`, `runtime/assistant-stream-port.ts`)
  *      are admitted; every other relative `src/**` edge (TUI/renderer mechanics,
  *      application currentness, the Direct/Remote adapters, `commands.ts`,
- *      `display-preset.ts`, the `src/transcript.ts` facade, …) fails by default,
+ *      the `src/transcript.ts` facade, any transitional/legacy root, …) fails by default,
  *      including literal dynamic spellings and value imports that would ride on a
  *      type-only allowance. Bare packages keep the PiTui/Tern/Remote package-face
  *      rule. The direction is `PiTui mechanics -> tui/transcript -> domain/transcript`,
@@ -271,20 +271,6 @@ export function isTranscriptRendererMechanics(resolved, specifier) {
 const DOMAIN_TRANSCRIPT_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
 
 /**
- * The TS7 closed-world allow-set of transitional ROOT edges the
- * `domain/transcript/**` authority may still consume as VALUES: deterministic
- * pure helpers with no TUI/renderer/lifecycle state, owned by TS8 for their
- * final placement (plan §34.1). Every other relative `src/**` edge fails.
- *
- * TS8-D shrank this set to the ONE remaining transitional root (`present.ts`,
- * whose `latestLine` was already extracted to `domain/transcript/text.ts`);
- * the final commit retires it and the set disappears entirely.
- */
-const DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES = new Set([
-  'present.ts',
-])
-
-/**
  * The canonical TYPE-ONLY edges the `domain/transcript/**` authority may
  * consume: `domain/display/icons.ts` because the domain carries the existing
  * `IconSemantic` compatibility field and the canonical neutral icon vocabulary
@@ -300,16 +286,16 @@ const DOMAIN_TRANSCRIPT_TYPE_ONLY_EDGES = new Set([
 ])
 
 /**
- * The TS7 sublayer contract for `domain/transcript/**`, expressed CLOSED-WORLD:
- * every relative edge must be either
+ * The TS7/TS8-D sublayer contract for `domain/transcript/**`, expressed
+ * CLOSED-WORLD: every relative edge must be either
  *   - a `domain/transcript/**` sibling, or
- *   - the ONE transitional root value (`present.ts`), or
  *   - a TYPE-ONLY import of one of {@link DOMAIN_TRANSCRIPT_TYPE_ONLY_EDGES}.
  * Anything else (`tui/**`, `app/**`, `runtime/direct|remote/**`, `commands.ts`,
- * `display-preset.ts`, `search-overlay.ts`, `transcript.ts`, `theme.ts`,
- * `tui-app.ts`/`renderer-registry.ts`, any other root/legacy module, …) FAILS by
+ * `search-overlay.ts`, `transcript.ts`, `theme.ts`, `tui-app.ts`/
+ * `renderer-registry.ts`, any transitional or legacy root module, …) FAILS by
  * default, so a future escape hatch must be added deliberately instead of being
- * missed by a forbidden list.
+ * missed by a forbidden list. TS8-D removed the last transitional root VALUE
+ * edge: the set is empty and can never grow back through this rule.
  *
  * Bare package specifiers keep the long-lived package-face contract: the vendored
  * PiTui fork, the Tern SDK and experimental Remote composition faces are
@@ -331,7 +317,6 @@ export function isDomainTranscriptBackendMechanics(resolved, specifier, meta = {
   // package-face rules above are the whole contract for it.
   if (!specifier.startsWith('.')) return false
   if (resolved.startsWith('domain/transcript/')) return false
-  if (DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES.has(resolved)) return false
   if (meta.typeOnly === true && DOMAIN_TRANSCRIPT_TYPE_ONLY_EDGES.has(resolved)) return false
   return true
 }
@@ -553,16 +538,15 @@ export const ARCHITECTURE_RULES = [
     // `PiTui mechanics -> tui/transcript -> domain/transcript`, so a domain
     // module reaching a renderer/backend owner means the fact was misclassified
     // and must be split, never allowlisted. The rule is CLOSED-WORLD (see
-    // `isDomainTranscriptBackendMechanics`): only domain siblings, the frozen
-    // transitional pure root VALUE helpers and the two TYPE-ONLY compatibility
-    // edges are admitted, so TS8 can only shrink the set. It also carries the
+    // `isDomainTranscriptBackendMechanics`): only domain siblings and the two
+    // TYPE-ONLY compatibility edges are admitted. It also carries the
     // type-only discriminator, so a value import can never ride along on a
     // type-only allowance.
     id: 'domain-transcript-imports-backend-mechanics',
     message:
       'src/domain/transcript/** is the transport/UI-neutral transcript semantic authority: it may import only its domain '
-      + 'siblings, the frozen transitional pure root helper (value: present; type-only: domain/display/icons, assistant-stream-port) and official DSH semantic packages — every other edge '
-      + '(tui/**, app/**, runtime/direct|remote, commands.ts, display-preset.ts, transcript.ts, PiTui, Tern, …) must be split instead',
+      + 'siblings, the canonical TYPE-ONLY edges (domain/display/icons.ts, runtime/assistant-stream-port.ts) and official DSH semantic packages — every other edge '
+      + '(tui/**, app/**, runtime/direct|remote, commands.ts, transcript.ts, any transitional/legacy root, PiTui, Tern, …) must be split instead',
     applies: (srcRel) => isDomainTranscriptSubtree(srcRel),
     forbids: (resolved, specifier, meta) => isDomainTranscriptBackendMechanics(resolved, specifier, meta),
     checksValueDynamicImport: true,

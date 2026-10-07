@@ -27,7 +27,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from 
 import { iconPrefix } from '../../icons.ts'
 import type { IconStyle } from '../../../domain/display/icons.ts'
 import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from '../../../long-message-disclosure.ts'
-import { systemContextBody } from '../../../present.ts'
+import { systemContextBody } from '../../transcript/tool-presentation.ts'
 import { color } from '../../../theme.ts'
 import type { TranscriptMessage } from '../../../transcript.ts'
 

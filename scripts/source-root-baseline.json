@@ -46,7 +46,6 @@
     "pending-context.ts",
     "pending-presentation.ts",
     "pending-submission.ts",
-    "present.ts",
     "presentation-lines.ts",
     "process-tui-slot.ts",
     "progress.ts",

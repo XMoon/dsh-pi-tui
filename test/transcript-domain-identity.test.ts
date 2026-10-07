@@ -39,6 +39,15 @@ test('the facade re-exports the canonical TranscriptFolder identity', () => {
   assert.strictEqual(facadeFoldTranscript, canonicalFoldTranscript)
 })
 
+test('the stable transcript facade owns no implementation and imports no client/tui module (TS8-D)', () => {
+  const source = readFileSync(new URL('../src/transcript.ts', import.meta.url), 'utf8')
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+  assert.equal(/\brenderTranscriptMarkdown\b/.test(code), false, 'the Markdown exporter is not a facade export')
+  assert.equal(/\b(?:function|class)\s/.test(code), false, 'the facade declares no local function/class implementation')
+  assert.equal(/^\s*import\b/m.test(code), false, 'the facade is pure re-exports — no local imports')
+  assert.equal(/from\s+['"][^'"]*(?:\/client\/|\/tui\/)/.test(code), false, 'the facade imports neither client/** nor tui/**')
+})
+
 test('exactly one production TranscriptFolder class declaration exists', () => {
   const declaring = productionSources(SRC)
     .filter(path => /\bclass TranscriptFolder\b/.test(readFileSync(path, 'utf8')))

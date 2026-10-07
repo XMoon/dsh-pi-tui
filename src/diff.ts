@@ -10,7 +10,7 @@
 import { structuredPatch } from 'diff'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import { color } from './theme.ts'
-import { relativizeToCwd } from './present.ts'
+import { relativizeToCwd } from './tui/transcript/tool-presentation.ts'
 
 /**
  * Whether a tool result should render as a diff: edit-class tools always,
