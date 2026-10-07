@@ -2314,7 +2314,7 @@ fd output can identify a directory without a trailing slash, including through s
 **Host**
 - src/tui/interaction/autocomplete/provider.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider
 - public AutocompleteProvider consumers may provide an fd-backed provider
-- Audit note: The current @ flow uses HostFilePort/discoverMention and the /image path uses completeImageArgument/LocalFileSource; neither is counted as a direct fd consumer of X027.
+- Audit note: The current @ flow uses HostFilePort/discoverMention and the /image path uses completePathArgument over ClientLocalDiscoveryDriver (its own Client finder); neither is counted as a direct fd consumer of X027.
 
 **Public / extension**
 - AutocompleteProvider output is public through editor completion integration
