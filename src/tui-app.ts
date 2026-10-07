@@ -62,7 +62,7 @@ import {
   SearchablePicker,
   type SearchablePickerTruncatePrimaryContext,
 } from './tui/pickers/searchable-picker.ts'
-import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
+import { claimProcessTuiSlot, releaseProcessTuiSlot } from './tui/process-slot.ts'
 import { isTernTerminal, ternCwdSequence, ternProgressState } from './tui/terminal/tern.ts'
 import { runSyncDisposalSteps } from './runtime/process/disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
@@ -279,7 +279,7 @@ import {
   RUNNING_PREVIEW_LINES,
   SETTLED_PREVIEW_VISUAL_ROWS,
 } from './local-shell-card.ts'
-import { formatBytes } from './bounded-output.ts'
+import { formatBytes } from './domain/media/format.ts'
 import type { RendererRegistry } from './extension/internal/renderer-registry.ts'
 import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
 import { EditorSeatMount } from './tui/interaction/editor-seat.ts'
@@ -3796,7 +3796,7 @@ export class TuiApp {
    * not-final-disposed surface is still a valid generation whose host
    * keybinding manager keeps syncing into the PROCESS-GLOBAL fork
    * keybindings — the slot is held until the FINAL dispose() (see
-   * process-tui-slot.ts). */
+   * tui/process-slot.ts). */
   stop(): void {
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
@@ -14749,7 +14749,7 @@ export class TuiApp {
    * §5.1): the card head, the `$ command` row, the newest preview rows
    * (5 source lines while running, up to 20 visual rows once settled),
    * and the hidden-count marker when content was cut. The capture layer
-   * (bounded-output caps) is untouched — this is display policy only.
+   * (client/shell/output-capture caps) is untouched — this is display policy only.
    * @param card - the card container to fill.
    * @param message - the local shell tool message (name 'shell', unbounded
    *   turn — see {@link isLocalShellCard}).

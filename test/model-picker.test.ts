@@ -26,7 +26,7 @@ import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Every TuiApp started here is stopped after each test (single-live-TUI
- *  slot; see src/process-tui-slot.ts). */
+ *  slot; see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

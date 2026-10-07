@@ -1381,7 +1381,7 @@ registrations/handles valid across stop/start round-trips). Two surfaces
 sharing one process would therefore fight over one keybinding state —
 App A's submit remap would hijack App B's Enter — even when one of them
 is merely stopped, not disposed. The host enforces the invariant
-fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
+fail-fast (re-vendor lifecycle follow-up P3, `src/tui/process-slot.ts`):
 
 - `TuiApp.start()` CLAIMS the process slot at the first successful start
   (a failed `start()` never leaks the claim); `TuiApp.stop()` NEVER

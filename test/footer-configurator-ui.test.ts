@@ -23,7 +23,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

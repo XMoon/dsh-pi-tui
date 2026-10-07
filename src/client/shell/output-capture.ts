@@ -1,15 +1,19 @@
 /**
- * Bounded accumulation of user-shell output: the UI card only ever holds
- * the TAIL of the stream (byte- and line-capped), so a runaway `yes` or
- * `find /` cannot grow memory without bound — including a stream that never
- * emits a newline (the unterminated tail is capped and UTF-8-safe too).
- * Two totals are tracked separately and must not be conflated: the WIRE
- * bytes actually received (raw, before decoding — the decoder may buffer
- * incomplete multi-byte sequences) and the DISPLAY bytes of the decoded
- * text. The cap is a DISPLAY cap; the truncation report states each in its
- * own unit. A companion {@link createFileCapture} bounds the full-output
- * disk capture the same way, so /tmp cannot be filled either.
- * @module @xmoon76/dsh-pi-tui/bounded-output
+ * Bounded CLIENT-side retention of authoritative Host shell output: the UI
+ * card only ever holds the TAIL of the stream (byte- and line-capped), so a
+ * runaway `yes` or `find /` cannot grow memory without bound — including a
+ * stream that never emits a newline (the unterminated tail is capped and
+ * UTF-8-safe too). Two totals are tracked separately and must not be
+ * conflated: the WIRE bytes actually received (raw, before decoding — the
+ * decoder may buffer incomplete multi-byte sequences) and the DISPLAY bytes
+ * of the decoded text. The cap is a DISPLAY cap; the truncation report states
+ * each in its own unit. A companion {@link createFileCapture} bounds the
+ * full-output disk capture the same way, so /tmp cannot be filled either.
+ *
+ * This is Client retention/capture policy for output the Host already
+ * produced — it is NOT Host execution authority (execution stays behind the
+ * injected `HostUserShellPort`).
+ * @module @xmoon76/dsh-pi-tui/client/shell/output-capture
  */
 
 import { closeSync, openSync, rmSync, writeSync } from 'node:fs'
@@ -277,28 +281,4 @@ export function createFileCapture(path: string, capBytes: number = SHELL_OUTPUT_
       }
     },
   }
-}
-
-/**
- * The truncation report line. Reports ACTUAL retained values (measured
- * from the tail), never the configured caps, and states each total in its
- * own unit: retained display bytes / retained lines, decoded display total,
- * and wire-received total.
- */
-export function formatTruncation(bounded: {
-  tail: string
-  totalBytes: number
-  totalWireBytes: number
-  totalLines: number
-}): string {
-  const retainedDisplay = Buffer.byteLength(bounded.tail, 'utf8')
-  const retainedLines = bounded.tail === '' ? 0 : bounded.tail.split('\n').length
-  return `… output truncated: retained ${formatBytes(retainedDisplay)} display / ${retainedLines} lines; decoded ${formatBytes(bounded.totalBytes)} display from ${formatBytes(bounded.totalWireBytes)} received (${bounded.totalLines} lines total)`
-}
-
-/** Human-readable byte count (e.g. `256.0 KiB`, `12.3 MiB`). */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }

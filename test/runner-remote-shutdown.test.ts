@@ -40,7 +40,7 @@ import type { RemoteApplicationOverride } from '../src/app/application-runtime.t
 import type { SessionOwnerRetirement } from '../src/app/session/owner-access.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
 import { CatalogRefreshCoordinator } from '../src/app/command/catalog-refresh.ts'
-import { liveTuiCountForTest } from '../src/process-tui-slot.ts'
+import { liveTuiCountForTest } from '../src/tui/process-slot.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
