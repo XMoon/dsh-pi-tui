@@ -19,7 +19,7 @@ import { classifyFileCompletionContext, extractAtPrefix } from '../src/tui/file-
 import { resolvePathQuery, type PathQueryEnvironment } from '../src/domain/file-completion/query.ts'
 import { scorePathCandidate } from '../src/domain/file-completion/ranking.ts'
 import { presentPathCandidate } from '../src/tui/file-completion/presentation.ts'
-import { MentionProvider } from '../src/mentions.ts'
+import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 

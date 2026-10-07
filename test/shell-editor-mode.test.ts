@@ -20,7 +20,7 @@ import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.
 import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
 import { createDiag } from '../src/diag.ts'
 import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../src/shell-completion.ts'
-import { MentionProvider } from '../src/mentions.ts'
+import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
