@@ -12,11 +12,11 @@
  * path), and the result is written into the `\x1b]0;…\x07` OSC sequence —
  * embedded ESC/OSC/BEL/C0 sequences must never escape the title payload
  * and emit arbitrary terminal control.
- * @module @xmoon76/dsh-pi-tui/terminal-title
+ * @module @xmoon76/dsh-pi-tui/tui/terminal/title
  */
 
 import { stripTerminalSequences, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { shortCwd } from './tui/footer/formatters.ts'
+import { shortCwd } from '../footer/formatters.ts'
 
 /** The title display cap (terminal cells, not code units). */
 export const MAX_TERMINAL_TITLE_WIDTH = 40

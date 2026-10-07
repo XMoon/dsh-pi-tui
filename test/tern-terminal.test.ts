@@ -249,6 +249,7 @@ function cwdHarness(options: {
       status: { snapshot: () => emptyStatusSnapshot() },
       commitStatus: () => {},
     },
+    updateTerminalTitle: () => {},
     isCleanedUp: () => false,
     liveAgent: () => options.live === undefined ? undefined : {
       session: {

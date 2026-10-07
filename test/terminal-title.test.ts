@@ -1,5 +1,6 @@
 /**
- * Headless tests for the terminal window title policy (src/terminal-title.ts):
+ * Headless tests for the terminal window title policy
+ * (src/tui/terminal/title.ts):
  * session-title-first composition, short-cwd fallback, the bare `dsh`
  * fallback, display-width capping (CJK / emoji / ZWJ safe), and the
  * no-UUID guarantee.
@@ -15,7 +16,7 @@ import {
   shortPathCwd,
   terminalTitleFits,
   terminalTitleOf,
-} from '../src/terminal-title.ts'
+} from '../src/tui/terminal/title.ts'
 
 test('a session title leads the composed title', () => {
   assert.equal(terminalTitleOf({ sessionTitle: 'Fix queue bug', cwd: '/foo/bar' }), 'dsh · Fix queue bug')
