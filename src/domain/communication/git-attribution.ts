@@ -10,11 +10,10 @@
  * `product-model` uses DSH's own `{{provider}}`/`{{model}}` prompt
  * variables (owned by `installModelSelection()` per step), so a model
  * switch changes the NEXT assembly with no listener, cache, or
- * re-registration.
- * @module @xmoon76/dsh-pi-tui/git-attribution
+ * re-registration. The neutral domain owns the mode/parse policy and the pure
+ * text; the section registration lives in `app/direct/system-prompt.ts`.
+ * @module @xmoon76/dsh-pi-tui/domain/communication/git-attribution
  */
-
-import type { SystemPromptLike } from './focus.ts'
 
 export type GitAttributionMode = 'off' | 'product' | 'product-model'
 
@@ -66,14 +65,7 @@ Assisted-By: {{provider}}/{{model}}
 Preserve existing commit trailers. When amending a commit that already contains either exact trailer, do not add a duplicate.`,
 }
 
-/** Register once per composed Agent; each assembly reads the live mode. */
-export function installGitAttributionPrompt(
-  systemPrompt: SystemPromptLike,
-  state: GitAttributionState,
-): () => void {
-  return systemPrompt.section({
-    name: GIT_ATTRIBUTION_SECTION_NAME,
-    order: GIT_ATTRIBUTION_SECTION_ORDER,
-    text: () => attributionPrompts[state.mode],
-  })
+/** The effective attribution section text for the live mode. */
+export function gitAttributionPromptText(state: GitAttributionState): string {
+  return attributionPrompts[state.mode]
 }

@@ -1,4 +1,5 @@
-/** Model-facing communication policy, independent of transcript presentation.
+/**
+ * Model-facing communication policy, independent of transcript presentation.
  *
  * Two independent axes (the PR #166 follow-up split):
  * - `ProgressUpdates` owns the user-facing mid-turn update cadence;
@@ -6,12 +7,14 @@
  *
  * Neither axis is a display preset: `DisplayState` owns what the surface can
  * make visible, and the Focus preset suppresses the effective progress
- * section through the live provider without mutating the saved preference.
- * @module @xmoon76/dsh-pi-tui/communication-policy
+ * section through the live display state without mutating the saved
+ * preference. Registration of the sections belongs to the Direct
+ * system-prompt owner (`app/direct/system-prompt.ts`); this module owns the
+ * pure text/policy derivation.
+ * @module @xmoon76/dsh-pi-tui/domain/communication/policy
  */
 
-import { isFocusDisplayPreset, type DisplayState } from './domain/display/preset.ts'
-import type { SystemPromptLike } from './focus.ts'
+import { isFocusDisplayPreset, type DisplayState } from '../display/preset.ts'
 
 export type ProgressUpdates = 'off' | 'milestones' | 'frequent'
 
@@ -99,26 +102,11 @@ Prioritize explanations of why, constraints, and decisions over narration of the
 /** The Focus surface owns what can reach the user, so the progress section
  * reads BOTH live states: on Focus the effective progress text is empty
  * regardless of the saved cadence (which is never mutated). */
-export function installProgressUpdatesPrompt(
-  systemPrompt: SystemPromptLike,
-  displayState: DisplayState,
-  state: ProgressUpdatesState,
-): () => void {
-  return systemPrompt.section({
-    name: PROGRESS_UPDATES_SECTION_NAME,
-    order: PROGRESS_UPDATES_SECTION_ORDER,
-    text: () => (isFocusDisplayPreset(displayState.preset) ? '' : progressPrompts[state.mode]),
-  })
+export function progressUpdatesPromptText(displayState: DisplayState, state: ProgressUpdatesState): string {
+  return isFocusDisplayPreset(displayState.preset) ? '' : progressPrompts[state.mode]
 }
 
-/** Register once per agent; each assembly reads the live, caller-owned state. */
-export function installResponseStylePrompt(
-  systemPrompt: SystemPromptLike,
-  state: ResponseStyleState,
-): () => void {
-  return systemPrompt.section({
-    name: RESPONSE_STYLE_SECTION_NAME,
-    order: RESPONSE_STYLE_SECTION_ORDER,
-    text: () => responsePrompts[state.style],
-  })
+/** The effective response-style section text for the live state. */
+export function responseStylePromptText(state: ResponseStyleState): string {
+  return responsePrompts[state.style]
 }
