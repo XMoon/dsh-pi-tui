@@ -20,7 +20,7 @@
 import type { ImageAttachmentRefLike, ImageMediaType } from '../domain/media/types.ts'
 
 /** One staged image snapshot: the bytes (when locally held) or the durable
- * ref (a recalled draft), plus the display facts both transports need. */
+ * ref (a recalled draft), plus the display facts the Remote serializer needs. */
 export interface PreparedImage {
   /** Exact encoded bytes; empty ONLY for a recalled draft (see recalledRef). */
   readonly bytes: Uint8Array
