@@ -1286,11 +1286,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       }
       // The TUI is about to mount: the app takes over the terminal now, and
       // the same instance is what dispose() releases.
-      app = startProcessTui(events, buildOptions(deps))
-      // A main-Agent `agent/status` observed BEFORE the mount (plan §8.2):
-      // project the latched desired state once the concrete surface exists. A
-      // latched `false` needs no write (no progress was ever shown).
-      if (mainAgentProgressActive) app.setTerminalProgress(true)
+      //
+      // A main-Agent `agent/status` observed BEFORE the mount (plan §8.2) is
+      // handed INTO the construction (plan addendum §25): the FIRST terminal
+      // acquisition already asserts the final state, instead of writing idle
+      // and being corrected one write later (an idle -> working flash).
+      app = startProcessTui(events, {
+        ...buildOptions(deps),
+        initialTerminalProgress: mainAgentProgressActive,
+      })
     },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original

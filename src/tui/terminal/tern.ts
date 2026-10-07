@@ -12,6 +12,8 @@
 
 import { isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import type { TerminalProgressState } from '@xmoon76/pi-tui'
+import type { RunPhase } from '../../domain/status/types.ts'
 
 /**
  * Whether the terminal identifies itself as Tern. Matched case-insensitively
@@ -35,4 +37,22 @@ export function isTernTerminal(env: NodeJS.ProcessEnv = process.env): boolean {
 export function ternCwdSequence(cwd: string): string | undefined {
   if (cwd === '' || cwd.includes('\0') || !isAbsolute(cwd)) return undefined
   return `\x1b]7;${pathToFileURL(cwd).href}\x07`
+}
+
+/**
+ * The OSC 9;4 state Tern should show for the authoritative main-Agent running
+ * truth refined by the canonical RunPhase (plan §6.2). This is a
+ * presentation-only mapping: `running` stays PR #230's main-Agent fence, and
+ * the phase only WIDENS an already-running state to Tern's `waiting_input`
+ * (`paused`). Idle wins over any phase, so a stale phase can never keep a
+ * retired owner busy:
+ *
+ * - not running          -> `clear`
+ * - running + a wait     -> `paused` (Tern `waiting_input`)
+ * - running + any other  -> `indeterminate` (Tern `working`)
+ */
+export function ternProgressState(running: boolean, phase: RunPhase): TerminalProgressState {
+  if (!running) return 'clear'
+  if (phase === 'waiting-approval' || phase === 'waiting-question') return 'paused'
+  return 'indeterminate'
 }

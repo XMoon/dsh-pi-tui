@@ -73,11 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Tern terminal compatibility: the Agent's running state now drives the
   terminal's native progress indicator (OSC 9;4), and completion
-  notifications use Tern's native OSC 9 toast under `Auto`. Every time the
-  TUI takes the terminal (startup, a fullscreen round-trip, an `$EDITOR`
-  round-trip) it also asserts the current progress state, so Tern's initial
-  "pane has a foreground command running" state — or any stale progress state
-  left by another program — no longer stays painted while the Agent is idle.
+  notifications use Tern's native OSC 9 toast under `Auto`. While the Agent
+  waits for a user confirmation or answer (an approval or a question) the pane
+  shows Tern's "waiting for input" state instead of staying "running", and
+  returns to running as soon as the wait settles (idle still clears it). Every
+  time the TUI takes the terminal (startup, a fullscreen round-trip, an
+  `$EDITOR` round-trip) it also asserts the current progress state, so Tern's
+  initial "pane has a foreground command running" state — or any stale
+  progress state left by another program — no longer stays painted while the
+  Agent is idle.
 
 - The fullscreen long user message bubble is now one local disclosure
   surface: a single click anywhere on a collapsed bubble (head text, marker,

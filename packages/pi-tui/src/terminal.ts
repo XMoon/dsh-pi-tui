@@ -11,6 +11,7 @@ const cjsRequire = createRequire(import.meta.url);
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0\x07";
+const TERMINAL_PROGRESS_PAUSED_SEQUENCE = "\x1b]9;4;4\x07";
 const NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
@@ -113,7 +114,22 @@ export interface Terminal {
 
 	// Progress indicator (OSC 9;4)
 	setProgress(active: boolean): void;
+
+	/**
+	 * Optional richer OSC 9;4 state projection (X059). Consumers that only
+	 * know the boolean `setProgress` keep working unchanged; `ProcessTerminal`
+	 * implements it so a host can express `paused` (OSC 9;4;4, e.g. Tern's
+	 * `waiting_input`) without a transient clear.
+	 */
+	setProgressState?(state: TerminalProgressState): void;
 }
+
+/**
+ * The physical OSC 9;4 progress states this terminal can own (X059):
+ * `clear` (9;4;0), `indeterminate` (9;4;3 plus the 1s keepalive) and `paused`
+ * (9;4;4, no keepalive — a state the boolean API cannot represent).
+ */
+export type TerminalProgressState = "clear" | "indeterminate" | "paused";
 
 const DEFAULT_ESCAPE_TIMEOUT_MS = 10;
 const DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100;
@@ -153,6 +169,10 @@ export class ProcessTerminal implements Terminal {
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
+	/** The PHYSICAL OSC 9;4 state (X059). Tracked separately from the
+	 * keepalive timer because `paused` is a real state with no interval: only
+	 * this field can tell `stop()` that there is something to clear. */
+	private progressState: TerminalProgressState = "clear";
 	private writeLogPath = (() => {
 		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
@@ -473,8 +493,14 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
-		if (this.clearProgressInterval()) {
+		// Clear EVERY physically active progress state, not only the
+		// keepalive-backed indeterminate one: `paused` has no interval, so the
+		// old interval-only predicate would leak OSC 9;4;4 into the shell or
+		// the $EDITOR that takes the terminal next (X059).
+		if (this.progressState !== "clear") {
+			this.clearProgressInterval();
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			this.progressState = "clear";
 		}
 
 		// Disable bracketed paste mode
@@ -579,7 +605,22 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setProgress(active: boolean): void {
-		if (active) {
+		// The boolean contract is unchanged: true = indeterminate + keepalive,
+		// false = clear. It now delegates to the stateful primitive so the
+		// physical state stays truthful for `stop()` (X059).
+		this.setProgressState(active ? "indeterminate" : "clear");
+	}
+
+	/**
+	 * OSC 9;4 state projection (X059). Each call writes its own state
+	 * UNCONDITIONALLY — the caller owns the dedupe, exactly like the boolean
+	 * contract, so `setProgress(true/false)` keeps its byte-for-byte behavior.
+	 * `paused` stops the keepalive and writes OSC 9;4;4 directly with NO
+	 * intermediate clear: a transient indeterminate/idle frame would make Tern
+	 * blink `working` between `working` and `waiting_input`.
+	 */
+	setProgressState(state: TerminalProgressState): void {
+		if (state === "indeterminate") {
 			// OSC 9;4;3 - indeterminate progress
 			process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 			if (!this.progressInterval) {
@@ -589,9 +630,10 @@ export class ProcessTerminal implements Terminal {
 			}
 		} else {
 			this.clearProgressInterval();
-			// OSC 9;4;0 - clear progress
-			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			// OSC 9;4;4 - paused (waiting for user input) / OSC 9;4;0 - clear
+			process.stdout.write(state === "paused" ? TERMINAL_PROGRESS_PAUSED_SEQUENCE : TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
+		this.progressState = state;
 	}
 
 	private clearProgressInterval(): boolean {

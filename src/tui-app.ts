@@ -48,6 +48,7 @@ import {
   type SettingItem,
   type SlashCommand,
   type Terminal,
+  type TerminalProgressState,
   type TuiInputListenerResult,
   type KeyId,
   type TuiMouseEvent,
@@ -62,7 +63,7 @@ import {
   type SearchablePickerTruncatePrimaryContext,
 } from './tui/pickers/searchable-picker.ts'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './process-tui-slot.ts'
-import { isTernTerminal, ternCwdSequence } from './tui/terminal/tern.ts'
+import { isTernTerminal, ternCwdSequence, ternProgressState } from './tui/terminal/tern.ts'
 import { runSyncDisposalSteps } from './disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
 // The generic overlay frame now lives in the TUI component layer; the stable
@@ -1562,6 +1563,15 @@ export interface TuiAppOptions {
    */
   ternTerminal?: boolean
   /**
+   * The authoritative main-Agent running truth already known BEFORE the mount
+   * (the surface's pre-mount `agent/status` latch). It initializes the desired
+   * progress state so the FIRST terminal acquisition asserts the FINAL state
+   * directly: without it a fresh TuiApp starts idle, writes `clear` at the
+   * mount and only then receives the latched `running` — a sub-frame
+   * idle -> working flash on the pane (plan addendum §25). Defaults to false.
+   */
+  initialTerminalProgress?: boolean
+  /**
    * The structural icon palette (emoji | symbols | minimal), read once at
    * startup from the persisted settings. Runtime switches go through
    * {@link TuiApp.setIconStyle} — renderers NEVER deep-read a settings
@@ -2237,13 +2247,25 @@ export class TuiApp {
    * capabilities fail benignly instead of touching a dead terminal. */
   private disposed = false
   /**
-   * The DESIRED terminal progress state (OSC 9;4 — plan §6). Presentation
-   * state only, never a second Agent lifecycle authority: it survives a
-   * stop() because ProcessTerminal.stop() clears the physical indicator and
-   * its keepalive, and every TuiApp-owned screen (re)start re-asserts this
-   * value.
+   * The authoritative main-Agent RUNNING truth (OSC 9;4 — plan §6). It is the
+   * one semantic input of the pane projection and the fence that keeps a
+   * retired/child Agent from ever showing progress; {@link
+   * reconcileTerminalProgress} turns it into the effective state.
+   * Presentation state only, never a second Agent lifecycle authority: it
+   * survives a stop() because ProcessTerminal.stop() clears the physical
+   * indicator and its keepalive, and every TuiApp-owned screen (re)start
+   * re-asserts the effective value.
    */
   private terminalProgressActive = false
+  /**
+   * The EFFECTIVE terminal progress state (OSC 9;4 — plan §9). For a Tern
+   * terminal it is the main-running truth WIDENED by the canonical RunPhase
+   * (a user-blocked phase becomes `paused`); every other terminal only ever
+   * sees the PR #230 clear/indeterminate pair. Deduping on this field keeps
+   * both the byte stream and the phase-driven reconcile write-free when
+   * nothing effective changed.
+   */
+  private terminalProgressState: TerminalProgressState = 'clear'
   /**
    * Whether the shared ProcessTerminal is currently OWNED for presentation by
    * this TuiApp (started, not suspended/stopped). A suspended screen must
@@ -3205,6 +3227,7 @@ export class TuiApp {
     this.displayState = options.displayState ?? { preset: 'full' }
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.ternTerminal = options.ternTerminal === true
+    this.terminalProgressActive = options.initialTerminalProgress === true
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
@@ -3902,10 +3925,13 @@ export class TuiApp {
    * Project the authoritative main-Agent running state onto the terminal's
    * native progress indicator (plan §6/§8). The terminal protocol — OSC 9;4
    * plus its keepalive — stays owned by the injected `Terminal`; this method
-   * only carries the desired boolean. Presentation only: an equal write is
-   * deduped (repeated `agent/status=running` must not churn the indicator),
-   * and a synchronous terminal-write failure is contained (plan §16 — a
-   * broken stdout must never crash the TUI).
+   * only carries the desired running truth. Tern additionally refines an
+   * already-running state with the canonical phase (a user-blocked phase
+   * becomes `paused` — plan §9); every other terminal keeps the plain boolean
+   * projection byte-for-byte. Presentation only: an equal state is deduped
+   * (repeated `agent/status=running` must not churn the indicator), and a
+   * synchronous terminal-write failure is contained (plan §16 — a broken
+   * stdout must never crash the TUI).
    *
    * While the TuiApp does NOT own the terminal (stopped, or suspended for the
    * external editor) the desired state is still folded — a
@@ -3915,16 +3941,48 @@ export class TuiApp {
   setTerminalProgress(active: boolean): void {
     if (this.terminalProgressActive === active) return
     this.terminalProgressActive = active
+    this.reconcileTerminalProgress()
+  }
+
+  /**
+   * Reconcile the EFFECTIVE terminal progress state from the TWO independent
+   * facts that can change it (plan §9.1): the authoritative main-Agent running
+   * truth and the canonical activity phase. Called from the running-truth
+   * setter and from every activity projection (a question/approval opening or
+   * settling changes the phase while the running truth is unchanged). The
+   * effective state is deduped, so a non-Tern surface never writes here and a
+   * repeated phase commit is inert.
+   */
+  private reconcileTerminalProgress(
+    phase: RunPhase = this.statusStore.snapshot().activity.phase,
+  ): void {
+    const state = this.effectiveTerminalProgressState(phase)
+    if (this.terminalProgressState === state) return
+    this.terminalProgressState = state
     if (!this.terminalPresentationActive) return
-    this.writeTerminalProgress(active)
+    this.writeTerminalProgress(state)
+  }
+
+  /**
+   * The effective pane state for the current inputs: the main-Agent running
+   * truth alone for every ordinary terminal, refined by the canonical phase for
+   * Tern (`waiting-approval`/`waiting-question` -> `paused`). Pure.
+   */
+  private effectiveTerminalProgressState(
+    phase: RunPhase = this.statusStore.snapshot().activity.phase,
+  ): TerminalProgressState {
+    if (!this.ternTerminal) return this.terminalProgressActive ? 'indeterminate' : 'clear'
+    return ternProgressState(this.terminalProgressActive, phase)
   }
 
   /**
    * Claim terminal presentation ownership for the cwd/progress projections.
    * Called immediately after EVERY TuiApp-owned screen start (plan §4.6/§7).
    *
-   * EVERY acquisition asserts the current DESIRED state — not just the first
-   * one. The progress indicator is terminal-side state that outlives an
+   * EVERY acquisition asserts the current EFFECTIVE desired state (the running
+   * truth refined by the canonical phase, see
+   * {@link reconcileTerminalProgress}) — not just the first one. The progress
+   * indicator is terminal-side state that outlives an
    * ownership window and can be changed while this TuiApp does not own the
    * terminal: Tern marks a pane "running" while a foreground command runs (and
    * `dsh` itself is such a command), and during an `$EDITOR` round-trip the
@@ -3937,7 +3995,13 @@ export class TuiApp {
   private enterTerminalPresentation(): void {
     this.terminalPresentationActive = true
     this.restoreTerminalCwd()
-    this.writeTerminalProgress(this.terminalProgressActive)
+    // Recompute the effective state from the live inputs FIRST, then write it
+    // unconditionally (PR #231): an acquisition must assert the final state on
+    // the very first write, so a progress state observed before the mount — or
+    // one left behind by another terminal owner — never needs a corrective
+    // second write.
+    this.terminalProgressState = this.effectiveTerminalProgressState()
+    this.writeTerminalProgress(this.terminalProgressState)
   }
 
   /**
@@ -3950,12 +4014,21 @@ export class TuiApp {
     this.terminalPresentationActive = false
   }
 
-  /** Write one progress hint through the injected terminal, containing a
-   * synchronous terminal-write failure (the async stream error is already
-   * contained by the runner's guarded stdout listener). */
-  private writeTerminalProgress(active: boolean): void {
+  /**
+   * Write one effective progress state through the injected terminal. Tern is
+   * the only owner of the richer stateful projection (plan §9.3); a terminal
+   * that does not implement it fails SOFT to the boolean contract — a paused
+   * wait degrades to the working indicator, never to a raw escape write — and
+   * a synchronous write failure is contained (the async stream error is
+   * already contained by the runner's guarded stdout listener).
+   */
+  private writeTerminalProgress(state: TerminalProgressState): void {
     try {
-      this.terminal.setProgress(active)
+      if (this.ternTerminal && this.terminal.setProgressState !== undefined) {
+        this.terminal.setProgressState(state)
+        return
+      }
+      this.terminal.setProgress(state !== 'clear')
     } catch {
       // Terminal presentation only: the semantic agent lifecycle continues.
     }
@@ -15867,6 +15940,13 @@ export class TuiApp {
     // paint the transcript rarely, so a render-driven freeze could miss the
     // whole wait and over-count it (plan §5.3).
     this.observeFocusTiming(activity.phase)
+    // Tern only (plan §9.1): the phase is the SECOND input of the pane-progress
+    // projection, so a wait that opens or settles while the main Agent keeps
+    // running moves the pane state immediately. The derived phase is passed in
+    // directly — the store commit above is not a read-back contract. A non-Tern
+    // terminal's effective state does not depend on the phase, so this is inert
+    // there (the reconcile dedupes before any write).
+    if (this.ternTerminal) this.reconcileTerminalProgress(activity.phase)
   }
 
   /**

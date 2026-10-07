@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { TuiApp } from '../src/tui-app.ts'
-import { isTernTerminal, ternCwdSequence } from '../src/tui/terminal/tern.ts'
+import { isTernTerminal, ternCwdSequence, ternProgressState } from '../src/tui/terminal/tern.ts'
 import { createStatusRuntime, type StatusRuntimeDeps } from '../src/app/surface/status-runtime.ts'
 import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -56,6 +56,23 @@ test('an unusable cwd yields no sequence (no Client-cwd / root substitute)', () 
   assert.equal(ternCwdSequence('relative/path'), undefined)
   assert.equal(ternCwdSequence('./here'), undefined)
   assert.equal(ternCwdSequence('/bad\0path'), undefined)
+})
+
+test('the Tern progress state refines running with the canonical phase (plan §6.2)', () => {
+  // Idle wins over EVERY phase: a stale phase can never keep a retired owner
+  // busy on the pane.
+  for (const phase of ['idle', 'working', 'waiting-approval', 'waiting-question', 'compacting', 'applying-compaction'] as const) {
+    assert.equal(ternProgressState(false, phase), 'clear', `idle + ${phase} is clear`)
+  }
+  // Only the two REAL user-blocked phases pause; every other busy phase keeps
+  // Tern's working state.
+  assert.equal(ternProgressState(true, 'waiting-approval'), 'paused')
+  assert.equal(ternProgressState(true, 'waiting-question'), 'paused')
+  assert.equal(ternProgressState(true, 'working'), 'indeterminate')
+  assert.equal(ternProgressState(true, 'compacting'), 'indeterminate')
+  assert.equal(ternProgressState(true, 'applying-compaction'), 'indeterminate')
+  assert.equal(ternProgressState(true, 'idle'), 'indeterminate',
+    'a running main Agent with no active work still shows working')
 })
 
 // ── TuiApp cwd presentation lifecycle ──────────────────────────────────────

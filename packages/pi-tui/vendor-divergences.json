@@ -5956,6 +5956,115 @@
     ],
     "notes": "Confirmed upstream blocks wheel, PageUp/PageDown, the scrollbar and the selection anchor under ANY visible overlay; the fork adds one optional passthrough keyed on the focused opted-in overlay with no other blocking overlay."
    }
+  },
+  "X059": {
+   "title": "Stateful OSC 9;4 projection (paused / waiting_input)",
+   "status": "ACTIVE",
+   "category": [
+    "HARD_HOST_API"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/index.ts",
+    "src/terminal.ts"
+   ],
+   "why": "Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which the boolean Terminal.setProgress(active) cannot express: false means idle, so a host that wants to show a user-blocked wait would have to write a clear first (a visible working -> idle -> waiting_input blink), and ProcessTerminal.stop() would not know that a physical state is still on the pane. The fork therefore keeps the boolean contract as-is and adds one optional stateful projection whose physical state is tracked independently of the keepalive timer.",
+   "changedSurface": [
+    "TerminalProgressState = 'clear' | 'indeterminate' | 'paused' (exported): the physical OSC 9;4 states this terminal can own.",
+    "Terminal.setProgressState?(state) — optional and additive; an implementation that does not provide it keeps the boolean contract unchanged.",
+    "ProcessTerminal.setProgressState: 'indeterminate' writes OSC 9;4;3 and starts the existing 1 s keepalive when absent; 'paused' stops the keepalive and writes OSC 9;4;4 with NO intermediate 9;4;0; 'clear' stops the keepalive and writes OSC 9;4;0.",
+    "ProcessTerminal.setProgress(active) delegates to the stateful primitive (true -> indeterminate, false -> clear) and keeps its exact bytes, timer ownership and dedupe behavior.",
+    "ProcessTerminal.stop() clears EVERY non-clear physical progress state, not only a keepalive-backed one, so a paused state cannot leak into the shell or an $EDITOR that takes the terminal next.",
+    "Host: src/tui-app.ts reconciles the effective pane state from the authoritative main-Agent running truth plus the canonical RunPhase; only a Tern terminal consumes setProgressState (every other terminal keeps the plain boolean projection)."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "The physical progress state is tracked next to (never derived from) the keepalive interval, because 'paused' is a real state with no interval; stop()'s clear predicate reads that field.",
+      "clearProgressInterval() remains the single timer-ownership point; setProgressState('indeterminate') reuses it and never starts a second interval.",
+      "The boolean setProgress and the host-visible sequence bytes are preserved: the new branch is additive and every pre-existing call path keeps its output."
+     ],
+     "notes": "The only behavior change for an existing caller is stop() also clearing a physically paused state, which the boolean API could never leave behind."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "ProcessTerminal implements the Terminal interface; the new member is optional, so structural/test implementations that only provide setProgress stay assignable.",
+      "No subclass edge: the method is a plain public method on ProcessTerminal, and TerminalProgressState is a closed string union."
+     ],
+     "notes": "An implementation without setProgressState is untouched and keeps the upstream boolean behavior."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "src/tui-app.ts owns the effective state: reconcileTerminalProgress() runs from setTerminalProgress() and from every activity projection (projectActivity), so a wait opening or settling while the main Agent runs moves the pane immediately.",
+      "The Tern-only guard keeps the richer method off every non-Tern path (plan §9.2), and a Tern terminal that lacks setProgressState fails soft to the boolean working/clear projection (plan §9.3).",
+      "The PR #230 ownership lifecycle is preserved: while the TuiApp does not own the terminal the desired state is only folded, and every screen (re)start re-asserts the CURRENT effective state."
+     ],
+     "notes": "Guarded by test/terminal-progress-lifecycle.test.ts (the Tern waiting_input section) and test/tern-terminal.test.ts (the pure mapping)."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "Terminal and the new TerminalProgressState are public package types; the method is optional and additive, so existing consumers compile and behave unchanged.",
+      "The extension-facing public API is deliberately not widened: no plugin-facing capability or option is added."
+     ],
+     "notes": "Absent method = upstream behavior."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "indeterminate -> paused stops the keepalive and writes paused directly, with no OSC 9;4;0 between the two states.",
+      "paused -> indeterminate resumes the keepalive; paused -> clear writes the clear sequence; paused -> stop() writes the clear sequence exactly once and leaves no timer.",
+      "setProgress(true/false) keeps its exact bytes and keepalive, and a repeated boolean active starts no second interval.",
+      "A host screen restart while paused re-asserts paused on the new screen, and a stop() after an explicit clear writes no second clear."
+     ],
+     "notes": "Guarded by packages/pi-tui/test/terminal.test.ts (X059) plus the host terminal-progress lifecycle regressions."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/terminal.test.ts: writes OSC 9;4;4 for paused with no intermediate clear (X059)",
+    "packages/pi-tui/test/terminal.test.ts: indeterminate -> paused stops the keepalive and writes paused directly (X059)",
+    "packages/pi-tui/test/terminal.test.ts: paused -> indeterminate resumes the active keepalive (X059)",
+    "packages/pi-tui/test/terminal.test.ts: paused -> clear writes the clear sequence and stops every timer (X059)",
+    "packages/pi-tui/test/terminal.test.ts: stop() clears a PHYSICALLY paused state exactly once (X059)",
+    "packages/pi-tui/test/terminal.test.ts: setProgress(true/false) keeps its exact bytes and keepalive (X059)",
+    "test/tern-terminal.test.ts: the Tern progress state refines running with the canonical phase",
+    "test/terminal-progress-lifecycle.test.ts: the Tern waiting_input section (approval, question, plan review, parked attention, owner fence, stop/$EDITOR/fullscreen restores)"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
+     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+    },
+    "relevantFiles": [
+     "packages/tui/src/terminal.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream's Terminal exposes only setProgress(active) over OSC 9;4 clear/indeterminate, and its stop() clears progress only when the keepalive interval was running. The fork adds one optional stateful projection ('paused' = OSC 9;4;4 without a transient clear), tracks the physical state separately from the keepalive, and makes stop() clear any non-clear state. Every existing call path is byte-for-byte unchanged."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire or replace when upstream gains an equivalent stateful/paused OSC 9;4 progress API (or the host stops needing a waiting_input pane state), then run the X059 fork terminal regressions and the host terminal-progress lifecycle regressions."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-07",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Audited the whole progress state machine against the pinned baseline: the boolean contract and its keepalive are unchanged, the new state is optional and consumed by the Tern ANSI path only, and the only widened lifecycle rule is stop() clearing a physically paused state."
+   }
   }
  }
 }
