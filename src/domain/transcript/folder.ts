@@ -39,7 +39,7 @@ import {
   totalTokens,
   type TokenUsageTotals,
   type UsageLike,
-} from '../../token-usage.ts'
+} from './usage.ts'
 import type {
   AssistantLiveChunk,
   AssistantLiveContentBlock,

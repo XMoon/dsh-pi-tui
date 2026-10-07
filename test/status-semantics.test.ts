@@ -12,7 +12,7 @@ import { deriveAccessStatus, sandboxModeName, type ApprovalServiceLike, type Per
 import { deriveActivityPhase, deriveActivityStatus } from '../src/domain/status/derive-activity.ts'
 import { derivePlanStatus } from '../src/domain/status/derive-plan.ts'
 import { usageFromStats } from '../src/domain/status/derive-usage.ts'
-import type { SessionStats } from '../src/stats.ts'
+import type { SessionStats } from '../src/domain/status/stats.ts'
 
 // ── Access ────────────────────────────────────────────────────────────────
 

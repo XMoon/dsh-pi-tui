@@ -435,7 +435,7 @@ test('the TuiApp chrome merges the budgeted outlet content (integration)', async
   ledger.register('chrome.header.badge', { id: 'budget' }, { text: 'budget-badge' }, 'p1')
   host.refreshOutlets()
   app.refreshChrome()
-  app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 0, steps: 0, statsLine: '' })
+  app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 0, steps: 0 })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('budget-badge'), `budgeted badge must render:\n${view}`)

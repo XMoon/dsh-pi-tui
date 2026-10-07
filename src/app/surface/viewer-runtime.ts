@@ -30,7 +30,7 @@
 
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
-import { StatsFolder } from '../../stats.ts'
+import { StatsFolder } from '../../domain/status/stats.ts'
 import { childOwnEvents, TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import { applyStreamingToolPreviewEvent } from '../../streaming-tool-preparing.ts'

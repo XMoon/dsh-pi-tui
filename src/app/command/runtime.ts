@@ -30,7 +30,7 @@ import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { SkillCatalogCapability, SkillDefinitionResult } from '../../runtime/catalog-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../../skill-catalog-refresh.ts'
 import type { HumanSkillCatalog } from '../../skill-catalog.ts'
-import type { SessionStats, SessionStatsFacts } from '../../stats.ts'
+import type { SessionStats, SessionStatsFacts } from '../../domain/status/stats.ts'
 import type { SurfaceCommandSummary } from '../../surface-catalog.ts'
 import type { LiveSessionScope, SessionScope, SessionScopeAuthority } from '../session/scope.ts'
 

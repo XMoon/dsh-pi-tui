@@ -18,7 +18,7 @@
 import { DirectPresentationReader } from '../../runtime/direct/presentation-read-direct.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
-import { computeStats, type SessionStats } from '../../stats.ts'
+import { computeStats, type SessionStats } from '../../domain/status/stats.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
 
 /** The exact Direct attachment face this bridge reads (the branch-selection

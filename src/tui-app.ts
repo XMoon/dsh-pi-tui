@@ -1420,8 +1420,6 @@ export interface StatusData {
   turns: number
   /** Steps (model requests) so far. */
   steps: number
-  /** Stats line (pi vocabulary), preformatted by the runner. */
-  statsLine: string
   /** Current permission preset (read-only/workspace-write/danger-full-access/custom). */
   permission?: string
   /** Current context pressure in tokens, when measured. */
@@ -1430,8 +1428,7 @@ export interface StatusData {
   contextWindow?: number
   /** M1: the structured usage facts (the footer's stats source). The
    * runner passes them through the status store; tests may supply them
-   * directly. Absent = the legacy statsLine remains for /status-style
-   * consumers and the footer renders the zeroed usage. */
+   * directly. Absent = the footer renders the zeroed usage. */
   usage?: UsageStatus
 }
 
@@ -2726,7 +2723,7 @@ export class TuiApp {
   // host reads it through the accessors below. The old private sets were
   // removed; every use now goes through this.overlayBroker.
   /** Footer state. */
-  private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' }
+  private status: StatusData = { model: '', cwd: '', branch: '', turns: 0, steps: 0 }
   /** Plan-mode badge state; appended to the header and footer when active. */
   private planMode = false
   /** The editor's normal border style, restored when plan mode ends. */
@@ -4247,7 +4244,7 @@ export class TuiApp {
       // The /model picker component dies with the surface too: a remountable
       // overlay opts out of disposeOnHide, so final teardown owns it explicitly.
       () => modelPickerComponent?.dispose?.(),
-      () => { this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0, statsLine: '' } },
+      () => { this.status = { model: '', cwd: '', branch: '', turns: 0, steps: 0 } },
       // Detach the extension surface host: its subscriptions and capability
       // set die with the surface (M2 stale-generation contract).
       () => this.extensionHost?.dispose(),

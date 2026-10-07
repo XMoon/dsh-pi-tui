@@ -282,7 +282,6 @@ const DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES = new Set([
   'content-block-presentation.ts',
   'failure-presentation.ts',
   'present.ts',
-  'token-usage.ts',
 ])
 
 /**
@@ -561,7 +560,7 @@ export const ARCHITECTURE_RULES = [
     message:
       'src/domain/transcript/** is the transport/UI-neutral transcript semantic authority: it may import only its domain '
       + 'siblings, the frozen transitional pure root helpers (value: context/content-block-presentation/failure-presentation/'
-      + 'present/token-usage; type-only: icons/assistant-stream-port) and official DSH semantic packages — every other edge '
+      + 'present; type-only: icons/assistant-stream-port) and official DSH semantic packages — every other edge '
       + '(tui/**, app/**, runtime/direct|remote, commands.ts, display-preset.ts, transcript.ts, PiTui, Tern, …) must be split instead',
     applies: (srcRel) => isDomainTranscriptSubtree(srcRel),
     forbids: (resolved, specifier, meta) => isDomainTranscriptBackendMechanics(resolved, specifier, meta),

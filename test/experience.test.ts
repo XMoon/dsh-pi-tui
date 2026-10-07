@@ -46,11 +46,10 @@ test('footer shows model, cwd, branch, counters, context pressure, and stats', a
     branch: 'main',
     turns: 2,
     steps: 5,
-    statsLine: '2 轮 · 5 步| LLM 8.1s',
     contextTokens: 25_000,
     contextWindow: 100_000,
     // M1: the footer composes the stats line from the STRUCTURED usage
-    // facts (the legacy statsLine string is no longer a footer input).
+    // facts (never a preformatted compatibility string).
     usage: {
       tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
       performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0 },

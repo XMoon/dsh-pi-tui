@@ -1474,7 +1474,7 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // composition folds) carries admitted throughput samples.
   const snapshot = await fixture.aggregate.presentation.presentationReader.read(mainId)
   assert.ok(snapshot !== undefined, 'the mounted Remote window is readable')
-  const statsMod = await import('../src/stats.ts')
+  const statsMod = await import('../src/domain/status/stats.ts')
   const recent = statsMod.recentPerformanceOf(snapshot!.durableEvents as never[])
   assert.ok(recent.tokensPerSec > 0,
     'the mounted window admits recent throughput samples (the composed /status recent figure is fold-backed, never a window-only zero)')

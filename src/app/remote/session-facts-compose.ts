@@ -28,8 +28,8 @@
 
 import type { PresentationDurableEvent, PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
 import type { SessionStatusProjection } from '../../runtime/session-reader-port.ts'
-import type { SessionStatsFacts } from '../../stats.ts'
-import { hasEnoughRecentPerformanceSamples, recentPerformanceOf } from '../../stats.ts'
+import type { SessionStatsFacts } from '../../domain/status/stats.ts'
+import { hasEnoughRecentPerformanceSamples, recentPerformanceOf } from '../../domain/status/stats.ts'
 
 /** The whole-log projection facts the composition consumes (detached). */
 export interface RemoteStatsProjectionFacts {

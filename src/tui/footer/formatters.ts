@@ -6,7 +6,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/footer/formatters
  */
 
-import { formatTokens } from '../../token-usage.ts'
+import { formatTokens } from '../token-format.ts'
 import type { UsageStatus } from '../../domain/status/types.ts'
 
 /** Whether cwd uses Windows path syntax rather than a POSIX filename with
@@ -228,9 +228,9 @@ export function formatTurnsSteps(turns: number, steps: number, format = 'both'):
  * 51 tok/s`. The performance tail carries the RECENT metrics only — the
  * lifetime `LLM` wall left the footer so a composite never mixes lifetime
  * and recent windows. This is a SEPARATE presentation contract from
- * formatStats (the /status detail line, which keeps the labeled lifetime
- * `LLM ...` term beside the recent metrics) — footer chrome vs detail
- * surface, never forced into string equality. */
+ * `formatStatsFacts` (`src/tui/commands/status.ts`, the /status detail line,
+ * which keeps the labeled lifetime `LLM ...` term beside the recent metrics)
+ * — footer chrome vs detail surface, never forced into string equality. */
 export function formatStatsLine(usage: UsageStatus): string {
   const tokens = usage.tokens
   // No owned token facts (an unavailable projection on the Remote branch):

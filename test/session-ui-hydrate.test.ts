@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { computeStats } from '../src/stats.ts'
+import { computeStats } from '../src/domain/status/stats.ts'
 import { hydrateSessionUi } from '../src/session-ui-hydrate.ts'
 import { foldTranscript } from '../src/transcript.ts'
 

@@ -604,7 +604,7 @@ test('parking keeps NEW replacement-editor text even when it is a SUBSTRING of t
 
 test('the footer switches to the viewed child\u2019s identity and back on exit', async () => {
   const { vt, app } = await startApp()
-  app.setStatus({ model: 'parent-model', cwd: '/parent', branch: '', turns: 9, steps: 9, statsLine: 'parent stats' })
+  app.setStatus({ model: 'parent-model', cwd: '/parent', branch: '', turns: 9, steps: 9 })
   await vt.waitForRender()
   app.setViewerMode(continuable())
   await vt.waitForRender()

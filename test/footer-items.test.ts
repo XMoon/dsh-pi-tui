@@ -475,13 +475,14 @@ test('token-usage:pi and cache-hit:pi render the pi vocabulary with compact pres
 
 test('the footer stats line and the /status detail line are SEPARATE contracts', async () => {
   // The footer's stats-line is chrome: recent metrics only, no lifetime
-  // LLM wall. formatStats is the /status DETAIL line: it keeps the labeled
-  // lifetime wall beside the recent metrics. They share the pi token
-  // vocabulary but must never be forced into string equality — the old
-  // source-consistency guard pinned them together and would have dragged
-  // the LLM wall back into every footer.
+  // LLM wall. The /status Stats row (formatStatsFacts) is the DETAIL
+  // surface: it keeps the labeled lifetime wall beside the recent metrics.
+  // They share the pi token vocabulary but must never be forced into string
+  // equality — the old source-consistency guard pinned them together and
+  // would have dragged the LLM wall back into every footer.
   const { formatStatsLine } = await import('../src/tui/footer/formatters.ts')
-  const { formatStats } = await import('../src/stats.ts')
+  const { formatStatsFacts } = await import('../src/tui/commands/status.ts')
+  const { sessionStatsFactsOf } = await import('../src/domain/status/stats.ts')
   const { usageFromStats } = await import('../src/domain/status/derive-usage.ts')
   const stats = {
     turns: 12,
@@ -497,13 +498,15 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
     cacheWriteTokens: 0,
   }
   const footerLine = formatStatsLine(usageFromStats(stats as never))
-  const detailLine = formatStats(stats as never)
+  const detailLine = formatStatsFacts(sessionStatsFactsOf(stats as never))
   assert.ok(!footerLine.includes('LLM'), `the footer line carries no lifetime wall:\n${footerLine}`)
   assert.ok(footerLine.includes('TTFB 2s') && footerLine.includes('40 tok/s'), `recent metrics on the footer line:\n${footerLine}`)
   assert.ok(detailLine.includes('LLM 2m00s'), `the detail line keeps the lifetime wall:\n${detailLine}`)
   assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('40 tok/s'), `recent metrics on the detail line:\n${detailLine}`)
   // The token/cache prefix stays IDENTICAL between the two surfaces.
-  assert.ok(footerLine.split(' | ')[0] === detailLine.split(' | ')[0], `shared pi vocabulary:\n${footerLine}\n${detailLine}`)
+  const tokenSegment = '↑2.6k ↓5.5k R20k CH91.9%'
+  assert.equal(footerLine.split(' | ')[0], tokenSegment, `shared pi vocabulary:\n${footerLine}`)
+  assert.ok(detailLine.includes(tokenSegment), `shared pi vocabulary:\n${detailLine}`)
 })
 
 test('an unavailable token projection renders the performance segment alone (no orphan separator)', async () => {

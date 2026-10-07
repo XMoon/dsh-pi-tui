@@ -501,7 +501,7 @@ test('PR5 §3.2 (F1): the live ingress re-answers availability off the SAME fold
   assert.ok(pairs > 0 && refreshes === pairs,
     'every live stats append re-answers the availability predicate')
   // ONE predicate shared by the fold accessor and the whole-log helper.
-  const stats = code('stats.ts')
+  const stats = code('domain/status/stats.ts')
   assert.ok(stats.includes('return recentEvidenceComplete(foldSessionStats(events).recent)'),
     'the whole-log helper delegates to the one predicate')
   assert.ok(stats.includes('return recentEvidenceComplete(this.recent)'),

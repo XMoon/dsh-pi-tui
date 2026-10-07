@@ -111,7 +111,7 @@ test('stale surface calls are benign no-ops after disposal', async () => {
   app.requestRender()
   app.requestRender(true)
   app.notify('after death')
-  app.setStatus({ model: 'x', cwd: '/w', branch: '', turns: 1, steps: 1, statsLine: '' })
+  app.setStatus({ model: 'x', cwd: '/w', branch: '', turns: 1, steps: 1 })
   app.setTasks([{ id: 't', label: 'l', status: 'running', kind: 'bash' }])
   app.setQueueItems([{ id: 'q', text: 't', mode: 'followup' }])
   app.setTodoSummary([{ content: 'todo', status: 'in_progress' }])

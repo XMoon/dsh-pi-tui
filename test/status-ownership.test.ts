@@ -79,7 +79,7 @@ test('§6.4 (1) an unrelated legacy refresh never clears the projection-owned pr
     assert.equal(access(store).permissionPreset?.id, 'workspace-write')
 
     // An unrelated legacy refresh (workspace/usage only, no legacy permission).
-    app.setStatus({ model: 'm', cwd: '/tmp/legacy-refresh', branch: '', turns: 3, steps: 7, statsLine: '' })
+    app.setStatus({ model: 'm', cwd: '/tmp/legacy-refresh', branch: '', turns: 3, steps: 7 })
 
     assert.equal(access(store).permissionPreset?.id, 'workspace-write',
       'the legacy writer expressed no opinion on permissionPreset — the projection value survives')
@@ -95,7 +95,7 @@ test('§6.4 (2) an absent legacy permission produces NO permission field mutatio
   try {
     const before = access(store)
     // No legacy permission is supplied at all.
-    app.setStatus({ model: 'm', cwd: '/tmp/no-perm', branch: '', turns: 0, steps: 0, statsLine: '' })
+    app.setStatus({ model: 'm', cwd: '/tmp/no-perm', branch: '', turns: 0, steps: 0 })
     const after = access(store)
     assert.equal('permissionPreset' in after, 'permissionPreset' in before,
       'the key is neither added nor removed by a legacy refresh without a legacy value')
@@ -133,7 +133,7 @@ test('§6.4 (3) the real surface owner reset is the explicit clear', () => {
 test('§6.4 (4) a legacy value still projects when a Direct composition supplies one', () => {
   const { app, store, dispose } = mountedStore()
   try {
-    app.setStatus({ model: 'm', cwd: '/tmp/direct', branch: '', turns: 0, steps: 0, statsLine: '', permission: 'danger-full-access' })
+    app.setStatus({ model: 'm', cwd: '/tmp/direct', branch: '', turns: 0, steps: 0, permission: 'danger-full-access' })
     assert.equal(access(store).permissionPreset?.id, 'danger-full-access',
       'a PRESENT legacy value projects (the Direct compatibility path)')
     assert.equal(access(store).permissionPreset?.matched, true)
