@@ -1,10 +1,9 @@
 /**
  * The application-owned prepared-prompt builder (TS8-C).
  *
- * ONE immutable representation of a user submission produced by the SHARED
- * draft-preparation authority, consumed by both transports. The fork happens
- * at the adapter/admission layer, never at the draft semantic preparation
- * layer:
+ * PreparedPrompt is the immutable application snapshot used by the REMOTE
+ * transport preparation path: ONE representation of a user submission produced
+ * from the Client draft stores, then serialized by the Remote serializer.
  *
  * ```text
  * DraftImageStore / DraftFileStore
@@ -12,10 +11,15 @@
  *         ▼
  * PreparedPrompt  (canonical ordered text + staged image bytes + names +
  *                  generic-file markers)
- *         ├── Direct  -> Host attachment admission -> UserMessage/durable refs
  *         └── Remote  -> preflight -> beginSubmission -> image
  *                        PromptContentPart -> Session.prompt
  * ```
+ *
+ * Direct does NOT consume PreparedPrompt today. It keeps its SEPARATE Direct
+ * `UserMessage` preparation (`app/submission/direct-message-preparation.ts` →
+ * `prepareUserMessage()` → Direct Host attachment admission → durable refs) —
+ * the historical split this stage preserves; converging Direct onto this
+ * snapshot is a later step, not TS8-C.
  *
  * A PreparedPrompt NEVER holds a Direct Agent, a Direct AttachmentStore ref, a
  * Host local filesystem path as wire content, or a generated Client object. It
@@ -52,7 +56,7 @@ export interface PreparedImageSource {
 /**
  * Build the immutable PreparedPrompt from the (already canonicalized) draft
  * text and the live draft stores. ONE pass, no Host calls, no admission:
- * this is the shared preparation authority both transports fork from.
+ * this is the snapshot the Remote transport preparation path forks from.
  */
 export function preparePrompt(sessionId: string, text: string, stores: PreparedPromptStores, requestId?: string): PreparedPrompt {
   // Generic-file placeholders only need PRESENCE for the fail-closed
