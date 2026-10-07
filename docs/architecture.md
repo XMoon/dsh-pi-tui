@@ -78,6 +78,12 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/app/command/authorization.ts` | the /login authorization bridge: target merge, notice rendering and prompt mapping over the config port's detached events (TS8-F2) |
 | `src/app/surface/version-display.ts` | the welcome-card combined version line, composed from the Client-local launcher reads (TS8-F2) |
 | `src/tui/startup/status.ts` | the pre-mount TTY-only startup status line (pure terminal presentation) (TS8-F2) |
+| `src/domain/command/policy.ts` | transport/UI-neutral command-line policy: the local/sessionless name sets, the ONE line classification, attachment-line classification, skill-invocation normalization, advertised-miss consumption and the plain `exit` prompt rule (TS8-F3) |
+| `src/domain/shell/danger.ts` | the neutral destructive-shell predicate the approval dialog uses (TS8-F3) |
+| `src/app/submission/command-policy.ts` | application submission-facing policy: the image-rejection gate and the busy delivery resolver (they consume Client draft/composer facts) (TS8-F3) |
+| `src/domain/catalog/provider.ts` | the neutral /login provider-catalog merge and credential-ref resolution (TS8-F3) |
+| `src/domain/communication/**` | neutral communication policy: progress-updates / response-style / git-attribution / Focus section identity, parsers and the pure prompt text (TS8-F3) |
+| `src/app/direct/system-prompt.ts` | the ONLY Direct systemPrompt composition + TUI section registration (progress updates, response style, git attribution, Focus) (TS8-F3) |
 | remaining historical feature dirs (`…`) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
@@ -295,7 +301,10 @@ process-lifetime roots (`detached.ts`, `diag.ts`, `disposal.ts`,
 bootstrap/config/launcher roots (`authorization.ts`,
 `legacy-settings-migration.ts`, `tui-config.ts`, `dsh-profile.ts`,
 `dsh-version.ts`, `startup-status.ts`, `exit.ts`, `git-branch.ts`), reaching
-`stable = 6 / legacy = 37`.
+`stable = 6 / legacy = 37`; F3 then retires the five
+command/communication/provider policy roots (`command-policy.ts`,
+`communication-policy.ts`, `focus.ts`, `git-attribution.ts`,
+`provider-catalog.ts`), reaching `stable = 6 / legacy = 32`.
 
 ## Existing directory convergence
 
@@ -712,6 +721,28 @@ the canonical `bundleVersion`/`dshVersion` instead of its private package reader
 The legacy-settings Direct type import is now legal inside the `app/bootstrap/**`
 composition zone, so the historical gate allowlist is emptied
 (`ARCHITECTURE_ALLOWLIST = []`) rather than re-pointed.
+
+TS8-F (PR F3) retires the five command/communication/provider policy roots
+(legacy `37 -> 32`, no forwarding shim):
+
+```text
+src/command-policy.ts        -> split: domain/command/policy.ts (pure line policy + classification)
+                                       + domain/shell/danger.ts (destructive-shell predicate)
+                                       + app/submission/command-policy.ts (image gate + delivery resolver)
+src/communication-policy.ts  -> domain/communication/policy.ts (names/orders/parsers + pure text)
+src/focus.ts                 -> domain/communication/focus.ts   (section identity + pure text)
+src/git-attribution.ts       -> domain/communication/git-attribution.ts
+src/provider-catalog.ts      -> domain/catalog/provider.ts
+```
+
+`app/direct/system-prompt.ts` is the ONLY owner of Direct `ctx.get('systemPrompt')`
+composition and of the TUI section registration (progress updates 80, response
+style 81, git attribution 82, Focus 90 — orders frozen); the neutral domain owns
+the section identity, the parsers and the pure prompt text. The public package
+entry keeps every command-policy name (re-exported from the three new owners).
+`domain/command/policy.ts` takes the authoritative Host claim as a structural
+`CommandLineHostClaim` input, so the neutral domain never imports the root
+`commands.ts` facade.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1
