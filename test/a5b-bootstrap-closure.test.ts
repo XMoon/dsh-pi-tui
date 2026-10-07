@@ -574,7 +574,10 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
   ],
   [
     'src/app/command/artifacts.ts',
-    ['artifactInFlight', 'ArtifactSaveFailure', 'localFileSource', 'saveArtifact', 'startArtifactSave'],
+    // TS8-A renamed the Client-local discovery slot (`localFileSource` ->
+    // `clientDiscovery`) when the artifact save owner moved onto the canonical
+    // Client completion capability; the declaration still lives in THIS owner.
+    ['artifactInFlight', 'ArtifactSaveFailure', 'clientDiscovery', 'saveArtifact', 'startArtifactSave'],
   ],
   [
     'src/app/command/surface.ts',
