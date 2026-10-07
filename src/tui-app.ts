@@ -189,9 +189,9 @@ import {
   webCardLines,
   type ToolPresenter,
 } from './tui/transcript/tool-presentation.ts'
-import { TranscriptSearchComponent } from './search.ts'
-import { CompactTextPreview } from './compact-text-preview.ts'
-import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
+import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
+import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
+import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
@@ -228,9 +228,10 @@ import { finalizedBlockFallbackText, openOpaqueBlockFallbackText } from './domai
 import { latestLine } from './domain/transcript/text.ts'
 import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 import type { TranscriptWindowState } from './domain/transcript/window.ts'
-import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
-import { createScrollRenderProfiler } from './scroll-render-profile.ts'
+import { createTranscriptRenderProfiler } from './tui/diagnostics/transcript-render-profile.ts'
+import { createScrollRenderProfiler } from './tui/diagnostics/scroll-profile.ts'
 import { FocusActivityComponent } from './tui/components/transcript/focus-activity.ts'
+import type { CompactionPhase } from './app/surface/compaction-presentation.ts'
 import { projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-projection.ts'
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
@@ -250,8 +251,8 @@ import { PendingContextComponent } from './tui/components/transcript/pending-con
 // existing row-type consumers source-compatible.
 import type { PendingContextRow, PendingInputPresentation, PendingTailRow, PendingUserRow, QueueItem } from './app/surface/pending-presentation.ts'
 export type { PendingInputPresentation, PendingPresentationInput, PendingPresentationRows, PendingContextRow, PendingTailRow, PendingUserRow, QueueItem } from './app/surface/pending-presentation.ts'
-import { thinkingPreviewTail } from './thinking-preview.ts'
-import { FocusTimingStore } from './focus-timing.ts'
+import { thinkingPreviewTail } from './tui/components/transcript/thinking-preview.ts'
+import { FocusTimingStore } from './tui/transcript/focus-timing.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
 import { iconFor, iconLead, iconPrefix } from './tui/icons.ts'
 import type { IconStyle } from './domain/display/icons.ts'
@@ -588,7 +589,7 @@ function sameSearchTarget(left: TranscriptSearchPresentationTarget | undefined, 
  * generated), or applying (the summary landed, the compacted surface is
  * being committed). Derived by the runner from compaction/start →
  * compaction/summary → compaction/end (foldCompactionEvent). */
-export type CompactionPhase = 'idle' | 'summarizing' | 'applying'
+export type { CompactionPhase }
 
 /** One live, ephemeral preview of a tool call whose arguments are still
  * streaming. This presentation state is deliberately separate from the
