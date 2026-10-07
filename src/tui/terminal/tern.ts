@@ -42,7 +42,7 @@ export function ternCwdSequence(cwd: string): string | undefined {
 /**
  * The OSC 9;4 state Tern should show for the authoritative main-Agent running
  * truth, the canonical surface `RunPhase` and the PROVENANCE of the wait that
- * owns the response surface (plan §6.2 + the interaction-origin addendum).
+ * owns the response surface (plan §6.2 + the Agent-blocking-wait addendum §20).
  * This is a presentation-only mapping — the running flag stays PR #230's
  * main-Agent fence and no second semantic authority is introduced:
  *
