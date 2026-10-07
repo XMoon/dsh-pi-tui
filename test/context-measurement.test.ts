@@ -36,6 +36,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { contextRefreshKind } from '../src/index.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -425,7 +426,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
           list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map() ,
         },
       } as unknown as TuiCommandRunner
-      registerTuiCommands(runner)
+      registerTuiCommandsWithDirectSeams(runner)
       const statusDef = defs.find(entry => entry.name === 'status')
       assert.ok(statusDef?.handler, 'the /status command is registered')
       await (statusDef.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })

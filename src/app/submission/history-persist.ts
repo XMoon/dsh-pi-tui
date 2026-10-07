@@ -15,10 +15,10 @@
  *   submit path; the test pins the ordering so a future "optimization"
  *   that writes before session creation cannot silently regress the first
  *   prompt of a fresh session.
- * @module @xmoon76/dsh-pi-tui/history-persist
+ * @module @xmoon76/dsh-pi-tui/app/submission/history-persist
  */
 
-import { appendHistoryRecord } from './history.ts'
+import { appendHistoryRecord } from '../../client/history/store.ts'
 
 /** The persist-time facts of one submission row. */
 export interface HistoryPersistContext {

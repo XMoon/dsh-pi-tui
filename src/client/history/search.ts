@@ -63,13 +63,13 @@
  * Future-proof: the panel consumes ONLY {@link HistorySearchSource} — a
  * SQLite/FTS backend may replace the file implementation without touching
  * the UI (plan §54).
- * @module @xmoon76/dsh-pi-tui/history-search
+ * @module @xmoon76/dsh-pi-tui/client/history/search
  */
 
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { historyFilePath, parseHistoryRecordLine, type ParsedHistoryRecord } from './history.ts'
-import { readJsonlReverseBatch, ReverseJsonlRevisionError, type ReverseJsonlCursor } from './history-reverse-reader.ts'
+import { historyFilePath, parseHistoryRecordLine, type ParsedHistoryRecord } from './store.ts'
+import { readJsonlReverseBatch, ReverseJsonlRevisionError, type ReverseJsonlCursor } from './reverse-reader.ts'
 
 /** The three scope categories (`/sessions` vocabulary). */
 export type HistoryScope = 'session' | 'current' | 'all'

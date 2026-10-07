@@ -39,9 +39,9 @@ import { Input } from '@xmoon76/pi-tui'
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import type { HistorySearchResult, HistorySearchSource, HistoryScope } from '../../history-search.ts'
-import { HISTORY_SEARCH_RESULT_LIMIT } from '../../history-search.ts'
-import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../history-search.ts'
+import type { HistorySearchResult, HistorySearchSource, HistoryScope } from '../../client/history/search.ts'
+import { HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
+import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../client/history/search.ts'
 
 /** Split threshold: at or above this panel width the list and details
  * render side by side (plan §20). */

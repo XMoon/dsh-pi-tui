@@ -11,9 +11,9 @@ import test from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FileHistorySearchSource, HistorySearchContinuationError, HistorySearchContinuationStaleError } from '../src/history-search.ts'
-import type { HistorySearchDebugStats, HistorySearchResult, HistoryScope } from '../src/history-search.ts'
-import { appendHistoryRecord, historyFilePath, historyFilePathFromHash } from '../src/history.ts'
+import { FileHistorySearchSource, HistorySearchContinuationError, HistorySearchContinuationStaleError } from '../src/client/history/search.ts'
+import type { HistorySearchDebugStats, HistorySearchResult, HistoryScope } from '../src/client/history/search.ts'
+import { appendHistoryRecord, historyFilePath, historyFilePathFromHash } from '../src/client/history/store.ts'
 
 function tempHome(life: TestLifecycle): string {
   return life.tempDir('pi-tui-history-search-')
@@ -451,7 +451,7 @@ test('S14: page overflow is carried — no match is ever lost across pages', asy
   const src = new FileHistorySearchSource({ dshHome: home, scanLimit: 5000 })
   const request = { scope: 'current' as const, cwd: '/a', query: '', limit: 10 }
   const pages: HistorySearchResult[][] = []
-  let continuation: import('../src/history-search.ts').HistorySearchContinuation | undefined
+  let continuation: import('../src/client/history/search.ts').HistorySearchContinuation | undefined
   for (let i = 0; i < 20; i += 1) {
     const page = await src.search(request, continuation)
     pages.push(page.results)
@@ -613,9 +613,9 @@ test('S20: a concurrent append between pages does not invalidate the continuatio
   appendFileSync(file, JSON.stringify({ v: 2, content: 'appended', cwd: '/a', ts: 9999 }) + '\n')
   // Walk the remaining pages (the budget is per call: 100 rows each).
   const all: string[] = [...page1.results.map(row => row.content)]
-  let continuation: import('../src/history-search.ts').HistorySearchContinuation | undefined = page1.continuation
+  let continuation: import('../src/client/history/search.ts').HistorySearchContinuation | undefined = page1.continuation
   for (let i = 0; i < 5; i += 1) {
-    const page: import('../src/history-search.ts').HistorySearchPage | undefined = continuation === undefined
+    const page: import('../src/client/history/search.ts').HistorySearchPage | undefined = continuation === undefined
       ? undefined
       : await src.search(request, continuation)
     if (page === undefined) break
@@ -727,9 +727,9 @@ test('S26: session continuation pages return only the current session', async (t
   assert.equal(page1.exhausted, false)
   assert.ok(page1.continuation !== undefined)
   const all: string[] = [...page1.results.map(row => row.content)]
-  let continuation: import('../src/history-search.ts').HistorySearchContinuation | undefined = page1.continuation
+  let continuation: import('../src/client/history/search.ts').HistorySearchContinuation | undefined = page1.continuation
   for (let i = 0; i < 5; i += 1) {
-    const page: import('../src/history-search.ts').HistorySearchPage | undefined = continuation === undefined
+    const page: import('../src/client/history/search.ts').HistorySearchPage | undefined = continuation === undefined
       ? undefined
       : await src.search(request, continuation)
     if (page === undefined) break

@@ -27,8 +27,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/catalog-port
  */
 
-import type { HumanSkillCatalog } from '../skill-catalog.ts'
-import type { StandingSkillRead } from '../skill-catalog-refresh.ts'
+import type { HumanSkillCatalog } from '../domain/catalog/skill.ts'
 import type { OperationResult, WriteOutcome } from './write-outcome.ts'
 
 /** One model row of the Host-generation model directory (mirrors the official
@@ -218,10 +217,20 @@ export type SkillDefinitionResult =
   /** The loaded definition is malformed (hostile/adapter data refused). */
   | { readonly kind: 'malformed' }
 
+/** One standing (sessionless) skill read result: the detached catalog plus the
+ * one-shot degradation notice (absent when nothing degraded). This is the
+ * port's own result type — the coordinator consumes it without owning it. */
+export interface StandingSkillRead {
+  readonly catalog: HumanSkillCatalog
+  /** One-shot user notice when the standing path degraded to the global
+   * layer (absent when nothing degraded). */
+  readonly notice?: string
+}
+
 /** The skill catalog sub-domain: sessionless standing reads, live agent
  *  reads, the loaded-definition path and the host-vs-fallback injection
- *  decision. The pure catalog logic stays in `src/skill-catalog.ts`; the
- *  Direct adapter owns the Host service discovery and the session-id →
+ *  decision. The pure catalog logic stays in `runtime/direct/skill-catalog.ts`;
+ *  the Direct adapter owns the Host service discovery and the session-id →
  *  live-agent resolution. */
 export interface SkillCatalogCapability {
   /** The sessionless STANDING skill catalog of one preset (the deferred

@@ -1,0 +1,162 @@
+/**
+ * The Direct effective surface-catalog read (TS8-E): the frozen, detached
+ * command + human-skill view for one live agent. The collector reads the
+ * EFFECTIVE catalogs one agent sees — `commands.list(agent)` (global layer plus
+ * agent-scoped shadows) and the agent-scoped skill service filtered by the
+ * official user-invocation policy — and returns plain frozen data that survives
+ * the agent's disposal.
+ *
+ * Only discovery metadata crosses the boundary: command HANDLERS and skill
+ * BODIES never enter a snapshot, and nothing here holds an Agent, a service,
+ * or a provider. Execution always re-binds to the live agent later.
+ *
+ * This Direct Host adapter reads the Direct `commands` service and resolves the
+ * live skill target through `runtime/direct/skill-catalog.ts`. Remote adapters
+ * must NOT import this module (they read the official Remote projections). The
+ * neutral DTOs live in `domain/catalog/surface.ts`.
+ * @module @xmoon76/dsh-pi-tui/runtime/direct/surface-catalog
+ */
+
+import { safeErrorMessage } from '../../error-boundary.ts'
+import { readHumanSkillCatalog, resolveLiveSkillTarget, type SkillCatalogContext } from './skill-catalog.ts'
+import type { HumanSkillSummary } from '../../domain/catalog/skill.ts'
+import { commandSummaryOf, type SurfaceCatalogIssue, type SurfaceCatalogSnapshot, type SurfaceCommandDescriptor, type SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
+
+/** Minimal live-agent face consumed by the effective catalog readers — and by
+ * {@link import('../../app/direct/initial-catalog.ts').SurfaceCatalogResolutionOptions}, so the
+ * published option type stays structural instead of inlining the Host Agent. */
+export interface SurfaceCatalogAgent {
+  readonly ctx: object
+  readonly session: {
+    readonly header: {
+      readonly cwd?: string
+    }
+  }
+}
+
+/** The commands-service surface the collector reads. */
+export interface SurfaceCommandsService {
+  list(agent: SurfaceCatalogAgent): readonly SurfaceCommandDescriptor[]
+}
+
+/** The narrow context surface {@link readSurfaceCatalog} consumes. The
+ * SKILL services are NOT reached here: every dsh skill/agent-presets
+ * access goes through `runtime/direct/skill-catalog.ts` (the single-point
+ * adapter, plan appendix B.1). */
+export interface SurfaceCatalogContext {
+  get(name: 'commands'): SurfaceCommandsService | undefined
+}
+
+/**
+ * The in-process global-layer command view. The upstream service requires an
+ * agent, but `commands.list(undefined)` resolves the global layer only
+ * (ScopedLayers merges no overlays for an undefined key); the current TUI
+ * already depends on this in-process behavior. The cast is isolated HERE so
+ * the undefined key never reaches a remote RPC path, and the helper is the
+ * single seam to replace if upstream ever ships a typed global-list API.
+ * @param commands - the commands service.
+ * @returns the global-layer descriptors (name-sorted by the registry).
+ */
+export function listGlobalCommands(commands: SurfaceCommandsService): readonly SurfaceCommandDescriptor[] {
+  return commands.list(undefined as unknown as SurfaceCatalogAgent)
+}
+
+/** Whether two descriptors expose identical authority metadata (origin-blind:
+ * an identical scoped entry needs no override because the visible result and
+ * the real-agent execution are the same either way). */
+function sameCommand(left: SurfaceCommandDescriptor, right: SurfaceCommandDescriptor): boolean {
+  return left.definitionId === right.definitionId
+    && left.name === right.name
+    && left.description === right.description
+    && left.input?.hint === right.input?.hint
+    // The attachment DECLARATION is part of the effective behavior (it
+    // decides whether a composer may attach anything), so a scoped entry
+    // that differs only in it is NOT the identical visible result.
+    && (left.input?.attachments === true) === (right.input?.attachments === true)
+}
+
+/**
+ * Read one agent's effective surface catalog: global + scoped commands and
+ * human-invocable skills, fully detached and frozen.
+ *
+ * Provider isolation (per the probe contract):
+ * - lifecycle/refresh cancellation terminates the WHOLE read and propagates;
+ * - an ordinary provider failure empties only that field and records a
+ *   detached issue; other providers continue;
+ * - a missing service is that provider's successful empty result (no issue).
+ *
+ * This function only READS: it registers nothing, mutates nothing, and never
+ * touches a runner's live agent. Probe and live agent share this collector
+ * so the two surfaces cannot drift apart.
+ * @param agent - the agent whose effective view to read.
+ * @param signal - lifecycle/refresh cancellation.
+ * @param ctx - the context surface resolving the services.
+ * @returns a frozen, detached snapshot.
+ */
+export async function readSurfaceCatalog(
+  agent: SurfaceCatalogAgent,
+  signal: AbortSignal,
+  ctx: SurfaceCatalogContext,
+): Promise<SurfaceCatalogSnapshot> {
+  signal.throwIfAborted()
+  const issues: SurfaceCatalogIssue[] = []
+  let commands: readonly SurfaceCommandSummary[] = []
+  let scopedCommands: readonly SurfaceCommandSummary[] = []
+  const commandsService = ctx.get('commands')
+  if (commandsService !== undefined) {
+    try {
+      const global = listGlobalCommands(commandsService)
+      const globalBy = new Map(global.map(descriptor => [descriptor.name, descriptor]))
+      const effective = commandsService.list(agent)
+      const scoped: SurfaceCommandSummary[] = []
+      for (const descriptor of effective) {
+        const summary = commandSummaryOf(descriptor)
+        const baseline = globalBy.get(descriptor.name)
+        if (baseline === undefined || !sameCommand(descriptor, baseline)) scoped.push(summary)
+      }
+      commands = sortCommands(effective.map(commandSummaryOf))
+      scopedCommands = sortCommands(scoped)
+    } catch (error) {
+      issues.push({ provider: 'commands', message: safeErrorMessage(error) })
+    }
+  }
+  let skills: readonly HumanSkillSummary[] = []
+  // The skill read goes through the single-point adapter (plan appendix
+  // B.1): the agent's own registry (preset-scoped or host) and the AGENT
+  // OBJECT as scope, snapshot-first with the list() compatibility path.
+  const skillTarget = resolveLiveSkillTarget(ctx as unknown as SkillCatalogContext, agent, agent.session.header.cwd ?? process.cwd())
+  if (skillTarget !== undefined) {
+    try {
+      signal.throwIfAborted()
+      const catalog = await readHumanSkillCatalog(skillTarget.registry, {
+        cwd: skillTarget.cwd,
+        scope: skillTarget.scope,
+        signal,
+      })
+      skills = catalog.skills
+      // An INCOMPLETE live observation is never authoritative (plan
+      // §10.2): it carries a detached skills issue, so the install side
+      // (mergePartial / installSurfaceSnapshot) keeps the last-good
+      // skills instead of replacing them with a partial catalog.
+      if (catalog.complete !== true) {
+        issues.push({ provider: 'skills', message: 'incomplete skill observation' })
+      }
+    } catch (error) {
+      // Cancellation is a lifecycle signal, not a provider failure: the
+      // whole read must propagate it, never degrade it into an issue.
+      if (signal.aborted) throw error
+      issues.push({ provider: 'skills', message: safeErrorMessage(error) })
+    }
+  }
+  return Object.freeze({
+    commands,
+    scopedCommands,
+    skills,
+    issues: Object.freeze(issues.map(issue => Object.freeze({ ...issue }))),
+  })
+}
+
+/** Name-stable sort for command summaries (copies, never mutates input). */
+function sortCommands(commands: readonly SurfaceCommandSummary[]): readonly SurfaceCommandSummary[] {
+  return Object.freeze([...commands].sort((left, right) => left.name < right.name ? -1 : 1))
+}

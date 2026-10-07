@@ -31,10 +31,10 @@ import { runSyncDisposalSteps } from '../../disposal.ts'
 import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { normalizeSkillInvocation } from '../../command-policy.ts'
-import { readSurfaceCatalog, type SurfaceCatalogAgent, type SurfaceCatalogContext } from '../../surface-catalog.ts'
+import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
-import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from '../../skill-catalog-refresh.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
@@ -109,9 +109,6 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
    *  member (the composition root also uses it for service lookups on its own
    *  side of the seam). */
   readonly ctx: TuiCommandRunner['ctx']
-  /** The surface-catalog read context (a narrow view of the Cordis context,
-   *  cast once by the composition root). */
-  readonly surfaceCatalogContext: SurfaceCatalogContext
   /** The diagnostic sink for command registration failures. */
   readonly logError: (message: string) => void
   readonly diag: Diag
@@ -160,6 +157,19 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     sessionStats: CommandRuntimeSurface['sessionStats']
     lastAssistantText: CommandRuntimeSurface['lastAssistantText']
     promptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T> | T): Promise<T>
+  }
+  /**
+   * The narrow Direct CATALOG capability (TS8-E): the composition root captures
+   * the Direct catalog context and the in-process `commands.list(undefined)`
+   * convention and injects both as neutral-DTO operations, so this application
+   * owner never imports a `runtime/direct/**` path. Absent on the Remote branch
+   * (the Remote read goes through the generation-fenced command source).
+   */
+  readonly directCatalog?: {
+    /** The Direct effective catalog read for one exact Agent. */
+    readSurfaceCatalog(agent: ExactAgent, signal: AbortSignal): Promise<SurfaceCatalogSnapshot>
+    /** The Direct Host global-layer command summaries (already detached). */
+    listGlobalCommands(): readonly SurfaceCommandSummary[]
   }
   /** The TRANSPORT-AWARE prepared-prompt builder (PR4 review round): on Remote
    *  the session writer's serializer requires the PreparedPrompt the ordinary
@@ -549,7 +559,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   const readRemoteSurfaceCatalog = async (
     sessionId: string,
     signal: AbortSignal,
-  ): Promise<import('../../surface-catalog.ts').SurfaceCatalogSnapshot> => {
+  ): Promise<import('../../domain/catalog/surface.ts').SurfaceCatalogSnapshot> => {
     const source = deps.remoteCommandSource
     if (source === undefined) throw new Error('the Remote command source is unavailable')
     return composeRemoteSurfaceCatalog({
@@ -567,7 +577,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * hostClaimOf against the installed claims). Name-only summaries keep the
    * collision baseline honest without inventing Host metadata.
    */
-  const remoteListScopedCommands = (): readonly import('../../surface-catalog.ts').SurfaceCommandSummary[] =>
+  const remoteListScopedCommands = (): readonly import('../../domain/catalog/surface.ts').SurfaceCommandSummary[] =>
     deps.clientCommands.list().map(definition => ({
       name: definition.name,
       description: definition.description,
@@ -653,7 +663,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     if (commandsRegistered) return
     commandsRegistered = true
     try {
-      const installed = registerTuiCommands(runner(), initial)
+      const installed = registerTuiCommands(runner(), initial, {
+        ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }),
+      })
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own
       // registration — later commands still installed. The user sees the
@@ -686,11 +698,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           if (remoteSessionId !== undefined) {
             return readRemoteSurfaceCatalog(remoteSessionId, readSignal)
           }
-          return readSurfaceCatalog(
-            agent as unknown as SurfaceCatalogAgent,
-            readSignal,
-            deps.surfaceCatalogContext,
-          )
+          const directCatalog = deps.directCatalog
+          if (directCatalog === undefined) {
+            throw new Error('BUG: the Direct catalog read capability is unavailable')
+          }
+          return directCatalog.readSurfaceCatalog(agent as unknown as ExactAgent, readSignal)
         },
         // The sessionless (preset) target reads the STANDING skill catalog
         // through the catalog capability (migration M1.8) — the
@@ -1149,14 +1161,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
  */
 export async function composeRemoteSurfaceCatalog(input: {
   readonly source: {
-    readCommands(sessionId: string, signal?: AbortSignal): Promise<readonly import('../../surface-catalog.ts').SurfaceCommandSummary[] | undefined>
+    readCommands(sessionId: string, signal?: AbortSignal): Promise<readonly import('../../domain/catalog/surface.ts').SurfaceCommandSummary[] | undefined>
     captureTransportToken(sessionId: string): unknown
     isTransportTokenCurrent(sessionId: string, token: unknown): boolean
   }
-  readonly listHumanSkills: (sessionId: string, signal?: AbortSignal) => Promise<import('../../skill-catalog.ts').HumanSkillCatalog | undefined>
+  readonly listHumanSkills: (sessionId: string, signal?: AbortSignal) => Promise<import('../../domain/catalog/skill.ts').HumanSkillCatalog | undefined>
   readonly sessionId: string
   readonly signal: AbortSignal
-}): Promise<import('../../surface-catalog.ts').SurfaceCatalogSnapshot> {
+}): Promise<import('../../domain/catalog/surface.ts').SurfaceCatalogSnapshot> {
   const { source, listHumanSkills, sessionId, signal } = input
   // §2.2 admission capture: the transport identity (Connection generation +
   // exact binding) is taken BEFORE any provider read; every settle is
@@ -1175,8 +1187,8 @@ export async function composeRemoteSurfaceCatalog(input: {
   if (!source.isTransportTokenCurrent(sessionId, admissionToken)) {
     throw new SupersededReadError('the connection changed during the catalog refresh')
   }
-  const issues: Array<import('../../surface-catalog.ts').SurfaceCatalogIssue> = []
-  let commands: readonly import('../../surface-catalog.ts').SurfaceCommandSummary[] = []
+  const issues: Array<import('../../domain/catalog/surface.ts').SurfaceCatalogIssue> = []
+  let commands: readonly import('../../domain/catalog/surface.ts').SurfaceCommandSummary[] = []
   if (commandsResult.status === 'rejected') {
     const reason = commandsResult.reason
     if (reason instanceof SupersededReadError) throw reason
@@ -1197,7 +1209,7 @@ export async function composeRemoteSurfaceCatalog(input: {
   // to a skills issue so the coordinator's merge keeps the last-good
   // skills (a same-target transient registry loss must not erase the
   // installed set; a genuinely empty-but-complete catalog still clears it).
-  let skills: readonly import('../../skill-catalog.ts').HumanSkillSummary[] = []
+  let skills: readonly import('../../domain/catalog/skill.ts').HumanSkillSummary[] = []
   if (skillsResult.status === 'fulfilled') {
     if (skillsResult.value === undefined) {
       issues.push({ provider: 'skills', message: 'the skill registry is unreachable for this session' })

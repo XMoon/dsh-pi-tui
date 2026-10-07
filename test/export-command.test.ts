@@ -34,6 +34,7 @@ import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -264,7 +265,7 @@ test('/export accepts no arguments: bare and whitespace-only succeed, any argume
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   startedApps.add(app)
-  registerTuiCommands(stubRunner(ctx, app))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app))
   const defs = commands.defs
 
   const bare = awaitHandler(defs, 'export', '')
@@ -288,7 +289,7 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   startedApps.add(app)
-  registerTuiCommands(stubRunner(ctx, app))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app))
   const defs = commands.defs
 
   // The stub declares the REQUIRED capability explicitly as `true` (Direct
@@ -316,7 +317,7 @@ test('/transcript refuses truthfully when the composition declares the capabilit
     ...stubRunner(ctx, app),
     transcriptExportAvailable: false,
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const refused = awaitHandler(commands.defs, 'transcript', '')
   assert.equal(refused.kind, 'error')
   assert.equal(refused.text, 'transcript export is unavailable on this backend')

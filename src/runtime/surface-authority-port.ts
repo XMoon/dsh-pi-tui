@@ -6,8 +6,8 @@
  * @module @xmoon76/dsh-pi-tui/runtime/surface-authority-port
  */
 
-import type { HumanSkillSummary } from '../skill-catalog.ts'
-import type { SurfaceCommandSummary } from '../surface-catalog.ts'
+import type { HumanSkillSummary } from '../domain/catalog/skill.ts'
+import type { SurfaceCommandSummary } from '../domain/catalog/surface.ts'
 
 /** Detached command/skill authority for one live Session. */
 export interface SurfaceAuthoritySnapshot {

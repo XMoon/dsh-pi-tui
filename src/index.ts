@@ -30,9 +30,9 @@ import { type ProgressUpdatesState, type ResponseStyleState } from './communicat
 import { type Diag } from './diag.ts'
 import {
   resolveInitialCatalog as resolveInitialCatalogImpl,
-  type InitialCatalogResolution,
-  type SurfaceCatalogContext,
-} from './surface-catalog.ts'
+} from './app/direct/initial-catalog.ts'
+import type { InitialCatalogResolution } from './domain/catalog/surface.ts'
+import type { SurfaceCatalogContext } from './runtime/direct/surface-catalog.ts'
 import { applyRunner } from './app/bootstrap.ts'
 import { composeDirectAgent, recordedDirectPreset } from './app/direct/composition.ts'
 
@@ -51,7 +51,7 @@ export { Config } from './tui-config.ts'
 export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from './command-policy.ts'
 export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './app/session/interrupt.ts'
 export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
-export type { InitialCatalogResolution } from './surface-catalog.ts'
+export type { InitialCatalogResolution } from './domain/catalog/surface.ts'
 
 /**
  * Options for {@link resolveInitialCatalog}.

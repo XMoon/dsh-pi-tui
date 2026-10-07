@@ -130,20 +130,20 @@
   "runtime/direct/session-writer-direct.ts": [
     "sessionTitle"
   ],
+  "runtime/direct/skill-catalog.ts": [
+    "agentPresets",
+    "skills"
+  ],
   "runtime/direct/subagent-direct.ts": [
     "subagents"
+  ],
+  "runtime/direct/surface-catalog.ts": [
+    "commands"
   ],
   "runtime/direct/turn-outline-compat.ts": [
     "import:dsh-session"
   ],
   "sessions.ts": [
     "import:dsh-session"
-  ],
-  "skill-catalog.ts": [
-    "agentPresets",
-    "skills"
-  ],
-  "surface-catalog.ts": [
-    "commands"
   ]
 }

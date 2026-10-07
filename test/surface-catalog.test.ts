@@ -11,11 +11,11 @@ import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SkillSummary, SkillViewOptions } from '@deepseek-ai/dsh-skill'
 import {
-  commandSummaryOf,
   listGlobalCommands,
   readSurfaceCatalog,
   type SurfaceCatalogContext,
-} from '../src/surface-catalog.ts'
+} from '../src/runtime/direct/surface-catalog.ts'
+import { commandSummaryOf } from '../src/domain/catalog/surface.ts'
 
 type TestCommandDescriptor = {
   readonly definitionId?: string

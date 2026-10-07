@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createRemoteCommandSource, type RemoteCommandSource } from '../src/app/remote/command-source.ts'
 import { composeRemoteSurfaceCatalog } from '../src/app/command/surface.ts'
-import { CatalogRefreshCoordinator } from '../src/skill-catalog-refresh.ts'
+import { CatalogRefreshCoordinator } from '../src/app/command/catalog-refresh.ts'
 import type { RemoteApplicationSource } from '../src/app/remote/presentation-source.ts'
 import type { SurfaceAuthoritySnapshot } from '../src/runtime/surface-authority-port.ts'
 

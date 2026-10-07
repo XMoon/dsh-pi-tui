@@ -16,7 +16,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../src/index.ts'
-import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../src/surface-catalog.ts'
+import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../src/domain/catalog/surface.ts'
 import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/app/session/operation-barrier.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -26,6 +26,7 @@ import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -272,7 +273,7 @@ test('display and focus commands share the canonical preset and apply Compact', 
   ctx.provide('skills', services.skills as never)
   const displayWrites: ('focus' | 'compact' | 'full')[] = []
   const runner = stubRunner(ctx, app, { agent: undefined, displayWrites })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const invoke = (name: string, rawInput: string): Promise<{ kind: string; text?: string }> | { kind: string; text?: string } => {
     const definition = services.defs.find(candidate => candidate.name === name)
     assert.ok(definition?.handler !== undefined, `${name} must be registered`)
@@ -304,7 +305,7 @@ test('/focus off maps a seeded Compact state to Full', async () => {
   ctx.provide('skills', services.skills as never)
   const displayWrites: ('focus' | 'compact' | 'full')[] = []
   const runner = stubRunner(ctx, app, { agent: undefined, displayWrites }, undefined, { initialDisplayPreset: 'compact' })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const definition = services.defs.find(candidate => candidate.name === 'focus')
   assert.ok(definition?.handler !== undefined)
   const result = await (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput: 'off' })
@@ -327,7 +328,7 @@ test('/display compact fails closed on a legacy runner without the canonical set
   const stub = stubRunner(ctx, app, { agent: undefined })
   const legacy: TuiCommandRunner = { ...stub, setFocusMode: (enabled) => { focusModes.push(enabled) } }
   delete (legacy as { setDisplayPreset?: unknown }).setDisplayPreset
-  registerTuiCommands(legacy)
+  registerTuiCommandsWithDirectSeams(legacy)
   const definition = services.defs.find(candidate => candidate.name === 'display')
   assert.ok(definition?.handler !== undefined, '/display must be registered')
   const result = await (definition.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }> | { kind: string; text?: string })({ rawInput: 'compact' })
@@ -347,7 +348,7 @@ test('an initial snapshot installs skill wrappers and claims SYNCHRONOUSLY with 
   ctx.provide('skills', services.skills as never)
   const state = { agent: undefined }
   const snapshot = snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }, { name: 'find-skills', description: 'Find skills' }] })
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, state), { snapshot })
+  const { wasAdvertised } = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state), { snapshot })
   // No await anywhere: the whole install is one synchronous commit.
   assert.deepEqual(
     services.registered.filter(name => name === 'glab' || name === 'find-skills').sort(),
@@ -372,7 +373,7 @@ test('without a snapshot no skill wrappers install and claims cover only the glo
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }))
+  const { wasAdvertised } = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: undefined }))
   assert.deepEqual(services.registered.filter(name => name === 'glab' || name === 'find-skills'), [],
     'no skill wrapper may install without a snapshot or a live session')
   assert.equal(wasAdvertised('builtin'), true)
@@ -397,7 +398,7 @@ test('a scoped override blocks a same-name skill wrapper; the effective command 
       { name: 'builtin', description: 'a skill that collides with the global view' },
     ],
   })
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }), { snapshot })
+  const { wasAdvertised } = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: undefined }), { snapshot })
   assert.deepEqual(
     services.registered.filter(name => name === 'glab' || name === 'scoped-cmd' || name === 'builtin'),
     ['glab'],
@@ -417,7 +418,7 @@ test('a commands/change event re-merges completions without re-probing and witho
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
   const snapshot = snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] })
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent: undefined }), { snapshot })
+  const { wasAdvertised } = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: undefined }), { snapshot })
   assert.equal(wasAdvertised('scoped-cmd'), true, 'the scoped override is advertised after the install')
   const readsBefore = services.skills.listCalls()
   // An external registry change (e.g. a global plugin registering a command):
@@ -443,7 +444,7 @@ test('the revalidating transition keeps skill names as revalidating handlers and
     list: async () => [],
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  const { wasAdvertised, enterTransition } = registerTuiCommands(
+  const { wasAdvertised, enterTransition } = registerTuiCommandsWithDirectSeams(
     stubRunner(ctx, app, { agent }),
     { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) },
   )
@@ -492,7 +493,7 @@ test('loadSkill refuses a session switch while resolving the skill body', async 
     },
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, state, undefined, { generation: () => generation }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state, undefined, { generation: () => generation }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -519,7 +520,7 @@ test('loadSkill steers a RUNNING agent at the next step boundary instead of park
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -551,7 +552,7 @@ test('the explicit /skill <name> path steers the original line and injects the b
       : undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab' })
@@ -598,7 +599,7 @@ test('the explicit /skill path admits and commits inside the shared prompt-admis
       inside.value = false
     }
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const skillDef = services.defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab @image.png' })
@@ -655,7 +656,7 @@ test('a transition started after the skill writer entered waits for the skill to
     order.push('commit')
     return originalPrompt(sessionId, message, mode)
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const skillDef = services.defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const pending = (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab @image.png' })
@@ -699,7 +700,7 @@ test('a missing agent status still delivers via steer+inject (no status branch)'
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -740,7 +741,7 @@ test('a model-only skill is refused by the explicit /skill <name> path and never
       : undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string; text?: string }>)({ rawInput: 'model-only' })
@@ -766,7 +767,7 @@ test('the /skill picker offers only human-invocable skills', async () => {
     get: async () => undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
@@ -794,7 +795,7 @@ test('a direct skill wrapper re-checks the policy on the CURRENT agent at execut
     get: async () => ({ name: 'flipped', description: 'now model only', content: 'body', invocation: { modelInvocable: true, userInvocable: false }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  const { wasAdvertised } = registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  const { wasAdvertised } = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'flipped', description: 'was human invocable' }],
   }) })
   assert.equal(wasAdvertised('flipped'), true, 'the snapshot advertised it')
@@ -822,7 +823,7 @@ test('a direct skill wrapper forwards /name args VERBATIM as the original line (
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -865,7 +866,7 @@ test('with a visible host skill loader the wrapper forwards the original line on
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -899,7 +900,7 @@ test('the /skill command splits /skill <name> <args> and forwards the args verba
       : undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab open issue 123' })
@@ -927,7 +928,7 @@ test('the /skill command normalizes a bare name to the /name line for the host g
       : undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: ' glab ' })
@@ -953,7 +954,7 @@ test('the direct wrapper preserves leading/multiple whitespace in args', async (
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -983,7 +984,7 @@ test('the /skill command with args on a RUNNING agent steers the pair into the r
       : undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const result = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: 'glab fix bug' })
@@ -1010,7 +1011,7 @@ test('the wrappers tolerate an undefined invocation (defensive rawInput fallback
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -1050,7 +1051,7 @@ test('the ordered prompt fallback carries the official source fields and a provi
   } as never)
   const { defs } = services
   const writerCalls: { kind: 'prompt'; mode?: 'queue' | 'steer'; messages?: readonly unknown[] }[] = []
-  registerTuiCommands(stubRunner(ctx, app, { agent, writerCalls }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent, writerCalls }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -1087,7 +1088,7 @@ test('the fallback injection forwards the resource base hint', async () => {
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't', resourceBase: { kind: 'directory', path: '/skills/glab' } }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -1119,7 +1120,7 @@ test('a tool merely NAMED skill without a loader shape is treated as no host loa
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = defs.findLast(def => def.name === 'glab')
@@ -1145,7 +1146,7 @@ test('a cancelled semantic skill write propagates cancellation instead of a comm
     list: async () => [],
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  registerTuiCommands(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
+  registerTuiCommandsWithDirectSeams(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
   const wrapper = services.defs.findLast(def => def.name === 'glab')
   assert.ok(wrapper?.handler !== undefined)
   await assert.rejects(
@@ -1169,7 +1170,7 @@ test('an indeterminate semantic skill write is explicit and does not auto-retry'
     list: async () => [],
     get: async (name: string) => ({ name, description: 'GitLab CLI', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  registerTuiCommands(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
+  registerTuiCommandsWithDirectSeams(runner, { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) })
   const wrapper = services.defs.findLast(def => def.name === 'glab')
   assert.ok(wrapper?.handler !== undefined)
   await assert.rejects(
@@ -1193,7 +1194,7 @@ test('an indeterminate title write suppresses outer draft restoration', async ()
     kind: 'indeterminate' as const,
     error: { code: 'transport/unknown', message: 'title result unknown' },
   })
-  const registered = registerTuiCommands(runner)
+  const registered = registerTuiCommandsWithDirectSeams(runner)
   const title = services.defs.find(def => def.name === 'title')
   assert.ok(title?.handler !== undefined)
 
@@ -1229,7 +1230,7 @@ test('a throwing skill steer releases the image pin (review finding)', async () 
   } as never)
   const runner = stubRunner(ctx, app, { agent })
   const draft = runner.imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const skillDef = services.defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   await assert.rejects(
@@ -1256,7 +1257,7 @@ test('the transition fence refuses a skill invocation mid-transition (zero write
     list: async () => [],
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  const registered = registerTuiCommands(
+  const registered = registerTuiCommandsWithDirectSeams(
     stubRunner(ctx, app, { agent }, createDiag({ filePath: undefined, stderrLevel: 'off' }), { transitionPending: true }),
     { snapshot: snapshotOf({ skills: [{ name: 'glab', description: 'GitLab CLI' }] }) },
   )
@@ -1285,7 +1286,7 @@ test('the transition fence does NOT refuse skill invocations when no transition 
     list: async () => [],
     get: async (name: string) => ({ name, description: 'body', content: 'body', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 't' }),
   } as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }), { snapshot: snapshotOf({
     skills: [{ name: 'glab', description: 'GitLab CLI' }],
   }) })
   const wrapper = services.defs.findLast(def => def.name === 'glab')
@@ -1327,7 +1328,7 @@ test('the /skill picker resolves the delivery mode at SELECTION time, not at ope
     get: (name: string) => name === 'skill' ? { name: 'skill', execute: async () => ({}) } : undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, { agent }, undefined, { busyEnter: 'steer' }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }, undefined, { busyEnter: 'steer' }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   // The picker opens while the agent is RUNNING with busyEnter=steer: a mode
@@ -1386,7 +1387,7 @@ test('a /skill picker whose catalog read settles after an owner swap never opens
     },
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const pending = (skillDef!.handler as (invocation: {
@@ -1431,7 +1432,7 @@ test('a /skill picker selection refuses when the owner changed while the picker 
     get: (name: string) => name === 'skill' ? { name: 'skill', execute: async () => ({}) } : undefined,
   } as never)
   const { defs } = services
-  registerTuiCommands(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state, undefined, { busyEnter: 'steer' }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
   const opened = await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<{ kind: string }>)({ rawInput: '' })
@@ -1457,7 +1458,7 @@ test('capability-truthful discovery copy is registered for the conditional comma
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent: undefined }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: undefined }))
   const descriptionOf = (name: string): string => {
     const def = services.defs.find(candidate => candidate.name === name)
     assert.ok(def?.description !== undefined, `/${name} must be registered with a description`)
@@ -1506,7 +1507,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent: undefined }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: undefined }))
   // The six existing aliases: an alias is another NAME of the same logical
   // command, registered immediately after its primary.
   const ALIASES = new Set(['quit', 'statusline', 'resume', 'subagents', 'image', 'rename'])

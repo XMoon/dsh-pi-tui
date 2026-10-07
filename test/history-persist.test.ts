@@ -17,8 +17,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { join } from 'node:path'
-import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../src/history-persist.ts'
-import { historyFilePath, loadHistoryRecords } from '../src/history.ts'
+import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../src/app/submission/history-persist.ts'
+import { historyFilePath, loadHistoryRecords } from '../src/client/history/store.ts'
 
 function tempHome(life: TestLifecycle): string {
   return life.tempDir('pi-tui-history-persist-')

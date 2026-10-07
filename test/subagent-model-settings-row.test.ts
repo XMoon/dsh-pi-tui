@@ -19,6 +19,7 @@ import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -255,7 +256,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; li
     exit: () => {},
     applyFooterSettings: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   // The captured panel args are read through GETTERS: the mock assigns the
   // outer variables when the handler runs, so a value snapshot taken at
   // harness construction would stay undefined.

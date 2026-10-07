@@ -25,6 +25,7 @@ import { parseNotificationMethod, parseNotificationMode } from '../src/domain/no
 import { installProgressUpdatesPrompt, installResponseStylePrompt, parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
 import { installFocusPrompt, type SystemPromptLike } from '../src/focus.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
@@ -202,7 +203,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (): Promise<void> => {

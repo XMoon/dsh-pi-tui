@@ -50,6 +50,7 @@ async function settle(): Promise<void> {
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -327,7 +328,7 @@ function setup(options: {
   })
   ctx.provide('authorization', authorization.service as never)
   const runner = stubRunner(ctx, app)
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   app.askQuestions = async () => [{ id: 'key', selected: [], custom: 'sk-test' }] as never
   app.openPicker = ((items: readonly { value: string; label?: string; group?: string }[], onSelect: (value: string) => void) => {
     onSelect((options.pick ?? ((rows) => rows[0]!.value))(items))

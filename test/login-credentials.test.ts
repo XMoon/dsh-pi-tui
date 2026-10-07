@@ -29,6 +29,7 @@ import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -250,7 +251,7 @@ function setup(options: {
     ctx.provide('llm', options.llm.service as never)
   }
   const runner = stubRunner(ctx, app)
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   // Stub the interactive surfaces: the key-entry question returns the fixed
   // key; the credential picker resolves to the stub's choice.
   app.askQuestions = async () => (options.questions?.() ?? [

@@ -7,7 +7,7 @@
  */
 
 import type { SurfaceAuthorityReader, SurfaceAuthoritySnapshot } from '../surface-authority-port.ts'
-import type { SurfaceCommandSummary } from '../../surface-catalog.ts'
+import type { SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type {
   RemoteConnectionGeneration,
   RemoteConnectionGenerationSource,

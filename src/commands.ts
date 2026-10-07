@@ -65,10 +65,10 @@ import type { Catalog } from './runtime/catalog-port.ts'
 import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshSource } from './skill-catalog-refresh.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
-import { commandSummaryOf, listGlobalCommands, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './surface-catalog.ts'
-import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './skill-catalog.ts'
+import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
+import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
 import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
@@ -805,10 +805,20 @@ export type HostCommandClaim =
  * between.
  * @param runner - the live runner surface.
  * @param initial - optional prefetched catalogs installed synchronously.
+ * @param catalogSeams - the narrow Direct catalog seams (the composition root
+ *   adapts the Direct Host global-layer read into detached summaries); absent
+ *   on the Remote branch, whose `commandRegistry` is undefined.
  */
+export interface CommandCatalogSeams {
+  /** The Direct Host global-layer command summaries (already detached). Absent
+   *  on Remote. */
+  readonly listGlobalCommands?: () => readonly SurfaceCommandSummary[]
+}
+
 export function registerTuiCommands(
   runner: TuiCommandRunner,
   initial?: InitialCommandCatalog,
+  catalogSeams: CommandCatalogSeams = {},
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -855,6 +865,23 @@ export function registerTuiCommands(
   const signal = runner.signal
   const commands = runner.commandRegistry
   const clientCommands = runner.clientCommands
+  /**
+   * The Direct Host global-layer summaries (TS8-E): the Direct
+   * `commands.list(undefined)` interpretation stays in
+   * `runtime/direct/surface-catalog.ts`; the composition root adapts it into
+   * detached summaries and injects the seam. A Direct registry WITHOUT the
+   * seam is a composition bug — resolving a catalog fact from a missing
+   * capability would silently change Host claims/collision/completion, so it
+   * fails loudly rather than degrading to an empty catalog.
+   */
+  const directGlobalCommands = (): readonly SurfaceCommandSummary[] => {
+    if (commands === undefined) return []
+    const read = catalogSeams.listGlobalCommands
+    if (read === undefined) {
+      throw new Error('BUG: the Direct command registry requires the global catalog read seam')
+    }
+    return read()
+  }
   const recordExtensionError = runner.recordExtensionError
   const clearExtensionError = runner.clearExtensionError
   const captureExtensionHealthRef = runner.captureExtensionHealthRef
@@ -1291,10 +1318,8 @@ export function registerTuiCommands(
     // registration); Remote builds it from the CLIENT registry's own
     // descriptors — the Host commands service is metadata-only there and its
     // in-process `list` must never be consulted for the TUI's registrations.
-    if (commands !== undefined) {
-      for (const descriptor of listGlobalCommands(commands)) {
-        byName.set(descriptor.name, commandSummaryOf(descriptor))
-      }
+    for (const command of directGlobalCommands()) {
+      byName.set(command.name, command)
     }
     for (const definition of clientCommands.list()) {
       byName.set(definition.name, commandSummaryOf(definition))
@@ -1381,7 +1406,7 @@ export function registerTuiCommands(
         // (whose by-name Client definitions would overwrite a genuine Host
         // descriptor such as the rc.2 Host `/export`). The display list and
         // the advertised claims keep the merged `entries`.
-        const hostView = [...listGlobalCommands(commands).map(commandSummaryOf).reduce(
+        const hostView = [...directGlobalCommands().reduce(
           (byName, descriptor) => { byName.set(descriptor.name, descriptor); return byName },
           new Map<string, SurfaceCommandSummary>(),
         ).values()]

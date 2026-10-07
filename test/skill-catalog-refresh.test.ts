@@ -10,11 +10,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshHooks } from '../src/skill-catalog-refresh.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshHooks } from '../src/app/command/catalog-refresh.ts'
 import { SupersededReadError } from '../src/runtime/read-error.ts'
 import { createDiag } from '../src/diag.ts'
-import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
-import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
+import type { HumanSkillCatalog } from '../src/domain/catalog/skill.ts'
+import type { SurfaceCatalogSnapshot } from '../src/domain/catalog/surface.ts'
 
 /** A promise the test resolves manually, to stage late completions. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {

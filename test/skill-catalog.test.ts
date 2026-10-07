@@ -19,8 +19,8 @@ import {
   type SkillCatalogContext,
   type SkillCatalogReadOptions,
   type SkillRegistryLike,
-  type SkillSummaryLike,
-} from '../src/skill-catalog.ts'
+} from '../src/runtime/direct/skill-catalog.ts'
+import type { SkillSummaryLike } from '../src/domain/catalog/skill.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 
 /** A catalog entry helper with the full invocation policy. */

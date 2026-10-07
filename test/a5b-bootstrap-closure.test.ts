@@ -1007,7 +1007,7 @@ test('A5b-4: the input-history owner owns the submission persistence policy', ()
   const root = compositionFile('src/app/bootstrap.ts')
   const controller = ownerFile('src/app/submission/controller.ts')
   const history = ownerFile('src/app/surface/input-history.ts')
-  assert.match(history, /from '\.\.\/\.\.\/history-persist\.ts'/u,
+  assert.match(history, /from '\.\.\/submission\/history-persist\.ts'/u,
     'the history owner must own the persist decision + ordering gate')
   assert.match(history, /runDetached\('input history write'/u,
     'the history owner must own the detached write')
@@ -1015,10 +1015,21 @@ test('A5b-4: the input-history owner owns the submission persistence policy', ()
     'the composition root must not write input history')
   assert.doesNotMatch(controller, /runDetached\('input history write'/u,
     'the submission controller must not write input history')
-  assert.doesNotMatch(controller, /from '\.\.\/\.\.\/history-persist\.ts'/u,
+  // The controller lives in `src/app/submission/`, so its canonical forbidden
+  // specifiers are `./history-persist.ts` (same dir) and
+  // `../../client/history/store.ts`.
+  const forbiddenHistoryPersist = /from '\.\/history-persist\.ts'/u
+  const forbiddenHistoryStore = /from '\.\.\/\.\.\/client\/history\/store\.ts'/u
+  assert.doesNotMatch(controller, forbiddenHistoryPersist,
     'the submission controller must consume the owner, not history-persist directly')
-  assert.doesNotMatch(controller, /from '\.\.\/\.\.\/history\.ts'/u,
+  assert.doesNotMatch(controller, forbiddenHistoryStore,
     'the submission controller must not resolve history file paths directly')
+  // Discriminating-power control: the SAME patterns must reject the real
+  // forbidden imports a controller in this directory would write.
+  assert.match("import { persistAfterSession } from './history-persist.ts'\n", forbiddenHistoryPersist,
+    'the negative guard must reject a direct history-persist import')
+  assert.match("import { historyFilePath } from '../../client/history/store.ts'\n", forbiddenHistoryStore,
+    'the negative guard must reject a direct history-store import')
   // Exactly ONE last-content state: the submission deps no longer expose it.
   assert.doesNotMatch(controller, /deps\.history\.(?:lastContent|setLastContent)\b/u,
     'the controller must not keep a second last-content state')

@@ -1,7 +1,7 @@
 /**
- * The standing-scope skill catalog adapter: the SINGLE narrow seam between
- * the TUI and the dsh skill services (the non-public-API isolation
- * contract, plan appendix B).
+ * The Direct Host skill-catalog adapter (TS8-E): the SINGLE narrow seam between
+ * the TUI and the dsh skill services (the non-public-API isolation contract,
+ * plan appendix B).
  *
  * Everything the TUI knows about dsh-skill and agent-presets lives here:
  * - structural service types (never upstream classes) with OPTIONAL
@@ -18,11 +18,16 @@
  * degraded targets or rethrown errors for the coordinator to classify;
  * aborts ALWAYS propagate as aborts. No failure may hang or crash the TUI —
  * the worst outcome is "the corresponding commands are missing".
- * @module @xmoon76/dsh-pi-tui/skill-catalog
+ * @module @xmoon76/dsh-pi-tui/runtime/direct/skill-catalog
  */
 
-import { isUserInvocable } from '@deepseek-ai/dsh-skill'
-import { safeErrorMessage } from './error-boundary.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
+import {
+  isUserInvocableSkill,
+  type HumanSkillCatalog,
+  type HumanSkillSummary,
+  type SkillSummaryLike,
+} from '../../domain/catalog/skill.ts'
 
 function isAbortError(error: unknown): boolean {
   try {
@@ -35,23 +40,6 @@ function isAbortError(error: unknown): boolean {
   }
 }
 
-/** The human-facing slice of one skill: display fields only. */
-export interface HumanSkillSummary {
-  readonly name: string
-  readonly description: string
-  readonly whenToUse?: string
-  /** Official model-invocation capability; Host-local paths are omitted. */
-  readonly modelInvocable?: boolean
-}
-
-/** The detached human skill catalog one observation produced. */
-export interface HumanSkillCatalog {
-  readonly skills: readonly HumanSkillSummary[]
-  /** Whether discovery completed within a stable revision (an incomplete
-   * observation must not replace a last-good catalog). */
-  readonly complete: boolean
-}
-
 /** Read options (structural mirror of the upstream view options; keeps the
  * adapter decoupled from upstream type shapes). */
 export interface SkillCatalogReadOptions {
@@ -60,19 +48,6 @@ export interface SkillCatalogReadOptions {
    * the global layer. */
   readonly scope?: object
   readonly signal?: AbortSignal
-}
-
-/** A summary-shaped entry the registry returns (structural; `snapshot()`
- * returns these with invocation metadata intact). `content` appears on
- * loaded DEFINITIONS (`get()`), never on summaries. */
-export interface SkillSummaryLike {
-  readonly name: unknown
-  readonly description: unknown
-  readonly whenToUse?: unknown
-  readonly content?: unknown
-  readonly provider?: unknown
-  readonly resourceBase?: unknown
-  readonly invocation?: { readonly modelInvocable?: unknown; readonly userInvocable?: unknown }
 }
 
 /** The dsh-skill registry as the adapter sees it. `snapshot` is OPTIONAL:
@@ -117,23 +92,6 @@ export interface SkillCatalogEventsContext {
  */
 export function subscribeSkillsChange(ctx: SkillCatalogEventsContext, listener: () => void): void {
   ctx.on?.('skills/change', listener)
-}
-
-/**
- * Whether one summary passes the OFFICIAL user-invocation policy — the
- * adapter's exported guard, used by every human entry point (direct
- * wrappers, `/skill`, the picker, and final body loads). A malformed
- * `invocation` (missing, non-object, non-boolean flag) is treated as NOT
- * user-invocable: the policy defaults are never reinterpreted, and a
- * hostile entry can neither throw nor sneak into a human surface.
- */
-export function isUserInvocableSkill(skill: SkillSummaryLike): boolean {
-  const invocation = skill.invocation
-  if (typeof invocation !== 'object' || invocation === null) return false
-  if (typeof invocation.userInvocable !== 'boolean') return false
-  // The official policy function: the guards above already proved the
-  // invocation shape, so the cast crosses unknown deliberately.
-  return isUserInvocable(skill as unknown as { invocation: { modelInvocable: boolean; userInvocable: boolean } })
 }
 
 /** One readable catalog target. */
