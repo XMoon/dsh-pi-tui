@@ -8,7 +8,7 @@
  *
  * The package entry re-exports `Config` unchanged, so the published root
  * surface is preserved while the composition root consumes the same contract.
- * @module @xmoon76/dsh-pi-tui/tui-config
+ * @module @xmoon76/dsh-pi-tui/app/config/schema
  */
 
 import z from '@deepseek-ai/schemastery'

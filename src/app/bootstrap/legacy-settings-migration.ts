@@ -28,16 +28,16 @@
  * `focusMode` exists here ONLY as a legacy input: it converges into
  * `displayPreset` (canonical valid → copy, else focusMode 'on' → focus,
  * else full) and is never carried as a canonical field.
- * @module @xmoon76/dsh-pi-tui/legacy-settings-migration
+ * @module @xmoon76/dsh-pi-tui/app/bootstrap/legacy-settings-migration
  */
 
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse } from 'yaml'
-import { resolveDisplayPreset, type PersistedDisplayInput } from './domain/display/preset.ts'
-import { parseFooterCommandConfig } from './domain/footer/command-trust.ts'
-import { isFooterLayout, parseFooterLayout } from './domain/footer/layout.ts'
+import { resolveDisplayPreset, type PersistedDisplayInput } from '../../domain/display/preset.ts'
+import { parseFooterCommandConfig } from '../../domain/footer/command-trust.ts'
+import { isFooterLayout, parseFooterLayout } from '../../domain/footer/layout.ts'
 
 /** The normalized, schema-clean footerCommand value for a legacy raw field:
  * the runtime parser's CANONICAL output (fail-soft repairs applied) wrapped
@@ -51,7 +51,7 @@ function normalizedFooterCommand(value: unknown): { schemaVersion: number; comma
   if (parsed === undefined) return undefined
   return { schemaVersion: 1, ...parsed }
 }
-import type { SettingsFormsLike, TuiSettingsPathOp } from './runtime/direct/tui-settings-direct.ts'
+import type { SettingsFormsLike, TuiSettingsPathOp } from '../../runtime/direct/tui-settings-direct.ts'
 
 /** The migration version this build completes. */
 const LEGACY_SETTINGS_MIGRATION_VERSION = 1

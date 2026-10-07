@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createExitController } from '../src/exit.ts'
+import { createExitController } from '../src/app/bootstrap/exit.ts'
 import { cancellationError, isCancellation, runDetached, runOwned } from '../src/runtime/process/tasks.ts'
 import { createDiag, type Diag } from '../src/runtime/process/diagnostics.ts'
 
