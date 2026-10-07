@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { join, win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
 import {
   expandHomeToken,
   reattachDisplayBase,
@@ -31,28 +31,57 @@ const WINDOWS: PathQueryEnvironment = { homeDir: 'C:\\Users\\fixture', windowsHo
 const CWD = '/ws'
 
 test('the resolver is environment-neutral: the explicit windowsHost selects the join, never process.platform', () => {
-  // The same raw token and cwd under the two INJECTED host facts.
+  // The same raw token and cwd under the two INJECTED host facts. Every expected
+  // value is the EXPLICIT posix/win32 algebra — never the ambient default export
+  // (which would make the expectation itself machine-dependent).
   const windows = resolvePathQuery('sub\\fi', CWD, WINDOWS)
-  const posix = resolvePathQuery('sub\\fi', CWD, POSIX)
+  const posixQuery = resolvePathQuery('sub\\fi', CWD, POSIX)
   assert.equal(windows.searchBase, win32.join(CWD, 'sub'))
-  assert.equal(posix.searchBase, join(CWD, 'sub'))
+  assert.equal(posixQuery.searchBase, posix.join(CWD, 'sub'))
   assert.equal(windows.searchTerm, 'fi')
-  assert.equal(posix.searchTerm, 'fi')
-  assert.equal(posix.winAbsolute, false, 'a relative backslash token is a dialect, not an absolute Windows path')
+  assert.equal(posixQuery.searchTerm, 'fi')
+  assert.equal(posixQuery.winAbsolute, false, 'a relative backslash token is a dialect, not an absolute Windows path')
+  // A forward-slash relative token under a Windows-looking cwd: the scope and
+  // parent algebra must be the HOST's, so the same input can never silently
+  // collapse to the running process cwd.
+  assert.equal(resolvePathQuery('src/fo', 'C:\\ws', WINDOWS).searchBase, win32.join('C:\\ws', 'src'))
+  assert.equal(resolvePathQuery('../fo', 'C:\\ws', WINDOWS).searchBase, win32.join('C:\\ws', '..'))
+  assert.equal(resolvePathQuery('../fo', 'C:\\ws', WINDOWS).searchBase, 'C:\\',
+    'the Windows parent of a drive root stays the drive root')
+  assert.notEqual(resolvePathQuery('../fo', 'C:\\ws', WINDOWS).searchBase, '.',
+    'the POSIX join of the same input collapses to the process cwd — never here')
+  // The POSIX side is unchanged and never mixed.
+  assert.equal(resolvePathQuery('src/fo', CWD, POSIX).searchBase, posix.join(CWD, 'src'))
+  assert.equal(resolvePathQuery('../fo', CWD, POSIX).searchBase, posix.join(CWD, '..'))
   // An unmistakable drive/UNC cwd keeps the win32 joiner even on a POSIX host.
   assert.equal(resolvePathQuery('sub\\fi', 'C:\\ws', POSIX).searchBase, win32.join('C:\\ws', 'sub'))
+  // The token GRAMMAR follows the same explicit facts: a drive-relative name is
+  // an ordinary POSIX name on a POSIX host, and a drive-relative path on Windows.
+  assert.equal(resolvePathQuery('C:foo', CWD, POSIX).searchTerm, 'C:foo')
+  assert.equal(resolvePathQuery('C:foo', CWD, WINDOWS).searchTerm, 'foo')
 })
 
-test('`~` forms expand through the INJECTED homeDir only', () => {
-  assert.equal(expandHomeToken('~', '/home/fixture'), '/home/fixture')
-  assert.equal(expandHomeToken('~/a', '/home/fixture'), join('/home/fixture', 'a'))
-  assert.equal(expandHomeToken('~\\a', '/home/fixture'), join('/home/fixture', 'a'),
+test('`~` forms expand through the INJECTED homeDir AND the injected host algebra', () => {
+  assert.equal(expandHomeToken('~', '/home/fixture', false), '/home/fixture')
+  assert.equal(expandHomeToken('~/a', '/home/fixture', false), posix.join('/home/fixture', 'a'))
+  assert.equal(expandHomeToken('~\\a', '/home/fixture', false), posix.join('/home/fixture', 'a'),
     'a Windows-looking home token still resolves against the injected home')
-  assert.equal(expandHomeToken('plain', '/home/fixture'), 'plain')
-  // The resolver never calls homedir(): an empty fixture home is authoritative.
+  assert.equal(expandHomeToken('~/a', 'C:\\Users\\fixture', true), win32.join('C:\\Users\\fixture', 'a'))
+  assert.equal(expandHomeToken('~\\a', 'C:\\Users\\fixture', true), win32.join('C:\\Users\\fixture', 'a'))
+  assert.equal(expandHomeToken('plain', '/home/fixture', false), 'plain')
+  // The resolver never calls homedir(): an explicit fixture home is authoritative.
   assert.equal(resolvePathQuery('~', CWD, { homeDir: '/nowhere-fixture', windowsHost: false }).searchBase,
     '/nowhere-fixture')
-  assert.equal(resolvePathQuery('~/pics/a', CWD, POSIX).searchBase, '/home/fixture/pics')
+  assert.equal(resolvePathQuery('~/pics/a', CWD, POSIX).searchBase, posix.join('/home/fixture', 'pics'))
+  assert.equal(resolvePathQuery('~/pics/a', CWD, WINDOWS).searchBase, win32.join('C:\\Users\\fixture', 'pics'),
+    'a Windows host expands the home subdirectory with the Windows algebra')
+  assert.equal(resolvePathQuery('~/../pics', CWD, WINDOWS).searchBase,
+    win32.join('C:\\Users\\fixture', '..'),
+    'the parent algebra of a Windows home is the Windows one — never the POSIX process cwd')
+  assert.notEqual(resolvePathQuery('~/../pics', CWD, WINDOWS).searchBase, '.',
+    'the un-neutralized join collapsed this to the process cwd')
+  assert.equal(resolvePathQuery('~/../pics', CWD, WINDOWS).searchTerm, 'pics')
+  assert.equal(resolvePathQuery('~/../pics', CWD, POSIX).searchBase, posix.join('/home/fixture', '..'))
   assert.equal(resolvePathQuery('~', CWD, WINDOWS).searchBase, 'C:\\Users\\fixture')
 })
 

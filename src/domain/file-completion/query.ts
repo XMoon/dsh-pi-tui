@@ -15,7 +15,7 @@
  * @module @xmoon76/dsh-pi-tui/domain/file-completion/query
  */
 
-import { basename, dirname, join, win32 } from 'node:path'
+import { posix, win32, type PlatformPath } from 'node:path'
 import type { PathCandidate, PathCompletionQuery } from './types.ts'
 
 /**
@@ -30,6 +30,17 @@ export interface PathQueryEnvironment {
 }
 
 /**
+ * The HOST filesystem's path algebra, selected from the EXPLICIT
+ * `windowsHost` fact. Every host-native path this module computes (a joined
+ * scope, an expanded `~`) goes through this api, so the domain never infers
+ * the running machine from the ambient `node:path` default export: a caller
+ * that injects a foreign host's facts gets that host's algebra.
+ */
+function hostPathApi(windowsHost: boolean): PlatformPath {
+  return windowsHost ? win32 : posix
+}
+
+/**
  * Return the final path component without depending on the host OS dialect.
  * Completion can present a Windows path while the client process is running
  * on POSIX (and vice versa), so `node:path.basename` is not sufficient here.
@@ -41,17 +52,20 @@ export function basenameOfPath(path: string): string {
 
 /**
  * Expand a leading `~` in one token against the locality's home directory
- * (other tokens unchanged). PURE — the home directory is an explicit fact.
+ * (other tokens unchanged). PURE — both the home directory AND the host
+ * platform are explicit facts: the joined result is a path on the HOST
+ * filesystem, so it uses that host's algebra.
  * @param token - the raw token.
  * @param homeDir - the locality owner's home directory fact.
+ * @param windowsHost - whether the filesystem host is Windows.
  */
-export function expandHomeToken(token: string, homeDir: string): string {
+export function expandHomeToken(token: string, homeDir: string, windowsHost: boolean): string {
   if (token === '~') return homeDir
   if (token.startsWith('~/') || token.startsWith('~\\')) {
     // Resolve a Windows-looking home token on POSIX too: the completion
     // source owns the real filesystem path, while the raw token keeps its
     // original separator for presentation.
-    return join(homeDir, token.slice(2).replace(/\\/g, '/'))
+    return hostPathApi(windowsHost).join(homeDir, token.slice(2).replace(/\\/g, '/'))
   }
   return token
 }
@@ -86,20 +100,26 @@ function isWindowsAbsolute(raw: string): boolean {
   return !raw.startsWith('/') && win32.isAbsolute(raw)
 }
 
-/** Join a relative scope while keeping POSIX test fixtures usable for a
- * Windows-looking token. On a real Windows host, win32.join is authoritative;
- * on POSIX, backslashes are the user's dialect but not filesystem separators.
- * The host choice is the EXPLICIT `windowsHost` fact, never `process.platform`
- * (the domain layer stays environment-neutral). */
+/** Join a relative scope while keeping POSIX fixtures usable for a
+ * Windows-looking token. The result is a path on the HOST filesystem, so the
+ * joiner comes from the EXPLICIT host fact (never `process.platform`); the
+ * TOKEN's own dialect only decides whether backslashes are the user's
+ * separators or ordinary characters.
+ *
+ * A `windowsDialect` token on a POSIX host has backslashes in the USER'S
+ * dialect, not as filesystem separators, so they are normalized; an
+ * unmistakable drive/UNC `cwd` selects the win32 joiner even on a POSIX host
+ * (that cwd string is itself a Windows path). */
 function joinRelativeScope(cwd: string, rawPath: string, windowsDialect: boolean, windowsHost: boolean): string {
-  if (!windowsDialect) return join(cwd, rawPath)
+  const api = hostPathApi(windowsHost)
+  if (!windowsDialect) return api.join(cwd, rawPath)
   // `win32.isAbsolute('/workspace')` is true for a rooted Windows path too,
   // but on POSIX that string is an ordinary absolute POSIX cwd. Select the
   // filesystem joiner from the explicit host fact or an unmistakable
   // drive/UNC cwd.
   const windowsCwd = /^[A-Za-z]:[\\/]/.test(cwd) || cwd.startsWith('\\\\')
   if (windowsHost || windowsCwd) return win32.join(cwd, rawPath)
-  return join(cwd, rawPath.replace(/\\/g, '/'))
+  return api.join(cwd, rawPath.replace(/\\/g, '/'))
 }
 
 /** Whether the raw token names a directory that should be LISTED
@@ -124,7 +144,7 @@ function isBareScopeForm(raw: string): boolean {
  * @param environment - the locality owner's explicit environment facts.
  */
 export function resolvePathQuery(raw: string, cwd: string, environment: PathQueryEnvironment): PathCompletionQuery {
-  const expanded = expandHomeToken(raw, environment.homeDir)
+  const expanded = expandHomeToken(raw, environment.homeDir, environment.windowsHost)
   // Detect the dialect from the RAW token, not from `path.isAbsolute` on the
   // expanded token. On Windows, node:path.isAbsolute(drivePath) is true but
   // that must not erase the Windows dialect; on POSIX, `~\\x` expands to a
@@ -133,8 +153,13 @@ export function resolvePathQuery(raw: string, cwd: string, environment: PathQuer
   const winAbsolute = isWindowsAbsolute(raw)
   const windowsDialect = isWindowsDialect(raw, winAbsolute)
   const absolute = isHomeToken(raw) || posixAbsolute || winAbsolute
-  const pathDirname = windowsDialect ? win32.dirname : dirname
-  const pathBasename = windowsDialect ? win32.basename : basename
+  // The TOKEN is parsed with the Windows grammar when the token's own dialect
+  // is Windows OR the HOST is Windows (a drive-relative `C:foo` is an ordinary
+  // POSIX name on a POSIX host, but a drive-relative path on a Windows one).
+  // Both facts are explicit here; the ambient default export is never used.
+  const tokenWindows = windowsDialect || environment.windowsHost
+  const pathDirname = tokenWindows ? win32.dirname : posix.dirname
+  const pathBasename = tokenWindows ? win32.basename : posix.basename
   const separator = separatorOfRaw(raw, windowsDialect)
 
   if (isBareScopeForm(raw)) {
@@ -179,7 +204,7 @@ export function resolvePathQuery(raw: string, cwd: string, environment: PathQuer
   // form resolves the raw directory against cwd (parent prefixes escape cwd
   // exactly as far as the user typed).
   const searchBaseForScope = isHomeToken(raw)
-    ? expandHomeToken(rawDir, environment.homeDir)
+    ? expandHomeToken(rawDir, environment.homeDir, environment.windowsHost)
     : (absolute ? pathDirname(expanded) : joinRelativeScope(cwd, rawDir, windowsDialect, environment.windowsHost))
   return {
     raw,

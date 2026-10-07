@@ -13,9 +13,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
+import { DirectWorkspaceDiscoveryDriver } from '../src/runtime/direct/file-completion/workspace-discovery.ts'
+import { MentionProvider } from '../src/mentions.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** A throwaway workspace with known files. */
@@ -240,6 +242,36 @@ test('candidates are detached PATH-ONLY DTOs (path/kind — the official FileRef
   assert.ok(item.kind === 'file' || item.kind === 'directory')
 })
 
+test('the workspace scanner exposes a symlinked directory but never descends it (TS8-A parity)', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-symlink-')
+  mkdirSync(join(root, 'real'))
+  writeFileSync(join(root, 'real', 'inside.ts'), 'x')
+  symlinkSync('real', join(root, 'linkdir'))
+  mkdirSync(join(root, 'dir'))
+  symlinkSync(join('..', 'real'), join(root, 'dir', 'nested-link'))
+  const scope = { kind: 'workspace', cwd: root } as const
+  const port = fallbackPort(root)
+  // The symlink itself stays a DIRECTORY candidate: a `@linkdir/` accept still
+  // continues into the link.
+  const link = okItems(await port.listReferences(scope, 'lin'))
+  assert.ok(link.some(item => item.path === 'linkdir' && item.kind === 'directory'),
+    `the symlinked directory is still a candidate: ${JSON.stringify(link)}`)
+  // Its target's children are never enumerated — at the root and below it alike
+  // (a descended symlink would rank `linkdir/inside.ts` exactly like the real
+  // `real/inside.ts`, so this assertion is discriminating).
+  const inside = okItems(await port.listReferences(scope, 'inside'))
+  const paths = inside.map(item => item.path)
+  assert.ok(paths.includes('real/inside.ts'), `the real directory is traversed: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.some(path => path.startsWith('linkdir/')), `a root symlink must not be descended: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.some(path => path.startsWith('dir/nested-link/')), `a deeper symlink must not be descended: ${JSON.stringify(paths)}`)
+  // A scoped listing still reads the directory the user EXPLICITLY named (the
+  // readdir follows the link) — the non-descent rule governs only the automatic
+  // bounded subtree scan, not an explicit scope.
+  const listed = okItems(await port.listReferences(scope, 'linkdir/'))
+  assert.deepEqual(listed.map(item => item.path), ['linkdir/inside.ts'])
+})
+
 // ── the fd-backed branch (the fork's whole-tree fuzzy search) ─────────────
 
 /** A fake `fd` executable: a script that prints the fixture's RELATIVE
@@ -306,28 +338,129 @@ test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)
 
 // ── session-vs-workspace routing (source -> route -> sink) ────────────────
 
-test('the SESSION scope routes to the official service ONLY — the Direct workspace scanner never runs', async (t) => {
+/**
+ * Record every entry the PRODUCTION Direct workspace driver is asked for.
+ * The port constructs its driver itself, so the spy is installed on the
+ * class prototype the port's instances resolve through — the recorded calls
+ * are the real consumer's, including the fs-only fallback path that never
+ * spawns a finder.
+ *
+ * The saved originals are deliberately NOT bound: `original.call(this, ...)`
+ * keeps the real receiver (a `.bind` clone would pin the prototype and hide
+ * instance state). Teardown restores the SAME function identities.
+ */
+function spyWorkspaceDriver(): { readonly calls: string[]; restore(): void } {
+  const calls: string[] = []
+  const originalFind = DirectWorkspaceDiscoveryDriver.prototype.find
+  const originalList = DirectWorkspaceDiscoveryDriver.prototype.listDirectory
+  DirectWorkspaceDiscoveryDriver.prototype.find = function (baseDir, term, signal) {
+    calls.push(`find:${baseDir}:${term}`)
+    return originalFind.call(this, baseDir, term, signal)
+  }
+  DirectWorkspaceDiscoveryDriver.prototype.listDirectory = function (baseDir, relativeDir, signal) {
+    calls.push(`list:${baseDir}:${relativeDir}`)
+    return originalList.call(this, baseDir, relativeDir, signal)
+  }
+  return {
+    calls,
+    restore: () => {
+      DirectWorkspaceDiscoveryDriver.prototype.find = originalFind
+      DirectWorkspaceDiscoveryDriver.prototype.listDirectory = originalList
+      if (DirectWorkspaceDiscoveryDriver.prototype.find !== originalFind
+        || DirectWorkspaceDiscoveryDriver.prototype.listDirectory !== originalList) {
+        throw new Error('the workspace driver spy was not fully restored')
+      }
+    },
+  }
+}
+
+test('the SESSION scope routes to the official service ONLY — the Direct workspace scanner is never entered', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  // The Direct WORKSPACE scanner's finder PROVES its own invocation by
-  // recording it: if the session route ever fell through to the local
-  // discovery pipeline, this marker would exist.
+  // Independent sink witness: the pinned finder records its OWN process run, so
+  // the fd spawn side is observable even beyond the driver call.
   const marker = join(life.tempDir('dsh-hostfile-route-'), 'finder-ran')
   const finder = fakeFd(life,
     `printf '%s' ran > ${JSON.stringify(marker)}\nprintf 'file-one.txt\\0'`)
-  // The Host authority's own answer — deliberately NOT anything the local
-  // workspace scan would return for the same query.
-  const official = officialService([{ path: 'host-answer/only.ts', kind: 'file' }])
-  const live = { session: { header: { cwd: root } } }
-  const port = new DirectHostFilePort(
-    (sessionId) => sessionId === 'session-live' ? live : undefined,
-    finder,
-    { get: (name: string) => name === 'fileReferences' ? official.service : undefined },
-  )
-  const result = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file')
-  assert.deepEqual(result, { kind: 'ok', items: [{ path: 'host-answer/only.ts', kind: 'file' }] },
-    'the session scope returns the official answer verbatim')
-  assert.equal(official.calls.length, 1, 'exactly one official Host list request')
-  assert.equal(official.calls[0]!.query, 'file', 'the official query form crossed')
-  assert.equal(existsSync(marker), false, 'the Direct workspace scanner must never run for a session scope')
+  const spy = spyWorkspaceDriver()
+  try {
+    // The Host authority's own answer — deliberately NOT anything the local
+    // workspace scan would return for the same query.
+    const official = officialService([{ path: 'host-answer/only.ts', kind: 'file' }])
+    const live = { session: { header: { cwd: root } } }
+    const port = new DirectHostFilePort(
+      (sessionId) => sessionId === 'session-live' ? live : undefined,
+      finder,
+      { get: (name: string) => name === 'fileReferences' ? official.service : undefined },
+    )
+    // 1. A non-empty Host answer crosses verbatim, in the Host's order.
+    assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file'),
+      { kind: 'ok', items: [{ path: 'host-answer/only.ts', kind: 'file' }] },
+      'the session scope returns the official answer verbatim')
+    assert.equal(official.calls.length, 1, 'exactly one official Host list request')
+    assert.equal(official.calls[0]!.query, 'file', 'the official query form crossed')
+    // 2. An EMPTY Host answer stays authoritative empty — never a local fallback.
+    const emptyService = new DirectHostFilePort(() => live, finder, { get: () => ({ list: async () => [] }) })
+    assert.deepEqual(await emptyService.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file'),
+      { kind: 'ok', items: [] })
+    // 3. An UNMOUNTED official capability stays unavailable — never a local fallback.
+    const unmounted = new DirectHostFilePort(() => live, finder)
+    assert.equal((await unmounted.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file')).kind,
+      'unavailable')
+    // 4. A FAILING official carrier rejects — never a local fallback.
+    const failing = new DirectHostFilePort(() => live, finder, {
+      get: () => ({ list: async () => { throw new Error('carrier down') } }),
+    })
+    await assert.rejects(failing.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file'), /carrier down/)
+    // THE FORBIDDEN SINK (both the finder process and the fs-only scan) never ran.
+    // Snapshot before the assertion: `deepEqual(x, [])` narrows x itself to
+    // `never[]`, which would break the positive-control reads below.
+    const sessionCalls = [...spy.calls]
+    assert.deepEqual(sessionCalls, [], 'no workspace find/listDirectory call for any session scope')
+    assert.equal(existsSync(marker), false, 'the workspace finder process never spawned for a session scope')
+    // POSITIVE CONTROL: the WORKSPACE scope DOES enter the production driver (the
+    // finder method AND the direct-child merge listing), so neither witness is
+    // vacuous.
+    const workspace = await port.listReferences({ kind: 'workspace', cwd: root }, 'file')
+    assert.ok(workspace.kind === 'ok' && workspace.items.length > 0, 'the workspace scope answers locally')
+    assert.ok(spy.calls.some(entry => entry.startsWith('find:')), `the workspace scope enters find(): ${JSON.stringify(spy.calls)}`)
+    assert.ok(spy.calls.some(entry => entry.startsWith('list:')), `the workspace merge lists children: ${JSON.stringify(spy.calls)}`)
+    assert.equal(existsSync(marker), true, 'the workspace scope runs the finder process')
+  } finally {
+    spy.restore()
+  }
+})
+
+test('the provider-level Session @ path reaches the official service only (port -> MentionProvider)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const finder = fakeFd(life, `printf 'file-one.txt\\0'`)
+  const spy = spyWorkspaceDriver()
+  try {
+    // The Host's own order, adversarially chosen so a local ranking would drop
+    // the second row for the query `zeta`.
+    const official = officialService([{ path: 'zeta.ts', kind: 'file' }, { path: 'alpha.ts', kind: 'file' }])
+    const port = new DirectHostFilePort(
+      (sessionId) => sessionId === 'session-live' ? { session: { header: { cwd: root } } } : undefined,
+      finder,
+      { get: () => official.service },
+    )
+    const provider = new MentionProvider([], root, port, undefined,
+      () => ({ kind: 'session', sessionId: 'session-live' }))
+    const result = await provider.getSuggestions(['@zeta'], 0, 5, { signal: abort })
+    assert.ok(result !== null, 'the Host answer must complete through the provider')
+    assert.deepEqual(result.items.map(item => item.value), ['@zeta.ts', '@alpha.ts'],
+      'the Host order is preserved with no local row and no local ranking')
+    const providerCalls = [...spy.calls]
+    assert.deepEqual(providerCalls, [], 'the provider never entered the workspace scanner')
+    // A Host capability that is unavailable presents as no candidates — still
+    // without a Client/Direct filesystem fallback.
+    const unmounted = new MentionProvider([], root, new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), finder),
+      undefined, () => ({ kind: 'session', sessionId: 'session-live' }))
+    assert.equal(await unmounted.getSuggestions(['@zeta'], 0, 5, { signal: abort }), null)
+    const unavailableCalls = [...spy.calls]
+    assert.deepEqual(unavailableCalls, [], 'an unavailable Host capability never falls back to the local scanner')
+  } finally {
+    spy.restore()
+  }
 })

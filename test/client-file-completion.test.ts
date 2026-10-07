@@ -141,7 +141,7 @@ test('the finder output parser: NUL records, whitespace, the newline fallback an
   assert.deepEqual(lineCandidates.map(candidate => candidate.path), ['a.txt', 'my file.txt'])
 })
 
-test('symlink facts: the root pass keeps the pre-TS8-A descent, a deeper symlinked directory is never descended', async (t) => {
+test('symlink facts: a symlinked directory is a candidate but is never descended, at the root or below', async (t) => {
   const life = testLifecycle(t)
   const cwd = life.tempDir('dsh-client-symlink-')
   mkdirSync(join(cwd, 'real'))
@@ -149,24 +149,34 @@ test('symlink facts: the root pass keeps the pre-TS8-A descent, a deeper symlink
   symlinkSync('real', join(cwd, 'linkdir'))
   mkdirSync(join(cwd, 'dir'))
   symlinkSync(join('..', 'real'), join(cwd, 'dir', 'nested-link'))
+  // A link that points OUTSIDE the scan root must not widen the traversal.
+  mkdirSync(join(cwd, '..', 'dsh-client-symlink-outside'), { recursive: true })
+  writeFileSync(join(cwd, '..', 'dsh-client-symlink-outside', 'outside.ts'), 'x')
+  symlinkSync(join('..', 'dsh-client-symlink-outside'), join(cwd, 'escape'))
   const driver = new ClientLocalDiscoveryDriver(null)
-  // The adapter reports the FACT (a symlink to a directory is a directory) and
-  // whether the neutral policy may descend it below the root.
+  // The adapter reports the FACT (a symlink to a directory IS a directory
+  // candidate) and whether the neutral policy may descend it.
   const root = await driver.listDirectory(cwd, '', abort)
   assert.ok(root !== null)
-  const link = root.find(entry => entry.name === 'linkdir')
-  assert.deepEqual(link, { name: 'linkdir', kind: 'directory', descendable: false })
-  const real = root.find(entry => entry.name === 'real')
-  assert.deepEqual(real, { name: 'real', kind: 'directory', descendable: true })
-  // Fuzzy: a root-level symlinked directory's children stay candidates (the
-  // pre-TS8-A root scan descended any directory child — preserved exactly),
-  // while a symlinked directory BELOW the root is exposed but not traversed.
+  assert.deepEqual(root.find(entry => entry.name === 'linkdir'),
+    { name: 'linkdir', kind: 'directory', descendable: false })
+  assert.deepEqual(root.find(entry => entry.name === 'real'),
+    { name: 'real', kind: 'directory', descendable: true })
+  assert.deepEqual(root.find(entry => entry.name === 'escape'),
+    { name: 'escape', kind: 'directory', descendable: false })
+  // Fuzzy: the symlink stays a DIRECTORY candidate (a `@linkdir/` accept still
+  // continues into the link), while its target's children are never enumerated —
+  // at the search root and below it alike (the pre-TS8-A root pass used
+  // Dirent.isDirectory(), which is false for a symlink, so it never descended
+  // one either).
   const hits = await discoverForQuery(resolvePathQuery('inside', cwd, ENV), driver, abort)
   const paths = hits.map(candidate => candidate.path)
   assert.ok(paths.includes('real/inside.ts'), `the real directory is traversed: ${JSON.stringify(paths)}`)
-  assert.ok(paths.includes('linkdir/inside.ts'), `the root symlink descent is preserved: ${JSON.stringify(paths)}`)
-  assert.ok(paths.includes('dir/nested-link'), `the deeper symlink is still exposed as a candidate: ${JSON.stringify(paths)}`)
+  assert.ok(paths.includes('linkdir'), `the root symlink is still a directory candidate: ${JSON.stringify(paths)}`)
+  assert.ok(paths.includes('dir/nested-link'), `the deeper symlink is still a candidate: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.includes('linkdir/inside.ts'), `a root symlinked directory must not be descended: ${JSON.stringify(paths)}`)
   assert.ok(!paths.includes('dir/nested-link/inside.ts'), `a below-root symlinked directory must not be descended: ${JSON.stringify(paths)}`)
+  assert.ok(!paths.some(path => path.startsWith('escape/')), `a symlink must not widen the scan outside the root: ${JSON.stringify(paths)}`)
 })
 
 test('abort wins: an aborted Client request never serves a late finder result', async (t) => {
@@ -202,9 +212,19 @@ test('root direct children stay complete over a bounded deep fallback', async (t
   // The root's direct children are outside the traversal bound, so a
   // root-level `src` is found even though the workspace holds more entries
   // than the fallback may descend.
-  const dirs = await discoverForQuery(resolvePathQuery('src', cwd, ENV), driver, abort)
-  assert.ok(dirs.some(candidate => candidate.path === 'src' && candidate.kind === 'directory'),
-    `the root-level directory survives the bound: ${JSON.stringify(dirs.map(candidate => candidate.path))}`)
+  //
+  // `discoverForQuery` returns the raw traversal set for an unscoped query (the
+  // ranking/filtering happens in the consumer), so the bound is directly
+  // observable: the two root children (never capped) plus EXACTLY
+  // MAX_FALLBACK_SCAN descended entries — the 40 surplus filler entries are
+  // never enumerated. Which directory supplies the descended entries depends on
+  // the filesystem's readdir order, so the assertion is on the deep total.
+  const scanned = await discoverForQuery(resolvePathQuery('zzz-nothing-matches', cwd, ENV), driver, abort)
+  const paths = scanned.map(candidate => candidate.path)
+  assert.ok(paths.includes('src'), `the root-level directory survives the bound: ${JSON.stringify(paths.slice(0, 4))}`)
+  assert.equal(scanned.length, MAX_FALLBACK_SCAN + 2, 'root children + the bounded deep traversal only')
+  assert.equal(scanned.filter(candidate => candidate.path.includes('/')).length, MAX_FALLBACK_SCAN,
+    'the deep traversal stops exactly at the bound')
   // A scoped listing of that directory is never a whole-tree scan.
   const children = await discoverForQuery(resolvePathQuery('src/', cwd, ENV), driver, abort)
   assert.deepEqual(children.map(candidate => candidate.path), ['wanted.ts'])

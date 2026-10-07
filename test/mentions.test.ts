@@ -12,6 +12,7 @@ import { join, win32 } from 'node:path'
 import { expandFileMentionsForSubmit, findFileMentions, MentionProvider, resolveMentionCandidate, suggestPathArgument } from '../src/mentions.ts'
 import { extractAtPrefix } from '../src/tui/file-completion/context.ts'
 import { resolvePathQuery, type PathQueryEnvironment } from '../src/domain/file-completion/query.ts'
+import { MAX_LOCAL_COMPLETION_SUGGESTIONS } from '../src/domain/file-completion/ranking.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } from '@deepseek-ai/dsh-file-reference-local/search'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -213,6 +214,31 @@ test('Host-ordered candidates pass through UNFILTERED and UNREORDERED (no second
   // 2. The Host's ORDER is preserved verbatim — no client-side re-sort.
   assert.deepEqual(result.items.map(item => item.value), ['@src/deep-nested.ts', '@somedir/other.ts'])
   assert.deepEqual(queries, ['sdt'], 'the official query form crossed')
+})
+
+test('a Host answer larger than the local completion cap is presented in FULL (no client-side slice)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // One row more than MAX_LOCAL_COMPLETION_SUGGESTIONS: the LOCAL ranking
+  // pipeline would slice this list, so the count is a discriminating witness
+  // that the Session `@` path never runs through it.
+  const hostAnswer: readonly { path: string; kind: 'file' | 'directory' }[] =
+    Array.from({ length: MAX_LOCAL_COMPLETION_SUGGESTIONS + 1 }, (_value, index) => ({
+      path: `host-row-${String(index).padStart(2, '0')}.ts`,
+      kind: 'file' as const,
+    }))
+  const provider = new MentionProvider(
+    [],
+    root,
+    fixedOfficialSeam(hostAnswer),
+    undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }),
+  )
+  const result = await provider.getSuggestions(['@host'], 0, 5, { signal: abort })
+  assert.ok(result !== null, 'the Host answer must complete')
+  assert.deepEqual(result.items.map(item => item.value), hostAnswer.map(candidate => `@${candidate.path}`),
+    'every Host row is presented, in the Host order, with no local cap applied')
+  assert.equal(result.items.length, MAX_LOCAL_COMPLETION_SUGGESTIONS + 1)
 })
 
 test('the provider completes the QUOTED @ form through the port (quoted values)', async (t) => {
