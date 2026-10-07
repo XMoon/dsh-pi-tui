@@ -21,7 +21,7 @@ import { parseProgressUpdates, parseResponseStyle } from '../../domain/communica
 import { parseGitAttributionMode } from '../../domain/communication/git-attribution.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../../domain/notification/settings.ts'
 import { parseTerminalProgressMode } from '../../domain/terminal-progress/settings.ts'
-import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../../wheel-scroll.ts'
+import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../../domain/display/wheel-scroll.ts'
 import { iconStyleOf } from '../../domain/display/icons.ts'
 import { parseUserKeybindings } from '../keybindings/config.ts'
 import { formatKeyId } from '../keybindings/hints.ts'

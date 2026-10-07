@@ -30,7 +30,7 @@ import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from 
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { resolveThemeSelection } from './theme-selection.ts'
-import { wheelScrollLinesOf } from '../../wheel-scroll.ts'
+import { wheelScrollLinesOf } from '../../domain/display/wheel-scroll.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { Backend } from '../../runtime/backend.ts'
