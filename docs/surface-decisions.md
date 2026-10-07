@@ -1354,7 +1354,7 @@ replay, exports, and semantic projections must keep the original text.
 
 ## User shell display policy
 
-- The capture layer (bounded-output byte/line/disk caps) is the memory
+- The capture layer (client/shell/output-capture byte/line/disk caps) is the memory
   safety boundary and is UNCHANGED; this policy only bounds what the card
   PRESENTS: a running card collapses to the newest 5 source lines, a
   settled card to at most 20 VISUAL rows, with an honest hidden-line

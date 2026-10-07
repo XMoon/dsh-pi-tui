@@ -9,16 +9,6 @@
     "tui-app.ts"
   ],
   "legacy": [
-    "bounded-output.ts",
-    "builtins.ts",
-    "diff.ts",
-    "local-shell-card.ts",
-    "process-tui-slot.ts",
-    "progress.ts",
-    "skill-reference-completion.ts",
-    "streaming-tool-preparing.ts",
-    "terminal-title.ts",
-    "tool-presentation-client.ts",
-    "working.ts"
+    "builtins.ts"
   ]
 }
