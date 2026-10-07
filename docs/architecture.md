@@ -84,6 +84,15 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/domain/catalog/provider.ts` | the neutral /login provider-catalog merge and credential-ref resolution (TS8-F3) |
 | `src/domain/communication/**` | neutral communication policy: progress-updates / response-style / git-attribution / Focus section identity, parsers and the pure prompt text (TS8-F3) |
 | `src/app/direct/system-prompt.ts` | the ONLY Direct systemPrompt composition + TUI section registration (progress updates, response style, git attribution, Focus) (TS8-F3) |
+| `src/tui/pickers/sessions.ts` | terminal session-picker row assembly/presentation for `/sessions` (TS8-F4) |
+| `src/domain/task/browser.ts` | transport/UI-neutral task-browser row model: job/subagent inputs, rows, ordering, runtime-activity projection, viewer-access semantics, interrupt parent and workflow-member target (TS8-F4) |
+| `src/app/surface/task-presentation.ts` | Task Center/Quick presentation: panel items, scope/type/search projection, disclosure tree, row labels/descriptions and the Job-view fallback text (TS8-F4) |
+| `src/app/surface/task-attention.ts` | Question attention → Task Center row mapping; `app/surface/question-controller.ts` owns `QuestionAttentionRow` (TS8-F4) |
+| `src/app/surface/task-browser-runtime.ts` | Task Center refresh/currentness runtime and summary (TS8-F4) |
+| `src/app/surface/viewer-policy.ts` | viewer open-token/currentness policy, session-swap teardown, viewer action capability and pending subagent-call matching (TS8-F4) |
+| `src/app/surface/viewer-submission.ts` | viewer settle disposition / stale-settle target policy and the Host-file send scope (TS8-F4) |
+| `src/runtime/subagent-outcome.ts` | backend-neutral subagent prompt refusal/indeterminate classification (TS8-F4; the detached DTOs live in `runtime/subagent-port.ts`) |
+| `src/tui/transcript/workflow-presentation.ts` | Workflow card adaptive presentation, importing the canonical `domain/transcript/**` projection directly (TS8-F4) |
 | remaining historical feature dirs (`…`) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
@@ -304,7 +313,12 @@ bootstrap/config/launcher roots (`authorization.ts`,
 `stable = 6 / legacy = 37`; F3 then retires the five
 command/communication/provider policy roots (`command-policy.ts`,
 `communication-policy.ts`, `focus.ts`, `git-attribution.ts`,
-`provider-catalog.ts`), reaching `stable = 6 / legacy = 32`.
+`provider-catalog.ts`), reaching `stable = 6 / legacy = 32`; F4 then retires
+the nine session/viewer/task roots (`sessions.ts`,
+`session-artifact-filename.ts`, `subagent-viewer.ts`,
+`subagent-viewer-submit.ts`, `task-browser-runtime.ts`,
+`task-center-attention.ts`, `task-presentation.ts`, `tasks-browser.ts`,
+`workflow-presentation.ts`), reaching `stable = 6 / legacy = 23`.
 
 ## Existing directory convergence
 
@@ -743,6 +757,29 @@ entry keeps every command-policy name (re-exported from the three new owners).
 `domain/command/policy.ts` takes the authoritative Host claim as a structural
 `CommandLineHostClaim` input, so the neutral domain never imports the root
 `commands.ts` facade.
+
+TS8-F (PR F4) retires the nine session/viewer/task roots (legacy `32 -> 23`, no
+forwarding shim):
+
+```text
+src/sessions.ts               -> tui/pickers/sessions.ts (dead helpers retired)
+src/session-artifact-filename.ts -> inlined into app/command/artifacts.ts
+src/subagent-viewer.ts        -> app/surface/viewer-policy.ts
+src/subagent-viewer-submit.ts -> split: runtime/subagent-port.ts (DTOs)
+                                       + runtime/subagent-outcome.ts (classification)
+                                       + runtime/direct/subagent-direct.ts (Direct deliver helper)
+                                       + app/surface/viewer-submission.ts (settle/stale policy)
+src/tasks-browser.ts          -> split: domain/task/browser.ts (neutral row model)
+                                       + app/surface/task-presentation.ts (row presentation)
+src/task-presentation.ts      -> app/surface/task-presentation.ts (projection; zero-consumer projectedTaskIds retired)
+src/task-center-attention.ts  -> app/surface/task-attention.ts; QuestionAttentionRow moves to app/surface/question-controller.ts
+src/task-browser-runtime.ts   -> app/surface/task-browser-runtime.ts
+src/workflow-presentation.ts  -> tui/transcript/workflow-presentation.ts
+```
+
+The retired `sessions.ts` `dsh-session` type edge disappears with its dead mapper,
+so the client-boundary baseline drops that entry (31 coupled files). `tui-app.ts`
+and the panels consume the application-owned task DTOs as types.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1

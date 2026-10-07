@@ -385,14 +385,15 @@ function main() {
       // TS8-F2: tui-config -> app/config/schema, dsh-profile ->
       // app/bootstrap/profile + client/launcher/profile; TS8-F3: command-policy
       // -> domain/command/policy + domain/shell/danger + app/submission/command-policy,
-      // communication-policy -> domain/communication/policy — never gain a new
-      // entry for an internal implementation path.
+      // communication-policy -> domain/communication/policy; TS8-F4: subagent-viewer
+      // -> app/surface/viewer-policy, task-presentation -> app/surface/task-presentation —
+      // never gain a new entry for an internal implementation path.
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/pending-presentation|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|compaction-presentation|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup|subagent-viewer|task-presentation)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|compaction-presentation|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }

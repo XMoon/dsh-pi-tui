@@ -24,22 +24,13 @@
     "search-overlay.ts",
     "search-profile.ts",
     "search.ts",
-    "session-artifact-filename.ts",
-    "sessions.ts",
     "skill-reference-completion.ts",
     "streaming-tool-preparing.ts",
-    "subagent-viewer-submit.ts",
-    "subagent-viewer.ts",
-    "task-browser-runtime.ts",
-    "task-center-attention.ts",
-    "task-presentation.ts",
-    "tasks-browser.ts",
     "terminal-title.ts",
     "thinking-preview.ts",
     "tool-presentation-client.ts",
     "transcript-render-profile.ts",
     "wheel-scroll.ts",
-    "workflow-presentation.ts",
     "working.ts"
   ]
 }
