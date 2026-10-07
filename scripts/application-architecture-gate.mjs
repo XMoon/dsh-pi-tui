@@ -818,7 +818,12 @@ export function parseImportSpecifiers(source, rel = 'module.ts') {
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       const expr = node.moduleReference.expression
       if (expr !== undefined && ts.isStringLiteral(expr)) {
-        out.push({ specifier: expr.text, line: lineOf(node), typeOnly: false, moduleTypeOnly: false })
+        // `import x = require('...')` is a runtime require (moduleTypeOnly
+        // false); `import type x = require('...')` is FULLY ERASED under
+        // verbatimModuleSyntax (no runtime edge), so the strict discriminator
+        // reads the declaration's own flag while the historical `typeOnly`
+        // stays false as before.
+        out.push({ specifier: expr.text, line: lineOf(node), typeOnly: false, moduleTypeOnly: node.isTypeOnly })
       }
     } else if (ts.isImportTypeNode(node)) {
       const spec = importTypeArgument(node)
