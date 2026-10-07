@@ -176,12 +176,12 @@ async function createHostFixture(
       // The row's id IS the settings namespace the Remote config port writes:
       // `tui-app`. The row plugin is a stub — mounting the real TUI here would register
       // this repository's own commands and surface inside the fixture — but its
-      // Config IS the product schema (`src/tui-config.ts`), so the section's
+      // Config IS the product schema (`src/app/config/schema.ts`), so the section's
       // fields, defaults and volatile markers are the shipped ones and the
       // Remote config path is exercised against the real shape.
       const rowModulePath = join(workRoot, 'm3b-tui-settings-row.mjs')
       writeFileSync(rowModulePath, [
-        `import { Config } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/tui-config.ts')).href)}`,
+        `import { Config } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/app/config/schema.ts')).href)}`,
         "export const name = 'm3b-tui-settings-row'",
         'export { Config }',
         'export function apply() {}',

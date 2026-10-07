@@ -19,6 +19,7 @@ import ts from 'typescript'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { PRODUCTION_SOURCE_EXTENSIONS, productionScriptKind } from './support/owner-modules.ts'
 import {
+  ARCHITECTURE_ALLOWLIST,
   ARCHITECTURE_RULES,
   buildStaticEdges,
   collectSourceEntries,
@@ -305,30 +306,34 @@ test('the bootstrap composition zone may construct Direct wiring (TS2)', () => {
   assert.equal(isDirectCompositionFile('bootstrap.ts'), false)
 })
 
-test('the only non-composition Direct import is the allowlisted legacy settings TYPE import', () => {
-  const withoutAllowlist = findViolations(collectSourceEntries(), { allowlist: [] })
+test('the production tree has no non-composition Direct import (the historical allowlist is gone)', () => {
+  // TS8-F2 moved the legacy settings migration into the composition zone and
+  // removed the historical exception, so no non-composition module may import
+  // Direct wiring at all — with or without an allowlist.
   assert.deepEqual(
-    withoutAllowlist.map(v => `${v.file}:${v.rule}`),
-    ['legacy-settings-migration.ts:direct-import-outside-composition'],
-    'the historical exception must stay exactly one type-only import',
+    findViolations(collectSourceEntries(), { allowlist: [] }).map(v => `${v.file}:${v.rule}`),
+    [],
+    'no non-composition Direct import may remain',
   )
-  assert.deepEqual(findViolations(collectSourceEntries()), [], 'the checked-in allowlist must clear it')
+  assert.deepEqual(ARCHITECTURE_ALLOWLIST, [], 'the checked-in allowlist is empty')
+  assert.deepEqual(findViolations(collectSourceEntries()), [])
 })
 
 test('an allowlist entry excuses only a TYPE-ONLY import, never a value import', () => {
-  const file = 'legacy-settings-migration.ts'
+  const file = 'app/command/surface.ts'
   const target = 'runtime/direct/tui-settings-direct.ts'
+  const specifier = `../../${target}`
   const allowlist = [`${file}:${target}`]
   assert.deepEqual(
-    findViolations([entry(file, `import type { T } from './${target}'\n`)], { allowlist }),
+    findViolations([entry(file, `import type { T } from '${specifier}'\n`)], { allowlist }),
     [],
     'the type-only import must be excused',
   )
-  const valueImport = findViolations([entry(file, `import { T } from './${target}'\n`)], { allowlist })
+  const valueImport = findViolations([entry(file, `import { T } from '${specifier}'\n`)], { allowlist })
   assert.equal(valueImport.length, 1, 'a value import of the same target must still fail')
   assert.equal(valueImport[0].rule, 'direct-import-outside-composition')
-  const inlineTypeOnly = findViolations([entry(file, `import { type T } from './${target}'\n`)], { allowlist })
-  assert.deepEqual(inlineTypeOnly, [], 'an all-inline-type import is type-only too')
+  const inlineTypeOnly = findViolations([entry(file, `import { type T } from '${specifier}'\n`)], { allowlist })
+  assert.deepEqual(inlineTypeOnly, [], 'an all-inline-type import is type-only too (the historical allowance semantics)')
 })
 
 test('startup.ts directly importing Remote composition is rejected', () => {
@@ -630,9 +635,9 @@ test('a multi-line block comment containing an import is ignored', () => {
 })
 
 test('the allowlist suppresses exactly the matching file:target pair', () => {
-  const file = 'legacy-settings-migration.ts'
+  const file = 'app/command/surface.ts'
   const target = 'runtime/direct/tui-settings-direct.ts'
-  const entries = [entry(file, `import type { T } from './${target}'\n`)]
+  const entries = [entry(file, `import type { T } from '../../${target}'\n`)]
   assert.equal(findViolations(entries, { allowlist: [`${file}:${target}`] }).length, 0)
   assert.equal(findViolations(entries, { allowlist: [`other.ts:${target}`] }).length, 1)
 })

@@ -673,13 +673,18 @@ test('A5/TS2: the composition zone is enumerated RECURSIVELY (nested helpers inc
     'a bag declared in a NESTED composition helper must appear in the composed composition surface')
   assert.ok(composed.includes('// >>> src/app/bootstrap/nested/bad.ts'),
     'the composed surface must banner the nested helper it now covers')
-  // The real tree is unchanged by the recursion: all six helpers are flat today.
+  // The real tree is unchanged by the recursion: every helper is flat today
+  // (TS8-F2 added the exit controller, the legacy settings migration and the
+  // authoritative running-profile read as composition helpers).
   assert.deepEqual(
     productionFilesUnder(process.cwd(), 'src/app/bootstrap'),
     [
       'src/app/bootstrap/event-wiring.ts',
+      'src/app/bootstrap/exit.ts',
+      'src/app/bootstrap/legacy-settings-migration.ts',
       'src/app/bootstrap/lifecycle.ts',
       'src/app/bootstrap/presentation-bridge.ts',
+      'src/app/bootstrap/profile.ts',
       'src/app/bootstrap/runtime-selection.ts',
       'src/app/bootstrap/session-startup.ts',
       'src/app/bootstrap/task-source.ts',
