@@ -17,14 +17,16 @@ import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 //
 // The startup row is the loader's FIRST line and the ONLY place that runs
 // before the authorization row is imported. If this module shared any code
-// with the rest of the bundle (src/dsh-version.ts is used by builtins and
+// with the rest of the bundle (src/client/launcher/version.ts is used by builtins and
 // the runner), the bundler would fold it into the shared chunk that ALSO
-// carries src/authorization.ts — whose `@deepseek-ai/dsh-authorization`
+// carries src/app/command/authorization.ts — whose `@deepseek-ai/dsh-authorization`
 // import cannot resolve below the declared DSH compatibility floor, so the
 // startup row would fail at IMPORT time and the friendly gate below would
 // never run.
-// Keep the gate's own dsh-version parsing and semver comparison INLINE here
-// (same logic as src/dsh-version.ts; guarded by the same tests).
+// Keep the gate's own version parsing and semver comparison INLINE here: the
+// runner's shared `versionAtLeast` was retired (TS8-F2), so this startup-local
+// comparator is the only one and is exercised through the compatibility gate
+// (`harnessCompatEntryFor`) by the startup tests.
 
 /** The installed dsh version, resolved from the launcher's real path. */
 function installedDshVersion(): string | undefined {
@@ -49,7 +51,8 @@ function installedDshVersion(): string | undefined {
   return undefined
 }
 
-/** Prerelease-aware `a >= b` (semver ordering; mirrors src/dsh-version.ts). */
+/** Prerelease-aware `a >= b` (semver ordering). Startup-local by design: the
+ * zero-dependency island never shares a chunk with the runner. */
 function versionAtLeast(version: string, minimum: string): boolean {
   const parse = (value: string): { nums: number[]; pre: string[] } => {
     const [core, prerelease = ''] = value.split('-')

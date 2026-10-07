@@ -17,7 +17,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyStartup, TUI_STARTUP_SERVICE, HARNESS_COMPAT, bundleVersionLabel, harnessCompatEntryFor, incompatibleHarnessMessage } from '../src/startup.ts'
-import { versionAtLeast } from '../src/dsh-version.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** The recovery expectations every below-floor notice shares, derived from the
@@ -58,26 +57,31 @@ function mountStartup(args: string[] = []): Context {
   return ctx
 }
 
-// ── versionAtLeast (pure semver comparison) ────────────────────────────────
+// ── the compatibility boundary selection (the startup-local comparator) ────
+// The runner's shared `versionAtLeast` was retired (TS8-F2), so the
+// startup-local comparator is exercised through its only surviving consumer,
+// the matrix selection, at the exact prerelease/range boundaries.
 
-test('versionAtLeast compares core versions', () => {
-  assert.equal(versionAtLeast('0.1.1-rc.1', '0.1.1-rc.1'), true)
-  assert.equal(versionAtLeast('0.1.1-rc.2', '0.1.1-rc.1'), true)
-  assert.equal(versionAtLeast('0.1.1', '0.1.1-rc.1'), true, 'a release beats any prerelease of the same core')
-  assert.equal(versionAtLeast('1.0.0', '0.1.1-rc.1'), true)
-  assert.equal(versionAtLeast('0.2.0-rc.0', '0.1.1-rc.1'), true)
-  assert.equal(versionAtLeast('0.1.0-rc.8', '0.1.1-rc.1'), false, 'the rc.8 line is below the floor')
-  assert.equal(versionAtLeast('0.1.1-rc.0', '0.1.1-rc.1'), false, 'rc.0 precedes rc.1')
-  assert.equal(versionAtLeast('0.1.0', '0.1.1-rc.1'), false)
-  assert.equal(versionAtLeast('0.1.0-rc.9', '0.1.1-rc.1'), false)
+test('harnessCompatEntryFor selects the range whose inclusive min the version reaches', () => {
+  assert.equal(harnessCompatEntryFor('0.1.0-rc.8')?.min, '0.1.0-rc.8', 'an inclusive lower bound belongs to its own range')
+  assert.equal(harnessCompatEntryFor('0.1.1-rc.1')?.min, '0.1.1-rc.1')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.1')?.min, '0.1.2-alpha.1')
+  assert.equal(harnessCompatEntryFor('0.1.3-alpha.1')?.min, '0.1.3-alpha.1')
+  assert.equal(harnessCompatEntryFor('0.2.0-rc.2'), undefined, 'the current supported line has no incompatible entry')
+  assert.equal(harnessCompatEntryFor('0.2.0'), undefined)
 })
 
-test('versionAtLeast compares prerelease identifiers the semver way', () => {
-  assert.equal(versionAtLeast('0.1.1-rc.10', '0.1.1-rc.9'), true, 'numeric identifiers compare numerically')
-  assert.equal(versionAtLeast('0.1.1-rc.9', '0.1.1-rc.10'), false)
-  assert.equal(versionAtLeast('0.1.1-rc.1', '0.1.1-rc.1'), true)
-  assert.equal(versionAtLeast('0.1.1-alpha.1', '0.1.1-rc.1'), false, 'alphanumeric > numeric, so alpha < rc')
-  assert.equal(versionAtLeast('0.1.1-rc.1', '0.1.1-alpha.1'), true)
+test('harnessCompatEntryFor compares prerelease identifiers the semver way', () => {
+  // A release beats any prerelease of the same core: 0.1.1 stays in the range
+  // whose inclusive min is 0.1.1-rc.1.
+  assert.equal(harnessCompatEntryFor('0.1.1')?.min, '0.1.1-rc.1')
+  // rc.0 precedes rc.1 (and alpha.0 precedes alpha.1), so each stays in the
+  // PREVIOUS range: prerelease identifiers order below the next bound.
+  assert.equal(harnessCompatEntryFor('0.1.1-rc.0')?.min, '0.1.0-rc.8')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.0')?.min, '0.1.1-rc.1')
+  // The exclusive upper bound belongs to the next range, never this one.
+  assert.equal(harnessCompatEntryFor('0.1.0-rc.7')?.max, '0.1.0-rc.8')
+  assert.equal(harnessCompatEntryFor('0.1.2-alpha.2')?.min, '0.1.2-alpha.2')
 })
 
 // ── the gate itself ────────────────────────────────────────────────────────

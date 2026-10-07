@@ -73,7 +73,7 @@ import { createTerminalNotificationPresentation } from '../tui/notification/runt
 import { sessionStatsFactsOf } from '../domain/status/stats.ts'
 import { isAssistantTokenDelta } from '../domain/transcript/usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/derive-plan.ts'
-import { migrateLegacySettings } from '../legacy-settings-migration.ts'
+import { migrateLegacySettings } from './bootstrap/legacy-settings-migration.ts'
 import { color } from '../tui/theme/runtime.ts'
 import type { TuiApp } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
@@ -85,15 +85,15 @@ import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
 import { openExternalUrl } from '../client/url/open.ts'
-import { createStartupStatus } from '../startup-status.ts'
+import { createStartupStatus } from '../tui/startup/status.ts'
 import { iconStyleOf } from '../domain/display/icons.ts'
 import { checkImageLimits } from '../client/media/image/intake.ts'
 import { ImageLoadError } from '../domain/media/errors.ts'
 import type { ImageLimitsLike } from '../domain/media/types.ts'
 import { consumeDraftAttachments } from '../client/media/draft-attachments.ts'
 import type { DirectPrepareInputDeps } from './submission/direct-message-preparation.ts'
-import { dshVersion } from '../dsh-version.ts'
-import { createExitController } from '../exit.ts'
+import { dshVersion } from '../client/launcher/version.ts'
+import { createExitController } from './bootstrap/exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from './submission/steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
@@ -125,11 +125,19 @@ import { dangerCommand } from '../command-policy.ts'
 import { resolveInitialCatalog } from './direct/initial-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
 import { queueTextOf } from '../app/surface/pending-presentation.ts'
-import { bundleVersion, packageVersion } from '../dsh-version.ts'
-import { hostRunningProfile, resumeCommand } from '../dsh-profile.ts'
+import { bundleVersion, packageVersion } from '../client/launcher/version.ts'
+import { resumeCommand } from '../client/launcher/profile.ts'
+import { hostRunningProfile, type ProfileContextReadLike } from './bootstrap/profile.ts'
 
-import type { Config } from '../tui-config.ts'
+import type { Config } from './config/schema.ts'
 import { composeDirectAgent, type DirectAgentComposition } from '../app/direct/composition.ts'
+
+/**
+ * The package entry re-exports the authoritative running-profile read through
+ * this facade (`index -> facade -> helper`): `app/bootstrap/profile.ts` is a
+ * composition helper, so the public root must not import it directly.
+ */
+export { hostRunningProfile, type ProfileContextReadLike } from './bootstrap/profile.ts'
 
 /** The launcher's bounded exit request; the TUI invokes it after keyboard
  * confirmation. */
@@ -234,7 +242,7 @@ export function applyRunnerWithRuntime(
   // blank terminal that reads as a dead TUI. Pure presentation: it owns no
   // lifecycle state, never starts timers, and every teardown path (abort
   // signal, resume failure, success-before-mount, fatal catch) clears it —
-  // see src/startup-status.ts. The later `Resuming session…` /
+  // see src/tui/startup/status.ts. The later `Resuming session…` /
   // `Preparing conversation…` stages reuse THIS object.
   const startupStatus = createStartupStatus(config.startupStatusOutput ?? {
     isTTY: process.stdout.isTTY === true,
