@@ -311,8 +311,9 @@ interface SurfaceHarness extends SurfaceControls {
   /**
    * The REAL Agent interaction seam for questions: one live request delivered
    * through the registered `QuestionInteractionPort` provider, which reaches
-   * `TuiApp.askQuestions(..., 'agent')` exactly like the `ask_user_question`
-   * tool call does (production: the Host question channel).
+   * `TuiApp.askQuestions(..., agentInputWait = true)` exactly like a LIVE
+   * `ask_user_question` foreground wait does (production: the Host question
+   * channel). A CONTINUED late answer takes the same channel with `false`.
    */
   readonly agentQuestion: (signal?: AbortSignal) => Promise<unknown>
   /** Install the Host question projection the port serves (cold discovery). */
@@ -441,8 +442,8 @@ function mountSurface(
   // `attachInteraction` reads the Task Center's diagnostics channel, which only
   // exists once that owner is attached, so this suite composes the SAME
   // production `interaction-runtime` against the mounted app instead: the call
-  // sites that declare `'agent'` (the approval port and the question
-  // controller's `ask`) are then the production ones under test.
+  // sites that declare an Agent-blocking wait (the approval port and the question
+  // controller's LIVE `ask`) are then the production ones under test.
   let approvalListener: ((request: ApprovalRequestLike, next: unknown) => unknown) | undefined
   let questionProvider: UserQuestionProvider | undefined
   let questionSnapshot: QuestionSurfaceSnapshot | undefined
