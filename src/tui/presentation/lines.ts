@@ -1,7 +1,7 @@
 /**
  * Presentation-boundary projections shared by single-row renderers.
  *
- * @module @xmoon76/dsh-pi-tui/presentation-lines
+ * @module @xmoon76/dsh-pi-tui/tui/presentation/lines
  */
 
 /**

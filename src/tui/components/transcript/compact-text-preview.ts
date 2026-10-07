@@ -5,7 +5,7 @@
  * baking a terminal width into the transcript message cache. A resize can
  * therefore reveal more text after a narrow preview without rebuilding the
  * host card or rerunning a tool presenter.
- * @module @xmoon76/dsh-pi-tui/compact-text-preview
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/compact-text-preview
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
@@ -114,14 +114,4 @@ export class CompactTextPreview implements Component {
     this.cached.set(safeWidth, lines)
     return lines
   }
-}
-
-/** Pure convenience form for callers that do not need a retained component. */
-export function compactTextPreviewLines(
-  text: string,
-  width: number,
-  maxVisualRows: number,
-  indent = '  ',
-): string[] {
-  return new CompactTextPreview({ text, maxVisualRows, indent }).render(width)
 }

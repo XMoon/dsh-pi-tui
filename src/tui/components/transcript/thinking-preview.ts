@@ -14,7 +14,7 @@
  *
  * Pure and presentation-only: no marquee/timer, no Host import. The actual
  * movement is driven solely by the provider's reasoning deltas.
- * @module @xmoon76/dsh-pi-tui/thinking-preview
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/thinking-preview
  */
 
 import { sliceByColumn, visibleWidth } from '@xmoon76/pi-tui'

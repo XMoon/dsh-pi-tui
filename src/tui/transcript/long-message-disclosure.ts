@@ -5,7 +5,7 @@
  * Both consumers decide and slice on the SAME visual rows the current width
  * produces (never logical lines), so a long line that wraps behaves
  * identically everywhere and an expanded body never duplicates head/tail rows.
- * @module @xmoon76/dsh-pi-tui/long-message-disclosure
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/long-message-disclosure
  */
 
 /** The visual-row geometry of one long-message fold. */

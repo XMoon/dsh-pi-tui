@@ -22,7 +22,7 @@
  */
 
 import { sliceByColumn, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { singlePhysicalLine } from '../../presentation-lines.ts'
+import { singlePhysicalLine } from '../presentation/lines.ts'
 
 /** Pause before the label starts moving (ms). */
 export const MARQUEE_INITIAL_PAUSE_MS = 800

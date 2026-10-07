@@ -18,7 +18,7 @@
 
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { focusToolDisplay, toolTitle, type ToolPresenter } from '../../transcript/tool-presentation.ts'
-import { thinkingPreviewTail } from '../../../thinking-preview.ts'
+import { thinkingPreviewTail } from './thinking-preview.ts'
 import { activeSubCallsOf, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from '../../../transcript.ts'
 import type { CompactActionSource, CompactActionStats } from '../../transcript/process-summary.ts'
 

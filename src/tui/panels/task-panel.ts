@@ -15,7 +15,7 @@ import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
 import { SelectedMarquee } from '../components/marquee.ts'
-import { singlePhysicalLine } from '../../presentation-lines.ts'
+import { singlePhysicalLine } from '../presentation/lines.ts'
 import {
   isTaskItemActive,
   isTaskItemFailure,
