@@ -16186,9 +16186,11 @@ export class TuiApp {
   /**
    * Update the footer: line 1 `[model] …/cwd branch [ctx bar] t/steps`,
    * line 2 the stats line (full preset) or nothing (compact). Partial
-   * updates merge. M1: the legacy fields still drive the legacy surfaces
-   * (/status, the extension session snapshot), and the SAME facts project
-   * into the unified status store the footer composes from.
+   * updates merge. M1: these legacy fields still feed the extension
+   * live-session snapshot (turns/steps/model/cwd/branch/permission), while the
+   * SAME facts project into the unified status store the footer composes from.
+   * `/status` reads the authority-grouped `SessionStatsFacts` directly — not
+   * these legacy fields.
    * @param status - the new status values.
    */
   setStatus(status: Partial<StatusData>): void {
