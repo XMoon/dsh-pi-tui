@@ -13,8 +13,8 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-writer-direct
  */
 
-import { safeErrorMessage, safeErrorString } from '../../error-boundary.ts'
-import { isCancellation } from '../../detached.ts'
+import { safeErrorMessage, safeErrorString } from '../process/errors.ts'
+import { isCancellation } from '../process/tasks.ts'
 import type { QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never

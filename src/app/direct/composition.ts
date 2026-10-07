@@ -18,7 +18,7 @@ import { installProgressUpdatesPrompt, installResponseStylePrompt, type Progress
 import { installFocusPrompt, type SystemPromptLike } from '../../focus.ts'
 import { installGitAttributionPrompt, type GitAttributionState } from '../../git-attribution.ts'
 import type { DisplayState } from '../../domain/display/preset.ts'
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { recordedSessionPreset } from '../../runtime/direct/session-preset-direct.ts'
 
 /** One agent's preset composition: the id to record and the setup that installs it. */

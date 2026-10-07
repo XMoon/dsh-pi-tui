@@ -46,7 +46,7 @@
  */
 
 import type { OverlayHandle } from '@xmoon76/pi-tui'
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 
 /** The broker's view of the active question suspension (owned by TuiApp's
  * QuestionFlow). The broker reads/writes it through this seam. */

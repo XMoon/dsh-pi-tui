@@ -11,9 +11,9 @@
  * @module @xmoon76/dsh-pi-tui/app/direct/initial-catalog
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
-import { isCancellation } from '../../detached.ts'
-import type { Diag } from '../../diag.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import { isCancellation } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import {
   readSurfaceCatalog,
   type SurfaceCatalogAgent,

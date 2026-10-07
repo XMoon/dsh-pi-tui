@@ -32,7 +32,7 @@ import test from 'node:test'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
 import { createSessionPresentation, type SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
-import type { Diag } from '../src/diag.ts'
+import type { Diag } from '../src/runtime/process/diagnostics.ts'
 
 /** The minimal well-formed durable payloads the transcript fold reads. */
 function dataOf(type: string, seq: number): Record<string, unknown> {

@@ -24,12 +24,12 @@
  * @module @xmoon76/dsh-pi-tui/app/command/surface
  */
 
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { BackendKind } from '../../runtime/backend.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
-import { runSyncDisposalSteps } from '../../disposal.ts'
-import { runOwned } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import { runOwned } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { normalizeSkillInvocation } from '../../command-policy.ts'
 import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'

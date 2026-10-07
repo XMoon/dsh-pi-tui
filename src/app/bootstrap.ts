@@ -78,10 +78,10 @@ import { color } from '../tui/theme/runtime.ts'
 import type { TuiApp } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
-import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
-import { runDetached, runOwned } from '../detached.ts'
+import { diagFromEnv, dshHome, type Diag } from '../runtime/process/diagnostics.ts'
+import { runDetached, runOwned } from '../runtime/process/tasks.ts'
 import { FileHistorySearchSource } from '../client/history/search.ts'
-import { safeErrorMessage } from '../error-boundary.ts'
+import { safeErrorMessage } from '../runtime/process/errors.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
 import { openExternalUrl } from '../client/url/open.ts'
@@ -178,7 +178,7 @@ export function applyRunnerWithRuntime(
   // behind the SAME port interfaces.
   // Process diagnostics: stderr + a log file under $DSH_HOME/logs. The cordis
   // logger has no exporter in this process, so it is NOT the troubleshooting
-  // channel — diag is (see diag.ts).
+  // channel — diag is (see runtime/process/diagnostics.ts).
   const diag: Diag = diagFromEnv(process.env)
   // The patch row carries a static config; the real session id comes from the
   // startup service (no `!!js` expression, so loader hot-reloads cannot race

@@ -21,17 +21,17 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/settings-runtime
  */
 
-import { runDetached } from '../../detached.ts'
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { serializeTuiSettingsMutation } from '../../runtime/config-port.ts'
 import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult } from '../../domain/display/preset.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { resolveThemeSelection } from './theme-selection.ts'
 import { wheelScrollLinesOf } from '../../wheel-scroll.ts'
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { Backend } from '../../runtime/backend.ts'
 import type { StatusSnapshot } from '../../domain/status/types.ts'

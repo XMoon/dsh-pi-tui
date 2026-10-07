@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { resolveInitialCatalog } from '../src/index.ts'
 import type { SurfaceCatalogContext } from '../src/runtime/direct/surface-catalog.ts'
 

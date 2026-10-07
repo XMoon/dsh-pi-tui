@@ -8,8 +8,8 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp, type TuiAppEvents, type TuiAppEventsBase } from '../src/tui-app.ts'
-import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
-import { createDiag } from '../src/diag.ts'
+import { runOwned, type OwnedTaskOptions } from '../src/runtime/process/tasks.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is

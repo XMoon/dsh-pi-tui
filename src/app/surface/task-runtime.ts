@@ -28,12 +28,12 @@ import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRunti
 import type { TaskPanelItem, TaskScope } from '../../task-presentation.ts'
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows, type QuestionAttentionRow } from '../../task-center-attention.ts'
 import type { TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
-import { runOwned } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { runOwned } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 
 /**
  * The roster-feed capability the Task Center consumes (A4-6, plan §15; M3-5

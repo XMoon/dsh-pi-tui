@@ -25,7 +25,7 @@ import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { recordedSessionPreset } from './session-preset-direct.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import type {
   CreateResult,
   CreateSessionRequest,

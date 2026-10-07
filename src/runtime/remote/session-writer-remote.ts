@@ -30,7 +30,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/session-writer-remote
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import type { QueueAction, SessionWriter, WriteOutcome } from '../session-writer-port.ts'
 import type {
   RemoteConnectionGenerationSource,

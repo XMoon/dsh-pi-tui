@@ -21,7 +21,7 @@ import {
   type TuiCommandRunner,
 } from '../src/commands.ts'
 import { credentialOptionsFor, resolveCredentialArg } from '../src/provider-catalog.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

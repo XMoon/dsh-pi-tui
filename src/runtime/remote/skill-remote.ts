@@ -20,7 +20,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/skill-remote
  */
 
-import { cancellationError } from '../../detached.ts'
+import { cancellationError } from '../process/tasks.ts'
 import { remoteFailureMessage } from './write-failure.ts'
 import type { HumanSkillCatalog, HumanSkillSummary } from '../../domain/catalog/skill.ts'
 import type { SkillCatalogCapability, SkillDefinitionResult } from '../catalog-port.ts'

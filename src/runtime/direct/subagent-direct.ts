@@ -21,7 +21,7 @@ import type {
   SubagentPromptContext,
   SubagentPort,
 } from '../subagent-port.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the service resolves from the dsh installation). */

@@ -25,7 +25,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'

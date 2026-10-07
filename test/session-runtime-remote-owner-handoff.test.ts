@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { Diag } from '../src/diag.ts'
+import type { Diag } from '../src/runtime/process/diagnostics.ts'
 import { createRemoteSessionOwnerServices } from '../src/app/remote/session-owners.ts'
 import { createSessionOwnershipCore } from '../src/app/session/ownership-core.ts'
 import { bindSessionRuntime, type SessionRuntimeSurface } from '../src/app/session/runtime.ts'

@@ -25,7 +25,7 @@
  */
 
 import type { Component } from '@xmoon76/pi-tui'
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import { PluginManagerController } from '../plugin-manager/controller.ts'

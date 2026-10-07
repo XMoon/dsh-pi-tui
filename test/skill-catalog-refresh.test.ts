@@ -12,7 +12,7 @@ import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshHooks } from '../src/app/command/catalog-refresh.ts'
 import { SupersededReadError } from '../src/runtime/read-error.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type { HumanSkillCatalog } from '../src/domain/catalog/skill.ts'
 import type { SurfaceCatalogSnapshot } from '../src/domain/catalog/surface.ts'
 

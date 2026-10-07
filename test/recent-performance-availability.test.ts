@@ -15,7 +15,7 @@ import { createOpeningJournal } from '../src/app/surface/opening-journal.ts'
 import { hasEnoughRecentPerformanceSamples, RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../src/domain/status/stats.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
-import type { Diag } from '../src/diag.ts'
+import type { Diag } from '../src/runtime/process/diagnostics.ts'
 
 /** One completed turn whose assistant message carries a VALID recent
  *  sample (embedded durable stream, two token deltas + usage). */

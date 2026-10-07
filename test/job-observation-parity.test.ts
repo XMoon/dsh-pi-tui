@@ -22,7 +22,7 @@ import {
   type RemoteObservedJobState,
 } from '../src/runtime/remote/job-observation-remote.ts'
 import type { JobObservedSnapshot, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 
 const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 

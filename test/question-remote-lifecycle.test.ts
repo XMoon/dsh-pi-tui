@@ -29,7 +29,7 @@ import type {
 import { QuestionAnswerError, QUESTION_REPLY_QUEUED } from '../src/runtime/interaction-port.ts'
 import { SupersededReadError } from '../src/runtime/read-error.ts'
 import type { TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../src/tui-app.ts'
-import type { Diag } from '../src/diag.ts'
+import type { Diag } from '../src/runtime/process/diagnostics.ts'
 
 /** A no-op diagnostics channel (the controller only forwards detach failures). */
 const SILENT_DIAG: Diag = {

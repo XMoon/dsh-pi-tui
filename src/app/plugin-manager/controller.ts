@@ -28,9 +28,9 @@ import type {
   PluginManagerSnapshot,
   PluginSpecInspectionFact,
 } from '../../runtime/plugin-manager-port.ts'
-import { runDetached } from '../../detached.ts'
-import { runSyncDisposalSteps } from '../../disposal.ts'
-import type { Diag } from '../../diag.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { classifyPluginPackages, type PluginClassificationInput, type PluginPresentationRole } from './classify.ts'
 import type { TuiExtensionObservation } from './extension-inventory.ts'
 import {

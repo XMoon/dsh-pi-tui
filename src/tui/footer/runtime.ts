@@ -12,7 +12,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/footer/runtime
  */
 
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
 import type { FooterCommandConfig } from '../../domain/footer/command-config.ts'
 import type { FooterLayoutV1 } from '../../domain/footer/layout.ts'

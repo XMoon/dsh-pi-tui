@@ -33,10 +33,10 @@
  * @module @xmoon76/dsh-pi-tui/app/bootstrap/lifecycle
  */
 
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { DISABLE_FOCUS_REPORTING } from '../../tui/notification/terminal-focus.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import type { Diag } from '../../diag.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionRetirementReport } from '../session/owner-access.ts'
 
 /**

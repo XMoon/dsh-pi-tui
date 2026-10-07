@@ -22,9 +22,9 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/status-runtime
  */
 
-import { runOwned } from '../../detached.ts'
-import type { Diag } from '../../diag.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { runOwned } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { bundleVersion, dshVersion, versionDisplay } from '../../dsh-version.ts'
 import { gitBranch } from '../../git-branch.ts'
 import type { ModelSelectionValue } from '../../domain/session/model-selection.ts'

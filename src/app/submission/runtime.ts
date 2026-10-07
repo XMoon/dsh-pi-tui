@@ -27,9 +27,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { cancellationError, isCancellation, runOwned } from '../../detached.ts'
-import type { Diag } from '../../diag.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { runReservedSubmit } from './submit-flow.ts'
 import { TransitionInProgressError } from '../session/operation-barrier.ts'
 import {

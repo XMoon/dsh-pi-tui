@@ -10,7 +10,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/session-reader-remote
  */
 
-import { cancellationError } from '../../detached.ts'
+import { cancellationError } from '../process/tasks.ts'
 import {
   contextPressureOccupancy,
   type SessionContentSearchPage,

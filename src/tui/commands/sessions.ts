@@ -14,8 +14,8 @@ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands
 import type { PickerCategory, TuiApp } from '../../tui-app.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError } from '../../app/session/scope.ts'
-import { cancellationError, isCancellation, runOwned } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
 import {
   CONTENT_SEARCH_DEBOUNCE_MS,

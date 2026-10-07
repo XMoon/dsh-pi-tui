@@ -1,7 +1,7 @@
 /**
  * Headless tests for the diagnostics channel: level filtering, line format,
  * field rendering, env resolution, and the file sink.
- * @module @xmoon76/dsh-pi-tui/diag.test
+ * @module @xmoon76/dsh-pi-tui/runtime/process/diagnostics.test
  */
 
 import assert from 'node:assert/strict'
@@ -9,7 +9,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { createDiag, diagFromEnv, diagLevelFromEnv, formatDiagTime, type DiagSink } from '../src/diag.ts'
+import { createDiag, diagFromEnv, diagLevelFromEnv, formatDiagTime, type DiagSink } from '../src/runtime/process/diagnostics.ts'
 
 /** Collect every written line. */
 function collector(): { lines: string[]; sink: DiagSink } {

@@ -24,7 +24,7 @@
  */
 
 import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { Backend } from '../../runtime/backend.ts'
 import type { TuiSettingsConfig } from '../../runtime/config-port.ts'

@@ -2,12 +2,12 @@
  * The synchronous disposal primitive (M3-6 PR3 plan D1): attempt every step
  * in order, then surface the collected failure(s). The whole PR3 teardown
  * chain relies on this contract, so the primitive is pinned directly.
- * @module @xmoon76/dsh-pi-tui/disposal.test
+ * @module @xmoon76/dsh-pi-tui/runtime/process/disposal.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { runSyncDisposalSteps } from '../src/disposal.ts'
+import { runSyncDisposalSteps } from '../src/runtime/process/disposal.ts'
 
 test('success: every step runs exactly once in caller order', () => {
   const calls: string[] = []

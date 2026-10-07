@@ -42,7 +42,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { bundleValue } from '../src/app/plugin-manager/model.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { DirectPluginManagerPort } from '../src/runtime/direct/plugin-manager-direct.ts'
 
 const PROBE_TOOL = 'rc2_live_tool_probe'

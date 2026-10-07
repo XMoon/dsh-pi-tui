@@ -15,8 +15,8 @@
 import assert from 'node:assert/strict'
 import { afterEach, test, type TestContext } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { createDiag } from '../src/diag.ts'
-import { runOwned } from '../src/detached.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { runOwned } from '../src/runtime/process/tasks.ts'
 import { liveTuiCountForTest } from '../src/process-tui-slot.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -38,7 +38,7 @@ function startApp(sink?: (label: string, error: unknown) => void): { app: TuiApp
       runOwned: <T>(
         label: string,
         task: () => T | Promise<T>,
-        options: Omit<import('../src/detached.ts').OwnedTaskOptions<T>, 'diag' | 'sessionId'>,
+        options: Omit<import('../src/runtime/process/tasks.ts').OwnedTaskOptions<T>, 'diag' | 'sessionId'>,
       ): void => {
         // Mirror `runOwned`'s option handling: a task-phase throw and an
         // `onResult` failure both reach the sink (the route uses `onResult`).
@@ -91,7 +91,7 @@ function startAppWithRealRunOwned(lines: string[]): { app: TuiApp; vt: VirtualTe
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<import('../src/detached.ts').OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void =>
+    runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<import('../src/runtime/process/tasks.ts').OwnedTaskOptions<T>, 'diag' | 'sessionId'>): void =>
       runOwned(label, task, { ...options, diag }),
   })
   app.start()

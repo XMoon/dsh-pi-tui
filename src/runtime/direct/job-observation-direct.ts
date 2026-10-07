@@ -13,9 +13,9 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/job-observation-direct
  */
 
-import { runOwned } from '../../detached.ts'
-import type { Diag } from '../../diag.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { runOwned } from '../process/tasks.ts'
+import type { Diag } from '../process/diagnostics.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../job-observation-port.ts'
 
 /** The minimal Cordis context surface this adapter needs (structural). */

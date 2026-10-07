@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { DirectJobObservationPort } from '../src/runtime/direct/job-observation-direct.ts'
 import type { JobObservedSnapshot } from '../src/runtime/job-observation-port.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 
 const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 

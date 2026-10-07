@@ -27,7 +27,7 @@ import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
 
-import { type Diag } from './diag.ts'
+import { type Diag } from './runtime/process/diagnostics.ts'
 import {
   resolveInitialCatalog as resolveInitialCatalogImpl,
 } from './app/direct/initial-catalog.ts'

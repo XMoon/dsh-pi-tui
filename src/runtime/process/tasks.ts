@@ -22,14 +22,14 @@
  * factory throw, task rejection, async onResult failure, a throwing
  * onCancel/onError — lands in the same terminal chain, and observing any
  * thrown value is sync-TOTAL (a hostile Proxy/getter/coercion can never
- * make the chain reject; see `error-boundary.ts` for the exact contract —
+ * make the chain reject; see `errors.ts` for the exact contract —
  * an observer spawning its OWN detached async work is outside it). A bare
  * `void somePromise()` is never allowed for either.
- * @module @xmoon76/dsh-pi-tui/detached
+ * @module @xmoon76/dsh-pi-tui/runtime/process/tasks
  */
 
-import type { Diag } from './diag.ts'
-import { safeErrorMessage } from './error-boundary.ts'
+import type { Diag } from './diagnostics.ts'
+import { safeErrorMessage } from './errors.ts'
 
 /** A lazily-created task: invoked synchronously inside the helper. */
 export type DetachedTask = () => unknown | Promise<unknown>
