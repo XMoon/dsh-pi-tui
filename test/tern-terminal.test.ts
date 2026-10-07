@@ -58,7 +58,7 @@ test('an unusable cwd yields no sequence (no Client-cwd / root substitute)', () 
   assert.equal(ternCwdSequence('/bad\0path'), undefined)
 })
 
-test('the Tern progress state needs BOTH a wait phase and an Agent-owned wait (plan §6.2)', () => {
+test('the Tern progress state needs BOTH a wait phase and a proven Agent-blocking wait (plan §6.2)', () => {
   const waitPhases = ['waiting-approval', 'waiting-question'] as const
   const busyPhases = ['idle', 'working', 'compacting', 'applying-compaction'] as const
   // Idle wins over EVERY (phase, origin) pair: a stale phase can never keep a
@@ -69,13 +69,14 @@ test('the Tern progress state needs BOTH a wait phase and an Agent-owned wait (p
         `idle + ${phase} (agent=${agentInputWait}) is clear`)
     }
   }
-  // A wait phase pauses ONLY when the wait was created by the Agent interaction
-  // port: `waiting-question` alone also covers a Client-local question (the
-  // `/login` authorization prompt), which must keep the pane working.
+  // A wait phase pauses ONLY when the caller proved the main Agent is BLOCKED on
+  // it: `waiting-question` alone also covers a Client-local question (the
+  // `/login` authorization prompt) and a CONTINUED late-answer form whose Agent
+  // already continued, and both must keep the pane working.
   for (const phase of waitPhases) {
-    assert.equal(ternProgressState(true, phase, true), 'paused', `an Agent ${phase} pauses`)
+    assert.equal(ternProgressState(true, phase, true), 'paused', `an Agent-blocking ${phase} pauses`)
     assert.equal(ternProgressState(true, phase, false), 'indeterminate',
-      `a Client-local ${phase} is NOT Agent waiting_input`)
+      `an unproven/local/continued ${phase} is NOT Agent waiting_input`)
   }
   // Every other busy phase keeps Tern's working state, whatever the origin flag.
   for (const phase of busyPhases) {

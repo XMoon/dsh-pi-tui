@@ -110,7 +110,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
           signal: req.signal,
           ...args === undefined ? {} : { arguments: args },
           ...args !== undefined && req.toolName === 'bash' && deps.dangerCommand(args) ? { danger: true } : {},
-        }, 'agent')
+        }, true)
       })
       // The interactive question answerer: ask_user_question tool calls
       // become dialog flows; the tool receives the structured answers. M3-3B
@@ -128,7 +128,10 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       })
       const controller = new QuestionSurfaceController({
         port: port.questions,
-        ask: (questions, signal, status) => options.mounted().askQuestions(questions, signal, status, 'agent'),
+        // The controller decides per presentation whether the Agent is blocked
+        // on the answer: a LIVE foreground wait is, a CONTINUED late answer is not.
+        ask: (questions, signal, status, agentInputWait) =>
+          options.mounted().askQuestions(questions, signal, status, agentInputWait),
         notify: (message, level) => { options.mounted().notify(message, level) },
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
