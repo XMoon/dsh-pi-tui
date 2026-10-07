@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/domain/status
  */
 
-import type { DisplayPreset } from '../../display-preset.ts'
+import type { DisplayPreset } from '../display/preset.ts'
 
 /** What the user is currently looking at (plan §4.6). */
 export interface ViewStatus {

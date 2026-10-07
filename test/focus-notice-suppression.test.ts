@@ -19,7 +19,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { projectFocus, type FocusProjectedBlock } from '../src/tui/transcript/focus-projection.ts'
 import { TranscriptFolder, type TurnActivity, type TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()

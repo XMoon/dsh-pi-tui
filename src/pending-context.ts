@@ -23,7 +23,8 @@
 
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
 import { CompactTextPreview } from './compact-text-preview.ts'
-import { iconPrefix, type IconStyle } from './icons.ts'
+import { iconPrefix } from './tui/icons.ts'
+import type { IconStyle } from './domain/display/icons.ts'
 import { color } from './theme.ts'
 
 /**

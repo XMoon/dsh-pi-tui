@@ -10,7 +10,7 @@
  * @module @xmoon76/dsh-pi-tui/communication-policy
  */
 
-import { isFocusDisplayPreset, type DisplayState } from './display-preset.ts'
+import { isFocusDisplayPreset, type DisplayState } from './domain/display/preset.ts'
 import type { SystemPromptLike } from './focus.ts'
 
 export type ProgressUpdates = 'off' | 'milestones' | 'frequent'

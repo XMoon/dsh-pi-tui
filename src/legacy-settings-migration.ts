@@ -35,7 +35,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse } from 'yaml'
-import { resolveDisplayPreset, type PersistedDisplayInput } from './display-preset.ts'
+import { resolveDisplayPreset, type PersistedDisplayInput } from './domain/display/preset.ts'
 import { parseFooterCommandConfig } from './domain/footer/command-trust.ts'
 import { isFooterLayout, parseFooterLayout } from './domain/footer/layout.ts'
 

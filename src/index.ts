@@ -26,7 +26,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
-import { type DisplayState } from './display-preset.ts'
+import { type DisplayState } from './domain/display/preset.ts'
 
 import { type Diag } from './diag.ts'
 import {

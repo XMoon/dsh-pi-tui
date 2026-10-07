@@ -1,11 +1,16 @@
 /**
- * Canonical transcript display presets and their layered disclosure policy.
+ * Neutral display-preset vocabulary, persisted-state resolution and
+ * availability (TS8-D split from the legacy root `src/display-preset.ts`).
  *
  * DisplayPreset is the one runtime vocabulary for presentation state. Every
  * preset whose projection exists in this build is available; the availability
  * gate exists so a future preset can never be claimed by another preset's
  * renderer before its own projection ships.
- * @module @xmoon76/dsh-pi-tui/display-preset
+ *
+ * The transcript materialization DISCLOSURE policy is terminal presentation
+ * and lives in `src/tui/transcript/display-policy.ts` — this module owns no
+ * renderer mechanics.
+ * @module @xmoon76/dsh-pi-tui/domain/display/preset
  */
 
 /** The complete display vocabulary. */
@@ -14,13 +19,6 @@ export type DisplayPreset = 'focus' | 'compact' | 'full'
 /** The shared mutable display authority passed between the runner, prompt and UI. */
 export interface DisplayState {
   preset: DisplayPreset
-}
-
-/** Default disclosure depth and behavioral policy for one preset. */
-export interface DisplayDisclosurePolicy {
-  readonly turnLayer: 'collapsed' | 'open'
-  readonly processLayer: 'collapsed' | 'expanded'
-  readonly focusBehavior: boolean
 }
 
 /** The outcome of attempting to apply one display preset to a surface. */
@@ -58,21 +56,11 @@ export function isDisplayPresetAvailable(preset: DisplayPreset): boolean {
   return preset === 'focus' || preset === 'compact' || preset === 'full'
 }
 
-/** Whether a preset enables the model-facing Focus behavioral policy. */
+/** Whether a preset enables the model-facing Focus behavioral policy. The
+ * neutral behavioral answer is exactly the preset identity — it must never
+ * depend on the terminal disclosure policy. */
 export function isFocusDisplayPreset(preset: DisplayPreset): boolean {
-  return displayPolicyFor(preset).focusBehavior
-}
-
-/** The layered disclosure contract every preset projection consumes. */
-export function displayPolicyFor(preset: DisplayPreset): DisplayDisclosurePolicy {
-  switch (preset) {
-    case 'focus':
-      return { turnLayer: 'collapsed', processLayer: 'collapsed', focusBehavior: true }
-    case 'compact':
-      return { turnLayer: 'open', processLayer: 'collapsed', focusBehavior: false }
-    case 'full':
-      return { turnLayer: 'open', processLayer: 'expanded', focusBehavior: false }
-  }
+  return preset === 'focus'
 }
 
 /**

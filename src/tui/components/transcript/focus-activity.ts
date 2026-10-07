@@ -23,7 +23,8 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { color } from '../../../theme.ts'
 import { formatTokens } from '../../token-format.ts'
-import { iconFor, type IconSemantic, type IconStyle } from '../../../icons.ts'
+import { iconFor } from '../../icons.ts'
+import type { IconSemantic, IconStyle } from '../../../domain/display/icons.ts'
 import {
   COMPACT_SLOT_LABEL_WIDTH,
   compactActionSlotLine,

@@ -7,7 +7,7 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { composeAgent } from '../src/index.ts'
 import { FOCUS_MODE_PROMPT, type SystemPromptLike } from '../src/focus.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 import {
   DEFAULT_PROGRESS_UPDATES,
   DEFAULT_RESPONSE_STYLE,

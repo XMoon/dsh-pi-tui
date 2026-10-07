@@ -15,7 +15,7 @@ import type {
 } from '@deepseek-ai/dsh-tools'
 import { finalizedBlockFallbackText } from './domain/transcript/content-blocks.ts'
 import { fileAttachmentSummary } from './domain/media/file-summary.ts'
-import { type IconSemantic } from './icons.ts'
+import { type IconSemantic } from './domain/display/icons.ts'
 
 import type { JsonValue } from './domain/transcript/types.ts'
 

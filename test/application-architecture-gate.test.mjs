@@ -95,7 +95,7 @@ test('presentation/adjacent modules importing Direct wiring are rejected (enumer
     'plugin-manager/panel.ts',
     'transcript.ts',
     'present.ts',
-    'icons.ts',
+    'tui/icons.ts',
     // TS6 moved the rendered-search mechanics under the PiTui component tree;
     // the rule is enumeration-free, so the sample follows the real owner.
     'tui/components/transcript/search-presentation.ts',
@@ -1045,6 +1045,9 @@ test('app owners must not import the TUI implementation layer (TS4 §11/§12)', 
     ['app/surface/plugin-manager-runtime.ts', '../../tui/plugin-manager/panel.ts', 'tui/plugin-manager/panel.ts'],
     ['app/surface/task-runtime.ts', '../../tui/panels/task-panel.ts', 'tui/panels/task-panel.ts'],
     ['app/session/runtime.ts', '../../tui/pickers/model-picker.ts', 'tui/pickers/model-picker.ts'],
+    // TS8-D: the compact token formatter is terminal presentation; an
+    // app/surface owner consumes the semantic usage facts, never this module.
+    ['app/surface/runtime.ts', '../../tui/token-format.ts', 'tui/token-format.ts'],
   ]
   for (const [file, specifier, target] of cases) {
     const valueImport = findViolations([entry(file, `import { x } from '${specifier}'\n`), entry(target, 'export const x = 1\n')])
@@ -1219,7 +1222,7 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
     // The command facade is part of the TUI command layer, not a core input.
     ['../../commands.ts', 'commands.ts'],
     ['../../theme.ts', 'theme.ts'],
-    ['../../icons.ts', 'icons.ts'],
+    ['../icons.ts', 'tui/icons.ts'],
     // The allowance is the core SUBTREE, not a name prefix: a similarly-named
     // NON-core directory is still mechanics.
     ['../../tui/transcript-legacy/x.ts', 'tui/transcript-legacy/x.ts'],
@@ -1339,6 +1342,10 @@ test('the transcript semantic domain is a closed-world purity contract (TS7)', (
     ['../../transcript.ts', 'transcript.ts'],
     ['../../commands.ts', 'commands.ts'],
     ['../../display-preset.ts', 'display-preset.ts'],
+    // TS8-D: only the TYPE-ONLY `domain/display/icons.ts` edge is open; the
+    // neutral preset authority and the concrete palette stay closed.
+    ['../../domain/display/preset.ts', 'domain/display/preset.ts'],
+    ['../../tui/icons.ts', 'tui/icons.ts'],
     ['../../search-overlay.ts', 'search-overlay.ts'],
     ['../../transcript-semantics.ts', 'transcript-semantics.ts'],
     ['../../context-presentation.ts', 'context-presentation.ts'],
@@ -1364,7 +1371,7 @@ test('the transcript semantic domain is a closed-world purity contract (TS7)', (
   // while a value or literal-dynamic spelling would pull concrete icon/palette or
   // live-ingress mechanics into the semantic authority.
   const typeOnlyEdges = [
-    ['../../icons.ts', 'icons.ts'],
+    ['../../domain/display/icons.ts', 'domain/display/icons.ts'],
     ['../../runtime/assistant-stream-port.ts', 'runtime/assistant-stream-port.ts'],
   ]
   for (const [specifier, target] of typeOnlyEdges) {

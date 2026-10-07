@@ -24,7 +24,7 @@
 import { runDetached } from '../../detached.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
 import { serializeTuiSettingsMutation } from '../../runtime/config-port.ts'
-import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult } from '../../display-preset.ts'
+import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult } from '../../domain/display/preset.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'

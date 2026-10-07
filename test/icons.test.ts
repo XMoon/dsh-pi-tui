@@ -12,7 +12,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { eastAsianWidthType } from 'get-east-asian-width'
-import { ALL_ICON_SEMANTICS, iconFor, iconLead, iconPrefix, iconStyleOf } from '../src/icons.ts'
+import { ALL_ICON_SEMANTICS, iconStyleOf } from '../src/domain/display/icons.ts'
+import { iconFor, iconLead, iconPrefix } from '../src/tui/icons.ts'
 
 /** The ONLY semantics allowed to show a glyph under minimal (the plan §34
  * visibility set — guards against someone silently stuffing decorative
