@@ -15,7 +15,7 @@ import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { SaveLocationPrompt, type SaveLocationDeps, type SaveLocationResult } from '../src/tui/interaction/save-location.ts'
-import type { DirectoryCompletionItem } from '../src/file-completion/directory-completion.ts'
+import type { DirectoryCompletionCandidate } from '../src/client/file-completion/directory-completion.ts'
 import { Frame, TuiApp } from '../src/tui-app.ts'
 import { TuiAltScreen } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -44,7 +44,7 @@ function fixtureDeps(life: ReturnType<typeof testLifecycle>): {
     targetExists: (directory, filename) => join(directory, filename) === target,
     complete: async (raw) => {
       if (raw === './') {
-        return [{ value: 'src/', label: 'src/' }]
+        return [{ value: 'src/', displayPath: 'src' }]
       }
       if (raw === './src/') {
         return null
@@ -205,12 +205,12 @@ test('left/right editing moves the text cursor', (t) => {
 
 test('late completion after cancel is ignored', async (t) => {
   const life = testLifecycle(t)
-  let resolveCompletion: ((items: DirectoryCompletionItem[] | null) => void) | undefined
+  let resolveCompletion: ((items: DirectoryCompletionCandidate[] | null) => void) | undefined
   const deps: SaveLocationDeps = {
     resolveDirectory: (input) => input,
     isDirectory: () => true,
     targetExists: () => false,
-    complete: () => new Promise<DirectoryCompletionItem[] | null>((resolve) => { resolveCompletion = resolve }),
+    complete: () => new Promise<DirectoryCompletionCandidate[] | null>((resolve) => { resolveCompletion = resolve }),
   }
   let result: SaveLocationResult | undefined
   const prompt = new SaveLocationPrompt(
@@ -221,7 +221,7 @@ test('late completion after cancel is ignored', async (t) => {
   prompt.handleInput('\x1b') // cancel (no suggestions open)
   assert.deepEqual(result, { kind: 'cancelled' })
   // The in-flight completion resolves AFTER the cancel: it must be fenced.
-  resolveCompletion?.([{ value: 'late/', label: 'late/' }])
+  resolveCompletion?.([{ value: 'late/', displayPath: 'late' }])
   await new Promise<void>(resolve => setTimeout(resolve, 10))
   assert.equal(prompt.getSuggestions().length, 0, 'late completion must be ignored')
   void life
@@ -237,7 +237,7 @@ test('a superseded refresh aborts the previous completion scan', async (t) => {
     complete: (_raw, signal) => {
       signals.push(signal)
       // Never resolves: the scan stays live until aborted.
-      return new Promise<DirectoryCompletionItem[] | null>(() => {})
+      return new Promise<DirectoryCompletionCandidate[] | null>(() => {})
     },
   }
   let result: SaveLocationResult | undefined
@@ -579,7 +579,7 @@ test('mouse parity: a stale pressed VALUE is released on click mismatch (no ghos
     isDirectory: () => true,
     targetExists: () => false,
     complete: async (raw: string) =>
-      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+      raw === './' ? [{ value: 'src/', displayPath: 'src' }, { value: 'lib/', displayPath: 'lib' }] : null,
   }
   const prompt = new SaveLocationPrompt(
     { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
@@ -600,17 +600,17 @@ test('mouse parity: a stale pressed VALUE is released on click mismatch (no ghos
     width: 60, height: 24, shift: false, alt: false, ctrl: false, clickCount: 1,
   })
   prompt.handleMouse(press(srcRow)) // pressed identity = 'src/'
-  const p = prompt as unknown as { suggestions: Array<{ value: string; label: string }>; mousePressedValue: string | undefined }
+  const p = prompt as unknown as { suggestions: Array<{ value: string; displayPath: string }>; mousePressedValue: string | undefined }
   assert.equal(p.mousePressedValue, 'src/', 'precondition — pressed identity latched')
   // An async completion refresh reorders the list WITHOUT a repaint.
-  p.suggestions = [{ value: 'lib/', label: 'lib/' }]
+  p.suggestions = [{ value: 'lib/', displayPath: 'lib' }]
   // The release click lands on a DIFFERENT row: the mismatch must
   // RELEASE the pressed identity (no stale latch for a later click).
   prompt.handleMouse(click(libRow))
   assert.equal(p.mousePressedValue, undefined, 'the pressed identity must be released on click mismatch')
   assert.equal(prompt.getValue(), './', 'the mismatched click must not accept anything')
   // The pressed suggestion returns; a click WITHOUT a fresh press must NOT accept.
-  p.suggestions = [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }]
+  p.suggestions = [{ value: 'src/', displayPath: 'src' }, { value: 'lib/', displayPath: 'lib' }]
   rendered = prompt.render(60)
   const srcRow2 = rendered.findIndex(line => line.includes('src/'))
   assert.ok(srcRow2 >= 0)
@@ -648,7 +648,7 @@ test('mouse parity: a REAL wheel event (button "none") moves the suggestion sele
     isDirectory: () => true,
     targetExists: () => false,
     complete: async (raw: string) =>
-      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+      raw === './' ? [{ value: 'src/', displayPath: 'src' }, { value: 'lib/', displayPath: 'lib' }] : null,
   }
   const prompt = new SaveLocationPrompt(
     { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
@@ -676,7 +676,7 @@ test('alt-screen integration: a real SGR wheel reaches the prompt through the fr
     isDirectory: () => true,
     targetExists: () => false,
     complete: async (raw: string) =>
-      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+      raw === './' ? [{ value: 'src/', displayPath: 'src' }, { value: 'lib/', displayPath: 'lib' }] : null,
   }
   const prompt = new SaveLocationPrompt(
     { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },
@@ -715,7 +715,7 @@ test('mouse parity: a click on an inert row releases the pressed identity (no st
     isDirectory: () => true,
     targetExists: () => false,
     complete: async (raw: string) =>
-      raw === './' ? [{ value: 'src/', label: 'src/' }, { value: 'lib/', label: 'lib/' }] : null,
+      raw === './' ? [{ value: 'src/', displayPath: 'src' }, { value: 'lib/', displayPath: 'lib' }] : null,
   }
   const prompt = new SaveLocationPrompt(
     { title: 'Save session archive', filename: 'dsh-session-session-abc.zip', initialDirectory: './' },

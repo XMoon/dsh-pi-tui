@@ -1,10 +1,10 @@
 /**
  * Directory-only completion adapter tests (Pre-Stage-D export convergence):
- * the Save Location field reuses the shared path engine (query resolution,
- * LocalFileSource discovery, ranking, dialect handling) and filters the
- * candidate facts to directories. Files are never suggested; `./`, `../`,
- * `~/` and directories with spaces all complete; the accepted value keeps
- * the user's separator and continues into the accepted directory.
+ * the Save Location field reuses the neutral path pipeline (query resolution,
+ * Client-local discovery, ranking, dialect handling) and filters the candidate
+ * facts to directories. Files are never suggested; `./`, `../`, `~/` and
+ * directories with spaces all complete; the accepted value keeps the user's
+ * separator and continues into the accepted directory.
  * @module @xmoon76/dsh-pi-tui/directory-completion.test
  */
 
@@ -12,9 +12,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { completeDirectory } from '../src/file-completion/directory-completion.ts'
-import { LocalFileSource } from '../src/file-completion/local-file-source.ts'
+import { completeDirectory } from '../src/client/file-completion/directory-completion.ts'
+import { ClientLocalDiscoveryDriver, clientPathQueryEnvironment } from '../src/client/file-completion/local-discovery.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+
+/** A forced-fallback Client discovery driver (`null` pins the bounded scan,
+ * so the fixture results never depend on an installed finder). */
+function clientDriver(): ClientLocalDiscoveryDriver {
+  return new ClientLocalDiscoveryDriver(null)
+}
 
 /** A fixture root with directories and files (files must never be suggested). */
 function fixture(life: ReturnType<typeof testLifecycle>): { root: string; cwd: string } {
@@ -32,7 +38,7 @@ function fixture(life: ReturnType<typeof testLifecycle>): { root: string; cwd: s
 
 test('completes the initial ./ listing with directories only', async (t) => {
   const { cwd } = fixture(testLifecycle(t))
-  const items = await completeDirectory('./', cwd, new LocalFileSource(null), new AbortController().signal)
+  const items = await completeDirectory('./', cwd, clientDriver(), clientPathQueryEnvironment(), new AbortController().signal)
   assert.ok(items !== null)
   const values = items.map(item => item.value)
   assert.ok(values.includes('./src/'), 'src directory suggested')
@@ -44,7 +50,7 @@ test('completes the initial ./ listing with directories only', async (t) => {
 
 test('scoped ./src/ listing continues into the directory children', async (t) => {
   const { cwd } = fixture(testLifecycle(t))
-  const items = await completeDirectory('./src/', cwd, new LocalFileSource(null), new AbortController().signal)
+  const items = await completeDirectory('./src/', cwd, clientDriver(), clientPathQueryEnvironment(), new AbortController().signal)
   // The listing of ./src/ has no subdirectories — the file main.ts must not
   // appear, so the result is null (nothing to suggest).
   assert.equal(items, null)
@@ -52,7 +58,7 @@ test('scoped ./src/ listing continues into the directory children', async (t) =>
 
 test('fuzzy term matches directories only', async (t) => {
   const { cwd } = fixture(testLifecycle(t))
-  const items = await completeDirectory('do', cwd, new LocalFileSource(null), new AbortController().signal)
+  const items = await completeDirectory('do', cwd, clientDriver(), clientPathQueryEnvironment(), new AbortController().signal)
   assert.ok(items !== null)
   const values = items.map(item => item.value)
   assert.ok(values.includes('docs/'), 'docs directory suggested for "do"')
@@ -61,7 +67,7 @@ test('fuzzy term matches directories only', async (t) => {
 
 test('../ navigation works', async (t) => {
   const { root, cwd } = fixture(testLifecycle(t))
-  const items = await completeDirectory('../', cwd, new LocalFileSource(null), new AbortController().signal)
+  const items = await completeDirectory('../', cwd, clientDriver(), clientPathQueryEnvironment(), new AbortController().signal)
   assert.ok(items !== null)
   const values = items.map(item => item.value)
   assert.ok(values.includes('../cwd/'), 'the parent lists the cwd directory')
@@ -76,7 +82,7 @@ test('~/ expansion lists the home directory', async (t) => {
   const saved = process.env.HOME
   try {
     process.env.HOME = home
-    const items = await completeDirectory('~/', cwd, new LocalFileSource(null), new AbortController().signal)
+    const items = await completeDirectory('~/', cwd, clientDriver(), clientPathQueryEnvironment(), new AbortController().signal)
     assert.ok(items !== null)
     const values = items.map(item => item.value)
     assert.ok(values.includes('~/pics/'), 'home directory children are listed')
@@ -89,17 +95,17 @@ test('~/ expansion lists the home directory', async (t) => {
 
 test('accepted directory value continues with a separator', async (t) => {
   const { cwd } = fixture(testLifecycle(t))
-  const items = await completeDirectory('./s', cwd, new LocalFileSource(null), new AbortController().signal)
+  const items = await completeDirectory('./s', cwd, clientDriver(), clientPathQueryEnvironment(), new AbortController().signal)
   assert.ok(items !== null)
   const src = items.find(item => item.value === './src/')
   assert.ok(src !== undefined, './src/ is suggested with the trailing separator')
-  assert.equal(src.label, './src/')
+  assert.equal(src.displayPath, './src', 'the display path stays bare — the TUI owns the marker')
 })
 
 test('aborted completion returns null', async (t) => {
   const { cwd } = fixture(testLifecycle(t))
   const controller = new AbortController()
   controller.abort()
-  const items = await completeDirectory('./', cwd, new LocalFileSource(null), controller.signal)
+  const items = await completeDirectory('./', cwd, clientDriver(), clientPathQueryEnvironment(), controller.signal)
   assert.equal(items, null)
 })

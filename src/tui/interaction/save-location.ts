@@ -32,7 +32,7 @@ import {
 import { Frame } from '../components/frame.ts'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { color } from '../../theme.ts'
-import type { DirectoryCompletionItem } from '../../file-completion/directory-completion.ts'
+import type { DirectoryCompletionCandidate } from '../../client/file-completion/directory-completion.ts'
 
 /** What the Save Location prompt asks for. */
 export interface SaveLocationRequest {
@@ -67,8 +67,10 @@ export interface SaveLocationDeps {
   isDirectory(path: string): boolean
   /** Whether the final target file (`join(directory, filename)`) exists. */
   targetExists(directory: string, filename: string): boolean
-  /** Directory completion (abortable; late results after close are fenced). */
-  complete(raw: string, signal: AbortSignal): Promise<DirectoryCompletionItem[] | null>
+  /** Directory completion (abortable; late results after close are fenced).
+   * The Client-local capability returns the bare display path; THIS component
+   * owns the directory marker it renders. */
+  complete(raw: string, signal: AbortSignal): Promise<DirectoryCompletionCandidate[] | null>
 }
 
 /** How many suggestion rows are rendered (the rest are summarized). */
@@ -87,7 +89,7 @@ export class SaveLocationPrompt implements Component, Focusable {
   private readonly onDone: (result: SaveLocationResult) => void
   private readonly input = new Input()
   /** The latest directory suggestions (empty = none). */
-  private suggestions: DirectoryCompletionItem[] = []
+  private suggestions: DirectoryCompletionCandidate[] = []
   /** Highlighted suggestion index. */
   private suggestionCursor = 0
   /** Completion generation: a late result from an older refresh is dropped. */
@@ -162,7 +164,7 @@ export class SaveLocationPrompt implements Component, Focusable {
   }
 
   /** The visible suggestions (test hook). */
-  getSuggestions(): readonly DirectoryCompletionItem[] {
+  getSuggestions(): readonly DirectoryCompletionCandidate[] {
     return this.suggestions
   }
 
@@ -400,7 +402,11 @@ export class SaveLocationPrompt implements Component, Focusable {
         const item = visible[i]
         if (item === undefined) continue
         const pointer = i === this.suggestionCursor ? color.primary('→') : ' '
-        const label = i === this.suggestionCursor ? color.textStrong(item.label) : item.label
+        // The directory marker is TUI presentation: the Client capability
+        // reports the bare path, this component renders the trailing `/` that
+        // tells the user the row continues into a directory.
+        const directoryLabel = `${item.displayPath}/`
+        const label = i === this.suggestionCursor ? color.textStrong(directoryLabel) : directoryLabel
         this.suggestionRows.push({ row: lines.length, value: item.value })
         lines.push(`${pointer} ${label}`)
       }
