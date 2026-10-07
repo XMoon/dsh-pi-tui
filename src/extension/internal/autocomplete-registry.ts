@@ -15,10 +15,10 @@
  *   continues to the next provider (never a crash);
  * - providers receive only the editor's cursor state — never the terminal,
  *   never the TuiApp, never the session.
- * @module @xmoon76/dsh-pi-tui/autocomplete-registry
+ * @module @xmoon76/dsh-pi-tui/extension/internal/autocomplete-registry
  */
 
-import type { AutocompleteHandle, AutocompleteProviderContribution, TuiAutocompleteProvider, TuiAutocompleteQuery, TuiAutocompleteSuggestions } from './extension/public-types.ts'
+import type { AutocompleteHandle, AutocompleteProviderContribution, TuiAutocompleteProvider, TuiAutocompleteQuery, TuiAutocompleteSuggestions } from '../public-types.ts'
 
 
 /** Internal registration record. */

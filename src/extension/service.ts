@@ -48,14 +48,14 @@ import type {
 import { AdvancedInputRegistry } from './internal/advanced-input.ts'
 import { UnstableInputRegistry } from './internal/unstable-input.ts'
 import { normalizeInputEvent } from './internal/input-events.ts'
-import { CommandBridge } from '../command-bridge.ts'
-import { ThemeRegistry } from '../theme-registry.ts'
+import { CommandBridge } from './internal/command-bridge.ts'
+import { ThemeRegistry } from './internal/theme-registry.ts'
 import { stripControlChars } from '../domain/footer/layout.ts'
-import { AutocompleteRegistry } from '../autocomplete-registry.ts'
-import { SettingsRegistry } from '../settings-registry.ts'
-import { KeybindingRegistry } from '../keybinding-registry.ts'
-import { RendererRegistry } from '../renderer-registry.ts'
-import { EditorRegistry } from '../editor-registry.ts'
+import { AutocompleteRegistry } from './internal/autocomplete-registry.ts'
+import { SettingsRegistry } from './internal/settings-registry.ts'
+import { KeybindingRegistry } from './internal/keybinding-registry.ts'
+import { RendererRegistry } from './internal/renderer-registry.ts'
+import { EditorRegistry } from './internal/editor-registry.ts'
 import type {
   AutocompleteHandle,
   EditorContribution,

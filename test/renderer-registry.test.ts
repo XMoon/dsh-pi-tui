@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { RendererRegistry } from '../src/renderer-registry.ts'
+import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import type { ExtensionView } from '../src/extension/public-types.ts'
 
 
@@ -210,7 +210,7 @@ test('RendererRegistry: duplicate ids are errors', () => {
 test('TuiApp: a tool renderer replaces the tool card; unload rebuilds the host card', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {
@@ -251,7 +251,7 @@ test('TuiApp: a tool renderer replaces the tool card; unload rebuilds the host c
 test('TuiApp: a throwing tool renderer falls back to the host card (no stall)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {
@@ -284,7 +284,7 @@ test('TuiApp: a throwing tool renderer falls back to the host card (no stall)', 
 test('TuiApp: the recorded rendererId matches the view actually built on content change (round-1 P1)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   let renderCalls = 0
   registry.registerToolRenderer({
@@ -314,7 +314,7 @@ test('TuiApp: the recorded rendererId matches the view actually built on content
 test('TuiApp: a host-fallback entry records the revision so renderers do NOT re-run (round-1 P2)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   let renderCalls = 0
   // A message renderer for 'system' only — user messages have NO renderer
@@ -345,7 +345,7 @@ test('TuiApp: a host-fallback entry records the revision so renderers do NOT re-
 test('TuiApp: renderer failures reach the health ledger sink (round-1 P3)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerToolRenderer({
     id: 'exploder', toolName: 'bash',
@@ -368,7 +368,7 @@ test('TuiApp: renderer failures reach the health ledger sink (round-1 P3)', asyn
 test('TuiApp: a broken renderer view lets a lower-priority renderer claim the card (P1-R5)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   let fallbackCalls = 0
   registry.registerToolRenderer({
@@ -401,7 +401,7 @@ test('TuiApp: a broken renderer view lets a lower-priority renderer claim the ca
 test('TuiApp: a renderer-returned view whose COMPILATION throws abdicates to the host card, never escapes (P1-07)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   // The render() itself SUCCEEDS (the registry's per-renderer boundary is
   // not the failing stage) — the returned view's `spans` GETTER throws at
@@ -439,7 +439,7 @@ test('TuiApp: a renderer-returned view whose COMPILATION throws abdicates to the
 test('TuiApp: a failed renderer RECOVERS and its health record clears (P1-08)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const { ExtensionLedger } = await import('../src/extension/internal/ledger.ts')
   const ledger = new ExtensionLedger(() => {})
   // P1-08: renderers are tracked in the health ledger by the SERVICE; the
@@ -485,7 +485,7 @@ test('TuiApp: a failed renderer RECOVERS and its health record clears (P1-08)', 
 test('TuiApp: the tool snapshot arguments/result are deeply frozen (round-1 P4)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   let snapshotArgs: unknown
   registry.registerToolRenderer({
@@ -528,7 +528,7 @@ test('TuiApp: a plugin-rendered component renders inside the transcript gutter (
   // honest observable of the same contract.)
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp, transcriptContentWidth } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerMessageRenderer({
     id: 'width-probe', kind: 'assistant',
@@ -578,7 +578,7 @@ test('TuiApp: a resize does NOT re-run plugin renderers for unchanged content (w
   // content") survives resizes. A content change still re-runs.
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   let calls = 0
   registry.registerMessageRenderer({

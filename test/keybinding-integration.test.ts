@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { EditorRegistry } from '../src/editor-registry.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'

@@ -239,8 +239,16 @@ const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
   // The TUI command facade/coordinator (the command layer's transitional root).
   'commands.ts',
   'tui-app.ts',
+  // TS8-E: the retired root theme module stays a guard (a forwarding shim at
+  // the retired path would be silently legal otherwise); the live terminal
+  // palette/TUI themes now live at `tui/theme/runtime.ts`, already covered by
+  // the `tui/**` prefix rule.
   'theme.ts',
+  // The concrete renderer registry moved under the extension boundary (TS8-E);
+  // both its retired root path and its canonical `extension/internal/**` path
+  // stay forbidden to the core (the root path is a retired-shim guard).
   'renderer-registry.ts',
+  'extension/internal/renderer-registry.ts',
   // TS7: the core consumes the canonical `domain/transcript/**` owners
   // directly. The semantic root facade and the three retired semantic roots
   // must never be re-entered (a forwarding shim at a retired path would be
@@ -249,6 +257,24 @@ const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
   'transcript-semantics.ts',
   'context-presentation.ts',
   'transcript-window.ts',
+])
+
+/**
+ * The Stable extension PUBLIC declaration sources (plan §21 #5): the published
+ * package entries and their public type modules. A third-party plugin author
+ * must be able to name every public extension contract without reaching the
+ * project's TUI implementation, so these modules are a closed public face —
+ * the concrete registries under `extension/internal/**` keep their reviewed
+ * key-policy / terminal-rendering adapter edges, but the public sources may
+ * never import `tui/**` or the `tui-app.ts` facade.
+ */
+const EXTENSION_PUBLIC_DECLARATION_SOURCES = new Set([
+  'extensions.ts',
+  'extension/public-types.ts',
+  'extension/advanced.ts',
+  'extension/advanced-types.ts',
+  'extension/unstable.ts',
+  'extension/unstable-types.ts',
 ])
 
 /**
@@ -551,6 +577,22 @@ export const ARCHITECTURE_RULES = [
     forbids: (resolved, specifier, meta) => isDomainTranscriptBackendMechanics(resolved, specifier, meta),
     checksValueDynamicImport: true,
     checksBareDynamicImport: true,
+  },
+  {
+    // TS8-E (plan §21 #5): the Stable extension PUBLIC declaration sources are
+    // the published plugin face. A public type must be nameable without the
+    // project's TUI implementation, so these sources never import `tui/**` or
+    // the `tui-app.ts` facade. This is a PUBLIC-source rule only: the concrete
+    // registries under `extension/internal/**` keep their reviewed key-policy
+    // (`tui/keybindings/**`) and terminal-rendering (`tui/theme/runtime.ts`)
+    // adapter edges, which this rule deliberately does not govern.
+    id: 'extension-public-declaration-imports-tui',
+    message:
+      'the Stable extension public declaration sources (src/extensions.ts and extension/public-types|advanced-types|unstable-types.ts, '
+      + 'their public entries) must not import project TUI implementation types (tui/**, tui-app.ts) — a public plugin contract stays free of terminal mechanics',
+    applies: (srcRel) => EXTENSION_PUBLIC_DECLARATION_SOURCES.has(srcRel),
+    forbids: (resolved) => resolved.startsWith('tui/') || resolved === 'tui-app.ts',
+    checksValueDynamicImport: true,
   },
 ]
 

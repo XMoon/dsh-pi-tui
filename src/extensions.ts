@@ -13,6 +13,12 @@
  * M1 scope: registry primitives only. The service is available before any
  * TUI surface exists (`tuiStartup` gate), so a plugin can register during
  * boot; the SurfaceHost (M2) attaches later and renders the registrations.
+ *
+ * This module is a PERMANENT root package entry (`package.json` export
+ * `./extensions`, tsdown bundle entry), not a legacy feature root: it stays
+ * at `src/extensions.ts` and is classified `stable` in the source-root
+ * ledger. The concrete registry classes it installs live behind the
+ * extension boundary under `src/extension/internal/**`.
  * @module @xmoon76/dsh-pi-tui/extensions
  */
 

@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { EditorRegistry } from '../src/editor-registry.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { EditorSeatMount } from '../src/tui/interaction/editor-seat.ts'
 import type { EditorHost, ExtensionEditor, ExtensionView } from '../src/extension/public-types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

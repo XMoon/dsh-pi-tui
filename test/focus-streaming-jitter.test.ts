@@ -9,7 +9,7 @@ import {
   streamingToolPreviewSnapshot,
   upsertStreamingToolPreview,
 } from '../src/streaming-tool-preparing.ts'
-import { RendererRegistry } from '../src/renderer-registry.ts'
+import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

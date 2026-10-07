@@ -978,7 +978,7 @@ test('revealSearchMatch opens the owner Thought and full-reveals the matched sec
 })
 
 test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Thought (review finding)', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerToolRenderer({
     id: 'probe', toolName: 'read',
@@ -3799,7 +3799,7 @@ function notStartedTurn(): SessionEvent[] {
 }
 
 test('Focus keeps a TOOL_NOT_STARTED diagnostic standalone: no Action slot, no action count, no plugin renderer', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerToolRenderer({
     id: 'probe', toolName: 'bash',

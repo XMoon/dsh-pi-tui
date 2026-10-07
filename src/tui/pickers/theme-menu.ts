@@ -30,7 +30,7 @@
 
 import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { settingsListTheme } from '../../theme.ts'
-import type { ThemeRegistry } from '../../theme-registry.ts'
+import type { ThemeRegistry } from '../../extension/internal/theme-registry.ts'
 import { themePickerRows, normalizePersistedTheme } from '../../theme-source.ts'
 
 /** The FRIENDLY display name of one persisted/selectable theme value:

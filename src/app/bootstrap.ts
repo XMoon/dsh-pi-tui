@@ -1619,13 +1619,13 @@ export function applyRunnerWithRuntime(
       /** The CONCRETE registries (the runner's dispatch/pickers need the
        * full read methods — handlerFor, isSessionless, etc. — beyond the
        * public narrow views). */
-      readonly commands: import('../command-bridge.ts').CommandBridge
-      readonly themes: import('../theme-registry.ts').ThemeRegistry
-      readonly autocomplete: import('../autocomplete-registry.ts').AutocompleteRegistry
-      readonly settings: import('../settings-registry.ts').SettingsRegistry
-      readonly keybindings: import('../keybinding-registry.ts').KeybindingRegistry
-      readonly renderers: import('../renderer-registry.ts').RendererRegistry
-      readonly editors: import('../editor-registry.ts').EditorRegistry
+      readonly commands: import('../extension/internal/command-bridge.ts').CommandBridge
+      readonly themes: import('../extension/internal/theme-registry.ts').ThemeRegistry
+      readonly autocomplete: import('../extension/internal/autocomplete-registry.ts').AutocompleteRegistry
+      readonly settings: import('../extension/internal/settings-registry.ts').SettingsRegistry
+      readonly keybindings: import('../extension/internal/keybinding-registry.ts').KeybindingRegistry
+      readonly renderers: import('../extension/internal/renderer-registry.ts').RendererRegistry
+      readonly editors: import('../extension/internal/editor-registry.ts').EditorRegistry
       _ledger(): import('../extension/internal/ledger.ts').ExtensionLedger
       /** INTERNAL owner → owning Loader entry id projection (P1-A1.4). */
       _ownerEntryIds(): ReadonlyMap<string, string>

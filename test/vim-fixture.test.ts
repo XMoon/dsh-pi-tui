@@ -20,7 +20,7 @@ import { PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { apply as applyExtensionHost } from '../src/extensions.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { EditorRegistry } from '../src/editor-registry.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 

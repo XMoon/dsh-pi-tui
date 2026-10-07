@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { EditorRegistry } from '../src/editor-registry.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { EditorSeatHolder } from '../src/tui/interaction/editor-seat-holder.ts'
 import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
@@ -272,7 +272,7 @@ test('EditorRegistry: owner unload removes the editor; duplicate ids error', () 
 test('TuiApp: a plugin editor wins the seat through the atomic handoff; unload restores the host default with the draft', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -314,7 +314,7 @@ test('TuiApp: a plugin editor wins the seat through the atomic handoff; unload r
 test('TuiApp: a creation throw keeps the current editor working (atomic handoff)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -338,7 +338,7 @@ test('TuiApp: a creation throw keeps the current editor working (atomic handoff)
 test('TuiApp: the editor host dispatch routes semantic actions through host paths', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -379,7 +379,7 @@ test('TuiApp: the editor host dispatch routes semantic actions through host path
 test('TuiApp: a stale host captured BEFORE dispose is inert after it — no seat mutation, no submission (P1-12)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -418,7 +418,7 @@ test('TuiApp: a stale host captured BEFORE dispose is inert after it — no seat
 test('TuiApp: setEditorText writes through the active replacement seat (P1-R9)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -437,7 +437,7 @@ test('TuiApp: setEditorText writes through the active replacement seat (P1-R9)',
 test('TuiApp: an old EditorHost is inert after a successful handoff (P1-R7/R8)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -481,7 +481,7 @@ test('TuiApp: an old EditorHost is inert after a successful handoff (P1-R7/R8)',
 test('TuiApp: EditorHost.replaceText notifies the current subscriber (P1-R8)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -505,7 +505,7 @@ test('TuiApp: EditorHost.replaceText notifies the current subscriber (P1-R8)', a
 test('TuiApp: the EditorHost subscription is DRIVEN by host mutations (P1-11)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -548,7 +548,7 @@ test('TuiApp: the EditorHost subscription is DRIVEN by host mutations (P1-11)', 
 test('TuiApp: a declined replacement key falls back into the active plugin draft (P1-R3)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -595,7 +595,7 @@ test('TuiApp: a declined replacement key falls back into the active plugin draft
 test('TuiApp: a declined replacement printable key uses the host fallback without a plugin resolver (P1-R3)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -639,7 +639,7 @@ test('TuiApp: a declined replacement printable key uses the host fallback withou
 test('TuiApp: declined fallback preserves a multiline grapheme cursor (P1-R3)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -685,7 +685,7 @@ test('TuiApp: declined fallback preserves a multiline grapheme cursor (P1-R3)', 
 test('TuiApp: declined fallback normalizes CRLF and tabs before host editing', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -720,7 +720,7 @@ test('TuiApp: declined fallback normalizes CRLF and tabs before host editing', a
 test('TuiApp: declined fallback preserves autocomplete state for host completion', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -767,7 +767,7 @@ test('TuiApp: declined fallback preserves autocomplete state for host completion
 test('TuiApp: declined fallback isolates replacement input errors', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const errors: string[] = []
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
@@ -800,7 +800,7 @@ test('TuiApp: declined fallback isolates replacement input errors', async () => 
 test('TuiApp: declined Enter preserves host autocomplete confirmation semantics', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const submitted: string[] = []
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
@@ -838,7 +838,7 @@ test('TuiApp: declined Enter preserves host autocomplete confirmation semantics'
 test('TuiApp: create-time EditorHost subscription survives the handoff commit', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -866,7 +866,7 @@ test('TuiApp: create-time EditorHost subscription survives the handoff commit', 
 test('TuiApp: repeated declined Up events continue host history navigation', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -905,7 +905,7 @@ test('TuiApp: repeated declined Up events continue host history navigation', asy
 test('TuiApp: a plugin editor with handleInput receives SEMANTIC events, never raw bytes (P1-5)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -991,7 +991,7 @@ test('TuiApp: a plugin editor with handleInput receives SEMANTIC events, never r
 test('TuiApp: terminal protocol normalization — legacy and CSI-u encodings reach the plugin as the SAME semantic key (P1-5)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -1042,7 +1042,7 @@ test('TuiApp: terminal protocol normalization — legacy and CSI-u encodings rea
 test('TuiApp: display-only replacement editor never routes typing into the hidden host editor (P2-R5)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -1115,7 +1115,7 @@ test('TuiApp: the HOST seat still routes ordinary typing normally (P2-R5 guard)'
 test('TuiApp: a TRANSFER throw disposes the newly created editor — no leak, current stays (P2-02)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -1147,7 +1147,7 @@ test('TuiApp: a TRANSFER throw disposes the newly created editor — no leak, cu
 test('TuiApp: a COMPILE throw after transfer disposes the created editor too (P2-02)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -1180,7 +1180,7 @@ test('TuiApp: a COMPILE throw after transfer disposes the created editor too (P2
 test('TuiApp: a failed editor creation is retried after a same-id re-registration (round-1 finding 4)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -1219,7 +1219,7 @@ test('TuiApp: a failed editor creation is retried after a same-id re-registratio
 test('TuiApp: the editor host dispatch clears the plugin draft through the host submit path (round-1 finding 2)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -1254,7 +1254,7 @@ test('TuiApp: the editor host dispatch clears the plugin draft through the host 
 test('TuiApp: the subagent viewer covers a PLUGIN editor and restores its draft (round-2 finding 1)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -1288,7 +1288,7 @@ test('TuiApp: the subagent viewer covers a PLUGIN editor and restores its draft 
 test('TuiApp: a plugin editor survives a fullscreen toggle with focus intact (round-2 finding 2)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
@@ -1323,7 +1323,7 @@ test('TuiApp: a plugin editor survives a fullscreen toggle with focus intact (ro
 test('TuiApp: a broken plugin view (compile throw) keeps the old editor working (round-2 finding 3)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -1355,7 +1355,7 @@ test('TuiApp: a broken plugin view (compile throw) keeps the old editor working 
 test('TuiApp: a plugin editor view REPAINTS after setText + invalidate (round-2 P1 live view)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -1409,7 +1409,7 @@ test('TuiApp: a plugin editor view REPAINTS after setText + invalidate (round-2 
 test('TuiApp: a compile throw inside invalidate() is isolated — the host keeps working (round-3 finding 1)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const registry = new EditorRegistry()
   const vt = new VirtualTerminal(80, 24)
   const notices: string[] = []

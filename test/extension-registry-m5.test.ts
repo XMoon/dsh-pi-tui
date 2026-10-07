@@ -13,11 +13,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { CommandBridge } from '../src/command-bridge.ts'
-import { ThemeRegistry } from '../src/theme-registry.ts'
-import { SettingsRegistry } from '../src/settings-registry.ts'
-import { AutocompleteRegistry } from '../src/autocomplete-registry.ts'
-import { KeybindingRegistry } from '../src/keybinding-registry.ts'
+import { CommandBridge } from '../src/extension/internal/command-bridge.ts'
+import { ThemeRegistry } from '../src/extension/internal/theme-registry.ts'
+import { SettingsRegistry } from '../src/extension/internal/settings-registry.ts'
+import { AutocompleteRegistry } from '../src/extension/internal/autocomplete-registry.ts'
+import { KeybindingRegistry } from '../src/extension/internal/keybinding-registry.ts'
 import { HOST_COMMAND_CATALOG, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, resolveSubmitDelivery } from '../src/index.ts'
 
 /** A minimal valid structural autocomplete provider for tests. */
