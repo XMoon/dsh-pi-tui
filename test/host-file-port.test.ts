@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -302,4 +302,32 @@ test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)
     candidates.some(candidate => candidate.path.includes('file-one.txt')),
     `the fallback must find the fixture file:\n${JSON.stringify(candidates)}`,
   )
+})
+
+// ── session-vs-workspace routing (source -> route -> sink) ────────────────
+
+test('the SESSION scope routes to the official service ONLY — the Direct workspace scanner never runs', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // The Direct WORKSPACE scanner's finder PROVES its own invocation by
+  // recording it: if the session route ever fell through to the local
+  // discovery pipeline, this marker would exist.
+  const marker = join(life.tempDir('dsh-hostfile-route-'), 'finder-ran')
+  const finder = fakeFd(life,
+    `printf '%s' ran > ${JSON.stringify(marker)}\nprintf 'file-one.txt\\0'`)
+  // The Host authority's own answer — deliberately NOT anything the local
+  // workspace scan would return for the same query.
+  const official = officialService([{ path: 'host-answer/only.ts', kind: 'file' }])
+  const live = { session: { header: { cwd: root } } }
+  const port = new DirectHostFilePort(
+    (sessionId) => sessionId === 'session-live' ? live : undefined,
+    finder,
+    { get: (name: string) => name === 'fileReferences' ? official.service : undefined },
+  )
+  const result = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file')
+  assert.deepEqual(result, { kind: 'ok', items: [{ path: 'host-answer/only.ts', kind: 'file' }] },
+    'the session scope returns the official answer verbatim')
+  assert.equal(official.calls.length, 1, 'exactly one official Host list request')
+  assert.equal(official.calls[0]!.query, 'file', 'the official query form crossed')
+  assert.equal(existsSync(marker), false, 'the Direct workspace scanner must never run for a session scope')
 })

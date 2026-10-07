@@ -7,11 +7,12 @@
  *                    (the official @deepseek-ai/dsh-file-reference-local
  *                    provider the TUI composition mounts — the same Host
  *                    service the wire `fileReferences/list` forwards to)
- * workspace scope -> the Direct-only legacy scanner (fd/fdfind whole-tree
- *                    fuzzy, the bounded recursive fallback) — a sessionless
- *                    compatibility path with NO official carrier (the wire
- *                    answers `unavailable`); it must not define the
- *                    session `@file` semantics
+ * workspace scope -> the Direct-only WORKSPACE compatibility scanner
+ *                    (`runtime/direct/file-completion/workspace-discovery.ts`:
+ *                    fd/fdfind whole-tree fuzzy, the bounded recursive
+ *                    fallback) — a sessionless compatibility path with NO
+ *                    official carrier (the wire answers `unavailable`); it
+ *                    must not define the session `@file` semantics
  * ```
  *
  * The official service owns the workspace root, ranking, result bounds,
@@ -27,9 +28,14 @@
 
 import { statSync } from 'node:fs'
 import { resolveMentionCandidate } from '../../mentions.ts'
-import type { DiscoverySource } from '../../file-completion/discovery.ts'
-import { discoverForQuery, resolveFdPath } from '../../file-completion/discovery.ts'
-import { rankDiscovery, reattachDisplayBase, resolveQuery } from '../../file-completion/engine.ts'
+import { discoverForQuery, type LocalDiscoveryDriver } from '../../domain/file-completion/discovery-policy.ts'
+import { reattachDisplayBase, resolvePathQuery } from '../../domain/file-completion/query.ts'
+import { rankPathCandidates } from '../../domain/file-completion/ranking.ts'
+import {
+  DirectWorkspaceDiscoveryDriver,
+  hostPathQueryEnvironment,
+  resolveFdPath,
+} from './file-completion/workspace-discovery.ts'
 import type {
   HostFileCandidate,
   HostFileListResult,
@@ -97,10 +103,11 @@ export class DirectHostFilePort implements HostFilePort {
     return this.ctx?.get('fileReferences') as FileReferencesServiceLike | undefined
   }
 
-  /** The discovery seam this adapter answers with (the Host's own fd
-   * detection — the port's discovery source is ALWAYS the Host fs). */
-  private get discoverySource(): DiscoverySource {
-    return { fdPath: this.fdPath }
+  /** The discovery boundary this adapter answers with: the Direct Host's own
+   * filesystem (the WORKSPACE compatibility path's scanner is ALWAYS the Host
+   * fs, never the Client's). */
+  private get workspaceDiscovery(): LocalDiscoveryDriver {
+    return new DirectWorkspaceDiscoveryDriver(this.fdPath)
   }
 
   /** TEST seam: the resolved fd/fdfind executable (null = fallback-only).
@@ -167,17 +174,17 @@ export class DirectHostFilePort implements HostFilePort {
     const workDir = scope.cwd
     const signal = options?.signal
     try {
-      const resolved = resolveQuery(query, workDir)
-      const candidates = await discoverForQuery(resolved, this.discoverySource, signal ?? new AbortController().signal)
+      const resolved = resolvePathQuery(query, workDir, hostPathQueryEnvironment())
+      const candidates = await discoverForQuery(resolved, this.workspaceDiscovery, signal ?? new AbortController().signal)
       signal?.throwIfAborted()
       // THE PORT CONTRACT: the candidates cross ALREADY ranked, filtered
       // and bounded, in the adapter's own order. This compatibility path
       // has no official authority, so the adapter completes the legacy
-      // ranking itself (the pure local rankDiscovery over the reattached
-      // user-facing paths — no UI DTO round-trip) — the client never
-      // re-ranks what a source returned.
+      // ranking itself (the pure neutral rankPathCandidates over the
+      // reattached user-facing paths — no UI DTO round-trip) — the client
+      // never re-ranks what a source returned.
       const displayed = candidates.map(candidate => reattachDisplayBase(candidate, resolved))
-      const ranked = rankDiscovery(displayed, resolved.searchTerm)
+      const ranked = rankPathCandidates(displayed, resolved.searchTerm)
       return {
         kind: 'ok',
         items: ranked.map(candidate => ({ path: candidate.path, kind: candidate.kind })),
@@ -230,6 +237,6 @@ function exists(candidate: string): boolean {
   }
 }
 
-/** Re-exported for the migration guard (the bundle boundary gate
- * allowlists the discovery module's fd probe). */
+/** Re-exported for the WORKSPACE compatibility scan's finder seam (the tests
+ * and the port's own constructor pin the Direct Host's fd/fdfind probe). */
 export { resolveFdPath }
