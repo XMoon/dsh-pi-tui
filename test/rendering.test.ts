@@ -1802,11 +1802,11 @@ test('transcript search: Ctrl+C closes the overlay and the hint advertises next/
   vt.sendInput('\x06') // ctrl+f opens search
   let view = await viewport(vt)
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  // The next/prev/close hint rides under the input (fixed non-configurable
-  // overlay keys — no effective binding to render).
-  assert.ok(view.includes('↵ next'), `search hint must advertise next:\n${view}`)
-  assert.ok(view.includes('prev'), `search hint must advertise previous:\n${view}`)
-  assert.ok(view.includes('esc/ctrl+c close'), `search hint must advertise esc/ctrl+c close:\n${view}`)
+  // The next/prev/close hint rides under the input. Its labels are rendered
+  // from the (non-configurable) keymap definitions and compacted to this exact
+  // overlay line, so the assertion pins the WHOLE hint rather than recomputing
+  // it in the test.
+  assert.ok(view.includes('↵ next · ⇧↵ prev · esc/ctrl+c close'), `search hint must render the full next/prev/close line:\n${view}`)
   // Ctrl+C closes search (the old behavior: the overlay's shared Input
   // swallowed Ctrl+C as its generic cancel and search stayed open).
   vt.sendInput('\x03') // ctrl+c

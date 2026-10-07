@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { TranscriptSearchComponent } from '../src/search.ts'
+import { TranscriptSearchComponent } from '../src/tui/interaction/transcript-search.ts'
 import type { TuiMouseEvent } from '@xmoon76/pi-tui'
 
 function mouse(type: 'press' | 'click', x: number, y: number, width = 40, height = 3): TuiMouseEvent {
