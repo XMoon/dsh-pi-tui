@@ -493,7 +493,7 @@ test('TypeScript import() type queries are static dependencies and are zone-chec
   ])
   assert.equal(violations.length, 1)
   assert.equal(violations[0].rule, 'direct-import-outside-composition')
-  assert.deepEqual(parseImportSpecifiers("type U = typeof import('./y.ts')\n"), [{ specifier: './y.ts', line: 1, typeOnly: true }])
+  assert.deepEqual(parseImportSpecifiers("type U = typeof import('./y.ts')\n"), [{ specifier: './y.ts', line: 1, typeOnly: true, moduleTypeOnly: true }])
 })
 
 test('the AST scanners are file-kind aware: a legal .tsx JSX tree is not a bypass (TS1)', () => {
@@ -506,7 +506,7 @@ test('the AST scanners are file-kind aware: a legal .tsx JSX tree is not a bypas
     '',
   ].join('\n')
   assert.deepEqual(parseImportSpecifiers(jsx, 'tui/panels/example.tsx'), [
-    { specifier: '../../app/remote/runtime.ts', line: 2, typeOnly: true },
+    { specifier: '../../app/remote/runtime.ts', line: 2, typeOnly: true, moduleTypeOnly: true },
   ])
   // The gate consumer rejects it through the TUI-layer rule.
   const violations = findViolations([entry('tui/panels/example.tsx', jsx)])
@@ -526,7 +526,7 @@ test('the AST scanners are file-kind aware: a legal .tsx JSX tree is not a bypas
     '',
   ].join('\n')
   assert.deepEqual(parseImportSpecifiers(legacyTs, 'app/surface/runtime.ts'), [
-    { specifier: './dep.ts', line: 1, typeOnly: false },
+    { specifier: './dep.ts', line: 1, typeOnly: false, moduleTypeOnly: false },
   ])
   assert.deepEqual(findDirectAdapterConstructions(legacyTs, 'app/surface/runtime.ts'), [
     { name: 'DirectSessionWriter', line: 2 },
@@ -619,14 +619,14 @@ test('parseImportSpecifiers covers the static ESM forms, type-only flags, and ig
 
 test('parseImportSpecifiers detects a from-clause split across lines', () => {
   const specs = parseImportSpecifiers("import { x } from\n  './app/direct/x.ts'\n")
-  assert.deepEqual(specs, [{ specifier: './app/direct/x.ts', line: 1, typeOnly: false }])
+  assert.deepEqual(specs, [{ specifier: './app/direct/x.ts', line: 1, typeOnly: false, moduleTypeOnly: false }])
 })
 
 test('a multi-line block comment containing an import is ignored', () => {
   const specs = parseImportSpecifiers(
     ['/*', "import { x } from './app/direct/x.ts'", '*/', "import { y } from './y.ts'", ''].join('\n'),
   )
-  assert.deepEqual(specs, [{ specifier: './y.ts', line: 4, typeOnly: false }])
+  assert.deepEqual(specs, [{ specifier: './y.ts', line: 4, typeOnly: false, moduleTypeOnly: false }])
 })
 
 test('the allowlist suppresses exactly the matching file:target pair', () => {
@@ -1560,10 +1560,11 @@ test('the semantic runtime layer must not import terminal presentation (TS1)', (
 })
 
 test('TS8-F: the process layer owns its five forbidden inner layers under one rule id', () => {
-  // The dedicated `runtime-process-imports-inner-layers` rule OWNS every edge
-  // (the generic runtime-imports-* / direct-import-outside-composition rules
-  // carve the subtree out), so each synthetic violation carries exactly one
-  // rule id instead of being double-reported.
+  // The generic runtime-imports-app|tui|client rules carve this subtree out so
+  // the runtime-layer direction has ONE rule id here. The carve-out is scoped to
+  // those rules only: an INDEPENDENT contract can still report the same file
+  // under its own id (pinned in the overlap test below), which is not the same
+  // invariant double-reported.
   const targets = ['app/surface/status-runtime.ts', 'tui/components/frame.ts', 'client/media/format.ts', 'runtime/direct/backend-direct.ts', 'runtime/remote/skill-remote.ts']
   for (const target of targets) {
     const violations = findViolations([entry('runtime/process/tasks.ts', `import { x } from '../../${target}'\n`)])
@@ -1586,7 +1587,24 @@ test('TS8-F: the process layer owns its five forbidden inner layers under one ru
   )
 })
 
-test('TS8-F: the process layer rejects DSH implementation value imports but keeps type faces and Node stdlib', () => {
+test('TS8-F: the process-layer rule coexists with independent contracts (not one invariant double-reported)', () => {
+  // The bootstrap-composition contract and the Remote lazy-boundary contract
+  // each keep their own rule id for an edge the process rule also governs.
+  const staticOverlap = findViolations([entry('runtime/process/tasks.ts', "import { x } from '../../app/bootstrap.ts'\n")])
+  assert.deepEqual(
+    [...new Set(staticOverlap.map(v => v.rule))].sort(),
+    ['owner-imports-bootstrap', 'runtime-process-imports-inner-layers'],
+    'the bootstrap-composition contract and the process rule are two independent contracts',
+  )
+  const dynamicOverlap = findViolations([entry('runtime/process/tasks.ts', "import('../../app/remote/runtime.ts')\n")])
+  assert.deepEqual(
+    [...new Set(dynamicOverlap.map(v => v.rule))].sort(),
+    ['remote-dynamic-import-owner', 'runtime-process-imports-inner-layers'],
+    'the Remote lazy-boundary contract and the process rule are two independent contracts',
+  )
+})
+
+test('TS8-F: the process layer rejects DSH implementation runtime edges but keeps erased type faces and Node stdlib', () => {
   const reject = findViolations([entry('runtime/process/tasks.ts', "import { createAgent } from '@deepseek-ai/dsh-agent'\n")])
   assert.equal(reject.length, 1)
   assert.equal(reject[0].rule, 'runtime-process-imports-dsh-implementation')
@@ -1595,10 +1613,27 @@ test('TS8-F: the process layer rejects DSH implementation value imports but keep
     findViolations([entry('runtime/process/tasks.ts', "import('@deepseek-ai/dsh-session')\n")])[0]?.rule,
     'runtime-process-imports-dsh-implementation',
   )
-  // Allowed: Node standard library, a TYPE-ONLY DSH structural face, a
+  // verbatimModuleSyntax: an INLINE type specifier still emits a runtime module
+  // load, so the rule must reject it. `typeOnly` alone cannot see this — the
+  // strict discriminator is `moduleTypeOnly` (declaration fully erased).
+  for (const spec of [
+    "import { type Agent } from '@deepseek-ai/dsh-agent'\n",
+    "export { type X } from '@deepseek-ai/dsh-agent'\n",
+  ]) {
+    const violations = findViolations([entry('runtime/process/tasks.ts', spec)])
+    assert.equal(violations.length, 1, `an inline-type DSH runtime edge must be rejected: ${spec.trim()}`)
+    assert.equal(violations[0].rule, 'runtime-process-imports-dsh-implementation')
+  }
+  // The parser proves WHY: the inline form is typeOnly but NOT moduleTypeOnly.
+  assert.deepEqual(
+    parseImportSpecifiers("import { type Agent } from '@deepseek-ai/dsh-agent'\n").map(s => [s.typeOnly, s.moduleTypeOnly]),
+    [[true, false]],
+  )
+  // Allowed: Node standard library, a FULLY ERASED DSH type face, a
   // non-business infrastructure package, and a process-layer sibling.
   assert.deepEqual(findViolations([entry('runtime/process/diagnostics.ts', "import { join } from 'node:path'\n")]), [])
   assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "import type { Agent } from '@deepseek-ai/dsh-agent'\n")]), [])
+  assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "export type { X } from '@deepseek-ai/dsh-agent'\n")]), [])
   assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "import { symbols } from '@deepseek-ai/cordis'\n")]), [])
   assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "import type { Diag } from './diagnostics.ts'\n")]), [])
 })
