@@ -29,7 +29,7 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/session-presentation
  */
 
-import { compactingFromLog, workingFromLog } from '../../compaction-presentation.ts'
+import { compactingFromLog, workingFromLog } from './compaction-presentation.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'

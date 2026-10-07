@@ -34,7 +34,7 @@ import {
   contextRefreshKind,
   foldCompactionEvent,
   settleCompactionSurface,
-} from '../../compaction-presentation.ts'
+} from './compaction-presentation.ts'
 import type { OpeningJournal } from './opening-journal.ts'
 import type { AgentLifecycleStatus } from './notification-runtime.ts'
 

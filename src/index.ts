@@ -98,7 +98,7 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
 export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './app/surface/task-presentation.ts'
 export { foldQueueRows, type QueueFoldResult } from './app/surface/pending-presentation.ts'
 export type { QueueInboxMessage } from './app/submission/pending-input.ts'
-export { compactingFromLog } from './compaction-presentation.ts'
+export { compactingFromLog } from './app/surface/compaction-presentation.ts'
 
 export { runningProfile, resumeCommand } from './client/launcher/profile.ts'
 export { hostRunningProfile, type ProfileContextReadLike } from './app/bootstrap.ts'
@@ -112,8 +112,8 @@ export {
   settleCompactionSurface,
   busyAfterTurnBoundary,
   contextRefreshKind,
-} from './compaction-presentation.ts'
-export type { CompactionFold, CompactionSettleSurface } from './compaction-presentation.ts'
+} from './app/surface/compaction-presentation.ts'
+export type { CompactionFold, CompactionSettleSurface } from './app/surface/compaction-presentation.ts'
 
 
 /**
