@@ -381,14 +381,16 @@ function main() {
       // `commandRejectsImages` signature references `DraftImageStoreLike`,
       // which pulls in the draft vocabulary (and the recalled-ref shape).
       // When a root module named here is retired to its canonical owner, this
-      // list must move WITH it (e.g. TS8-F1: diag -> runtime/process/diagnostics),
-      // never gain a new entry for an internal implementation path.
+      // list must move WITH it — TS8-F1: diag -> runtime/process/diagnostics;
+      // TS8-F2: tui-config -> app/config/schema, dsh-profile ->
+      // app/bootstrap/profile + client/launcher/profile — never gain a new entry
+      // for an internal implementation path.
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/session\/interrupt|app\/submission\/pending-input|app\/surface\/pending-presentation|builtins|client\/media\/image\/types|command-policy|commands|communication-policy|compaction-presentation|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/media\/types|dsh-profile|dsh-profile|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup|subagent-viewer|task-presentation|tui-config)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/session\/interrupt|app\/submission\/pending-input|app\/surface\/pending-presentation|builtins|client\/launcher\/profile|client\/media\/image\/types|command-policy|commands|communication-policy|compaction-presentation|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/media\/types|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup|subagent-viewer|task-presentation)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }

@@ -61,7 +61,7 @@ guarantee.
 
 ## Lifecycle roots are equally total
 
-Startup and exit (`src/index.ts` root catch, `src/exit.ts`) protect every
+Startup and exit (`src/index.ts` root catch, `src/app/bootstrap/exit.ts`) protect every
 step individually (diag, cleanup, hint, exit), so no throw can skip
 teardown or leak a rejection. The Direct owned-session retirement
 (`src/runtime/direct/owned-session-retirement.ts`) is equally total: every

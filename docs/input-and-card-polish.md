@@ -180,7 +180,7 @@ default matches every reference implementation.
 
 **Touch points**
 
-- `src/tui-config.ts` — settings schema + base (`localShellSandbox: 'bypass'`).
+- `src/app/config/schema.ts` — settings schema + base (`localShellSandbox: 'bypass'`).
 - `src/app/submission/user-shell.ts` — reads the preference per run and passes
   it to `HostUserShellPort.execute`.
 - `src/runtime/direct/host-user-shell-direct.ts` — the Direct Host adapter:

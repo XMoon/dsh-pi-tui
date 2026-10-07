@@ -69,6 +69,15 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/runtime/remote/pi-tui-file-reference-contract.ts` | the private `piTuiFileReferences` Typert contract: ONE handwritten invocation descriptor both the Host registration and the Client contribution derive from (TS8-HF1) |
 | `src/runtime/remote/pi-tui-file-reference-host-bridge.ts` | the Remote Host-side bridge binding the private method to the Host-scoped `@` completion authority (TS8-HF1) |
 | `src/app/remote/pi-tui-file-reference-host.ts` | the private `piTuiFileReferences` Cordis Host row: service key, explicit Typert registration and row lifetime (TS8-HF1) |
+| `src/client/launcher/**` | Client-local launcher reads: the `--profile` argv scrape + resume hint (`profile.ts`) and the installed-dsh/bundle version reads (`version.ts`) (TS8-F2) |
+| `src/client/git/**` | Client-local workspace git read: the nearest `.git/HEAD` branch probe (`branch.ts`) (TS8-F2) |
+| `src/app/config/schema.ts` | the TUI plugin Cordis Config schema (the public `Config` re-export) (TS8-F2) |
+| `src/app/bootstrap/profile.ts` | the authoritative running-profile read (Host `profileContext.name` first, argv fallback) (TS8-F2) |
+| `src/app/bootstrap/exit.ts` | the interactive exit controller (latch → cleanup → retirement preparation → hint → `appExit`) (TS8-F2) |
+| `src/app/bootstrap/legacy-settings-migration.ts` | the one-shot legacy settings.yaml migration (bootstrap composition; Direct settings types legal in the zone) (TS8-F2) |
+| `src/app/command/authorization.ts` | the /login authorization bridge: target merge, notice rendering and prompt mapping over the config port's detached events (TS8-F2) |
+| `src/app/surface/version-display.ts` | the welcome-card combined version line, composed from the Client-local launcher reads (TS8-F2) |
+| `src/tui/startup/status.ts` | the pre-mount TTY-only startup status line (pure terminal presentation) (TS8-F2) |
 | remaining historical feature dirs (`…`) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
@@ -86,7 +95,7 @@ Every production module belongs to exactly one owner layer:
 | `src/app/**` | application lifecycle, orchestration, currentness and owner composition |
 | `src/runtime/**` | semantic ports/contracts plus Direct/Remote backend adapters |
 | `src/domain/**` | transport/UI-neutral semantic models, policies, folds and derived state |
-| `src/client/**` | Client-local non-TUI platform capability (local media, clipboard, artifact IO) |
+| `src/client/**` | Client-local non-TUI platform capability (local media, clipboard, artifact IO, launcher profile/version reads, workspace git branch) |
 | `src/tui/**` | terminal rendering, pickers, panels, commands and interaction |
 | `src/extension/**` | the public extension compatibility boundary |
 
@@ -282,7 +291,11 @@ reaching `stable = 6 / legacy = 49` (the TS8-E root scope no longer exists at th
 source root). TS8-F continues from that ledger: F1 retires the four
 process-lifetime roots (`detached.ts`, `diag.ts`, `disposal.ts`,
 `error-boundary.ts`) into `src/runtime/process/**`, reaching
-`stable = 6 / legacy = 45`.
+`stable = 6 / legacy = 45`; F2 then retires the eight
+bootstrap/config/launcher roots (`authorization.ts`,
+`legacy-settings-migration.ts`, `tui-config.ts`, `dsh-profile.ts`,
+`dsh-version.ts`, `startup-status.ts`, `exit.ts`, `git-branch.ts`), reaching
+`stable = 6 / legacy = 37`.
 
 ## Existing directory convergence
 
@@ -675,6 +688,30 @@ imports stay allowed. The generic `runtime-imports-app|tui|client` rules carve
 the subtree out, so the runtime-layer direction has one owning rule id here;
 independent contracts (the bootstrap-composition rule, the Remote lazy-boundary
 rule) can still report the same file under their own id.
+
+TS8-F (PR F2) retires the bootstrap/config/launcher roots (legacy `45 -> 37`, no
+forwarding shim) and removes the last architecture allowlist exception:
+
+```text
+src/authorization.ts             -> split: runtime/config-port.ts (AuthorizationFlowTarget)
+                                    + runtime/direct/config-direct.ts (AuthorizationServiceLike,
+                                      LLM_PI_AI_SCOPE, authorizationTargets)
+                                    + app/command/authorization.ts (login merge/notice/prompt bridge)
+src/legacy-settings-migration.ts -> app/bootstrap/legacy-settings-migration.ts
+src/tui-config.ts                -> app/config/schema.ts
+src/dsh-profile.ts               -> split: client/launcher/profile.ts + app/bootstrap/profile.ts
+src/dsh-version.ts               -> split: client/launcher/version.ts + app/surface/version-display.ts
+src/startup-status.ts            -> tui/startup/status.ts
+src/exit.ts                      -> app/bootstrap/exit.ts
+src/git-branch.ts                -> client/git/branch.ts
+```
+
+The retired root `versionAtLeast` implementation is not moved: the zero-dependency
+`startup.ts` island keeps its own private comparator. `src/builtins.ts` consumes
+the canonical `bundleVersion`/`dshVersion` instead of its private package reader.
+The legacy-settings Direct type import is now legal inside the `app/bootstrap/**`
+composition zone, so the historical gate allowlist is emptied
+(`ARCHITECTURE_ALLOWLIST = []`) rather than re-pointed.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1

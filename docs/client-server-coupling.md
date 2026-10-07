@@ -274,9 +274,10 @@ the `src/app/bootstrap.ts` + `src/app/bootstrap/**` composition zone,
 application owners `app/session`, `app/submission`, `app/command`, `app/surface`,
 `app/plugin-manager`, and all presentation such as `tui-app.ts`, `transcript.ts`, `tui/transcript/tool-presentation.ts`,
 `footer/**`, `components/**`) consumes semantic DTOs / Backend ports / narrow
-injected callbacks; the single proven historical exception is the type-only
-`legacy-settings-migration.ts` import, recorded in the gate allowlist (a value
-import of the same target still fails). `app/surface/**` must not construct
+injected callbacks; the historical type-only `legacy-settings-migration.ts`
+exception is GONE — TS8-F2 moved that file into the `app/bootstrap/**`
+composition zone, where the Direct import is legal, and emptied the gate
+allowlist (`ARCHITECTURE_ALLOWLIST = []`). `app/surface/**` must not construct
 Direct adapters, and experimental Remote composition must not be statically
 reachable from `startup.ts`.
 
