@@ -19,9 +19,18 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { ProcessTerminal, type TerminalProgressState } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
+import type { RunPhase } from '../src/domain/status/types.ts'
 import { createSurfaceRuntime } from '../src/app/surface/runtime.ts'
+import { createInteractionRuntime } from '../src/app/surface/interaction-runtime.ts'
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { TerminalNotificationPresentation } from '../src/app/surface/notification-runtime.ts'
+import type { ApprovalOutcome } from '../src/tui/panels/approval-dialog.ts'
+import type {
+  ApprovalRequestLike,
+  InteractionPort,
+  QuestionInteractionPort,
+  UserQuestionProvider,
+} from '../src/runtime/interaction-port.ts'
 import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -39,6 +48,11 @@ afterEach(() => {
     try { app.dispose() } catch {}
   }
 })
+
+/** A no-op diagnostics channel (the interaction owner only forwards failures). */
+const SILENT_DIAG = {
+  debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {},
+} as const
 
 /** Drain the routing's `queueMicrotask` pending-input refreshes. */
 async function drain(): Promise<void> {
@@ -281,6 +295,25 @@ interface SurfaceHarness extends SurfaceControls {
   readonly progressStates: TerminalProgressState[]
   /** The LIVE mounted app: real Question / Approval flows drive it. */
   readonly app: TuiApp
+  /** The canonical activity phase the surface publishes (NOT the pane state). */
+  readonly phase: () => RunPhase
+  /**
+   * The REAL Agent interaction seam: one approval request delivered through the
+   * registered `InteractionPort.onApprovalRequest` handler (production: the
+   * Direct/Remote backend's approval port).
+   */
+  readonly agentApproval: (request: {
+    toolName: string
+    reason: string
+    signal?: AbortSignal
+  }) => Promise<ApprovalOutcome>
+  /**
+   * The REAL Agent interaction seam for questions: one live request delivered
+   * through the registered `QuestionInteractionPort` provider, which reaches
+   * `TuiApp.askQuestions(..., 'agent')` exactly like the `ask_user_question`
+   * tool call does (production: the Host question channel).
+   */
+  readonly agentQuestion: (signal?: AbortSignal) => Promise<unknown>
   dispose(): void
 }
 
@@ -397,15 +430,65 @@ function mountSurface(
     else process.env.TERM_PROGRAM = previousTermProgram
   }
 
+  // The REAL Agent interaction seam. `createSurfaceRuntime`'s own
+  // `attachInteraction` reads the Task Center's diagnostics channel, which only
+  // exists once that owner is attached, so this suite composes the SAME
+  // production `interaction-runtime` against the mounted app instead: the call
+  // sites that declare `'agent'` (the approval port and the question
+  // controller's `ask`) are then the production ones under test.
+  let approvalListener: ((request: ApprovalRequestLike, next: unknown) => unknown) | undefined
+  let questionProvider: UserQuestionProvider | undefined
+  const questionPort = {
+    onRequest: (next: UserQuestionProvider) => { questionProvider = next; return true },
+    subscribe: () => () => {},
+    snapshot: () => undefined,
+    claimTimedWait: async () => undefined,
+    answerContinued: async () => 'queued',
+  } as unknown as QuestionInteractionPort
+  const interactionPort = {
+    questions: questionPort,
+    onApprovalRequest: (listener: (request: ApprovalRequestLike, next: unknown) => unknown) => {
+      approvalListener = listener
+    },
+    setApprovalPolicy: () => true,
+  } as unknown as InteractionPort
+  const agentInteraction = createInteractionRuntime({
+    mounted: () => surface.app,
+    liveApp: () => surface.app,
+    currentSessionId: () => 'session-terminal-progress-test',
+    schedulePaint: () => {},
+    diag: () => SILENT_DIAG,
+    isCleanedUp: () => false,
+    setQuestionAttention: () => {},
+    onAttentionChanged: () => {},
+  })
+  agentInteraction.attach(interactionPort, { lookupCallArgs: () => undefined, dangerCommand: () => false })
+
   let disposed = false
   return {
     progress,
     progressStates,
     app: surface.app,
+    phase: () => surface.status.snapshot().activity.phase,
+    agentApproval: (request) => {
+      if (approvalListener === undefined) throw new Error('the Agent approval listener was not registered')
+      return approvalListener(request, undefined) as Promise<ApprovalOutcome>
+    },
+    agentQuestion: (signal) => {
+      if (questionProvider === undefined) throw new Error('the Agent question provider was not registered')
+      return questionProvider({
+        sessionId: 'session-terminal-progress-test',
+        callId: 'call-1',
+        timed: false,
+        questions: [{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }],
+        ...(signal === undefined ? {} : { signal }),
+      }, async () => ({ answers: [] }))
+    },
     ...controls,
     dispose: () => {
       if (disposed) return
       disposed = true
+      agentInteraction.dispose()
       surface.dispose()
       restoreTerminal()
     },
@@ -561,14 +644,16 @@ test('notification mode off suppresses the toast but never the pane progress (pl
 
 // ── Tern waiting_input refinement (PR B / fork X059) ────────────────────────
 //
-// The canonical RunPhase is the SECOND input of the pane-progress projection:
-// while the main Agent keeps RUNNING, a real user-blocked wait moves Tern to
-// `paused` (waiting_input) and its settlement moves it back to `indeterminate`.
-// Everything is driven through the REAL Question / Approval owners — the state
-// is never inferred from a tool name, a rendered string or a parked attention
-// count.
+// The canonical RunPhase is the FIRST input of the pane-progress projection, and
+// the PROVENANCE of the presented wait is the second: a `waiting-question` /
+// `waiting-approval` phase pauses the pane ONLY when the wait was created by the
+// Agent interaction port. The positives below enter through that real port
+// (`InteractionPort.onApprovalRequest` / `QuestionInteractionPort` provider), so
+// the assertion covers source -> discriminator -> TuiApp -> TerminalProgressState;
+// the negative proves a Client-local question (the `/login` authorization shape)
+// keeps the pane working even though the canonical phase IS `waiting-question`.
 
-test('a Tern approval pauses the pane and settling it returns to working', async () => {
+test('a Tern AGENT approval pauses the pane and settling it returns to working', async () => {
   const h = mountSurface((controls) => {
     controls.setOwner('main')
     controls.routeStatus('main', 'running')
@@ -579,9 +664,9 @@ test('a Tern approval pauses the pane and settling it returns to working', async
       'the FIRST acquisition asserts the latched running state (no idle -> working flash)')
 
     const controller = new AbortController()
-    const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    const decision = h.agentApproval({ toolName: 'bash', reason: 'probe', signal: controller.signal })
     assert.deepEqual(h.progressStates, ['indeterminate', 'paused'],
-      'the open approval projects the canonical waiting-approval phase immediately (no agent/status needed)')
+      'the Agent approval port projects waiting_input immediately (no agent/status needed)')
     controller.abort()
     await decision
     await drain()
@@ -593,7 +678,7 @@ test('a Tern approval pauses the pane and settling it returns to working', async
   }
 })
 
-test('a Tern question flow pauses the pane and settling it returns to working', async () => {
+test('a Tern AGENT question flow pauses the pane and settling it returns to working', async () => {
   const h = mountSurface((controls) => {
     controls.setOwner('main')
     controls.routeStatus('main', 'running')
@@ -601,12 +686,9 @@ test('a Tern question flow pauses the pane and settling it returns to working', 
   try {
     await drain()
     const controller = new AbortController()
-    const answer = h.app.askQuestions(
-      [{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }],
-      controller.signal,
-    )
+    const answer = h.agentQuestion(controller.signal)
     assert.deepEqual(h.progressStates, ['indeterminate', 'paused'],
-      'the presented question projects the canonical waiting-question phase immediately')
+      'the live Agent question projects waiting_input immediately')
     controller.abort()
     await answer.catch(() => {})
     await drain()
@@ -617,8 +699,39 @@ test('a Tern question flow pauses the pane and settling it returns to working', 
   }
 })
 
+test('a CLIENT-LOCAL question never pauses the Tern pane (the /login authorization shape)', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'])
+
+    // `src/authorization.ts` / the `/login` command ask through the SAME
+    // `TuiApp.askQuestions` entry point, with the fail-closed `'local'` origin:
+    // the canonical phase still becomes `waiting-question` (footer/Focus keep
+    // their authority) but the main Agent is NOT waiting for the user.
+    const controller = new AbortController()
+    const answer = h.app.askQuestions(
+      [{ id: 'auth', question: 'API key', masked: true }],
+      controller.signal,
+    )
+    assert.equal(h.phase(), 'waiting-question', 'the canonical surface phase is the generic wait phase')
+    assert.deepEqual(h.progressStates, ['indeterminate'],
+      'a Client-local question must NEVER project the Agent waiting_input state')
+    controller.abort()
+    await answer.catch(() => {})
+    await drain()
+    assert.equal(h.phase(), 'idle', 'the local flow settled')
+    assert.deepEqual(h.progressStates, ['indeterminate'], 'and the pane never left the working state')
+  } finally {
+    h.dispose()
+  }
+})
+
 test('a plan-review prompt reaches waiting_input through the real Approval port', async () => {
-  // The state comes from `approvals.isActive()`, NOT from matching the
+  // The state comes from the Agent approval port, NOT from matching the
   // `exit_plan_mode` tool name: the SAME flow pauses for a `bash` prompt
   // (previous test) and an unattended attention count does not.
   const h = mountSurface((controls) => {
@@ -628,7 +741,7 @@ test('a plan-review prompt reaches waiting_input through the real Approval port'
   try {
     await drain()
     const controller = new AbortController()
-    const decision = h.app.showApprovalPrompt({
+    const decision = h.agentApproval({
       toolName: 'exit_plan_mode',
       reason: 'review the plan',
       signal: controller.signal,
@@ -671,7 +784,7 @@ test('a Tern owner commit clears a paused state and a late retired owner cannot 
     await drain()
     assert.deepEqual(h.progressStates, ['indeterminate'])
     const controller = new AbortController()
-    const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    const decision = h.agentApproval({ toolName: 'bash', reason: 'probe', signal: controller.signal })
     assert.deepEqual(h.progressStates, ['indeterminate', 'paused'])
 
     h.setOwner('B')
@@ -736,7 +849,7 @@ test('a $EDITOR-suspended Tern app folds a wait opening and resumes directly to 
     // The wait OPENS while the editor owns the terminal: only the desired
     // state is folded, the editor's screen never receives progress bytes.
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
     assert.deepEqual(states, ['clear', 'indeterminate'],
       'a suspended terminal receives no progress bytes for the opening wait')
 
@@ -779,7 +892,7 @@ test('a $EDITOR-suspended Tern app folds a wait settling and an idle round-trip,
     // The wait opens AND settles while the editor owns the terminal, then the
     // Agent goes idle: every change is folded, none is written.
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
     controller.abort()
     await decision
     await drain()
@@ -813,7 +926,7 @@ test('a Tern terminal without the stateful projection fails soft to the working 
     assert.deepEqual(progress, [false, true])
 
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
     assert.deepEqual(progress, [false, true, true],
       'a paused target re-asserts the working indicator (idempotent bytes), never a clear or a raw sequence')
     controller.abort()
@@ -831,7 +944,7 @@ test('a fullscreen swap while paused restores the paused state on the new screen
   try {
     app.setTerminalProgress(true)
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
     assert.deepEqual(states, ['clear', 'indeterminate', 'paused'])
     app.setFullscreen(true)
     app.setFullscreen(false)

@@ -41,18 +41,27 @@ export function ternCwdSequence(cwd: string): string | undefined {
 
 /**
  * The OSC 9;4 state Tern should show for the authoritative main-Agent running
- * truth refined by the canonical RunPhase (plan §6.2). This is a
- * presentation-only mapping: `running` stays PR #230's main-Agent fence, and
- * the phase only WIDENS an already-running state to Tern's `waiting_input`
- * (`paused`). Idle wins over any phase, so a stale phase can never keep a
- * retired owner busy:
+ * truth, the canonical surface `RunPhase` and the PROVENANCE of the wait that
+ * owns the response surface (plan §6.2 + the interaction-origin addendum).
+ * This is a presentation-only mapping — the running flag stays PR #230's
+ * main-Agent fence and no second semantic authority is introduced:
  *
- * - not running          -> `clear`
- * - running + a wait     -> `paused` (Tern `waiting_input`)
- * - running + any other  -> `indeterminate` (Tern `working`)
+ * - not running               -> `clear`
+ * - running + an AGENT-owned wait phase -> `paused` (Tern `waiting_input`)
+ * - running + anything else   -> `indeterminate` (Tern `working`)
+ *
+ * The phase alone is NOT enough: `waiting-question` only means "a question owns
+ * the response surface", which is also true for a Client-local flow (`/login`
+ * authorization, a plugin confirm) while the main Agent keeps running. Only
+ * `agentInputWait` proves the wait belongs to the current main-Agent
+ * interaction, so a local dialog can never claim the pane's `waiting_input`.
  */
-export function ternProgressState(running: boolean, phase: RunPhase): TerminalProgressState {
+export function ternProgressState(
+  running: boolean,
+  phase: RunPhase,
+  agentInputWait: boolean,
+): TerminalProgressState {
   if (!running) return 'clear'
-  if (phase === 'waiting-approval' || phase === 'waiting-question') return 'paused'
-  return 'indeterminate'
+  const waitPhase = phase === 'waiting-approval' || phase === 'waiting-question'
+  return waitPhase && agentInputWait ? 'paused' : 'indeterminate'
 }
