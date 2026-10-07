@@ -4718,7 +4718,7 @@ end of this file).
   write itself stays `PendingInputReader(childId)` +
   `SessionWriter.updateQueue(childId, occurrence, {kind:'steer'})`.
 - **Durable images read through the OWNING presentation's retained Session**
-  (`src/image/loader.ts` + `src/tui/components/media/image-thumbnail.ts` +
+  (`src/client/media/image/loader.ts` + `src/tui/components/media/image-thumbnail.ts` +
   `src/tui-app.ts` + `src/app/bootstrap.ts`): the read AUTHORITY belongs to the
   attachment ref's owning presentation, not to whichever Session is on screen when
   the read runs. `TuiApp` stamps each thumbnail with the presentation scope sampled
@@ -4743,6 +4743,27 @@ end of this file).
   and re-checks the Connection generation + binding identity before the bytes are
   committed. There is no `retain()` on this path and no Host attachment access on
   the Remote branch; Direct keeps `ctx.attachments.readImage`.
+
+- **TS8-C media/platform ownership split** (`domain/media/**` +
+  `client/media/**` + `client/clipboard/**` + `client/url/**` +
+  `app/submission/direct-*.ts` + `runtime/prepared-prompt.ts`): the historical
+  `src/image/**` and `src/attachment/**` mixed owners are retired WITHOUT a
+  forwarding tree. Neutral media vocabulary, failures and byte formatting live
+  in `domain/media/**`; Client-local image/file draft, intake, cache, the
+  durable-byte loader, local file SOURCE streaming (64 KiB, pre/post
+  fingerprint, cancellation, close on all exits), clipboard read/copy and URL
+  opening live under `client/**`; the Direct Host `saveImages` /
+  `saveFileStream` / model preflight and the Direct `UserMessage` preparation
+  live in `app/submission/direct-*.ts`; and the transport-neutral `PreparedPrompt`
+  contract lives in `runtime/prepared-prompt.ts` — the Remote serializer imports
+  it and no longer imports any Client module. Locality correction (D12): the
+  composition gates BOTH Client `imageLimits()` seats (the `/image` command runner
+  and the Ctrl+V paste intake) AND the `attachments`/`llm` injections on
+  `selectedRuntime.kind === 'direct'`. Remote Client intake therefore receives
+  `undefined` and uses only its own safety/resident caps; the exact Session's
+  official `imageLimits` projection is still re-applied by the Remote serializer
+  before `session/prompt`, which remains the final admission authority. Remote
+  generic-file submission remains unsupported before dispatch.
 
 ### Qualification
 

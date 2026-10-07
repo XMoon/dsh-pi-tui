@@ -944,6 +944,15 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     ['client/file-completion/local-discovery.ts', '../../runtime/remote/session-reader-remote.ts', ['client-imports-remote-composition']],
     ['client/file-completion/local-discovery.ts', '../../app/remote/runtime.ts', ['client-imports-remote-composition']],
     ['client/file-completion/local-discovery.ts', '../../runtime/direct/file-completion/workspace-discovery.ts', ['direct-import-outside-composition']],
+    // TS8-C: the same four directions on the canonical media/platform owners.
+    // The neutral domain may not depend on the Client capability, the Host
+    // semantic layer may not depend on it, and the Client capability may not
+    // reach Direct wiring or the Remote composition.
+    ['domain/media/foo.ts', '../../client/media/image/types.ts', ['domain-imports-client']],
+    ['runtime/remote/foo.ts', '../../client/media/image/loader.ts', ['runtime-imports-client']],
+    ['client/media/image/loader.ts', '../../../runtime/direct/session-archive-direct.ts', ['direct-import-outside-composition']],
+    ['client/media/image/loader.ts', '../../../runtime/remote/session-reader-remote.ts', ['client-imports-remote-composition']],
+    ['client/clipboard/read.ts', '../../app/remote/runtime.ts', ['client-imports-remote-composition']],
     ['app/plugin-manager/controller.ts', '../../runtime/direct/plugin-manager-direct.ts', ['direct-import-outside-composition']],
     ['app/session/foo.ts', '../bootstrap/lifecycle.ts', ['owner-imports-bootstrap']],
     ['app/surface/foo.ts', '../bootstrap/event-wiring.ts', ['owner-imports-bootstrap']],
@@ -976,6 +985,17 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     ['tui/file-completion/path-argument.ts', '../../client/file-completion/local-discovery.ts'],
     ['tui/file-completion/local-path-completion.ts', '../../domain/file-completion/discovery-policy.ts'],
     ['runtime/direct/file-completion/workspace-discovery.ts', '../../../domain/file-completion/ranking.ts'],
+    // TS8-C: the canonical media/platform directions — the application Direct
+    // preparation consumes the Client draft capability, the application platform
+    // owner composes the Client clipboard, the TUI renders through the Client
+    // durable-byte loader, and the Client/neutral runtime layers consume the
+    // neutral domain vocabulary.
+    ['app/submission/direct-message-preparation.ts', '../../client/media/attachment/placeholder.ts'],
+    ['app/surface/client-actions.ts', '../../client/clipboard/read.ts'],
+    ['tui/components/media/image-thumbnail.ts', '../../../client/media/image/loader.ts'],
+    ['client/media/image/intake.ts', '../../../domain/media/types.ts'],
+    ['runtime/prepared-prompt.ts', '../domain/media/types.ts'],
+    ['runtime/remote/prompt-serializer-remote.ts', '../prepared-prompt.ts'],
   ]
   for (const [file, specifier] of allowed) {
     // Each positive control is anchored by a NEGATIVE case above, so "allowed"
@@ -1570,18 +1590,19 @@ test('the source-root baseline accepts the exact captured tree and fails closed 
   assert.throws(() => readSourceRootBaseline(badSchema), /unsupported source-root baseline schema/)
 })
 
-test('a retired historical feature directory must not reappear (TS8-A)', () => {
+test('a retired historical feature directory must not reappear (TS8-A/TS8-C)', () => {
   // The directory-level companion of the root ledger: TS8-A retires the mixed
-  // `src/file-completion/**` directory, so the real tree must no longer have it
-  // and every retired entry must fail closed when it is recreated.
-  assert.ok(RETIRED_SOURCE_DIRECTORIES.includes('file-completion'),
-    'the retired ledger must track the TS8-A directory')
+  // `src/file-completion/**` directory and TS8-C retires `src/image/**` +
+  // `src/attachment/**`, so the real tree must no longer have them and every
+  // retired entry must fail closed when it is recreated.
   const directories = listSourceRootDirectories()
   assert.deepEqual(findRetiredSourceDirectoryViolations(directories), [],
     'the real production tree must not contain a retired feature directory')
-  assert.equal(directories.includes('file-completion'), false,
-    'src/file-completion/ must be gone after TS8-A')
-  for (const name of RETIRED_SOURCE_DIRECTORIES) {
+  for (const name of ['file-completion', 'image', 'attachment']) {
+    assert.ok(RETIRED_SOURCE_DIRECTORIES.includes(name),
+      `the retired ledger must track the ${name} directory`)
+    assert.equal(directories.includes(name), false,
+      `src/${name}/ must be gone after its TS8 stage`)
     assert.match(
       findRetiredSourceDirectoryViolations([...directories, name]).join('\n'),
       new RegExp(`src/${name}/ is a retired historical feature directory`),

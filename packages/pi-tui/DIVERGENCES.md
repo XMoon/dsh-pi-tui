@@ -2081,7 +2081,7 @@ Fullscreen transcript lines reserve leading columns for a bullet/emoji. Copying 
 - Audit note: No host subclass can recover startColumn from final text.
 
 **Host**
-- src/clipboard.ts callback and fullscreen drag-copy UX
+- src/client/clipboard/copy.ts callback and fullscreen drag-copy UX
 - Audit note: The host callback shape receives only final text.
 
 **Public / extension**
@@ -2235,7 +2235,7 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 - Audit note: No local replacement branch remains.
 
 **Host**
-- src/clipboard.ts callback supplies host clipboard policy and Copied!/Copy failed feedback.
+- src/client/clipboard/copy.ts callback supplies host clipboard policy and Copied!/Copy failed feedback.
 - Audit note: The host remains a consumer of the upstream seam, not of a local divergence.
 
 **Public / extension**
@@ -2270,7 +2270,7 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 
 #### Replacement mapping
 
-- Former local clipboard patch -> upstream copySelection/copyOnSelect/active-selection API; host policy remains src/clipboard.ts.
+- Former local clipboard patch -> upstream copySelection/copyOnSelect/active-selection API; host policy remains src/client/clipboard/copy.ts.
 
 #### Retirement evidence
 
