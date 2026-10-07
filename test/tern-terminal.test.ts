@@ -58,21 +58,30 @@ test('an unusable cwd yields no sequence (no Client-cwd / root substitute)', () 
   assert.equal(ternCwdSequence('/bad\0path'), undefined)
 })
 
-test('the Tern progress state refines running with the canonical phase (plan §6.2)', () => {
-  // Idle wins over EVERY phase: a stale phase can never keep a retired owner
-  // busy on the pane.
-  for (const phase of ['idle', 'working', 'waiting-approval', 'waiting-question', 'compacting', 'applying-compaction'] as const) {
-    assert.equal(ternProgressState(false, phase), 'clear', `idle + ${phase} is clear`)
+test('the Tern progress state needs BOTH a wait phase and an Agent-owned wait (plan §6.2)', () => {
+  const waitPhases = ['waiting-approval', 'waiting-question'] as const
+  const busyPhases = ['idle', 'working', 'compacting', 'applying-compaction'] as const
+  // Idle wins over EVERY (phase, origin) pair: a stale phase can never keep a
+  // retired owner busy on the pane.
+  for (const phase of [...waitPhases, ...busyPhases] as const) {
+    for (const agentInputWait of [true, false]) {
+      assert.equal(ternProgressState(false, phase, agentInputWait), 'clear',
+        `idle + ${phase} (agent=${agentInputWait}) is clear`)
+    }
   }
-  // Only the two REAL user-blocked phases pause; every other busy phase keeps
-  // Tern's working state.
-  assert.equal(ternProgressState(true, 'waiting-approval'), 'paused')
-  assert.equal(ternProgressState(true, 'waiting-question'), 'paused')
-  assert.equal(ternProgressState(true, 'working'), 'indeterminate')
-  assert.equal(ternProgressState(true, 'compacting'), 'indeterminate')
-  assert.equal(ternProgressState(true, 'applying-compaction'), 'indeterminate')
-  assert.equal(ternProgressState(true, 'idle'), 'indeterminate',
-    'a running main Agent with no active work still shows working')
+  // A wait phase pauses ONLY when the wait was created by the Agent interaction
+  // port: `waiting-question` alone also covers a Client-local question (the
+  // `/login` authorization prompt), which must keep the pane working.
+  for (const phase of waitPhases) {
+    assert.equal(ternProgressState(true, phase, true), 'paused', `an Agent ${phase} pauses`)
+    assert.equal(ternProgressState(true, phase, false), 'indeterminate',
+      `a Client-local ${phase} is NOT Agent waiting_input`)
+  }
+  // Every other busy phase keeps Tern's working state, whatever the origin flag.
+  for (const phase of busyPhases) {
+    assert.equal(ternProgressState(true, phase, true), 'indeterminate')
+    assert.equal(ternProgressState(true, phase, false), 'indeterminate')
+  }
 })
 
 // ── TuiApp cwd presentation lifecycle ──────────────────────────────────────

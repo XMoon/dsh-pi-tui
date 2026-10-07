@@ -110,7 +110,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
           signal: req.signal,
           ...args === undefined ? {} : { arguments: args },
           ...args !== undefined && req.toolName === 'bash' && deps.dangerCommand(args) ? { danger: true } : {},
-        })
+        }, 'agent')
       })
       // The interactive question answerer: ask_user_question tool calls
       // become dialog flows; the tool receives the structured answers. M3-3B
@@ -128,7 +128,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       })
       const controller = new QuestionSurfaceController({
         port: port.questions,
-        ask: (questions, signal, status) => options.mounted().askQuestions(questions, signal, status),
+        ask: (questions, signal, status) => options.mounted().askQuestions(questions, signal, status, 'agent'),
         notify: (message, level) => { options.mounted().notify(message, level) },
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
