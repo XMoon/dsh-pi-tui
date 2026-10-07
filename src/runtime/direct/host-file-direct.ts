@@ -27,7 +27,8 @@
  */
 
 import { statSync } from 'node:fs'
-import { resolveMentionCandidate } from '../../mentions.ts'
+import { homedir } from 'node:os'
+import { isAbsolute, join, win32 } from 'node:path'
 import { discoverForQuery, type LocalDiscoveryDriver } from '../../domain/file-completion/discovery-policy.ts'
 import { reattachDisplayBase, resolvePathQuery } from '../../domain/file-completion/query.ts'
 import { rankPathCandidates } from '../../domain/file-completion/ranking.ts'
@@ -208,7 +209,7 @@ export class DirectHostFilePort implements HostFilePort {
     if (cwd === undefined) {
       return { kind: 'unavailable', reason: 'the session scope has no resolvable Host workspace' }
     }
-    const candidate = resolveMentionCandidate(path, cwd)
+    const candidate = resolveReferenceCandidate(path, cwd)
     return exists(candidate)
       ? { kind: 'found', path: candidate }
       : { kind: 'missing' }
@@ -224,6 +225,29 @@ export class DirectHostFilePort implements HostFilePort {
     // both backends send the SAME bytes for the same input.
     return text
   }
+}
+
+/**
+ * Resolve ONE raw Host reference path to the candidate absolute path: `~`
+ * expands through the Host homedir, an absolute path stays as-is, a
+ * relative path resolves against the Host workspace cwd. PURE — the Direct
+ * diagnostic `resolveReference` seam's own path resolution.
+ */
+function resolveReferenceCandidate(raw: string, hostCwd: string): string {
+  if (raw === '~' || raw.startsWith('~/') || raw.startsWith('~\\')) {
+    return raw === '~'
+      ? homedir()
+      : join(homedir(), raw.slice(2).replace(/\\/g, '/'))
+  }
+  // `path.isAbsolute` follows the host OS. The reference grammar must also
+  // preserve Windows drive/UNC references when a client process is POSIX
+  // (and must not mistake a POSIX `/tmp` path for a Windows path on Windows).
+  if (isAbsolute(raw) || (!raw.startsWith('/') && win32.isAbsolute(raw))) return raw
+  // A relative Windows-looking token is still relative to the Host scope;
+  // normalize its separators only when the scope itself is POSIX.
+  return raw.includes('\\') && process.platform !== 'win32'
+    ? join(hostCwd, raw.replace(/\\/g, '/'))
+    : join(hostCwd, raw)
 }
 
 /** The synchronous existence probe (the Direct machine IS the Host

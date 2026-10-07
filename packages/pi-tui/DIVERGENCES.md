@@ -2312,7 +2312,7 @@ fd output can identify a directory without a trailing slash, including through s
 - Audit note: The current host passes fdPath=null to this inner provider for deterministic fallback, so no claim is made that the host's @-mention HostFilePort path exercises fd output.
 
 **Host**
-- src/mentions.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider
+- src/tui/interaction/autocomplete/provider.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider
 - public AutocompleteProvider consumers may provide an fd-backed provider
 - Audit note: The current @ flow uses HostFilePort/discoverMention and the /image path uses completeImageArgument/LocalFileSource; neither is counted as a direct fd consumer of X027.
 

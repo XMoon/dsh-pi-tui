@@ -130,7 +130,8 @@ export function extractAtPrefix(text: string): string | null {
   // ...or a CJK-glued `@` INSIDE the token (the character right before the
   // `@` is a CJK code point, e.g. `\u770b\u770b@foo`): the LAST such `@`
   // is the mention start (a CJK sentence glues the mention to the
-  // previous character — the same rule findFileMentions applies).
+  // previous character — the same CJK-glued boundary rule the `@`-mention
+  // completion trigger applies).
   for (let index = token.length - 1; index >= 1; index -= 1) {
     if (token[index] === '@' && isCjkChar(token[index - 1] ?? '')) return token.slice(index)
   }

@@ -14,13 +14,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { DirectWorkspaceDiscoveryDriver } from '../src/runtime/direct/file-completion/workspace-discovery.ts'
 import { ClientLocalDiscoveryDriver } from '../src/client/file-completion/local-discovery.ts'
 import type { LocalDirectoryEntry } from '../src/domain/file-completion/discovery-policy.ts'
 import type { PathCandidate } from '../src/domain/file-completion/types.ts'
-import { MentionProvider, type MentionScope } from '../src/mentions.ts'
+import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
+import type { HostFileScope } from '../src/runtime/host-file-port.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** A throwaway workspace with known files. */
@@ -201,6 +203,10 @@ test('resolveReference probes existence with the mention resolution rules', asyn
   const scope = { kind: 'workspace', cwd: root } as const
   assert.deepEqual(await port.resolveReference(scope, 'file-one.txt'), { kind: 'found', path: join(root, 'file-one.txt') })
   assert.deepEqual(await port.resolveReference(scope, './file-one.txt'), { kind: 'found', path: join(root, 'file-one.txt') })
+  // Bare `~` resolves to the Host home directory itself, not `<cwd>/~`
+  // (the Direct diagnostic path resolution's home expansion, proven through
+  // the public port behavior).
+  assert.deepEqual(await port.resolveReference(scope, '~'), { kind: 'found', path: homedir() })
   assert.deepEqual(await port.resolveReference(scope, 'missing.txt'), { kind: 'missing' })
   // ~ expands through the homedir (a nonexistent home path stays missing).
   assert.deepEqual(await port.resolveReference(scope, '~/definitely-not-a-dir-xyz'), { kind: 'missing' })
@@ -457,7 +463,7 @@ test('the provider-level Session @ path never falls back to the Client filesyste
   }
   try {
     const live = { session: { header: { cwd: root } } }
-    const sessionScope = (): MentionScope => ({ kind: 'session', sessionId: 'session-live' })
+    const sessionScope = (): HostFileScope => ({ kind: 'session', sessionId: 'session-live' })
     // The `/image` command makes the Client path-argument chain reachable on the
     // SAME provider instance; `localFdPath = null` pins the Client finder to the
     // bounded fallback so every local row would come from `root` itself.

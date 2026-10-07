@@ -96,7 +96,8 @@ export interface HostFilePort {
    * `src/fo` for `@src/fo` and `my file` for `@"my file` — exactly what
    * the official `FileReferenceService.list(agent, query, signal)` and
    * the generated `fileReferences/list` Remote accept. The editor
-   * grammar's `@`/quote stripping is CLIENT policy (mentions.ts), never
+   * grammar's `@`/quote stripping is CLIENT policy
+   * (`tui/interaction/autocomplete/provider.ts`), never
    * an adapter's. Returns the candidates the current Host filesystem
    * discovery offers — ALREADY filtered, ranked and bounded BY THE HOST
    * AUTHORITY for this query, in the Host's order (the client presents
