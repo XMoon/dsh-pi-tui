@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEnvironment, type RunCommand } from '../src/image/clipboard.ts'
+import { clipboardBackendOf, commandOnPath, readClipboardImage, type ClipboardEnvironment, type RunCommand } from '../src/client/clipboard/read.ts'
 
 /** A tiny valid PNG header (1×1). */
 function pngBytes(): Buffer {

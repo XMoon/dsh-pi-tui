@@ -39,7 +39,7 @@ import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, t
 import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
-import { copyToClipboard } from '../../clipboard.ts'
+import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../display-preset.ts'
 import { draftHasImages } from '../../client/media/draft-attachments.ts'
 import { prepareUserMessage } from '../submission/direct-message-preparation.ts'

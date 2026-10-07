@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process'
  * would hand attacker-controlled strings to a shell helper. Fire-and-
  * forget: opener failures are best-effort (a link click must never
  * disturb the TUI).
+ * @module @xmoon76/dsh-pi-tui/client/url/open
  */
 export function openExternalUrl(rawUrl: string): void {
   let url: URL

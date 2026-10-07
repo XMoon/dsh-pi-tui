@@ -9,8 +9,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from '../src/clipboard.ts'
-import { createClipboardRunner } from '../src/image/clipboard.ts'
+import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from '../src/client/clipboard/copy.ts'
+import { createClipboardRunner } from '../src/client/clipboard/read.ts'
 
 /** A recording executor: captures every invocation, answers per script. */
 function scriptedRun(script: Record<string, number>): { run: CopyExecutor; calls: Array<{ command: string; args: readonly string[]; input: string }> } {

@@ -1,5 +1,5 @@
 /**
- * Clipboard image reading (plan M3, §9).
+ * Client-local clipboard READ capability (plan M3, §9; TS8-C).
  *
  * The paste action probes the platform clipboard ONCE, then: an image
  * becomes a draft (placeholder into the editor); plain text keeps the
@@ -8,10 +8,14 @@
  * follows the plan: Wayland `wl-paste`, X11 `xclip`, WSL/macOS/Windows
  * PowerShell+AppKit PNG round-trips, graceful unsupported elsewhere.
  *
+ * This is the ONE clipboard-read owner for BOTH text and image payloads: it
+ * is NOT image-specific, so it must not live under `client/media/image/**`
+ * (the same platform detection serves the text fallback).
+ *
  * Every platform runs through an injected `RunCommand`, so CI exercises
  * the decision trees with mocks (plan §26) and real machines verify one
  * native path.
- * @module @xmoon76/dsh-pi-tui/image/clipboard
+ * @module @xmoon76/dsh-pi-tui/client/clipboard/read
  */
 
 import { tmpdir } from 'node:os'
@@ -19,9 +23,9 @@ import { join } from 'node:path'
 import { existsSync, rmSync, readFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { ClipboardImageError } from '../domain/media/errors.ts'
-import type { ImageMediaType } from '../domain/media/types.ts'
-import { parseImageMetadata } from '../client/media/image/intake.ts'
+import { ClipboardImageError } from '../../domain/media/errors.ts'
+import type { ImageMediaType } from '../../domain/media/types.ts'
+import { parseImageMetadata } from '../media/image/intake.ts'
 
 /** One clipboard probe outcome. */
 export type ClipboardReadResult =
