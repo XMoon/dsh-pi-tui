@@ -121,7 +121,7 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
         localShellSandbox: 'bypass',
         homeEndKeys: 'viewport',
         wheelScrollLines: '1',
-        notificationMode: 'unfocused', notificationMethod: 'auto',
+        notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
       }),
       replace: (next: { footer: string; footerLayout?: unknown; footerFallbackMode?: string; footerCustomItems?: unknown }) => {
         doc.footer = next.footer
@@ -146,7 +146,7 @@ test('footer, focus, and fullscreen writes share one FIFO at the live commit poi
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
+    notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
   }
   const pending: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
   const settings: TuiSettingsLike = {
@@ -191,7 +191,7 @@ test('a failed whole-document settings write does not block later queued writes'
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
+    notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
   }
   let calls = 0
   let rejectFirst: (error: Error) => void = () => {}
@@ -291,7 +291,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -385,7 +385,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
+    notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
     footerCustomItems: userRaw,
   }
   const pendingWrites: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
@@ -473,7 +473,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -634,7 +634,7 @@ test('/footer Esc cancels without writing', async () => {
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -718,7 +718,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -802,7 +802,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -870,7 +870,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -919,7 +919,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -965,7 +965,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -1015,7 +1015,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1099,7 +1099,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1160,7 +1160,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     get: () => ({
       theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'on',
       busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport',
-      wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto', footerCustomItems: [known],
+      wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', footerCustomItems: [known],
     }),
     replace: () => new Promise<void>((_resolve, reject) => { rejectReplace = reject }),
   }
@@ -1221,7 +1221,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -1332,7 +1332,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       setModelSelectionPending: () => {},
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
-      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1412,7 +1412,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
     ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
     const doc = { footer: 'default' as string, footerLayout: undefined as unknown, footerCustomItems: undefined as unknown }
     const failingSettings: TuiSettingsLike = {
-      get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
+      get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
       replace: () => { throw new Error('write failed') },
     }
     const applied: Array<{ footer: string }> = []
@@ -1460,7 +1460,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       setModelSelectionPending: () => {},
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
-      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1574,7 +1574,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       setModelSelectionPending: () => {},
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
-      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

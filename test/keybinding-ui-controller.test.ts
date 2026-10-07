@@ -326,7 +326,7 @@ test('shared settings mutations serialize and preserve both concurrent edits', a
     homeEndKeys: 'off',
     wheelScrollLines: '1',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
   }
   let gets = 0
   let replaces = 0
@@ -389,7 +389,7 @@ test('the shared queue also preserves an unrelated whole-document settings write
     homeEndKeys: 'off',
     wheelScrollLines: '1',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
   }
   let replaces = 0
   const firstReplaceStarted = deferred<void>()

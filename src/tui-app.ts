@@ -1581,6 +1581,13 @@ export interface TuiAppOptions {
    */
   initialTerminalProgress?: boolean
   /**
+   * The persisted "Terminal progress" presentation preference already known
+   * before the mount (default true). While false the effective state is still
+   * folded but the physical OSC 9;4 projection is suppressed, and the FIRST
+   * acquisition asserts clear instead of the current effective state.
+   */
+  terminalProgressEnabled?: boolean
+  /**
    * The structural icon palette (emoji | symbols | minimal), read once at
    * startup from the persisted settings. Runtime switches go through
    * {@link TuiApp.setIconStyle} — renderers NEVER deep-read a settings
@@ -2277,6 +2284,16 @@ export class TuiApp {
    * changed.
    */
   private terminalProgressState: TerminalProgressState = 'clear'
+  /**
+   * The persisted "Terminal progress" presentation preference (default true).
+   * A presentation GATE over the effective state, never a second Agent-state
+   * authority: while false the desired logical state keeps folding from the
+   * same authoritative inputs but no active/paused bytes are written, so
+   * re-enabling can immediately reproject the current truth. Disabling asserts
+   * one clear (through the same low-level path, which also retires any
+   * heartbeat) and every acquisition while disabled asserts clear.
+   */
+  private terminalProgressEnabled = true
   /**
    * Whether the shared ProcessTerminal is currently OWNED for presentation by
    * this TuiApp (started, not suspended/stopped). A suspended screen must
@@ -3239,6 +3256,7 @@ export class TuiApp {
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.ternTerminal = options.ternTerminal === true
     this.terminalProgressActive = options.initialTerminalProgress === true
+    this.terminalProgressEnabled = options.terminalProgressEnabled !== false
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
@@ -3956,13 +3974,37 @@ export class TuiApp {
   }
 
   /**
+   * Apply the persisted "Terminal progress" presentation preference live.
+   * Same value is a no-op. Turning it OFF while the TUI owns the terminal
+   * asserts ONE clear (which also retires any heartbeat through the same
+   * low-level state path) but NEVER rewrites the desired logical state, so
+   * re-enabling can reproject the current truth without a new Agent status.
+   * Turning it ON recomputes the effective state from the authoritative
+   * inputs and writes it immediately (running -> working, a proven Agent
+   * wait -> paused, idle -> clear). While the TUI does not own the terminal
+   * only the preference is folded — the next acquisition projects it.
+   */
+  setTerminalProgressEnabled(enabled: boolean): void {
+    if (this.terminalProgressEnabled === enabled) return
+    this.terminalProgressEnabled = enabled
+    if (!this.terminalPresentationActive) return
+    if (!enabled) {
+      this.writeTerminalProgress('clear')
+      return
+    }
+    this.terminalProgressState = this.effectiveTerminalProgressState()
+    this.writeTerminalProgress(this.terminalProgressState)
+  }
+
+  /**
    * Reconcile the EFFECTIVE terminal progress state from the TWO independent
    * facts that can change it (plan §9.1): the authoritative main-Agent running
    * truth and the canonical activity phase. Called from the running-truth
    * setter and from every activity projection (a question/approval opening or
    * settling changes the phase while the running truth is unchanged). The
    * effective state is deduped, so a non-Tern surface never writes here and a
-   * repeated phase commit is inert.
+   * repeated phase commit is inert. The desired state keeps folding while the
+   * presentation preference is off — only the physical write is gated.
    */
   private reconcileTerminalProgress(
     phase: RunPhase = this.statusStore.snapshot().activity.phase,
@@ -3971,6 +4013,7 @@ export class TuiApp {
     if (this.terminalProgressState === state) return
     this.terminalProgressState = state
     if (!this.terminalPresentationActive) return
+    if (!this.terminalProgressEnabled) return
     this.writeTerminalProgress(state)
   }
 
@@ -4013,11 +4056,16 @@ export class TuiApp {
    * ownership window and can be changed while this TuiApp does not own the
    * terminal: Tern marks a pane "running" while a foreground command runs (and
    * `dsh` itself is such a command), and during an `$EDITOR` round-trip the
-   * editor — or a crashed process, before this one — can leave `OSC 9;4;3`
+   * editor — or a crashed process, before this one — can leave `OSC 9;4;1;0`
    * behind. Re-asserting on each acquisition makes the indicator authoritative
    * for the whole ownership window, exactly as `CSI ? 1004` focus reporting is
    * asserted at mount and released on every exit; the writes stay on ownership
    * boundaries only, never on the status/repaint hot path.
+   *
+   * While the terminalProgress preference is OFF the desired state is still
+   * folded, but the acquisition asserts CLEAR instead: "off" must mean no dsh
+   * progress indicator is left active, not merely that dsh stopped updating
+   * one (a prior owner may have painted the pane).
    */
   private enterTerminalPresentation(): void {
     this.terminalPresentationActive = true
@@ -4028,7 +4076,7 @@ export class TuiApp {
     // one left behind by another terminal owner — never needs a corrective
     // second write.
     this.terminalProgressState = this.effectiveTerminalProgressState()
-    this.writeTerminalProgress(this.terminalProgressState)
+    this.writeTerminalProgress(this.terminalProgressEnabled ? this.terminalProgressState : 'clear')
   }
 
   /**

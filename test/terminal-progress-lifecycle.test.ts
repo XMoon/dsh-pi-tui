@@ -130,7 +130,7 @@ test('every terminal acquisition asserts the desired progress state', () => {
     // The pane's progress indicator is terminal-side state that outlives an
     // ownership window: Tern paints a pane "running" while a foreground command
     // runs (and `dsh` itself is that command), a killed process can leave
-    // OSC 9;4;3 behind, and an $EDITOR round-trip hands the PTY to another
+    // OSC 9;4;1;0 behind, and an $EDITOR round-trip hands the PTY to another
     // program. Each acquisition therefore re-asserts the CURRENT desired state.
     assert.deepEqual(progress, [false], 'the mount asserts the idle state (clearing any stale pane busy)')
     app.stop()
@@ -328,6 +328,9 @@ interface SurfaceHarness extends SurfaceControls {
   readonly notifyQuestionChange: () => void
   /** Reopen a parked CONTINUED (late-answer) question from the Task Center. */
   readonly reopenContinued: (callId: string) => boolean
+  /** Apply the native-terminal-progress preference through the REAL surface
+   *  seam (`SurfaceRuntime.setTerminalProgressMode`). */
+  readonly setTerminalProgressMode: (mode: string) => void
   dispose(): void
 }
 
@@ -342,6 +345,9 @@ interface MountSurfaceOptions {
   readonly presentation?: TerminalNotificationPresentation
   readonly notificationMode?: string
   readonly notificationMethod?: string
+  /** The persisted native-terminal-progress preference at mount ('on'
+   *  default | 'off'). */
+  readonly terminalProgress?: string
   /**
    * Mount the surface as a Tern terminal (`TERM_PROGRAM=tern` around the app
    * construction). The environment is restored immediately afterwards: the
@@ -409,6 +415,7 @@ function mountSurface(
     notificationPresentation: options.presentation ?? nullPresentation,
     notificationMode: options.notificationMode,
     notificationMethod: options.notificationMethod,
+    terminalProgress: options.terminalProgress,
     createPluginManagerPanel,
   })
   surface.attachEventRouting(routingSource)
@@ -509,6 +516,7 @@ function mountSurface(
     notifyQuestionChange: () => { questionSubscriber?.() },
     reopenContinued: (callId) =>
       agentInteraction.controller()?.reopen('session-terminal-progress-test', callId) ?? false,
+    setTerminalProgressMode: (mode) => surface.setTerminalProgressMode(mode),
     ...controls,
     dispose: () => {
       if (disposed) return
@@ -614,7 +622,7 @@ test('disposal clears the REAL OSC 9;4 indicator and stops its keepalive (plan �
       process.stdout.write = previousWrite
     }
   }
-  const activeWrites = (): number => writes.filter(write => write === '\x1b]9;4;3\x07').length
+  const activeWrites = (): number => writes.filter(write => write === '\x1b]9;4;1;0\x07').length
   const clearWrites = (): number => writes.filter(write => write === '\x1b]9;4;0\x07').length
   // X059: only a terminal known to expire OSC 9;4 state owns the 1 s heartbeat,
   // and the policy is snapshotted when `ProcessTerminal` is constructed inside
@@ -1170,5 +1178,132 @@ test('a fullscreen swap while paused restores the paused state on the new screen
     assert.deepEqual(states, ['clear', 'indeterminate', 'paused', 'paused', 'paused', 'indeterminate'])
   } finally {
     app.dispose()
+  }
+})
+
+// ── Terminal progress presentation preference (plan §12.8/§12.9) ─────────────
+//
+// The "Terminal progress" setting is a presentation GATE over the SAME
+// authoritative fold (main-running truth + canonical RunPhase + agentInputWait),
+// never a second Agent-state authority. The tests below drive the REAL surface
+// seam (`SurfaceRuntime.setTerminalProgressMode`) and the real Agent approval
+// port, so disabling/re-enabling is proven against the production lifecycle.
+
+test('turning terminal progress off clears immediately and suppresses later active/paused writes', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'], 'the enabled running state projects working')
+
+    h.setTerminalProgressMode('off')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'clear'],
+      'disabling asserts ONE clear through the same low-level path')
+
+    // Semantic churn while off: an Agent-blocking wait opens and settles, then
+    // the Agent goes idle. Nothing physical may be written.
+    const controller = new AbortController()
+    const decision = h.agentApproval({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    assert.deepEqual(h.progressStates, ['indeterminate', 'clear'],
+      'opening an Agent-blocking wait writes no paused state while off')
+    controller.abort()
+    await decision
+    await drain()
+    h.routeStatus('main', 'idle')
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'clear'],
+      'settling the wait and going idle write no active/paused bytes while off')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('turning terminal progress back on while running reprojects working immediately', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    h.setTerminalProgressMode('off')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'clear'])
+
+    // NO new agent/status: re-enabling reprojects the still-running truth.
+    h.setTerminalProgressMode('on')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'clear', 'indeterminate'],
+      're-enabling writes the CURRENT effective state without a new Agent status')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('off/on while the Agent is blocked on a wait clears and then restores paused', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    const controller = new AbortController()
+    const decision = h.agentApproval({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'])
+
+    h.setTerminalProgressMode('off')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'clear'])
+    h.setTerminalProgressMode('on')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'clear', 'paused'],
+      'the Agent-blocking wait truth survives the toggle and reprojects waiting_input')
+
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'clear', 'paused', 'indeterminate'],
+      'settling returns to working because the Agent is still running')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a surface mounted with terminal progress off asserts clear and suppresses every acquisition', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    // The pre-mount running latch must NOT be projected while off.
+    controls.routeStatus('main', 'running')
+  }, { tern: true, terminalProgress: 'off' })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['clear'],
+      'the mount asserts clear instead of the latched running state')
+    h.app.stop()
+    h.app.start()
+    assert.deepEqual(h.progressStates, ['clear', 'clear'],
+      'a reacquisition while off asserts clear again and no active/paused bytes')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a disabled surface still folds the truth and projects the current state only on re-enable', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true, terminalProgress: 'off' })
+  try {
+    await drain()
+    // running -> waiting_input -> running while off: no physical writes.
+    const controller = new AbortController()
+    const decision = h.agentApproval({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(h.progressStates, ['clear'], 'the whole off window stays physically clear')
+
+    h.setTerminalProgressMode('on')
+    assert.deepEqual(h.progressStates, ['clear', 'indeterminate'],
+      're-enabling projects the CURRENT folded truth exactly once, not a replay of the suppressed churn')
+  } finally {
+    h.dispose()
   }
 })

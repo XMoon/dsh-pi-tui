@@ -191,6 +191,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly surface: {
     setNotificationMode(mode: string): void
     setNotificationMethod(method: string): void
+    setTerminalProgressMode(mode: string): void
     openJobView(jobId: string): void
     openTasksBrowser(viewMode: 'quick' | 'full'): void
   }
@@ -880,6 +881,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the panel persists the raw string through the config port.
       setNotificationMode: (mode) => deps.surface.setNotificationMode(mode),
       setNotificationMethod: (method) => deps.surface.setNotificationMethod(method),
+      setTerminalProgressMode: (mode) => deps.surface.setTerminalProgressMode(mode),
       ensureSession: () => deps.session.ensureSession(),
       get selected() { return deps.model.selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending

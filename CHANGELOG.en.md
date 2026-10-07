@@ -81,7 +81,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$EDITOR` round-trip) it also asserts the current progress state, so Tern's
   initial "pane has a foreground command running" state — or any stale
   progress state left by another program — no longer stays painted while the
-  Agent is idle.
+  Agent is idle. Working is now reported as `OSC 9;4;1;0` (no strong
+  indeterminate animation), and a new `/settings → Terminal progress` switch
+  (On by default) turns the native indicator off: disabling clears it
+  immediately and stops further reporting, while re-enabling restores the
+  current Agent state right away.
 
 - The fullscreen long user message bubble is now one local disclosure
   surface: a single click anywhere on a collapsed bubble (head text, marker,

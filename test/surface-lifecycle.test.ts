@@ -284,6 +284,7 @@ test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge 
     notificationPresentation: nullPresentation,
     notificationMode: undefined,
     notificationMethod: undefined,
+    terminalProgress: undefined,
     createPluginManagerPanel,
   })
   const failure = new Error('theme hook release failed')

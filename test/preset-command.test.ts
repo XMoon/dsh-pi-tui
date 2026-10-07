@@ -337,7 +337,7 @@ function stubRunner(options: {
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -507,7 +507,7 @@ test('/keybindings opens sessionless without creating a session', async () => {
     wheelScrollLines: '1',
       iconStyle: 'emoji',
       notificationMode: 'unfocused',
-      notificationMethod: 'auto',
+      terminalProgress: 'on', notificationMethod: 'auto',
       keybindings: undefined,
     }),
     replace: async () => {},
@@ -905,7 +905,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
     get: () => {
       reads += 1
       onGet?.(reads)
-      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }
+      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }
     },
     replace: doc => { currentTheme = doc.theme as string },
   }
@@ -1063,7 +1063,7 @@ test('/keybindings reload re-reads the settings document LAZILY (the explicit re
   let settingsDoc = {
     theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue',
     localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1',
-    iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto',
+    iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
     keybindings: { 'app.input.steer': 'ctrl+x' },
   }
   let reads = 0
@@ -1104,7 +1104,7 @@ test('/keybindings reload queues behind an editor write and applies the latest d
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
     keybindings: { 'app.input.steer': 'ctrl+x' },
   }
   let writes = 0
@@ -1169,7 +1169,7 @@ test('/keybindings reset queues behind an editor write and keeps the final reset
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
     keybindings: undefined,
   }
   let writes = 0
@@ -1223,7 +1223,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   // now-keybindings-less document.
   let replaced = 0
   const failing: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { replaced += 1; throw new Error('write refused') },
   }
   let t = setup({ tuiSettings: failing })
@@ -1250,7 +1250,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
     get: () => {
       okReads += 1
       if (okReads > 1) throw new Error('no second read allowed')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => { okReplaced += 1 },
   }
@@ -1311,7 +1311,7 @@ test('/keybindings reload is fail-soft: a throwing settings read keeps the last-
   const tuiSettings: TuiSettingsLike = {
     get: () => {
       if (failing) throw new Error('settings read exploded')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => {},
   }

@@ -128,6 +128,7 @@ import { buildPendingPresentation } from '../../pending-presentation.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from '../../search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from '../../search-profile.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
+import { parseTerminalProgressMode } from '../../domain/terminal-progress/settings.ts'
 // TS3 §31-§36: the surface's independent application-level owners. Each is
 // constructed exactly once here; none of them imports this aggregate's value
 // implementation (only its cross-owner facade types).
@@ -232,6 +233,9 @@ export interface SurfaceRuntimeOptions {
   /** The persisted notification settings at startup (parsed by the owner). */
   readonly notificationMode: string | undefined
   readonly notificationMethod: string | undefined
+  /** The persisted native-terminal-progress preference at startup ('on'
+   *  default | 'off'), parsed through the shared terminal-progress parser. */
+  readonly terminalProgress: string | undefined
   /**
    * The concrete Plugin Manager terminal panel factory (TS4 §8/§10): the
    * composition zone selects the TUI implementation and injects it here, so no
@@ -271,6 +275,10 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   /** The notification settings write path (`/notify`, `agent/status` policy). */
   setNotificationMode(mode: string): void
   setNotificationMethod(method: string): void
+  /** The native-terminal-progress preference write path (`/settings` row):
+   *  parse the raw mode through the shared parser and gate the mounted app's
+   *  physical OSC 9;4 projection. Never a persistence authority. */
+  setTerminalProgressMode(mode: string): void
   /** A terminal focus report (CSI ? 1004): the tracker only records state. */
   handleTerminalFocus(focused: boolean): void
   /** Any REAL input proves the user is operating the terminal (restores
@@ -1185,6 +1193,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     setNotificationMethod(method) {
       notification.setMethod(method)
     },
+    setTerminalProgressMode(mode) {
+      app?.setTerminalProgressEnabled(parseTerminalProgressMode(mode) === 'on')
+    },
     handleTerminalFocus(focused) {
       notification.handleTerminalFocus(focused)
     },
@@ -1294,6 +1305,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       app = startProcessTui(events, {
         ...buildOptions(deps),
         initialTerminalProgress: mainAgentProgressActive,
+        terminalProgressEnabled: parseTerminalProgressMode(options.terminalProgress) === 'on',
       })
     },
     disposePluginManager() {

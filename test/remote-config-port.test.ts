@@ -93,6 +93,7 @@ const TUI_DEFAULTS = {
   responseStyle: 'default',
   notificationMode: 'unfocused',
   notificationMethod: 'auto',
+  terminalProgress: 'on',
   wheelScrollLines: '1',
 }
 
@@ -811,6 +812,39 @@ test('raw settings fields round-trip verbatim and an unrelated write never touch
   assert.deepEqual(after.footerCustomItems, footerCustomItems)
   assert.deepEqual(after.footerCommand, footerCommand)
   assert.deepEqual(after.footerLayout, VALID_LAYOUT)
+})
+
+test('terminalProgress keeps Direct/Remote parity: missing resolves on, explicit off reads back, one path-scoped op', async () => {
+  // A section that omits the field (an older saved document) still resolves to
+  // the schema default `on` through the adapter's own defaults.
+  const { terminalProgress: _omitted, ...withoutProgress } = TUI_DEFAULTS
+  const missing = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...withoutProgress }, revision: 1 })
+  })
+  await missing.port.describe()
+  assert.equal(missing.port.tuiSettings?.get().terminalProgress, 'on',
+    'a missing remote terminalProgress resolves to the on default')
+
+  // An explicit off is read back verbatim.
+  const explicit = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, terminalProgress: 'off' }, revision: 1 })
+  })
+  await explicit.port.describe()
+  assert.equal(explicit.port.tuiSettings?.get().terminalProgress, 'off')
+
+  // A replace writes exactly one path-scoped op and leaves every other field
+  // untouched.
+  const { port, state } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
+  })
+  await port.describe()
+  const settings = port.tuiSettings
+  assert.ok(settings !== undefined)
+  assert.equal(settings.get().terminalProgress, 'on')
+  await settings.replace({ ...settings.get(), terminalProgress: 'off' })
+  assert.deepEqual(state.mutateCalls[state.mutateCalls.length - 1].ops,
+    [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
+    'only the changed field crosses')
 })
 
 test('tuiSettings is undefined until the tui-app namespace is present', async () => {

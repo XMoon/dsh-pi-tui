@@ -695,6 +695,7 @@ const TUI_SETTINGS_DEFAULTS: {
   readonly responseStyle: string
   readonly notificationMode: string
   readonly notificationMethod: string
+  readonly terminalProgress: string
   readonly wheelScrollLines: string
 } = {
   theme: 'auto',
@@ -711,6 +712,7 @@ const TUI_SETTINGS_DEFAULTS: {
   responseStyle: 'default',
   notificationMode: 'unfocused',
   notificationMethod: 'auto',
+  terminalProgress: 'on',
   wheelScrollLines: '1',
 }
 
@@ -735,6 +737,7 @@ const DIFF_FIELDS: readonly string[] = [
   'responseStyle',
   'notificationMode',
   'notificationMethod',
+  'terminalProgress',
   'wheelScrollLines',
   'keybindings',
 ]
@@ -766,6 +769,7 @@ function tuiSettingsDocOf(section: unknown): TuiSettingsDoc {
     displayPreset: stringOr(record.displayPreset, TUI_SETTINGS_DEFAULTS.displayPreset),
     notificationMode: stringOr(record.notificationMode, TUI_SETTINGS_DEFAULTS.notificationMode),
     notificationMethod: stringOr(record.notificationMethod, TUI_SETTINGS_DEFAULTS.notificationMethod),
+    terminalProgress: stringOr(record.terminalProgress, TUI_SETTINGS_DEFAULTS.terminalProgress),
     wheelScrollLines: stringOr(record.wheelScrollLines, TUI_SETTINGS_DEFAULTS.wheelScrollLines),
     keybindings: record.keybindings,
   }
