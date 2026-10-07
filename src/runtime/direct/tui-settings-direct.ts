@@ -48,6 +48,7 @@ export interface TuiConfigRefs {
   readonly responseStyle: Volatile<string | undefined>
   readonly notificationMode: Volatile<string>
   readonly notificationMethod: Volatile<string>
+  readonly terminalProgress: Volatile<string>
   readonly wheelScrollLines: Volatile<string>
   readonly keybindings: Volatile<unknown>
   /** Internal one-shot legacy-migration marker; never a product row. */
@@ -123,6 +124,7 @@ const DIFF_FIELDS: readonly (keyof TuiConfigRefs)[] = [
   'responseStyle',
   'notificationMode',
   'notificationMethod',
+  'terminalProgress',
   'wheelScrollLines',
   'keybindings',
 ]
@@ -161,6 +163,7 @@ export class DirectTuiSettings implements TuiSettingsConfig {
       responseStyle: this.refs.responseStyle.get(),
       notificationMode: this.refs.notificationMode.get(),
       notificationMethod: this.refs.notificationMethod.get(),
+      terminalProgress: this.refs.terminalProgress.get(),
       wheelScrollLines: this.refs.wheelScrollLines.get(),
       keybindings: this.refs.keybindings.get(),
     }

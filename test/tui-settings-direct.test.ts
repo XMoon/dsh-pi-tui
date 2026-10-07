@@ -43,6 +43,7 @@ function refsOf(overrides: Partial<Record<keyof TuiConfigRefs, unknown>> = {}): 
     gitAttribution: ref('off'),
     notificationMode: ref('unfocused'),
     notificationMethod: ref('auto'),
+    terminalProgress: ref('on'),
     wheelScrollLines: ref('1'),
     keybindings: ref(undefined),
     legacySettingsMigrationVersion: ref(0),
@@ -109,6 +110,7 @@ function defaults(): TuiSettingsDoc {
     gitAttribution: 'off',
     notificationMode: 'unfocused',
     notificationMethod: 'auto',
+    terminalProgress: 'on',
     wheelScrollLines: '1',
     keybindings: undefined,
   }
@@ -165,6 +167,42 @@ test('a gitAttribution change crosses the DIFF_FIELDS mapping as its own path-sc
   const settings2 = new DirectTuiSettings(refs2, forms2.forms)
   await settings2.replace({ ...settings2.get(), gitAttribution: 'off' } as TuiSettingsDoc)
   assert.deepEqual(forms2.calls[0]?.ops, [{ op: 'unset', path: ['gitAttribution'] }],
+    'a reset-to-inherited unsets the override instead of pinning it')
+})
+
+test('a terminalProgress change crosses the DIFF_FIELDS mapping as its own path-scoped set', async () => {
+  // The /settings row's persistence depends on this mapping: without the
+  // field in DIFF_FIELDS the whole-document write would silently DROP the new
+  // mode, while the fake-settings row test would still pass.
+  const refs = refsOf()
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  assert.equal(settings.get().terminalProgress, 'on', 'fresh defaults include terminalProgress: on')
+  // get() reads the live reference (never a boot-time snapshot).
+  refs.write('terminalProgress', 'off')
+  assert.equal(settings.get().terminalProgress, 'off')
+  refs.write('terminalProgress', 'on')
+  await settings.replace({ ...settings.get(), terminalProgress: 'off' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls, [{
+    ns: 'tui-app',
+    ops: [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
+    revision: 2,
+  }], 'the mode change crosses as exactly one path-scoped set')
+
+  // An UNRELATED write preserves terminalProgress (no spurious op).
+  const refs3 = refsOf({ terminalProgress: 'off' })
+  const forms3 = formsOf({}, 2, refs3.snapshot())
+  const settings3 = new DirectTuiSettings(refs3, forms3.forms)
+  await settings3.replace({ ...settings3.get(), theme: 'dark' } as TuiSettingsDoc)
+  assert.deepEqual(forms3.calls[0]?.ops, [{ op: 'set', path: ['theme'], value: 'dark' }],
+    'an unrelated write never touches terminalProgress')
+
+  // Writing the inherited default over a USER override resets it (unset).
+  const refs2 = refsOf({ terminalProgress: 'on' })
+  const forms2 = formsOf({ terminalProgress: 'off' }, 2, refs2.snapshot())
+  const settings2 = new DirectTuiSettings(refs2, forms2.forms)
+  await settings2.replace({ ...settings2.get(), terminalProgress: 'on' } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [{ op: 'unset', path: ['terminalProgress'] }],
     'a reset-to-inherited unsets the override instead of pinning it')
 })
 

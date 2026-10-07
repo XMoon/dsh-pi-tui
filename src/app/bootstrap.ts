@@ -449,6 +449,7 @@ export function applyRunnerWithRuntime(
       notificationPresentation,
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
+      terminalProgress: tuiSettings?.get().terminalProgress,
       // TS4 §10: the composition zone selects the CONCRETE Plugin Manager panel
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.
@@ -1360,6 +1361,7 @@ export function applyRunnerWithRuntime(
       surface: {
         setNotificationMode: (mode) => surface.setNotificationMode(mode),
         setNotificationMethod: (method) => surface.setNotificationMethod(method),
+        setTerminalProgressMode: (mode) => surface.setTerminalProgressMode(mode),
         openJobView: (jobId) => surface.openJobView(jobId),
         openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),
       },

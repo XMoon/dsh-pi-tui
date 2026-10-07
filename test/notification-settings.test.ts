@@ -188,7 +188,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     focusEnabled: () => displayState.preset === 'focus',
     setFocusMode: () => {},
     setNotificationMode: (mode) => { appliedModes.push(mode) },
-    setNotificationMethod: (method) => { appliedMethods.push(method) },
+    setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),

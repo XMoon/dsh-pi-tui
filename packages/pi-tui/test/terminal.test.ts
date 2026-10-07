@@ -315,19 +315,19 @@ describe("ProcessTerminal progress", () => {
 		}
 	});
 
-	it("setProgress(true/false) keeps its exact per-call bytes on a persistent terminal (X059)", () => {
+	it("setProgress(true/false) writes its working/clear bytes once per explicit call (X059)", () => {
 		mock.timers.enable({ apis: ["setInterval"] });
 		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
 		const capture = captureStdout();
 
 		try {
 			terminal.setProgress(true);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
 			terminal.setProgress(true);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;3\x07"],
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"],
 				"the boolean write stays unconditional (the host owns the dedupe)");
 			terminal.setProgress(false);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;3\x07", "\x1b]9;4;0\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07", "\x1b]9;4;0\x07"]);
 			mock.timers.tick(5000);
 			assert.equal(capture.writes.length, 3, "a persistent terminal receives no periodic refresh");
 		} finally {
@@ -336,16 +336,16 @@ describe("ProcessTerminal progress", () => {
 		}
 	});
 
-	it("a persistent terminal's indeterminate writes ONE 9;4;3 and starts no heartbeat (X059)", () => {
+	it("a persistent terminal's indeterminate writes ONE 9;4;1;0 and starts no heartbeat (X059)", () => {
 		mock.timers.enable({ apis: ["setInterval"] });
 		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
 		const capture = captureStdout();
 
 		try {
 			terminal.setProgressState("indeterminate");
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
 			mock.timers.tick(5000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"], "no periodic 9;4;3 refresh");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"], "no periodic 9;4;1;0 refresh");
 		} finally {
 			capture.restore();
 			mock.timers.reset();
@@ -362,7 +362,7 @@ describe("ProcessTerminal progress", () => {
 		try {
 			terminal.setProgressState("indeterminate");
 			mock.timers.tick(5000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"],
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"],
 				"the construction-time persistent-terminal snapshot still owns the one-shot policy");
 		} finally {
 			capture.restore();
@@ -379,12 +379,12 @@ describe("ProcessTerminal progress", () => {
 
 		try {
 			terminal.setProgressState("indeterminate");
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
 			mock.timers.tick(1000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;3\x07"],
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"],
 				"the heartbeat re-asserts the state every second");
 			mock.timers.tick(1000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;3\x07", "\x1b]9;4;3\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"]);
 			terminal.setProgress(true);
 			assert.equal(capture.writes.length, 4, "a repeated explicit active writes its own bytes");
 			mock.timers.tick(1000);
@@ -414,12 +414,12 @@ describe("ProcessTerminal progress", () => {
 
 		try {
 			terminal.setProgressState("indeterminate");
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
 			mock.timers.tick(1000);
 			assert.equal(capture.writes.length, 2, "the active heartbeat is running");
 
 			terminal.setProgressState("paused");
-			assert.deepEqual(capture.writes.slice(1), ["\x1b]9;4;3\x07", "\x1b]9;4;4\x07"],
+			assert.deepEqual(capture.writes.slice(1), ["\x1b]9;4;1;0\x07", "\x1b]9;4;4\x07"],
 				"paused follows active directly, with NO \u001b]9;4;0 between them");
 			mock.timers.tick(5000);
 			assert.equal(capture.writes.length, 3, "paused owns no heartbeat of its own");
@@ -437,13 +437,13 @@ describe("ProcessTerminal progress", () => {
 		try {
 			terminal.setProgressState("indeterminate");
 			mock.timers.tick(5000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"], "no heartbeat before the wait");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"], "no heartbeat before the wait");
 
 			terminal.setProgressState("paused");
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;4\x07"],
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;4\x07"],
 				"paused follows active directly, with NO \u001b]9;4;0 between them");
 			mock.timers.tick(5000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;4\x07"],
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;4\x07"],
 				"paused owns no timer of its own");
 		} finally {
 			capture.restore();
@@ -459,9 +459,9 @@ describe("ProcessTerminal progress", () => {
 		try {
 			terminal.setProgressState("paused");
 			terminal.setProgressState("indeterminate");
-			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;3\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07"]);
 			mock.timers.tick(1000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;3\x07", "\x1b]9;4;3\x07"],
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"],
 				"the resumed active state keeps re-asserting itself");
 		} finally {
 			capture.restore();
@@ -469,7 +469,7 @@ describe("ProcessTerminal progress", () => {
 		}
 	});
 
-	it("a persistent terminal's paused -> indeterminate writes one 9;4;3 and starts no heartbeat (X059)", () => {
+	it("a persistent terminal's paused -> indeterminate writes one 9;4;1;0 and starts no heartbeat (X059)", () => {
 		mock.timers.enable({ apis: ["setInterval"] });
 		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
 		const capture = captureStdout();
@@ -477,9 +477,9 @@ describe("ProcessTerminal progress", () => {
 		try {
 			terminal.setProgressState("paused");
 			terminal.setProgressState("indeterminate");
-			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;3\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07"]);
 			mock.timers.tick(5000);
-			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;3\x07"],
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07"],
 				"the resumed active state is a one-shot projection");
 		} finally {
 			capture.restore();
@@ -531,7 +531,7 @@ describe("ProcessTerminal progress", () => {
 		try {
 			terminal.setProgressState("indeterminate");
 			terminal.stop();
-			assert.equal(capture.writes.filter((chunk) => chunk === "\x1b]9;4;3\x07").length, 1);
+			assert.equal(capture.writes.filter((chunk) => chunk === "\x1b]9;4;1;0\x07").length, 1);
 			assert.equal(capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07").length, 1);
 			const written = capture.writes.length;
 			mock.timers.tick(5000);
@@ -551,7 +551,7 @@ describe("ProcessTerminal progress", () => {
 			terminal.setProgressState("indeterminate");
 			mock.timers.tick(1000);
 			assert.equal(
-				capture.writes.filter((chunk) => chunk === "\x1b]9;4;3\x07").length,
+				capture.writes.filter((chunk) => chunk === "\x1b]9;4;1;0\x07").length,
 				2,
 				"the active heartbeat is running before the stop",
 			);

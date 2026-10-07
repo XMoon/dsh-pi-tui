@@ -273,7 +273,7 @@ function fakeRunnerDeps(options: {
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -333,7 +333,7 @@ function fakeRunnerDeps(options: {
     clientCwd: '/ws',
     surface: {
       setNotificationMode: () => {},
-      setNotificationMethod: () => {},
+      setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
       openJobView: () => {},
       openTasksBrowser: () => {},
     },

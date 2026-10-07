@@ -9,7 +9,11 @@ import { StdinBuffer } from "./stdin-buffer.ts";
 const cjsRequire = createRequire(import.meta.url);
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
-const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
+/** OSC 9;4 state 1 value 0 — a WORKING progress state whose completion
+ * percentage is unknown. Deliberately NOT state 3: a determinate state 1
+ * with value 0 keeps the pane "working" without forcing the strong
+ * indeterminate animation (X059). */
+const TERMINAL_PROGRESS_WORKING_SEQUENCE = "\x1b]9;4;1;0\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0\x07";
 const TERMINAL_PROGRESS_PAUSED_SEQUENCE = "\x1b]9;4;4\x07";
 const NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
@@ -125,10 +129,13 @@ export interface Terminal {
 }
 
 /**
- * The physical OSC 9;4 progress states this terminal can own (X059):
- * `clear` (9;4;0), `indeterminate` (9;4;3; terminals that expire the state
- * receive a 1 s keepalive) and `paused` (9;4;4, no keepalive — a state the
- * boolean API cannot represent).
+ * The logical terminal progress states owned by the fork (X059):
+ * `clear` (idle), `indeterminate` (active working whose completion
+ * percentage is unknown) and `paused` (waiting for user input — a state the
+ * boolean API cannot represent). The physical OSC 9;4 encoding is an
+ * implementation detail of `ProcessTerminal`: the fork currently presents
+ * `indeterminate` as OSC 9;4 state 1 value 0 and `paused` as state 4;
+ * terminals that expire the active state receive a 1 s keepalive.
  */
 export type TerminalProgressState = "clear" | "indeterminate" | "paused";
 
@@ -155,8 +162,8 @@ export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
  * Whether the attached terminal expires the OSC 9;4 indeterminate state and
  * therefore needs the 1 s heartbeat (X059). Ghostty and Monstar drop the
  * progress state unless it is re-asserted; persistent terminals (Tern, Kitty,
- * WezTerm, ...) keep it, and re-writing `9;4;3` there is unnecessary — it can
- * even restart their native indeterminate animation (e.g. Windows Terminal).
+ * WezTerm, ...) keep it, and re-writing `9;4;1;0` there is unnecessary — it can
+ * even restart their native progress animation (e.g. Windows Terminal).
  * A positive allowlist: an unknown terminal is NOT refreshed.
  */
 export function shouldKeepTerminalProgressAlive(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -629,17 +636,21 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setProgress(active: boolean): void {
-		// The boolean contract is unchanged: true = indeterminate, false =
-		// clear, and each explicit call writes its own bytes. It delegates to
-		// the stateful primitive so the physical state stays truthful for
-		// `stop()` (X059); the indeterminate heartbeat stays terminal-specific.
+		// The boolean LOGICAL contract is unchanged: true = indeterminate,
+		// false = clear, and each explicit call writes its own state once. The
+		// WORKING physical payload is now OSC 9;4;1;0 (X059), so only the clear
+		// byte pair is identical to the upstream/baseline sequence. It delegates
+		// to the stateful primitive so the physical state stays truthful for
+		// `stop()` (X059); the active heartbeat stays terminal-specific.
 		this.setProgressState(active ? "indeterminate" : "clear");
 	}
 
 	/**
 	 * OSC 9;4 state projection (X059). Each call writes its own state
 	 * UNCONDITIONALLY — the caller owns the dedupe, exactly like the boolean
-	 * contract, so `setProgress(true/false)` keeps its byte-for-byte behavior.
+	 * contract, so `setProgress(true/false)` still writes exactly once per
+	 * call (`indeterminate` is presented as OSC 9;4;1;0, not the upstream
+	 * 9;4;3).
 	 * `indeterminate` starts the 1 s heartbeat only on terminals known to
 	 * expire OSC 9;4 state; a persistent terminal (Tern) gets the single
 	 * explicit write only. `paused` stops the heartbeat and writes OSC 9;4;4
@@ -649,11 +660,11 @@ export class ProcessTerminal implements Terminal {
 	 */
 	setProgressState(state: TerminalProgressState): void {
 		if (state === "indeterminate") {
-			// OSC 9;4;3 - indeterminate progress
-			process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+			// OSC 9;4;1;0 - working, completion percentage unknown (X059)
+			process.stdout.write(TERMINAL_PROGRESS_WORKING_SEQUENCE);
 			if (this.keepProgressAlive && !this.progressInterval) {
 				this.progressInterval = setInterval(() => {
-					process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+					process.stdout.write(TERMINAL_PROGRESS_WORKING_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
 			}
 		} else {

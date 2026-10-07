@@ -1,19 +1,18 @@
 /**
- * Icon-style /settings tests (plan §17 + §34.8): the row lists all three
- * styles, missing/invalid persisted values fall back to emoji, the toggle
- * applies to the app IMMEDIATELY (no restart, no session reload) and
- * persists a replace that preserves the other fields.
- * @module @xmoon76/dsh-pi-tui/icon-style-settings.test
+ * Terminal-progress /settings integration tests (plan §12.3/§12.13/§14.4): the
+ * single parser authority, the row's default/invalid fallbacks, the immediate
+ * runtime setter, and whole-document persistence through the shared runner
+ * fixture. Pure — no dsh tree needed.
+ * @module @xmoon76/dsh-pi-tui/terminal-progress-settings.test
  */
 
 import assert from 'node:assert/strict'
 import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
-import { CommandId } from '@deepseek-ai/dsh-commands'
 import { Context } from '@deepseek-ai/cordis'
-import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
+import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -23,12 +22,14 @@ import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
-
+import {
+  DEFAULT_TERMINAL_PROGRESS_MODE,
+  parseTerminalProgressMode,
+} from '../src/domain/terminal-progress/settings.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
- * is disposed after each test — the process slot (the vendored fork
- * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * is disposed after each test (the process slot is released by the FINAL
+ * dispose, never by stop()). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -38,8 +39,7 @@ afterEach(() => {
   }
 })
 
-/** A fake TuiSettingsLike recording every replace (the TUI settings
- * document surface; the writes array lets tests assert persistence). */
+/** A fake TuiSettingsLike recording every replace. */
 function fakeSettings(doc: Record<string, unknown>) {
   const writes: Array<Record<string, unknown>> = []
   return {
@@ -55,8 +55,9 @@ function fakeSettings(doc: Record<string, unknown>) {
   }
 }
 
-/** Register the TUI commands with a stubbed runner and return /settings. */
-function setupSettings(options: { iconStyle?: string } = {}) {
+/** Register the TUI commands with a stubbed runner and return /settings plus
+ * the recorded runtime terminal-progress setter calls. */
+function setupSettings(options: { terminalProgress?: string; failWrite?: boolean } = {}) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -73,9 +74,6 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     execute: async () => undefined,
   } as never)
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
-  // The fake document starts from the FULL default shape. When no
-  // iconStyle is passed, the field is OMITTED entirely — the exact shape
-  // of an old settings file written before the preference existed.
   const settings = fakeSettings({
     theme: 'auto',
     footer: 'full',
@@ -84,9 +82,14 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     focusMode: 'off',
-    wheelScrollLines: '1',
-    ...(options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle }),
+    progressUpdates: 'milestones',
+    responseStyle: 'default',
+    keybindings: { 'app.transcript.toggle': ['ctrl+o'] },
+    customExtension: { enabled: true },
+    ...(options.terminalProgress === undefined ? {} : { terminalProgress: options.terminalProgress }),
   })
+  if (options.failWrite) settings.value.replace = () => { throw new Error('settings unavailable') }
+  const appliedModes: string[] = []
   const runner: TuiCommandRunner = {
     ctx,
     app,
@@ -107,8 +110,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
-      turnOutline: () => undefined,
-      sessionStatus: () => undefined,
+      turnOutline: () => undefined, sessionStatus: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
@@ -159,11 +161,16 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
+    progressUpdatesState: { mode: 'milestones' },
+    responseStyleState: { style: 'default' },
+    gitAttributionState: { mode: 'off' },
+    displayPreset: () => 'full',
+    setDisplayPreset: () => ({ kind: 'applied' as const, preset: 'full' }),
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
+    setNotificationMethod: () => {},
+    setTerminalProgressMode: (mode) => { appliedModes.push(mode) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -182,93 +189,96 @@ function setupSettings(options: { iconStyle?: string } = {}) {
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (): Promise<void> => {
     await (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
-      commandId: CommandId('cmd-icon-test'),
+      commandId: 'x' as never,
       agent: undefined as never,
       rawInput: '',
       signal: new AbortController().signal,
     })
+    await vt.flush()
   }
   const view = async (): Promise<string> => {
     await vt.waitForRender()
-    return vt.getViewport().join('\n')
+    return stripTerminalSequences(vt.getViewport().join('\n'))
   }
-  return { vt, app, settings, run, view }
+  /** Search-navigate to the row so the test does not depend on row index. */
+  const viewRow = async (): Promise<string> => {
+    vt.sendInput('Terminal progress')
+    const text = await view()
+    if (!text.includes('Terminal progress')) throw new Error('Terminal progress row never rendered')
+    return text
+  }
+  return { vt, app, settings, run, view, viewRow, appliedModes }
 }
 
-test('/settings lists the Icon style row; missing and invalid persisted values fall back to emoji', async () => {
-  // Missing field (old settings file): the row reads emoji.
-  const t = setupSettings({})
+test('the parser is the single authority and fails safe to on', () => {
+  assert.equal(DEFAULT_TERMINAL_PROGRESS_MODE, 'on')
+  assert.equal(parseTerminalProgressMode(undefined), 'on')
+  assert.equal(parseTerminalProgressMode('on'), 'on')
+  assert.equal(parseTerminalProgressMode('off'), 'off')
+  assert.equal(parseTerminalProgressMode('garbage'), 'on')
+})
+
+test('the row renders on when the persisted value is absent', async () => {
+  const t = setupSettings()
   await t.run()
-  await t.view()
-  // Rows without a session: theme, icon-style, expand, thinking, footer,
-  // busy-enter, local-shell-sandbox, home-end-keys, fullscreen — the
-  // icon-style row is the 2nd.
-  t.vt.sendInput('\x1b[B')
-  const view = await t.view()
-  assert.ok(view.includes('Icon style'), `row missing:\n${view}`)
-  // The selected row's VALUE sits on the label's line (the description
-  // below also names the styles, so assert on the row line specifically).
-  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('Icon style'))
-  assert.ok(row !== undefined && row.includes('Icon style') && row.includes('emoji'),
-    `missing persisted value must fall back to emoji (row: ${row}):\n${view}`)
+  const view = await t.viewRow()
+  const row = view.split('\n').find(line => /Terminal progress\s+on\b/.test(line))
+  assert.ok(row !== undefined, `absent value must render on:\n${view}`)
   t.app.dispose()
-
-  // An invalid persisted value never renders outside the values list.
-  const t2 = setupSettings({ iconStyle: 'garbage' })
-  await t2.run()
-  await t2.view()
-  t2.vt.sendInput('\x1b[B')
-  const view2 = await t2.view()
-  assert.ok(stripTerminalSequences(view2).split('\n').some(line => line.includes('Icon style') && line.includes('emoji')),
-    `invalid persisted value must fall back to emoji:\n${view2}`)
-  assert.ok(!view2.includes('garbage'), `the raw invalid value must never render:\n${view2}`)
-  t2.app.dispose()
-
-  // A persisted minimal value renders as minimal.
-  const t3 = setupSettings({ iconStyle: 'minimal' })
-  await t3.run()
-  await t3.view()
-  t3.vt.sendInput('\x1b[B')
-  const view3 = await t3.view()
-  assert.ok(stripTerminalSequences(view3).split('\n').some(line => line.includes('Icon style') && line.includes('minimal')),
-    `persisted minimal must render on the row:\n${view3}`)
-  t3.app.stop()
 })
 
-test('the Icon style row toggle applies immediately and persists without dropping other fields', async () => {
-  const t = setupSettings({ iconStyle: 'emoji' })
+test('the row renders on for an invalid persisted value and never the raw string', async () => {
+  const t = setupSettings({ terminalProgress: 'garbage' })
   await t.run()
-  await t.view()
-  t.vt.sendInput('\x1b[B') // move to the icon-style row
-  await t.view()
-  t.vt.sendInput('\r') // toggle emoji -> symbols
-  await t.view()
-  // The app runtime switched IMMEDIATELY (no restart, no reload).
-  assert.equal(t.app.currentIconStyle(), 'symbols', 'the app runtime must switch before persistence settles')
-  assert.ok(t.settings.writes.length >= 1, 'the toggle must persist a write')
-  const last = t.settings.writes[t.settings.writes.length - 1]
-  assert.equal(last?.iconStyle, 'symbols', `wrote: ${JSON.stringify(last)}`)
-  // A replace is wholesale: every other field rides along untouched.
-  assert.equal(last?.theme, 'auto')
-  assert.equal(last?.footer, 'full')
-  assert.equal(last?.fullscreen, 'on')
-  t.app.stop()
+  const view = await t.viewRow()
+  const row = view.split('\n').find(line => /Terminal progress\s+on\b/.test(line))
+  assert.ok(row !== undefined, `invalid value must fall back to on:\n${view}`)
+  assert.ok(!view.includes('garbage'), 'the raw invalid value never renders')
+  t.app.dispose()
 })
 
-test('the toggle cycles through all three styles in one open panel', async () => {
-  const t = setupSettings({ iconStyle: 'emoji' })
+test('cycling the row applies the runtime setter immediately and persists the whole document', async () => {
+  const t = setupSettings({ terminalProgress: 'on' })
   await t.run()
+  await t.viewRow()
+  t.vt.sendInput('\r') // cycle: on -> off
+  assert.deepEqual(t.appliedModes, ['off'], 'the runtime setter receives the chosen mode synchronously')
   await t.view()
-  t.vt.sendInput('\x1b[B') // icon-style row
+  assert.equal(t.settings.writes.length, 1, 'exactly one whole-document write')
+  const write = t.settings.writes[0]!
+  assert.equal(write.terminalProgress, 'off', `wrote: ${JSON.stringify(write)}`)
+  assert.equal(write.theme, 'auto', 'unrelated fields are preserved')
+  assert.equal(write.progressUpdates, 'milestones', 'the narration cadence is never conflated with this gate')
+  assert.deepEqual(write.keybindings, { 'app.transcript.toggle': ['ctrl+o'] })
+  assert.deepEqual(write.customExtension, { enabled: true })
+  t.app.dispose()
+})
+
+test('reopening /settings shows the persisted value', async () => {
+  const t = setupSettings({ terminalProgress: 'on' })
+  await t.run()
+  await t.viewRow()
+  t.vt.sendInput('\r') // on -> off
   await t.view()
-  t.vt.sendInput('\r') // -> symbols
+  t.vt.sendInput('\x1b') // Esc closes without writing
   await t.view()
-  assert.equal(t.app.currentIconStyle(), 'symbols')
-  t.vt.sendInput('\r') // -> minimal
+  await t.run()
+  const view = await t.viewRow()
+  const row = view.split('\n').find(line => /Terminal progress\s+off\b/.test(line))
+  assert.ok(row !== undefined, `reopened row must show the persisted off:\n${view}`)
+  t.app.dispose()
+})
+
+test('a failed persistence write keeps the runtime change and notifies', async () => {
+  const t = setupSettings({ failWrite: true })
+  const notifications: string[] = []
+  t.app.notify = message => { notifications.push(message) }
+  await t.run()
+  await t.viewRow()
+  t.vt.sendInput('\r')
+  assert.deepEqual(t.appliedModes, ['off'], 'the runtime change survives the failed write')
   await t.view()
-  assert.equal(t.app.currentIconStyle(), 'minimal', 'minimal must be reachable in the same panel')
-  t.vt.sendInput('\r') // -> emoji (wraps)
-  await t.view()
-  assert.equal(t.app.currentIconStyle(), 'emoji', 'the cycle wraps back to emoji')
-  t.app.stop()
+  assert.ok(notifications.some(message => message.includes('settings unavailable')),
+    `the write failure surfaces:\n${notifications.join('; ')}`)
+  t.app.dispose()
 })

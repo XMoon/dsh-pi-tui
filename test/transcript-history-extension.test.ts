@@ -249,6 +249,7 @@ function mountBoundaryHarness(turns: number, options: {
     notificationPresentation: nullNotificationPresentation,
     notificationMode: undefined,
     notificationMethod: undefined,
+    terminalProgress: undefined,
     createPluginManagerPanel,
   })
   surface.attachEventRouting(routingSource)

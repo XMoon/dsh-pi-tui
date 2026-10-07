@@ -20,6 +20,7 @@ import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyRe
 import { parseProgressUpdates, parseResponseStyle } from '../../communication-policy.ts'
 import { parseGitAttributionMode } from '../../git-attribution.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../../domain/notification/settings.ts'
+import { parseTerminalProgressMode } from '../../domain/terminal-progress/settings.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../../wheel-scroll.ts'
 import { iconStyleOf } from '../../icons.ts'
 import { parseUserKeybindings } from '../keybindings/config.ts'
@@ -79,6 +80,7 @@ type SettingsCommandRunner = Pick<
   | 'setFocusMode'
   | 'setNotificationMethod'
   | 'setNotificationMode'
+  | 'setTerminalProgressMode'
   | 'setSessionApprovalPolicy'
   | 'tuiSettings'
 >
@@ -531,6 +533,15 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               description: 'How the completion notification is delivered: Auto (default) — OSC 9 / OSC 777 / bell by terminal; OSC 9; OSC 777; Bell',
               currentValue: parseNotificationMethod(settingsDoc?.notificationMethod),
               values: ['auto', 'osc9', 'osc777', 'bell'],
+            },
+            {
+              id: 'terminal-progress',
+              label: 'Terminal progress',
+              description: 'Show native terminal/tab Agent status with OSC 9;4. On (default) reports working, waiting for input, and idle; Off clears and suppresses native progress state.',
+              // An invalid persisted value must never render as a row outside
+              // the values list: the parser resolves it to the default.
+              currentValue: parseTerminalProgressMode(settingsDoc?.terminalProgress),
+              values: ['on', 'off'],
             },
             {
               id: 'fullscreen',
@@ -992,6 +1003,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                     () => settings.replace(withUserFooterCustomItems({ ...settings.get(), notificationMethod: value }, runner.config)),
                   ), { notify: true })
                 }
+              }
+            } else if (id === 'terminal-progress') {
+              const mode = parseTerminalProgressMode(value)
+              // Apply to the runtime surface FIRST (the physical projection
+              // changes now), then persist best-effort through the shared
+              // whole-document transaction — the existing settings contract.
+              runner.setTerminalProgressMode(mode)
+              const settings = tuiSettings
+              if (settings !== undefined) {
+                detach('settings terminal progress write', () => serializeTuiSettingsMutation(
+                  settings,
+                  () => settings.replace(withUserFooterCustomItems({ ...settings.get(), terminalProgress: mode }, runner.config)),
+                ), { notify: true })
               }
             } else if (id === 'fullscreen') {
               if (value === 'off' || value === 'on') {

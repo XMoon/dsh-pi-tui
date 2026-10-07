@@ -64,6 +64,7 @@ function surfaceOwner() {
     notificationPresentation: nullPresentation,
     notificationMode: undefined,
     notificationMethod: undefined,
+    terminalProgress: undefined,
     createPluginManagerPanel,
   })
 }

@@ -75,6 +75,9 @@ export interface Config {
   readonly notificationMode: Volatile<string>
   /** Completion-notification method ('auto' | 'osc9' | 'osc777' | 'bell'). */
   readonly notificationMethod: Volatile<string>
+  /** Native terminal progress state projection ('on' | 'off'): whether the
+   * TUI reports the OSC 9;4 pane progress state at all. Defaults to on. */
+  readonly terminalProgress: Volatile<string>
   /** Fullscreen mouse-wheel step ('1' | '2' | '3' | '5' | '8'). */
   readonly wheelScrollLines: Volatile<string>
   /** The user keybinding overrides as a whole-value RAW field. The
@@ -140,6 +143,7 @@ export const Config: z<Config> = z.object({
   responseStyle: z.string().default('default').volatile(),
   notificationMode: z.string().default('unfocused').volatile(),
   notificationMethod: z.string().default('auto').volatile(),
+  terminalProgress: z.string().default('on').volatile(),
   wheelScrollLines: z.string().default('1').volatile(),
   keybindings: z.any().volatile(),
   legacySettingsMigrationVersion: z.number().default(0).volatile(),
