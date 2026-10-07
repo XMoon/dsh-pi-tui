@@ -10,11 +10,11 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import {
   finalizedBlockFallbackText,
-  fileAttachmentSummary,
   openOpaqueBlockFallbackText,
   textWithAttachmentMarkers,
   userBlocksVisibleNow,
-} from '../src/content-block-presentation.ts'
+} from '../src/domain/transcript/content-blocks.ts'
+import { fileAttachmentSummary } from '../src/domain/media/file-summary.ts'
 import { resultTextLines } from '../src/present.ts'
 import { collectRewindCandidates, rewindPickerItem } from '../src/rewind.ts'
 import { renderTranscriptMarkdown, TranscriptFolder } from '../src/transcript.ts'

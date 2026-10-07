@@ -26,7 +26,7 @@ import type { SubmissionPresentationItem } from './submission-presentation.ts'
 import type { PendingInputItem, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
 import type { PendingContextRow, PendingTailRow, PendingUserRow, QueueItem } from './tui-app.ts'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { fileAttachmentSummary } from './content-block-presentation.ts'
+import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 
 /** The joined pending-input rows for one subject. */
 export interface PendingPresentationRows {

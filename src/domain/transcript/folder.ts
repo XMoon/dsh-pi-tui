@@ -25,15 +25,12 @@ import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-llm-retry'
 import type { ToolWorkflowAgentStartData, ToolWorkflowRunStartData } from '@deepseek-ai/dsh-tool-workflow/types'
-import { contextIconSemantic, contextSummary } from '../../context.ts'
 import {
-  finalizedBlockFallbackText,
-  fileAttachmentSummary,
   textWithAttachmentMarkers,
   userBlocksVisibleNow,
-} from '../../content-block-presentation.ts'
-import { displayFailure, displayFailureText } from '../../failure-presentation.ts'
-import { latestLine } from '../../present.ts'
+} from './content-blocks.ts'
+import { displayFailure, displayFailureText } from './failure.ts'
+import { latestLine } from './text.ts'
 import {
   StepUsageAccumulator,
   totalTokens,
@@ -45,7 +42,7 @@ import type {
   AssistantLiveContentBlock,
   AssistantLiveInput,
 } from '../../runtime/assistant-stream-port.ts'
-import { contextPresentation, contextProvenance } from './context-semantics.ts'
+import { contextIconSemantic, contextPresentation, contextProvenance, contextSummary } from './context-semantics.ts'
 import { isGroupableRead } from './grouping.ts'
 import {
   isSurfacedInteractionToolName,

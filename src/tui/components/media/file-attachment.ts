@@ -7,7 +7,7 @@
  */
 
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
-import { fileAttachmentSummary, type FileAttachmentPresentationRef } from '../../../content-block-presentation.ts'
+import { fileAttachmentSummary, type FileAttachmentPresentationRef } from '../../../domain/media/file-summary.ts'
 
 /** The caller-owned color surface for attachment rows. */
 export interface FileAttachmentTheme {

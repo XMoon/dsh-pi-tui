@@ -32,7 +32,7 @@ import {
   type CompactActionPresentation,
 } from './compact-process-preview.ts'
 import { compactActionStatParts, formatCompactDuration, type CompactActionStats } from '../../transcript/process-summary.ts'
-import { displayFailureText } from '../../../failure-presentation.ts'
+import { displayFailureText } from '../../../domain/transcript/failure.ts'
 import { focusTiming, type FocusTimingStore } from '../../../focus-timing.ts'
 import type { RunPhase } from '../../../domain/status/types.ts'
 import type { TurnActivity } from '../../../transcript.ts'

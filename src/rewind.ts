@@ -13,7 +13,7 @@
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { userBlocksVisibleNow } from './content-block-presentation.ts'
+import { userBlocksVisibleNow } from './domain/transcript/content-blocks.ts'
 import { textOf } from './transcript.ts'
 import type { PickerItem } from './tui-app.ts'
 

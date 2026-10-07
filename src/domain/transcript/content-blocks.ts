@@ -1,27 +1,18 @@
 /**
- * Client-local presentation helpers for finalized ContentBlocks.
+ * Transcript-neutral textual projection of finalized ContentBlocks (TS8-D
+ * move out of the legacy root `src/content-block-presentation.ts`).
  *
  * These functions consume only durable metadata. They never resolve attachment
- * bytes or paths, and unknown finalized blocks stay explicit and bounded.
- * @module @xmoon76/dsh-pi-tui/content-block-presentation
+ * bytes or paths, and unknown finalized blocks stay explicit and bounded. The
+ * media-specific `fileAttachmentSummary` lives in `domain/media/file-summary.ts`,
+ * so this transcript-neutral owner never reaches another domain subtree.
+ * @module @xmoon76/dsh-pi-tui/domain/transcript/content-blocks
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { formatBytes } from './domain/media/format.ts'
 
 /** Match the Web JsonBlock serialized-payload bound. */
 export const FINALIZED_BLOCK_PAYLOAD_MAX_CHARS = 20_000
-
-/** The durable metadata needed for a file's human-facing summary. */
-export interface FileAttachmentPresentationRef {
-  readonly name: string
-  readonly bytes: number
-}
-
-/** Render a FileBlock attachment without exposing its opaque storage id. */
-export function fileAttachmentSummary(attachment: FileAttachmentPresentationRef): string {
-  return `📄 ${attachment.name} · ${formatBytes(attachment.bytes)}`
-}
 
 /** The flat marker for one known attachment occurrence. */
 function attachmentMarker(block: ContentBlock): string | undefined {

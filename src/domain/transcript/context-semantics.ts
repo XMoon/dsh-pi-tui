@@ -11,16 +11,18 @@
  *
  * The renderer-neutral PRESENTATION consequences — the presentation kind, the
  * ambient clustering and the structured summary — live under
- * `tui/transcript/**` (TS6). The residual presentation compatibility helpers in
- * `src/context.ts` (icon semantic, notice summary) consume this module's
- * low-level source readers; they never re-parse a source, so exactly ONE parser
- * for source kind / form / sender / provenance role remains.
+ * `tui/transcript/**` (TS6). The card-header icon SEMANTIC and the notice
+ * one-line summary consume this module's low-level source readers; they were
+ * merged here in TS8-D from the retired `src/context.ts` compatibility root,
+ * so exactly ONE parser for source kind / form / sender / provenance role
+ * remains.
  *
  * The carrier types live in the canonical `domain/transcript/types.ts` and are
  * re-exported here for their consumers.
  * @module @xmoon76/dsh-pi-tui/domain/transcript/context-semantics
  */
 
+import { type IconSemantic } from '../../icons.ts'
 import { isSurfacedContext } from './semantics.ts'
 import type {
   ContextProvenance,
@@ -31,17 +33,17 @@ import type {
 
 export type { ContextProvenance, TranscriptContextForm, TranscriptContextPresentation } from './types.ts'
 
-/** One durable source narrowed to the readable-record shape; null for anything else. Shared with the residual presentation helpers in `src/context.ts`. */
+/** One durable source narrowed to the readable-record shape; null for anything else. */
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
   return value as Record<string, unknown>
 }
 
-/** A record field read as a non-empty string, or null. Shared with the residual presentation helpers in `src/context.ts`. */
+/** A record field read as a non-empty string, or null. */
 export function readString(record: Record<string, unknown>, key: string): string | null {
   const value = record[key]
   return typeof value === 'string' && value.length > 0 ? value : null
-} // asRecord + readString (exported for the residual src/context.ts readers)
+} // asRecord + readString (low-level source readers)
 
 /** Distinct non-empty `field` values of an array-valued source member, in first-seen order.
  * The `seen` Set keeps a foreign/legacy log with a very large member array
@@ -142,4 +144,37 @@ export function contextFormOf(message: TranscriptMessage): TranscriptContextForm
 export function isAmbientContext(message: TranscriptMessage): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
   const form = contextFormOf(message)
   return isSurfacedContext(message) && form !== undefined && AMBIENT_CONTEXT_FORMS.includes(form)
+}
+
+/**
+ * The card-header icon SEMANTIC for one context injection, keyed by source
+ * kind so a reader can tell an instruction file from a skill catalog or a
+ * recalled session at a glance (the Web renders one browse icon for all of
+ * them). The glyph itself resolves through the concrete TUI palette at render
+ * time — fold state stores the semantic, never a concrete emoji/symbol, so an
+ * icon-style switch repaints ALREADY-FOLDED context cards immediately.
+ * @param source - the logged user/message source.
+ */
+export function contextIconSemantic(source: unknown): IconSemantic {
+  const record = asRecord(source)
+  const kind = record === null ? null : readString(record, 'kind')
+  switch (kind) {
+    case 'agent-instructions': return 'context-file'
+    case 'skill-invocation': return 'context-skill'
+    case 'plugin': {
+      // A notice is a one-off account; everything else is payload.
+      return readString(record ?? {}, 'form') === 'notice' ? 'context-notice' : 'context-plugin'
+    }
+    case 'subagent-settled': return 'context-notice'
+    case 'session-reference': return 'context-recall'
+    default: return 'context-generic'
+  }
+}
+
+/** The producer's one-line notice summary, or null when absent. */
+export function contextSummary(source: unknown): string | null {
+  const record = asRecord(source)
+  if (record === null) return null
+  const summary = record['summary']
+  return typeof summary === 'string' && summary !== '' ? summary : null
 }
