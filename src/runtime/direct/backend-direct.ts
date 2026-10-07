@@ -15,7 +15,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/backend-direct
  */
 
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../process/diagnostics.ts'
 import type { Backend } from '../backend.ts'
 import { createDirectBackend } from '../backend.ts'
 import type { TuiSettingsConfig } from '../config-port.ts'

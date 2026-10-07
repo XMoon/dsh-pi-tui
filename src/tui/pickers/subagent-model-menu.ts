@@ -44,7 +44,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import type { OwnedTaskOptions } from '../../detached.ts'
+import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import type { ModelDirectoryDto } from '../../runtime/catalog-port.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from '../../runtime/config-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'

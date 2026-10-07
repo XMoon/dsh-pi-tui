@@ -20,10 +20,10 @@
 import type { DirectAgentComposition } from '../direct/composition.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
 import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
-import { runDetached } from '../../detached.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
 import { workingFromLog } from '../../compaction-presentation.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import type { Diag } from '../../diag.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 
 /** The live Direct agent face the session-startup reads consume. */
 export interface LiveAgentLike {

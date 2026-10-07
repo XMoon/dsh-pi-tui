@@ -28,7 +28,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/owned-session-retirement
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 
 /** The Direct ownership surface the retirement drives (structural — the
  * runner wires the live Agent / AgentHandle / sessions / subagents). */

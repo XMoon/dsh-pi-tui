@@ -25,9 +25,9 @@
 import { Text } from '@xmoon76/pi-tui'
 import type { PiTuiExtensionService } from '../../extensions.ts'
 import { SurfaceHost } from '../../extension/internal/surface-host.ts'
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { KeybindingRegistry } from '../../extension/internal/keybinding-registry.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { TuiApp, TuiAppOptions } from '../../tui-app.ts'
 
 /** One non-optional capability borrowed from the TuiApp option contract. */

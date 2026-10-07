@@ -38,9 +38,9 @@ import type {
 } from '../../runtime/interaction-port.ts'
 import { QuestionAnswerError, QUESTION_BAD_ANSWER, QUESTION_REPLY_QUEUED } from '../../runtime/interaction-port.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
-import type { Diag } from '../../diag.ts'
-import { runDetached } from '../../detached.ts'
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { QuestionFlowDraft, TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
 
 import type { QuestionAttentionRow } from '../../task-center-attention.ts'

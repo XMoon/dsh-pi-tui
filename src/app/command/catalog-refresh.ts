@@ -39,8 +39,8 @@
 // structural here lets the coordinator stay branch-neutral without widening
 // to a Host type.
 export type CatalogReadTarget = object
-import type { Diag } from '../../diag.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { StandingSkillRead } from '../../runtime/catalog-port.ts'
 import type { SurfaceCatalogSnapshot } from '../../domain/catalog/surface.ts'

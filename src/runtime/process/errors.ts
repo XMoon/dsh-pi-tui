@@ -1,6 +1,6 @@
 /**
  * Shared, TOTAL error-observation helpers for every async boundary in the
- * TUI: the owned/detached entries (`detached.ts`), the lifecycle roots
+ * TUI: the owned/detached entries (`tasks.ts`), the lifecycle roots
  * (startup, exit, flush), the per-task callbacks and the diagnostics
  * formatter. One implementation, one behavior — no drift between modules.
  *
@@ -16,7 +16,7 @@
  * boundary, and no synchronous try/catch can intercept it. Callers must
  * not describe this module as a strict "any legal value, zero side
  * effects" guarantee.
- * @module @xmoon76/dsh-pi-tui/error-boundary
+ * @module @xmoon76/dsh-pi-tui/runtime/process/errors
  */
 
 /**

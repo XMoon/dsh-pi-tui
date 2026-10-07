@@ -30,7 +30,7 @@
  * @module @xmoon76/dsh-pi-tui/app/remote/session-owners
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { clientOwnerOf, type ClientSessionOwner, type SessionHandle } from '../../runtime/session-lifecycle-port.ts'
 import type {
   SessionOwnerAccess,

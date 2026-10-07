@@ -14,13 +14,13 @@
  *
  * Writes are best-effort and never throw; a failed file sink is disabled
  * silently so diagnostics can never take the TUI down.
- * @module @xmoon76/dsh-pi-tui/diag
+ * @module @xmoon76/dsh-pi-tui/runtime/process/diagnostics
  */
 
 import { closeSync, mkdirSync, openSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { safeErrorMessage } from './error-boundary.ts'
+import { safeErrorMessage } from './errors.ts'
 
 /** Diagnostic severity, ascending. */
 export type DiagLevel = 'debug' | 'info' | 'warn' | 'error'

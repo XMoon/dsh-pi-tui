@@ -17,7 +17,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/surface-catalog
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import { readHumanSkillCatalog, resolveLiveSkillTarget, type SkillCatalogContext } from './skill-catalog.ts'
 import type { HumanSkillSummary } from '../../domain/catalog/skill.ts'
 import { commandSummaryOf, type SurfaceCatalogIssue, type SurfaceCatalogSnapshot, type SurfaceCommandDescriptor, type SurfaceCommandSummary } from '../../domain/catalog/surface.ts'

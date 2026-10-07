@@ -8,7 +8,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/surface-authority-remote
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import type {
   SurfaceAuthorityReader,
   SurfaceAuthoritySnapshot,

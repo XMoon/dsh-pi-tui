@@ -28,7 +28,7 @@ import {
   searchSessionContentPage,
   type SessionSearchProviderLike,
 } from './session-search-direct.ts'
-import { cancellationError } from '../../detached.ts'
+import { cancellationError } from '../process/tasks.ts'
 import { contextPressureOccupancy, type SessionContentSearchPage, type SessionProjectionSummary, type SessionReader, type SessionStatusProjection, type SessionSummary } from '../session-reader-port.ts'
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
 import { directTurnOutlineCompat } from './turn-outline-compat.ts'

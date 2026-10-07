@@ -9,7 +9,7 @@
 
 import { SettingsList } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture, TuiApp } from '../../tui-app.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { HumanSkillCatalog } from '../../domain/catalog/skill.ts'
 import type { CatalogRefreshOutcome } from '../../app/command/catalog-refresh.ts'

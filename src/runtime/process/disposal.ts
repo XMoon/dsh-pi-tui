@@ -15,7 +15,7 @@
  * - two or more failures: throw `AggregateError(failures, label)`.
  *
  * A throwing step never truncates its siblings.
- * @module @xmoon76/dsh-pi-tui/disposal
+ * @module @xmoon76/dsh-pi-tui/runtime/process/disposal
  */
 
 /** Attempt every synchronous disposal step in order, surfacing failures. */

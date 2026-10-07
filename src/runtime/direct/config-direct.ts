@@ -34,8 +34,8 @@ import {
   type ProviderCatalogEntry,
   type ProviderOption,
 } from '../../provider-catalog.ts'
-import { cancellationError } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { cancellationError } from '../process/tasks.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,

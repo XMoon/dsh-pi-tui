@@ -24,7 +24,7 @@
  * @module @xmoon76/dsh-pi-tui/app/session/transition
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 
 /** The settled outcome of a transition. A failure carries the RAW abort so a
  *  caller can read a machine-readable cause (e.g. a `LifecycleError` with

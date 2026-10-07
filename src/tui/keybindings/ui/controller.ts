@@ -19,7 +19,7 @@ import {
   type KeybindingEditorBinding,
   type KeybindingEditorModel,
 } from './model.ts'
-import { safeErrorMessage } from '../../../error-boundary.ts'
+import { safeErrorMessage } from '../../../runtime/process/errors.ts'
 import type { ParsedUserKeybindings } from '../config.ts'
 
 export type KeybindingMutation =

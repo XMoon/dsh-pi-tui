@@ -33,8 +33,8 @@
  */
 
 import type { DraftFileStore } from '../../client/media/attachment/file-draft.ts'
-import type { OwnedTaskOptions } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { checkImageLimits } from '../../client/media/image/intake.ts'
 import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
@@ -386,7 +386,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             // §3C-4 (review R7-4/R8): this is NOT a stage classifier — it is a
             // conservative FAIL-CLOSED publication fence for an UNEXPECTED owned
             // task failure. `runOwned` routes BOTH a task rejection and an async
-            // `onResult` failure here (src/detached.ts `handlerFailure`), so a
+            // `onResult` failure here (src/runtime/process/tasks.ts `handlerFailure`), so a
             // post-adoption consumer bug can reach this callback too; such a
             // failure naturally fails the fence, because the rewind's own
             // adoption advances the navigation epoch. That is exactly right:

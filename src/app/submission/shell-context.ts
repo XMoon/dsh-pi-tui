@@ -16,7 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/app/submission/shell-context
  */
 
-import { cancellationError } from '../../detached.ts'
+import { cancellationError } from '../../runtime/process/tasks.ts'
 import { sessionUnchanged } from './steer.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import { TransitionInProgressError } from '../session/operation-barrier.ts'

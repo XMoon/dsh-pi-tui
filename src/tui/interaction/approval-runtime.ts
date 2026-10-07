@@ -12,7 +12,7 @@
  */
 
 import { matchesKey, type OverlayHandle, type TuiInputListenerResult } from '@xmoon76/pi-tui'
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { ResponsiveOverlayFrame } from '../components/frame.ts'
 import {
   ApprovalDialogSurface,

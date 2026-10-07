@@ -22,7 +22,7 @@ import { link, open, rename, rm, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, win32 } from 'node:path'
 import type { FileHandle } from 'node:fs/promises'
-import { cancellationError } from '../../detached.ts'
+import { cancellationError } from '../../runtime/process/tasks.ts'
 
 /** A collision-resistant temp path in the target's directory. */
 function tempPathFor(target: string): string {

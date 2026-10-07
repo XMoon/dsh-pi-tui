@@ -5,7 +5,7 @@
  * type-aware lint (`@typescript-eslint/no-floating-promises` catches forms
  * this matcher cannot see: variable promises, `new Promise`, line-broken
  * void, and floating promises without `void`). Every detected use must be
- * either a terminal sink inside `src/detached.ts` (the helpers themselves)
+ * either a terminal sink inside `src/runtime/process/tasks.ts` (the helpers themselves)
  * or a documented lifecycle-root allowlist entry — a line carrying the
  * `allowlist` marker (the startup and exit orchestrations). New hand-
  * written `void` promise chains fail this test instead of waiting for the
@@ -130,7 +130,7 @@ test('the matcher self-tests: allowed fixtures stay allowed, denied fixtures are
   assert.deepEqual(findVoidDiscards('/* doc: void somePromise() */'), [])
 })
 
-test('every production `void <promise>` discard is in detached.ts or an explicit allowlist', () => {
+test('every production `void <promise>` discard is in runtime/process/tasks.ts or an explicit allowlist', () => {
   const violations: string[] = []
   for (const path of listSourceFiles(srcDir)) {
     const file = relative(srcDir, path)
@@ -139,10 +139,10 @@ test('every production `void <promise>` discard is in detached.ts or an explicit
     const clean = stripComments(source).split('\n')
     for (let index = 0; index < clean.length; index += 1) {
       if (!VOID_PROMISE.test(clean[index]!)) continue
-      // detached.ts is the helpers' own terminal sink; everything else
+      // runtime/process/tasks.ts is the helpers' own terminal sink; everything else
       // needs the explicit `allowlist` marker on the SAME line (checked
       // on the ORIGINAL line: comment stripping removes the marker).
-      if (file !== 'detached.ts' && !originalLines[index]!.includes('allowlist')) {
+      if (file !== 'runtime/process/tasks.ts' && !originalLines[index]!.includes('allowlist')) {
         violations.push(`${file}:${index + 1}: ${clean[index]!.trim()}`)
       }
     }
@@ -150,7 +150,7 @@ test('every production `void <promise>` discard is in detached.ts or an explicit
   assert.deepEqual(
     violations,
     [],
-    'hand-written `void` promise chains are only legal inside detached.ts or with an explicit `allowlist` marker (AGENTS.md hard rule)',
+    'hand-written `void` promise chains are only legal inside runtime/process/tasks.ts or with an explicit `allowlist` marker (AGENTS.md hard rule)',
   )
 })
 

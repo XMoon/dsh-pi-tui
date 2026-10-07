@@ -17,9 +17,9 @@
  */
 
 import type { AgentPreset } from '@deepseek-ai/dsh-agent-preset-registry'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import { runDetached } from '../../detached.ts'
-import type { Diag } from '../../diag.ts'
+import { safeErrorMessage } from '../process/errors.ts'
+import { runDetached } from '../process/tasks.ts'
+import type { Diag } from '../process/diagnostics.ts'
 import {
   copyModelSelection,
   normalizeModelSelection,

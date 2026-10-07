@@ -11,7 +11,7 @@
 
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PickerItem, TuiApp } from '../../tui-app.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { CredentialProviderOption } from '../../runtime/config-port.ts'
 import {

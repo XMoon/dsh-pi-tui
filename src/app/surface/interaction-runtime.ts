@@ -24,8 +24,8 @@
  */
 
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
-import type { Diag } from '../../diag.ts'
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { QuestionAttentionRow } from '../../task-center-attention.ts'

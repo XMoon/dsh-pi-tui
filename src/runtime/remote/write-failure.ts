@@ -18,8 +18,8 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/write-failure
  */
 
-import { isCancellation } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { isCancellation } from '../process/tasks.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import { isRemoteBusinessRefusalCode, type WriteError, type WriteOutcome } from '../write-outcome.ts'
 
 /** Structural official Remote failure: the stable `code` is the discriminator. */

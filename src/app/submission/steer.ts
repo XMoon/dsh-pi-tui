@@ -19,7 +19,7 @@
 
 import { TransitionInProgressError } from '../session/operation-barrier.ts'
 import { SessionScopeSupersededError } from '../session/scope.ts'
-import { cancellationError } from '../../detached.ts'
+import { cancellationError } from '../../runtime/process/tasks.ts'
 import type { SessionWriter, WriteError, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
 

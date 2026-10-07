@@ -15,7 +15,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Diag } from './diag.ts'
+import type { Diag } from './runtime/process/diagnostics.ts'
 import { isFocusDisplayPreset, type DisplayState } from './domain/display/preset.ts'
 
 /** The system-prompt section name: TUI-private, never a host/preset name. */

@@ -17,7 +17,7 @@
 
 import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import type {
   HostUserShellAdmission,
   HostUserShellExecution,

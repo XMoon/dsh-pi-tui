@@ -29,7 +29,7 @@
  */
 
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import { runSyncDisposalSteps } from '../../disposal.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { StatsFolder } from '../../domain/status/stats.ts'
 import { childOwnEvents, TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'

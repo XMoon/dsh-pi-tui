@@ -25,7 +25,7 @@
  * @module @xmoon76/dsh-pi-tui/exit
  */
 
-import { safeErrorMessage } from './error-boundary.ts'
+import { safeErrorMessage } from './runtime/process/errors.ts'
 
 /** Diagnostics sink used by the exit controller (subset of Diag). */
 export interface ExitDiagLike {

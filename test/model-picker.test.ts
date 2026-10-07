@@ -21,8 +21,8 @@ import {
   type ModelPickerCurrent,
 } from '../src/tui/pickers/model-picker.ts'
 import type { ModelDirectoryDto, ModelDirectoryModelDto, ModelSelectionDto } from '../src/runtime/catalog-port.ts'
-import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
-import { createDiag } from '../src/diag.ts'
+import { runOwned, type OwnedTaskOptions } from '../src/runtime/process/tasks.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Every TuiApp started here is stopped after each test (single-live-TUI
