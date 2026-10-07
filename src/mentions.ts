@@ -9,18 +9,19 @@
  * the fork's CombinedAutocompleteProvider (client-local editor
  * machinery).
  *
- * FILE-COMPLETION CONVERGENCE (the 2026-08-27 plan, realigned M3-3A): the
- * `/attach` and `/image` path arguments complete through the shared local
- * engine in `src/file-completion/` (plan §5-§8). The SESSION `@` mention
- * path is different by authority: discovery/ranking come from the OFFICIAL
- * Host service through the Host-file port (candidates arrive already
- * filtered, ranked and bounded), the mention VALUE is the official
- * `formatFileMention` grammar's, and only the Direct WORKSPACE scope keeps
- * the legacy scanner as a compatibility path. THIS module keeps the
- * mention GRAMMAR (extractAtPrefix, findFileMentions, the historical
- * send-time rewriter — retired from the product path) and the
- * MentionProvider adapter. The FILE-COMPLETION CONTEXT classifier
- * (plan §4) is the ONE gate — file completion opens ONLY on `@...`,
+ * FILE-COMPLETION CONVERGENCE (the 2026-08-27 plan, realigned M3-3A; TS8-A
+ * split): the `/attach` and `/image` path arguments complete through the
+ * CLIENT-local capability in `src/client/file-completion/` over the neutral
+ * policy in `src/domain/file-completion/`, presented by
+ * `src/tui/file-completion/`. The SESSION `@` mention path is different by
+ * authority: discovery/ranking come from the OFFICIAL Host service through the
+ * Host-file port (candidates arrive already filtered, ranked and bounded), the
+ * mention VALUE is the official `formatFileMention` grammar's, and only the
+ * Direct WORKSPACE scope keeps its own Host scanner as a compatibility path
+ * (`src/runtime/direct/file-completion/`). THIS module keeps the mention
+ * GRAMMAR (findFileMentions, the historical send-time rewriter — retired from
+ * the product path) and the MentionProvider adapter. The FILE-COMPLETION
+ * CONTEXT classifier is the ONE gate — file completion opens ONLY on `@...`,
  * `/attach ...`, and `/image ...`.
  * @module @xmoon76/dsh-pi-tui/mentions
  */
@@ -41,19 +42,18 @@ import { applyInlineSkillReference, extractInlineSkillPrefix } from './skill-ref
 import type { HumanSkillSummary } from './skill-catalog.ts'
 import {
   classifyFileCompletionContext,
-  extractAtPrefix,
-  FILE_ARGUMENT_COMMANDS,
-} from './file-completion/context.ts'
-import { completePath, resolveQuery } from './file-completion/engine.ts'
-import { presentPathCandidate } from './file-completion/presentation.ts'
-import { separatorOfRaw, stripAtQuotes } from './file-completion/query.ts'
-import { LocalFileSource } from './file-completion/local-file-source.ts'
-import { resolveFdPath } from './file-completion/discovery.ts'
-
-// The migration-era surface re-exported for test pins (`mentions.test.ts`
-// imports `resolvePathSearch` and `extractAtPrefix` from this module).
-export { extractAtPrefix } from './file-completion/context.ts'
-export { resolvePathSearch } from './file-completion/query.ts'
+  stripAtQuotes,
+} from './tui/file-completion/context.ts'
+import { FILE_ARGUMENT_COMMANDS } from './domain/file-completion/path-argument-commands.ts'
+import { resolvePathQuery, separatorOfRaw } from './domain/file-completion/query.ts'
+import type { PathQueryEnvironment } from './domain/file-completion/query.ts'
+import { completePath } from './tui/file-completion/local-path-completion.ts'
+import { presentPathCandidate } from './tui/file-completion/presentation.ts'
+import {
+  ClientLocalDiscoveryDriver,
+  clientPathQueryEnvironment,
+} from './client/file-completion/local-discovery.ts'
+import type { LocalDiscoveryDriver } from './domain/file-completion/discovery-policy.ts'
 
 /** Token separators: `@` must sit at the start of the current token. */
 const PATH_DELIMITERS = new Set([' ', '\t', '\n', '\r', '"', "'", '='])
@@ -248,11 +248,13 @@ function sameMentionScope(left: MentionScope, right: MentionScope): boolean {
 
 /** Complete the argument text shared by the provider-level attachment
  * commands and the awaitable command compatibility hook. The caller chooses the
- * filesystem source and cwd; no HostFilePort is involved. */
+ * LOCALITY discovery driver, its explicit environment facts and the cwd; no
+ * HostFilePort is involved. */
 async function completePathArgumentText(
   argument: string,
   cwd: string,
-  source: LocalFileSource,
+  driver: LocalDiscoveryDriver,
+  environment: PathQueryEnvironment,
   signal: AbortSignal,
   allowEmpty: boolean,
 ): Promise<AutocompleteItem[] | null> {
@@ -274,7 +276,7 @@ async function completePathArgumentText(
     // unquoted later word must not cause the earlier word to be clobbered.
     return null
   }
-  const items = await completePath(token, cwd, source, signal, { at: false, quoted })
+  const items = await completePath(token, cwd, driver, environment, signal, { at: false, quoted })
   return items === null ? null : items.map(item => ({ ...item, value: `${leading}${item.value}` }))
 }
 
@@ -299,8 +301,8 @@ export class MentionProvider implements AutocompleteProvider {
   private readonly pathArgumentCommands: ReadonlySet<string>
   /** The live editor input mode (shell-editor-mode plan). */
   private readonly inputModeSource: () => EditorInputMode
-  /** The `/attach` and `/image` discovery source: Client-local (never HostFilePort). */
-  private readonly localSource: LocalFileSource
+  /** The `/attach` and `/image` discovery driver: Client-local (never HostFilePort). */
+  private readonly localDiscovery: ClientLocalDiscoveryDriver
   /** Client-local cwd for `/image`; intentionally separate from the Host
    * session scope so a future remote attach cannot make image completion read
    * the Host workspace. */
@@ -367,13 +369,11 @@ export class MentionProvider implements AutocompleteProvider {
     this.hostShellCompletion = hostShellCompletion
     this.inner = new CombinedAutocompleteProvider([...slashCommands], workDir, null)
     this.pathArgumentCommands = FILE_ARGUMENT_COMMANDS
-    // `/attach` and `/image` discovery source: the CLIENT's own filesystem.
-    // `localFdPath` is a test/API pin: UNDEFINED (the default) probes PATH
-    // (fd then fdfind — plan §12), `null` FORCES the bounded local
-    // fallback (deterministic tests), a string pins the finder.
-    this.localSource = localFdPath === undefined
-      ? new LocalFileSource(resolveFdPath())
-      : new LocalFileSource(localFdPath)
+    // `/attach` and `/image` discovery driver: the CLIENT's own filesystem.
+    // `localFdPath` is a test/API pin: UNDEFINED (the default) probes the
+    // Client PATH (fd then fdfind), `null` FORCES the bounded local fallback
+    // (deterministic tests), a string pins the finder.
+    this.localDiscovery = new ClientLocalDiscoveryDriver(localFdPath)
   }
 
   /** The virtual serialized line for a shell-mode editor position on the
@@ -614,7 +614,10 @@ export class MentionProvider implements AutocompleteProvider {
     if (signal.aborted || candidates.length === 0) return null
     if (!sameMentionScope(scope, this.scopeOf())) return null
     const { raw, quoted } = stripMentionToken(atPrefix)
-    const query = resolveQuery(raw, this.workDir)
+    // Only the token DIALECT is read here (the `@` value shape and its
+    // separator): the Host candidates themselves never pass through the query
+    // resolver or the local ranking.
+    const query = resolvePathQuery(raw, this.workDir, clientPathQueryEnvironment())
     // PRESENTATION ONLY: the port's candidates are already filtered,
     // ranked and bounded by the Host discovery authority — this layer
     // preserves their order exactly (no second client-side ranking pass
@@ -669,7 +672,14 @@ export class MentionProvider implements AutocompleteProvider {
     localCwd: string,
     signal: AbortSignal,
   ): Promise<AutocompleteSuggestions | null> {
-    const items = await completePathArgumentText(argument, localCwd, this.localSource, signal, true)
+    const items = await completePathArgumentText(
+      argument,
+      localCwd,
+      this.localDiscovery,
+      clientPathQueryEnvironment(),
+      signal,
+      true,
+    )
     return items === null ? null : { prefix: argument, items }
   }
 
@@ -958,6 +968,13 @@ export async function suggestPathArgument(
   cwd: string,
   localFdPath: string | null | undefined = undefined,
 ): Promise<AutocompleteItem[] | null> {
-  const source = new LocalFileSource(localFdPath)
-  return completePathArgumentText(argumentText, cwd, source, new AbortController().signal, false)
+  const driver = new ClientLocalDiscoveryDriver(localFdPath)
+  return completePathArgumentText(
+    argumentText,
+    cwd,
+    driver,
+    clientPathQueryEnvironment(),
+    new AbortController().signal,
+    false,
+  )
 }

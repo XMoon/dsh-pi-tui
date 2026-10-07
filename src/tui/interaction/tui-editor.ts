@@ -25,7 +25,8 @@
 import { decodePrintableKey, Editor, matchesKey, truncateToWidth, type EditorTheme, type SelectListLayoutOptions, type TUI } from '@xmoon76/pi-tui'
 import { SelectedMarquee } from '../components/marquee.ts'
 import { color } from '../../theme.ts'
-import { classifyFileCompletionContext, FILE_ARGUMENT_COMMANDS } from '../../file-completion/context.ts'
+import { classifyFileCompletionContext } from '../file-completion/context.ts'
+import { FILE_ARGUMENT_COMMANDS } from '../../domain/file-completion/path-argument-commands.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
 import { extractInlineSkillPrefix } from '../../skill-reference-completion.ts'
 
