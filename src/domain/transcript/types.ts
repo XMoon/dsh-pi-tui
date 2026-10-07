@@ -23,8 +23,9 @@ import type { TranscriptWorkflowMessage } from './workflow-projection.ts'
  * DSH 0.1.2-alpha.2 moved `JsonValue` from `@deepseek-ai/dsh-session` to
  * `@deepseek-ai/dsh-util-values`; the TUI keeps a local type-only copy so the
  * presentation surface needs no new peer dependency. Identical to the official
- * recursive definition. Canonical owner since TS7 — `src/present.ts` re-exports
- * it for compatibility.
+ * recursive definition. Canonical owner since TS7 — re-exported for
+ * compatibility by `src/tui/transcript/tool-presentation.ts` (TS8-D moved the
+ * former `src/present.ts` presentation there).
  */
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
