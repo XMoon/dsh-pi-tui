@@ -142,8 +142,5 @@
   ],
   "runtime/direct/turn-outline-compat.ts": [
     "import:dsh-session"
-  ],
-  "sessions.ts": [
-    "import:dsh-session"
   ]
 }

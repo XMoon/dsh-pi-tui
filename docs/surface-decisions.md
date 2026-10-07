@@ -324,7 +324,7 @@ future change must not silently reverse:
   intake) are consumed by the host BEFORE the ladder reaches the editor, so
   the viewer can never act on the parent session.
 - **Non-empty viewer prompt writes have exactly one path**: the runner's `onSubagentSubmit` →
-  `submitSubagentPrompt` (src/subagent-viewer-submit.ts) → the official
+  `submitSubagentPrompt` (internal to src/runtime/direct/subagent-direct.ts) → the official
   `ctx.subagents.prompt`. Never `ctx.subagents.sendMessage(...)` (that is
   the Agent-authored Steer path — a human prompt must queue as its own
   turn), never `ctx.agents.get(childId).followup(...)` (bypasses the
@@ -1427,7 +1427,7 @@ Full:               every current actionable attention row + tracked work
 
 The Question controller owns the authority interpretation and exposes a
 detached presentation model (`QuestionAttentionRow`); the pure
-`task-center-attention.ts` maps it onto panel rows (stable
+`app/surface/task-attention.ts` maps it onto panel rows (stable
 `question:<sessionId>:<callId>` identity, `Needs attention` group, `?` glyph,
 `awaiting answer` / `answering`), and the surface composes attention ABOVE the
 work rows before the browser's first frame.
