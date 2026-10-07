@@ -13,7 +13,7 @@
  * confirmed overwrite uses the safest platform-appropriate replacement
  * (POSIX rename replaces atomically; Windows falls back to unlink + rename
  * once — the temp file is complete, so the final artifact is never partial).
- * @module @xmoon76/dsh-pi-tui/client-artifact-save
+ * @module @xmoon76/dsh-pi-tui/client/artifact/save
  */
 
 import { randomUUID } from 'node:crypto'
@@ -22,7 +22,7 @@ import { link, open, rename, rm, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, win32 } from 'node:path'
 import type { FileHandle } from 'node:fs/promises'
-import { cancellationError } from './detached.ts'
+import { cancellationError } from '../../detached.ts'
 
 /** A collision-resistant temp path in the target's directory. */
 function tempPathFor(target: string): string {
