@@ -1,21 +1,26 @@
 /**
- * The Direct Host WORKSPACE discovery implementation (TS8-A): the DIRECT
- * process's filesystem behind the neutral {@link LocalDiscoveryDriver}
- * contract, used only by the sessionless `HostFileScope { kind: 'workspace',
- * cwd }` compatibility path of `DirectHostFilePort`.
+ * The Direct Host discovery implementation (TS8-A, renamed by TS8-HF1): the
+ * DIRECT process's filesystem behind the neutral {@link LocalDiscoveryDriver}
+ * contract. It has two legitimate consumers:
  *
- * A live Session `@` discovery never runs through this adapter — that path is
- * the OFFICIAL Host authority's (`ctx.fileReferences.list` through the port),
- * whose candidates arrive already filtered, ranked and bounded, and it has no
- * official Remote carrier, so the workspace compatibility path stays
- * Direct-only.
+ * ```text
+ * 1. the sessionless `HostFileScope { kind: 'workspace', cwd }` compatibility
+ *    path of `DirectHostFilePort` (the cold surface with no official carrier);
+ * 2. the explicit-path `@` navigation route of the Session scope
+ *    (`runtime/direct/host-file-augmentation-direct.ts`), where the user
+ *    explicitly typed the scope (`@src/`, `@../`, `@/abs`, `@~/`).
+ * ```
+ *
+ * A BARE Session `@` query (`@foo`) never runs through this adapter — that
+ * path is the OFFICIAL Host authority's (`ctx.fileReferences.list` through the
+ * port), whose candidates arrive already filtered, ranked and bounded.
  *
  * It owns the Direct Host process's own PATH/PATHEXT finder detection, its
  * `node:fs` facts and its fd/fdfind process. The small syscall-level
  * duplication against `client/file-completion/local-discovery.ts` is
  * deliberate: the two adapters read DIFFERENT machines under Remote, and one
  * concrete source owner for both localities is exactly what TS8-A removes.
- * @module @xmoon76/dsh-pi-tui/runtime/direct/file-completion/workspace-discovery
+ * @module @xmoon76/dsh-pi-tui/runtime/direct/file-completion/host-discovery
  */
 
 import { accessSync, constants as fsConstants, readdirSync, statSync } from 'node:fs'
@@ -95,7 +100,7 @@ function entryIsDirectory(
   return false
 }
 
-/** Run the Direct Host finder for one WORKSPACE query. Returns NULL on finder
+/** Run the Direct Host finder for one scoped query. Returns NULL on finder
  * FAILURE (the neutral policy then runs the bounded fallback), `[]` on a
  * genuine no-match or an abort. */
 function runHostFinder(
@@ -174,13 +179,13 @@ function runHostFinder(
 }
 
 /**
- * The Direct WORKSPACE compatibility discovery driver: the Direct Host
- * process's OWN filesystem, with a Host PATH finder when present.
+ * The Direct Host discovery driver: the Direct Host process's OWN filesystem,
+ * with a Host PATH finder when present.
  *
  * `fdPath` is a test/API pin: `undefined` probes the Host PATH, `null` FORCES
  * the bounded fallback (no finder), a string pins one finder.
  */
-export class DirectWorkspaceDiscoveryDriver implements LocalDiscoveryDriver {
+export class DirectHostDiscoveryDriver implements LocalDiscoveryDriver {
   private readonly fdPathValue: string | null
 
   constructor(fdPath: string | null | undefined = undefined) {

@@ -943,7 +943,7 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     ['runtime/direct/foo.ts', '../../client/file-completion/local-discovery.ts', ['runtime-imports-client']],
     ['client/file-completion/local-discovery.ts', '../../runtime/remote/session-reader-remote.ts', ['client-imports-remote-composition']],
     ['client/file-completion/local-discovery.ts', '../../app/remote/runtime.ts', ['client-imports-remote-composition']],
-    ['client/file-completion/local-discovery.ts', '../../runtime/direct/file-completion/workspace-discovery.ts', ['direct-import-outside-composition']],
+    ['client/file-completion/local-discovery.ts', '../../runtime/direct/file-completion/host-discovery.ts', ['direct-import-outside-composition']],
     // TS8-C: the same four directions on the canonical media/platform owners.
     // The neutral domain may not depend on the Client capability, the Host
     // semantic layer may not depend on it, and the Client capability may not
@@ -984,7 +984,7 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     // vacuous).
     ['tui/file-completion/path-argument.ts', '../../client/file-completion/local-discovery.ts'],
     ['tui/file-completion/local-path-completion.ts', '../../domain/file-completion/discovery-policy.ts'],
-    ['runtime/direct/file-completion/workspace-discovery.ts', '../../../domain/file-completion/ranking.ts'],
+    ['runtime/direct/file-completion/host-discovery.ts', '../../../domain/file-completion/ranking.ts'],
     // TS8-C: the canonical media/platform directions — the application Direct
     // preparation consumes the Client draft capability, the application platform
     // owner composes the Client clipboard, the TUI renders through the Client
