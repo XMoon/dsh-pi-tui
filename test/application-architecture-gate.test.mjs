@@ -29,7 +29,9 @@ import {
   findViolations,
   isBootstrapCompositionFile,
   isDirectCompositionFile,
+  isDshImplementationPackage,
   isRemoteComposition,
+  isRuntimeProcessSubtree,
   listSourceRootDirectories,
   listSourceRootFiles,
   parseImportSpecifiers,
@@ -1555,6 +1557,61 @@ test('the semantic runtime layer must not import terminal presentation (TS1)', (
   }
   // runtime -> its own semantic ports and the app layer keeps its existing rule.
   assert.deepEqual(findViolations([entry('runtime/catalog-port.ts', "import type { T } from '../runtime/backend.ts'\n")]), [])
+})
+
+test('TS8-F: the process layer owns its five forbidden inner layers under one rule id', () => {
+  // The dedicated `runtime-process-imports-inner-layers` rule OWNS every edge
+  // (the generic runtime-imports-* / direct-import-outside-composition rules
+  // carve the subtree out), so each synthetic violation carries exactly one
+  // rule id instead of being double-reported.
+  const targets = ['app/surface/status-runtime.ts', 'tui/components/frame.ts', 'client/media/format.ts', 'runtime/direct/backend-direct.ts', 'runtime/remote/skill-remote.ts']
+  for (const target of targets) {
+    const violations = findViolations([entry('runtime/process/tasks.ts', `import { x } from '../../${target}'\n`)])
+    assert.equal(violations.length, 1, `runtime/process -> ${target} must be rejected exactly once`)
+    assert.equal(violations[0].rule, 'runtime-process-imports-inner-layers')
+    assert.equal(violations[0].file, 'runtime/process/tasks.ts')
+    assert.equal(violations[0].line, 1)
+  }
+  // A TYPE-ONLY import is not an escape hatch for the layer rule.
+  assert.equal(
+    findViolations([entry('runtime/process/diagnostics.ts', "import type { T } from '../../client/media/format.ts'\n")]).length,
+    1,
+    'a type-only runtime/process -> client edge must be rejected',
+  )
+  // A literal VALUE dynamic import reaches the same module as a static one.
+  assert.equal(
+    findViolations([entry('runtime/process/tasks.ts', "import('../../app/surface/status-runtime.ts')\n")])[0]?.rule,
+    'runtime-process-imports-inner-layers',
+    'a value dynamic runtime/process -> app edge must be rejected',
+  )
+})
+
+test('TS8-F: the process layer rejects DSH implementation value imports but keeps type faces and Node stdlib', () => {
+  const reject = findViolations([entry('runtime/process/tasks.ts', "import { createAgent } from '@deepseek-ai/dsh-agent'\n")])
+  assert.equal(reject.length, 1)
+  assert.equal(reject[0].rule, 'runtime-process-imports-dsh-implementation')
+  // A bare VALUE dynamic import is the same value edge, not an escape hatch.
+  assert.equal(
+    findViolations([entry('runtime/process/tasks.ts', "import('@deepseek-ai/dsh-session')\n")])[0]?.rule,
+    'runtime-process-imports-dsh-implementation',
+  )
+  // Allowed: Node standard library, a TYPE-ONLY DSH structural face, a
+  // non-business infrastructure package, and a process-layer sibling.
+  assert.deepEqual(findViolations([entry('runtime/process/diagnostics.ts', "import { join } from 'node:path'\n")]), [])
+  assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "import type { Agent } from '@deepseek-ai/dsh-agent'\n")]), [])
+  assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "import { symbols } from '@deepseek-ai/cordis'\n")]), [])
+  assert.deepEqual(findViolations([entry('runtime/process/tasks.ts', "import type { Diag } from './diagnostics.ts'\n")]), [])
+})
+
+test('TS8-F: the process-layer predicates match the subtree and package boundaries', () => {
+  assert.ok(isRuntimeProcessSubtree('runtime/process/tasks.ts'))
+  assert.ok(isRuntimeProcessSubtree('runtime/process/nested/x.ts'))
+  assert.ok(!isRuntimeProcessSubtree('runtime/backend.ts'))
+  assert.ok(!isRuntimeProcessSubtree('runtime/process.ts'))
+  assert.ok(isDshImplementationPackage('@deepseek-ai/dsh-agent'))
+  assert.ok(isDshImplementationPackage('@deepseek-ai/dsh-tools/lib/face'))
+  assert.ok(!isDshImplementationPackage('@deepseek-ai/cordis'))
+  assert.ok(!isDshImplementationPackage('@xmoon76/pi-tui'))
 })
 
 test('the source-root baseline accepts the exact captured tree and fails closed on every drift (TS1 §20.3)', (t) => {
