@@ -21,10 +21,10 @@
  * legacy. `isDurablePublished` and the publication taxonomy are GONE: a
  * post-DSH rejection is never unlocked, never retried, never fallen back —
  * the old session simply stays current.
- * @module @xmoon76/dsh-pi-tui/transition
+ * @module @xmoon76/dsh-pi-tui/app/session/transition
  */
 
-import { safeErrorMessage } from './error-boundary.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
 
 /** The settled outcome of a transition. A failure carries the RAW abort so a
  *  caller can read a machine-readable cause (e.g. a `LifecycleError` with

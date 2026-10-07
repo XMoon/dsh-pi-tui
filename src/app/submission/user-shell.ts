@@ -28,7 +28,7 @@ import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, 
 import type { Diag } from '../../diag.ts'
 import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import type { InterruptAgentLike } from '../../interrupt.ts'
+import type { InterruptAgentLike } from '../session/interrupt.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
 import type { HostUserShellPort } from '../../runtime/host-user-shell-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'

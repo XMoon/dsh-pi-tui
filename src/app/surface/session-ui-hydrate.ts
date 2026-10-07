@@ -6,11 +6,11 @@
  * populate both together. Keeping that operation in one small adapter makes
  * it harder for a resume path to pre-fold the same event log and then hydrate
  * it again when the live surface is installed.
- * @module @xmoon76/dsh-pi-tui/session-ui-hydrate
+ * @module @xmoon76/dsh-pi-tui/app/surface/session-ui-hydrate
  */
 
-import { StatsFolder } from './domain/status/stats.ts'
-import { TranscriptFolder } from './domain/transcript/folder.ts'
+import { StatsFolder } from '../../domain/status/stats.ts'
+import { TranscriptFolder } from '../../domain/transcript/folder.ts'
 
 type SessionEvents = Parameters<TranscriptFolder['apply']>[0]
 

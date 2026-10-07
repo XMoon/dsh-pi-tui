@@ -40,7 +40,7 @@ import {
   type SteerSubmissionDeps,
   type SubmissionRuntimeSurface,
 } from '../src/app/submission/runtime.ts'
-import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from '../src/app/session/operation-barrier.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 import { compositionSource } from './support/composition-surface.ts'
 import { productionSources } from './support/owner-modules.ts'

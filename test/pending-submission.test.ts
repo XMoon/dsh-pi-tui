@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PendingSubmissions, pendingSubmissionsNotReplaced } from '../src/pending-submission.ts'
+import { PendingSubmissions, pendingSubmissionsNotReplaced } from '../src/app/submission/pending-submission.ts'
 
 function ledger(): PendingSubmissions {
   return new PendingSubmissions()

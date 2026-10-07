@@ -37,7 +37,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
 import { projectFocus } from '../src/tui/transcript/focus-projection.ts'
 import { resultTextLines, writeFoldedPreview } from '../src/tui/transcript/tool-presentation.ts'
-import { collectRewindCandidates } from '../src/rewind.ts'
+import { collectRewindCandidates } from '../src/domain/session/rewind.ts'
 import {
   transcriptSearchText,
   TranscriptFolder,

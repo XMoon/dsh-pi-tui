@@ -37,12 +37,12 @@ import { renderSkillContent } from '@deepseek-ai/dsh-skill'
 import type { ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
-import { TransitionInProgressError } from './session-operation-barrier.ts'
+import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
-import type { DefaultIntentRecord } from './default-intent.ts'
+import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { Component } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture } from './tui-app.ts'
-import { mergeDraft } from './steer.ts'
+import { mergeDraft } from './app/submission/steer.ts'
 import type { DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
 import type { ProgressUpdatesState, ResponseStyleState } from './communication-policy.ts'
 import type { GitAttributionState } from './git-attribution.ts'
@@ -173,7 +173,7 @@ export type LoadSkill = (
 /** One default-intent operation's ownership record: the id is the settle
  *  authority (an older operation settling must never clear or restore a
  *  newer operation's pending intent), the selection is the intent value. */
-export type { DefaultIntentRecord } from './default-intent.ts'
+export type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 
 /** The /new session-id constructor: the ONE place the dsh-session `SessionId`
  * value import lives (domain modules consume the typed result, never the package). */

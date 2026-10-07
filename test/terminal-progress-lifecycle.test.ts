@@ -410,7 +410,7 @@ function mountSurface(
     queueTextOf: () => '',
   } as unknown as SurfaceEventRoutingSource<never>
 
-  const surface = createSurfaceRuntime({
+  const surface =  createSurfaceRuntime({
     tuiVersion: '0.0.0-test',
     notificationPresentation: options.presentation ?? nullPresentation,
     notificationMode: options.notificationMode,

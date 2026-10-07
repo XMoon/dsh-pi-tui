@@ -49,7 +49,7 @@ export { Config } from './tui-config.ts'
 // lives in its natural top-level module; the package-root exports are preserved
 // here unchanged.
 export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from './command-policy.ts'
-export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './interrupt.ts'
+export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './app/session/interrupt.ts'
 export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
 export type { InitialCatalogResolution } from './surface-catalog.ts'
 
@@ -94,7 +94,8 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
 }
 
 export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './task-presentation.ts'
-export { foldQueueRows, type QueueFoldResult, type QueueInboxMessage } from './pending-presentation.ts'
+export { foldQueueRows, type QueueFoldResult } from './app/surface/pending-presentation.ts'
+export type { QueueInboxMessage } from './app/submission/pending-input.ts'
 export { compactingFromLog } from './compaction-presentation.ts'
 
 export { runningProfile, hostRunningProfile, resumeCommand, type ProfileContextReadLike } from './dsh-profile.ts'

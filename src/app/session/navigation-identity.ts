@@ -4,7 +4,7 @@
  * The actual Host operation lives on `SessionLifecycle.fork()`. This module
  * deliberately contains no seed construction, child-id generation, preset
  * inheritance or Agent creation; those are Host responsibilities after D2.4.
- * @module @xmoon76/dsh-pi-tui/session-fork
+ * @module @xmoon76/dsh-pi-tui/app/session/navigation-identity
  */
 
 /** The local NAVIGATION identity captured when a fork/rewind navigation intent

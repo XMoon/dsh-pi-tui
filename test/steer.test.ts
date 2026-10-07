@@ -8,9 +8,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerDeps, type SteerSubjectLike } from '../src/steer.ts'
-import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
-import { SessionTransitionGate } from '../src/transition-gate.ts'
+import { hasParkedSteering, mergeDraft, PARKED_STEERING_NOTICE, refuseByTransitionFence, sessionUnchanged, steerAll, steerHasPayload, type SteerDeps, type SteerSubjectLike } from '../src/app/submission/steer.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from '../src/app/session/operation-barrier.ts'
+import { SessionTransitionGate } from '../src/app/session/transition-gate.ts'
 import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 import type { PendingInputReader } from '../src/runtime/pending-input-reader-port.ts'
 

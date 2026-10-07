@@ -14,14 +14,14 @@
  *   steered one at a time through the official occurrence-level writer
  *   operation, matching the dsh-web client; the gesture is FIFO best-effort,
  *   not an atomic batch.
- * @module @xmoon76/dsh-pi-tui/steer
+ * @module @xmoon76/dsh-pi-tui/app/submission/steer
  */
 
-import { TransitionInProgressError } from './session-operation-barrier.ts'
-import { SessionScopeSupersededError } from './app/session/scope.ts'
-import { cancellationError } from './detached.ts'
-import type { SessionWriter, WriteError, WriteOutcome } from './runtime/session-writer-port.ts'
-import type { PendingInputReader, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
+import { TransitionInProgressError } from '../session/operation-barrier.ts'
+import { SessionScopeSupersededError } from '../session/scope.ts'
+import { cancellationError } from '../../detached.ts'
+import type { SessionWriter, WriteError, WriteOutcome } from '../../runtime/session-writer-port.ts'
+import type { PendingInputReader, PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
 
 /** The minimal writer-subject surface a steer needs: the exact identity a
  * gesture's writes address. On Direct that identity IS the live Agent object

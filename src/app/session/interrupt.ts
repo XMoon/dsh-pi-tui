@@ -3,7 +3,7 @@
  * turn/tool run while PRESERVING the pending queue. Kept out of the
  * composition root so the rule is testable headless, and its structural
  * faces keep the internal runtime port module out of the published entry.
- * @module @xmoon76/dsh-pi-tui/interrupt
+ * @module @xmoon76/dsh-pi-tui/app/session/interrupt
  */
 /** Public settlement shape for the interrupt helper. Kept local so the
  * entry-point declaration does not expose the internal runtime port module. */

@@ -32,7 +32,7 @@
 import { compactingFromLog, workingFromLog } from '../../compaction-presentation.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../history.ts'
-import { hydrateSessionUi } from '../../session-ui-hydrate.ts'
+import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { StatsFolder } from '../../domain/status/stats.ts'
 import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep } from '../../streaming-tool-preparing.ts'
 import { TranscriptFolder } from '../../domain/transcript/folder.ts'

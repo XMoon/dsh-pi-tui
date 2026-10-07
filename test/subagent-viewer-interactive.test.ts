@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { isEmptyAcceleratedViewerSubmit, TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
-import { mergeDraft } from '../src/steer.ts'
+import { mergeDraft } from '../src/app/submission/steer.ts'
 import { enterChildDisplaySubject, exitChildDisplaySubject } from './support/display-subject.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

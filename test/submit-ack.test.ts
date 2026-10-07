@@ -14,7 +14,7 @@ import {
   settleSubmitAck,
   submitAckLabel,
   submitAckPending,
-} from '../src/submit-ack.ts'
+} from '../src/app/submission/ack.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

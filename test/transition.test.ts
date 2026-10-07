@@ -15,7 +15,7 @@ import {
   runTransitionTo,
   type TransitionHost,
   type TransitionSteps,
-} from '../src/transition.ts'
+} from '../src/app/session/transition.ts'
 
 interface Handle {
   agent: { session: { id: string } }

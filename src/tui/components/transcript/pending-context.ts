@@ -18,14 +18,14 @@
  * occurrence the row disappears (a brief claim gap before the durable
  * `user/message` lands is acceptable; no shadow ledger papers over it).
  *
- * @module @xmoon76/dsh-pi-tui/pending-context
+ * @module @xmoon76/dsh-pi-tui/tui/components/transcript/pending-context
  */
 
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
-import { CompactTextPreview } from './compact-text-preview.ts'
-import { iconPrefix } from './tui/icons.ts'
-import type { IconStyle } from './domain/display/icons.ts'
-import { color } from './tui/theme/runtime.ts'
+import { CompactTextPreview } from '../../../compact-text-preview.ts'
+import { iconPrefix } from '../../icons.ts'
+import type { IconStyle } from '../../../domain/display/icons.ts'
+import { color } from '../../theme/runtime.ts'
 
 /**
  * The waiting-status line. While the subject RUNS the occurrence waits for

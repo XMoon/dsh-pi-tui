@@ -5,7 +5,7 @@ import test from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { computeStats } from '../src/domain/status/stats.ts'
-import { hydrateSessionUi } from '../src/session-ui-hydrate.ts'
+import { hydrateSessionUi } from '../src/app/surface/session-ui-hydrate.ts'
 import { foldTranscript } from '../src/transcript.ts'
 
 function event<K extends string>(

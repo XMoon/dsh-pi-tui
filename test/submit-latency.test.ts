@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SubmitLatencyTracker, type SubmitLatencySink } from '../src/submit-latency.ts'
+import { SubmitLatencyTracker, type SubmitLatencySink } from '../src/app/submission/latency.ts'
 
 interface RecordingSink extends SubmitLatencySink {
   lines: { message: string; fields: Record<string, unknown> | undefined }[]

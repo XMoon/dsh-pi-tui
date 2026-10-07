@@ -1,6 +1,6 @@
 /**
  * Unit tests for the pure sessionless `/model` default-intent state machine
- * (`src/default-intent.ts`) — the REAL machine the production runner uses.
+ * (`app/command/model-default-intent.ts`) — the REAL machine the production runner uses.
  *
  * These replace the former UI-driven overlap tests (the picker now awaits the
  * global-default save, so two overlapping picks can no longer be produced
@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DefaultIntentTracker } from '../src/default-intent.ts'
+import { DefaultIntentTracker } from '../src/app/command/model-default-intent.ts'
 
 const a = { provider: 'p', model: 'a' }
 const b = { provider: 'p', model: 'b' }

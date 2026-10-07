@@ -23,7 +23,7 @@ import type { Diag } from '../../diag.ts'
 import {
   copyModelSelection,
   normalizeModelSelection,
-} from '../../model-selection.ts'
+} from '../../domain/session/model-selection.ts'
 import type { OperationOwnership, OperationResult, WriteOutcome } from '../write-outcome.ts'
 import type { SessionModelSelectionOwnerLike } from './model-selection-direct.ts'
 import {

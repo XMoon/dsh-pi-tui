@@ -36,7 +36,7 @@
  * every exit path. Accepting overwrites any older pending state (the
  * newest gesture decides what the row says) and bumps the epoch, which
  * invalidates every older token.
- * @module @xmoon76/dsh-pi-tui/submit-ack
+ * @module @xmoon76/dsh-pi-tui/app/submission/ack
  */
 
 /** What the pending row advertises: a fresh submission (idle agent — the

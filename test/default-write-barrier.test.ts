@@ -1,5 +1,5 @@
 /**
- * Unit tests for the pure `DefaultWriteBarrier` (`src/default-write-barrier.ts`)
+ * Unit tests for the pure `DefaultWriteBarrier` (`app/command/model-default-write-barrier.ts`)
  * — the admission barrier a fresh create uses to wait for EVERY in-flight
  * sessionless `/model` default write (including a stale older one that is still
  * re-asserting the newest committed value).
@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DefaultWriteBarrier } from '../src/default-write-barrier.ts'
+import { DefaultWriteBarrier } from '../src/app/command/model-default-write-barrier.ts'
 
 test('wait awaits an OLDER write still settling after a NEWER one resolved', async () => {
   const barrier = new DefaultWriteBarrier()

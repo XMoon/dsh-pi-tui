@@ -25,7 +25,8 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { directTurnOutlineCompat, rewindOutlineRows } from '../src/rewind.ts'
+import { directTurnOutlineCompat } from '../src/runtime/direct/turn-outline-compat.ts'
+import { rewindOutlineRows } from '../src/app/surface/rewind-presentation.ts'
 import { DirectSessionReader } from '../src/runtime/direct/session-direct.ts'
 
 function event<K extends string>(type: K, data: Record<string, unknown>, seq: number): SessionEvent {
