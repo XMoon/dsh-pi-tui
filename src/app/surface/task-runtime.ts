@@ -23,10 +23,11 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/task-runtime
  */
 
-import { buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, rowGroup, subagentInterruptParent, taskRowLabel, taskTreePrefix, viewerAccessHint, viewerAccessOf, workflowMemberViewerTarget, type TaskBrowserJobInput, type TaskBrowserRow } from '../../tasks-browser.ts'
-import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from '../../task-browser-runtime.ts'
-import type { TaskPanelItem, TaskScope } from '../../task-presentation.ts'
-import { fullQuestionRows, questionIdentityOf, quickQuestionRows, type QuestionAttentionRow } from '../../task-center-attention.ts'
+import { buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, subagentInterruptParent, viewerAccessOf, workflowMemberViewerTarget, type TaskBrowserJobInput, type TaskBrowserRow } from '../../domain/task/browser.ts'
+import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from './task-browser-runtime.ts'
+import { rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPanelItem, type TaskScope } from './task-presentation.ts'
+import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-attention.ts'
+import type { QuestionAttentionRow } from './question-controller.ts'
 import type { TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'

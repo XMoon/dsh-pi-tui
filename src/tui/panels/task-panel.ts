@@ -22,10 +22,10 @@ import {
   projectTaskItems,
   type TaskPanelItem,
   type TaskScope,
-} from '../../task-presentation.ts'
+} from '../../app/surface/task-presentation.ts'
 import type { TaskBrowserViewState } from '../../app/surface/task-runtime.ts'
 
-export type { TaskPanelItem, TaskScope } from '../../task-presentation.ts'
+export type { TaskPanelItem, TaskScope } from '../../app/surface/task-presentation.ts'
 
 /** One physical row of the last painted panel frame (mouse hit-testing).
  * The map is built from the EXACT final rows render() returns (including
