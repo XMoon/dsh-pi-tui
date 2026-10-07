@@ -8,7 +8,8 @@
  *
  * Covered probes (plan §16): P1 Session list/read · P2 contextPressure
  * projection · P3 modelCatalog grouped directory · P4 llm/discoverModels ·
- * P5 skills/list · P6 Session-scoped fileReferences/list · P7
+ * P5 skills/list · P6 Session-scoped `@` discovery (the private
+ * piTuiFileReferences augmentation, TS8-HF1) · P7
  * PresentationReader.loadThrough · P8 turnOutline projection · P9 retained
  * child Session projection read · P10 reconnect/generation replacement ·
  * P11 rc.2 Question wire surfaces (the live forwarded request, the
@@ -448,8 +449,10 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
     assert.deepEqual(skills?.skills.map(skill => skill.name), ['smoke-skill'],
       'the Session-addressed human catalog flows through the real wire')
 
-    // P6 — Session-scoped fileReferences/list (the exact session id drives
-    // the Host lookup; the child scope carries the CHILD identity).
+    // P6 — Session-scoped `@` discovery through the private piTuiFileReferences
+    // augmentation (TS8-HF1): the bare query delegates the official Host
+    // provider, the exact session id drives the Host lookup, and the child
+    // scope carries the CHILD identity.
     const files = await semantics.hostFile.listReferences({ kind: 'session', sessionId: MAIN }, 'notes')
     assert.deepEqual(files, { kind: 'ok', items: [{ path: 'anchor/notes.md', kind: 'file' }] })
     const childFiles = await semantics.hostFile.listReferences({ kind: 'session', sessionId: CHILD }, 'notes')

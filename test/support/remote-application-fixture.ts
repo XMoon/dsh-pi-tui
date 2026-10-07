@@ -27,7 +27,8 @@
  *   production Host mounts from `@deepseek-ai/dsh-file-reference-local`. The
  *   Remote Host composition now requires it (the private `piTuiFileReferences`
  *   bare route delegates to it); the stand-in answers an empty workspace index
- *   and no consumer of this fixture asserts its candidates.
+ *   and no consumer of this fixture asserts its candidates. The REAL service
+ *   is opt-in for the wire proofs (`fileReferences: 'local'`).
  * - the LLM adapter (`StubLlmAdapter` by default; PR3 suites inject a real
  *   scripted streaming adapter): a scripted endpoint stand-in — the Host
  *   emits REAL agent events, the wire forwards them, only the model itself
@@ -215,6 +216,20 @@ export async function createRemoteApplicationHostFixture(
      * other consumer keeps its exact previous composition.
      */
     readonly pluginManagerProfile?: boolean
+    /**
+     * TS8-HF1: the Host `@`-file reference provider the private
+     * `piTuiFileReferences` bare route delegates. `'local'` mounts the REAL
+     * `@deepseek-ai/dsh-file-reference-local` service the production Host
+     * mounts; a provider object is used as-is; the default is the empty
+     * stand-in (see the FIXTURE MANIFEST header).
+     */
+    readonly fileReferences?: 'local' | {
+      list(
+        agent: unknown,
+        query: string,
+        signal?: AbortSignal,
+      ): Promise<readonly { readonly path: string; readonly kind: 'file' | 'directory' }[]>
+    }
   } = {},
 ): Promise<{
   ctx: Context
@@ -257,7 +272,13 @@ export async function createRemoteApplicationHostFixture(
     // production Host mounts `@deepseek-ai/dsh-file-reference-local`; this
     // stand-in is the empty workspace index the composition needs to exist
     // (see the FIXTURE MANIFEST header).
-    ctx.provide('fileReferences', { list: async () => [] } as never)
+    if (options.fileReferences === 'local') {
+      const LocalFileReferenceService = (await import('@deepseek-ai/dsh-file-reference-local')).default
+      await ctx.plugin(LocalFileReferenceService)
+    } else {
+      ctx.provide('fileReferences',
+        (options.fileReferences ?? { list: async () => [] }) as never)
+    }
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
     if (options.pluginManagerProfile === true) {

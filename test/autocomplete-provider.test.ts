@@ -163,6 +163,76 @@ test('the session scope completes @ mentions through the OFFICIAL Host service o
   assert.ok(queries.every(entry => !entry.startsWith('@')), `no at-prefixed query crosses: ${JSON.stringify(queries)}`)
 })
 
+/** A Session-scoped Direct adapter whose EXPLICIT route runs the Host scanner
+ * (fd pinned OFF for determinism). No official provider is mounted, so a BARE
+ * query is unavailable — every assertion below therefore proves the scoped
+ * route. */
+function scopedSeam(root: string): DirectHostFilePort {
+  return new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
+}
+
+test('the session scope completes an EXPLICIT scoped query through the Host scanner (TS8-HF1)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, scopedSeam(root), undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }), null)
+  // `@src/deep` has a separator: the Host scanner searches ONLY `<ws>/src`,
+  // recursively, and the accepted value keeps the typed prefix.
+  const scoped = await provider.getSuggestions(['@src/deep'], 0, 9, { signal: abort })
+  assert.ok(scoped !== null, `@src/deep must suggest:\n${JSON.stringify(scoped)}`)
+  assert.equal(scoped.prefix, '@src/deep')
+  assert.deepEqual(scoped.items.map(item => item.value), ['@src/deep-nested.ts'])
+  // The same term WITHOUT the separator is a bare query — unavailable here, so
+  // the witness above cannot come from the official path.
+  assert.equal(await provider.getSuggestions(['@deep'], 0, 5, { signal: abort }), null,
+    'the scoped witness is not vacuous: the same term is not served on the bare route')
+})
+
+test('an explicit parent scope keeps its ../ display prefix through the provider (TS8-HF1)', async (t) => {
+  const life = testLifecycle(t)
+  const parent = life.tempDir('dsh-mentions-parent-')
+  const root = join(parent, 'ws')
+  mkdirSync(root)
+  mkdirSync(join(parent, 'shared'))
+  writeFileSync(join(parent, 'shared', 'foo.txt'), 'x')
+  const provider = new MentionProvider([], root, scopedSeam(root), undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }), null)
+  const result = await provider.getSuggestions(['@../shared/fo'], 0, 13, { signal: abort })
+  assert.ok(result !== null, `@../shared/fo must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, '@../shared/fo')
+  assert.deepEqual(result.items.map(item => item.value), ['@../shared/foo.txt'],
+    'the user-facing ../ prefix survives presentation')
+})
+
+test('the HOME shorthand completes to an ABSOLUTE Host value — never ~/... (TS8-HF1)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const home = life.tempDir('dsh-mentions-home-')
+  mkdirSync(join(home, 'Downloads'))
+  writeFileSync(join(home, 'Downloads', 'loads.txt'), 'x')
+  // The Direct adapter reads the HOST home directory; pin it so the accepted
+  // value is asserted exactly instead of against the developer's real $HOME.
+  const savedHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const provider = new MentionProvider([], root, scopedSeam(root), undefined,
+      () => ({ kind: 'session', sessionId: 'session-live' }), null)
+    const result = await provider.getSuggestions(['@~/Down'], 0, 7, { signal: abort })
+    assert.ok(result !== null, `@~/Down must suggest:\n${JSON.stringify(result)}`)
+    assert.equal(result.prefix, '@~/Down')
+    const values = result.items.map(item => item.value)
+    assert.ok(values.includes(`@${join(home, 'Downloads')}/`),
+      `the home scope drives discovery: ${JSON.stringify(values)}`)
+    assert.ok(values.includes(`@${join(home, 'Downloads', 'loads.txt')}`),
+      `the nested candidate is absolute: ${JSON.stringify(values)}`)
+    assert.ok(values.every(value => !value.startsWith('@~')),
+      `no value may reintroduce the ~/ shorthand DSH cannot resolve: ${JSON.stringify(values)}`)
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME
+    else process.env.HOME = savedHome
+  }
+})
+
 /** An official-service stand-in that returns FIXED candidates in a FIXED
  * order (the Host authority's answer for a query), for order/subsequence
  * preservation proofs. */

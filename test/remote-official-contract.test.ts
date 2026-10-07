@@ -13,6 +13,12 @@
  * called at runtime; `assert.equal(typeof …, 'function')` keeps them referenced
  * so the compiler must keep checking them.
  *
+ * TS8-HF1 exception: `RemoteHostFilePort` no longer consumes an upstream
+ * namespace. Its source is the private `piTuiFileReferences` contribution this
+ * bundle mounts itself (`piTuiHostFilePort` below), and the proof is that the
+ * AUGMENTED Client namespace still satisfies the adapter's declared source type
+ * with no cast.
+ *
  * Contract matrix (adapter -> official face):
  *
  * | Adapter                        | Official face                                   |
@@ -34,6 +40,7 @@
  * | RemoteInteractionPort          | `ISessions` + `ClientRemote` (userQuestions + $on) |
  * | RemoteSessionArchive          | the composition-owned `Fetch`                   |
  * | RemoteConfigPort               | `ClientRemote['settings']` + `['credentials']`   |
+ * | RemoteHostFilePort (TS8-HF1)   | the PRIVATE `piTuiFileReferences` contribution   |
  *
  * @module @xmoon76/dsh-pi-tui/remote-official-contract.test
  */
@@ -171,8 +178,13 @@ function officialSkillCatalog(
   return new RemoteSkillCatalog(skills, generation)
 }
 
-function officialHostFilePort(
-  fileReferences: ClientRemote['fileReferences'],
+/** TS8-HF1: the Session `@` source is the PRIVATE `piTuiFileReferences`
+ * contribution this bundle mounts itself (its namespace type is augmented by
+ * `runtime/remote/pi-tui-file-reference-contract.ts`), not an upstream face.
+ * The proof is still a real structural assignability check: the mounted Client
+ * namespace must satisfy the adapter's declared source type with no cast. */
+function piTuiHostFilePort(
+  fileReferences: ClientRemote['piTuiFileReferences'],
   generation: ConnectionGenerationState,
 ): RemoteHostFilePort {
   return new RemoteHostFilePort(fileReferences, generation)
@@ -259,7 +271,7 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     officialPluginManagerPort,
     officialJobObservationPort,
     officialSkillCatalog,
-    officialHostFilePort,
+    piTuiHostFilePort,
     officialRemoteInteractionPort,
   ]) {
     assert.equal(typeof proof, 'function')
