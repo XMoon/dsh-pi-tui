@@ -31,6 +31,16 @@
  * once the shared resolver distinguishes host dialect, token dialect and literal
  * backslashes.
  *
+ * PARENT-TRAVERSAL SPELLING: a relative scope is searched with the SAME spelling
+ * the Host's local filesystem backend gives the accepted value. On a POSIX Host a
+ * path containing a `..` segment is anchored with its PHYSICAL spelling by
+ * `dsh-fs-local` (kernel resolves an intermediate symlink before the parent step);
+ * the scoped search therefore keeps the raw `<cwd>/<displayBase>` concatenation for
+ * those queries instead of the lexically joined directory, so completion and the
+ * model's read can never land in two different physical directories. Windows, the
+ * absolute forms (already verbatim) and the home shorthand (absolute normalized
+ * value) keep the shared resolver's spelling.
+ *
  * The official provider is called ONLY on the bare route; an authoritative
  * official `[]` stays empty and never falls back to the scanner. The scoped
  * route never calls the official provider and needs no capability from it.
@@ -62,6 +72,7 @@ import {
   resolvePathQuery,
   type PathQueryEnvironment,
 } from '../../domain/file-completion/query.ts'
+import type { PathCompletionQuery } from '../../domain/file-completion/types.ts'
 import { rankPathCandidates } from '../../domain/file-completion/ranking.ts'
 import type { HostFileCandidate, HostFileListResult } from '../host-file-port.ts'
 
@@ -127,6 +138,39 @@ function materializeHostPath(candidate: HostFileCandidate, searchBase: string, w
   return { path: api.join(searchBase, candidate.path), kind: candidate.kind }
 }
 
+/** One `..` path SEGMENT — the exact shape the Host filesystem backend keys its
+ * physical-spelling rule on (`dsh-fs-local`'s `localDisplayPath`). */
+const PARENT_SEGMENT = /(?:^|[\\/])\.\.(?:[\\/]|$)/u
+
+/**
+ * The directory one explicit scope searches.
+ *
+ * The Host's local filesystem backend anchors a POSIX session-relative path that
+ * contains a `..` SEGMENT with its PHYSICAL spelling (`<cwd>/<path>`, deliberately
+ * unnormalized), so the kernel resolves an intermediate symlink BEFORE the parent
+ * step; every other spelling goes through a lexical `resolve(cwd, path)`, and
+ * Windows always resolves lexically. Because the accepted completion VALUE is
+ * `displayBase + name`, the search must use that very same spelling: searching the
+ * lexically joined directory would let the completion offer `../x` that the model's
+ * read resolves into a DIFFERENT physical directory (and hide candidates that do
+ * exist there). This is one segment test plus one concatenation — the same rule the
+ * consumer applies to the value we are about to hand it, not a second path parser.
+ *
+ * Absolute scopes already spell their traversal verbatim, and a home shorthand
+ * materializes an ABSOLUTE normalized value, so neither needs the alignment.
+ */
+function scopeSearchBase(
+  resolved: PathCompletionQuery,
+  raw: string,
+  hostCwd: string,
+  environment: PathQueryEnvironment,
+): string {
+  if (environment.windowsHost) return resolved.searchBase
+  if (isHomeToken(raw) || raw.startsWith('/') || resolved.winAbsolute) return resolved.searchBase
+  if (!PARENT_SEGMENT.test(resolved.displayBase)) return resolved.searchBase
+  return `${hostCwd}/${resolved.displayBase}`
+}
+
 /**
  * Answer one session `@` completion query over the Host facts.
  *
@@ -169,7 +213,9 @@ export async function listPiTuiHostFileReferences(
   // that scope with the shared TS8-A path/query machinery.
   const workspaceCwd = agent.session.header.cwd ?? process.cwd()
   const resolved = resolvePathQuery(query, workspaceCwd, deps.environment)
-  const discovered = await discoverForQuery(resolved, deps.driver, signal)
+  const searchBase = scopeSearchBase(resolved, query, workspaceCwd, deps.environment)
+  const scope = searchBase === resolved.searchBase ? resolved : { ...resolved, searchBase }
+  const discovered = await discoverForQuery(scope, deps.driver, signal)
   signal.throwIfAborted()
   // RANK BEFORE the final path shape is chosen. The home shorthand must return
   // an ABSOLUTE Host path, but scoring those absolute paths would let the HOME

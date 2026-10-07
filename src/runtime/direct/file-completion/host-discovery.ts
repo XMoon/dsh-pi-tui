@@ -82,6 +82,17 @@ export function resolveFdPath(): string | null {
   return null
 }
 
+/** Join a Host path WITHOUT collapsing a `..` segment. The Host's filesystem
+ * backend anchors a POSIX path containing a `..` segment with its physical
+ * spelling (the kernel resolves an intermediate symlink before the parent step),
+ * so a search base that deliberately keeps that traversal may not be lexically
+ * re-normalized on the way to a syscall. For every base the neutral resolver
+ * already normalized (no `..` left) this is identical to `path.join`. */
+function hostJoin(baseDir: string, relative: string): string {
+  if (relative === '') return baseDir
+  return baseDir.endsWith('/') ? `${baseDir}${relative}` : `${baseDir}/${relative}`
+}
+
 /** Whether one Dirent is a directory (symlinks followed; a broken link is a
  * file candidate — the fork's rule). */
 function entryIsDirectory(
@@ -92,7 +103,7 @@ function entryIsDirectory(
   if (entry.isDirectory()) return true
   if (entry.isSymbolicLink()) {
     try {
-      return statSync(join(baseDir, name)).isDirectory()
+      return statSync(hostJoin(baseDir, name)).isDirectory()
     } catch {
       return false
     }
@@ -166,7 +177,7 @@ function runHostFinder(
         let isDirectory = record.directoryHint
         if (!isDirectory) {
           try {
-            isDirectory = statSync(join(baseDir, record.path)).isDirectory()
+            isDirectory = statSync(hostJoin(baseDir, record.path)).isDirectory()
           } catch {
             isDirectory = false
           }
@@ -205,12 +216,12 @@ export class DirectHostDiscoveryDriver implements LocalDiscoveryDriver {
     if (signal.aborted) return null
     let entries
     try {
-      entries = readdirSync(join(baseDir, relativeDir), { withFileTypes: true })
+      entries = readdirSync(hostJoin(baseDir, relativeDir), { withFileTypes: true })
     } catch {
       return null
     }
     if (signal.aborted) return null
-    const dir = join(baseDir, relativeDir)
+    const dir = hostJoin(baseDir, relativeDir)
     return entries.map(entry => ({
       name: entry.name,
       kind: entryIsDirectory(dir, entry.name, entry) ? 'directory' : 'file',

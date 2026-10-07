@@ -12,8 +12,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, basename } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import type { PathQueryEnvironment } from '../src/domain/file-completion/query.ts'
 import type { LocalDirectoryEntry } from '../src/domain/file-completion/discovery-policy.ts'
 import { DirectHostDiscoveryDriver } from '../src/runtime/direct/file-completion/host-discovery.ts'
@@ -148,6 +150,76 @@ test('an explicit parent scope resolves on the HOST cwd and keeps the ../ prefix
   const paths = okItems(await listPiTuiHostFileReferences(h.agent, '../shared/fo', abort, h.deps)).map(item => item.path)
   assert.deepEqual(paths, ['../shared/foo.txt'])
   assert.deepEqual(h.officialCalls, [])
+})
+
+test('a `..` scope searches the PHYSICAL traversal, so completion and read agree under a symlinked cwd', async (t) => {
+  const life = testLifecycle(t)
+  const real = life.tempDir('dsh-hfa-real-')
+  mkdirSync(join(real, 'project'))
+  mkdirSync(join(real, 'shared'))
+  writeFileSync(join(real, 'shared', 'correct.txt'), 'physical')
+  const alias = life.tempDir('dsh-hfa-alias-')
+  symlinkSync(join(real, 'project'), join(alias, 'workspace'))
+  const cwd = join(alias, 'workspace')
+  const h = harness(life, {}, { workspaceCwd: cwd })
+  // The Host's local fs backend anchors `../shared/correct.txt` with its PHYSICAL
+  // spelling: the kernel resolves the `workspace` symlink BEFORE the parent step,
+  // landing in <real>/shared. The scoped search must land there too.
+  assert.deepEqual(okItems(await listPiTuiHostFileReferences(h.agent, '../shared/cor', abort, h.deps))
+    .map(item => item.path), ['../shared/correct.txt'],
+  'the scoped search resolves the symlink before the parent step')
+  // NEGATIVE: a match that exists ONLY in the lexically joined sibling must never
+  // be offered — the model's read of `../shared/decoy.txt` would resolve physically
+  // and find nothing (or a different file).
+  mkdirSync(join(alias, 'shared'))
+  writeFileSync(join(alias, 'shared', 'decoy.txt'), 'lexical')
+  assert.deepEqual(okItems(await listPiTuiHostFileReferences(h.agent, '../shared/dec', abort, h.deps)), [],
+    'a lexically-only sibling is never offered')
+  assert.deepEqual(h.officialCalls, [], 'the whole case stays on the scoped route')
+})
+
+test('a symlink traversed MID-scope before `..` is resolved physically too', async (t) => {
+  const life = testLifecycle(t)
+  const outside = life.tempDir('dsh-hfa-outside-')
+  mkdirSync(join(outside, 'project'))
+  mkdirSync(join(outside, 'shared'))
+  writeFileSync(join(outside, 'shared', 'mid.txt'), 'physical')
+  const root = life.tempDir('dsh-hfa-mid-')
+  symlinkSync(join(outside, 'project'), join(root, 'link'))
+  mkdirSync(join(root, 'shared'))
+  writeFileSync(join(root, 'shared', 'mid-decoy.txt'), 'lexical')
+  const h = harness(life, {}, { workspaceCwd: root })
+  assert.deepEqual(okItems(await listPiTuiHostFileReferences(h.agent, 'link/../shared/mid', abort, h.deps))
+    .map(item => item.path), ['link/../shared/mid.txt'],
+  'the mid-scope symlink is resolved before the parent step')
+})
+
+test('the Host filesystem backend reads the accepted `..` value exactly where the scoped search looked', async (t) => {
+  const life = testLifecycle(t)
+  const real = life.tempDir('dsh-hfa-read-real-')
+  mkdirSync(join(real, 'project'))
+  mkdirSync(join(real, 'shared'))
+  writeFileSync(join(real, 'shared', 'correct.txt'), 'physical')
+  const alias = life.tempDir('dsh-hfa-read-alias-')
+  symlinkSync(join(real, 'project'), join(alias, 'workspace'))
+  const cwd = join(alias, 'workspace')
+  const h = harness(life, {}, { workspaceCwd: cwd })
+  const [offered] = okItems(await listPiTuiHostFileReferences(h.agent, '../shared/cor', abort, h.deps))
+  assert.equal(offered?.path, '../shared/correct.txt')
+
+  // The AUTHORITATIVE consumer: the Host's `ctx.fs` (what the read tool resolves
+  // against) must land on the very same physical file for the offered value.
+  const ctx = new Context()
+  await ctx.plugin(LocalFileSystem)
+  try {
+    const target = await ctx.fs.resolve(offered!.path, { cwd })
+    assert.equal(target.displayPath, `${cwd}/../shared/correct.txt`,
+      'the Host keeps the PHYSICAL spelling of a `..` path')
+    assert.equal(readFileSync(target.displayPath, 'utf8'), 'physical',
+      'the accepted value reads the file the scoped search found')
+  } finally {
+    await ctx.fiber.dispose()
+  }
 })
 
 test('an explicitly named excluded directory is searchable on the scoped route', async (t) => {
