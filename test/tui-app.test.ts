@@ -25,7 +25,7 @@ import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { APP_KEYBINDINGS } from '../src/tui/keybindings/definitions.ts'
-import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../src/clipboard.ts'
+import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../src/client/clipboard/copy.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the

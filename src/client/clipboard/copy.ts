@@ -29,9 +29,10 @@
  *
  * Every subprocess runs through an injected {@link CopyExecutor} and every
  * platform fact through a {@link CopyEnvironment}, so the decision trees
- * are exercised with mocks in CI (test/clipboard.test.ts) and the runner
- * wires the real execFile-backed executor once (src/index.ts).
- * @module @xmoon76/dsh-pi-tui/clipboard
+ * are exercised with mocks in CI (test/clipboard.test.ts). The real
+ * execFile-backed executor is wired once by the application platform owner:
+ * `app/surface/client-actions.ts`.
+ * @module @xmoon76/dsh-pi-tui/client/clipboard/copy
  */
 
 /** The command runner abstraction (CI injects mocks). The text payload is
@@ -48,7 +49,7 @@ export interface CopyExecutor {
 export interface CopyEnvironment {
   readonly platform: string
   readonly env: Record<string, string | undefined>
-  /** PATH-aware helper detection (see commandOnPath in image/clipboard.ts). */
+  /** PATH-aware helper detection (see commandOnPath in client/clipboard/read.ts). */
   readonly exists: (command: string) => boolean
   /** Whether stdout is a TTY — the OSC 52 leg needs a terminal. */
   readonly isTTY: () => boolean

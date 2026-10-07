@@ -1650,7 +1650,7 @@ export interface TuiAppOptions {
   /**
    * Client-local clipboard delivery for fullscreen drag-selection copy
    * (issue #7). When wired, the alt screen's selection copy routes through
-   * this callback (the shared policy in src/clipboard.ts: an independent
+   * this callback (the shared policy in src/client/clipboard/copy.ts: an independent
    * terminal-client OSC 52 leg plus an independent native/platform
    * compatibility leg) instead of the vendor's raw OSC 52 write; the
    * returned boolean drives the `Copied!` / `Copy failed` flash. Optional —
@@ -1660,7 +1660,7 @@ export interface TuiAppOptions {
   /**
    * Host-owned link activation for fullscreen OSC 8 clicks: the alt
    * screen's mouse capture swallows the terminal's native click-to-open,
-   * so the host opens http/https URLs itself (src/open-url.ts). Optional
+   * so the host opens http/https URLs itself (src/client/url/open.ts). Optional
    * — absent leaves fullscreen link clicks inert.
    */
   openExternalUrl?: (url: string) => void

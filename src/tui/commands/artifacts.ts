@@ -182,7 +182,7 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
         if (text === undefined) return { kind: 'error', text: 'no assistant message yet' }
         if (text === '') return { kind: 'error', text: 'last assistant message has no text' }
         // Issue #7: the SAME client-local shared user-clipboard policy as the
-        // fullscreen drag selection (src/clipboard.ts): an independent
+        // fullscreen drag selection (src/client/clipboard/copy.ts): an independent
         // terminal-client OSC 52 leg plus an independent native/platform
         // compatibility leg. A helper success never suppresses the OSC 52 leg.
         const ok = await runner.copyToClipboard(text)
