@@ -33,7 +33,7 @@ import {
   type SessionContentHit,
   type SessionPickerItem,
   type SessionPickerRow,
-} from '../../sessions.ts'
+} from '../pickers/sessions.ts'
 import type { SessionSummary } from '../../runtime/session-reader-port.ts'
 import type {
   DetachTask,

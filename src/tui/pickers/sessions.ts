@@ -10,22 +10,12 @@
  * projection port (`src/runtime/session-reader-port.ts`); the Direct
  * adapter in `src/runtime/direct/` owns the official DSH projection,
  * cache, and observation semantics.
- * @module @xmoon76/dsh-pi-tui/sessions
+ * @module @xmoon76/dsh-pi-tui/tui/pickers/sessions
  */
 
 import { normalize } from 'node:path'
-import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 
-/**
- * Legacy exported window size: how many most-recent sessions the picker's
- * FIRST title batch used to be capped to, historically. It no longer caps
- * any read — the picker enriches every MAIN row it can display (see
- * commands.ts `openSessionPicker`), so a session beyond this window still
- * gets its projection. Kept exported (and pinned by a test) as a documented
- * legacy value; do not reintroduce it as a read cap.
- */
-export const MAX_PICKER_SESSIONS = 200
 /** First-batch size for the progressive projection loader: the visible
  * picker window fills immediately, then the remaining rows load behind it. */
 export const PROJECTION_FIRST_BATCH = 20
@@ -34,19 +24,6 @@ export const PROJECTION_BATCH_SIZE = 50
 /** Content-search debounce (dsh-web parity): a filter must stay stable for
  * this long before the Host content search runs. */
 export const CONTENT_SEARCH_DEBOUNCE_MS = 250
-
-/**
- * Session persistence refuses logs containing a format/event vocabulary this
- * runtime cannot faithfully interpret. Keep that refusal visible at every UI
- * read boundary; turning it into an untitled or missing search row would make
- * durable data loss look like an ordinary absent value.
- */
-export function isUnsupportedSessionFormatError(reason: unknown): boolean {
-  if (typeof reason !== 'object' || reason === null) return false
-  const value = reason as { name?: unknown; code?: unknown }
-  return value.name === 'SessionFormatUnsupportedError'
-    || value.code === 'SESSION_FORMAT_UNSUPPORTED'
-}
 
 /** Strip the `session-` prefix and keep the first 8 characters, like the
  * kimicode card's short id. */
@@ -310,22 +287,4 @@ export function findSessionMatch(rows: readonly SessionPickerRow[], query: strin
     row.id === query
     || row.id.startsWith(`session-${bare}`)
     || shortSessionId(row.id).startsWith(bare))
-}
-
-/** Map a persistence header onto the picker row shape. */
-export function headerToPickerRow(header: SessionHeader, live: boolean): SessionPickerRow {
-  return {
-    id: header.id,
-    updatedAt: header.createdAt,
-    createdAt: header.createdAt,
-    cwd: header.cwd,
-    // This pure mapper has no roster to disambiguate the legal custom `code`
-    // id from old pi-tui data. Preserve the durable value; the Direct reader
-    // resolves effective preset state through the DSH projection before it
-    // exposes an enriched row.
-    ...header.agentPreset === undefined ? {} : { preset: header.agentPreset },
-    parentSession: header.parentSession,
-    origin: header.origin,
-    live,
-  }
 }
