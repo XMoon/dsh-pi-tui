@@ -730,6 +730,84 @@ test('a CLIENT-LOCAL question never pauses the Tern pane (the /login authorizati
   }
 })
 
+test('a question FIFO handover from a LOCAL flow to an AGENT flow pauses the pane', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    const local = new AbortController()
+    const localAnswer = h.app.askQuestions(
+      [{ id: 'auth', question: 'API key', masked: true }],
+      local.signal,
+    )
+    assert.equal(h.phase(), 'waiting-question')
+    assert.deepEqual(h.progressStates, ['indeterminate'], 'a Client-local wait is not Agent waiting_input')
+
+    // The Agent question queues BEHIND the local one: the seat is occupied, so
+    // its own origin must not move the pane yet.
+    const agent = new AbortController()
+    const agentAnswer = h.agentQuestion(agent.signal)
+    await drain()
+    assert.equal(h.phase(), 'waiting-question')
+    assert.deepEqual(h.progressStates, ['indeterminate'], 'a queued wait does not own the surface yet')
+
+    // Settle the local flow: the seat hands over to the Agent question while the
+    // canonical phase stays `waiting-question`, so ONLY a re-projection of the new
+    // flow's origin can flip the pane.
+    local.abort()
+    await localAnswer.catch(() => {})
+    await drain()
+    assert.equal(h.phase(), 'waiting-question', 'the phase is unchanged across the handover')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'],
+      'the handover re-derives the pane state from the NEW (Agent-owned) flow')
+
+    agent.abort()
+    await agentAnswer.catch(() => {})
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'indeterminate'])
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a question FIFO handover from an AGENT flow to a LOCAL flow returns the pane to working', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    const agent = new AbortController()
+    const agentAnswer = h.agentQuestion(agent.signal)
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'])
+
+    // A Client-local flow queues behind the Agent question.
+    const local = new AbortController()
+    const localAnswer = h.app.askQuestions(
+      [{ id: 'auth', question: 'API key', masked: true }],
+      local.signal,
+    )
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'], 'the queued local wait is not projected')
+
+    agent.abort()
+    await agentAnswer.catch(() => {})
+    await drain()
+    assert.equal(h.phase(), 'waiting-question', 'the phase is unchanged across the handover')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'indeterminate'],
+      'the handover to a Client-local flow must DROP waiting_input')
+
+    local.abort()
+    await localAnswer.catch(() => {})
+    await drain()
+    assert.equal(h.phase(), 'idle')
+  } finally {
+    h.dispose()
+  }
+})
+
 test('a plan-review prompt reaches waiting_input through the real Approval port', async () => {
   // The state comes from the Agent approval port, NOT from matching the
   // `exit_plan_mode` tool name: the SAME flow pauses for a `bash` prompt

@@ -18807,6 +18807,11 @@ export class TuiApp {
             () => { (this.fullscreen ?? this.tui).setFocus(target.frame!) },
             // The next queued flow owns the seat (follow-up P1).
             () => this.setFocusSeat('overlay'),
+            // The wait that owns the surface CHANGED — a different flow, possibly
+            // with a different ORIGIN — while the phase stays `waiting-question`,
+            // so the activity projection (and with it the effective pane state)
+            // must be re-derived here, exactly like the final-restoration branch.
+            () => this.projectActivity(),
             () => { (this.fullscreen ?? this.tui).requestRender() },
           ])
         } else {
