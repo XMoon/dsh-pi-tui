@@ -11,7 +11,8 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
-import { isDiffResult, renderDiffLine } from '../src/diff.ts'
+import { isDiffResult } from '../src/tui/transcript/diff-projection.ts'
+import { renderDiffLine } from '../src/tui/components/transcript/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/tui/transcript/tool-presentation.ts'
