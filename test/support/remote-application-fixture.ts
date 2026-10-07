@@ -23,6 +23,11 @@
  * - `agentDefaultModel` + `webServer`: the minimal readiness values the
  *   composition requires (identical to the M3-1 L5 fixture); they carry no
  *   Remote-wire state.
+ * - `fileReferences` (TS8-HF1): the official `@`-file reference provider the
+ *   production Host mounts from `@deepseek-ai/dsh-file-reference-local`. The
+ *   Remote Host composition now requires it (the private `piTuiFileReferences`
+ *   bare route delegates to it); the stand-in answers an empty workspace index
+ *   and no consumer of this fixture asserts its candidates.
  * - the LLM adapter (`StubLlmAdapter` by default; PR3 suites inject a real
  *   scripted streaming adapter): a scripted endpoint stand-in — the Host
  *   emits REAL agent events, the wire forwards them, only the model itself
@@ -247,6 +252,12 @@ export async function createRemoteApplicationHostFixture(
     const LocalAttachmentStore = (await import('@deepseek-ai/dsh-attachment-local')).default
     await ctx.plugin(LocalAttachmentStore, { dshHome: workRoot })
     ctx.provide('webServer', { registerUpgrade: () => () => {} })
+    // Host prerequisite for the M3 Remote composition (TS8-HF1): the private
+    // `piTuiFileReferences` bare route delegates the official provider. The
+    // production Host mounts `@deepseek-ai/dsh-file-reference-local`; this
+    // stand-in is the empty workspace index the composition needs to exist
+    // (see the FIXTURE MANIFEST header).
+    ctx.provide('fileReferences', { list: async () => [] } as never)
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
     if (options.pluginManagerProfile === true) {

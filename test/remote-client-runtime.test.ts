@@ -174,6 +174,10 @@ async function createHostFixture(
       admitPromptContent: async (content: unknown) => content,
     } as never)
     ctx.provide('webServer', { registerUpgrade: () => () => {} })
+    // Host prerequisite for the M3 Remote composition (TS8-HF1): the private
+    // `piTuiFileReferences` bare route delegates the official provider, which
+    // the production Host mounts as `@deepseek-ai/dsh-file-reference-local`.
+    ctx.provide('fileReferences', { list: async () => [] } as never)
     // Host prerequisite for the M3 Remote composition (see the smoke fixture):
     // the production Host mounts it from `@deepseek-ai/dsh-base`.
     await ctx.plugin(UserQuestionService)

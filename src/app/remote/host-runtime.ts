@@ -1,11 +1,12 @@
 /**
  * Experimental Remote-serving Host composition (M3-1).
  *
- * This module owns ONLY the additive official Host rows of the Remote
- * runtime: it receives the already-running ordinary pi-tui Host `Context`,
- * mounts the exact Remote Host composition closure as tracked
- * Cordis fibers, and exposes the narrow in-process carrier that
- * `client-runtime.ts` installs as the Client Connection transport.
+ * This module owns ONLY the additive Host rows of the Remote runtime: the
+ * private `piTuiFileReferences` augmentation row plus the exact official
+ * Remote Host composition closure. It receives the already-running ordinary
+ * pi-tui Host `Context`, mounts everything as tracked Cordis fibers, and
+ * exposes the narrow in-process carrier that `client-runtime.ts` installs as
+ * the Client Connection transport.
  *
  * It does not boot a second Host Context, does not edit or emulate
  * `cordis.patch.yml`, and never touches the existing `jobController` row.
@@ -27,6 +28,7 @@ import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import * as sessionLogExport from '@deepseek-ai/dsh-session-log-export'
 import * as sessionStats from '@deepseek-ai/dsh-session-stats'
 import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
+import { PiTuiFileReferenceHostService, type FileReferencesServiceLike, type LiveAgentLike } from './pi-tui-file-reference-host.ts'
 
 /**
  * Host services the ordinary Host Context must already expose before any M3
@@ -49,6 +51,11 @@ const HOST_PREREQUISITE_SERVICES = [
   'agentDefaultModel',
   'attachments',
   'commands',
+  // The OFFICIAL `@`-file reference provider (the TUI composition mounts the
+  // `file-reference-local` row): the private `piTuiFileReferences` bare route
+  // delegates to it, so a Host without it could not serve a bare Session `@`
+  // query at all. Required rather than silently degraded.
+  'fileReferences',
   'fs',
   'llm',
   'sessions',
@@ -179,6 +186,25 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
   }
 
   try {
+    // 0. The private `piTuiFileReferences` Host service (TS8-HF1): the explicit
+    //    `@`-completion augmentation whose descriptor must be registered before
+    //    any Client can mount the matching contribution. Mounted ahead of the
+    //    carrier so the endpoint is live before the first Client call. The
+    //    composition resolves the two narrow Host facts it needs (the same
+    //    reflect reads the prerequisite check above uses for base services).
+    const fileReferenceFiber = hostContext.inject(PiTuiFileReferenceHostService.inject, pluginCtx => {
+      new PiTuiFileReferenceHostService(pluginCtx, {
+        // Both facts are read PER CALL: a replaced `agents` registry or
+        // `fileReferences` provider must be observed, never a composition-time
+        // snapshot (the same reflect idiom the prerequisite check above uses).
+        agentFor: sessionId =>
+          (hostContext.reflect.get('agents') as { get(id: string): unknown } | undefined)
+            ?.get(sessionId) as LiveAgentLike | undefined,
+        official: () => hostContext.reflect.get('fileReferences') as FileReferencesServiceLike | undefined,
+      })
+    })
+    fibers.push(fileReferenceFiber)
+    await fileReferenceFiber
     // 1. Host connection — provides `connection` for the in-process carrier.
     //    No HTTP surface is composed, so the row's browser-authentication
     //    side is deliberately absent (the proven in-process fixture form);
