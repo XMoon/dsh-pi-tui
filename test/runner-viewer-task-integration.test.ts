@@ -2236,3 +2236,189 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(!viewNoOfficial.includes('100/2.0k'), `no context window may render when the official child context is unavailable:\n${viewNoOfficial}`)
   assert.ok(viewNoOfficial.includes('child display subject A'), `the child identity must still render:\n${viewNoOfficial}`)
 })
+
+test('F4-R1: a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {
+  // The connected production chain under test:
+  //   TuiApp viewer follow-up (Enter in an interactive continuable viewer)
+  //     -> TuiAppEvents.onSubagentSubmit (application-events.ts)
+  //     -> deps.subagentDelivery.subagent.prompt(...) inside runOwned
+  //     -> the REAL DirectSubagentPort reading the injected `subagents` service
+  //     -> onResult/onError -> viewer.settleSubmit (viewer-runtime.ts)
+  //     -> the current/stale draft sink.
+  // Nothing here stubs onSubagentSubmit or calls setEditorText/
+  // restoreSubagentDraft to manufacture the sink; the injected official prompt
+  // surface is the only fake.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-viewer-settle-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'viewer-settle-parent',
+    header: { id: 'viewer-settle-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'viewer-settle-child',
+    header: {
+      id: 'viewer-settle-child',
+      cwd: home,
+      createdAt: 1_700_000_000_001,
+      version: SESSION_FORMAT_VERSION,
+      isSeeded: true,
+      parentSession: parent.id,
+    },
+    events: [
+      event('turn/start', { turn: 1 }, 0),
+      event('step/start', { turn: 1, step: 1 }, 1),
+      event('user/message', {
+        id: MessageId('viewer-settle-first-prompt'),
+        role: 'user',
+        content: [{ type: 'text', text: 'child first prompt' }],
+        source: { kind: 'user' },
+      }, 2, 'append'),
+      event('assistant/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          id: MessageId('viewer-settle-first-reply'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'child first reply' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        usage: { inputTokens: 3, outputTokens: 2 },
+        stream: [],
+      }, 3, 'append'),
+      event('step/end', { turn: 1, step: 1 }, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+
+  // The official prompt surface the REAL DirectSubagentPort reads lazily. A
+  // held refusal lets the test move the viewer BETWEEN the send and the
+  // settlement; an accepting arm is the positive control.
+  const promptCalls: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }[] = []
+  const held: (() => void)[] = []
+  let accepted = false
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child',
+      id: child.id,
+      label: 'settle child',
+      mode: 'continuable',
+      activity: 'inactive',
+      hasChildren: false,
+      parentId: parent.id,
+      depth: 1,
+    }],
+    prompt: async (request: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }) => {
+      promptCalls.push(request)
+      if (accepted) return { messageId: 'viewer-settle-accepted' }
+      await new Promise<void>(resolve => { held.push(resolve) })
+      // A refused continuation: the Direct adapter classifies this as
+      // `stale-child`, a PROVEN rejection (never indeterminate).
+      throw { code: 'subagent/not-resumable' }
+    },
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  const openViewer = async (): Promise<void> => {
+    await tasksHandler()
+    await settle()
+    await vt.waitForRender()
+    input('\r')
+    await settle()
+    await vt.waitForRender()
+    assert.notEqual(app.getViewerGeneration(), 0, 'the continuable child viewer must mount')
+  }
+  const typeText = (text: string): void => { for (const char of text) input(char) }
+  const clearVisibleDraft = (): void => {
+    const current = app.getDraft()
+    for (let index = 0; index < current.length; index += 1) input('\x7f')
+  }
+  const noTranscriptRow = (text: string): boolean =>
+    !(probe.capturedMessages ?? []).some(message => (message.text ?? '').includes(text))
+
+  // ── 0. ACCEPTED positive control: the official prompt resolves ok, so the
+  // production settlement restores NOTHING to either draft sink.
+  await openViewer()
+  accepted = true
+  typeText('accepted follow-up')
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(promptCalls.length, 1, 'the production viewer submit must reach the official prompt exactly once')
+  assert.equal(promptCalls[0]!.childSessionId, child.id)
+  assert.deepEqual(promptCalls[0]!.content, [{ type: 'text', text: 'accepted follow-up' }])
+  assert.equal(app.getDraft(), '', 'an accepted send must not restore the visible draft')
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  await openViewer()
+  assert.equal(app.getDraft(), '', 'an accepted send must not restore into the child slot either')
+
+  // ── 1. CURRENT-viewer refusal: the production settlement merges the failed
+  // text beneath whatever the user typed while the send was in flight.
+  accepted = false
+  const generationAtCurrentSend = app.getViewerGeneration()
+  typeText('first refusal text')
+  input('\r')
+  await settle()
+  assert.equal(promptCalls.length, 2, 'the refusal submit must reach the official prompt')
+  assert.equal(app.getDraft(), '', 'the submit clears the visible draft before the async delivery')
+  typeText('newer text')
+  held.at(-1)!()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'newer text\n\nfirst refusal text',
+    'a refusal for the still-current viewer must merge the failed text under the newer visible draft')
+  assert.equal(app.getViewerGeneration(), generationAtCurrentSend, 'the current arm must not have moved the viewer')
+  assert.ok(noTranscriptRow('first refusal text'), 'a refusal must never insert a fake transcript row')
+
+  // ── 2. DELAYED refusal after the SAME child viewer closed before settle:
+  // the current (parent) editor is untouched and the text goes to the
+  // addressed child's map-only slot, surfacing only on re-entry.
+  clearVisibleDraft()
+  await settle()
+  assert.equal(app.getDraft(), '', 'the editor must be empty before the delayed send')
+  const generationAtDelayedSend = app.getViewerGeneration()
+  typeText('delayed refusal text')
+  input('\r')
+  await settle()
+  assert.equal(promptCalls.length, 3, 'the delayed submit must reach the official prompt')
+  assert.equal(app.getDraft(), '', 'the delayed submit clears the visible draft before delivery')
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.ok(app.getViewerGeneration() > generationAtDelayedSend, 'Esc must close the viewer before the refusal settles')
+  assert.equal(app.getDraft(), '', 'the parent editor is untouched while the delayed send is pending')
+  held.at(-1)!()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'a stale refusal must never touch the current visible editor')
+  assert.ok(noTranscriptRow('delayed refusal text'), 'a stale refusal must never insert a fake transcript row')
+  await openViewer()
+  assert.equal(app.getDraft(), 'delayed refusal text',
+    'the stale refusal must restore into the ADDRESSED child slot (surfaced when that child is viewed again)')
+})
