@@ -31,13 +31,15 @@ export const MAX_FINDER_RESULTS = 100
  * observed it on ITS filesystem. */
 export interface LocalDirectoryEntry {
   readonly name: string
-  /** Whether a symlink to a directory resolves to a directory (the adapter
-   * follows the link for the FACT, like the fork's rule). */
+  /** Whether the adapter reports the FACT that the entry is a directory by
+   * following a symlink (the fork's rule). A symlinked directory is exposed as
+   * a DIRECTORY candidate. */
   readonly kind: 'file' | 'directory'
-  /** Whether the neutral policy may descend into this entry while scanning
-   * BELOW the search root: a symlinked directory is exposed as a candidate
-   * but never traversed (cycle safety). The root pass descends any directory
-   * child, preserving the pre-TS8-A root scan exactly. */
+  /** Whether the neutral policy may DESCEND into this entry during a bounded
+   * subtree scan. A symlinked directory is exposed as a candidate but never
+   * traversed — at the search root and below it alike — so a link to a parent
+   * directory, to the workspace's outside, or a cycle can neither widen the
+   * scan nor consume the traversal budget. */
   readonly descendable: boolean
 }
 
@@ -123,8 +125,10 @@ export function normalizeFinderRecords(stdout: string): readonly FinderRecord[] 
  * The bounded recursive scan of one directory's SUBTREE: the root's direct
  * children are always complete (a root-level `src/` must be found), deeper
  * entries are capped at {@link MAX_FALLBACK_SCAN}. Paths are relative to
- * `baseDir` (`sub/deep.ts`); `.git` is skipped (kimi parity); symlinked
- * directories below the root are NOT descended (cycle safety).
+ * `baseDir` (`sub/deep.ts`); `.git` is skipped (kimi parity); a symlinked
+ * directory is NEVER descended — at the search root and below it alike
+ * (cycle safety), so a link to a parent directory or to the workspace's
+ * outside cannot widen the scan or consume the traversal budget.
  *
  * ASYNC: the fuzzy fallback runs on the EDITOR path, so a synchronous
  * whole-tree traversal would block the editor's event loop per keystroke. The
@@ -145,7 +149,7 @@ export async function scanSubtree(
   for (const entry of firstEntries) {
     if (entry.name === '.git') continue
     candidates.push({ path: entry.name, kind: entry.kind })
-    if (entry.kind === 'directory') stack.push(entry.name)
+    if (entry.descendable) stack.push(entry.name)
   }
   // Deeper levels: bounded, async, abort-aware.
   let scanned = 0

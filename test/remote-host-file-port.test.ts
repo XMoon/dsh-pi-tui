@@ -155,7 +155,11 @@ test('F8: the adapter module never touches the Client filesystem', async () => {
   assert.ok(!/\bprocess\.cwd\(\)/.test(adapterSource), 'no process.cwd()')
   assert.ok(!/\bhomedir\(\)/.test(adapterSource), 'no homedir()')
   assert.ok(!/\bstatSync\(|\brealpath\(|\breaddir\(/.test(adapterSource), 'no fs probes')
-  assert.ok(!/LocalFileSource/.test(adapterSource), 'no LocalFileSource')
+  // The Client-local discovery capability (TS8-A owner: client/file-completion):
+  // the Remote Host adapter must never borrow the CLIENT filesystem to answer a
+  // Host query, in any spelling.
+  assert.ok(!/ClientLocalDiscoveryDriver|local-discovery|client\/file-completion/u.test(adapterSource),
+    'no Client-local discovery capability')
 })
 
 test('F9: the child scope carries the CHILD session id — never a parent cwd', async () => {
