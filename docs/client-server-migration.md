@@ -5826,3 +5826,151 @@ later docs-only metadata commits).
 
 M3-6 PR3 = DONE (shutdown / HMR / mounted-fatal teardown)
 M3-6 PR4 = DONE (final closure / docs / gates — see the M3 closure record)
+
+## TS8-HF1 status (DONE) — explicit scoped Host `@` completion compatibility
+
+The Session `@` realignment onto the official `fileReferences` provider left the
+explicit path-navigation forms undiscoverable: that provider searches only inside
+the Agent workspace and does not traverse parent, absolute, excluded or symlinked
+scopes. TS8-HF1 restores them WITHOUT weakening the locality architecture.
+
+### The frozen boundary
+
+```text
+bare workspace fuzzy search   @foo @readme @src @.env
+  -> official ctx.fileReferences
+     (workspace index, cache, tool-result invalidation, official exclusions,
+      official scoring and maxResults stay authoritative)
+
+explicit path navigation      @src/ @src/uti @./ @../shared/foo @/tmp/foo
+                              @~/Downloads/  Windows drive/UNC paths
+  -> dsh-pi-tui Host scoped discovery against the exact scope the user typed
+```
+
+The route is decided by the TOKEN's own shape (a separator, a root form, or a
+Windows drive/UNC path) — never by resolved workspace containment (the superseded
+v1 rule), official result count or filesystem existence. The official provider is
+called ONLY on the bare route; an authoritative official `[]` stays empty and never
+falls back to the scanner. The scoped route never calls the official provider, so
+explicitly named excluded directories (`@dist/`), symlink scopes, `../` parent
+navigation and absolute Host paths all work; a symlink encountered BELOW an explicit
+scope stays a candidate and is never descended.
+
+POSIX BOUNDARY (deliberate narrowing): on a POSIX Host a backslash is an ordinary
+filename character, but the reused TS8-A `resolvePathQuery` selects its Windows
+dialect from the token alone and normalizes the separators on a POSIX host — a
+pinned Client-local cross-dialect contract (`test/domain-file-completion.test.ts`,
+`test/file-completion-convergence.test.ts`) that must not change. An ambiguous POSIX
+token containing a backslash (`foo\bar`, `dir\name/foo`, `src/foo\bar`) is therefore
+NOT claimed by the scoped route: it stays with the official provider instead of
+being searched in a normalized (different) directory. This is not a claim that such
+a token is a bare fuzzy query — it is a fail-closed refusal over an exact scope the
+augmentation cannot represent; the guard is deleted once the shared resolver
+distinguishes host dialect, token dialect and literal backslashes.
+
+HOME shorthand (`@~`, `@~/Down`) is TUI completion INPUT syntax only: discovery runs
+against the Host home, and every accepted candidate is materialized as an ABSOLUTE
+Host path, because DSH path resolution performs no shell-style `~` expansion.
+Ranking always scores the SCOPE-RELATIVE candidate and materializes only afterwards,
+so the absolute home prefix can never satisfy the path-substring tier and fabricate
+matches. No general send-time mention parser or rewrite pass is restored —
+`HostFilePort.canonicalizeMentions()` stays identity on both backends.
+
+### Direct / Remote parity
+
+One Host-side router owns the decision for both backends
+(`runtime/direct/host-file-augmentation-direct.ts`):
+
+```text
+DirectHostFilePort  -> listPiTuiHostFileReferences (in-process)
+RemoteHostFilePort  -> piTuiFileReferences/list
+                       -> the Host Cordis row (app/remote/pi-tui-file-reference-host.ts)
+                       -> the Host bridge (runtime/remote/pi-tui-file-reference-host-bridge.ts)
+                       -> the SAME listPiTuiHostFileReferences
+```
+
+The private `piTuiFileReferences` endpoint is an AUGMENTATION, not a replacement:
+the official `fileReferences` namespace stays mounted and authoritative for bare
+queries (the Host-side bare route delegates to it). Its handwritten Typert contract
+owns ONE `InvocationDescriptor` that both the explicit Host registration
+(`ctx.typert.register`, never source-mode decorator discovery) and the explicit
+Client contribution (`ctx.remote.$mount`) derive from. The Cordis row lives in
+`app/remote/**` and reaches the Direct Host implementation only through
+`runtime/remote/**`, because the architecture gate forbids `app/remote/** ->
+runtime/direct/**`.
+
+### Intentional non-restorations
+
+These remain official-provider behavior and are NOT historical characteristics
+TS8-HF1 brought back: bare-query ranking, the bare-query result bound (the
+historical 50-suggestion local cap does not apply), the official exclusion policy,
+implicit hidden-file matching for a bare query, and the official cache/invalidation.
+A bare `@env` needs no local widening — `@.env` is itself a bare official query.
+
+### Qualification
+
+Levels follow the migration qualification governance (L1 semantic port, L2 Direct
+adapter, L3 Remote adapter, L4 parity, L5 official in-process wire, L6 application).
+
+- L1/L2 — `test/host-file-augmentation.test.ts`: the router's source→sink matrix
+  (bare → official once/scanner zero; official `[]` → no fallback; scoped recursive
+  fuzzy; `./`; parent; excluded dir; explicit symlink scope with nested non-descent;
+  absolute; HOME shorthand → absolute with the scope-relative ranking negative case;
+  cancellation; the Windows classifier; the POSIX ambiguous-backslash boundary). It
+  calls `listPiTuiHostFileReferences` directly over the REAL Direct discovery driver
+  and a recording stand-in for the official provider, so it proves the router's
+  own decision, not the adapter's plumbing.
+- L2 — `test/host-file-port.test.ts`: the Direct adapter (`runtime/direct/host-file-direct.ts`)
+  — bare delegation, explicit route without the official capability,
+  excluded/symlinked/absolute scopes through the port, workspace compatibility,
+  `resolveReference`, identity canonicalization, the Host-home value.
+- L1/L2 — `test/pi-tui-file-reference-host.test.ts`: the descriptor identity shared
+  by both contributions, the fiber-owned registration/withdrawal lifetime, and the
+  Host row's bare/scoped/cancellation/home behavior.
+- L3 — `test/remote-host-file-port.test.ts`: the Remote adapter's namespace,
+  forwarding, business-`unavailable` preservation, generation fence,
+  workspace/existence unsupported states and the no-Client-fs source guard.
+- L4 — `test/remote-host-file-augmentation.test.ts` (Direct/Remote parity step): the
+  Direct port and the private wire port answer IDENTICALLY — same Host context, same
+  inputs, same Host order, detached candidates — for bare, explicit scoped,
+  explicitly excluded and home queries. That is the parity proof for the shared
+  router; the ports differ only in transport.
+- L5 — `test/remote-host-file-augmentation.test.ts` (real in-process wire over the
+  REAL `dsh-file-reference-local` Host provider): bare → official; explicit → Host
+  scanner; an explicitly typed `dist/` scope returns its entry while the BARE query
+  for the same entry is an authoritative empty (the discriminating pair); official
+  `[]` → no scanner fallback; home shorthand → absolute Host value; zero Client
+  filesystem discovery with a positive control.
+- User-visible provider behavior — `test/autocomplete-provider.test.ts`
+  (scoped fuzzy, `../` prefix, absolute home value) +
+  `test/file-completion-convergence.test.ts` (directory continuation, untouched Host
+  order, the `/image` Client-local chain).
+- Built/private-Remote qualification — `pnpm smoke:pi-tui-file-reference-built`
+  imports the BUILD chunk that actually exports the experimental Remote runtime
+  (located by its export, never by grepping built JavaScript), composes the real
+  Host + Client runtime and drives the endpoint over the real in-process carrier.
+- Gates — `pnpm typecheck`, `pnpm gate:architecture`, `pnpm gate:boundary`,
+  `node scripts/naming-gate.mjs`, `git diff --check`, and the stage-final
+  `pnpm verify:prepush` plus the migration/compat lanes listed in the PR record.
+  No L6 claim: no runner/application wiring changes here.
+
+### Removal path
+
+When the minimum supported DSH `fileReferences` provider itself supports
+equivalent explicit scoped recursive search, parent/absolute Host path
+navigation, explicit excluded/symlink scope access and a Host-home-safe
+completion representation, the augmentation is deleted: both ports point back at
+the official provider, and the Host router
+(`runtime/direct/host-file-augmentation-direct.ts`), the private contract
+(`runtime/remote/pi-tui-file-reference-contract.ts`), the bridge
+(`runtime/remote/pi-tui-file-reference-host-bridge.ts`) and the Cordis row
+(`app/remote/pi-tui-file-reference-host.ts`) go away — together with the private
+Client contribution, the `fileReferences` Host prerequisite entry and the
+`dsh-typert-protocol` peer if no other production source needs it.
+`MentionProvider` and the port surface stay untouched. The single upstream-
+retirement marker in the Host router names the deletion condition. The POSIX
+ambiguous-backslash guard is a SEPARATE, earlier deletion: it goes when the shared
+`domain/file-completion/query.ts` resolver distinguishes host dialect, token
+dialect and literal backslashes (the pinned cross-dialect contract above).
+
+Root ledger unchanged (`stable = 5`, `legacy = 94`).

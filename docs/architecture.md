@@ -56,12 +56,15 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/domain/file-completion/**` | transport/UI-neutral file-completion query/ranking/discovery policy (TS8-A) |
 | `src/client/file-completion/**` | Client-local filesystem completion capability (`/attach`, `/image`, Save Location) (TS8-A) |
 | `src/tui/file-completion/**` | terminal trigger grammar + completion presentation/local pipeline (TS8-A) |
-| `src/runtime/direct/file-completion/**` | Direct Host WORKSPACE compatibility discovery (TS8-A) |
+| `src/runtime/direct/file-completion/**` | Direct Host scoped discovery: the sessionless WORKSPACE compatibility path AND the explicit Session `@` path-navigation route (TS8-A / TS8-HF1) |
 | `src/domain/media/**` | transport/UI-neutral media vocabulary: media types, durable image/file refs, the deployment image policy, the media failure vocabulary and byte formatting (TS8-C) |
 | `src/client/media/**` | Client-local media capability: image draft/intake/cache/durable-byte loader, generic-file draft/intake/source streaming, and the ONE combined draft lifecycle (`draft-attachments.ts`) (TS8-C) |
 | `src/client/clipboard/**` | Client-local clipboard capability: the read probes (`read.ts`) and the copy delivery policy (`copy.ts`) (TS8-C) |
 | `src/client/url/**` | Client-local external URL opener (TS8-C) |
 | `src/runtime/prepared-prompt.ts` | the transport-neutral `PreparedPrompt` contract (TS8-C) |
+| `src/runtime/remote/pi-tui-file-reference-contract.ts` | the private `piTuiFileReferences` Typert contract: ONE handwritten invocation descriptor both the Host registration and the Client contribution derive from (TS8-HF1) |
+| `src/runtime/remote/pi-tui-file-reference-host-bridge.ts` | the Remote Host-side bridge binding the private method to the Host-scoped `@` completion authority (TS8-HF1) |
+| `src/app/remote/pi-tui-file-reference-host.ts` | the private `piTuiFileReferences` Cordis Host row: service key, explicit Typert registration and row lifetime (TS8-HF1) |
 | remaining historical feature dirs (`…`) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
@@ -185,6 +188,47 @@ keybinding, footer and notification owners from TS5; the transcript presentation
 core and the PiTui transcript mechanics from TS6). It is not an application or
 Host layer — application lifecycle/orchestration stays in `src/app/**`.
 
+## Session `@` completion routing (TS8-HF1)
+
+The session `@` scope has ONE frozen Host-side router, used by BOTH backends:
+
+```text
+bare workspace fuzzy search        -> official ctx.fileReferences
+  @foo @readme @src @.env              (workspace index, cache, exclusions,
+                                       scoring, maxResults stay authoritative)
+
+explicit path navigation           -> dsh-pi-tui Host scoped discovery
+  @src/ @./ @../x @/abs @~/x           (the exact scope the user typed)
+  Windows drive/UNC paths
+```
+
+The route is decided by the TOKEN's own shape (any separator, a root form, or a
+Windows drive/UNC path), never by resolved workspace containment, by official
+result count or by filesystem existence. The official provider is called ONLY on
+the bare route; an authoritative official `[]` stays empty and never falls back to
+the scanner. The scoped route never calls the official provider — so explicitly
+named excluded directories, symlink scopes, parent and absolute paths all work, and
+DSH path resolution never sees a literal `~/...` completion value (the accepted
+candidate is materialized as an absolute Host path; ranking always scores the
+SCOPE-RELATIVE candidate, so the home prefix itself can never fabricate matches).
+
+POSIX BOUNDARY: on a POSIX Host a backslash is an ordinary filename character, but
+the reused TS8-A path resolver selects its Windows dialect from the token alone and
+normalizes the separators (a pinned Client-local cross-dialect contract). The
+augmentation therefore does NOT CLAIM an ambiguous POSIX token containing a
+backslash (`foo\bar`, `dir\name/foo`): it stays with the official provider instead
+of being searched in a normalized (different) directory. That is a deliberate
+fail-closed narrowing, deleted once the shared resolver distinguishes host dialect,
+token dialect and literal backslashes.
+
+Direct and Remote share this authority: the Direct adapter reaches it in-process,
+the Remote Client reaches the SAME router through the private `piTuiFileReferences`
+endpoint (the official `fileReferences` namespace stays mounted and authoritative
+for bare queries). The custom endpoint AUGMENTS the official provider; it does not
+replace it. Bare-query ranking, result bound, exclusion policy, implicit hidden
+matching and cache/invalidation remain official behavior — TS8-HF1 does not restore
+the historical local characteristics there.
+
 ## Source placement and the root ledger
 
 `scripts/source-root-baseline.json` records the current ROOT production modules as
@@ -224,7 +268,7 @@ owners:
 | `status/` | `domain/status/` (DONE — `src/status/` is absent) | TS3 DONE |
 | `image/` | `domain/media/` (neutral vocabulary/failures/formatting) + `client/media/image/` (Client draft/intake/cache/loader) + `client/clipboard/read.ts` (clipboard read) + `app/submission/direct-image-*.ts` (Direct Host admission/model preflight) (DONE — `src/image/` is absent) | TS8-C DONE |
 | `attachment/` | `domain/media/` (neutral refs) + `client/media/attachment/` (Client draft/intake/source streaming) + `app/submission/direct-file-admission.ts` (the Direct Host `saveFileStream` sink) (DONE — `src/attachment/` is absent) | TS8-C DONE |
-| `file-completion/` | `domain/file-completion/` (pure query/ranking/discovery policy) + `client/file-completion/` (Client-local filesystem implementation) + `tui/file-completion/` (editor trigger + `AutocompleteItem` presentation) + `runtime/direct/file-completion/` (Direct Host WORKSPACE compatibility filesystem) (DONE — `src/file-completion/` is absent) | TS8-A DONE |
+| `file-completion/` | `domain/file-completion/` (pure query/ranking/discovery policy) + `client/file-completion/` (Client-local filesystem implementation) + `tui/file-completion/` (editor trigger + `AutocompleteItem` presentation) + `runtime/direct/file-completion/` (Direct Host scoped discovery: the WORKSPACE compatibility path and the explicit Session `@` route) (DONE — `src/file-completion/` is absent) | TS8-A DONE |
 
 The remaining directories stay where they are until their assigned stage; each row
 records the intended owner. A row marked DONE has no compatibility forwarding
