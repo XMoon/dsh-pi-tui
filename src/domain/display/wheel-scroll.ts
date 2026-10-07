@@ -8,7 +8,7 @@
  * ConfigPort like every other TUI preference) but is applied ONLY to the
  * alt screen's constructor option (`TuiAltScreenOptions.wheelScrollLines`)
  * — the fork's wheel handling is never reimplemented here.
- * @module @xmoon76/dsh-pi-tui/wheel-scroll
+ * @module @xmoon76/dsh-pi-tui/domain/display/wheel-scroll
  */
 
 /** The selectable wheel steps, in display order. */
