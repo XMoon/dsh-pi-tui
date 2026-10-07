@@ -3,7 +3,7 @@
  * the registerTuiCommands → installCompletions → MentionProvider chain must end
  * with a working completion menu down in the editor (the natural-typing and
  * Tab flows), exactly like the @ mention menu. The unit tests in
- * mentions.test.ts cover suggestPathArgument in isolation; this file drives
+ * autocomplete-provider.test.ts cover suggestPathArgument in isolation; this file drives
  * the installed completion surface through the real command registration so
  * a broken mapping (e.g. getArgumentCompletions dropped on the way into
  * setCommandCompletions) cannot regress silently.
