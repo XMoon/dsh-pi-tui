@@ -1092,12 +1092,20 @@ export function findSourceRootViolations(baseline, currentRootFiles) {
  * now canonical — `domain/file-completion/**` (neutral query/ranking/discovery
  * policy), `client/file-completion/**` (Client-local filesystem completion),
  * `tui/file-completion/**` (trigger + presentation) and
- * `runtime/direct/file-completion/**` (Direct WORKSPACE compatibility IO). New
- * completion code belongs to its canonical layer; recreating the old mixed
- * directory fails closed. Each later TS8 stage adds its own entry as it
- * retires the next historical directory.
+ * `runtime/direct/file-completion/**` (Direct WORKSPACE compatibility IO).
+ *
+ * TS8-C retires the mixed media/platform directories `src/image/**` and
+ * `src/attachment/**`: their owners are now canonical — `domain/media/**`
+ * (neutral media vocabulary/failures/formatting), `client/media/**` +
+ * `client/clipboard/**` + `client/url/**` (Client-local capability) and
+ * `app/submission/direct-*.ts` + `runtime/prepared-prompt.ts` (application
+ * Direct preparation and the transport-neutral prepared prompt).
+ *
+ * New completion/media/platform code belongs to its canonical layer;
+ * recreating an old mixed directory fails closed. Each later TS8 stage adds
+ * its own entry as it retires the next historical directory.
  */
-export const RETIRED_SOURCE_DIRECTORIES = ['file-completion']
+export const RETIRED_SOURCE_DIRECTORIES = ['file-completion', 'image', 'attachment']
 
 /** Every directory directly under `src/`, sorted (the placement layer's own walk). */
 export function listSourceRootDirectories(dir = SRC) {

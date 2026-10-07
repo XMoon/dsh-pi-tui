@@ -57,7 +57,12 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/client/file-completion/**` | Client-local filesystem completion capability (`/attach`, `/image`, Save Location) (TS8-A) |
 | `src/tui/file-completion/**` | terminal trigger grammar + completion presentation/local pipeline (TS8-A) |
 | `src/runtime/direct/file-completion/**` | Direct Host WORKSPACE compatibility discovery (TS8-A) |
-| remaining historical feature dirs (`image/`, `attachment/`, …) | keep domain ownership until their assigned stage |
+| `src/domain/media/**` | transport/UI-neutral media vocabulary: media types, durable image/file refs, the deployment image policy, the media failure vocabulary and byte formatting (TS8-C) |
+| `src/client/media/**` | Client-local media capability: image draft/intake/cache/durable-byte loader, generic-file draft/intake/source streaming, and the ONE combined draft lifecycle (`draft-attachments.ts`) (TS8-C) |
+| `src/client/clipboard/**` | Client-local clipboard capability: the read probes (`read.ts`) and the copy delivery policy (`copy.ts`) (TS8-C) |
+| `src/client/url/**` | Client-local external URL opener (TS8-C) |
+| `src/runtime/prepared-prompt.ts` | the transport-neutral `PreparedPrompt` contract (TS8-C) |
+| remaining historical feature dirs (`…`) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
 debt, not an invitation to move its semantics into a new layer.
@@ -217,8 +222,8 @@ owners:
 | `notification/` | `domain/notification/` + `tui/notification/` (DONE — `src/notification/` is absent) | TS5 DONE |
 | `plugin-manager/` | `app/plugin-manager/` + `tui/plugin-manager/panel.ts` (DONE — `src/plugin-manager/` is absent) | TS3 + TS4 DONE |
 | `status/` | `domain/status/` (DONE — `src/status/` is absent) | TS3 DONE |
-| `image/` | `client/media/image/` | TS8 |
-| `attachment/` | `client/media/attachment/` | TS8 |
+| `image/` | `domain/media/` (neutral vocabulary/failures/formatting) + `client/media/image/` (Client draft/intake/cache/loader) + `client/clipboard/read.ts` (clipboard read) + `app/submission/direct-image-*.ts` (Direct Host admission/model preflight) (DONE — `src/image/` is absent) | TS8-C DONE |
+| `attachment/` | `domain/media/` (neutral refs) + `client/media/attachment/` (Client draft/intake/source streaming) + `app/submission/direct-file-admission.ts` (the Direct Host `saveFileStream` sink) (DONE — `src/attachment/` is absent) | TS8-C DONE |
 | `file-completion/` | `domain/file-completion/` (pure query/ranking/discovery policy) + `client/file-completion/` (Client-local filesystem implementation) + `tui/file-completion/` (editor trigger + `AutocompleteItem` presentation) + `runtime/direct/file-completion/` (Direct Host WORKSPACE compatibility filesystem) (DONE — `src/file-completion/` is absent) | TS8-A DONE |
 
 The remaining directories stay where they are until their assigned stage; each row

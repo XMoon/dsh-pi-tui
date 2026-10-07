@@ -2549,7 +2549,7 @@
     "host": {
      "audited": true,
      "items": [
-      "src/clipboard.ts callback and fullscreen drag-copy UX"
+      "src/client/clipboard/copy.ts callback and fullscreen drag-copy UX"
      ],
      "notes": "The host callback shape receives only final text."
     },
@@ -2734,7 +2734,7 @@
     "host": {
      "audited": true,
      "items": [
-      "src/clipboard.ts callback supplies host clipboard policy and Copied!/Copy failed feedback."
+      "src/client/clipboard/copy.ts callback supplies host clipboard policy and Copied!/Copy failed feedback."
      ],
      "notes": "The host remains a consumer of the upstream seam, not of a local divergence."
     },
@@ -2777,7 +2777,7 @@
      "Keep the upstream copy-selection API and verify the host callback path on each re-vendor."
     ],
     "replacementMapping": [
-     "Former local clipboard patch -> upstream copySelection/copyOnSelect/active-selection API; host policy remains src/clipboard.ts."
+     "Former local clipboard patch -> upstream copySelection/copyOnSelect/active-selection API; host policy remains src/client/clipboard/copy.ts."
     ],
     "evidence": [
      "Pinned source exposes all required callback and selection methods.",

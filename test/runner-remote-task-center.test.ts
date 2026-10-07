@@ -1112,7 +1112,7 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   // ── A REAL durable image in the CHILD Session. The exact official seam: the
   // real `LocalAttachmentStore.saveImages` admits the PNG, and the returned ref
   // rides a durable child message block — the same `{type:'image', attachment}`
-  // shape `src/image/admission.ts` produces for a submitted image.
+  // shape `src/app/submission/direct-image-admission.ts` produces for a submitted image.
   const attachments = host.ctx.get('attachments') as unknown as FixtureAttachments
   const png = await realPng('#c0ffee', 2)
   const image = (await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'child-a-shot.png' }]))[0]!
@@ -1160,7 +1160,7 @@ test('L6 §14 step 10 + F7: the mounted child viewer routes the durable child im
   await waitFor('the child Session served the durable image bytes', () =>
     served.has(imageKey), 20_000)
 
-  // The loader caches per captured CONTEXT (the `src/image/loader.ts` scope
+  // The loader caches per captured CONTEXT (the `src/client/media/image/loader.ts` scope
   // model), so one ref may legitimately be read once per scope; what must hold
   // is the ROUTING — every read of the child's image addresses the CHILD.
   const imageReads = routed.filter(entry => entry.attachmentId === image.attachmentId)
