@@ -1,9 +1,15 @@
 /**
- * The pending-input presentation join (D2.2): the ONE authoritative place that
- * turns the Host-owned pending-input projection plus the client-local
- * submission echoes into the queue-pane rows and the ordered conversation-tail
- * lane (user steering rows interleaved with non-user context occurrences) the
- * TUI renders.
+ * The pending-input presentation join (D2.2 / TS8-E): the ONE authoritative
+ * place that turns the Host-owned pending-input projection plus the
+ * client-local submission echoes into the queue-pane rows and the ordered
+ * conversation-tail lane (user steering rows interleaved with non-user context
+ * occurrences) the TUI renders.
+ *
+ * This is an APPLICATION-presentation projection: it reads the current
+ * subject's authoritative pending snapshot and the local optimistic echoes and
+ * produces the mounted surface's presentation DTOs. It owns no submission
+ * write, no echo lifecycle and no terminal mechanics — the concrete TUI
+ * (`tui-app.ts` + `tui/components/**`) only consumes and renders these DTOs.
  *
  * The join is identity-only: an authoritative occurrence suppresses a local
  * echo when their `rpcId`/`requestId` match. Text is never a correlation key,
@@ -14,19 +20,73 @@
  * The runner supplies the content text formatter, so this module stays
  * Host-free and transport-free while the single join rule remains shared by the
  * Direct production path and the experimental Remote path.
- *
- * It also owns the queue-PANE row fold (`foldQueueRows` plus the semantic
- * pending-item projection) the mounted surface renders.
- *
- * @module @xmoon76/dsh-pi-tui/pending-presentation
+ * @module @xmoon76/dsh-pi-tui/app/surface/pending-presentation
  */
 
-import { pendingSubmissionsNotReplaced } from './pending-submission.ts'
-import type { SubmissionPresentationItem } from './submission-presentation.ts'
-import type { PendingInputItem, PendingInputSnapshot } from './runtime/pending-input-reader-port.ts'
-import type { PendingContextRow, PendingTailRow, PendingUserRow, QueueItem } from './tui-app.ts'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { fileAttachmentSummary } from './domain/media/file-summary.ts'
+import { pendingSubmissionsNotReplaced } from '../submission/pending-submission.ts'
+import type { QueueInboxMessage } from '../submission/pending-input.ts'
+import type { SubmissionPresentationItem } from '../submission/presentation.ts'
+import type { PendingInputItem, PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
+import { fileAttachmentSummary } from '../../domain/media/file-summary.ts'
+
+/** One semantic queued pending-input row for the queue pane. */
+export interface QueueItem {
+  /** The pending message id (agent inbox identity), or a local request id. */
+  id: string
+  /** The message text, single-line display form. */
+  text: string
+  /** next-turn followup vs next-step steer. */
+  mode: 'followup' | 'steer'
+  /** The correlation identity (authoritative rpc id or local request id). */
+  rpcId?: string
+  /** A client-local echo not yet backed by an authoritative occurrence. */
+  local?: boolean
+}
+
+/** One pending user-input row for the ephemeral conversation-tail lane: an
+ * authoritative `steering` occurrence or a client-local submission echo. It is
+ * never durable transcript content. */
+export interface PendingUserRow {
+  /** The occurrence id (Host) or request id (local echo). */
+  id: string
+  /** Display text (attachment markers included). */
+  text: string
+  /** The correlation identity (authoritative rpc id or local request id). */
+  rpcId?: string
+  /** A client-local echo not yet backed by an authoritative occurrence. */
+  local?: boolean
+  /** The pending status line: an accepted steer reads `steering…`, an idle
+   * prompt awaiting its durable message reads `sending…`. */
+  status?: 'steering' | 'sending'
+  /** Whether `text` is the row's COMPLETE content (text-only user input), so
+   * the same visual-row disclosure as a durable text-only user message
+   * applies. ABSENT means UNKNOWN and fails open to the FULL presentation —
+   * a pending row carrying attachment markers must never be folded only to
+   * materialize as a full mixed-content durable bubble. */
+  foldableText?: boolean
+}
+
+/** One pending non-user Context row for the ephemeral conversation-tail
+ * lane: an authoritative `placement === 'context'` occurrence (background /
+ * injected input parked in the Host inbox before materialization). It has a
+ * NON-user visual identity, is never durable transcript content, and never
+ * correlates with a client-local echo. */
+export interface PendingContextRow {
+  /** The Host occurrence id. */
+  id: string
+  /** Display text (the runner's single-line content projection). */
+  text: string
+}
+
+/** One ordered conversation-tail row: the join's projection unit for the
+ * ephemeral lane — an authoritative `steering` occurrence or a client-local
+ * user echo (`user`), or an authoritative non-user `context` occurrence
+ * (`context`). It lives beside its row shapes and the join that produces it,
+ * so there is exactly one definition. */
+export type PendingTailRow =
+  | { readonly kind: 'user'; readonly row: PendingUserRow }
+  | { readonly kind: 'context'; readonly row: PendingContextRow }
 
 /** The joined pending-input rows for one subject. */
 export interface PendingPresentationRows {
@@ -38,6 +98,20 @@ export interface PendingPresentationRows {
   readonly tail: readonly PendingTailRow[]
   /** Activity of the subject (drives the queue-pane steer hint). */
   readonly running: boolean
+}
+
+/** The single atomic pending-input presentation update. Queue rows, the ONE
+ * ordered ephemeral conversation-tail lane (user steering rows interleaved
+ * with non-user context occurrences), and the subject's activity move
+ * together so a handoff never paints an intermediate blank/duplicate frame. */
+export interface PendingInputPresentation {
+  /** Authoritative `queued` occurrences plus client-local queued echoes. */
+  queued: readonly QueueItem[]
+  /** The ordered conversation tail: `steering`/local-user rows plus
+   * non-user `context` occurrences, in the join's projection order. */
+  tail: readonly PendingTailRow[]
+  /** Activity of the same pending-input subject (drives the queue steer hint). */
+  running: boolean
 }
 
 /** Inputs of one join. */
@@ -160,21 +234,6 @@ function echoText(echo: SubmissionPresentationItem): string {
   const markers = echo.attachments.map(attachment =>
     attachment.kind === 'image' ? `[Image: ${attachment.label}]` : `[File: ${attachment.label}]`)
   return [echo.text, ...markers].filter(part => part !== '').join(' ')
-}
-
-/** One semantic pending-input item as the queue mirror sees it. */
-export interface QueueInboxMessage {
-  readonly id: string
-  readonly content: readonly ContentBlock[]
-}
-
-/** Adapt one semantic pending-input item to the queue pane's presentation
- * projection without reintroducing backend-specific fields. */
-export function queueInboxMessageOf(item: PendingInputItem): QueueInboxMessage {
-  return {
-    id: item.id,
-    content: item.content as readonly ContentBlock[],
-  }
 }
 
 /** The queue-pane rows for one semantic pending-input batch. */

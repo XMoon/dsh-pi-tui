@@ -244,7 +244,7 @@ function mountBoundaryHarness(turns: number, options: {
     },
   } as unknown as SurfaceEventRoutingSource<never>
 
-  const surface = createSurfaceRuntime({
+  const surface =  createSurfaceRuntime({
     tuiVersion: '0.0.0-test',
     notificationPresentation: nullNotificationPresentation,
     notificationMode: undefined,

@@ -42,7 +42,7 @@ import {
   type SubagentPromptReject,
   type SubagentViewerSubmitRequest,
 } from '../../subagent-viewer-submit.ts'
-import { mergeDraft } from '../../steer.ts'
+import { mergeDraft } from '../submission/steer.ts'
 import type { ViewerAccess } from '../../tasks-browser.ts'
 import type { StreamingToolPreview } from '../../tui-app.ts'
 import type { SurfaceRuntime, SurfaceViewedChildPresentation } from './runtime.ts'

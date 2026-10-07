@@ -24,7 +24,7 @@
 
 import type { PresentationReader } from '../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../runtime/session-reader-port.ts'
-import type { SubmissionPresentationSource } from '../submission-presentation.ts'
+import type { SubmissionPresentationSource } from './submission/presentation.ts'
 import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
 import type { PiTuiExtensionService } from '../extensions.ts'

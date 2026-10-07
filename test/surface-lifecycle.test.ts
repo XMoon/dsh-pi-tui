@@ -279,7 +279,7 @@ const nullPresentation = {
 }
 
 test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge detach', () => {
-  const surface = createSurfaceRuntime({
+  const surface =  createSurfaceRuntime({
     tuiVersion: '0.0.0-test',
     notificationPresentation: nullPresentation,
     notificationMode: undefined,

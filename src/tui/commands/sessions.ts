@@ -12,7 +12,7 @@
 import { scheduler } from 'node:timers/promises'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PickerCategory, TuiApp } from '../../tui-app.ts'
-import { TransitionInProgressError } from '../../session-operation-barrier.ts'
+import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError } from '../../app/session/scope.ts'
 import { cancellationError, isCancellation, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'

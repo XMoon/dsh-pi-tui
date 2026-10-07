@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SessionTransitionGate } from '../src/transition-gate.ts'
+import { SessionTransitionGate } from '../src/app/session/transition-gate.ts'
 
 /** A promise the test resolves manually, to stage in-flight races. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {

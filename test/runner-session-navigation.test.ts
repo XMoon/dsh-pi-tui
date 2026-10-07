@@ -9,7 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldPendingModelSelection } from '../src/model-selection.ts'
+import { foldPendingModelSelection } from '../src/domain/session/model-selection.ts'
 import {
   disposeContext,
   event,

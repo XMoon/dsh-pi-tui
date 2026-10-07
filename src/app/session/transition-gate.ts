@@ -24,7 +24,7 @@
  * and a task that re-enters the gate (calls `run` from inside its own
  * async continuation) is refused loudly via AsyncLocalStorage — re-entry
  * would deadlock the queue.
- * @module @xmoon76/dsh-pi-tui/transition-gate
+ * @module @xmoon76/dsh-pi-tui/app/session/transition-gate
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'

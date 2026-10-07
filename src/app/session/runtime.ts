@@ -23,7 +23,7 @@ import {
   type SessionHandle,
   type SessionLifecycle,
 } from '../../runtime/session-lifecycle-port.ts'
-import { isRewindIdentityCurrent, type RewindNavigationIdentity } from '../../session-fork.ts'
+import { isRewindIdentityCurrent, type RewindNavigationIdentity } from './navigation-identity.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
   SessionOwnerAccess,
@@ -33,7 +33,7 @@ import type {
 import type { ForkSourcePin, SessionOwnershipCore } from './ownership-core.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './scope.ts'
 import type { SessionOwnerRef } from './subject.ts'
-import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from '../../transition.ts'
+import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
 
 /** The runner-supplied surface operations the runtime drives. */
 export interface SessionRuntimeSurface {

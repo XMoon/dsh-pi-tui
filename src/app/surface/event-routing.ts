@@ -26,8 +26,8 @@ import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import type { PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
-import type { SubmissionPresentationItem } from '../../submission-presentation.ts'
-import type { SubmitLatencyPhase } from '../../submit-latency.ts'
+import type { SubmissionPresentationItem } from '../submission/presentation.ts'
+import type { SubmitLatencyPhase } from '../submission/latency.ts'
 import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import {
   busyAfterTurnBoundary,

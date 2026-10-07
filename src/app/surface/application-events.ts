@@ -39,13 +39,14 @@ import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { checkImageLimits } from '../../client/media/image/intake.ts'
 import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
 import { resolveComposerDelivery } from '../../commands.ts'
-import { rewindCandidateOfLoadedWindow, rewindOutlineRows } from '../../rewind.ts'
+import { rewindCandidateOfLoadedWindow } from '../../domain/session/rewind.ts'
+import { rewindOutlineRows } from './rewind-presentation.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import type { SubagentPort } from '../../runtime/subagent-port.ts'
-import type { RewindNavigationIdentity } from '../../session-fork.ts'
-import { mergeDraft, steerAll, type SteerSubjectLike } from '../../steer.ts'
+import type { RewindNavigationIdentity } from '../session/navigation-identity.ts'
+import { mergeDraft, steerAll, type SteerSubjectLike } from '../submission/steer.ts'
 import {
   isEmptyAcceleratedViewerSubmit,
   type TuiApp,

@@ -31,7 +31,7 @@ import {
 import { cancellationError } from '../../detached.ts'
 import { contextPressureOccupancy, type SessionContentSearchPage, type SessionProjectionSummary, type SessionReader, type SessionStatusProjection, type SessionSummary } from '../session-reader-port.ts'
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
-import { directTurnOutlineCompat } from '../../rewind.ts'
+import { directTurnOutlineCompat } from './turn-outline-compat.ts'
 import { detachedSessionStatus } from '../session-status-projection.ts'
 
 /**

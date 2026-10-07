@@ -10,7 +10,7 @@
  * Each tracked promise is the caller's settlement promise, which (for Direct)
  * already includes its own fenced correction. The barrier owns no Host state,
  * performs no I/O, and is pure enough to unit-test directly.
- * @module @xmoon76/dsh-pi-tui/default-write-barrier
+ * @module @xmoon76/dsh-pi-tui/app/command/model-default-write-barrier
  */
 
 /** Tracks every in-flight default write and lets a caller await them all. */

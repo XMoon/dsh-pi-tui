@@ -24,7 +24,7 @@ import {
 } from '../src/app/submission/runtime.ts'
 import type { PresetCatalog } from '../src/runtime/catalog-port.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
-import { mergeDraft } from '../src/steer.ts'
+import { mergeDraft } from '../src/app/submission/steer.ts'
 import { KeybindingEditorController } from '../src/tui/keybindings/ui/controller.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'

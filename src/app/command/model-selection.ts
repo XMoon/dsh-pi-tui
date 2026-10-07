@@ -13,9 +13,9 @@
  * @module @xmoon76/dsh-pi-tui/app/command/model-selection
  */
 
-import { DefaultIntentTracker } from '../../default-intent.ts'
-import { DefaultWriteBarrier } from '../../default-write-barrier.ts'
-import { sameModelSelection, type ModelSelectionValue } from '../../model-selection.ts'
+import { DefaultIntentTracker } from './model-default-intent.ts'
+import { DefaultWriteBarrier } from './model-default-write-barrier.ts'
+import { sameModelSelection, type ModelSelectionValue } from '../../domain/session/model-selection.ts'
 
 /** The TUI-only selection facade shape (structurally the Host
  *  `ModelSelectionRef`, never imported). */

@@ -242,14 +242,20 @@ import { summarizeWorkSpan, type CompactWorkSummary } from './tui/transcript/wor
 import { ContextClusterComponent } from './tui/components/transcript/context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './tui/transcript/context-structure.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './tui/components/transcript/context-row.ts'
-import { PendingContextComponent } from './pending-context.ts'
+import { PendingContextComponent } from './tui/components/transcript/pending-context.ts'
+// TS8-E: the pending-input presentation DTOs are an application-facing
+// presentation contract owned by app/surface/pending-presentation.ts. TuiApp
+// (PiTui mechanics) consumes their shape; the type re-export keeps TuiApp's
+// existing row-type consumers source-compatible.
+import type { PendingContextRow, PendingInputPresentation, PendingTailRow, PendingUserRow, QueueItem } from './app/surface/pending-presentation.ts'
+export type { PendingInputPresentation, PendingPresentationInput, PendingPresentationRows, PendingContextRow, PendingTailRow, PendingUserRow, QueueItem } from './app/surface/pending-presentation.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { FocusTimingStore } from './focus-timing.ts'
 import { WorkingIndicator, workingFramesFor } from './working.ts'
 import { iconFor, iconLead, iconPrefix } from './tui/icons.ts'
 import type { IconStyle } from './domain/display/icons.ts'
 import { indeterminateProgressFrames } from './progress.ts'
-import { submitAckLabel, type SubmitPendingDetail } from './submit-ack.ts'
+import { submitAckLabel, type SubmitPendingDetail } from './app/submission/ack.ts'
 import { cancellationError, type OwnedTaskOptions } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
 import type { SurfaceHost } from './extension/internal/surface-host.ts'
@@ -1433,63 +1439,6 @@ export interface StatusData {
   usage?: UsageStatus
 }
 
-/** One semantic queued pending-input row for the queue pane. */
-export interface QueueItem {
-  /** The pending message id (agent inbox identity), or a local request id. */
-  id: string
-  /** The message text, single-line display form. */
-  text: string
-  /** next-turn followup vs next-step steer. */
-  mode: 'followup' | 'steer'
-  /** The correlation identity (authoritative rpc id or local request id). */
-  rpcId?: string
-  /** A client-local echo not yet backed by an authoritative occurrence. */
-  local?: boolean
-}
-
-/** One pending user-input row for the ephemeral conversation-tail lane: an
- * authoritative `steering` occurrence or a client-local submission echo. It is
- * never durable transcript content. */
-export interface PendingUserRow {
-  /** The occurrence id (Host) or request id (local echo). */
-  id: string
-  /** Display text (attachment markers included). */
-  text: string
-  /** The correlation identity (authoritative rpc id or local request id). */
-  rpcId?: string
-  /** A client-local echo not yet backed by an authoritative occurrence. */
-  local?: boolean
-  /** The pending status line: an accepted steer reads `steering…`, an idle
-   * prompt awaiting its durable message reads `sending…`. */
-  status?: 'steering' | 'sending'
-  /** Whether `text` is the row's COMPLETE content (text-only user input), so
-   * the same visual-row disclosure as a durable text-only user message
-   * applies. ABSENT means UNKNOWN and fails open to the FULL presentation —
-   * a pending row carrying attachment markers must never be folded only to
-   * materialize as a full mixed-content durable bubble. */
-  foldableText?: boolean
-}
-
-/** One pending non-user Context row for the ephemeral conversation-tail
- * lane: an authoritative `placement === 'context'` occurrence (background /
- * injected input parked in the Host inbox before materialization). It has a
- * NON-user visual identity, is never durable transcript content, and never
- * correlates with a client-local echo. */
-export interface PendingContextRow {
-  /** The Host occurrence id. */
-  id: string
-  /** Display text (the runner's single-line content projection). */
-  text: string
-}
-
-/** One ordered conversation-tail row: the join's projection unit for the
- * ephemeral lane — an authoritative `steering` occurrence or a client-local
- * user echo (`user`), or an authoritative non-user `context` occurrence
- * (`context`). The join (`pending-presentation.ts`) imports this union;
- * it lives here beside its row shapes so there is exactly one definition. */
-export type PendingTailRow =
-  | { readonly kind: 'user'; readonly row: PendingUserRow }
-  | { readonly kind: 'context'; readonly row: PendingContextRow }
 
 /** The stable presentation identity of one pending-user row: the rpc
  * correlation when present (a local echo and its authoritative occurrence
@@ -1512,20 +1461,6 @@ function pendingTailRowKey(item: PendingTailRow): string {
   return item.kind === 'user'
     ? (item.row.rpcId !== undefined ? `rpc:${item.row.rpcId}` : `id:${item.row.id}`)
     : `ctx:${item.row.id}`
-}
-
-/** The single atomic pending-input presentation update. Queue rows, the ONE
- * ordered ephemeral conversation-tail lane (user steering rows interleaved
- * with non-user context occurrences), and the subject's activity move
- * together so a handoff never paints an intermediate blank/duplicate frame. */
-export interface PendingInputPresentation {
-  /** Authoritative `queued` occurrences plus client-local queued echoes. */
-  queued: readonly QueueItem[]
-  /** The ordered conversation tail: `steering`/local-user rows plus
-   * non-user `context` occurrences, in the join's projection order. */
-  tail: readonly PendingTailRow[]
-  /** Activity of the same pending-input subject (drives the queue steer hint). */
-  running: boolean
 }
 
 /** Injectable TuiApp options; every field is optional. */
@@ -2767,7 +2702,7 @@ export class TuiApp {
   private compactionPhase: CompactionPhase = 'idle'
   /** The working row's turn-derived activity (setWorking input). */
   private workingActive = false
-  /** Local submit acknowledgement (submit-ack.ts, plan D): the submission
+  /** Local submit acknowledgement (app/submission/ack.ts, plan D): the submission
    * work between the editor clearing and the FIRST authoritative DSH event
    * ('submit' → Submitting…, 'queued' → Queued…). A status driver for the
    * working row — never a synthetic transcript row. */

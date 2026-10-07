@@ -7,7 +7,7 @@
  * independent of Cordis and Host services lets Direct and future Remote
  * adapters share the same ownership rules without importing DSH internals.
  *
- * @module @xmoon76/dsh-pi-tui/model-selection
+ * @module @xmoon76/dsh-pi-tui/domain/session/model-selection
  */
 
 /** Detached provider/model/effort data used at the semantic boundary. */

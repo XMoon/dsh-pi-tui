@@ -11,7 +11,7 @@ import test from 'node:test'
 import {
   SessionOperationBarrier,
   TransitionInProgressError,
-} from '../src/session-operation-barrier.ts'
+} from '../src/app/session/operation-barrier.ts'
 
 async function settle(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 0))

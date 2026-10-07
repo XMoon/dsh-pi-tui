@@ -31,7 +31,7 @@ import { cancellationError, isCancellation, runOwned } from '../../detached.ts'
 import type { Diag } from '../../diag.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import { runReservedSubmit } from './submit-flow.ts'
-import { TransitionInProgressError } from '../../session-operation-barrier.ts'
+import { TransitionInProgressError } from '../session/operation-barrier.ts'
 import {
   formatShellSubmitText,
   submitShellResult,
@@ -47,7 +47,7 @@ import {
   steerAll,
   steerHasPayload,
   type SteerSubjectLike,
-} from '../../steer.ts'
+} from './steer.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 
 /** One accepted queue pull-back whose local representation waits on a transition. */
@@ -270,7 +270,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
 // TUI operations as narrow hooks (editor/card/notify/ack/session-writer); this
 // module decides the ORDER and the terminal settlement, and is therefore the
 // single place a future `session/writer-held` recovery is added. The helpers
-// (`src/steer.ts`, `src/shell-context.ts`) keep their own write bodies.
+// (`app/submission/steer.ts`, `src/shell-context.ts`) keep their own write bodies.
 
 /**
  * One completed `!` context run's submission (kimi parity). The runner owns the
@@ -767,7 +767,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
   // not a record (completed `!`/`!!` runs).
   deps.clearSettledLocalMessages()
   // The payload verdict is computed ONCE here on the SERIALIZED wire form and
-  // passed to steerAll (steer.ts never guesses shell/image semantics): `!` /
+  // passed to steerAll (app/submission/steer.ts never guesses shell/image semantics): `!` /
   // `!!` shell modes make a bare prefix a payload, attachment placeholders
   // make an empty-text draft a payload, whitespace alone is not.
   const draftHasPayload = text.trim() !== '' || deps.draftHasAttachments(text)

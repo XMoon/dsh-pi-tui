@@ -7,7 +7,7 @@ import {
   rawSelectionFromRequestHeader,
   sameModelSelection,
   selectionFromRequestHeader,
-} from '../src/model-selection.ts'
+} from '../src/domain/session/model-selection.ts'
 
 const header = (provider: string, model: string, reasoningEffort?: string, adapterDefault = false) => ({
   config: {

@@ -43,6 +43,9 @@
     "import:dsh-agent",
     "import:dsh-session"
   ],
+  "domain/session/rewind.ts": [
+    "import:dsh-session"
+  ],
   "domain/status/stats.ts": [
     "import:dsh-session"
   ],
@@ -54,9 +57,6 @@
   ],
   "index.ts": [
     "import:dsh-agent"
-  ],
-  "rewind.ts": [
-    "import:dsh-session"
   ],
   "runtime/direct/backend-direct.ts": [
     "shell"
@@ -132,6 +132,9 @@
   ],
   "runtime/direct/subagent-direct.ts": [
     "subagents"
+  ],
+  "runtime/direct/turn-outline-compat.ts": [
+    "import:dsh-session"
   ],
   "sessions.ts": [
     "import:dsh-session"

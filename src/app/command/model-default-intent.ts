@@ -17,10 +17,10 @@
  *
  * Pure and Host-free: the selection is the structural `ModelSelectionValue`
  * (or any caller-supplied selection type), never a DSH Host type.
- * @module @xmoon76/dsh-pi-tui/default-intent
+ * @module @xmoon76/dsh-pi-tui/app/command/model-default-intent
  */
 
-import type { ModelSelectionValue } from './model-selection.ts'
+import type { ModelSelectionValue } from '../../domain/session/model-selection.ts'
 
 /** One default-intent operation (the settle-authority record the command
  *  surface reads to settle a specific operation). */

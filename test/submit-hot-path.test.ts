@@ -215,7 +215,7 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
     },
     inject: (message: unknown) => { host?.injected.push(message) },
     // The official Agent shape is `cancel(cause, options?)` — the knobs are
-    // OPTIONAL (`src/interrupt.ts`), and the Direct retirement's pre-cancel
+    // OPTIONAL (`app/session/interrupt.ts`), and the Direct retirement's pre-cancel
     // deliberately calls it with no knobs at all (the port hides them). The
     // fake must tolerate the no-arg call instead of reading an undefined
     // options object.

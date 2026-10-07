@@ -46,7 +46,7 @@ import type {} from '@deepseek-ai/dsh-token-meter'
 import { selectBlankSessionPreset, sessionPresetOf } from '../runtime/direct/session-preset-direct.ts'
 import { DirectTuiSettings, type SettingsFormsLike } from '../runtime/direct/tui-settings-direct.ts'
 import type { DefaultModelServiceLike } from '../runtime/direct/model-selection-direct.ts'
-import { rawSelectionFromRequestHeader } from '../model-selection.ts'
+import { rawSelectionFromRequestHeader } from '../domain/session/model-selection.ts'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
@@ -95,7 +95,7 @@ import type { DirectPrepareInputDeps } from './submission/direct-message-prepara
 import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
-import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from '../steer.ts'
+import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from './submission/steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
 import type { RemoteApplicationOverride, RemoteTransportLifetime } from '../app/application-runtime.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
@@ -123,7 +123,7 @@ import { type HumanSkillCatalog } from '../skill-catalog.ts'
 import { dangerCommand } from '../command-policy.ts'
 import { resolveInitialCatalog } from '../surface-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
-import { queueTextOf } from '../pending-presentation.ts'
+import { queueTextOf } from '../app/surface/pending-presentation.ts'
 import { bundleVersion, packageVersion } from '../dsh-version.ts'
 import { hostRunningProfile, resumeCommand } from '../dsh-profile.ts'
 
@@ -1273,7 +1273,7 @@ export function applyRunnerWithRuntime(
     // retirement coordinator is fully wired before any owner is created.)
 
     /** The ordinary session-transition transaction. Its canonical ordering
-     * lives in `runTransitionTo` (src/transition.ts — unit-tested): quiesce and
+     * lives in `runTransitionTo` (app/session/transition.ts — unit-tested): quiesce and
      * flush the old owner, run caller preflight, create/open the child, commit
      * the visible handle synchronously, then retire the old Direct owner and
      * refresh the child surface. Published children are never treated as if

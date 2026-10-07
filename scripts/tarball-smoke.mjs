@@ -385,7 +385,7 @@ function main() {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(builtins|client\/media\/image\/types|command-policy|commands|communication-policy|compaction-presentation|diag|display-preset|domain\/media\/types|dsh-profile|dsh-profile|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|interrupt|pending-presentation|skill-catalog|startup|subagent-viewer|surface-catalog|task-presentation|tui-config)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/session\/interrupt|app\/submission\/pending-input|app\/surface\/pending-presentation|builtins|client\/media\/image\/types|command-policy|commands|communication-policy|compaction-presentation|diag|display-preset|domain\/media\/types|dsh-profile|dsh-profile|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|skill-catalog|startup|subagent-viewer|surface-catalog|task-presentation|tui-config)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }

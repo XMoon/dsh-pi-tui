@@ -6,8 +6,9 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { collectRewindCandidates, isHumanTurnMessage, rewindPickerItem } from '../src/rewind.ts'
-import { isRewindIdentityCurrent } from '../src/session-fork.ts'
+import { collectRewindCandidates, isHumanTurnMessage } from '../src/domain/session/rewind.ts'
+import { rewindPickerItem } from '../src/tui/pickers/rewind.ts'
+import { isRewindIdentityCurrent } from '../src/app/session/navigation-identity.ts'
 
 function event<K extends string>(type: K, data: Record<string, unknown>, seq: number): SessionEvent {
   return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent

@@ -59,7 +59,7 @@ const nullPresentation = {
 
 /** The real surface owner over a null notification sink (cheap, no mount). */
 function surfaceOwner() {
-  return createSurfaceRuntime({
+  return  createSurfaceRuntime({
     tuiVersion: '0.0.0-test',
     notificationPresentation: nullPresentation,
     notificationMode: undefined,

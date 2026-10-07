@@ -7,9 +7,9 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { buildPendingPresentation } from '../src/pending-presentation.ts'
+import { buildPendingPresentation } from '../src/app/surface/pending-presentation.ts'
 import type { PendingInputSnapshot } from '../src/runtime/pending-input-reader-port.ts'
-import type { SubmissionPresentationItem } from '../src/submission-presentation.ts'
+import type { SubmissionPresentationItem } from '../src/app/submission/presentation.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

@@ -40,7 +40,7 @@
  * session that reports back. Marks for other sessions or without a
  * baseline are ignored; the tracker never throws and a timing failure can
  * never affect the session.
- * @module @xmoon76/dsh-pi-tui/submit-latency
+ * @module @xmoon76/dsh-pi-tui/app/submission/latency
  */
 
 export type SubmitLatencyPhase =

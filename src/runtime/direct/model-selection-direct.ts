@@ -19,7 +19,7 @@ import {
   sameModelSelection,
   selectionFromRequestHeader,
   type ModelSelectionValue,
-} from '../../model-selection.ts'
+} from '../../domain/session/model-selection.ts'
 
 /** The narrow default-model service surface used by this Direct owner. */
 export interface DefaultModelServiceLike {

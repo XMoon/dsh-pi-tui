@@ -7,13 +7,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PendingSubmissions, pendingSubmissionsNotReplaced } from '../src/pending-submission.ts'
+import { PendingSubmissions, pendingSubmissionsNotReplaced } from '../src/app/submission/pending-submission.ts'
+import { DirectSubmissionPresentation } from '../src/app/submission/presentation.ts'
 import {
-  DirectSubmissionPresentation,
   RemoteSubmissionPresentation,
   type RemoteSubmissionSessionFace,
   type RemoteSubmissionSessionsSource,
-} from '../src/submission-presentation.ts'
+} from '../src/app/remote/submission-presentation.ts'
 import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 function remoteSessions(byId: Readonly<Record<string, RemoteSubmissionSessionFace>>): RemoteSubmissionSessionsSource {

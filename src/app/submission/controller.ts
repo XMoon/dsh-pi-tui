@@ -35,18 +35,18 @@ import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExit
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
-import { PendingSubmissions, type PendingSubmissionPlacement } from '../../pending-submission.ts'
-import { queueInboxMessageOf } from '../../pending-presentation.ts'
+import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
+import { queueInboxMessageOf } from './pending-input.ts'
 import type { HostCommandExecution, HostCommandOutcome, HostCommandPort } from '../../runtime/host-command-port.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import { shellCommandOf } from '../../shell-context.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
-import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from '../../submit-ack.ts'
-import { SubmitLatencyTracker, type SubmitLatencyPhase } from '../../submit-latency.ts'
-import { DirectSubmissionPresentation, type SubmissionPresentationSource } from '../../submission-presentation.ts'
-import { mergeDraft, refuseByTransitionFence } from '../../steer.ts'
+import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './ack.ts'
+import { SubmitLatencyTracker, type SubmitLatencyPhase } from './latency.ts'
+import { DirectSubmissionPresentation, type SubmissionPresentationSource } from './presentation.ts'
+import { mergeDraft, refuseByTransitionFence } from './steer.ts'
 import type { ComposerSubmitRequest, TuiApp } from '../../tui-app.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
@@ -266,7 +266,7 @@ export interface SubmissionController {
   /** Correlate one authoritative durable occurrence by request id. */
   observeDurable(rpcId: string): void
   /** The client-local presentation echoes for one session. */
-  snapshotEchoes(sessionId: string | undefined): readonly import('../../submission-presentation.ts').SubmissionPresentationItem[] | undefined
+  snapshotEchoes(sessionId: string | undefined): readonly import('./presentation.ts').SubmissionPresentationItem[] | undefined
   /** The image submission deps the command runner consumes. */
   prepareDeps(): DirectPrepareInputDeps
   /** Publish one local submission echo. The composition root resolves the
@@ -438,8 +438,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
   }
 
-  // ── Local submit acknowledgement + latency timeline (submit-ack.ts /
-  // submit-latency.ts) ── the immediate "Submitting…" / "Queued…" row
+  // ── Local submit acknowledgement + latency timeline (app/submission/ack.ts /
+  // app/submission/latency.ts) ── the immediate "Submitting…" / "Queued…" row
   // between the editor clearing and the FIRST authoritative DSH event,
   // and the T0-T5 phase timings for the diag channel. The window is real
   // even without any per-submit persistence check: session create, image

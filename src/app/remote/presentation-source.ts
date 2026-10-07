@@ -31,8 +31,8 @@
 
 import type { PresentationReader } from '../../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../../runtime/session-reader-port.ts'
-import type { SubmissionPresentationSource } from '../../submission-presentation.ts'
-import { RemoteSubmissionPresentation } from '../../submission-presentation.ts'
+import type { SubmissionPresentationSource } from '../submission/presentation.ts'
+import { RemoteSubmissionPresentation } from './submission-presentation.ts'
 import { RemoteTaskReader } from '../../runtime/remote/task-read-remote.ts'
 import { CURRENT_STATUS_PROJECTION_KEYS } from '../../runtime/remote/session-reader-remote.ts'
 import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'

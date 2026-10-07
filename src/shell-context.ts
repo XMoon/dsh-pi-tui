@@ -17,9 +17,9 @@
  */
 
 import { cancellationError } from './detached.ts'
-import { sessionUnchanged } from './steer.ts'
+import { sessionUnchanged } from './app/submission/steer.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
-import { TransitionInProgressError } from './session-operation-barrier.ts'
+import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError } from './app/session/scope.ts'
 
 /** The minimal agent surface the shell submit needs (the runner's live agent). */

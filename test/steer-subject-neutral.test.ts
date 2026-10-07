@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { sessionUnchanged, steerAll, type SteerDeps, type SteerSubjectLike } from '../src/steer.ts'
+import { sessionUnchanged, steerAll, type SteerDeps, type SteerSubjectLike } from '../src/app/submission/steer.ts'
 import type { WriteOutcome } from '../src/runtime/write-outcome.ts'
 
 const CHILD = 'child-x'

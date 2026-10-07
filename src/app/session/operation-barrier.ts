@@ -22,7 +22,7 @@
  * it quiesces the old agent, and no new writer can enter while it runs.
  * The old FIFO gate (SessionTransitionGate) remains for the single-writer
  * transition rule; correctness no longer rests on a `busy` flag.
- * @module @xmoon76/dsh-pi-tui/session-operation-barrier
+ * @module @xmoon76/dsh-pi-tui/app/session/operation-barrier
  */
 
 /** Thrown by `runWriter` while a transition is frozen: the caller refuses

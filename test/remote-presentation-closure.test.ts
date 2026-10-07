@@ -18,11 +18,11 @@ import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { RemotePendingInputReader } from '../src/runtime/remote/pending-input-reader-remote.ts'
-import { RemoteSubmissionPresentation } from '../src/submission-presentation.ts'
-import type { RemotePendingSubmission } from '../src/submission-presentation.ts'
+import { RemoteSubmissionPresentation } from '../src/app/remote/submission-presentation.ts'
+import type { RemotePendingSubmission } from '../src/app/remote/submission-presentation.ts'
 import type { RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
 import { createObservableGenerationHarness } from './support/remote-generation.ts'
-import { buildPendingPresentation } from '../src/pending-presentation.ts'
+import { buildPendingPresentation } from '../src/app/surface/pending-presentation.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {

@@ -25,7 +25,7 @@
  * This module is transport-neutral and pure: it never reads a Host inbox and
  * never touches the terminal. The runner owns the refresh scheduling and the
  * atomic presentation handoff.
- * @module @xmoon76/dsh-pi-tui/pending-submission
+ * @module @xmoon76/dsh-pi-tui/app/submission/pending-submission
  */
 
 /** Where a local submission is presented while pending. */
