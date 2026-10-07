@@ -224,16 +224,16 @@ test('an allowlisted call cannot be swapped for a different call site in the sam
   const life = testLifecycle(t)
   // Same file as an allowance, DIFFERENT expression: a per-file count would
   // excuse it; the file + normalized call-site key must not.
-  const { root, path } = syntheticSource(life, 'gate-swap-', 'src/transcript.ts', 'export const events = session.snapshotEvents()\n')
+  const { root, path } = syntheticSource(life, 'gate-swap-', 'src/client/artifact/transcript-markdown.ts', 'export const events = session.snapshotEvents()\n')
   const offenders = scanDeprecatedReaders([path], { root })
   const { unallowed, stale } = classifyDeprecatedReaders(offenders)
   assert.equal(unallowed.length, 1, 'a renamed/moved call site must not be excused')
-  assert.ok(stale.some(entry => entry.file === 'src/transcript.ts'), 'the original allowance is now stale')
+  assert.ok(stale.some(entry => entry.file === 'src/client/artifact/transcript-markdown.ts'), 'the original allowance is now stale')
 })
 
 test('the exact allowlisted call site is accepted and leaves no stale allowance', (t) => {
   const life = testLifecycle(t)
-  const allowance = DEPRECATED_READER_ALLOWLIST.find(entry => entry.file === 'src/transcript.ts')
+  const allowance = DEPRECATED_READER_ALLOWLIST.find(entry => entry.file === 'src/client/artifact/transcript-markdown.ts')
   assert.ok(allowance !== undefined)
   const { root, path } = syntheticSource(life, 'gate-allow-', allowance.file, `${allowance.site}\n`)
   const offenders = scanDeprecatedReaders([path], { root })

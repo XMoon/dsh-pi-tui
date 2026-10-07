@@ -6005,3 +6005,65 @@ ambiguous-backslash guard is a SEPARATE, earlier deletion: it goes when the shar
 dialect and literal backslashes (the pinned cross-dialect contract above).
 
 Root ledger unchanged (`stable = 5`, `legacy = 94`).
+
+## TS8-D status (DONE) — transcript / status residual semantic closure
+
+TS8-D closes the semantic/presentation ownership debt deliberately left by
+TS6/TS7. It retires eight legacy root modules with no forwarding shims
+(legacy ledger `94 -> 86`):
+
+```text
+src/context.ts                    -> domain/transcript/context-semantics.ts
+src/content-block-presentation.ts -> domain/transcript/content-blocks.ts
+                                   + domain/media/file-summary.ts
+src/failure-presentation.ts       -> domain/transcript/failure.ts
+src/present.ts                    -> tui/transcript/tool-presentation.ts
+                                   (+ latestLine -> domain/transcript/text.ts)
+src/token-usage.ts                -> domain/transcript/usage.ts
+                                   (+ formatTokens -> tui/token-format.ts)
+src/stats.ts                      -> domain/status/stats.ts
+                                   (+ formatStatsFacts -> tui/commands/status.ts)
+src/icons.ts                      -> domain/display/icons.ts + tui/icons.ts
+src/display-preset.ts             -> domain/display/preset.ts
+                                   + tui/transcript/display-policy.ts
+```
+
+`src/transcript.ts` is reduced to a pure semantic re-export facade; the
+`/transcript` Markdown formatter moves to
+`client/artifact/transcript-markdown.ts` (consumed by
+`app/command/artifacts.ts`). `isFocusDisplayPreset()` becomes the neutral
+`preset === 'focus'` answer, independent of the terminal disclosure policy.
+The dead compatibility string path `StatusData.statsLine` / `formatStats` is
+removed.
+
+### Contract / invariants
+
+- `domain/transcript/**` is CLOSED-WORLD: only its own siblings and two
+  TYPE-ONLY edges (`domain/display/icons.ts`, `runtime/assistant-stream-port.ts`);
+  no transitional root VALUE edge remains and no architecture allowlist entry was
+  added.
+- ONE `TranscriptFolder` remains; the facade re-exports the SAME constructor.
+- Usage/stats math, transcript folding, display policy, icon glyphs and Markdown
+  bytes are unchanged (ownership/path move only).
+- No package export change; `composeAgent()` keeps its structural `DisplayState`
+  parameter shape.
+- Direct remains the production default; no Remote wire/schema change.
+
+### Qualification
+
+- Targeted: `test/stats.test.ts`, `test/footer-items.test.ts`,
+  `test/experience.test.ts`, `test/context-hardening.test.ts`,
+  `test/failure-presentation.test.ts`, `test/file-transcript.test.ts`,
+  `test/transcript.test.ts`, `test/transcript-domain-identity.test.ts`,
+  `test/display-preset.test.ts`, `test/icons.test.ts`,
+  `test/streaming-tool-preparing.test.ts`, `test/tool-presentation-client.test.ts`
+  and the Compact/Focus presentation suites.
+- Gates: `pnpm typecheck:bundle`, `scripts/application-architecture-gate.mjs`,
+  `scripts/client-boundary-gate.mjs`, `node scripts/naming-gate.mjs`,
+  `git diff --check`.
+- Stage-final: `pnpm verify:prepush` plus the migration lanes
+  (`smoke:remote-session-read-parity`, `smoke:remote-surface-authority-parity`,
+  `smoke:remote-presentation-parity`, `smoke:boundary`,
+  `smoke:startup-strictness`, `compat:dsh:npm`, `compat:dsh:client-family`).
+
+Root ledger: `stable = 5`, `legacy = 86`.

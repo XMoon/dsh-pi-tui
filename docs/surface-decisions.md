@@ -37,7 +37,7 @@ remaining gaps where a card fell back to raw JSON or raw result text:
   of a raw args dump (Web TodoRow parity), so the folded row does not
   repeat it.
 
-Pure helpers live in `src/present.ts` (`webCardLines`,
+Pure helpers live in `src/tui/transcript/tool-presentation.ts` (`webCardLines`,
 `genericRawInputLines`, `resultTextLines`, `foldedCallPreview`,
 `summarizeToolArgs`); the render layer in `src/tui-app.ts` owns colors
 and layout. Pinned by `test/rendering.test.ts`.
@@ -996,11 +996,13 @@ Full and expanded Focus materialize it instead of each re-deriving boundaries:
   cluster presentation obeys the surface capability exactly like Full. Collapsed
   Focus keeps its hoist policy and substitutes the canonical cluster identity in
   Focus-projected order.
-- **`displayPolicyFor()` is the runtime authority** for materialization:
-  `isFocusDisplayPreset()` delegates to `focusBehavior`, and `projectedBlocks()`
-  selects the Compact / Focus / Full materializer from `turnLayer`,
-  `processLayer` and `focusBehavior`, so the policy table and the runtime cannot
-  drift.
+- **`displayPolicyFor()` is the runtime materialization authority**
+  (`src/tui/transcript/display-policy.ts`): `projectedBlocks()` selects the
+  Compact / Focus / Full materializer from `turnLayer`, `processLayer` and
+  `focusBehavior`, so the policy table and the runtime cannot drift.
+  `isFocusDisplayPreset()` is the NEUTRAL behavioral answer
+  (`src/domain/display/preset.ts`), exactly `preset === 'focus'` — it must not
+  depend on the terminal disclosure policy (TS8-D).
 - **Search reveals a canonical container PATH.** Every preset resolves the
   hiding containers through the same neutral ancestry (Focus root via
   `searchTargetTurn()`, nested Work, Context cluster); a flat/fail-open

@@ -34,12 +34,13 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/runtime/**` | transport-neutral semantic ports/contracts |
 | `src/runtime/direct/**` | Direct semantic adapters |
 | `src/runtime/remote/**` | Remote semantic adapters |
-| `src/domain/status/**` | transport/UI-neutral status model, derivations and store |
+| `src/domain/status/**` | transport/UI-neutral status model, derivations, store AND the session stats fold/facts (`stats.ts`) (TS3, TS8-D) |
 | `src/tui-app.ts` | current TUI root facade + remaining legacy presentation/interaction implementation |
-| `src/tui/commands/**` | Client-local built-in slash command definitions (TS1 domain modules) |
+| `src/tui/commands/**` | Client-local built-in slash command definitions (TS1 domain modules; TS8-D owns the `/status` stats-row formatter) |
 | `src/commands.ts` | stable command facade + registration/catalog coordinator |
-| `src/transcript.ts` | stable transcript compatibility facade + Markdown exporter island (TS7); canonical semantics live in `src/domain/transcript/**` |
-| `src/domain/transcript/**` | ONE transport/UI-neutral transcript semantic/lifecycle authority (TS7): fold, classification, Context form/provenance, Workflow projection, search corpus, grouping and window semantics |
+| `src/transcript.ts` | stable transcript semantic facade ONLY (TS7/TS8-D): pure re-exports of the canonical `src/domain/transcript/**` owners; no Markdown implementation and no client/tui import |
+| `src/domain/transcript/**` | ONE transport/UI-neutral transcript semantic/lifecycle authority (TS7/TS8-D): fold, classification, Context form/provenance, Workflow projection, search corpus, grouping, window semantics, token usage accounting, content-block projection, safe failure mapping and text helpers |
+| `src/domain/display/**` | transport/UI-neutral display vocabulary (TS8-D): preset state/resolution and the neutral icon semantics/style normalization |
 | `src/extension/**` | extension service/Client-local extension ownership |
 | `src/domain/footer/**` | transport/UI-neutral footer layout/policy/command DTOs (TS5) |
 | `src/domain/notification/**` | transport/UI-neutral notification policy + completion state machine (TS5) |
@@ -48,7 +49,7 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/tui/footer/**` | terminal footer composition/configuration/runtime (TS5) |
 | `src/tui/notification/**` | terminal focus reports, notifier and notification presentation (TS5) |
 | `src/tui/components/**` | generic TUI leaf components (frames, transcript leaves, media, marquee) |
-| `src/tui/transcript/**` | backend-neutral Client transcript presentation core (TS6: canonical structure, container vocabulary, Context clustering/summary, process/Work summary, Compact/Focus projections, reveal resolution) |
+| `src/tui/transcript/**` | backend-neutral Client transcript presentation core (TS6/TS8-D: canonical structure, container vocabulary, Context clustering/summary, process/Work summary, Compact/Focus projections, reveal resolution, display disclosure policy and backend-neutral tool-card presentation) |
 | `src/tui/components/transcript/**` | PiTui transcript mechanics (TS6: Focus/Activity cards, Context cluster/rows, rendered search highlight) |
 | `src/tui/panels/**` | TUI panels (task browser, history, approval dialog, output viewer) |
 | `src/tui/pickers/**` | TUI pickers, the picker adapters and the marquee/filter seam |
@@ -57,10 +58,12 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/client/file-completion/**` | Client-local filesystem completion capability (`/attach`, `/image`, Save Location) (TS8-A) |
 | `src/tui/file-completion/**` | terminal trigger grammar + completion presentation/local pipeline (TS8-A) |
 | `src/runtime/direct/file-completion/**` | Direct Host scoped discovery: the sessionless WORKSPACE compatibility path AND the explicit Session `@` path-navigation route (TS8-A / TS8-HF1) |
-| `src/domain/media/**` | transport/UI-neutral media vocabulary: media types, durable image/file refs, the deployment image policy, the media failure vocabulary and byte formatting (TS8-C) |
+| `src/domain/media/**` | transport/UI-neutral media vocabulary: media types, durable image/file refs, the deployment image policy, the media failure vocabulary, byte formatting AND the file-attachment textual summary (`file-summary.ts`) (TS8-C, TS8-D) |
 | `src/client/media/**` | Client-local media capability: image draft/intake/cache/durable-byte loader, generic-file draft/intake/source streaming, and the ONE combined draft lifecycle (`draft-attachments.ts`) (TS8-C) |
 | `src/client/clipboard/**` | Client-local clipboard capability: the read probes (`read.ts`) and the copy delivery policy (`copy.ts`) (TS8-C) |
 | `src/client/url/**` | Client-local external URL opener (TS8-C) |
+| `src/client/artifact/**` | Client-local artifact output capability: the safe file sink (`save.ts`) and the `/transcript` Markdown formatter (`transcript-markdown.ts`) (Pre-Stage-D, TS8-D) |
+| `src/tui/icons.ts`, `src/tui/token-format.ts` | concrete terminal presentation: the structural icon glyph palette/composition and the compact token-count formatter (TS8-D) |
 | `src/runtime/prepared-prompt.ts` | the transport-neutral `PreparedPrompt` contract (TS8-C) |
 | `src/runtime/remote/pi-tui-file-reference-contract.ts` | the private `piTuiFileReferences` Typert contract: ONE handwritten invocation descriptor both the Host registration and the Client contribution derive from (TS8-HF1) |
 | `src/runtime/remote/pi-tui-file-reference-host-bridge.ts` | the Remote Host-side bridge binding the private method to the Host-scoped `@` completion authority (TS8-HF1) |
@@ -380,18 +383,22 @@ Plugins consume host-owned extension APIs, registries and brokers, not raw
 `src/domain/transcript/**` owns the semantic fold/projection facts: durable
 chronology, turn/step identity, assistant/thinking convergence, workflow/subcall
 projection, read grouping, compaction fusion, search corpus identity/revision
-and `TranscriptItemId` allocation. `src/transcript.ts` is the stable
-compatibility facade: it re-exports those owners (the SAME `TranscriptFolder`
-constructor) and keeps the existing Markdown exporter compatibility island
-outside the domain.
+and `TranscriptItemId` allocation. `src/transcript.ts` is the stable semantic
+facade: it re-exports those owners (the SAME `TranscriptFolder` constructor) and
+owns no implementation. TS8-D moved the `/transcript` Markdown exporter out of
+the facade to the Client artifact formatter
+`src/client/artifact/transcript-markdown.ts`.
 
 TS7 split the former `src/transcript.ts` monolith into the ONE domain graph
 `types` / `semantics` / `context-semantics` / `workflow-projection` / `search` /
-`grouping` / `window` / `folder`. It is an internal modularization only: no
-second mutable `TranscriptFolder`/search/focus semantic store, and a
-`domain-transcript-imports-backend-mechanics` gate rule keeps
-`domain/transcript/**` blind to TUI/renderer mechanics, application currentness,
-the Direct/Remote adapters and the facade.
+`grouping` / `window` / `folder`; TS8-D added the residual semantic helpers
+`usage` / `content-blocks` / `failure` / `text` and merged the retired
+`src/context.ts` helpers into `context-semantics`. It is an internal
+modularization only: no second mutable `TranscriptFolder`/search/focus semantic
+store, and a `domain-transcript-imports-backend-mechanics` gate rule keeps
+`domain/transcript/**` CLOSED-WORLD — only its own siblings and two TYPE-ONLY
+edges (`domain/display/icons.ts`, `runtime/assistant-stream-port.ts`) are
+admitted; every transitional root VALUE edge is gone.
 
 TUI/Focus/Compact/Search presentation may consume those facts but may not own an
 independent chronology or fold.
@@ -583,11 +590,27 @@ src/search-presentation.ts      -> src/tui/components/transcript/search-presenta
 `src/context-presentation.ts` and `src/transcript-semantics.ts` are retired
 (TS7): the Context form/provenance/ambient authority now lives in
 `src/domain/transcript/context-semantics.ts` and the classification in
-`src/domain/transcript/semantics.ts`. `src/search-overlay.ts` and
-`src/display-preset.ts` stay deliberately unmoved for TS8. The Direct-vs-Remote presentation parity
+`src/domain/transcript/semantics.ts`. `src/search-overlay.ts` stays deliberately
+unmoved for a later TS8 stage; `src/display-preset.ts` was split by TS8-D into
+the neutral `src/domain/display/preset.ts` and the terminal
+`src/tui/transcript/display-policy.ts`. The Direct-vs-Remote presentation parity
 comparator left `src/runtime/**` for
 `scripts/support/presentation-read-shadow.ts` (qualification tooling, not
 runtime product authority), so `runtime/**` still imports zero `tui/**`.
+
+TS8-D closed the transcript/status residual semantic debt: the eight legacy roots
+`context.ts`, `content-block-presentation.ts`, `failure-presentation.ts`,
+`present.ts`, `token-usage.ts`, `icons.ts`, `stats.ts` and `display-preset.ts`
+were retired with no forwarding shims (legacy ledger `94 -> 86`). Semantic
+authority now lives in `domain/transcript/**` (usage / content-blocks / failure /
+text / context), `domain/status/stats.ts`, `domain/display/**` and
+`domain/media/file-summary.ts`; terminal presentation lives in
+`tui/transcript/**` (display policy + tool-card presentation), `tui/icons.ts` and
+`tui/token-format.ts`; the `/transcript` Markdown formatter lives in
+`client/artifact/transcript-markdown.ts` and `src/transcript.ts` is a pure
+semantic re-export facade. The dead `StatusData.statsLine` / `formatStats`
+compatibility string path was removed, and the domain/transcript closed-world
+gate admits only its own siblings and the two TYPE-ONLY edges.
 
 Each PR that introduces a new architectural zone extends the architecture gate
 for that zone; the gate deliberately enforces only the zones that exist today.
