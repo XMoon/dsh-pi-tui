@@ -203,7 +203,7 @@ import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type Save
 // than importing the concrete `src/tui/interaction/**` modules (TS5 §15).
 export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
-import { MentionProvider } from './mentions.ts'
+import { MentionProvider } from './tui/interaction/autocomplete/provider.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {

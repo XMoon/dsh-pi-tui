@@ -12,7 +12,7 @@ import test from 'node:test'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MentionProvider } from '../src/mentions.ts'
+import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
 import { shellCompletionContext, suggestShellCompletion } from '../src/shell-completion.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
