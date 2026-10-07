@@ -30,7 +30,7 @@
  *
  * Also exports {@link CoalescingRefreshGate}: the deterministic, timer-free
  * coalescer for invalidation notifications (`skills/change`).
- * @module @xmoon76/dsh-pi-tui/skill-catalog-refresh
+ * @module @xmoon76/dsh-pi-tui/app/command/catalog-refresh
  */
 
 // M3-4 PR4 §2.3: the refresh target is the OPAQUE catalog-read target the
@@ -39,11 +39,11 @@
 // structural here lets the coordinator stay branch-neutral without widening
 // to a Host type.
 export type CatalogReadTarget = object
-import type { Diag } from './diag.ts'
-import { safeErrorMessage } from './error-boundary.ts'
-import { SupersededReadError } from './runtime/read-error.ts'
-import type { HumanSkillCatalog } from './skill-catalog.ts'
-import type { SurfaceCatalogSnapshot } from './surface-catalog.ts'
+import type { Diag } from '../../diag.ts'
+import { safeErrorMessage } from '../../error-boundary.ts'
+import { SupersededReadError } from '../../runtime/read-error.ts'
+import type { StandingSkillRead } from '../../runtime/catalog-port.ts'
+import type { SurfaceCatalogSnapshot } from '../../domain/catalog/surface.ts'
 
 /** The source that issued one refresh request (diagnostics). */
 export type CatalogRefreshSource = 'live-session' | 'preset' | 'reload' | 'invalidation'
@@ -71,14 +71,6 @@ export type CatalogRefreshOutcome =
   | { readonly kind: 'applied'; readonly snapshot: SurfaceCatalogSnapshot; readonly notice?: string }
   | { readonly kind: 'failed'; readonly error: string }
   | { readonly kind: 'superseded' }
-
-/** One standing (sessionless) skill read result. */
-export interface StandingSkillRead {
-  readonly catalog: HumanSkillCatalog
-  /** One-shot user notice when the standing path degraded to the global
-   * layer (absent when nothing degraded). */
-  readonly notice?: string
-}
 
 /** The surface hooks the coordinator drives (wired by the runner). */
 export interface CatalogRefreshHooks {

@@ -28,6 +28,7 @@ import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -314,7 +315,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
       }
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   assert.ok(def?.handler !== undefined, 'footer handler missing')
   const result = await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
@@ -490,7 +491,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
       if (doc !== undefined) applied.push({ footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems })
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const footer = commands.defs.find(entry => entry.name === 'footer')
   const settingsCommand = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(footer?.handler !== undefined)
@@ -643,7 +644,7 @@ test('/footer Esc cancels without writing', async () => {
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (doc) => { if (doc !== undefined) applied.push({ ...doc }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -727,7 +728,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -818,7 +819,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
       }
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -928,7 +929,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -1024,7 +1025,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   // Open the REAL /settings picker (the registered handler builds the
@@ -1108,7 +1109,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
@@ -1238,7 +1239,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
       if (doc !== undefined) applied.push({ footerLayout: doc.footerLayout })
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const footer = commands.defs.find(entry => entry.name === 'footer')
   assert.ok(footer?.handler !== undefined)
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
@@ -1349,7 +1350,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
         syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
-    registerTuiCommands(runner)
+    registerTuiCommandsWithDirectSeams(runner)
     const def = commands.defs.find(entry => entry.name === 'footer')
     await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
     await vt.waitForRender()
@@ -1477,7 +1478,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
         syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
-    registerTuiCommands(runner)
+    registerTuiCommandsWithDirectSeams(runner)
     const def = commands.defs.find(entry => entry.name === 'footer')
     await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
     await vt.waitForRender()
@@ -1591,7 +1592,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
         syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
-    registerTuiCommands(runner)
+    registerTuiCommandsWithDirectSeams(runner)
     const def = commands.defs.find(entry => entry.name === 'footer')
     await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
     await vt.waitForRender()

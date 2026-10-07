@@ -14,6 +14,7 @@ import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -76,7 +77,7 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
   const runner = new Proxy(base, {
     get: (target, property) => property in target ? target[property as string] : () => undefined,
   }) as unknown as TuiCommandRunner
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const invoke = (name: string): unknown => {
     const definition = defs.find(candidate => candidate.name === name)
     assert.ok(definition?.handler !== undefined, `${name} must be registered`)

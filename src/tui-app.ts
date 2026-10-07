@@ -192,7 +192,7 @@ import { TranscriptSearchComponent } from './search.ts'
 import { CompactTextPreview } from './compact-text-preview.ts'
 import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
 import { HistoryPanel, historyOverlayGeometry } from './tui/panels/history-panel.ts'
-import type { HistorySearchSource } from './history-search.ts'
+import type { HistorySearchSource } from './client/history/search.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
 import { ApprovalRuntime } from './tui/interaction/approval-runtime.ts'
 import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
@@ -1656,7 +1656,7 @@ export interface TuiAppOptions {
    * close/refresh/scope/accept lifecycle and never reads the filesystem
    * itself. Optional — absent, Ctrl+R falls through unbound.
    */
-  historySearchSource?: import('./history-search.ts').HistorySearchSource
+  historySearchSource?: import('./client/history/search.ts').HistorySearchSource
   /**
    * The live working directory the `current` scope resolves against (the
    * runner forwards the session cwd). Fallback: `workspaceRoot`; absent
@@ -17205,7 +17205,7 @@ export class TuiApp {
     scope: import('./runtime/host-file-port.ts').HostFileScope
       | (() => import('./runtime/host-file-port.ts').HostFileScope) = { kind: 'workspace', cwd },
      localCwd: string | (() => string) = cwd,
-    skillReferences: readonly import('./skill-catalog.ts').HumanSkillSummary[] = [],
+    skillReferences: readonly import('./domain/catalog/skill.ts').HumanSkillSummary[] = [],
     hostShellCompletion: boolean = true,
   ): void {
     const base = new MentionProvider(

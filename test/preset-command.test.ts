@@ -27,8 +27,8 @@ import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failur
 import { mergeDraft } from '../src/app/submission/steer.ts'
 import { KeybindingEditorController } from '../src/tui/keybindings/ui/controller.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
-import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/app/command/catalog-refresh.ts'
+import type { SurfaceCommandSummary } from '../src/domain/catalog/surface.ts'
 import { SESSIONLESS_COMMANDS } from '../src/index.ts'
 import { createDiag } from '../src/diag.ts'
 import { customThemesDir } from '../src/client/theme/files.ts'
@@ -40,6 +40,7 @@ import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -465,7 +466,7 @@ function setup(options: {
     presetsPort: options.presetsPort,
     currentPreset: options.currentPreset,
   })
-  const surface = registerTuiCommands(runner)
+  const surface = registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'preset')
   assert.ok(def?.handler !== undefined, 'preset handler missing')
   const run = async (rawInput: string): Promise<unknown> =>

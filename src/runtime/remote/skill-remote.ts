@@ -22,9 +22,9 @@
 
 import { cancellationError } from '../../detached.ts'
 import { remoteFailureMessage } from './write-failure.ts'
-import type { HumanSkillCatalog, HumanSkillSummary } from '../../skill-catalog.ts'
+import type { HumanSkillCatalog, HumanSkillSummary } from '../../domain/catalog/skill.ts'
 import type { SkillCatalogCapability, SkillDefinitionResult } from '../catalog-port.ts'
-import type { StandingSkillRead } from '../../skill-catalog-refresh.ts'
+import type { StandingSkillRead } from '../../runtime/catalog-port.ts'
 import type {
   RemoteConnectionGeneration,
   RemoteConnectionGenerationSource,

@@ -80,7 +80,7 @@ import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extens
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
 import { diagFromEnv, dshHome, type Diag } from '../diag.ts'
 import { runDetached, runOwned } from '../detached.ts'
-import { FileHistorySearchSource } from '../history-search.ts'
+import { FileHistorySearchSource } from '../client/history/search.ts'
 import { safeErrorMessage } from '../error-boundary.ts'
 import { DraftImageStore } from '../client/media/image/draft-store.ts'
 import { DraftFileStore } from '../client/media/attachment/file-draft.ts'
@@ -115,13 +115,14 @@ import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
-import { commandSummaryOf, type SurfaceCatalogContext, type SurfaceCatalogSnapshot } from '../surface-catalog.ts'
+import { listGlobalCommands, readSurfaceCatalog, type SurfaceCatalogContext, type SurfaceCommandsService } from '../runtime/direct/surface-catalog.ts'
+import { commandSummaryOf, type SurfaceCatalogSnapshot } from '../domain/catalog/surface.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
-import { type HumanSkillCatalog } from '../skill-catalog.ts'
+import { type HumanSkillCatalog } from '../domain/catalog/skill.ts'
 import { dangerCommand } from '../command-policy.ts'
-import { resolveInitialCatalog } from '../surface-catalog.ts'
+import { resolveInitialCatalog } from './direct/initial-catalog.ts'
 import { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from '../task-presentation.ts'
 import { queueTextOf } from '../app/surface/pending-presentation.ts'
 import { bundleVersion, packageVersion } from '../dsh-version.ts'
@@ -1506,7 +1507,26 @@ export function applyRunnerWithRuntime(
             Promise.resolve(task()) as Promise<T>,
         }),
       },
-      surfaceCatalogContext: ctx as unknown as SurfaceCatalogContext,
+      // TS8-E: the narrow Direct catalog capability. The Direct catalog context
+      // and the in-process `commands.list(undefined)` convention are captured
+      // ONCE here and adapted into neutral-DTO operations, so the application
+      // command owner never imports a `runtime/direct/**` path. Absent on the
+      // Remote branch (its read goes through the generation-fenced source).
+      ...(remoteSources === undefined ? {
+        directCatalog: {
+          readSurfaceCatalog: (agent: Agent, signal: AbortSignal) =>
+            readSurfaceCatalog(
+              agent as unknown as Parameters<typeof readSurfaceCatalog>[0],
+              signal,
+              ctx as unknown as SurfaceCatalogContext,
+            ),
+          listGlobalCommands: () => {
+            const commands = ctx.get('commands') as SurfaceCommandsService | undefined
+            if (commands === undefined) return []
+            return listGlobalCommands(commands).map(commandSummaryOf)
+          },
+        },
+      } : {}),
       logError: (message) => ctx.logger.error(message),
     })
     // A5b-2: the surface status owner (footer/status derivation, the context

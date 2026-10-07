@@ -25,7 +25,7 @@ import {
 import { shellCompletionContext, suggestShellCompletion } from '../../../shell-completion.ts'
 import { shellPrefixForMode, type EditorInputMode } from '../editor-input-mode.ts'
 import { applyInlineSkillReference, extractInlineSkillPrefix } from '../../../skill-reference-completion.ts'
-import type { HumanSkillSummary } from '../../../skill-catalog.ts'
+import type { HumanSkillSummary } from '../../../domain/catalog/skill.ts'
 import {
   classifyFileCompletionContext,
   stripAtQuotes,

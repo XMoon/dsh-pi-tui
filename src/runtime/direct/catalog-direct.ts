@@ -1,14 +1,14 @@
 /**
  * The Direct catalog adapter (M1.8) — the in-process implementation of
  * `Catalog` over the dsh `llm` / `agentDefaultModel` / `agentPresets` /
- * `tools` services and the `src/skill-catalog.ts` seam. This is the ONLY
+ * `tools` services and the `src/runtime/direct/skill-catalog.ts` seam. This is the ONLY
  * module in the catalog-read path that touches `ctx`; consumers
  * (commands.ts, the surface coordinator) depend on the port, and the
  * Remote adapters under `src/runtime/remote/` implement the same
  * interfaces (models/presets since D2.3, skills since M3-3A).
  *
  * The skill sub-domain deliberately keeps the pure catalog logic in
- * `src/skill-catalog.ts` (snapshot-first reads, official invocation
+ * `src/runtime/direct/skill-catalog.ts` (snapshot-first reads, official invocation
  * policy, stable sort, deep freeze): this adapter only wires Host service
  * discovery and the session-id → live-agent resolution (runner-injected).
  *
@@ -33,8 +33,8 @@ import {
   subscribeSkillsChange,
   type SkillCatalogContext,
   type SkillCatalogEventsContext,
-  type SkillSummaryLike,
-} from '../../skill-catalog.ts'
+} from './skill-catalog.ts'
+import type { SkillSummaryLike } from '../../domain/catalog/skill.ts'
 import type {
   Catalog,
   ModelCatalog,
@@ -51,7 +51,7 @@ import type {
   SkillDefinitionDto,
   SkillDefinitionResult,
 } from '../catalog-port.ts'
-import type { StandingSkillRead } from '../../skill-catalog-refresh.ts'
+import type { StandingSkillRead } from '../../runtime/catalog-port.ts'
 import type { ProviderCatalogEntry } from '../../provider-catalog.ts'
 import { selectBlankSessionPreset } from './session-preset-direct.ts'
 
@@ -638,7 +638,7 @@ function presetErrorCode(error: unknown): string | undefined {
 }
 
 /** The Direct skill catalog (`ctx.skills` / `ctx.agentPresets` /
- * `ctx.tools` behind the `src/skill-catalog.ts` seam). */
+ * `ctx.tools` behind the `src/runtime/direct/skill-catalog.ts` seam). */
 export class DirectSkillCatalog implements SkillCatalogCapability {
   private readonly ctx: HostContextLike
   private readonly agentFor: (sessionId: string) => unknown | undefined
@@ -666,7 +666,7 @@ export class DirectSkillCatalog implements SkillCatalogCapability {
     }
   }
 
-  async listHumanSkills(sessionId: string, signal?: AbortSignal): Promise<import('../../skill-catalog.ts').HumanSkillCatalog | undefined> {
+  async listHumanSkills(sessionId: string, signal?: AbortSignal): Promise<import('../../domain/catalog/skill.ts').HumanSkillCatalog | undefined> {
     const agent = this.liveAgent(sessionId)
     if (agent === undefined) return undefined
     const target = resolveLiveSkillTarget(this.ctx as unknown as SkillCatalogContext, agent, agentCwd(agent))

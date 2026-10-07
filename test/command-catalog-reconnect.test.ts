@@ -290,7 +290,6 @@ function fakeRunnerDeps(options: {
   const scopeFacts = sessionScopeFacts(() => undefined, () => 0)
   const surface = createCommandSurface<ModelSelectionValue, string, never>({
     ctx,
-    surfaceCatalogContext: { get: () => undefined },
     logError: () => {},
     diag: silentDiag,
     signal: new AbortController().signal,
@@ -320,6 +319,10 @@ function fakeRunnerDeps(options: {
       sessionStats: async () => undefined,
       lastAssistantText: async () => undefined,
       promptAdmission: async (_agent, _hasImages, task) => task(),
+    },
+    directCatalog: {
+      readSurfaceCatalog: async () => ({ commands: [], scopedCommands: [], skills: [], issues: [] }),
+      listGlobalCommands: () => [],
     },
     catalog: runner.catalog as never,
     toCatalogAgent: (agent) => agent as never,

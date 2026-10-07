@@ -26,7 +26,7 @@
  * - A vanished/shrunk file degrades: stat/open/read failures propagate to
  *   the caller (the search source skips the file); a short read (file
  *   truncated between stat and read) stops the scan at the new EOF.
- * @module @xmoon76/dsh-pi-tui/history-reverse-reader
+ * @module @xmoon76/dsh-pi-tui/client/history/reverse-reader
  */
 
 import { open, stat } from 'node:fs/promises'

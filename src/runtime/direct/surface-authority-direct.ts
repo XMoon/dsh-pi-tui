@@ -11,7 +11,7 @@
 import {
   readSurfaceCatalog,
   type SurfaceCatalogContext,
-} from '../../surface-catalog.ts'
+} from './surface-catalog.ts'
 import type {
   SurfaceAuthorityReader,
   SurfaceAuthoritySnapshot,

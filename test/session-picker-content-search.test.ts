@@ -25,6 +25,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import type { SessionContentSearchPage, SessionReader } from '../src/runtime/session-reader-port.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -213,7 +214,7 @@ function harness(options: {
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'sessions')
   assert.ok(def?.handler !== undefined, 'sessions handler missing')
   const resumeDef = defs.find(entry => entry.name === 'resume')

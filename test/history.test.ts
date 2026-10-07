@@ -27,7 +27,7 @@ import {
   parseHistoryLines,
   parseHistoryRecords,
   recallHistoryForSession,
-} from '../src/history.ts'
+} from '../src/client/history/store.ts'
 
 function tempHome(life: TestLifecycle): string {
   return life.tempDir('pi-tui-history-')

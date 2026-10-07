@@ -12,8 +12,8 @@ import { afterEach, test } from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FileHistorySearchSource } from '../src/history-search.ts'
-import { historyFilePath } from '../src/history.ts'
+import { FileHistorySearchSource } from '../src/client/history/search.ts'
+import { historyFilePath } from '../src/client/history/store.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file

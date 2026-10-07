@@ -13,11 +13,11 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { TuiApp } from '../src/tui-app.ts'
 import { LOCAL_COMMANDS } from '../src/index.ts'
-import { CatalogRefreshCoordinator } from '../src/skill-catalog-refresh.ts'
+import { CatalogRefreshCoordinator } from '../src/app/command/catalog-refresh.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { TransitionInProgressError } from '../src/app/session/operation-barrier.ts'
 import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
-import { readSurfaceCatalog, type SurfaceCatalogContext } from '../src/surface-catalog.ts'
+import { readSurfaceCatalog, type SurfaceCatalogContext } from '../src/runtime/direct/surface-catalog.ts'
 import { createDiag } from '../src/diag.ts'
 import { darkColors, lightColors } from '../src/domain/display/theme.ts'
 import { currentPalette } from '../src/tui/theme/runtime.ts'
@@ -31,6 +31,7 @@ import { DefaultIntentTracker } from '../src/app/command/model-default-intent.ts
 import { DirectModelSelectionOwner } from '../src/runtime/direct/model-selection-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -297,7 +298,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const settingsDef = services.defs.find(def => def.name === 'settings')
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
@@ -339,7 +340,7 @@ test('/tasks Enter opens the job detail through the shared openJobView', async (
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const tasksDef = services.defs.find(def => def.name === 'tasks')
   assert.ok(tasksDef?.handler !== undefined, 'tasks handler missing')
   ;(tasksDef!.handler as () => unknown)()
@@ -364,7 +365,7 @@ test('a stale catalog refresh cannot install commands into a newer session', asy
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', services.skills as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
-  const installed = registerTuiCommands(stubRunner(ctx, app, state))
+  const installed = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
   // A coordinator over the real surface hooks: the post-mount refresh owner.
   const coordinator = new CatalogRefreshCoordinator({
     readAgent: (agent, signal) => readSurfaceCatalog(agent as never, signal, ctx as unknown as SurfaceCatalogContext),
@@ -412,7 +413,7 @@ test('/quit is a registered alias of /exit sharing its handler', () => {
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: undefined, generation: 1 }
-  registerTuiCommands(stubRunner(ctx, app, state))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
   const exitDef = services.defs.find(def => def.name === 'exit')
   const quitDef = services.defs.find(def => def.name === 'quit')
   assert.ok(exitDef !== undefined, '/exit must be registered')
@@ -430,7 +431,7 @@ test('/subagents is a registered alias of /tasks sharing its handler', () => {
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: undefined, generation: 1 }
-  registerTuiCommands(stubRunner(ctx, app, state))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
   const tasksDef = services.defs.find(def => def.name === 'tasks')
   const subagentsDef = services.defs.find(def => def.name === 'subagents')
   assert.ok(tasksDef !== undefined, '/tasks must be registered')
@@ -448,7 +449,7 @@ test('/queue is fully removed: the name is no longer host-owned or registered', 
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
-  registerTuiCommands(stubRunner(ctx, app, state))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
   const queueDef = services.defs.find(def => def.name === 'queue')
   assert.equal(queueDef, undefined,
     '/queue must not be registered — the name is released (input steers to the model like any unknown /line)')
@@ -476,7 +477,7 @@ test('/exit and /quit route through the runner requestExit, never their own tear
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   for (const name of ['exit', 'quit']) {
     const def = services.defs.find(entry => entry.name === name)
     assert.ok(def?.handler !== undefined, `${name} handler missing`)
@@ -525,7 +526,7 @@ test('a failed global-default save keeps the durable Session choice (a live writ
   const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
   process.on('unhandledRejection', onUnhandled)
   try {
-    registerTuiCommands(proxy as unknown as typeof runner)
+    registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
     const modelDef = services.defs.find(entry => entry.name === 'model')
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
     await (modelDef!.handler as () => Promise<unknown>)()
@@ -592,7 +593,7 @@ test('a FAILED global-default save still commits the live Session choice (no ses
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   try {
     const modelDef = services.defs.find(entry => entry.name === 'model')
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
@@ -670,7 +671,7 @@ test('a failed live default save after a session switch never mutates any Sessio
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   try {
     const modelDef = services.defs.find(entry => entry.name === 'model')
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
@@ -740,7 +741,7 @@ test('a stale live /model settle never repaints the new Session (no sessionless-
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   try {
     const modelDef = services.defs.find(entry => entry.name === 'model')
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
@@ -801,7 +802,7 @@ test('a sessionless /model pick awaits its default save and reports the committe
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   try {
     const modelDef = services.defs.find(entry => entry.name === 'model')
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
@@ -856,7 +857,7 @@ test('an AMBIGUOUS sessionless default save keeps an explicit UNRESOLVED intent,
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   try {
     const modelDef = services.defs.find(entry => entry.name === 'model')
     assert.ok(modelDef?.handler !== undefined, '/model handler missing')
@@ -894,7 +895,7 @@ test('a failing skill catalog refresh degrades to a detached issue, never an unh
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: (line: string) => { lines.push(line) } }] })
   try {
     const state = { agent: fakeAgent('session-a'), generation: 1 }
-    const installed = registerTuiCommands(stubRunner(ctx, app, state, diag))
+    const installed = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state, diag))
     const coordinator = new CatalogRefreshCoordinator({
       readAgent: (agent, signal) => readSurfaceCatalog(agent as never, signal, ctx as unknown as SurfaceCatalogContext),
       readStanding: async () => { throw new Error('not used') },
@@ -978,7 +979,7 @@ test('/rename is a registered alias of /title sharing its handler', () => {
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
   ctx.provide('sessionTitle', fakeTitles().titles as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
   const titleDef = services.defs.find(def => def.name === 'title')
   const renameDef = services.defs.find(def => def.name === 'rename')
   assert.ok(titleDef !== undefined, '/title must be registered')
@@ -1001,7 +1002,7 @@ test('/title without an argument regenerates and overwrites the current title', 
   ctx.provide('sessionTitle', titles as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
   const signal = new AbortController().signal
-  registerTuiCommands(stubRunner(ctx, app, state))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('', signal))
@@ -1028,7 +1029,7 @@ test('/rename without an argument behaves identically (regenerates)', async () =
     refresh: async () => ({ title: 'renamed by ai', eventSeq: 4, messageSeqs: [], source: { kind: 'auto' } }),
   })
   ctx.provide('sessionTitle', titles as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
   const renameDef = services.defs.find(def => def.name === 'rename')
   assert.ok(renameDef?.handler !== undefined, '/rename handler missing')
   const result = await (renameDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
@@ -1050,7 +1051,7 @@ test('/title without an argument on a blank session leaves the title as-is', asy
   ctx.provide('commands', services.commands as never)
   const { titles, calls } = fakeTitles({ refresh: async () => undefined })
   ctx.provide('sessionTitle', titles as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
@@ -1078,7 +1079,7 @@ test('/title with an argument pins the title; an invalid title surfaces as an er
   })
   ctx.provide('sessionTitle', titles as never)
   const state = { agent: fakeAgent('session-a'), generation: 1 }
-  registerTuiCommands(stubRunner(ctx, app, state))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const ok = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('fix footer'))
@@ -1113,7 +1114,7 @@ test('/title foo reports a frozen transition as the transition notice, never the
   // NOT stale.
   let writerEntered = false
   Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new TransitionInProgressError() } })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
@@ -1137,7 +1138,7 @@ test('/title foo reports a superseded capture as the stale notice', async () => 
   const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
   let writerEntered = false
   Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new SessionScopeSupersededError() } })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
@@ -1175,7 +1176,7 @@ test('/title foo renders an indeterminate write as a no-retry notice, never a si
       },
     },
   })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
@@ -1200,7 +1201,7 @@ test('/title (regenerate) reports a frozen transition as the transition notice, 
   const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
   let writerEntered = false
   Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new TransitionInProgressError() } })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
@@ -1224,7 +1225,7 @@ test('/title (regenerate) reports a superseded capture as the stale notice', asy
   const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
   let writerEntered = false
   Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new SessionScopeSupersededError() } })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const titleDef = services.defs.find(def => def.name === 'title')
   assert.ok(titleDef?.handler !== undefined, '/title handler missing')
   const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
@@ -1248,7 +1249,7 @@ test('/title without an argument surfaces a failing refresh as an error result',
   const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
   process.on('unhandledRejection', onUnhandled)
   try {
-    registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+    registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
     const titleDef = services.defs.find(def => def.name === 'title')
     assert.ok(titleDef?.handler !== undefined, '/title handler missing')
     const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
@@ -1270,7 +1271,7 @@ test('/title and /rename degrade when the sessionTitle service is absent', async
   startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
   const titleDef = services.defs.find(def => def.name === 'title')
   const renameDef = services.defs.find(def => def.name === 'rename')
   assert.ok(titleDef?.handler !== undefined && renameDef?.handler !== undefined)
@@ -1324,7 +1325,7 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
       },
     },
   })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const settingsDef = services.defs.find(def => def.name === 'settings')
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
@@ -1398,7 +1399,7 @@ test('/settings nested Theme submenu responds to fullscreen mouse clicks (mouse 
       },
     },
   })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const settingsDef = services.defs.find(def => def.name === 'settings')
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
@@ -1456,7 +1457,7 @@ test('/settings theme write aborts when USER custom storage is unavailable', asy
       },
     },
   })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const settingsDef = services.defs.find(def => def.name === 'settings')
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
@@ -1515,7 +1516,7 @@ test('/settings theme STALE pick through the REAL handler rolls the row and the 
     },
     extensions: { themes: registry, settings: new SettingsRegistry() },
   })
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const settingsDef = services.defs.find(def => def.name === 'settings')
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
@@ -1579,7 +1580,7 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   startedApps.add(app)
   const services = fakeServices()
   ctx.provide('commands', services.commands as never)
-  registerTuiCommands(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
   const settingsDef = services.defs.find(def => def.name === 'settings')
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
@@ -1692,7 +1693,7 @@ test('a REJECTED model selection keeps the prior authoritative selection and sho
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1721,7 +1722,7 @@ test('an INDETERMINATE model selection never claims the requested model as commi
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1749,7 +1750,7 @@ test('a late model selection settle from a replaced Session cannot repaint the n
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1781,7 +1782,7 @@ test('/model dismisses the whole overlay after a committed no-effort selection',
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1813,7 +1814,7 @@ test('a SUPERSEDED /model result emits no notice and never claims the requested 
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1845,7 +1846,7 @@ test('a /model result whose Session generation was swapped mid-write makes NO cl
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1880,7 +1881,7 @@ test('a same-generation port-superseded /model result makes NO repaint/close dec
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1909,7 +1910,7 @@ test('a superseded model-catalog read keeps the /model surface silent (no stale 
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   const result = await (modelDef!.handler as () => Promise<{ kind: string; text?: string }>)()
@@ -1949,7 +1950,7 @@ test('a sessionless INDETERMINATE default write keeps an explicit UNRESOLVED int
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -1984,7 +1985,7 @@ test('an authoritative Host read reconciles an UNRESOLVED sessionless default in
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
@@ -2028,7 +2029,7 @@ test('a /model picker opened on S1 cannot apply to S2 after a session switch (su
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await (modelDef!.handler as () => Promise<unknown>)()
@@ -2080,7 +2081,7 @@ test('a sessionless /model picker cannot write a Session that appeared in the sa
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await (modelDef!.handler as () => Promise<unknown>)()
@@ -2132,7 +2133,7 @@ test('a sessionless /model whose subject drifts to a same-generation live Sessio
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   await (modelDef!.handler as () => Promise<unknown>)()
@@ -2215,7 +2216,7 @@ function modelRunner(state: { agent: ReturnType<typeof fakeAgent> | undefined; g
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   return { app, handler: modelDef!.handler as () => Promise<unknown> }
@@ -2326,7 +2327,7 @@ test('a lifecycle-aborted /model directory read is a cancellation diagnostic, no
       return Reflect.get(target, prop, receiver)
     },
   })
-  registerTuiCommands(proxy as unknown as typeof runner)
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
   const modelDef = services.defs.find(entry => entry.name === 'model')
   assert.ok(modelDef?.handler !== undefined, '/model handler missing')
   controller.abort()

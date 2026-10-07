@@ -24,7 +24,7 @@
  *
  * Pure and injectable so pathing, parsing, and append rules are unit-testable
  * without touching the terminal or dsh services.
- * @module @xmoon76/dsh-pi-tui/history
+ * @module @xmoon76/dsh-pi-tui/client/history/store
  */
 
 import { createHash } from 'node:crypto'

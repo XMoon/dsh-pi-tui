@@ -31,6 +31,7 @@ import {
   type GitAttributionState,
 } from '../src/git-attribution.ts'
 import type { SystemPromptLike } from '../src/focus.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -195,7 +196,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (): Promise<void> => {

@@ -36,10 +36,10 @@ import {
 import { SupersededReadError } from '../src/runtime/read-error.ts'
 import type { SkillDefinitionResult } from '../src/runtime/catalog-port.ts'
 import type { PermissionPresetOutcome, PermissionPresetResult } from '../src/commands.ts'
-import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/skill-catalog-refresh.ts'
+import type { HumanSkillCatalog } from '../src/domain/catalog/skill.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/app/command/catalog-refresh.ts'
 import { computeStats, type SessionStats } from '../src/domain/status/stats.ts'
-import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
+import type { SurfaceCommandSummary } from '../src/domain/catalog/surface.ts'
 
 /** The subset of `TuiCommandRunner` the scope helper supplies: the CAPTURE
  * members plus the A3-2 scope-bound facades. A stub must also expose

@@ -932,7 +932,7 @@ test('history overlay preserves background cells outside its physical frame', as
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
@@ -977,7 +977,7 @@ test('history overlay reflows geometry without restarting its search state', asy
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(50, 10)
@@ -1021,7 +1021,7 @@ test('history overlay preserves query and selection across fullscreen rebinds', 
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
@@ -1064,7 +1064,7 @@ test('a history-overlay click before the post-resize repaint is rejected at capp
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 40)
