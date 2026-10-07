@@ -10,7 +10,8 @@
  * - the session-bound context-measurement coordinator: the cached value, the
  *   dirty classification, the explicit force and the deferred initial measure
  *   with its generation/session fence;
- * - the session workspace read (`sessionCwd`), the terminal-title write, the
+ * - the session workspace read (`sessionCwd`), the terminal-title identity
+ *   facts (the composition applies the OSC policy), the
  *   welcome card and the session goal text.
  *
  * The module is deliberately neutral: it imports no Host session/agent package
@@ -40,7 +41,6 @@ import { usageFromStats } from '../../domain/status/derive-usage.ts'
 import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { resolveDisplaySubject } from '../../domain/status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, StatusPatch, StatusSnapshot, ViewStatus, WorkspaceStatus } from '../../domain/status/types.ts'
-import { setTerminalTitle, terminalTitleOf } from '../../terminal-title.ts'
 import type { StatusData, TuiApp } from '../../tui-app.ts'
 
 /** The live-agent facts the status derivation reads. */
@@ -101,6 +101,13 @@ export interface StatusSurface {
 export interface StatusRuntimeDeps {
   /** The mounted surface owner (status store + commit coordination + app). */
   readonly surface: StatusSurface
+  /**
+   * Apply the terminal window title for the CURRENT surface identity. The
+   * composition owns the terminal policy (OSC 0 payload, ANSI stripping,
+   * visible-cell width): this owner supplies only the semantic identity
+   * facts, so it never learns the escape sequence or the width mechanics.
+   */
+  readonly updateTerminalTitle: (context: { readonly sessionTitle?: string; readonly cwd?: string }) => void
   /** True once the runner is disposing: no refresh may commit. */
   readonly isCleanedUp: () => boolean
   /** The live agent of the current owner, or undefined. */
@@ -390,23 +397,21 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
 
   /**
    * Derive + write the terminal window title from the CURRENT surface
-   * identity (the title policy in terminal-title.ts): session
-   * presentation title first, the session (or launch) short cwd as the
-   * fallback — never the full session UUID / model / preset. Called at
+   * identity (the composition's title policy, `tui/terminal/title.ts`):
+   * session presentation title first, the session (or launch) short cwd as
+   * the fallback — never the full session UUID / model / preset. Called at
    * every identity change: fresh startup, session create/resume/switch,
    * and session/title events (the session title event lands in the
    * header through setSessionTitle; the OSC title follows).
    */
-  
   const refreshTerminalTitle = (): void => {
-    const title = terminalTitleOf({
+    deps.updateTerminalTitle({
       sessionTitle: deps.surface.app.getSessionTitle(),
       // The OFFICIAL fact (a live session whose row carries no cwd yields
       // the plain 'dsh' title — the client cwd never impersonates the
       // session's Host workspace).
       cwd: sessionCwdFact(),
     })
-    setTerminalTitle(title)
   }
 
   /**

@@ -72,6 +72,7 @@ function makeHarness(options: { remote?: boolean } = {}): {
         store.update(patch)
       },
     },
+    updateTerminalTitle: () => {},
     isCleanedUp: () => false,
     // The harness exercises the DIRECT (Agent-less) status path; the main
     // subject's sections are asserted from the store, not from a live Agent.
