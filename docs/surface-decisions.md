@@ -291,7 +291,7 @@ here — or edited externally in `settings.yaml` / `.credentials.yaml` —
 shows up without a restart. `/login` supports both CredentialRef
 (API-key) and CredentialKey authorization-flow targets.
 
-Resolution helpers: `src/provider-catalog.ts` (`providerOptionsFor`,
+Resolution helpers: `src/domain/catalog/provider.ts` (`providerOptionsFor`,
 `credentialOptionsFor`, `resolveCredentialArg`, `deriveKeyRef`,
 `ROUTE_PATTERN`), pinned by `test/provider-catalog.test.ts` and
 `test/login-credentials.test.ts`.
