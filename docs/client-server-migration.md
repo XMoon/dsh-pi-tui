@@ -5876,6 +5876,20 @@ so the absolute home prefix can never satisfy the path-substring tier and fabric
 matches. No general send-time mention parser or rewrite pass is restored —
 `HostFilePort.canonicalizeMentions()` stays identity on both backends.
 
+PARENT-TRAVERSAL SPELLING (completion/read consistency): a relative scope is searched
+with the SAME spelling the Host's filesystem backend gives the accepted value.
+`dsh-fs-local`'s `localDisplayPath()` anchors a POSIX path containing a `..` SEGMENT
+with its PHYSICAL spelling (the raw `<cwd>/<path>` concatenation, so the kernel
+resolves an intermediate symlink BEFORE the parent step) and resolves every other
+spelling lexically; Windows always resolves lexically. Because the accepted completion
+value is `displayBase + name`, the scoped search keeps that same raw concatenation for
+`..` queries, and the Direct Host discovery driver joins its base without lexically
+re-normalizing it. Otherwise a symlinked Session cwd would make the dropdown list one
+directory while the model's read resolves `../x` into another ("completion sees A,
+the read gets B"). Absolute scopes already spell their traversal verbatim, and the
+home shorthand emits an absolute normalized value; neither needs the alignment. This
+is the consumer's own segment test plus one concatenation — not a second path parser.
+
 ### Direct / Remote parity
 
 One Host-side router owns the decision for both backends
@@ -5924,6 +5938,13 @@ adapter, L3 Remote adapter, L4 parity, L5 official in-process wire, L6 applicati
   — bare delegation, explicit route without the official capability,
   excluded/symlinked/absolute scopes through the port, workspace compatibility,
   `resolveReference`, identity canonicalization, the Host-home value.
+- L1/L2 — `test/host-file-augmentation.test.ts` (parent-traversal spelling): a
+  symlinked Session cwd (`alias/workspace -> real/project`) — `../shared/cor` must
+  find `<real>/shared/correct.txt` and must NOT offer a match that exists only in the
+  lexically joined sibling; a symlink traversed MID-scope before `..`
+  (`link/../shared/mid`) resolves physically too; and a decisive cross-check mounts
+  the REAL `ctx.fs` (`@deepseek-ai/dsh-fs-local`) and asserts the value the router
+  offers resolves to exactly the file the scoped search found.
 - L1/L2 — `test/pi-tui-file-reference-host.test.ts`: the descriptor identity shared
   by both contributions, the fiber-owned registration/withdrawal lifetime, and the
   Host row's bare/scoped/cancellation/home behavior.
