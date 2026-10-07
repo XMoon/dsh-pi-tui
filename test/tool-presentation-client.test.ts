@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import { createClientToolPresenter } from '../src/tool-presentation-client.ts'
+import { createClientToolPresenter } from '../src/tui/transcript/client-tool-presenter.ts'
 
 const presenter = createClientToolPresenter()
 
@@ -69,7 +69,7 @@ test('result: always undefined — settled rendering stays with the existing Cli
 })
 
 test('negative lock: no Host tool registry, no presenter callbacks, no wire surface', () => {
-  const source = readFileSync(new URL('../src/tool-presentation-client.ts', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/tui/transcript/client-tool-presenter.ts', import.meta.url), 'utf8')
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
   assert.equal(code.includes('ctx.tools'), false)
   assert.equal(code.includes('ctx.get'), false)

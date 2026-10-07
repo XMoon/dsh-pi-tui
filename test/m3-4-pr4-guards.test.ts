@@ -88,7 +88,7 @@ test('§D2 (review round 3 ruling): Direct keeps the Host compatibility MIRROR; 
 /* ─────────────────── §18.2 Remote tool presenter gate ────────────────── */
 
 test('§18.2 the Remote presentation bridge is Client-derived (no Host registry, no presenter callbacks)', () => {
-  const clientPresenter = code('tool-presentation-client.ts')
+  const clientPresenter = code('tui/transcript/client-tool-presenter.ts')
   assert.equal(clientPresenter.includes('ctx.tools'), false)
   assert.equal(clientPresenter.includes('ctx.get'), false)
   assert.equal(clientPresenter.includes('presentCall'), false)
