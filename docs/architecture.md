@@ -142,9 +142,9 @@ src/runtime/** never imports src/app/**
 src/runtime/** never imports src/tui/**
 src/runtime/** never imports src/client/**
 src/runtime/process/** never imports src/app/**, src/tui/**, src/client/** or the
-  Direct/Remote adapters (`runtime/direct|remote/**`), and takes no DSH
-  business/service implementation VALUE import (a type-only structural face and
-  the Node standard library stay allowed)
+  Direct/Remote adapters (`runtime/direct|remote/**`), and never loads a DSH
+  business/service implementation package (only a FULLY ERASED `import type` /
+  `export type` face and the Node standard library stay allowed)
 application owners never import the bootstrap composition zone (facade or helper)
 application owners never import src/tui/** implementation
 src/domain/** never imports src/app/**, src/tui/**, src/client/** or experimental Remote composition
@@ -666,10 +666,15 @@ src/error-boundary.ts  -> src/runtime/process/errors.ts
 
 The `runtime-process-imports-inner-layers` gate rule forbids `app/**`, `tui/**`,
 `client/**` and `runtime/direct|remote/**` from the subtree, and
-`runtime-process-imports-dsh-implementation` forbids a DSH business/service
-VALUE import (`@deepseek-ai/dsh-*`; a type-only structural face and Node standard
-library imports stay allowed). The generic `runtime-imports-app|tui|client` rules
-carve the subtree out, so each edge has exactly one owning rule id.
+`runtime-process-imports-dsh-implementation` forbids loading a DSH
+business/service implementation package (`@deepseek-ai/dsh-*`): only a FULLY
+ERASED type face (`import type` / `export type`, which emits no runtime edge)
+is allowed — an inline `import { type X }` still emits a module load under
+`verbatimModuleSyntax: true` and is rejected — while Node standard library
+imports stay allowed. The generic `runtime-imports-app|tui|client` rules carve
+the subtree out, so the runtime-layer direction has one owning rule id here;
+independent contracts (the bootstrap-composition rule, the Remote lazy-boundary
+rule) can still report the same file under their own id.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1
