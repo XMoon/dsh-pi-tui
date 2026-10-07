@@ -1,19 +1,24 @@
 /**
- * The TUI's command-line policy (plan §27): which slash lines the TUI
- * owns locally, which need no session, how one agent-facing line is
- * delivered while the agent runs, which lines refuse staged images, and
- * the destructive-shell-command predicate the approval dialog uses.
+ * The transport/UI-neutral command-line policy (plan §27 / TS8-F3): which slash
+ * lines the TUI owns locally, which need no session, which lines are local for
+ * attachment purposes, and the ONE semantic line classification every dispatch
+ * gate consumes.
  *
- * Pure and Host-free (structural inputs plus DSH's own parseCommand), so
- * the dispatch gates are testable headless and the presentation/submission
- * paths share ONE classification.
- * @module @xmoon76/dsh-pi-tui/command-policy
+ * Pure and Host-free (structural inputs plus DSH's own `parseCommand`), so the
+ * dispatch gates are testable headless and the presentation/submission paths
+ * share ONE classification. The application/submission-facing half (the
+ * image-rejection gate and the delivery resolver) lives in
+ * `app/submission/command-policy.ts`; the destructive-shell predicate lives in
+ * `domain/shell/danger.ts`.
+ *
+ * The AUTHORITATIVE Host-name fact stays an explicit input
+ * ({@link CommandLineClassificationFacts.hostOriginClaim}); this domain never
+ * derives Host authority from the effective claim union (which also carries the
+ * Client's own TUI registrations).
+ * @module @xmoon76/dsh-pi-tui/domain/command/policy
  */
 
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { resolveComposerDelivery, type HostCommandClaim, type SubmitDelivery } from './commands.ts'
-import { draftHasImages } from './client/media/draft-attachments.ts'
-import type { ComposerSubmitGesture } from './tui-app.ts'
 /**
  * Slash commands that need no session: before the first user message
  * (deferred start) they run locally without creating one. Everything else
@@ -74,31 +79,6 @@ export const LOCAL_COMMANDS = new Set([
 ])
 
 /**
- * Command semantics matrix (plan §19.3/M12): a LOCAL command line carrying a
- * staged image placeholder is REJECTED — local commands are pure UI
- * controls, never LLM prompts. AGENT-FACING input (plain prompts AND
- * per-skill slash invocations like `/grilling`) SUPPORTS images: the skill
- * wrapper builds its message through the same prepared-input path, so an
- * image-bearing skill line is a real multimodal prompt (review finding 4).
- * There is never a silent drop.
- * @param parsed - the parsed slash command, undefined for a plain prompt.
- * @param text - the submission text.
- * @param store - the live draft store.
- * @param isLocal - whether THIS LINE is a LOCAL (TUI-owned/UI) command; skill
- *   names answer false. Never derived from the name alone: a host command's
- *   input KIND decides which line it claims (see
- *   {@link commandIsLocalForAttachments}).
- */
-export function commandRejectsImages(
-  parsed: { name: string; rawInput?: string } | undefined,
-  text: string,
-  store: import('./client/media/image/types.ts').DraftImageStoreLike,
-  isLocal: boolean,
-): boolean {
-  return parsed !== undefined && isLocal && draftHasImages(text, store)
-}
-
-/**
  * The STATIC host-owned command catalog (P1-04): the ownership sets
  * (LOCAL_COMMANDS and SESSIONLESS_COMMANDS — the TUI's own local/UI command
  * names, including the ones `registerTuiCommands` registers, plus core
@@ -132,13 +112,21 @@ export type CommandLineClassification =
   | { readonly kind: 'skill-invocation' }
   | { readonly kind: 'ordinary-submission'; readonly hostNameReserved: boolean }
 
+/** The Host-origin claim of one exact line as this neutral domain sees it:
+ * `undefined` = no genuine Host command owns the name; `claimed:false` = Host
+ * owns the name but not this line. The stable root's `HostCommandClaim` is
+ * structurally identical, so callers pass it without a cast. */
+export type CommandLineHostClaim =
+  | { readonly claimed: true; readonly attachments: boolean }
+  | { readonly claimed: false }
+
 /** The classifier input facts (each one a LIVE source observation — never a
  *  reconstructed name-list guess). */
 export interface CommandLineClassificationFacts {
   /** The genuine Host-origin claim of this exact line (§1C-4
    *  `hostOriginClaimOf`): `undefined` = no genuine Host command owns the
    *  name; `claimed:false` = Host owns the name but not this line. */
-  readonly hostOriginClaim: HostCommandClaim | undefined
+  readonly hostOriginClaim: CommandLineHostClaim | undefined
   /** Whether a LIVE TUI-owned Client command registration owns the name
    *  (the Client registry itself — a bare-line invocation shape). */
   readonly tuiCommand: boolean
@@ -282,46 +270,6 @@ export function commandIsLocalForAttachments(
 }
 
 /**
- * The TUI dispatch boundary's delivery resolution: the WEB composer policy
- * ({@link resolveComposerDelivery}) applied to agent-facing input, with the
- * TUI's own ownership terms on top. Pure so the dispatch gate (inside the
- * runner closure) is testable headless.
- * @param parsed - the parsed slash command, undefined for a plain prompt.
- * @param running - whether the live agent reports running.
- * @param gesture - the composer gesture that raised the submission.
- * @param busyEnter - the persisted preference value (''/undefined = queue).
- * @param isTuiLocalLine - whether the line is a TUI-LOCAL command line by
- *   the §D3 line authority ({@link isLocalCommandLine}'s order: a
- *   HOST-RESOLVED name — claimed or merely resolved — is never local). The
- *   caller derives it once and shares it with every gate, so an argued
- *   `/export foo` of an execute-kind Host command follows the ORDINARY
- *   queue/steer busy policy instead of a local-command placeholder.
- *   Absent = fall back to the legacy LOCAL_COMMANDS set (callers that have
- *   no host view yet, e.g. the pre-parse echo path).
- */
-export function resolveSubmitDelivery(
-  parsed: { name: string; rawInput?: string } | undefined,
-  running: boolean,
-  gesture: ComposerSubmitGesture,
-  busyEnter: string | undefined,
-  isTuiLocalLine?: boolean,
-): SubmitDelivery {
-  if (parsed !== undefined) {
-    // `/skill <name> [args...]` is an AGENT-facing invocation (loadSkill),
-    // NOT the local picker: it follows the busy policy like any other
-    // prompt. Only the bare `/skill` picker counts as local (review finding
-    // — same classification as the image-rejection gate).
-    if (parsed.name === 'skill' && (parsed.rawInput?.trim() ?? '') !== '') return resolveComposerDelivery(running, gesture, busyEnter)
-    // A TUI-owned local command executes through its own surface and never
-    // steers; its delivery value is only ever a placeholder for the (never
-    // taken) skill-delivery binding. Client contributions never reach this
-    // resolver at all (the namespace dispatch routes them first).
-    if (isTuiLocalLine ?? LOCAL_COMMANDS.has(parsed.name)) return 'queue'
-  }
-  return resolveComposerDelivery(running, gesture, busyEnter)
-}
-
-/**
  * Normalize an explicit `/skill <name> <args>` invocation to the skill's
  * own slash line `/<name> <args>` (review finding 2). The harness's
  * explicit skill gesture scans for `/<skill-name>` — it would extract
@@ -379,33 +327,4 @@ export function shouldConsumeAdvertisedMiss(
  */
 export function isPlainExitPrompt(text: string): boolean {
   return text.trim() === 'exit'
-}
-/** Shell commands the approval dialog flags as dangerous (kimi-inspired). */
-const DANGER_PATTERNS: readonly RegExp[] = [
-  /\bmkfs(\.\w+)?\b/,
-  /\bdd\s+if=.*of=\/dev\//,
-  /^:\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:/,
-  /\bchmod\s+-R\s+777\s+\//,
-  /\bgit\s+push\b[^\n|;]*(--force\b|\s-f\b)/,
-  /\b(shutdown|reboot|poweroff|init\s+0)\b/,
-  />+\s*\/dev\/sd/,
-  /\bcurl\b[^\n|]*\|\s*(ba)?sh\b/,
-]
-
-/**
- * Whether a shell command matches a destructive pattern. `rm` is treated
- * specially: any spelling of recursive + force flags (`rm -rf`, `rm -r -f`,
- * `rm -rf /`) is dangerous; the remaining patterns are verbatim matches.
- */
-export function dangerCommand(command: string): boolean {
-  // Slice the flags from the WORD-BOUNDED rm match itself: slicing from the
-  // first "rm" substring (e.g. inside "alarm") would read flags from the
-  // wrong offset and both miss and misfire depending on what follows.
-  const rm = /\brm\b/i.exec(command)
-  if (rm !== null) {
-    const flags = command.slice(rm.index + rm[0].length)
-    const combined = flags.match(/-\w+/g)?.join('') ?? ''
-    if (combined.includes('r') && combined.includes('f')) return true
-  }
-  return DANGER_PATTERNS.some(pattern => pattern.test(command))
 }

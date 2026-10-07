@@ -52,7 +52,7 @@ import type {
   SkillDefinitionResult,
 } from '../catalog-port.ts'
 import type { StandingSkillRead } from '../../runtime/catalog-port.ts'
-import type { ProviderCatalogEntry } from '../../provider-catalog.ts'
+import type { ProviderCatalogEntry } from '../../domain/catalog/provider.ts'
 import { selectBlankSessionPreset } from './session-preset-direct.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never

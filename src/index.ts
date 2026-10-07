@@ -25,7 +25,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
-import { type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
+import { type ProgressUpdatesState, type ResponseStyleState } from './domain/communication/policy.ts'
 
 import { type Diag } from './runtime/process/diagnostics.ts'
 import {
@@ -48,7 +48,9 @@ export { Config } from './app/config/schema.ts'
 // Relocated root helpers (A5-1/A5-1b, plan §27): every helper implementation
 // lives in its natural top-level module; the package-root exports are preserved
 // here unchanged.
-export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from './command-policy.ts'
+export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt } from './domain/command/policy.ts'
+export { dangerCommand } from './domain/shell/danger.ts'
+export { commandRejectsImages, resolveSubmitDelivery } from './app/submission/command-policy.ts'
 export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './app/session/interrupt.ts'
 export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
 export type { InitialCatalogResolution } from './domain/catalog/surface.ts'
