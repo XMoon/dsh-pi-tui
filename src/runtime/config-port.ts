@@ -250,7 +250,7 @@ export interface ProviderProfileConfig {
   /** The merged /login credential options: the llm configurable-provider
    * directory over its PER-ENTRY settings sections when the llm service
    * is present, the settings-only fallback otherwise (the pure
-   * provider-catalog.ts merge, wired by the adapter). Detached DTOs with
+   * domain/catalog/provider.ts merge, wired by the adapter). Detached DTOs with
    * semantic flags only — no settings namespace or path ever crosses. */
   listCredentialOptions(): readonly CredentialProviderOption[]
   /** Persist one provider profile (the add-provider wizard; the adapter

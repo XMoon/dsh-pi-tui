@@ -16,7 +16,7 @@
  *     (`<ROUTE>_API_KEY`), exactly like the web's `deriveKeyRef`;
  *   - the deepseek official adapter always leads.
  *
- * @module @xmoon76/dsh-pi-tui/provider-catalog
+ * @module @xmoon76/dsh-pi-tui/domain/catalog/provider
  */
 
 /** One /login credential target: a human label plus the env-var ref to set. */

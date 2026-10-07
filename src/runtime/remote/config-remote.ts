@@ -42,7 +42,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/config-remote
  */
 
-import { credentialOptionsFor, providerOptionsFor, type ProviderCatalogEntry, type ProviderOption } from '../../provider-catalog.ts'
+import { credentialOptionsFor, providerOptionsFor, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,

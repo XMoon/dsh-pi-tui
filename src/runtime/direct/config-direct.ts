@@ -35,7 +35,7 @@ import {
   providerOptionsFor,
   type ProviderCatalogEntry,
   type ProviderOption,
-} from '../../provider-catalog.ts'
+} from '../../domain/catalog/provider.ts'
 import { cancellationError } from '../process/tasks.ts'
 import { safeErrorMessage } from '../process/errors.ts'
 import {
@@ -381,7 +381,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
   /** The merged /login option list as the port's CLIENT DTOs: the llm
    * configurable-provider directory over its PER-ENTRY sections when the
    * llm service is present, the settings-only fallback otherwise. The
-   * pure merge stays in provider-catalog.ts; this adapter only wires the
+   * pure merge stays in domain/catalog/provider.ts; this adapter only wires the
    * section reads and maps the schema facts onto the semantic
    * `canProvisionProfile` flag (never a namespace or path across the
    * port). */

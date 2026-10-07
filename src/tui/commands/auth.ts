@@ -19,7 +19,7 @@ import {
   resolveCredentialArg,
   ROUTE_PATTERN,
   PROTOCOL_CHOICES,
-} from '../../provider-catalog.ts'
+} from '../../domain/catalog/provider.ts'
 import {
   authorizationFailureText,
   createAuthorizationFlow,
