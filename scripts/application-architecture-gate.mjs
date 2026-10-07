@@ -91,7 +91,7 @@
  *   9. (TS7) `src/domain/transcript/**` — the ONE transport/UI-neutral
  *      transcript semantic/lifecycle authority — is CLOSED-WORLD: only its own
  *      siblings, the frozen transitional pure root VALUE helpers and two
- *      TYPE-ONLY compatibility edges (`icons.ts`, `runtime/assistant-stream-port.ts`)
+ *      TYPE-ONLY compatibility edges (`domain/display/icons.ts`, `runtime/assistant-stream-port.ts`)
  *      are admitted; every other relative `src/**` edge (TUI/renderer mechanics,
  *      application currentness, the Direct/Remote adapters, `commands.ts`,
  *      `display-preset.ts`, the `src/transcript.ts` facade, …) fails by default,
@@ -240,7 +240,6 @@ const TRANSCRIPT_CORE_FORBIDDEN_TARGETS = new Set([
   'commands.ts',
   'tui-app.ts',
   'theme.ts',
-  'icons.ts',
   'renderer-registry.ts',
   // TS7: the core consumes the canonical `domain/transcript/**` owners
   // directly. The semantic root facade and the three retired semantic roots
@@ -286,15 +285,17 @@ const DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES = new Set([
 ])
 
 /**
- * The transitional root edges allowed ONLY as TYPE-ONLY imports: `icons.ts`
- * because the domain carries the existing `IconSemantic` compatibility field
- * (plan §9.3) and the neutral structural live port (plan §18) whose data
- * vocabulary is transport-neutral. A VALUE import of either would pull concrete
- * icon/palette or live-ingress mechanics into the semantic authority, so the
- * closed-world contract admits the type spelling and nothing else.
+ * The canonical TYPE-ONLY edges the `domain/transcript/**` authority may
+ * consume: `domain/display/icons.ts` because the domain carries the existing
+ * `IconSemantic` compatibility field and the canonical neutral icon vocabulary
+ * now lives there (TS8-D), and the neutral structural live port (plan §18)
+ * whose data vocabulary is transport-neutral. A VALUE import of either would
+ * pull concrete icon/palette or live-ingress mechanics into the semantic
+ * authority, so the closed-world contract admits the type spelling and nothing
+ * else.
  */
-const DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES = new Set([
-  'icons.ts',
+const DOMAIN_TRANSCRIPT_TYPE_ONLY_EDGES = new Set([
+  'domain/display/icons.ts',
   'runtime/assistant-stream-port.ts',
 ])
 
@@ -303,7 +304,7 @@ const DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES = new Set([
  * every relative edge must be either
  *   - a `domain/transcript/**` sibling, or
  *   - the ONE transitional root value (`present.ts`), or
- *   - a TYPE-ONLY import of one of {@link DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES}.
+ *   - a TYPE-ONLY import of one of {@link DOMAIN_TRANSCRIPT_TYPE_ONLY_EDGES}.
  * Anything else (`tui/**`, `app/**`, `runtime/direct|remote/**`, `commands.ts`,
  * `display-preset.ts`, `search-overlay.ts`, `transcript.ts`, `theme.ts`,
  * `tui-app.ts`/`renderer-registry.ts`, any other root/legacy module, …) FAILS by
@@ -331,7 +332,7 @@ export function isDomainTranscriptBackendMechanics(resolved, specifier, meta = {
   if (!specifier.startsWith('.')) return false
   if (resolved.startsWith('domain/transcript/')) return false
   if (DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES.has(resolved)) return false
-  if (meta.typeOnly === true && DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES.has(resolved)) return false
+  if (meta.typeOnly === true && DOMAIN_TRANSCRIPT_TYPE_ONLY_EDGES.has(resolved)) return false
   return true
 }
 
@@ -560,7 +561,7 @@ export const ARCHITECTURE_RULES = [
     id: 'domain-transcript-imports-backend-mechanics',
     message:
       'src/domain/transcript/** is the transport/UI-neutral transcript semantic authority: it may import only its domain '
-      + 'siblings, the frozen transitional pure root helpers (value: present; type-only: icons/assistant-stream-port) and official DSH semantic packages — every other edge '
+      + 'siblings, the frozen transitional pure root helper (value: present; type-only: domain/display/icons, assistant-stream-port) and official DSH semantic packages — every other edge '
       + '(tui/**, app/**, runtime/direct|remote, commands.ts, display-preset.ts, transcript.ts, PiTui, Tern, …) must be split instead',
     applies: (srcRel) => isDomainTranscriptSubtree(srcRel),
     forbids: (resolved, specifier, meta) => isDomainTranscriptBackendMechanics(resolved, specifier, meta),
@@ -958,7 +959,7 @@ export function findViolations(entries, options = {}) {
       for (const rule of ARCHITECTURE_RULES) {
         if (!rule.applies(rel)) continue
         // The edge kind travels with the resolved target so a rule can draw a
-        // type-only line (e.g. the TS7 domain's `icons.ts` /
+        // type-only line (e.g. the TS7 domain's `domain/display/icons.ts` /
         // `assistant-stream-port.ts` allowances) instead of allowlisting the
         // target wholesale for value imports too.
         if (!rule.forbids(target, specifier, { typeOnly })) continue

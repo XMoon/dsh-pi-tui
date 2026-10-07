@@ -22,7 +22,7 @@
  * @module @xmoon76/dsh-pi-tui/domain/transcript/context-semantics
  */
 
-import { type IconSemantic } from '../../icons.ts'
+import { type IconSemantic } from '../display/icons.ts'
 import { isSurfacedContext } from './semantics.ts'
 import type {
   ContextProvenance,

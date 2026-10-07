@@ -14,7 +14,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-llm-retry'
-import type { IconSemantic } from '../../icons.ts'
+import type { IconSemantic } from '../display/icons.ts'
 import type { TokenUsageTotals } from './usage.ts'
 import type { TranscriptWorkflowMessage } from './workflow-projection.ts'
 

@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installProgressUpdatesPrompt, installResponseStylePrompt, type ProgressUpdatesState, type ResponseStyleState } from '../../communication-policy.ts'
 import { installFocusPrompt, type SystemPromptLike } from '../../focus.ts'
 import { installGitAttributionPrompt, type GitAttributionState } from '../../git-attribution.ts'
-import type { DisplayState } from '../../display-preset.ts'
+import type { DisplayState } from '../../domain/display/preset.ts'
 import type { Diag } from '../../diag.ts'
 import { recordedSessionPreset } from '../../runtime/direct/session-preset-direct.ts'
 

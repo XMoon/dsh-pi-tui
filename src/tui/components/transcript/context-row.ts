@@ -24,7 +24,8 @@
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
-import { iconPrefix, type IconStyle } from '../../../icons.ts'
+import { iconPrefix } from '../../icons.ts'
+import type { IconStyle } from '../../../domain/display/icons.ts'
 import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from '../../../long-message-disclosure.ts'
 import { systemContextBody } from '../../../present.ts'
 import { color } from '../../../theme.ts'

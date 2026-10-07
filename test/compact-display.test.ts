@@ -12,7 +12,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()

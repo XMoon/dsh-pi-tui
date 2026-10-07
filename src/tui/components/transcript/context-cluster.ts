@@ -18,7 +18,8 @@
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
 import type { ContextCluster } from '../../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../../transcript/context-summary.ts'
-import { iconLead, sectionDisclosureSemantic, type IconStyle } from '../../../icons.ts'
+import { iconLead } from '../../icons.ts'
+import { sectionDisclosureSemantic, type IconStyle } from '../../../domain/display/icons.ts'
 import { color } from '../../../theme.ts'
 
 /** The cluster header: `▸ 📎 Context · 6 injections`.

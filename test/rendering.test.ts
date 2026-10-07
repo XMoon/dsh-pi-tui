@@ -18,7 +18,7 @@ import {
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
-import { iconFor } from '../src/icons.ts'
+import { iconFor } from '../src/tui/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'
 import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
 import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type WorkflowRunId } from '../src/transcript.ts'

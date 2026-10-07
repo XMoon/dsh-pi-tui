@@ -21,7 +21,7 @@ import {
   FOCUS_SECTION_ORDER,
   installFocusPrompt,
 } from '../src/focus.ts'
-import { resolveDisplayPreset, type DisplayState } from '../src/display-preset.ts'
+import { resolveDisplayPreset, type DisplayState } from '../src/domain/display/preset.ts'
 import {
   FocusActivityComponent,
   focusCollapsedBody,

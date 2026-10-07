@@ -7,13 +7,13 @@ import { FOCUS_MODE_PROMPT, installFocusPrompt } from '../src/focus.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
-  displayPolicyFor,
   isDisplayPreset,
   isDisplayPresetAvailable,
   isFocusDisplayPreset,
   resolveDisplayPreset,
   type DisplayState,
-} from '../src/display-preset.ts'
+} from '../src/domain/display/preset.ts'
+import { displayPolicyFor } from '../src/tui/transcript/display-policy.ts'
 
 test('recognizes the complete display vocabulary and exposes every preset', () => {
   assert.equal(isDisplayPreset('focus'), true)

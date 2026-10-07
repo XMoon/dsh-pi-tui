@@ -21,7 +21,7 @@ import {
   type GitAttributionState,
 } from '../src/git-attribution.ts'
 import { PROGRESS_UPDATES_SECTION_NAME, RESPONSE_STYLE_SECTION_NAME, installProgressUpdatesPrompt, installResponseStylePrompt, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 // The attribution state is a Direct-application internal concern: it is NOT part
 // of the public composeAgent() surface, so the composition regressions exercise
 // the internal owner directly (same pattern as direct-owner-registry.test.ts).

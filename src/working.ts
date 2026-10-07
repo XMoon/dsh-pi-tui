@@ -23,7 +23,8 @@
  */
 
 import { Text } from '@xmoon76/pi-tui'
-import { iconFor, type IconStyle } from './icons.ts'
+import { iconFor } from './tui/icons.ts'
+import type { IconStyle } from './domain/display/icons.ts'
 import { color } from './theme.ts'
 
 /** The DEFAULT animation frames for one icon style, DERIVED from the icon

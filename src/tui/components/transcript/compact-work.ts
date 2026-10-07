@@ -23,7 +23,8 @@ import {
 import { compactActionStatParts, formatCompactDuration } from '../../transcript/process-summary.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from '../../transcript/work-summary.ts'
 import type { TranscriptWorkSpan } from '../../transcript/structure.ts'
-import { iconLead, sectionDisclosureSemantic, type IconStyle } from '../../../icons.ts'
+import { iconLead } from '../../icons.ts'
+import { sectionDisclosureSemantic, type IconStyle } from '../../../domain/display/icons.ts'
 import { color } from '../../../theme.ts'
 
 /**

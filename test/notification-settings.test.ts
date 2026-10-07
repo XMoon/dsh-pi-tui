@@ -24,7 +24,7 @@ import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../src/domain/notification/settings.ts'
 import { installProgressUpdatesPrompt, installResponseStylePrompt, parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
 import { installFocusPrompt, type SystemPromptLike } from '../src/focus.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork

@@ -16,7 +16,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Diag } from './diag.ts'
-import { isFocusDisplayPreset, type DisplayState } from './display-preset.ts'
+import { isFocusDisplayPreset, type DisplayState } from './domain/display/preset.ts'
 
 /** The system-prompt section name: TUI-private, never a host/preset name. */
 export const FOCUS_SECTION_NAME = 'tui:focus-mode'

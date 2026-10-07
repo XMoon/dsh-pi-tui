@@ -13,7 +13,8 @@
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import { iconLead, type IconStyle } from '../../icons.ts'
+import { iconLead } from '../icons.ts'
+import type { IconStyle } from '../../domain/display/icons.ts'
 import { longMessageDisclosureWindow } from '../../long-message-disclosure.ts'
 import { latestLine } from '../../domain/transcript/text.ts'
 import { relativizeToCwd } from '../../present.ts'
