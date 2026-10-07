@@ -93,6 +93,16 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/app/surface/viewer-submission.ts` | viewer settle disposition / stale-settle target policy and the Host-file send scope (TS8-F4) |
 | `src/runtime/subagent-outcome.ts` | backend-neutral subagent prompt refusal/indeterminate classification (TS8-F4; the detached DTOs live in `runtime/subagent-port.ts`) |
 | `src/tui/transcript/workflow-presentation.ts` | Workflow card adaptive presentation, importing the canonical `domain/transcript/**` projection directly (TS8-F4) |
+| `src/tui/interaction/transcript-search.ts` | PiTui transcript search input/focus/mouse/N-of-M interaction rendering (TS8-F5) |
+| `src/app/surface/search-overlay.ts` | search open-overlay state, revision, current occurrence and refresh-step currentness (TS8-F5) |
+| `src/app/surface/search-profile.ts` | observational search transaction-stage profiler (TS8-F5) |
+| `src/app/surface/compaction-presentation.ts` | compaction phase/log presentation and the canonical `CompactionPhase` union (TS8-F5) |
+| `src/tui/transcript/focus-timing.ts` | the per-surface Focus timing store (the process-global singleton was removed) (TS8-F5) |
+| `src/tui/transcript/long-message-disclosure.ts` | visual-row long-message disclosure geometry (TS8-F5) |
+| `src/tui/components/transcript/compact-text-preview.ts`, `thinking-preview.ts` | compact preview + visible-column thinking tail components (TS8-F5; they consume PiTui width mechanics, so they live under `tui/components/**`) |
+| `src/tui/presentation/lines.ts` | terminal physical-row sanitation/presentation helpers (TS8-F5) |
+| `src/tui/diagnostics/scroll-profile.ts`, `transcript-render-profile.ts` | render-cost profilers, grouped as TUI diagnostics (TS8-F5) |
+| `src/domain/display/wheel-scroll.ts` | the persisted wheel-lines -> accepted wheel-step semantic (TS8-F5) |
 | remaining historical feature dirs (`…`) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
@@ -318,7 +328,13 @@ the nine session/viewer/task roots (`sessions.ts`,
 `session-artifact-filename.ts`, `subagent-viewer.ts`,
 `subagent-viewer-submit.ts`, `task-browser-runtime.ts`,
 `task-center-attention.ts`, `task-presentation.ts`, `tasks-browser.ts`,
-`workflow-presentation.ts`), reaching `stable = 6 / legacy = 23`.
+`workflow-presentation.ts`), reaching `stable = 6 / legacy = 23`; F5 then
+retires the twelve transcript/search/disclosure roots
+(`compact-text-preview.ts`, `compaction-presentation.ts`, `focus-timing.ts`,
+`long-message-disclosure.ts`, `presentation-lines.ts`,
+`scroll-render-profile.ts`, `search-overlay.ts`, `search-profile.ts`,
+`search.ts`, `thinking-preview.ts`, `transcript-render-profile.ts`,
+`wheel-scroll.ts`), reaching `stable = 6 / legacy = 11`.
 
 ## Existing directory convergence
 
@@ -637,8 +653,10 @@ src/search-presentation.ts      -> src/tui/components/transcript/search-presenta
 `src/context-presentation.ts` and `src/transcript-semantics.ts` are retired
 (TS7): the Context form/provenance/ambient authority now lives in
 `src/domain/transcript/context-semantics.ts` and the classification in
-`src/domain/transcript/semantics.ts`. `src/search-overlay.ts` stays deliberately
-unmoved for a later TS8 stage; `src/display-preset.ts` was split by TS8-D into
+`src/domain/transcript/semantics.ts`. TS8-F5 split the search surface into
+`domain/transcript/search.ts` semantics, `app/surface/search-overlay.ts` state
+and `tui/interaction/transcript-search.ts` interaction; `src/display-preset.ts`
+was split by TS8-D into
 the neutral `src/domain/display/preset.ts` and the terminal
 `src/tui/transcript/display-policy.ts`. The Direct-vs-Remote presentation parity
 comparator left `src/runtime/**` for
@@ -780,6 +798,29 @@ src/workflow-presentation.ts  -> tui/transcript/workflow-presentation.ts
 The retired `sessions.ts` `dsh-session` type edge disappears with its dead mapper,
 so the client-boundary baseline drops that entry (31 coupled files). `tui-app.ts`
 and the panels consume the application-owned task DTOs as types.
+
+TS8-F (PR F5) retires the twelve transcript/search/disclosure roots
+(legacy `23 -> 11`, no forwarding shim):
+
+```text
+src/search.ts                 -> tui/interaction/transcript-search.ts
+src/search-overlay.ts         -> app/surface/search-overlay.ts
+src/search-profile.ts         -> app/surface/search-profile.ts
+src/compaction-presentation.ts-> app/surface/compaction-presentation.ts (owns the canonical CompactionPhase; tui-app.ts type-re-exports it)
+src/focus-timing.ts           -> tui/transcript/focus-timing.ts (process-global focusTiming singleton removed; focusDurationText/the Focus component take the timing store explicitly)
+src/long-message-disclosure.ts-> tui/transcript/long-message-disclosure.ts
+src/presentation-lines.ts     -> tui/presentation/lines.ts
+src/scroll-render-profile.ts  -> tui/diagnostics/scroll-profile.ts
+src/transcript-render-profile.ts -> tui/diagnostics/transcript-render-profile.ts
+src/thinking-preview.ts       -> tui/components/transcript/thinking-preview.ts (NOT tui/transcript/**: it consumes PiTui width mechanics, which the tui/transcript core rule forbids)
+src/compact-text-preview.ts   -> tui/components/transcript/compact-text-preview.ts (zero-consumer compactTextPreviewLines retired)
+src/wheel-scroll.ts           -> domain/display/wheel-scroll.ts
+```
+
+The search three-layer contract stays: `domain/transcript/search.ts` semantics,
+`app/surface/search-overlay.ts` state/currentness, `tui/interaction/transcript-search.ts`
+interaction. `tui/transcript/focus-timing.ts` reads `TurnActivity` from the
+canonical `domain/transcript/types.ts`, never the root facade.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1

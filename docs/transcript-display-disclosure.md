@@ -189,8 +189,10 @@ the `tui-transcript-imports-renderer-mechanics` architecture rule:
 registry or concrete TUI component, and since TS7 it reads the semantic owners
 from `src/domain/transcript/**` instead of the `src/transcript.ts` facade. The
 Context semantic authority (`contextFormOf` / `isAmbientContext`) now lives in
-`src/domain/transcript/context-semantics.ts`; `src/search-overlay.ts` and
-`src/display-preset.ts` stay unmoved for TS8.
+`src/domain/transcript/context-semantics.ts`; TS8-F5 moved the overlay state to
+`src/app/surface/search-overlay.ts` and the interaction rendering to
+`src/tui/interaction/transcript-search.ts` (search semantics stay in
+`src/domain/transcript/search.ts`).
 
 ## Compact projection
 

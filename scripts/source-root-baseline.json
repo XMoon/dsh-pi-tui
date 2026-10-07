@@ -11,26 +11,14 @@
   "legacy": [
     "bounded-output.ts",
     "builtins.ts",
-    "compact-text-preview.ts",
-    "compaction-presentation.ts",
     "diff.ts",
-    "focus-timing.ts",
     "local-shell-card.ts",
-    "long-message-disclosure.ts",
-    "presentation-lines.ts",
     "process-tui-slot.ts",
     "progress.ts",
-    "scroll-render-profile.ts",
-    "search-overlay.ts",
-    "search-profile.ts",
-    "search.ts",
     "skill-reference-completion.ts",
     "streaming-tool-preparing.ts",
     "terminal-title.ts",
-    "thinking-preview.ts",
     "tool-presentation-client.ts",
-    "transcript-render-profile.ts",
-    "wheel-scroll.ts",
     "working.ts"
   ]
 }
