@@ -30,6 +30,7 @@ import type {
   InteractionPort,
   QuestionInteractionPort,
   QuestionSurfaceSnapshot,
+  QuestionWaitClaim,
   UserQuestionProvider,
 } from '../src/runtime/interaction-port.ts'
 import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
@@ -315,7 +316,12 @@ interface SurfaceHarness extends SurfaceControls {
    * `ask_user_question` foreground wait does (production: the Host question
    * channel). A CONTINUED late answer takes the same channel with `false`.
    */
-  readonly agentQuestion: (signal?: AbortSignal) => Promise<unknown>
+  readonly agentQuestion: (
+    signal?: AbortSignal,
+    options?: { timed?: boolean; callId?: string },
+  ) => Promise<unknown>
+  /** Install the Host timed-wait claim the next live request will receive. */
+  readonly setClaim: (claim: QuestionWaitClaim | undefined) => void
   /** Install the Host question projection the port serves (cold discovery). */
   readonly setQuestionSnapshot: (snapshot: QuestionSurfaceSnapshot | undefined) => void
   /** Fire the port's projection notification (the Host change feed). */
@@ -447,6 +453,7 @@ function mountSurface(
   let approvalListener: ((request: ApprovalRequestLike, next: unknown) => unknown) | undefined
   let questionProvider: UserQuestionProvider | undefined
   let questionSnapshot: QuestionSurfaceSnapshot | undefined
+  let questionClaim: QuestionWaitClaim | undefined
   let questionSubscriber: (() => void) | undefined
   const questionPort = {
     onRequest: (next: UserQuestionProvider) => { questionProvider = next; return true },
@@ -455,7 +462,7 @@ function mountSurface(
       return () => { if (questionSubscriber === listener) questionSubscriber = undefined }
     },
     snapshot: () => questionSnapshot,
-    claimTimedWait: async () => undefined,
+    claimTimedWait: async () => questionClaim,
     answerContinued: async () => 'queued',
   } as unknown as QuestionInteractionPort
   const interactionPort = {
@@ -487,16 +494,17 @@ function mountSurface(
       if (approvalListener === undefined) throw new Error('the Agent approval listener was not registered')
       return approvalListener(request, undefined) as Promise<ApprovalOutcome>
     },
-    agentQuestion: (signal) => {
+    agentQuestion: (signal, options) => {
       if (questionProvider === undefined) throw new Error('the Agent question provider was not registered')
       return questionProvider({
         sessionId: 'session-terminal-progress-test',
-        callId: 'call-1',
-        timed: false,
+        callId: options?.callId ?? 'call-1',
+        timed: options?.timed === true,
         questions: [{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }],
         ...(signal === undefined ? {} : { signal }),
       }, async () => ({ answers: [] }))
     },
+    setClaim: (claim) => { questionClaim = claim },
     setQuestionSnapshot: (snapshot) => { questionSnapshot = snapshot },
     notifyQuestionChange: () => { questionSubscriber?.() },
     reopenContinued: (callId) =>
@@ -742,6 +750,60 @@ test('a CLIENT-LOCAL question never pauses the Tern pane (the /login authorizati
     await drain()
     assert.equal(h.phase(), 'idle', 'the local flow settled')
     assert.deepEqual(h.progressStates, ['indeterminate'], 'and the pane never left the working state')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a timed Agent question hands over to its own CONTINUED form without pausing the pane', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'])
+
+    // The Host timed-wait claim: it ends when the Host records the timed result.
+    let endWait!: () => void
+    const ended = new Promise<void>(resolve => { endWait = resolve })
+    let releases = 0
+    h.setClaim({ remainingMs: 60_000, ended, release: () => { releases += 1 } })
+
+    // 1. The LIVE foreground Agent wait: the Agent IS blocked -> waiting_input.
+    //    Nothing below sends another agent/status; every transition is driven by
+    //    the real controller lifecycle.
+    const live = h.agentQuestion(undefined, { timed: true, callId: 'call-timed' })
+    await drain()
+    assert.equal(h.phase(), 'waiting-question')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'],
+      'the live foreground Agent wait is Agent-blocking')
+    assert.equal(releases, 0, 'the claim is held while the foreground wait runs')
+
+    // 2. The Host records the timed result: the SAME call is now `continued` and
+    //    the Agent has already continued ("Your answer will arrive as a new
+    //    turn").
+    h.setQuestionSnapshot({
+      sessionId: 'session-terminal-progress-test',
+      active: [{
+        sessionId: 'session-terminal-progress-test',
+        callId: 'call-timed',
+        state: 'continued',
+        questions: [{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }],
+      }],
+      settled: [],
+      queuedReplyCallIds: new Set(),
+    })
+
+    // 3. The Host wait ENDS: the controller closes the foreground attempt and its
+    //    own awaitContinued() re-offers the call as the editable late answer.
+    endWait()
+    await live.catch(() => {})
+    await drain()
+    assert.equal(h.phase(), 'waiting-question', 'the late-answer form still owns the surface')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'indeterminate'],
+      'the Agent already continued: the pane leaves waiting_input and returns to working')
+    assert.equal(releases, 1, 'the ended claim is released exactly once')
   } finally {
     h.dispose()
   }

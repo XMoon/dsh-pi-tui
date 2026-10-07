@@ -3975,11 +3975,11 @@ export class TuiApp {
   /**
    * The effective pane state for the current inputs: the main-Agent running
    * truth alone for every ordinary terminal, refined for Tern by the canonical
-   * phase AND the provenance of the wait that owns the response surface. The
-   * canonical `RunPhase` says "a question/approval is on screen"; only an
-   * `agent`-owned wait means the main Agent is actually waiting for the user —
-   * a Client-local flow (`/login` authorization, a plugin confirm) leaves the
-   * pane working while the Agent keeps running. Pure.
+   * phase AND the lifecycle-owned `agentInputWait` fact (whether the Agent is
+   * BLOCKED on the presented wait). The canonical `RunPhase` only says "a
+   * question/approval is on screen": a Client-local flow (`/login` authorization,
+   * a plugin confirm) and a CONTINUED late-answer form whose Agent already
+   * continued leave the pane working while the Agent keeps running. Pure.
    */
   private effectiveTerminalProgressState(
     phase: RunPhase = this.statusStore.snapshot().activity.phase,
@@ -18808,9 +18808,10 @@ export class TuiApp {
             // The next queued flow owns the seat (follow-up P1).
             () => this.setFocusSeat('overlay'),
             // The wait that owns the surface CHANGED — a different flow, possibly
-            // with a different ORIGIN — while the phase stays `waiting-question`,
-            // so the activity projection (and with it the effective pane state)
-            // must be re-derived here, exactly like the final-restoration branch.
+            // with a different `agentInputWait` — while the phase stays
+            // `waiting-question`, so the activity projection (and with it the
+            // effective pane state) must be re-derived here, exactly like the
+            // final-restoration branch.
             () => this.projectActivity(),
             () => { (this.fullscreen ?? this.tui).requestRender() },
           ])

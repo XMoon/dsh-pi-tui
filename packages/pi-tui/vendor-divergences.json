@@ -5975,7 +5975,7 @@
     "ProcessTerminal.setProgressState: 'indeterminate' writes OSC 9;4;3 and starts the existing 1 s keepalive when absent; 'paused' stops the keepalive and writes OSC 9;4;4 with NO intermediate 9;4;0; 'clear' stops the keepalive and writes OSC 9;4;0.",
     "ProcessTerminal.setProgress(active) delegates to the stateful primitive (true -> indeterminate, false -> clear) and keeps its exact bytes, timer ownership and dedupe behavior.",
     "ProcessTerminal.stop() clears EVERY non-clear physical progress state, not only a keepalive-backed one, so a paused state cannot leak into the shell or an $EDITOR that takes the terminal next.",
-    "Host: src/tui-app.ts reconciles the effective pane state from the authoritative main-Agent running truth plus the canonical RunPhase; only a Tern terminal consumes setProgressState (every other terminal keeps the plain boolean projection)."
+    "Host: src/tui-app.ts reconciles the effective pane state from THREE inputs — the authoritative main-Agent running truth, the canonical RunPhase, and the lifecycle-owned agentInputWait fact (whether the Agent is BLOCKED on the presented wait); only a Tern terminal consumes setProgressState (every other terminal keeps the plain boolean projection)."
    ],
    "dependencies": {
     "vendorInternal": {
@@ -5998,11 +5998,12 @@
     "host": {
      "audited": true,
      "items": [
-      "src/tui-app.ts owns the effective state: reconcileTerminalProgress() runs from setTerminalProgress() and from every activity projection (projectActivity), so a wait opening or settling while the main Agent runs moves the pane immediately.",
+      "src/tui-app.ts owns the effective state: reconcileTerminalProgress() runs from setTerminalProgress() and from every activity projection (projectActivity), so a wait opening or settling while the main Agent runs moves the pane immediately — including the question FIFO handover, where the phase is unchanged but the new flow's agentInputWait is not.",
+     "Only a wait the main Agent is BLOCKED on pauses the pane: agentInputWait is supplied by the interaction lifecycle that owns the wait (the LIVE foreground Agent question wait and the Agent approval port pass true; a CONTINUED late-answer form whose Agent already continued, the /login authorization prompt and every other Client-local flow stay false), so neither the canonical phase nor the interaction SOURCE alone can claim waiting_input.",
       "The Tern-only guard keeps the richer method off every non-Tern path (plan §9.2), and a Tern terminal that lacks setProgressState fails soft to the boolean working/clear projection (plan §9.3).",
       "The PR #230 ownership lifecycle is preserved: while the TuiApp does not own the terminal the desired state is only folded, and every screen (re)start re-asserts the CURRENT effective state."
      ],
-     "notes": "Guarded by test/terminal-progress-lifecycle.test.ts (the Tern waiting_input section) and test/tern-terminal.test.ts (the pure mapping)."
+     "notes": "Guarded by test/terminal-progress-lifecycle.test.ts (the Tern waiting_input section: the real Agent-port positives, the /login local negative, the CONTINUED live->continued handover negative, the FIFO handover flips and the lifecycle restores) and test/tern-terminal.test.ts (the pure mapping)."
     },
     "publicExtension": {
      "audited": true,
@@ -6030,8 +6031,8 @@
     "packages/pi-tui/test/terminal.test.ts: paused -> clear writes the clear sequence and stops every timer (X059)",
     "packages/pi-tui/test/terminal.test.ts: stop() clears a PHYSICALLY paused state exactly once (X059)",
     "packages/pi-tui/test/terminal.test.ts: setProgress(true/false) keeps its exact bytes and keepalive (X059)",
-    "test/tern-terminal.test.ts: the Tern progress state refines running with the canonical phase",
-    "test/terminal-progress-lifecycle.test.ts: the Tern waiting_input section (approval, question, plan review, parked attention, owner fence, stop/$EDITOR/fullscreen restores)"
+    "test/tern-terminal.test.ts: the Tern progress state needs a wait phase AND a proven Agent-blocking wait",
+    "test/terminal-progress-lifecycle.test.ts: the Tern waiting_input section (real Agent approval/question positives, plan review, parked attention, the /login local negative, the CONTINUED live->continued handover negative, the FIFO handover flips, owner fence, stop/$EDITOR/fullscreen restores)"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -6063,7 +6064,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Audited the whole progress state machine against the pinned baseline: the boolean contract and its keepalive are unchanged, the new state is optional and consumed by the Tern ANSI path only, and the only widened lifecycle rule is stop() clearing a physically paused state."
+    "notes": "Audited the whole progress state machine against the pinned baseline: the boolean contract and its keepalive are unchanged, the new state is optional and consumed by the Tern ANSI path only, and the only widened lifecycle rule is stop() clearing a physically paused state. The host-side consumer contract is THREE inputs (main-Agent running + canonical RunPhase + the lifecycle-owned agentInputWait); a re-vendor or retirement audit must keep the third input, never collapse it back to the phase alone."
    }
   }
  }
