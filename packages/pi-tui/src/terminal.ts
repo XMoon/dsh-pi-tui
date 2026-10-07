@@ -126,8 +126,9 @@ export interface Terminal {
 
 /**
  * The physical OSC 9;4 progress states this terminal can own (X059):
- * `clear` (9;4;0), `indeterminate` (9;4;3 plus the 1s keepalive) and `paused`
- * (9;4;4, no keepalive — a state the boolean API cannot represent).
+ * `clear` (9;4;0), `indeterminate` (9;4;3; terminals that expire the state
+ * receive a 1 s keepalive) and `paused` (9;4;4, no keepalive — a state the
+ * boolean API cannot represent).
  */
 export type TerminalProgressState = "clear" | "indeterminate" | "paused";
 
@@ -148,6 +149,24 @@ export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
 		return DEFAULT_SSH_ESCAPE_TIMEOUT_MS;
 	}
 	return DEFAULT_ESCAPE_TIMEOUT_MS;
+}
+
+/**
+ * Whether the attached terminal expires the OSC 9;4 indeterminate state and
+ * therefore needs the 1 s heartbeat (X059). Ghostty and Monstar drop the
+ * progress state unless it is re-asserted; persistent terminals (Tern, Kitty,
+ * WezTerm, ...) keep it, and re-writing `9;4;3` there is unnecessary — it can
+ * even restart their native indeterminate animation (e.g. Windows Terminal).
+ * A positive allowlist: an unknown terminal is NOT refreshed.
+ */
+export function shouldKeepTerminalProgressAlive(env: NodeJS.ProcessEnv = process.env): boolean {
+	const termProgram = (env.TERM_PROGRAM ?? "").toLowerCase();
+	const term = (env.TERM ?? "").toLowerCase();
+
+	const ghostty = termProgram === "ghostty" || term.includes("ghostty") || Boolean(env.GHOSTTY_RESOURCES_DIR);
+	const monstar = termProgram === "monstar" || term === "monstar";
+
+	return ghostty || monstar;
 }
 
 /**
@@ -173,6 +192,11 @@ export class ProcessTerminal implements Terminal {
 	 * keepalive timer because `paused` is a real state with no interval: only
 	 * this field can tell `stop()` that there is something to clear. */
 	private progressState: TerminalProgressState = "clear";
+	/** Whether the attached terminal expires OSC 9;4 state and needs the
+	 * indeterminate heartbeat (X059). Snapshotted ONCE at construction: the
+	 * terminal identity cannot change within this process, so a later env
+	 * mutation must not flip the timer policy of a live terminal. */
+	private readonly keepProgressAlive = shouldKeepTerminalProgressAlive();
 	private writeLogPath = (() => {
 		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
@@ -605,9 +629,10 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setProgress(active: boolean): void {
-		// The boolean contract is unchanged: true = indeterminate + keepalive,
-		// false = clear. It now delegates to the stateful primitive so the
-		// physical state stays truthful for `stop()` (X059).
+		// The boolean contract is unchanged: true = indeterminate, false =
+		// clear, and each explicit call writes its own bytes. It delegates to
+		// the stateful primitive so the physical state stays truthful for
+		// `stop()` (X059); the indeterminate heartbeat stays terminal-specific.
 		this.setProgressState(active ? "indeterminate" : "clear");
 	}
 
@@ -615,15 +640,18 @@ export class ProcessTerminal implements Terminal {
 	 * OSC 9;4 state projection (X059). Each call writes its own state
 	 * UNCONDITIONALLY — the caller owns the dedupe, exactly like the boolean
 	 * contract, so `setProgress(true/false)` keeps its byte-for-byte behavior.
-	 * `paused` stops the keepalive and writes OSC 9;4;4 directly with NO
-	 * intermediate clear: a transient indeterminate/idle frame would make Tern
-	 * blink `working` between `working` and `waiting_input`.
+	 * `indeterminate` starts the 1 s heartbeat only on terminals known to
+	 * expire OSC 9;4 state; a persistent terminal (Tern) gets the single
+	 * explicit write only. `paused` stops the heartbeat and writes OSC 9;4;4
+	 * directly with NO intermediate clear: a transient indeterminate/idle
+	 * frame would make Tern blink `working` between `working` and
+	 * `waiting_input`.
 	 */
 	setProgressState(state: TerminalProgressState): void {
 		if (state === "indeterminate") {
 			// OSC 9;4;3 - indeterminate progress
 			process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
-			if (!this.progressInterval) {
+			if (this.keepProgressAlive && !this.progressInterval) {
 				this.progressInterval = setInterval(() => {
 					process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
