@@ -766,7 +766,7 @@ export function classifyTool(name: string): ToolVariant {
 
 /** The structural icon semantic per exact tool name, for synthetic cards
  * without a registry entry (the glyph itself resolves through
- * src/icons.ts — fold state never stores a concrete emoji/symbol). */
+ * src/tui/icons.ts — fold state never stores a concrete emoji/symbol). */
 const TOOL_SEMANTICS: Record<string, IconSemantic> = {
   shell: 'tool-shell',
   subagent: 'subagent',

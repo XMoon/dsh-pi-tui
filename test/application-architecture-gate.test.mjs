@@ -1309,11 +1309,12 @@ test('the backend-neutral transcript core rejects renderer mechanics (TS6)', () 
 test('the transcript semantic domain is a closed-world purity contract (TS7)', () => {
   // `src/domain/transcript/**` is the ONE transport/UI-neutral transcript
   // semantic/lifecycle authority. The contract is CLOSED-WORLD: only domain
-  // siblings, the frozen transitional pure root VALUE helpers and two TYPE-ONLY
-  // compatibility edges are admitted — everything else fails by default, so a
-  // future escape hatch has to be added deliberately instead of being missed by a
-  // forbidden-target list. A value import must never ride along on a type-only
-  // allowance, and the literal-dynamic spelling must reach the same verdict.
+  // siblings and the two canonical TYPE-ONLY compatibility edges
+  // (`domain/display/icons.ts`, `runtime/assistant-stream-port.ts`) are
+  // admitted — everything else fails by default, so a future escape hatch has
+  // to be added deliberately instead of being missed by a forbidden-target
+  // list. A value import must never ride along on a type-only allowance, and
+  // the literal-dynamic spelling must reach the same verdict.
   const RULE = 'domain-transcript-imports-backend-mechanics'
   const staticEdge = (file, specifier, target, source) =>
     findViolations([entry(file, source), entry(target, 'export const x = 1\n')])
