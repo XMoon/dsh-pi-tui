@@ -451,8 +451,8 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/runtime/prepared-prompt.ts` | (none) | TS8-C transport-neutral `PreparedPrompt` contract consumed by `src/runtime/remote/prompt-serializer-remote.ts`; imports only `domain/media/types.ts`. No Client draft-store/placeholder type may enter it. |
 | `src/default-intent.ts` | (none) | The pure D2.3 sessionless `/model` default-intent state machine (operation ancestry + settle authority). It uses the structural `ModelSelectionValue` (generic over the caller's selection type) — no `ctx`, no Host services, no I/O, no Host import. |
 | `src/sessions.ts` | `import:dsh-session` | Type-only session types. |
-| `src/domain/status/stats.ts` | `import:dsh-session` | Type-only; the session stats fold/facts (moved from the retired `src/stats.ts` by TS8-D). |
-| `src/client/artifact/transcript-markdown.ts` | `import:dsh-session` | Type-only; the Client artifact Markdown formatter consumes the client session event/window type (moved out of the `src/transcript.ts` facade by TS8-D), not transport (plan §20). |
+| `src/domain/status/stats.ts` | `import:dsh-session` | `SessionEvent` type + the `isReplacementSurfaceEvent` replacement fence; the session stats fold/facts (moved from the retired `src/stats.ts` by TS8-D). |
+| `src/client/artifact/transcript-markdown.ts` | `import:dsh-session` | `SessionEvent`/`SessionHeader` types + the `isReplacementSurfaceEvent` / `TOOL_NOT_STARTED` event helpers; the Client artifact Markdown formatter (moved out of the `src/transcript.ts` facade by TS8-D), not transport (plan §20). |
 | `src/domain/transcript/types.ts` | `import:dsh-session` | Type-only; the canonical session-event identity carriers (`CommandId` / `SessionEventSeq`) relocated by TS7 from `src/transcript.ts`. |
 | `src/domain/transcript/folder.ts` | `import:dsh-session` | Session event/window values (`isReplacementSurfaceEvent`, `TOOL_NOT_STARTED`) consumed by the ONE fold; relocated by TS7 from `src/transcript.ts`. |
 
