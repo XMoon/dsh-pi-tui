@@ -670,12 +670,14 @@ test('notification mode off suppresses the toast but never the pane progress (pl
 // ── Tern waiting_input refinement (PR B / fork X059) ────────────────────────
 //
 // The canonical RunPhase is the FIRST input of the pane-progress projection, and
-// the PROVENANCE of the presented wait is the second: a `waiting-question` /
-// `waiting-approval` phase pauses the pane ONLY when the wait was created by the
-// Agent interaction port. The positives below enter through that real port
-// (`InteractionPort.onApprovalRequest` / `QuestionInteractionPort` provider), so
-// the assertion covers source -> discriminator -> TuiApp -> TerminalProgressState;
-// the negative proves a Client-local question (the `/login` authorization shape)
+// the lifecycle-owned `agentInputWait` fact is the second: a `waiting-question` /
+// `waiting-approval` phase pauses the pane ONLY when the Agent is BLOCKED on that
+// wait. "This form came from the Agent channel" is not enough — a CONTINUED
+// late-answer form comes from that channel and must not pause. The positives below
+// enter through the real Agent port (`InteractionPort.onApprovalRequest` /
+// `QuestionInteractionPort` provider), so the assertion covers
+// source -> lifecycle decision -> TuiApp -> TerminalProgressState; the negatives
+// prove a Client-local question (the `/login` authorization shape)
 // keeps the pane working even though the canonical phase IS `waiting-question`.
 
 test('a Tern AGENT approval pauses the pane and settling it returns to working', async () => {
