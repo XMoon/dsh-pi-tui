@@ -34,13 +34,13 @@ import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
 import { StatsFolder } from '../../domain/status/stats.ts'
-import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep } from '../../streaming-tool-preparing.ts'
+import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep, type StreamingToolPreview, type ToolSummaryKeys } from './streaming-tool-preparing.ts'
 import { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
-import type { StreamingToolPreview, TuiApp } from '../../tui-app.ts'
+import type { TuiApp } from '../../tui-app.ts'
 import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from './runtime.ts'
 
 /**
@@ -114,6 +114,11 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
   readonly surface: SurfaceRuntime<Event>
   /** Process diagnostics for the cold-scan timings. */
   readonly diag: Diag
+  /** The injected canonical tool summary-key policy the Preparing projection
+   *  extracts argument summaries with (`toolSummaryKeys`). Required: the
+   *  application owner must not import the TUI transcript presentation module,
+   *  and a silent `[]` fallback would change Preparing summary semantics. */
+  readonly summaryKeys: ToolSummaryKeys
   /** True once the runner is disposing: no hydration may start. */
   readonly isCleanedUp: () => boolean
   /** F10 (round 4): re-derive the footer status from the CURRENT folds —
@@ -293,11 +298,12 @@ export function applyAssistantLiveInput(
   stats: StatsFolder,
   previews: Map<string, StreamingToolPreview>,
   input: AssistantLiveInput,
+  summaryKeys: ToolSummaryKeys,
 ): void {
   if (input.kind === 'end' && (input.status === 'abandoned' || input.settlement === 'attempt')) {
     clearStreamingToolPreviewsForStep(previews, input.turn, input.step)
   } else if (!(input.kind === 'chunk' && owner.turnActivity(input.turn)?.completed === true)) {
-    applyStreamingToolPreviewInput(previews, input)
+    applyStreamingToolPreviewInput(previews, input, summaryKeys)
   }
   owner.applyLiveInput(input)
   stats.applyLiveInput(input)
@@ -522,7 +528,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     recentPerformanceAvailable = recentCoverageComplete
       || statsFolder.hasEnoughRecentEvidence()
     for (const liveInput of input.liveBaseline) {
-      applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput)
+      applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
     deps.diag.debug('session bootstrap scan', {
       scan: 'transcript',
@@ -758,7 +764,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     recentPerformanceAvailable = recentCoverageComplete
       || statsFolder.hasEnoughRecentEvidence()
     for (const liveInput of snapshot.liveInputs) {
-      applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput)
+      applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
     // F10 (round 4): the stats fold was just REPLACED by the wider window —
     // the footer's status derivation still reads the pre-hydrate snapshot,
@@ -803,7 +809,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       : deps.surface.app.scrollToTop({ disableFollow: true })
   }
   const applyAssistantInput = (input: AssistantLiveInput): void => {
-    applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
+    applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input, deps.summaryKeys)
   }
   const setToolArgs = (callId: string, args: string): void => { callArgs.set(callId, args) }
   const deleteToolArgs = (callId: string): void => { callArgs.delete(callId) }

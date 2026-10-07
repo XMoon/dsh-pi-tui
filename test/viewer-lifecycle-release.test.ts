@@ -26,6 +26,7 @@ import {
 } from '../src/app/surface/viewer-runtime.ts'
 import type { SurfaceRuntime } from '../src/app/surface/runtime.ts'
 import type { SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
+import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
 import { compositionSource } from './support/composition-surface.ts'
 
 const viewerSource = readFileSync(
@@ -255,6 +256,7 @@ test('M3-6 PR3: a throwing ingress disposer cannot strand the retained child bin
   const viewer = createViewerRuntime<SessionPresentationEvent>({
     surface,
     isCleanedUp: () => false,
+    summaryKeys: toolSummaryKeys,
     currentSessionId: () => 'parent-1',
     liveParentSessionId: () => 'parent-1',
     childView,

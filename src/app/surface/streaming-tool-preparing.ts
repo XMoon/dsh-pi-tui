@@ -1,13 +1,46 @@
 /**
- * Pure local operations for the live tool-call preparing projection: the
- * preview map operations plus the two appliers that fold a durable session
- * event or one transient assistant-stream input onto them.
+ * The application-facing Preparing projection for a live tool call whose
+ * arguments are still streaming: the preview-map operations plus the two
+ * appliers that fold a durable session event or one transient
+ * assistant-stream input onto them.
+ *
+ * The summary policy — which argument fields name a known tool — is TUI
+ * transcript presentation policy, so this application owner must not import
+ * `tui/transcript/tool-presentation.ts` and must not copy its key table.
+ * The surface composition injects the required {@link ToolSummaryKeys}
+ * callback (`toolSummaryKeys`); production composition always supplies it,
+ * because an `[]` fallback would silently change Preparing summary semantics.
+ * @module @xmoon76/dsh-pi-tui/app/surface/streaming-tool-preparing
  */
 
-import type { StreamingToolPreview } from './tui-app.ts'
-import { toolSummaryKeys } from './tui/transcript/tool-presentation.ts'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { AssistantLiveInput } from './runtime/assistant-stream-port.ts'
+import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
+
+/** The injected canonical summary-key policy: the candidate argument fields
+ * for one tool name, in formal preference order. */
+export type ToolSummaryKeys = (name: string) => readonly string[]
+
+/** One live, ephemeral preview of a tool call whose arguments are still
+ * streaming. This presentation state is deliberately separate from the
+ * durable TranscriptMessage/TurnActivity model. */
+export interface StreamingToolPreview {
+  readonly callId: string
+  readonly turn: number
+  readonly step: number
+  readonly index: number
+  readonly name?: string
+  /** Total UTF-8 bytes received through argumentsDelta. */
+  readonly argumentBytes: number
+  /** Early human identity extracted from bounded partial args. */
+  readonly summary?: string
+  /** Bounded partial args retained until summary is found or a known-name scan reaches the cap. */
+  readonly scanPrefix?: string
+  /** The first streamed delta's time (post-F6 plan §12.14). The durable
+   * elapsed-time continuity across the Preparing → durable handoff is owned
+   * by the transcript's own preparing-start sidecar (first delta per call
+   * identity); the fail-open Preparing row renders no elapsed time. */
+  readonly startedAt?: number
+}
 
 /** Hard cap for the partial argument prefix retained for summary extraction. */
 export const PREPARING_SCAN_MAX_CHARS = 4096
@@ -92,6 +125,7 @@ export interface StreamingToolPreviewInput {
 export function upsertStreamingToolPreview(
   previews: Map<string, StreamingToolPreview>,
   input: StreamingToolPreviewInput,
+  summaryKeys: ToolSummaryKeys,
 ): void {
   const previous = previewAt(previews, input.turn, input.step, input.index)
   const key = input.callId === ''
@@ -124,7 +158,7 @@ export function upsertStreamingToolPreview(
       // extraction point; partial streams do not promise a later re-selection.
       const extracted = name === undefined
         ? undefined
-        : extractPartialStringField(candidate, toolSummaryKeys(name))
+        : extractPartialStringField(candidate, summaryKeys(name))
       if (extracted !== undefined) {
         summary = extracted
         scanPrefix = undefined
@@ -238,6 +272,7 @@ export function applyStreamingToolPreviewEvent(
 export function applyStreamingToolPreviewInput(
   previews: Map<string, StreamingToolPreview>,
   input: AssistantLiveInput,
+  summaryKeys: ToolSummaryKeys,
 ): void {
   if (input.kind !== 'chunk') return
   const chunk = input.chunk
@@ -250,7 +285,7 @@ export function applyStreamingToolPreviewInput(
       name: chunk.name,
       argumentsDelta: chunk.argumentsDelta,
       time: input.time,
-    })
+    }, summaryKeys)
     return
   }
   if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
@@ -263,6 +298,6 @@ export function applyStreamingToolPreviewInput(
       index: chunk.index,
       name,
       time: input.time,
-    })
+    }, summaryKeys)
   }
 }

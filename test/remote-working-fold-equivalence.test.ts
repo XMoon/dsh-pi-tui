@@ -32,6 +32,7 @@ import test from 'node:test'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
 import { createSessionPresentation, type SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
+import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
 import type { Diag } from '../src/runtime/process/diagnostics.ts'
 
 /** The minimal well-formed durable payloads the transcript fold reads. */
@@ -134,6 +135,7 @@ function harness(): Harness {
   const presentation = createSessionPresentation<SessionPresentationEvent>({
     surface: surface as never,
     diag,
+    summaryKeys: toolSummaryKeys,
     isCleanedUp: () => false,
     refreshStatusCheap: () => {},
     folds: { title: () => undefined },

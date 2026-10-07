@@ -33,7 +33,7 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { StatsFolder } from '../../domain/status/stats.ts'
 import { childOwnEvents, TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'
-import { applyStreamingToolPreviewEvent } from '../../streaming-tool-preparing.ts'
+import { applyStreamingToolPreviewEvent, type StreamingToolPreview, type ToolSummaryKeys } from './streaming-tool-preparing.ts'
 import { createViewerOpenToken, matchPendingSubagentCall, teardownViewerForSessionSwap } from './viewer-policy.ts'
 import { resolveSubagentSettleTarget, subagentPromptDisposition } from './viewer-submission.ts'
 import type {
@@ -43,7 +43,6 @@ import type {
 } from '../../runtime/subagent-port.ts'
 import { mergeDraft } from '../submission/steer.ts'
 import type { ViewerAccess } from '../../domain/task/browser.ts'
-import type { StreamingToolPreview } from '../../tui-app.ts'
 import type { SurfaceRuntime, SurfaceViewedChildPresentation } from './runtime.ts'
 import {
   applyAssistantLiveInput,
@@ -180,6 +179,9 @@ export interface ViewerRuntimeDeps<Event extends SessionPresentationEvent> {
   readonly childView: ViewerChildSource<Event>
   /** Re-derive the footer/status projections after a viewer transition. */
   readonly refreshStatus: () => void
+  /** The injected canonical tool summary-key policy the child Preparing
+   *  projection extracts argument summaries with (`toolSummaryKeys`). */
+  readonly summaryKeys: ToolSummaryKeys
   /** Restore the main transcript's semantic latest/history anchor. */
   readonly restoreMainTranscriptAnchor: () => void
   /** Start one detached viewer-owned async flow (the runner's ownership
@@ -444,7 +446,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
       // the viewer existed. Replay the read-side transient baseline after
       // durable hydration and before the child surface is mounted.
       for (const input of view.snapshot.liveInputs) {
-        applyAssistantLiveInput(childFolder, childStats, childPreviews, input)
+        applyAssistantLiveInput(childFolder, childStats, childPreviews, input, deps.summaryKeys)
       }
       const childWindow = new TranscriptWindowController({
         windowTurns: TRANSCRIPT_WINDOW_TURNS,
@@ -514,7 +516,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
         onLiveInput: (input) => {
           if (viewing === undefined || viewing.id !== childId) return
           const target = viewing
-          applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
+          applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
           deps.surface.repaint()
         },
         onWindowReplaced: () => {
@@ -614,7 +616,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     target.window.setTurns(folder.groupedTurns())
     target.stats = stats
     for (const input of snapshot.liveInputs) {
-      applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
+      applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
     }
     target.cwd = snapshot.cwd
     target.activity = snapshot.activity
@@ -848,7 +850,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
   const applyAssistantInput = (input: AssistantLiveInput): void => {
     const target = viewing
     if (target === undefined) return
-    applyAssistantLiveInput(target.folder, target.stats, target.previews, input)
+    applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
   }
 
   /**

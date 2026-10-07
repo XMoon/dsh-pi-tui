@@ -63,7 +63,7 @@ import { preparePrompt } from './submission/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { createDirectChildViewSource } from './direct/child-view.ts'
-import { toolPresenterFrom, type ToolDefinitionLike } from '../tui/transcript/tool-presentation.ts'
+import { toolPresenterFrom, toolSummaryKeys, type ToolDefinitionLike } from '../tui/transcript/tool-presentation.ts'
 import { createClientToolPresenter } from '../tool-presentation-client.ts'
 import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../domain/communication/policy.ts'
 import { parseGitAttributionMode, type GitAttributionState } from '../domain/communication/git-attribution.ts'
@@ -1073,6 +1073,10 @@ export function applyRunnerWithRuntime(
     const presentation = createSessionPresentation<SessionEvent>({
       surface,
       diag,
+      // The Preparing projection extracts argument summaries with the
+      // canonical TUI presentation policy, injected here (Direct and Remote
+      // share it).
+      summaryKeys: toolSummaryKeys,
       isCleanedUp: () => cleanedUp,
       refreshStatusCheap: () => status.refresh(),
       folds: { title: (events) => foldSessionTitle(events)?.title },
@@ -1883,6 +1887,7 @@ export function applyRunnerWithRuntime(
     const viewer = createViewerRuntime<SessionEvent>({
       surface,
       isCleanedUp: () => cleanedUp,
+      summaryKeys: toolSummaryKeys,
       currentSessionId: () => ownership.currentSessionId(),
       // Remote branch: the live pending subject is the CURRENT owner's
       // session (no Direct Agent exists to name it).

@@ -13,9 +13,10 @@ import {
   removeStreamingToolPreview,
   streamingToolPreviewSnapshot,
   upsertStreamingToolPreview,
-} from '../src/streaming-tool-preparing.ts'
+} from '../src/app/surface/streaming-tool-preparing.ts'
 import { toolIconSemantic, toolSummaryKeys, toolTitle } from '../src/tui/transcript/tool-presentation.ts'
-import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import type { StreamingToolPreview } from '../src/app/surface/streaming-tool-preparing.ts'
 import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -71,7 +72,7 @@ function applyPreviewInput(previews: Map<string, StreamingToolPreview>, input: A
       index: chunk.index,
       name: chunk.name,
       argumentsDelta: chunk.argumentsDelta,
-    })
+    }, toolSummaryKeys)
     return
   }
   if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
@@ -81,7 +82,7 @@ function applyPreviewInput(previews: Map<string, StreamingToolPreview>, input: A
       step: input.step,
       index: chunk.index,
       name: chunk.block.name,
-    })
+    }, toolSummaryKeys)
   }
 }
 

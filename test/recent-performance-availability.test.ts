@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionPresentation, type SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
+import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
 import { createOpeningJournal } from '../src/app/surface/opening-journal.ts'
 import { hasEnoughRecentPerformanceSamples, RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../src/domain/status/stats.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
@@ -138,6 +139,7 @@ function harness(): Harness {
   const presentation = createSessionPresentation<SessionPresentationEvent>({
     surface: surface as never,
     diag,
+    summaryKeys: toolSummaryKeys,
     isCleanedUp: () => false,
     refreshStatusCheap: () => { statusRefreshes += 1 },
     folds: { title: () => undefined },
