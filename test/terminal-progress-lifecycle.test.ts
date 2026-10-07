@@ -29,6 +29,7 @@ import type {
   ApprovalRequestLike,
   InteractionPort,
   QuestionInteractionPort,
+  QuestionSurfaceSnapshot,
   UserQuestionProvider,
 } from '../src/runtime/interaction-port.ts'
 import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
@@ -314,6 +315,12 @@ interface SurfaceHarness extends SurfaceControls {
    * tool call does (production: the Host question channel).
    */
   readonly agentQuestion: (signal?: AbortSignal) => Promise<unknown>
+  /** Install the Host question projection the port serves (cold discovery). */
+  readonly setQuestionSnapshot: (snapshot: QuestionSurfaceSnapshot | undefined) => void
+  /** Fire the port's projection notification (the Host change feed). */
+  readonly notifyQuestionChange: () => void
+  /** Reopen a parked CONTINUED (late-answer) question from the Task Center. */
+  readonly reopenContinued: (callId: string) => boolean
   dispose(): void
 }
 
@@ -438,10 +445,15 @@ function mountSurface(
   // controller's `ask`) are then the production ones under test.
   let approvalListener: ((request: ApprovalRequestLike, next: unknown) => unknown) | undefined
   let questionProvider: UserQuestionProvider | undefined
+  let questionSnapshot: QuestionSurfaceSnapshot | undefined
+  let questionSubscriber: (() => void) | undefined
   const questionPort = {
     onRequest: (next: UserQuestionProvider) => { questionProvider = next; return true },
-    subscribe: () => () => {},
-    snapshot: () => undefined,
+    subscribe: (_sessionId: string, listener: () => void) => {
+      questionSubscriber = listener
+      return () => { if (questionSubscriber === listener) questionSubscriber = undefined }
+    },
+    snapshot: () => questionSnapshot,
     claimTimedWait: async () => undefined,
     answerContinued: async () => 'queued',
   } as unknown as QuestionInteractionPort
@@ -484,6 +496,10 @@ function mountSurface(
         ...(signal === undefined ? {} : { signal }),
       }, async () => ({ answers: [] }))
     },
+    setQuestionSnapshot: (snapshot) => { questionSnapshot = snapshot },
+    notifyQuestionChange: () => { questionSubscriber?.() },
+    reopenContinued: (callId) =>
+      agentInteraction.controller()?.reopen('session-terminal-progress-test', callId) ?? false,
     ...controls,
     dispose: () => {
       if (disposed) return
@@ -730,6 +746,46 @@ test('a CLIENT-LOCAL question never pauses the Tern pane (the /login authorizati
   }
 })
 
+test('a CONTINUED Agent question (reopened late answer) never pauses the Tern pane', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'])
+
+    // The Host wait ENDED: the call is `continued` and the Agent already
+    // continued — its own form says "The Agent continued. Your answer will
+    // arrive as a new turn". The projection change feed makes the surface
+    // discover the late-answer call (cold discovery: nothing is auto-revealed).
+    h.setQuestionSnapshot({
+      sessionId: 'session-terminal-progress-test',
+      active: [{
+        sessionId: 'session-terminal-progress-test',
+        callId: 'call-late',
+        state: 'continued',
+        questions: [{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }],
+      }],
+      settled: [],
+      queuedReplyCallIds: new Set(),
+    })
+    h.notifyQuestionChange()
+    await drain()
+    assert.equal(h.phase(), 'idle', 'a parked continued call does not own the surface')
+    assert.deepEqual(h.progressStates, ['indeterminate'])
+
+    // The user reopens the late-answer form from the Task Center.
+    assert.equal(h.reopenContinued('call-late'), true, 'the continued call is answerable')
+    await drain()
+    assert.equal(h.phase(), 'waiting-question', 'the late-answer form IS a presented question')
+    assert.deepEqual(h.progressStates, ['indeterminate'],
+      'but the Agent is NOT blocked on it: a continued question must never show waiting_input')
+  } finally {
+    h.dispose()
+  }
+})
+
 test('a question FIFO handover from a LOCAL flow to an AGENT flow pauses the pane', async () => {
   const h = mountSurface((controls) => {
     controls.setOwner('main')
@@ -927,7 +983,7 @@ test('a $EDITOR-suspended Tern app folds a wait opening and resumes directly to 
     // The wait OPENS while the editor owns the terminal: only the desired
     // state is folded, the editor's screen never receives progress bytes.
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, true)
     assert.deepEqual(states, ['clear', 'indeterminate'],
       'a suspended terminal receives no progress bytes for the opening wait')
 
@@ -970,7 +1026,7 @@ test('a $EDITOR-suspended Tern app folds a wait settling and an idle round-trip,
     // The wait opens AND settles while the editor owns the terminal, then the
     // Agent goes idle: every change is folded, none is written.
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, true)
     controller.abort()
     await decision
     await drain()
@@ -1004,7 +1060,7 @@ test('a Tern terminal without the stateful projection fails soft to the working 
     assert.deepEqual(progress, [false, true])
 
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, true)
     assert.deepEqual(progress, [false, true, true],
       'a paused target re-asserts the working indicator (idempotent bytes), never a clear or a raw sequence')
     controller.abort()
@@ -1022,7 +1078,7 @@ test('a fullscreen swap while paused restores the paused state on the new screen
   try {
     app.setTerminalProgress(true)
     const controller = new AbortController()
-    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, 'agent')
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, true)
     assert.deepEqual(states, ['clear', 'indeterminate', 'paused'])
     app.setFullscreen(true)
     app.setFullscreen(false)

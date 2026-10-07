@@ -47,14 +47,15 @@ export function ternCwdSequence(cwd: string): string | undefined {
  * main-Agent fence and no second semantic authority is introduced:
  *
  * - not running               -> `clear`
- * - running + an AGENT-owned wait phase -> `paused` (Tern `waiting_input`)
+ * - running + an Agent-BLOCKING wait phase -> `paused` (Tern `waiting_input`)
  * - running + anything else   -> `indeterminate` (Tern `working`)
  *
  * The phase alone is NOT enough: `waiting-question` only means "a question owns
  * the response surface", which is also true for a Client-local flow (`/login`
- * authorization, a plugin confirm) while the main Agent keeps running. Only
- * `agentInputWait` proves the wait belongs to the current main-Agent
- * interaction, so a local dialog can never claim the pane's `waiting_input`.
+ * authorization, a plugin confirm) AND for a CONTINUED late-answer form whose
+ * Agent already continued. Only a caller that owns the interaction lifecycle can
+ * prove the main Agent is BLOCKED on the input (`agentInputWait`), so neither a
+ * local dialog nor a continued question can claim the pane's `waiting_input`.
  */
 export function ternProgressState(
   running: boolean,

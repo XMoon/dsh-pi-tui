@@ -13,7 +13,6 @@
 
 import { matchesKey, type OverlayHandle, type TuiInputListenerResult } from '@xmoon76/pi-tui'
 import { runSyncDisposalSteps } from '../../disposal.ts'
-import type { TuiInteractionOrigin } from '../../tui-app.ts'
 import { ResponsiveOverlayFrame } from '../components/frame.ts'
 import {
   ApprovalDialogSurface,
@@ -59,8 +58,8 @@ export interface PendingApproval {
   request: ApprovalPromptRequest
   resolve: (outcome: ApprovalOutcome) => void
   onAbort?: () => void
-  /** Who presented this prompt (Agent interaction port vs a Client-local flow). */
-  origin: TuiInteractionOrigin
+  /** Whether the main Agent is BLOCKED on this approval (never a local dialog). */
+  agentInputWait: boolean
   /** The live overlay handle behind the current approval dialog. */
   handle?: OverlayHandle
   /** The live geometry wrapper behind the current approval handle. */
@@ -91,10 +90,10 @@ export class ApprovalRuntime {
     return this.active !== undefined
   }
 
-  /** The provenance of the approval that owns the input stage, if any: only an
-   * Agent-owned prompt may be projected as the pane's `waiting_input`. */
-  activeOrigin(): TuiInteractionOrigin | undefined {
-    return this.active?.origin
+  /** Whether the approval that owns the input stage is one the main Agent is
+   * blocked on: only then may it be projected as the pane's `waiting_input`. */
+  activeAgentInputWait(): boolean {
+    return this.active?.agentInputWait === true
   }
 
   /** Sync the on-screen approval against a live terminal resize. */
@@ -131,20 +130,20 @@ export class ApprovalRuntime {
   /**
    * Queue an approval prompt and resolve when the user decides.
    * @param request - the tool, reason, and optional abort signal.
-   * @param origin - who is asking (the Agent approval port vs a Client-local
-   *   flow); only an Agent-owned prompt may become the pane's `waiting_input`.
+   * @param agentInputWait - whether the main Agent is blocked on this approval;
+   *   only such a prompt may become the pane's `waiting_input`.
    * @returns the user's decision.
    */
   showPrompt(
     request: ApprovalPromptRequest,
-    origin: TuiInteractionOrigin = 'local',
+    agentInputWait = false,
   ): Promise<ApprovalOutcome> {
     // A disposed surface must never leave the caller hanging: settle
     // cancelled immediately (M0 stale-generation contract — the runner's
     // approval handler may fire during exit teardown).
     if (this.host.isDisposed()) return Promise.resolve('cancelled')
     return new Promise<ApprovalOutcome>((resolve) => {
-      const pending: PendingApproval = { request, resolve, origin }
+      const pending: PendingApproval = { request, resolve, agentInputWait }
       if (request.signal !== undefined) {
         const onAbort = (): void => {
           try {

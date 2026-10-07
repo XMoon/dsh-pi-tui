@@ -91,11 +91,15 @@ interface ContinuedEntry {
 /** The controller's surface-side hooks (all injected; no Host access). */
 export interface QuestionControllerDeps {
   readonly port: QuestionInteractionPort
-  /** Mount the terminal flow in the editor seat. */
+  /** Mount the terminal flow in the editor seat.
+   *  `agentInputWait` is the fact the pane needs: the LIVE foreground wait means
+   *  the main Agent is blocked on the answer (`true`), while a CONTINUED
+   *  late-answer form is presented after the Agent already continued (`false`). */
   readonly ask: (
     questions: readonly TuiQuestion[],
     signal: AbortSignal | undefined,
     status: TuiQuestionStatus,
+    agentInputWait: boolean,
   ) => Promise<TuiQuestionAnswer[]>
   /** Non-blocking user-facing line. */
   readonly notify: (message: string, level: 'info' | 'error') => void
@@ -582,7 +586,7 @@ export class QuestionSurfaceController {
     // abort from the surface's point of view, never a user cancel.
     if (this.disposed) throw questionRejection(ASK_ABORTED)
     try {
-      const answers = await this.deps.ask(request.questions.map(toTuiQuestion), signal, status)
+      const answers = await this.deps.ask(request.questions.map(toTuiQuestion), signal, status, true)
       return { answers: answers.map(toAnswerItem) }
     } catch (error) {
       if (timedOut) throw questionRejection(ASK_TIMED_OUT)
@@ -671,7 +675,9 @@ export class QuestionSurfaceController {
     try {
       // The panel is withdrawn through THIS signal when authority changes or
       // the user parks, so the form never outlives its answerability.
-      const answers = await this.deps.ask(entry.questions.map(toTuiQuestion), controller.signal, status)
+      // The Agent CONTINUED: the answer arrives as a new turn, so this form is
+      // not an Agent-blocking wait even though it came from the Agent channel.
+      const answers = await this.deps.ask(entry.questions.map(toTuiQuestion), controller.signal, status, false)
       const outcome = await this.deps.port.answerContinued(
         entry.sessionId,
         entry.callId,

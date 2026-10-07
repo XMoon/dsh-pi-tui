@@ -1164,22 +1164,18 @@ export interface TuiQuestionStatus {
   initialDraft?: QuestionFlowDraft
 }
 
-/** The PROVENANCE of one presented interaction. `agent` means the wait was
- * created by the Agent/Host interaction port (the `ask_user_question` tool or
- * an Agent approval request); `local` means a Client-local flow owns the seat
- * (the `/login` authorization prompt, a plugin's advanced confirm/input, any
- * other local dialog). It exists because the canonical surface `RunPhase`
- * answers "is a question on screen?", NOT "is the main Agent waiting for the
- * user?" — only an `agent`-owned wait may be projected as the pane's
- * `waiting_input`. Every caller that is not the Agent interaction port stays
- * `local` by default (fail-closed: a local dialog never claims an Agent wait). */
-export type TuiInteractionOrigin = 'agent' | 'local'
-
 /** Live state of one user-questions flow (the QuestionFlow seat). */
 interface QuestionState {
   flow: QuestionFlow
-  /** Who presented this flow (Agent interaction port vs a Client-local flow). */
-  origin: TuiInteractionOrigin
+  /**
+   * Whether the CURRENT main Agent is blocked on this flow's input. Supplied by
+   * the caller that owns the interaction lifecycle: the Agent question channel's
+   * LIVE foreground wait (`true`), a CONTINUED late-answer form whose Agent has
+   * already continued (`false`), or a Client-local dialog (`false`). Only `true`
+   * may become the pane's `waiting_input` — "this form came from the Agent
+   * channel" is NOT the same fact as "the Agent is blocked on it".
+   */
+  agentInputWait: boolean
   /** The mounted QuestionFrame, while this flow owns the editor seat. */
   frame?: QuestionFrame
   /**
@@ -3993,14 +3989,15 @@ export class TuiApp {
   }
 
   /**
-   * Whether the interaction currently owning the response surface was created
-   * by the Agent/Host interaction port. `false` for every Client-local flow:
-   * the phase alone cannot tell the two apart, so the provenance is carried by
-   * the presented flow itself (questions) or by the active approval record.
+   * Whether the interaction currently owning the response surface is a wait the
+   * main Agent is BLOCKED on. A CONTINUED (late-answer) Agent question and every
+   * Client-local flow are `false`: the phase alone cannot tell them apart, so the
+   * fact is supplied by the caller that owns the lifecycle and carried by the
+   * presented flow itself.
    */
   private agentInputWaitActive(): boolean {
-    if (this.activeQuestions?.origin === 'agent') return true
-    return this.approvals.activeOrigin() === 'agent'
+    if (this.activeQuestions?.agentInputWait === true) return true
+    return this.approvals.activeAgentInputWait() === true
   }
 
   /**
@@ -18496,16 +18493,17 @@ export class TuiApp {
    * approval interaction owner; TS5 §8.3). The dialog body stays in the TS4
    * `tui/panels/approval-dialog.ts` presentation.
    * @param request - the tool, reason, and optional abort signal.
-   * @param origin - who is asking: the Agent/Host approval port passes
-   *   `'agent'`; a future Client-local approval surface keeps the fail-closed
-   *   `'local'` default and never claims an Agent wait.
+   * @param agentInputWait - whether the main Agent is BLOCKED on this approval:
+   *   the Agent/Host approval port passes `true`; the fail-closed default is
+   *   `false`, so a Client-local approval surface could never claim the pane's
+   *   `waiting_input` by accident.
    * @returns the user's decision.
    */
   showApprovalPrompt(
     request: ApprovalPromptRequest,
-    origin: TuiInteractionOrigin = 'local',
+    agentInputWait = false,
   ): Promise<ApprovalOutcome> {
-    return this.approvals.showPrompt(request, origin)
+    return this.approvals.showPrompt(request, agentInputWait)
   }
 
   /** Headless-test hook: the number of live approval frames (a fullscreen
@@ -18610,12 +18608,14 @@ export class TuiApp {
     signal?: AbortSignal,
     status?: TuiQuestionStatus,
     /**
-     * Who is asking. The Agent/Host interaction port passes `'agent'` so the
-     * wait can be projected as the pane's `waiting_input`; every Client-local
-     * caller (the `/login` authorization prompt, plugin confirms, tests) keeps
-     * the fail-closed `'local'` default — its question is NOT an Agent wait.
+     * Whether the main Agent is BLOCKED on this input. The Agent question
+     * channel's LIVE foreground wait passes `true`; a CONTINUED late-answer form
+     * (the Agent already continued and the answer arrives as a new turn), the
+     * `/login` authorization prompt, plugin confirms and tests keep the
+     * fail-closed `false` default. Only `true` can become the pane's
+     * `waiting_input`.
      */
-    origin: TuiInteractionOrigin = 'local',
+    agentInputWait = false,
   ): Promise<TuiQuestionAnswer[]> {
     // A disposed surface must never leave the caller hanging: settle
     // rejected immediately (M0 stale-generation contract — the runner's
@@ -18650,7 +18650,7 @@ export class TuiApp {
         resolve,
         reject,
         signal,
-        origin,
+        agentInputWait,
         ...status === undefined ? {} : { status },
       }
       state.flow.setStatus(status)
