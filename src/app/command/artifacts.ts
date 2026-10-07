@@ -13,8 +13,8 @@
 import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from '../../client-artifact-save.ts'
-import { completeDirectory } from '../../file-completion/directory-completion.ts'
-import { LocalFileSource } from '../../file-completion/local-file-source.ts'
+import { ClientLocalDiscoveryDriver, clientPathQueryEnvironment } from '../../client/file-completion/local-discovery.ts'
+import { completeDirectory } from '../../client/file-completion/directory-completion.ts'
 import { isCancellation, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
 import type { Diag } from '../../diag.ts'
@@ -79,9 +79,9 @@ export function createArtifactSaveOwner<
     }
   }
 
-  /** The Client-local directory completion source (the shared engine). */
+  /** The Client-local directory completion driver (the Client's own fs). */
   
-  const localFileSource = new LocalFileSource()
+  const clientDiscovery = new ClientLocalDiscoveryDriver()
 
   const saveArtifact = async (
     name: 'export' | 'transcript',
@@ -112,7 +112,13 @@ export function createArtifactSaveOwner<
             return false
           }
         },
-        complete: (raw, completionSignal) => completeDirectory(raw, deps.clientCwd, localFileSource, completionSignal),
+        complete: (raw, completionSignal) => completeDirectory(
+          raw,
+          deps.clientCwd,
+          clientDiscovery,
+          clientPathQueryEnvironment(),
+          completionSignal,
+        ),
       }, deps.signal)
     } catch (error) {
       // A REFUSAL (a duplicate prompt, or an active Host question/approval)
