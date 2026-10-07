@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { createSearchProfiler, searchProfilingEnabled } from '../src/search-profile.ts'
+import { createSearchProfiler, searchProfilingEnabled } from '../src/app/surface/search-profile.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'

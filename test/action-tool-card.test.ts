@@ -17,7 +17,7 @@ import {
   toolCardHeader,
 } from '../src/tui/transcript/tool-presentation.ts'
 import type { CompactToolPresentation } from '../src/tui/transcript/tool-presentation.ts'
-import { CompactTextPreview } from '../src/compact-text-preview.ts'
+import { CompactTextPreview } from '../src/tui/components/transcript/compact-text-preview.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

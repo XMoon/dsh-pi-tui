@@ -28,7 +28,7 @@ import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
-import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../src/wheel-scroll.ts'
+import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../src/domain/display/wheel-scroll.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 

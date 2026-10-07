@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { FocusTimingStore, focusTimerPaused } from '../src/focus-timing.ts'
+import { FocusTimingStore, focusTimerPaused } from '../src/tui/transcript/focus-timing.ts'
 import type { TurnActivity } from '../src/transcript.ts'
 
 /** A minimal mutable activity; the timer only reads start/end/completed. The

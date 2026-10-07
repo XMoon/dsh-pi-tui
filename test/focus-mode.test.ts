@@ -44,7 +44,7 @@ function actionStatsOf(total: number, types: Record<string, number> = {}): Compa
 import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/tui/transcript/tool-presentation.ts'
 import { totalTokens } from '../src/domain/transcript/usage.ts'
 import { formatTokens } from '../src/tui/token-format.ts'
-import { FocusTimingStore } from '../src/focus-timing.ts'
+import { FocusTimingStore } from '../src/tui/transcript/focus-timing.ts'
 import type { RunPhase } from '../src/domain/status/types.ts'
 
 /** Build an event with an EXPLICIT time (Focus timing tests need control). */
@@ -1378,7 +1378,7 @@ test('FocusActivityComponent reads the live phase without a rebuild and freezes 
 test('a completed Focus turn renders Turn complete instead of Thought', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
-  const header = new FocusActivityComponent({ activity: folder.turnActivity(0)!, expanded: false, actionStats: actionStatsOf(2, { read: 2 }), now: () => 35_000 }).render(80).join('\n')
+  const header = new FocusActivityComponent({timing: new FocusTimingStore(),  activity: folder.turnActivity(0)!, expanded: false, actionStats: actionStatsOf(2, { read: 2 }), now: () => 35_000 }).render(80).join('\n')
   assert.ok(header.includes('Turn complete 6s'), header)
   assert.ok(!header.includes('Thought'), `the live label must not read Thought: ${header}`)
 })
@@ -1962,16 +1962,16 @@ test('the component renders a flat muted card and refreshes duration live', () =
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const component = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(1, { read: 1 }), now: () => 35000 })
+  const component = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: false, actionStats: actionStatsOf(1, { read: 1 }), now: () => 35000 })
   const lines = component.render(80)
   assert.ok(lines[0]!.includes('🐋 Turn complete 6s · 1 action · read ×1'), lines[0])
   assert.ok(!lines[0]!.startsWith('  '), 'the card chrome shares the transcript left edge (addendum v2 §28)')
   // Running turns re-read `now` per render: a later frame shows the new
   // duration (the WorkingIndicator heartbeat drives the repaint).
   const running = activityOf(0, [eventAt('turn/start', { turn: 0 }, 1000, 0)])!
-  const live = new FocusActivityComponent({ activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 12000 })
+  const live = new FocusActivityComponent({timing: new FocusTimingStore(),  activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 12000 })
   assert.ok(live.render(80)[0]!.includes('🐋 Working 11s'))
-  const later = new FocusActivityComponent({ activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 14000 })
+  const later = new FocusActivityComponent({timing: new FocusTimingStore(),  activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 14000 })
   assert.ok(later.render(80)[0]!.includes('🐋 Working 13s'))
 })
 
@@ -1982,7 +1982,7 @@ test('the symbols/minimal disclosure keeps every narrow width inside the termina
   for (const iconStyle of ['symbols', 'minimal'] as const) {
     for (const width of [1, 2, 3, 4, 8]) {
       for (const expanded of [false, true]) {
-        const component = new FocusActivityComponent({ activity, expanded, actionStats: actionStatsOf(0), now: () => 35000, iconStyle })
+        const component = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded, actionStats: actionStatsOf(0), now: () => 35000, iconStyle })
         for (const line of component.render(width)) {
           assert.ok(visibleWidth(line) <= width, `row wider than ${width} cols under ${iconStyle} (${expanded ? 'expanded' : 'collapsed'}): ${JSON.stringify(line)}`)
         }
@@ -2199,7 +2199,7 @@ test('FocusActivityComponent.render returns only physical rows for a multiline T
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
   ])!
-  const component = new FocusActivityComponent({
+  const component = new FocusActivityComponent({timing: new FocusTimingStore(),
     activity,
     expanded: false,
     actionStats: actionStatsOf(1, { bash: 1 }),
@@ -2597,7 +2597,7 @@ test('the Thought component never exceeds the terminal at widths 1-3', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const component = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
+  const component = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
   for (const width of [1, 2, 3]) {
     for (const line of component.render(width)) {
       assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
@@ -2609,8 +2609,8 @@ test('the Thought component never renders a line wider than the terminal', () =>
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const running = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
-  const open = new FocusActivityComponent({ activity, expanded: true, actionStats: actionStatsOf(0), now: () => 35000 })
+  const running = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
+  const open = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: true, actionStats: actionStatsOf(0), now: () => 35000 })
   for (const width of [12, 20, 40, 80]) {
     for (const line of [...running.render(width), ...open.render(width)]) {
       assert.ok(visibleWidth(line) <= width, `line ${JSON.stringify(line)} exceeds width ${width}`)

@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { longMessageDisclosureWindow } from '../src/long-message-disclosure.ts'
+import { longMessageDisclosureWindow } from '../src/tui/transcript/long-message-disclosure.ts'
 
 const geometry = { thresholdRows: 10, headRows: 4, tailRows: 3 }
 const marker = (hidden: number): string => `… ${hidden} hidden`
