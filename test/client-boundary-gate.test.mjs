@@ -53,6 +53,26 @@ test('scanTree ignores comment lines and non-Host services', (t) => {
   })
 })
 
+test('scanTree sees OPTIONAL-CHAINED Host access (ctx?.get / ctx?.<service>)', (t) => {
+  // A lazily-resolved service is the same Host coupling as a direct read: the
+  // Direct Host-file adapter reads its `fileReferences` authority through
+  // `this.ctx?.get('fileReferences')`, which the pre-TS8-A matcher silently
+  // missed (it required a literal `ctx.get(`).
+  const life = testLifecycle(t)
+  const dir = life.tempDir('client-boundary-optional-')
+  writeFileSync(
+    join(dir, 'sample.ts'),
+    [
+      'const a = this.ctx?.get(\'fileReferences\')',
+      'const b = ctx?.sessions.list()',
+      'const c = this.ctx?.get(\'loader\') // not a Host pattern',
+    ].join('\n'),
+  )
+  assert.deepEqual(scanTree(dir), {
+    'sample.ts': ['fileReferences', 'sessions'],
+  })
+})
+
 test('findNewDebt reports only pairs missing from the baseline', () => {
   const scanned = { 'a.ts': ['agents', 'sessions'], 'b.ts': ['skills'] }
   const baseline = { 'a.ts': ['agents'] }
@@ -78,6 +98,10 @@ test('HOST_SERVICES covers the migration inventory', () => {
     'agentPresets',
     'sessionQuery',
     'sessionPersistence',
+    'sessionProjections',
+    'sessionProjectionCache',
+    'sessionTitle',
+    'fileReferences',
     'commands',
     'tools',
     'skills',

@@ -47,6 +47,7 @@ export const HOST_SERVICES = [
   'sessionProjections',
   'sessionProjectionCache',
   'sessionTitle',
+  'fileReferences',
   'commands',
   'tools',
   'skills',
@@ -69,11 +70,17 @@ export const HOST_SERVICES = [
 ]
 
 const SERVICE_ALT = HOST_SERVICES.join('|')
+// Both access forms tolerate OPTIONAL CHAINING (`ctx?.get('x')` /
+// `ctx?.x`): a lazily-resolved service is the SAME Host coupling as a direct
+// one, and a matcher that only saw `ctx.get(` silently missed the Direct
+// Host-file adapter's `fileReferences` read.
 const PATTERNS = [
-  // ctx.get('service') — the dominant access form in this codebase.
-  { key: (m) => m[1], re: new RegExp(`ctx\\.get\\(['"](${SERVICE_ALT})['"]`) },
-  // ctx.<service> property access (would throw without inject; still debt).
-  { key: (m) => m[1], re: new RegExp(`ctx\\.(${SERVICE_ALT})\\b`) },
+  // ctx.get('service') / ctx?.get('service') — the dominant access form in
+  // this codebase.
+  { key: (m) => m[1], re: new RegExp(`ctx\\??\\.get\\(['"](${SERVICE_ALT})['"]`) },
+  // ctx.<service> / ctx?.<service> property access (would throw without
+  // inject; still debt).
+  { key: (m) => m[1], re: new RegExp(`ctx\\??\\.(${SERVICE_ALT})\\b`) },
   // Concrete Host object types. The negative lookahead (?![\w-]) ensures
   // exact package matching: `dsh-agent` does not match `dsh-agent-preset-registry`.
   { key: () => 'import:dsh-agent', re: /@deepseek-ai\/dsh-agent(?![\w-])/ },
