@@ -103,10 +103,11 @@ export { compactingFromLog } from './app/surface/compaction-presentation.ts'
 export { runningProfile, resumeCommand } from './client/launcher/profile.ts'
 export { hostRunningProfile, type ProfileContextReadLike } from './app/bootstrap.ts'
 
-// A4-7: the compaction/context presentation folds live in the top-level
-// compaction-presentation module (plan §16/§27) and are consumed by the
-// surface routing; the root entry point re-exports them unchanged so the
-// published package surface stays byte-compatible.
+// A4-7: the compaction/context presentation folds live in the application-owned
+// `app/surface` compaction-presentation module (plan §16/§27; TS8-F5 moved them
+// out of the top-level root) and are consumed by the surface routing; the root
+// entry point re-exports them unchanged so the published package surface stays
+// byte-compatible.
 export {
   foldCompactionEvent,
   settleCompactionSurface,

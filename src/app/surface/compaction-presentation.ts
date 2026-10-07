@@ -6,9 +6,9 @@
  * compaction lifecycle pairing, the matched-settle surface effects, the
  * turn-boundary busy rule, the context re-measure classification, and the
  * resumed-session-log bootstrap folds (`workingFromLog`, `compactingFromLog`).
- * They read no Host identity and no persistence, so they are a top-level
- * presentation module (the boundary direction is `app/* -> presentation
- * modules`).
+ * They read no Host identity and no persistence, so they are an application-owned
+ * surface presentation module under `app/surface/**` (TS8-F5 moved them out of
+ * the top-level root).
  *
  * `src/index.ts` re-exports them unchanged to keep the public entry point
  * byte-compatible (the published package and the regression suites import them
