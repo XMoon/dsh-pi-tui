@@ -1372,10 +1372,9 @@ test('the transcript semantic domain is a closed-world purity contract (TS7)', (
 
   // 2. The two TYPE-ONLY edges are canonical domain vocabulary
   // (`domain/display/icons.ts`) and a neutral runtime port
-  // (`runtime/assistant-stream-port.ts`) — not transitional roots: the type
-  // spelling passes, while a value or literal-dynamic spelling would pull the
-  // concrete icon palette or live-ingress mechanics into the semantic
-  // authority.
+  // (`runtime/assistant-stream-port.ts`) — not transitional roots. Only the
+  // type spelling passes; value and literal-dynamic spellings remain forbidden
+  // by the closed-world semantic-domain contract.
   const typeOnlyEdges = [
     ['../../domain/display/icons.ts', 'domain/display/icons.ts'],
     ['../../runtime/assistant-stream-port.ts', 'runtime/assistant-stream-port.ts'],
