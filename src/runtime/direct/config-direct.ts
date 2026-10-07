@@ -17,17 +17,19 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
+import {
+  credentialKeyId,
+  credentialKeyScope,
+  type CredentialKey,
+  type CredentialRef,
+} from '@deepseek-ai/dsh-credentials'
 import {
   AuthorizationDeclinedError,
+  type AuthorizationEntry,
   type AuthorizationInteraction,
+  type AuthorizationNotice,
   type AuthorizationPrompt,
 } from '@deepseek-ai/dsh-authorization'
-import {
-  authorizationTargets,
-  type AuthorizationServiceLike,
-  type AuthorizationTarget,
-} from '../../authorization.ts'
 import {
   credentialOptionsFor,
   providerOptionsFor,
@@ -46,6 +48,7 @@ import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../..
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
+  AuthorizationFlowTarget,
   AuthorizationPromptEvent,
   ConfigPort,
   CredentialConfig,
@@ -575,8 +578,50 @@ export class DirectCredentialConfig implements CredentialConfig {
   }
 }
 
-/** The Direct authorization config (`ctx.authorization` behind the
- * authorization.ts seam). The upstream interaction model (notify/prompt
+/** The record scope every llm-pi-ai provider flow writes under (matches
+ * `@deepseek-ai/dsh-llm-pi-ai`'s RECORD_SCOPE — the TUI addresses flows by
+ * route through it). Direct Host knowledge, kept beside the adapter that
+ * interprets the Host authorization entries. */
+export const LLM_PI_AI_SCOPE = 'llm-pi-ai'
+
+/** The structural authorization service surface this Direct adapter reads. */
+export interface AuthorizationServiceLike {
+  list(): readonly AuthorizationEntry[]
+  describe(key: CredentialKey): AuthorizationEntry | undefined
+  begin(request: {
+    key: CredentialKey
+    method?: string
+    interaction: {
+      notify(notice: AuthorizationNotice): void
+      prompt(prompt: {
+        kind: 'text' | 'secret' | 'select'
+        message: string
+        placeholder?: string
+        options?: readonly { id: string; label: string; description?: string }[]
+        signal?: AbortSignal
+      }): Promise<string>
+    }
+    signal?: AbortSignal
+  }): Promise<{ status: 'authorized' | 'cancelled' }>
+  cancel(key: CredentialKey): void
+}
+
+/** Map the Host authorization entries to detached /login flow targets,
+ * deriving the route from the key's scope (llm-pi-ai flows address the provider
+ * route). This is the ONLY place that knows the Host entry shape. */
+export function authorizationTargets(entries: readonly AuthorizationEntry[]): AuthorizationFlowTarget[] {
+  return entries.map(entry => ({
+    kind: 'authorization',
+    route: credentialKeyScope(entry.key) === LLM_PI_AI_SCOPE ? credentialKeyId(entry.key) : undefined,
+    key: entry.key,
+    label: entry.label,
+    methods: entry.methods,
+    inFlight: entry.inFlight,
+  }))
+}
+
+/** The Direct authorization config (`ctx.authorization` behind the config
+ * port's AuthorizationConfig). The upstream interaction model (notify/prompt
  * callbacks) is bridged into the port's EVENT model: the adapter owns the
  * bridge interaction, consumers see only detached events and answer with
  * `respond`/`cancel` — no callback ever crosses the contract. */
@@ -614,7 +659,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     return this.authorization() !== undefined
   }
 
-  listTargets(): readonly AuthorizationTarget[] {
+  listTargets(): readonly AuthorizationFlowTarget[] {
     const authorization = this.authorization()
     // Detached copies — the method OBJECTS are cloned too (a shallow
     // array copy would still alias the Host's method rows).

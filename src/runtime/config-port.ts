@@ -27,7 +27,6 @@
  * @module @xmoon76/dsh-pi-tui/runtime/config-port
  */
 
-import type { AuthorizationTarget } from '../authorization.ts'
 import type { FooterCommandConfig } from '../domain/footer/command-config.ts'
 import type { FooterCustomItemsParseResult } from '../domain/footer/custom-items.ts'
 
@@ -303,9 +302,27 @@ export interface CredentialConfig {
   onChanged(listener: () => void): () => void
 }
 
-/** One authorization flow as the /login surface sees it (detached — the
- * same DTO the authorization.ts helpers consume). */
-export type AuthorizationFlowTarget = AuthorizationTarget
+/** One authorization flow as the /login surface sees it — a DETACHED DTO with
+ * semantic facts only (the application command layer's /login helpers consume
+ * it). `key` is the detached key identity, the same string form
+ * {@link AuthorizationConfig.begin} accepts; no Host credential object or Host
+ * package type crosses this port. The Direct adapter interprets the Host
+ * authorization entries into this shape. */
+export interface AuthorizationFlowTarget {
+  kind: 'authorization'
+  /** The provider route the flow authenticates, when the key's scope maps one
+   * (llm-pi-ai flows are keyed `llm-pi-ai/<route>`); undefined for flows owned
+   * by other plugins that no route profile addresses. */
+  route?: string
+  /** The detached key identity this flow writes. */
+  key: string
+  /** User-facing label of what is being authorized. */
+  label: string
+  /** The offered sign-in methods, most preferred first. */
+  methods: readonly { id: string; label: string }[]
+  /** Whether an attempt is running for this key right now. */
+  inFlight: boolean
+}
 
 /** A detached authorization notice (the message, and the page/code the
  * human must act on — never a secret). */
