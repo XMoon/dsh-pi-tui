@@ -34,16 +34,15 @@ import { StatsFolder } from '../../domain/status/stats.ts'
 import { childOwnEvents, TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import { applyStreamingToolPreviewEvent } from '../../streaming-tool-preparing.ts'
-import { createViewerOpenToken, matchPendingSubagentCall, teardownViewerForSessionSwap } from '../../subagent-viewer.ts'
-import {
-  resolveSubagentSettleTarget,
-  subagentPromptDisposition,
-  type SubagentPromptOutcome,
-  type SubagentPromptReject,
-  type SubagentViewerSubmitRequest,
-} from '../../subagent-viewer-submit.ts'
+import { createViewerOpenToken, matchPendingSubagentCall, teardownViewerForSessionSwap } from './viewer-policy.ts'
+import { resolveSubagentSettleTarget, subagentPromptDisposition } from './viewer-submission.ts'
+import type {
+  SubagentPromptOutcome,
+  SubagentPromptReject,
+  SubagentViewerSubmitRequest,
+} from '../../runtime/subagent-port.ts'
 import { mergeDraft } from '../submission/steer.ts'
-import type { ViewerAccess } from '../../tasks-browser.ts'
+import type { ViewerAccess } from '../../domain/task/browser.ts'
 import type { StreamingToolPreview } from '../../tui-app.ts'
 import type { SurfaceRuntime, SurfaceViewedChildPresentation } from './runtime.ts'
 import {

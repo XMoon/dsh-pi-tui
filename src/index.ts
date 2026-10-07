@@ -52,7 +52,7 @@ export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, HOST_COMMAND_CATALOG, isLocalComm
 export { dangerCommand } from './domain/shell/danger.ts'
 export { commandRejectsImages, resolveSubmitDelivery } from './app/submission/command-policy.ts'
 export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './app/session/interrupt.ts'
-export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
+export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './app/surface/viewer-policy.ts'
 export type { InitialCatalogResolution } from './domain/catalog/surface.ts'
 
 /**
@@ -95,7 +95,7 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
   return resolveInitialCatalogImpl(options)
 }
 
-export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './task-presentation.ts'
+export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './app/surface/task-presentation.ts'
 export { foldQueueRows, type QueueFoldResult } from './app/surface/pending-presentation.ts'
 export type { QueueInboxMessage } from './app/submission/pending-input.ts'
 export { compactingFromLog } from './compaction-presentation.ts'
