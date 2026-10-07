@@ -29,8 +29,9 @@ nothing. Tab had two more gaps:
   is a first-class fork hook (autocomplete.ts). The `/attach` and `/image`
   completion entries (installed by `installCompletions` in commands.ts, gated
   by the `PATH_ARGUMENT_COMMANDS` set) carry it, backed by `suggestPathArgument`
-  (mentions.ts). The session cwd is read at CALL time, so a session switch
-  mid-edit stays correct.
+  (`src/tui/file-completion/path-argument.ts`). This is CLIENT-local completion:
+  the Client cwd and the Client filesystem are read at CALL time, so a session
+  switch mid-edit stays correct and a Host/remote workspace is never consulted.
 - **`suggestPathArgument(argumentText, cwd)`** is shell-style and
   directory-local (the fd whole-tree fuzzy search stays `@`'s job). It
   resolves `~`, absolute and relative forms — including Windows drive
@@ -196,7 +197,7 @@ placement" optimization is possible later.
 
 ## Guarding tests
 
-- `test/mentions.test.ts` — suggestPathArgument (bare prefix, directory
+- `test/autocomplete-provider.test.ts` — suggestPathArgument (bare prefix, directory
   continuation, `~`/absolute forms, quoting, single-token gate, provider
   integration through the fork command branch, the Tab gate override).
 - `test/tui-editor.test.ts` — headless: `/image sh` natural dropdown, Tab on

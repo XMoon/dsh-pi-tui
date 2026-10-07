@@ -938,6 +938,9 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     // domain never depends on it; the Client never reaches into Host
     // transport/composition (Direct is closed by its own rule below).
     ['domain/file-completion/query.ts', '../../client/file-completion/local-discovery.ts', ['domain-imports-client']],
+    // TS8-B: the Host semantic/adaptor layer must never depend on the
+    // Client-local capability (the inner platform layer, like app/tui).
+    ['runtime/direct/foo.ts', '../../client/file-completion/local-discovery.ts', ['runtime-imports-client']],
     ['client/file-completion/local-discovery.ts', '../../runtime/remote/session-reader-remote.ts', ['client-imports-remote-composition']],
     ['client/file-completion/local-discovery.ts', '../../app/remote/runtime.ts', ['client-imports-remote-composition']],
     ['client/file-completion/local-discovery.ts', '../../runtime/direct/file-completion/workspace-discovery.ts', ['direct-import-outside-composition']],
@@ -967,6 +970,10 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
     // capability, and the Direct adapter consumes the same neutral domain.
     ['client/file-completion/directory-completion.ts', '../../domain/file-completion/query.ts'],
     ['app/command/artifacts.ts', '../../client/file-completion/directory-completion.ts'],
+    // TS8-B: the TUI presentation layer consumes the Client-local capability
+    // (the `runtime-imports-client` negative above keeps this from being
+    // vacuous).
+    ['tui/file-completion/path-argument.ts', '../../client/file-completion/local-discovery.ts'],
     ['tui/file-completion/local-path-completion.ts', '../../domain/file-completion/discovery-policy.ts'],
     ['runtime/direct/file-completion/workspace-discovery.ts', '../../../domain/file-completion/ranking.ts'],
   ]
@@ -979,6 +986,33 @@ test('the domain layer is transport/UI-neutral and the app/plugin owners stay of
       findViolations([entry(file, `import { x } from '${specifier}'\n`)]),
       [],
       `${file} -> ${specifier} must stay allowed`,
+    )
+  }
+  // TS8-B: a literal VALUE dynamic import is an EQUIVALENT spelling of the same
+  // edge, so `runtime-imports-client` opts into `checksValueDynamicImport` and
+  // must classify it — otherwise the layer could be entered later with a green
+  // gate. The dynamic positives keep the opt-in from becoming a blanket
+  // dynamic-import ban for the legal runtime targets.
+  const dynamicCases = [
+    ['runtime/direct/foo.ts', '../../client/file-completion/local-discovery.ts', ['runtime-imports-client']],
+    ['runtime/remote/foo.ts', '../../client/artifact/save.ts', ['runtime-imports-client']],
+  ]
+  for (const [file, specifier, rules] of dynamicCases) {
+    const violations = findViolations([entry(file, `const m = await import('${specifier}')\n`)])
+    assert.deepEqual([...violations.map(v => v.rule)].sort(), [...rules].sort(),
+      `${file} -> (dynamic) ${specifier} must fail as ${rules.join(' + ')} only`)
+  }
+  const dynamicAllowed = [
+    // The Host semantic layer may dynamically load the neutral domain and its
+    // own runtime ports.
+    ['runtime/direct/foo.ts', '../../domain/file-completion/query.ts'],
+    ['runtime/remote/foo.ts', '../host-file-port.ts'],
+  ]
+  for (const [file, specifier] of dynamicAllowed) {
+    assert.deepEqual(
+      findViolations([entry(file, `const m = await import('${specifier}')\n`)]),
+      [],
+      `${file} -> (dynamic) ${specifier} must stay allowed`,
     )
   }
 })
