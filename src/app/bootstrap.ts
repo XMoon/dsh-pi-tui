@@ -2601,15 +2601,19 @@ export function applyRunnerWithRuntime(
     // command-owned; the composition root only triggers the wiring step.
     command.attachRuntime()
     /**
-     * The Remote prepareMessage (M3-4 PR3 Step 7): the SAME draft-preparation
-     * authority (canonicalization + strict placeholder expansion) produces the
-     * immutable application-owned PreparedPrompt. The transport fork happens
-     * in the serializer (preflight/serialize over the official Client
-     * contract), never in the draft semantic layer.
+     * The Remote prepareMessage (M3-4 PR3 Step 7): the REMOTE application
+     * preparation builder. The Direct/Remote builder selection happens HERE at
+     * the application layer — `submission.prepareMessage()` creates the Direct
+     * `UserMessage` (`direct-message-preparation.ts`), while this
+     * `preparePrompt()` snapshots the drafts into the immutable `PreparedPrompt`
+     * — and the two share only the mention canonicalization and the strict
+     * combined placeholder-expansion semantics. The Remote serializer then owns
+     * just the Remote preflight/encoding/wire mapping over the official Client
+     * contract; the draft semantic layer is never branched by transport.
      */
     const prepareRemotePrompt = async (text: string, requestId: string): Promise<unknown> => {
-      // Mention canonicalization is part of the SHARED preparation authority:
-      // route through the same port seam the Direct pipeline uses.
+      // Mention canonicalization must match the Direct pipeline exactly: route
+      // through the same Host-file port seam.
       const canonical = await backend.hostFile.canonicalizeMentions(
         { kind: 'session', sessionId: ownership.currentSessionId() ?? '' },
         text,
@@ -2668,12 +2672,14 @@ export function applyRunnerWithRuntime(
           (m, k) => app.notify(m, k),
         ),
         prepareMessage: (text, requestId) => remoteSources === undefined
-          // Direct: the shared preparation authority runs the Host
-          // attachment admission inline (the existing pipeline).
+          // Direct: the Direct UserMessage preparation runs the Host
+          // attachment admission inline (app/submission/direct-message-preparation.ts).
           ? submission.prepareMessage(text, requestId)
-          // Remote (M3-4 PR3): the SAME preparation authority produces the
-          // immutable application-owned PreparedPrompt; the transport fork
-          // happens inside the serializer (preflight/serialize), never here.
+          // Remote (M3-4 PR3): the Remote application builder snapshots the
+          // drafts into the immutable PreparedPrompt; the Remote serializer
+          // then performs the preflight/encoding/wire mapping over the official
+          // Client contract. Both branches share canonicalization + strict
+          // placeholder semantics, not one preparation authority.
           : prepareRemotePrompt(text, requestId),
         prompt: (sessionId, message) => backend.sessionWriter.prompt(sessionId, message, 'queue'),
       },
