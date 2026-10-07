@@ -149,10 +149,12 @@ test('symlink facts: a symlinked directory is a candidate but is never descended
   symlinkSync('real', join(cwd, 'linkdir'))
   mkdirSync(join(cwd, 'dir'))
   symlinkSync(join('..', 'real'), join(cwd, 'dir', 'nested-link'))
-  // A link that points OUTSIDE the scan root must not widen the traversal.
-  mkdirSync(join(cwd, '..', 'dsh-client-symlink-outside'), { recursive: true })
-  writeFileSync(join(cwd, '..', 'dsh-client-symlink-outside', 'outside.ts'), 'x')
-  symlinkSync(join('..', 'dsh-client-symlink-outside'), join(cwd, 'escape'))
+  // A link that points OUTSIDE the scan root must not widen the traversal. The
+  // target is a lifecycle-owned directory (`tempDir` creates directly under
+  // `os.tmpdir()`, so `join(cwd, '..')` would be a shared, never-cleaned path).
+  const outside = life.tempDir('dsh-client-symlink-outside-')
+  writeFileSync(join(outside, 'outside.ts'), 'x')
+  symlinkSync(outside, join(cwd, 'escape'))
   const driver = new ClientLocalDiscoveryDriver(null)
   // The adapter reports the FACT (a symlink to a directory IS a directory
   // candidate) and whether the neutral policy may descend it.
