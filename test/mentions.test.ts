@@ -9,10 +9,16 @@ import test from 'node:test'
 import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, win32 } from 'node:path'
-import { expandFileMentionsForSubmit, extractAtPrefix, findFileMentions, MentionProvider, resolveMentionCandidate, resolvePathSearch, suggestPathArgument } from '../src/mentions.ts'
+import { expandFileMentionsForSubmit, findFileMentions, MentionProvider, resolveMentionCandidate, suggestPathArgument } from '../src/mentions.ts'
+import { extractAtPrefix } from '../src/tui/file-completion/context.ts'
+import { resolvePathQuery, type PathQueryEnvironment } from '../src/domain/file-completion/query.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } from '@deepseek-ai/dsh-file-reference-local/search'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+/** The explicit path-query environment for the pure resolver pins: the domain
+ * layer never discovers `homeDir`/`windowsHost` itself. */
+const QUERY_ENV: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
 
 /** A throwaway workspace with known files. */
 function fixtureWorkspace(life: TestLifecycle): string {
@@ -372,18 +378,29 @@ test('POSIX and Windows ROOT partials keep their separator as the search dir', (
   // dirname leaves a trailing separator ONLY on roots, and a root must
   // stay a root: `/et` reads `/` (a stripped `/` would read `''`),
   // `C:\Wi` reads `C:\` (not the drive-relative `C:`), and the UNC share
-  // root keeps its trailing separator. Pure — no filesystem involved.
-  assert.deepEqual(resolvePathSearch('/et', '/ws', '/et'), { searchDir: '/', searchPrefix: 'et', winAbsolute: false })
-  assert.deepEqual(resolvePathSearch('C:\\Wi', '/ws', 'C:\\Wi'), { searchDir: 'C:\\', searchPrefix: 'Wi', winAbsolute: true })
-  assert.deepEqual(resolvePathSearch('\\\\server\\share\\fo', '/ws', '\\\\server\\share\\fo'), {
+  // root keeps its trailing separator. Pure — no filesystem involved, and the
+  // resolver receives its environment facts explicitly.
+  const scope = (raw: string) => {
+    const query = resolvePathQuery(raw, '/ws', QUERY_ENV)
+    return { searchDir: query.searchBase, searchPrefix: query.searchTerm, winAbsolute: query.winAbsolute }
+  }
+  assert.deepEqual(scope('/et'), { searchDir: '/', searchPrefix: 'et', winAbsolute: false })
+  assert.deepEqual(scope('C:\\Wi'), { searchDir: 'C:\\', searchPrefix: 'Wi', winAbsolute: true })
+  assert.deepEqual(scope('\\\\server\\share\\fo'), {
     searchDir: '\\\\server\\share\\',
     searchPrefix: 'fo',
     winAbsolute: true,
   })
   // Ordinary dirs carry no trailing separator anyway.
-  assert.deepEqual(resolvePathSearch('C:\\Users\\sh', '/ws', 'C:\\Users\\sh'), { searchDir: 'C:\\Users', searchPrefix: 'sh', winAbsolute: true })
-  assert.deepEqual(resolvePathSearch('/tmp/fi', '/ws', '/tmp/fi'), { searchDir: '/tmp', searchPrefix: 'fi', winAbsolute: false })
-  assert.deepEqual(resolvePathSearch('sub/fi', '/ws', 'sub/fi'), { searchDir: join('/ws', 'sub'), searchPrefix: 'fi', winAbsolute: false })
+  assert.deepEqual(scope('C:\\Users\\sh'), { searchDir: 'C:\\Users', searchPrefix: 'sh', winAbsolute: true })
+  assert.deepEqual(scope('/tmp/fi'), { searchDir: '/tmp', searchPrefix: 'fi', winAbsolute: false })
+  assert.deepEqual(scope('sub/fi'), { searchDir: join('/ws', 'sub'), searchPrefix: 'fi', winAbsolute: false })
+  // The host-platform FACT is injected: the same relative Windows-dialect
+  // token joins with the explicit windowsHost, never with process.platform.
+  const windows = resolvePathQuery('sub\\fi', '/ws', { homeDir: '/home/fixture', windowsHost: true })
+  const posix = resolvePathQuery('sub\\fi', '/ws', { homeDir: '/home/fixture', windowsHost: false })
+  assert.equal(windows.searchBase, win32.join('/ws', 'sub'))
+  assert.equal(posix.searchBase, join('/ws', 'sub'))
 })
 
 test('a POSIX root partial completes from `/` (fs level, when /tmp exists)', async (t) => {

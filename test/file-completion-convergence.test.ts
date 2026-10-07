@@ -15,10 +15,10 @@ import { afterEach, test } from 'node:test'
 import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, win32, sep } from 'node:path'
-import { classifyFileCompletionContext, extractAtPrefix } from '../src/file-completion/context.ts'
-import { resolvePathQuery } from '../src/file-completion/query.ts'
-import { scorePathCandidate } from '../src/file-completion/ranking.ts'
-import { presentPathCandidate } from '../src/file-completion/presentation.ts'
+import { classifyFileCompletionContext, extractAtPrefix } from '../src/tui/file-completion/context.ts'
+import { resolvePathQuery, type PathQueryEnvironment } from '../src/domain/file-completion/query.ts'
+import { scorePathCandidate } from '../src/domain/file-completion/ranking.ts'
+import { presentPathCandidate } from '../src/tui/file-completion/presentation.ts'
 import { MentionProvider } from '../src/mentions.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -456,14 +456,25 @@ printf '%s\\0' './visible.txt'
 })
 
 test('§23 matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
-  const query = resolvePathQuery('C:\\Users\\sh', '/ws')
+  // The domain resolver is environment-neutral: these pure pins supply the
+  // facts explicitly instead of reading the process environment.
+  const environment: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
+  const query = resolvePathQuery('C:\\Users\\sh', '/ws', environment)
   assert.equal(query.searchBase, win32.dirname('C:\\Users\\sh'))
   assert.equal(query.displayBase, 'C:\\Users\\')
   assert.equal(query.winAbsolute, true)
-  const unc = resolvePathQuery('\\\\server\\share\\fo', '/ws')
+  const unc = resolvePathQuery('\\\\server\\share\\fo', '/ws', environment)
   assert.equal(unc.searchBase, '\\\\server\\share\\')
   assert.equal(unc.displayBase, '\\\\server\\share\\')
   assert.equal(unc.winAbsolute, true)
+  // The SAME raw/cwd resolves differently under the two explicit host facts —
+  // proven without touching process.platform.
+  const windowsHost = resolvePathQuery('sub\\fi', '/ws', { homeDir: '/home/fixture', windowsHost: true })
+  const posixHost = resolvePathQuery('sub\\fi', '/ws', environment)
+  assert.equal(windowsHost.searchBase, win32.join('/ws', 'sub'))
+  assert.equal(posixHost.searchBase, '/ws/sub')
+  // `~` expansion uses the injected homeDir, never the real homedir().
+  assert.equal(resolvePathQuery('~/pics/a', '/ws', environment).searchBase, '/home/fixture/pics')
 })
 
 test('candidates present one full display path independently of host path dialect', () => {
@@ -474,11 +485,11 @@ test('candidates present one full display path independently of host path dialec
   assert.equal(rootFile.label, 'package.json')
   assert.equal(rootFile.description, undefined)
   const nestedFile = presentPathCandidate(
-    { path: 'src/file-completion/presentation.ts', kind: 'file' },
+    { path: 'src/tui/file-completion/presentation.ts', kind: 'file' },
     { at: false, quoted: false },
   )
   assert.ok(nestedFile !== undefined)
-  assert.equal(nestedFile.label, 'src/file-completion/presentation.ts')
+  assert.equal(nestedFile.label, 'src/tui/file-completion/presentation.ts')
   assert.equal(nestedFile.description, undefined)
   const directory = presentPathCandidate(
     { path: 'C:\\Users\\Pictures', kind: 'directory' },
