@@ -758,7 +758,7 @@ test('a CLIENT-LOCAL question never pauses the Tern pane (the /login authorizati
     await drain()
     assert.deepEqual(h.progressStates, ['indeterminate'])
 
-    // `src/authorization.ts` / the `/login` command ask through the SAME
+    // `src/app/command/authorization.ts` / the `/login` command ask through the SAME
     // `TuiApp.askQuestions` entry point, with the fail-closed `agentInputWait =
     // false` default: the canonical phase still becomes `waiting-question`
     // (footer/Focus keep their authority) but the main Agent is NOT blocked on

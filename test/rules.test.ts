@@ -434,7 +434,7 @@ test('legacy history moves to JSONL files and never re-enters Config', () => {
   const source = runnerSource()
   assert.doesNotMatch(source, /settings history cleanup/u,
     'the retired whole-document history cleanup write must stay deleted')
-  const migration = readFileSync(join(srcDir, 'legacy-settings-migration.ts'), 'utf8')
+  const migration = readFileSync(join(srcDir, 'app/bootstrap/legacy-settings-migration.ts'), 'utf8')
   // The field lists that DO cross into Config never mention history, and no
   // history migration exists at all in PR A (plan §8.5: the legacy data
   // stays in the read-only file; a durable history move is not this PR's
