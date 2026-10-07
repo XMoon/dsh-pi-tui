@@ -1,60 +1,34 @@
 /**
- * The rc.1 authorization bridge: the TUI's half of the
- * `@deepseek-ai/dsh-authorization` seam. The seam owns the protocol and the
- * lifecycle (OAuth, device-code, provider-native flows are llm-pi-ai's
- * business, never this file's); this module only
+ * The application command layer's authorization bridge: the /login surface's
+ * half of the config port's authorization contract. The Host seam owns the
+ * protocol and the lifecycle (OAuth, device-code, provider-native flows are
+ * llm-pi-ai's business, never this file's); the Direct adapter maps the Host
+ * entries into the detached flow targets, and this module
  *
- *   1. turns upstream flow descriptors into typed /login targets,
- *   2. merges them with the CredentialRef targets (the two key spaces stay
- *      distinct — a route with an explicit `apiKeyEnv` profile keeps the
- *      reference path even when the same route has an authorization flow),
- *   3. renders notices through the host's durable output panel (a device-
+ *   1. merges those flow targets with the CredentialRef targets (the two key
+ *      spaces stay distinct — a route with an explicit `apiKeyEnv` profile
+ *      keeps the reference path even when the same route has an authorization
+ *      flow),
+ *   2. renders notices through the host's durable output panel (a device-
  *      code URL must stay visible while the user opens the browser), and
- *   4. maps prompts (text/secret/select) onto the host question/picker
+ *   3. maps prompts (text/secret/select) onto the host question/picker
  *      surfaces, converting a user decline into `AuthorizationDeclinedError`
  *      and keeping a prompt-level signal withdrawal distinct from a decline.
  *
- * Nothing here knows a provider: it renders whatever the seam reports.
+ * Nothing here knows a provider: it renders whatever the port reports.
  *
- * @module @xmoon76/dsh-pi-tui/authorization
+ * @module @xmoon76/dsh-pi-tui/app/command/authorization
  */
 
-import type { AuthorizationEntry, AuthorizationNotice } from '@deepseek-ai/dsh-authorization'
-import {
-  credentialKeyId,
-  credentialKeyScope,
-  type CredentialKey,
-} from '@deepseek-ai/dsh-credentials'
-import type { TuiApp } from './tui-app.ts'
+import type { AuthorizationNotice } from '@deepseek-ai/dsh-authorization'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
+  AuthorizationFlowTarget,
   AuthorizationNoticeEvent,
   AuthorizationPromptEvent,
   CredentialProviderOption,
-} from './runtime/config-port.ts'
-
-/** The record scope every llm-pi-ai provider flow writes under (matches
- * `@deepseek-ai/dsh-llm-pi-ai`'s RECORD_SCOPE — the TUI addresses flows by
- * route through it). */
-export const LLM_PI_AI_SCOPE = 'llm-pi-ai'
-
-/** One authorization flow as the /login surface sees it. */
-export interface AuthorizationTarget {
-  kind: 'authorization'
-  /** The provider route the flow authenticates, when the key's scope maps
-   *  one (llm-pi-ai flows are keyed `llm-pi-ai/<route>`); undefined for
-   *  flows owned by other plugins that no route profile addresses. */
-  route?: string
-  /** The credential record this flow writes. */
-  key: CredentialKey
-  /** User-facing label of what is being authorized. */
-  label: string
-  /** The offered sign-in methods, most preferred first. */
-  methods: readonly { id: string; label: string }[]
-  /** Whether an attempt is running for this key right now. */
-  inFlight: boolean
-}
+} from '../../runtime/config-port.ts'
 
 /** One /login or /logout target: either a CredentialRef to set, or an
  *  authorization flow to run. The two address spaces stay typed apart. */
@@ -68,45 +42,10 @@ export type LoginTarget =
       declared: boolean
       namesCredential: boolean
     }
-  | AuthorizationTarget
-
-/** The structural authorization service surface the commands read. */
-export interface AuthorizationServiceLike {
-  list(): readonly AuthorizationEntry[]
-  describe(key: CredentialKey): AuthorizationEntry | undefined
-  begin(request: {
-    key: CredentialKey
-    method?: string
-    interaction: {
-      notify(notice: AuthorizationNotice): void
-      prompt(prompt: {
-        kind: 'text' | 'secret' | 'select'
-        message: string
-        placeholder?: string
-        options?: readonly { id: string; label: string; description?: string }[]
-        signal?: AbortSignal
-      }): Promise<string>
-    }
-    signal?: AbortSignal
-  }): Promise<{ status: 'authorized' | 'cancelled' }>
-  cancel(key: CredentialKey): void
-}
-
-/** Map the seam's entries to /login targets, deriving the route from the
- *  key's scope (llm-pi-ai flows address the provider route). */
-export function authorizationTargets(entries: readonly AuthorizationEntry[]): AuthorizationTarget[] {
-  return entries.map(entry => ({
-    kind: 'authorization',
-    route: credentialKeyScope(entry.key) === LLM_PI_AI_SCOPE ? credentialKeyId(entry.key) : undefined,
-    key: entry.key,
-    label: entry.label,
-    methods: entry.methods,
-    inFlight: entry.inFlight,
-  }))
-}
+  | AuthorizationFlowTarget
 
 /** The flow target for a provider route, when one is registered. */
-export function flowForRoute(targets: readonly AuthorizationTarget[], route: string): AuthorizationTarget | undefined {
+export function flowForRoute(targets: readonly AuthorizationFlowTarget[], route: string): AuthorizationFlowTarget | undefined {
   return targets.find(target => target.route === route)
 }
 
@@ -127,10 +66,10 @@ export function flowForRoute(targets: readonly AuthorizationTarget[], route: str
  */
 export function mergeLoginTargets(
   options: readonly CredentialProviderOption[],
-  targets: readonly AuthorizationTarget[],
+  targets: readonly AuthorizationFlowTarget[],
 ): LoginTarget[] {
-  const flowByRoute = new Map<string, AuthorizationTarget>()
-  const standalone: AuthorizationTarget[] = []
+  const flowByRoute = new Map<string, AuthorizationFlowTarget>()
+  const standalone: AuthorizationFlowTarget[] = []
   for (const target of targets) {
     if (target.route !== undefined) flowByRoute.set(target.route, target)
     else standalone.push(target)
@@ -175,8 +114,10 @@ export function formatAuthorizationNotice(notice: AuthorizationNotice): string {
   return lines.join('\n')
 }
 
-/** The render surface an interaction needs — a slice of {@link TuiApp}
- *  the headless tests can fake. */
+/** The render surface an interaction needs — the narrow slice of the mounted
+ *  TUI surface (output viewer / question flow / picker) the headless tests can
+ *  fake; declared structurally so this application owner never imports the TUI
+ *  implementation. */
 export interface AuthorizationSurface {
   /** Show a durable text panel; returns a closer. */
   openOutputViewer(options: {

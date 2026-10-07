@@ -13,7 +13,7 @@ import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PickerItem, TuiApp } from '../../tui-app.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
-import type { CredentialProviderOption } from '../../runtime/config-port.ts'
+import type { AuthorizationFlowTarget, CredentialProviderOption } from '../../runtime/config-port.ts'
 import {
   deriveKeyRef,
   resolveCredentialArg,
@@ -25,9 +25,8 @@ import {
   createAuthorizationFlow,
   flowForRoute,
   mergeLoginTargets,
-  type AuthorizationTarget,
   type LoginTarget,
-} from '../../authorization.ts'
+} from '../../app/command/authorization.ts'
 import type { RegisterOne, TuiCommandRunner } from '../../commands.ts'
 
 /** The runner operations the auth commands consume. */
@@ -88,7 +87,7 @@ function mergedPickerRows(merged: readonly LoginTarget[]): PickerItem[] {
 
 /** Recover an authorization target from a picked row value (the marker
  * prefix guarantees no collision with reference route values). */
-function targetFromPickerValue(merged: readonly LoginTarget[], value: string): AuthorizationTarget | undefined {
+function targetFromPickerValue(merged: readonly LoginTarget[], value: string): AuthorizationFlowTarget | undefined {
   if (!value.startsWith(AUTH_VALUE_PREFIX)) return undefined
   const key = value.slice(AUTH_VALUE_PREFIX.length)
   for (const target of merged) {
@@ -118,7 +117,7 @@ function mergedTargetsSummary(merged: readonly LoginTarget[]): string {
 async function runAuthorizationLogin(
   app: TuiApp,
   runner: Pick<TuiCommandRunner, 'catalog' | 'config' | 'diag' | 'signal'>,
-  target: AuthorizationTarget,
+  target: AuthorizationFlowTarget,
   options: readonly CredentialProviderOption[],
 ): Promise<CommandResult> {
   const authorization = runner.config.authorization
@@ -213,7 +212,7 @@ async function runAuthorizationLogin(
  */
 async function provisionKeylessProfile(
   runner: Pick<TuiCommandRunner, 'config' | 'diag'>,
-  target: AuthorizationTarget,
+  target: AuthorizationFlowTarget,
   options: readonly CredentialProviderOption[],
 ): Promise<string> {
   if (target.route === undefined) return ''
@@ -254,7 +253,7 @@ const LOGOUT_RECORD_VALUE = '\u0000record:'
 async function logoutPickerRows(
   credentials: LogoutCredentialsLike,
   options: readonly CredentialProviderOption[],
-  targets: readonly AuthorizationTarget[],
+  targets: readonly AuthorizationFlowTarget[],
 ): Promise<{ rows: PickerItem[]; recordCleanupUnavailable: boolean }> {
   const rows: PickerItem[] = []
   const seenRefs = new Set<string>()
@@ -452,7 +451,7 @@ export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars
         const arg = invocation.rawInput.trim()
         let route: string | undefined
         let ref: string | undefined
-        let target: AuthorizationTarget | undefined
+        let target: AuthorizationFlowTarget | undefined
         if (arg !== '') {
           // An explicit env-var / known-ref name ALWAYS keeps the reference
           // path, even when the same route has an authorization flow (§11.1,

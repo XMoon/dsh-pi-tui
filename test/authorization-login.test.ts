@@ -25,14 +25,13 @@ import {
 } from '../src/commands.ts'
 import {
   authorizationFailureText,
-  authorizationTargets,
   createAuthorizationFlow,
   flowForRoute,
   formatAuthorizationNotice,
   mergeLoginTargets,
   type AuthorizationSurface,
-  type AuthorizationTarget,
-} from '../src/authorization.ts'
+} from '../src/app/command/authorization.ts'
+import { authorizationTargets } from '../src/runtime/direct/config-direct.ts'
 import { providerOptionsFor, type ProviderCatalogEntry } from '../src/provider-catalog.ts'
 import { credentialOptionOf } from '../src/runtime/direct/config-direct.ts'
 import { QuestionFlow, type QuestionFlowQuestion } from '../src/tui/interaction/question.ts'
