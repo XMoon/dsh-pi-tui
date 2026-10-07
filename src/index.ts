@@ -26,7 +26,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 import { type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
-import { type DisplayState } from './domain/display/preset.ts'
 
 import { type Diag } from './diag.ts'
 import {
@@ -111,6 +110,15 @@ export {
   contextRefreshKind,
 } from './compaction-presentation.ts'
 export type { CompactionFold, CompactionSettleSurface } from './compaction-presentation.ts'
+
+
+/**
+ * The PUBLIC structural shape of the shared mutable display authority. The
+ * canonical owner is `src/domain/display/preset.ts` (`DisplayState`); the
+ * published `composeAgent` signature stays STRUCTURAL so the internal source
+ * path never leaks into the declaration bundle (TS8-D).
+ */
+type DisplayState = { preset: 'focus' | 'compact' | 'full' }
 
 
 /** One agent's preset composition: the id to record and the setup that installs it. */
