@@ -12,7 +12,7 @@
 
 import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
-import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from '../../client-artifact-save.ts'
+import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from '../../client/artifact/save.ts'
 import { ClientLocalDiscoveryDriver, clientPathQueryEnvironment } from '../../client/file-completion/local-discovery.ts'
 import { completeDirectory } from '../../client/file-completion/directory-completion.ts'
 import { isCancellation, runOwned } from '../../detached.ts'
