@@ -797,14 +797,14 @@ function installVirtualProcessTerminal(vt: VirtualTerminal): () => void {
   const prototype = ProcessTerminal.prototype as object
   const names = [
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
     'columns', 'rows', 'kittyProtocolActive', 'modifyOtherKeysActive',
   ]
   const originals = new Map<string, PropertyDescriptor | undefined>()
   const virtual = vt as unknown as Record<string, unknown>
   const methods = new Set([
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
   ])
   for (const name of names) {
     originals.set(name, Object.getOwnPropertyDescriptor(prototype, name))
