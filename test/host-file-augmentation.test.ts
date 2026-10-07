@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, basename } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
@@ -217,6 +217,75 @@ test('the Host filesystem backend reads the accepted `..` value exactly where th
       'the Host keeps the PHYSICAL spelling of a `..` path')
     assert.equal(readFileSync(target.displayPath, 'utf8'), 'physical',
       'the accepted value reads the file the scoped search found')
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('a Session cwd that itself carries `..` keeps the physical spelling too', async (t) => {
+  const life = testLifecycle(t)
+  const real = life.tempDir('dsh-hfa-cwd-real-')
+  mkdirSync(join(real, 'child'))
+  mkdirSync(join(real, 'project', 'src'), { recursive: true })
+  writeFileSync(join(real, 'project', 'src', 'correct.ts'), 'physical')
+  const alias = life.tempDir('dsh-hfa-cwd-alias-')
+  symlinkSync(join(real, 'child'), join(alias, 'link'))
+  mkdirSync(join(alias, 'project', 'src'), { recursive: true })
+  writeFileSync(join(alias, 'project', 'src', 'decoy.ts'), 'lexical')
+  // NOT path.join: the cwd spelling itself carries the symlink + `..` the Host
+  // filesystem backend anchors physically.
+  const cwd = `${alias}/link/../project`
+  const h = harness(life, {}, { workspaceCwd: cwd })
+  const paths = okItems(await listPiTuiHostFileReferences(h.agent, 'src/cor', abort, h.deps)).map(item => item.path)
+  assert.deepEqual(paths, ['src/correct.ts'],
+    `the cwd's own parent traversal is resolved physically: ${JSON.stringify(paths)}`)
+  assert.deepEqual(okItems(await listPiTuiHostFileReferences(h.agent, 'src/dec', abort, h.deps)), [],
+    'a lexically-only sibling of a `..` cwd is never offered')
+  assert.deepEqual(h.officialCalls, [], 'the whole case stays on the scoped route')
+
+  const ctx = new Context()
+  await ctx.plugin(LocalFileSystem)
+  try {
+    const target = await ctx.fs.resolve('src/correct.ts', { cwd })
+    assert.equal(target.displayPath, `${cwd}/src/correct.ts`,
+      'the Host keeps the PHYSICAL spelling anchored on the cwd')
+    assert.equal(readFileSync(target.displayPath, 'utf8'), 'physical',
+      'the accepted value reads the file the scoped search found')
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
+test('the HOME shorthand searches exactly the directory its absolute value names', async (t) => {
+  const life = testLifecycle(t)
+  const real = life.tempDir('dsh-hfa-home-real-')
+  mkdirSync(join(real, 'child'))
+  mkdirSync(join(real, 'project', 'Downloads'), { recursive: true })
+  writeFileSync(join(real, 'project', 'Downloads', 'loads.txt'), 'physical')
+  const alias = life.tempDir('dsh-hfa-home-alias-')
+  symlinkSync(join(real, 'child'), join(alias, 'link'))
+  mkdirSync(join(alias, 'project', 'Downloads'), { recursive: true })
+  writeFileSync(join(alias, 'project', 'Downloads', 'decoy.txt'), 'lexical')
+  // A HOME spelling that carries both a symlink and a `..`.
+  const home = `${alias}/link/../project`
+  const ctx = new Context()
+  await ctx.plugin(LocalFileSystem)
+  try {
+    for (const query of ['~', '~/', '~/Down']) {
+      const h = harness(life, {}, { homeDir: home })
+      const offered = okItems(await listPiTuiHostFileReferences(h.agent, query, abort, h.deps))
+      assert.ok(offered.length > 0, `@${query} offers the Host home's entries`)
+      for (const item of offered) {
+        assert.ok(isAbsolute(item.path) && !item.path.startsWith('~'),
+          `@${query} emits an absolute Host path: ${item.path}`)
+        // The authoritative consumer: an absolute value is resolved by the Host's
+        // own filesystem backend; it must name the directory the search read.
+        const target = await ctx.fs.resolve(item.path, { cwd: '/' })
+        assert.equal(target.displayPath, item.path)
+        assert.ok(existsSync(target.displayPath),
+          `@${query} emitted a value the Host cannot open: ${item.path}`)
+      }
+    }
   } finally {
     await ctx.fiber.dispose()
   }

@@ -224,16 +224,20 @@ token dialect and literal backslashes.
 PARENT-TRAVERSAL SPELLING: a relative scope is searched with the very spelling the
 Host's filesystem backend gives the accepted value. On a POSIX Host `dsh-fs-local`
 anchors a path containing a `..` segment with its PHYSICAL spelling — the raw
-`<cwd>/<path>` concatenation, so the kernel resolves an intermediate symlink BEFORE
-the parent step — and resolves every other path lexically (Windows always
-lexically). Because the accepted completion value is `displayBase + name`, the scoped
-search keeps that same raw concatenation for `..` queries, and the Direct Host
-discovery driver joins its base without re-normalizing it, so completion and the
-model's read can never land in two different physical directories. Absolute scopes
-spell their traversal verbatim already, and a home shorthand materializes an
-absolute normalized value; neither needs the alignment. This is one segment test plus
-one concatenation — the consumer's own rule applied to the value we hand it, not a
-second path parser.
+`<anchor>/<path>` concatenation, where the anchor is the Session cwd for a relative
+value and the value itself for an absolute one, so the kernel resolves an
+intermediate symlink BEFORE the parent step — and resolves every other path lexically
+(Windows always lexically). Because the accepted completion value is
+`displayBase + name`, the scoped search tests the WHOLE anchored spelling (a `..`
+carried by the Session cwd itself counts exactly like one in the typed scope) and
+keeps that raw concatenation when required; the Direct Host discovery driver joins its
+base without re-normalizing it, so completion and the model's read can never land in
+two different physical directories. Absolute scopes already spell their traversal
+verbatim. A home shorthand emits an ABSOLUTE `path.join`-normalized value, so its
+scope is normalized identically — the bare `~`/`~/` root form is the one form whose
+search base is the raw `homedir()` spelling. This is one segment test plus one
+concatenation (plus one lexical normalize for the home root form) — the consumer's own
+rule applied to the value we hand it, not a second path parser.
 
 Direct and Remote share this authority: the Direct adapter reaches it in-process,
 the Remote Client reaches the SAME router through the private `piTuiFileReferences`
