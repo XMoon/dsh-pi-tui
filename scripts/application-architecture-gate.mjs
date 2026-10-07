@@ -275,10 +275,10 @@ const DOMAIN_TRANSCRIPT_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/te
  * consume: `domain/display/icons.ts` because the domain carries the existing
  * `IconSemantic` compatibility field and the canonical neutral icon vocabulary
  * now lives there (TS8-D), and the neutral structural live port (plan §18)
- * whose data vocabulary is transport-neutral. A VALUE import of either would
- * pull concrete icon/palette or live-ingress mechanics into the semantic
- * authority, so the closed-world contract admits the type spelling and nothing
- * else.
+ * whose data vocabulary is transport-neutral. The closed-world contract admits
+ * ONLY the type spelling of these two owners; value and literal-dynamic
+ * spellings stay forbidden so the semantic authority never takes a runtime
+ * dependency on them.
  */
 const DOMAIN_TRANSCRIPT_TYPE_ONLY_EDGES = new Set([
   'domain/display/icons.ts',
