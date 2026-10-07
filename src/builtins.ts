@@ -15,9 +15,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { dshVersion } from './dsh-version.ts'
+import { bundleVersion, dshVersion } from './client/launcher/version.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import type { DockItem, HeaderBadge, StyledSpan } from './extension/public-types.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
@@ -27,16 +25,6 @@ export const name = 'pi-tui-builtins'
 
 /** The builtins mount only when the TUI startup flags were parsed. */
 export const inject = [TUI_STARTUP_SERVICE, PI_TUI_EXTENSIONS_SERVICE]
-
-/** The `@xmoon76/dsh-pi-tui` package version (dist/extensions.mjs → ../package.json). */
-function packageVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
-    return pkg.version ?? '0.0.0'
-  } catch {
-    return '0.0.0'
-  }
-}
 
 /**
  * Register the first-party chrome contributions. The turn/step footer
@@ -63,8 +51,8 @@ export function apply(ctx: Context): void {
     description: 'The dsh and bundle versions (first-party builtin).',
   }, {
     text: installedDsh === undefined
-      ? `tui-v${packageVersion()}`
-      : `dsh-${installedDsh} · tui-v${packageVersion()}`,
+      ? `tui-v${bundleVersion()}`
+      : `dsh-${installedDsh} · tui-v${bundleVersion()}`,
     tone: 'info',
   })
 

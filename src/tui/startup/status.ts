@@ -26,7 +26,7 @@
  *   error output. `write()` returning false (backpressure) is not a failure,
  *   and a non-throwing write does not by itself prove the bytes reached the
  *   screen.
- * @module @xmoon76/dsh-pi-tui/startup-status
+ * @module @xmoon76/dsh-pi-tui/tui/startup/status
  */
 
 /** The output seam the status writes through (injectable for tests). */

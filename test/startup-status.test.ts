@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createStartupStatus, type StartupStatusOutput } from '../src/startup-status.ts'
+import { createStartupStatus, type StartupStatusOutput } from '../src/tui/startup/status.ts'
 
 /** A recording output seam. */
 function recordingOutput(isTTY = true): { writes: string[]; output: StartupStatusOutput } {

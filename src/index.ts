@@ -42,8 +42,8 @@ export const name = 'tui-runner'
 /** Core services required before the TUI can mount. */
 export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SERVICE]
 
-import type { Config } from './tui-config.ts'
-export { Config } from './tui-config.ts'
+import type { Config } from './app/config/schema.ts'
+export { Config } from './app/config/schema.ts'
 
 // Relocated root helpers (A5-1/A5-1b, plan §27): every helper implementation
 // lives in its natural top-level module; the package-root exports are preserved
@@ -98,7 +98,8 @@ export { foldQueueRows, type QueueFoldResult } from './app/surface/pending-prese
 export type { QueueInboxMessage } from './app/submission/pending-input.ts'
 export { compactingFromLog } from './compaction-presentation.ts'
 
-export { runningProfile, hostRunningProfile, resumeCommand, type ProfileContextReadLike } from './dsh-profile.ts'
+export { runningProfile, resumeCommand } from './client/launcher/profile.ts'
+export { hostRunningProfile, type ProfileContextReadLike } from './app/bootstrap.ts'
 
 // A4-7: the compaction/context presentation folds live in the top-level
 // compaction-presentation module (plan §16/§27) and are consumed by the
