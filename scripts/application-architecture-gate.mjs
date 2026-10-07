@@ -30,7 +30,8 @@
  * wrappers unwrapped) and governs the sanctioned lazy backend-loading seam: the
  * Remote lazy-boundary rule admits exactly one such edge, and any rule that
  * opts in with `checksValueDynamicImport` is evaluated against the rest (today
- * the TS4 `app-imports-tui` lock). The generic rule list stays static-only on
+ * the TS4 `app-imports-tui` lock and the TS8-B `runtime-imports-client` lock).
+ * The generic rule list stays static-only on
  * purpose so that sanctioned seam is not re-classified. Still out of scope: a
  * non-literal dynamic argument or one containing a `${…}` substitution (a
  * genuinely dynamic expression), CommonJS `require('...')` calls (this tree is
@@ -105,6 +106,9 @@
  *  11. (TS8-A) `src/client/**` must not import experimental Remote composition:
  *      Client-local state never depends on the Host transport. The Direct side
  *      is already closed by rule 2.
+ *  12. (TS8-B) `src/runtime/**` must not import `src/client/**`: the
+ *      Client-local platform capability is the INNER layer (like `app/`/`tui/`),
+ *      so the Host semantic/adaptor layer never depends on it.
  *
  * Root source placement (plan §20.3): `scripts/source-root-baseline.json` is a
  * shrinking ledger of the ROOT production modules. A new root module
@@ -356,6 +360,25 @@ export const ARCHITECTURE_RULES = [
     message: 'src/runtime/** must not import src/tui/** (the semantic/adaptor layer never depends on terminal presentation)',
     applies: (srcRel) => srcRel.startsWith('runtime/'),
     forbids: (resolved) => resolved.startsWith('tui/'),
+  },
+  {
+    // TS8-B closes the locality direction for the Client-local capability:
+    // `src/client/**` is the INNER platform layer, exactly like `app/` and
+    // `tui/`, and the Host semantic/adaptor layer must never depend on it. A
+    // runtime adapter reaching a Client capability means the fact was
+    // misclassified (or the dependency inverted) and must be split, never
+    // allowlisted.
+    id: 'runtime-imports-client',
+    message:
+      'src/runtime/** must not import src/client/** (Client-local platform capability is the inner layer; '
+      + 'the Host semantic/adaptor layer never depends on it)',
+    applies: (srcRel) => srcRel.startsWith('runtime/'),
+    forbids: (resolved) => resolved.startsWith('client/'),
+    // A literal VALUE dynamic import reaches the same Client module as a
+    // static one; without this opt-in `await import('.../client/...')` would
+    // be an equivalent spelling that silently enters the layer later with a
+    // green gate (the same escape hatch `app-imports-tui` already closes).
+    checksValueDynamicImport: true,
   },
   {
     // TS3 creates the first canonical `src/domain/**` subtree (the

@@ -34,7 +34,7 @@ maintaining a parallel command database.
 ### Design
 
 New module `src/shell-completion.ts`, consumed by `MentionProvider`
-(`src/mentions.ts`). The provider detects a `!`-prefixed line and delegates to
+(`src/tui/interaction/autocomplete/provider.ts`). The provider detects a `!`-prefixed line and delegates to
 the shell bridge; every other line keeps the current behavior.
 
 **Trigger rules** (inside a `!`/`!!` line only):
@@ -97,7 +97,7 @@ Decisions that matter:
 **Touch points**
 
 - `src/shell-completion.ts` — new module (bridge + cache + subcommand table).
-- `src/mentions.ts` — `MentionProvider.getSuggestions` branches on a
+- `src/tui/interaction/autocomplete/provider.ts` — `MentionProvider.getSuggestions` branches on a
   `!`-line; `applyCompletion` routes command-name items.
 - `src/tui/interaction/tui-editor.ts` — no change needed (the fork's autocomplete machinery
   already re-triggers after input; the provider swap is transparent).
@@ -526,7 +526,7 @@ the body/cursor never jump on a mode switch. The editor border uses
   normalization, history hooks, Tab routing.
 - `src/tui-app.ts` — boundary serialization/decoding, Esc ladder, seat-mode
   routing, footer hint.
-- `src/mentions.ts` — the virtual completion prefix.
+- `src/tui/interaction/autocomplete/provider.ts` — the virtual completion prefix.
 - `src/tui/interaction/editor-seat-holder.ts` — `getInputMode`/`setSerializedInput` on the
   seat surface, wire-form handoff.
 
