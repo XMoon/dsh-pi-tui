@@ -5881,14 +5881,20 @@ with the SAME spelling the Host's filesystem backend gives the accepted value.
 `dsh-fs-local`'s `localDisplayPath()` anchors a POSIX path containing a `..` SEGMENT
 with its PHYSICAL spelling (the raw `<cwd>/<path>` concatenation, so the kernel
 resolves an intermediate symlink BEFORE the parent step) and resolves every other
-spelling lexically; Windows always resolves lexically. Because the accepted completion
-value is `displayBase + name`, the scoped search keeps that same raw concatenation for
-`..` queries, and the Direct Host discovery driver joins its base without lexically
-re-normalizing it. Otherwise a symlinked Session cwd would make the dropdown list one
-directory while the model's read resolves `../x` into another ("completion sees A,
-the read gets B"). Absolute scopes already spell their traversal verbatim, and the
-home shorthand emits an absolute normalized value; neither needs the alignment. This
-is the consumer's own segment test plus one concatenation — not a second path parser.
+spelling lexically; Windows always resolves lexically. The anchor is the Session cwd for a relative value and the value itself for an
+absolute one, and the rule tests the WHOLE anchored spelling — so a `..` carried by
+the Session cwd counts exactly like one in the typed scope. Because the accepted
+completion value is `displayBase + name`, the scoped search tests that same anchored
+spelling and keeps the raw concatenation when required, and the Direct Host discovery
+driver joins its base without lexically re-normalizing it. Otherwise a symlinked or
+`..`-bearing Session cwd would make the dropdown list one directory while the model's
+read resolves the value into another ("completion sees A, the read gets B"). Absolute
+scopes already spell their traversal verbatim. The home shorthand emits an ABSOLUTE
+`path.join`-normalized value, so its scope is normalized identically — the bare
+`~`/`~/` root form is the one form whose search base is the raw `homedir()` spelling,
+and a `..`-bearing HOME would otherwise be searched physically while the emitted
+value names the lexical directory. This is the consumer's own segment test plus one
+concatenation (plus one normalize for the home root form) — not a second path parser.
 
 ### Direct / Remote parity
 
@@ -5942,9 +5948,13 @@ adapter, L3 Remote adapter, L4 parity, L5 official in-process wire, L6 applicati
   symlinked Session cwd (`alias/workspace -> real/project`) — `../shared/cor` must
   find `<real>/shared/correct.txt` and must NOT offer a match that exists only in the
   lexically joined sibling; a symlink traversed MID-scope before `..`
-  (`link/../shared/mid`) resolves physically too; and a decisive cross-check mounts
-  the REAL `ctx.fs` (`@deepseek-ai/dsh-fs-local`) and asserts the value the router
-  offers resolves to exactly the file the scoped search found.
+  (`link/../shared/mid`); a cwd that ITSELF carries `..` (`alias/link/../project`,
+  query `src/cor`); and a HOME spelling carrying both a symlink and a `..` for the
+  bare `~`, `~/` and `~/Down` forms, where every emitted absolute value must still be
+  openable. Two decisive cross-checks mount the REAL `ctx.fs`
+  (`@deepseek-ai/dsh-fs-local`) and assert the value the router offers resolves to
+  exactly the file/directory the scoped search read. Mutation-verified: reverting the
+  anchored-spelling and home-normalization halves turns the two new cases red.
 - L1/L2 — `test/pi-tui-file-reference-host.test.ts`: the descriptor identity shared
   by both contributions, the fiber-owned registration/withdrawal lifetime, and the
   Host row's bare/scoped/cancellation/home behavior.

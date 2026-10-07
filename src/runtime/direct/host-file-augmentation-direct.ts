@@ -145,19 +145,28 @@ const PARENT_SEGMENT = /(?:^|[\\/])\.\.(?:[\\/]|$)/u
 /**
  * The directory one explicit scope searches.
  *
- * The Host's local filesystem backend anchors a POSIX session-relative path that
- * contains a `..` SEGMENT with its PHYSICAL spelling (`<cwd>/<path>`, deliberately
+ * The Host's local filesystem backend anchors a POSIX path that contains a `..`
+ * SEGMENT with its PHYSICAL spelling (the raw `<anchor>/<path>`, deliberately
  * unnormalized), so the kernel resolves an intermediate symlink BEFORE the parent
- * step; every other spelling goes through a lexical `resolve(cwd, path)`, and
- * Windows always resolves lexically. Because the accepted completion VALUE is
- * `displayBase + name`, the search must use that very same spelling: searching the
- * lexically joined directory would let the completion offer `../x` that the model's
- * read resolves into a DIFFERENT physical directory (and hide candidates that do
- * exist there). This is one segment test plus one concatenation — the same rule the
- * consumer applies to the value we are about to hand it, not a second path parser.
+ * step; every other spelling goes through a lexical `resolve(anchor, path)`, and
+ * Windows always resolves lexically. Two consequences drive this function:
  *
- * Absolute scopes already spell their traversal verbatim, and a home shorthand
- * materializes an ABSOLUTE normalized value, so neither needs the alignment.
+ * 1. The anchor is `<hostCwd>` for a relative scope and the value itself for an
+ *    absolute one, and the rule tests the WHOLE anchored spelling — so a `..`
+ *    carried by the SESSION CWD flips it just like one in the typed scope. The
+ *    consumer applies that rule to the value we hand it (`displayBase + name`), so
+ *    the search must use the same spelling; otherwise the completion could offer a
+ *    path the model's read resolves into a DIFFERENT physical directory.
+ * 2. A home shorthand emits an ABSOLUTE value through `path.join`, which normalizes
+ *    lexically. Its scope must be normalized the same way: the bare `~`/`~/` root
+ *    form is the one form whose search base is the raw `homedir()` string, so a
+ *    `..`-bearing HOME would otherwise be searched physically while the value we
+ *    emit names the lexical directory.
+ *
+ * Absolute forms already spell their traversal verbatim. This is one segment test
+ * plus one concatenation (plus one lexical normalize for the home root form) — the
+ * consumer's own rule applied to the value we are about to hand it, not a second
+ * path parser.
  */
 function scopeSearchBase(
   resolved: PathCompletionQuery,
@@ -165,10 +174,18 @@ function scopeSearchBase(
   hostCwd: string,
   environment: PathQueryEnvironment,
 ): string {
+  const api = environment.windowsHost ? win32 : posix
+  if (isHomeToken(raw)) {
+    // The emitted value is absolute and `path.join`-normalized; the bare
+    // `~`/`~/` scope is the raw homedir() spelling, so normalize it identically.
+    return api.normalize(resolved.searchBase)
+  }
   if (environment.windowsHost) return resolved.searchBase
-  if (isHomeToken(raw) || raw.startsWith('/') || resolved.winAbsolute) return resolved.searchBase
-  if (!PARENT_SEGMENT.test(resolved.displayBase)) return resolved.searchBase
-  return `${hostCwd}/${resolved.displayBase}`
+  if (raw.startsWith('/') || resolved.winAbsolute) return resolved.searchBase
+  // The consumer tests `<anchor>/<value>`, anchor = the Session cwd, so the CWD's
+  // own `..` counts exactly like one in the typed scope.
+  const physicalScope = `${hostCwd}/${resolved.displayBase}`
+  return PARENT_SEGMENT.test(physicalScope) ? physicalScope : resolved.searchBase
 }
 
 /**
