@@ -1,6 +1,7 @@
 /** Regression coverage for live-only streaming tool-call preparing rows. */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { afterEach, test } from 'node:test'
 import type { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { RetryId } from '@deepseek-ai/dsh-llm-retry'
@@ -515,4 +516,28 @@ test('narrow Preparing rows stay single-line while preserving the byte tail', as
   assert.equal(rows.length, 1, `narrow Preparing row wrapped:\n${vt.getViewport().join('\n')}`)
   assert.ok(rows[0]!.includes('... · 120.6 KiB'), `byte tail missing:\n${vt.getViewport().join('\n')}`)
   assert.ok(rows[0]!.includes('…'), `summary should truncate with the existing marker:\n${rows[0]}`)
+})
+
+// ── §10.8/§10.12 structural controls: the summary policy is INJECTED ────────
+
+/** Source with comments removed (the controls judge executable code only). */
+const executableSource = (relative: string): string =>
+  readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '')
+
+test('the application Preparing owner imports no TUI presentation module and copies no summary key table', () => {
+  const code = executableSource('app/surface/streaming-tool-preparing.ts')
+  assert.equal(/from '[^']*tui\//.test(code), false,
+    `the application owner must reach the summary policy only through injection:\n${code}`)
+  assert.equal(code.includes('SUMMARY_KEYS'), false, 'the canonical key table must never be copied')
+  assert.equal(code.includes('tool-presentation'), false, 'the TUI presentation module is not an application dependency')
+})
+
+test('the surface composition injects the canonical summary policy into BOTH Preparing owners', () => {
+  const bootstrap = executableSource('app/bootstrap.ts')
+  const injections = bootstrap.match(/summaryKeys: toolSummaryKeys,/g) ?? []
+  assert.equal(injections.length, 2, 'the session owner and the viewer owner both receive the injected policy')
+  assert.ok(bootstrap.includes("import { toolPresenterFrom, toolSummaryKeys,"),
+    'the composition imports the canonical TUI policy rather than defining its own')
 })

@@ -229,7 +229,10 @@ test('a non-Tern terminal never receives OSC 7', () => {
 
 interface CwdHarness {
   readonly forwarded: (string | undefined)[]
+  /** The semantic identity facts the composition's title seam received. */
+  readonly titles: { sessionTitle?: string; cwd?: string }[]
   refresh(): void
+  refreshTitle(): void
 }
 
 function cwdHarness(options: {
@@ -238,18 +241,21 @@ function cwdHarness(options: {
    *  whose official header carries no cwd. */
   live?: { cwd?: string }
   clientCwd?: string
+  sessionTitle?: string
 }): CwdHarness {
   const forwarded: (string | undefined)[] = []
+  const titles: { sessionTitle?: string; cwd?: string }[] = []
   const runtime = createStatusRuntime({
     surface: {
-      // Only setTerminalCwd is exercised by refreshTerminalCwd.
+      // Only setTerminalCwd / getSessionTitle are exercised here.
       app: {
         setTerminalCwd: (cwd: string | undefined) => { forwarded.push(cwd) },
+        getSessionTitle: () => options.sessionTitle ?? '',
       } as unknown as TuiApp,
       status: { snapshot: () => emptyStatusSnapshot() },
       commitStatus: () => {},
     },
-    updateTerminalTitle: () => {},
+    updateTerminalTitle: (context: { sessionTitle?: string; cwd?: string }) => { titles.push(context) },
     isCleanedUp: () => false,
     liveAgent: () => options.live === undefined ? undefined : {
       session: {
@@ -282,7 +288,7 @@ function cwdHarness(options: {
     diag: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} },
     clientCwd: options.clientCwd ?? '/client/launch',
   } as unknown as StatusRuntimeDeps)
-  return { forwarded, refresh: () => runtime.refreshTerminalCwd() }
+  return { forwarded, titles, refresh: () => runtime.refreshTerminalCwd(), refreshTitle: () => runtime.refreshTerminalTitle() }
 }
 
 test('a Direct live Session publishes its header cwd', () => {
@@ -308,4 +314,29 @@ test('a DSH Remote backend never publishes a Host cwd into the Client terminal',
   h.refresh()
   assert.deepEqual(h.forwarded, [undefined],
     'the Remote Host workspace fails closed: the pane belongs to the Client machine')
+})
+
+// ── Status layer: the terminal TITLE identity facts (the composition applies
+//    the OSC policy; this owner supplies semantic facts only) ───────────────
+
+test('the title seam receives the session title first, with the session cwd as the fallback fact', () => {
+  const h = cwdHarness({ live: { cwd: '/work/A' }, sessionTitle: 'Fix queue bug' })
+  h.refreshTitle()
+  assert.deepEqual(h.titles, [{ sessionTitle: 'Fix queue bug', cwd: '/work/A' }])
+})
+
+test('a sessionless Direct surface supplies the launch cwd to the title seam', () => {
+  const h = cwdHarness({ clientCwd: '/client/launch' })
+  h.refreshTitle()
+  assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: '/client/launch' }])
+})
+
+test('a Remote surface never supplies the Client launch cwd as the session workspace title fact', () => {
+  // The official projection is the ONLY workspace authority on the Remote
+  // branch: with no projected cwd the fact is undefined, so the title policy
+  // falls back to the bare brand instead of impersonating a Host workspace
+  // with the Client machine's launch directory.
+  const h = cwdHarness({ remote: true, clientCwd: '/client/launch' })
+  h.refreshTitle()
+  assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: undefined }])
 })
