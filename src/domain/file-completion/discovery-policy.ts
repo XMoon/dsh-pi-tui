@@ -10,7 +10,7 @@
  * `node:child_process`, `process.env` or `process.platform`. Every filesystem
  * fact arrives through the narrow, locality-specific {@link LocalDiscoveryDriver}
  * the Client (`client/file-completion/local-discovery.ts`) and the Direct Host
- * (`runtime/direct/file-completion/workspace-discovery.ts`) each own.
+ * (`runtime/direct/file-completion/host-discovery.ts`) each own.
  * @module @xmoon76/dsh-pi-tui/domain/file-completion/discovery-policy
  */
 

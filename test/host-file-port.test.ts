@@ -1,13 +1,14 @@
 /**
  * Adapter contract tests for the Direct Host-file port
- * (runtime/direct/host-file-direct.ts, migration M1.10): the port is the
- * locality boundary — `@`-reference DISCOVERY runs against the HOST
- * filesystem through the port, never a client fs assumption. These tests
- * pin the behavior (fd whole-tree fuzzy via the fork when fd is present,
- * the bounded recursive fallback otherwise, stat existence checks on the
- * Direct-only seam, and the M3-3A official literal mention semantics)
- * with the Direct adapter: detached path-only DTOs, cancellation
- * semantics, session scope resolution, and fail-closed degradation.
+ * (runtime/direct/host-file-direct.ts, migration M1.10, scoped route
+ * TS8-HF1): the port is the locality boundary — `@`-reference DISCOVERY runs
+ * against the HOST filesystem through the port, never a client fs assumption.
+ * These tests pin the behavior (a BARE session query delegates the official
+ * authority, an EXPLICIT path scope uses the Host scanner, the WORKSPACE
+ * compatibility scan, stat existence checks on the Direct-only seam, and the
+ * M3-3A official literal mention semantics) with the Direct adapter: detached
+ * path-only DTOs, cancellation semantics, session scope resolution, and
+ * fail-closed degradation.
  * @module @xmoon76/dsh-pi-tui/host-file-port.test
  */
 
@@ -15,9 +16,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
-import { DirectWorkspaceDiscoveryDriver } from '../src/runtime/direct/file-completion/workspace-discovery.ts'
+import { DirectHostDiscoveryDriver } from '../src/runtime/direct/file-completion/host-discovery.ts'
 import { ClientLocalDiscoveryDriver } from '../src/client/file-completion/local-discovery.ts'
 import type { LocalDirectoryEntry } from '../src/domain/file-completion/discovery-policy.ts'
 import type { PathCandidate } from '../src/domain/file-completion/types.ts'
@@ -36,6 +37,20 @@ function fixtureWorkspace(life: TestLifecycle): string {
   mkdirSync(join(root, '.git'))
   writeFileSync(join(root, '.git', 'config'), 'ignored')
   return root
+}
+
+/** A workspace nested under a parent that also holds a sibling directory, so
+ * explicit parent navigation (`../shared/fo`) has a controlled target. */
+function nestedWorkspace(life: TestLifecycle): { parent: string; root: string } {
+  const parent = life.tempDir('dsh-hostfile-parent-')
+  const root = join(parent, 'ws')
+  mkdirSync(root)
+  writeFileSync(join(root, 'file-one.txt'), 'one')
+  mkdirSync(join(root, 'src'))
+  writeFileSync(join(root, 'src', 'deep-nested.ts'), 'deep')
+  mkdirSync(join(parent, 'shared'))
+  writeFileSync(join(parent, 'shared', 'foo.txt'), 'shared')
+  return { parent, root }
 }
 
 const abort = new AbortController().signal
@@ -174,24 +189,29 @@ test('an abort mid-scan cancels the fallback discovery (a rejection, never unava
     'a cancelled discovery rejects — Direct and Remote share the one cancellation semantic')
 })
 
-test('the session scope maps the OFFICIAL service: exact agent, official query form, detached result', async () => {
+test('a BARE session query maps the OFFICIAL service: exact agent, official query form, detached result', async () => {
   const { port, calls } = officialPort([{ path: 'src/a.ts', kind: 'file' }, { path: 'src', kind: 'directory' }])
-  const result = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'src/fo')
+  const result = await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'src')
   assert.deepEqual(result, { kind: 'ok', items: [{ path: 'src/a.ts', kind: 'file' }, { path: 'src', kind: 'directory' }] })
   assert.equal(calls.length, 1)
-  assert.equal(calls[0]!.query, 'src/fo', 'the port carries the OFFICIAL query form — path text after `@`, no prefix/quotes')
+  assert.equal(calls[0]!.query, 'src', 'the port carries the OFFICIAL query form — path text after `@`, no prefix/quotes')
   assert.ok(calls[0]!.agent !== undefined, 'the exact live Agent crosses, never a cwd string')
 })
 
-test('the session scope fails closed without the official service or a live agent', async (t) => {
+test('the session scope fails closed without a live agent, and an explicit scope needs no official service', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   const { port } = officialPort()
-  const noAgent = await port.listReferences({ kind: 'session', sessionId: 'no-such' }, 'src/fo')
+  const noAgent = await port.listReferences({ kind: 'session', sessionId: 'no-such' }, 'src')
   assert.equal(noAgent.kind, 'unavailable', 'no live Agent for the session identity')
+  // A ctx-less construction (no official service): the BARE route is
+  // unavailable, while the EXPLICIT route answers from the Host scanner.
   const ctxLess = new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
-  const noService = await ctxLess.listReferences({ kind: 'session', sessionId: 's' }, 'src/fo')
-  assert.equal(noService.kind, 'unavailable', 'the official service must be mounted')
+  const noService = await ctxLess.listReferences({ kind: 'session', sessionId: 's' }, 'src')
+  assert.equal(noService.kind, 'unavailable', 'the official service must be mounted for a bare query')
+  assert.deepEqual(await ctxLess.listReferences({ kind: 'session', sessionId: 's' }, 'src/'),
+    { kind: 'ok', items: [{ path: 'src/deep-nested.ts', kind: 'file' }] },
+    'an explicit scope route works without the official capability')
   assert.equal((await ctxLess.resolveReference({ kind: 'session', sessionId: 's' }, 'file-one.txt')).kind, 'found',
     'the Direct-only existence seam still resolves through the agent cwd')
 })
@@ -384,7 +404,7 @@ function spyDriver(target: SpyableDiscoveryDriver, calls: string[]): () => void 
   }
 }
 
-test('the SESSION scope routes to the official service ONLY — the Direct workspace scanner is never entered', async (t) => {
+test('a BARE session query routes to the official service ONLY — the Host scanner is never entered', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
   // Independent sink witness: the pinned finder records its OWN process run, so
@@ -393,7 +413,7 @@ test('the SESSION scope routes to the official service ONLY — the Direct works
   const finder = fakeFd(life,
     `printf '%s' ran > ${JSON.stringify(marker)}\nprintf 'file-one.txt\\0'`)
   const calls: string[] = []
-  const restoreDirect = spyDriver(DirectWorkspaceDiscoveryDriver.prototype, calls)
+  const restoreDirect = spyDriver(DirectHostDiscoveryDriver.prototype, calls)
   try {
     // The Host authority's own answer — deliberately NOT anything the local
     // workspace scan would return for the same query.
@@ -407,14 +427,15 @@ test('the SESSION scope routes to the official service ONLY — the Direct works
     // 1. A non-empty Host answer crosses verbatim, in the Host's order.
     assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file'),
       { kind: 'ok', items: [{ path: 'host-answer/only.ts', kind: 'file' }] },
-      'the session scope returns the official answer verbatim')
+      'the bare session scope returns the official answer verbatim')
     assert.equal(official.calls.length, 1, 'exactly one official Host list request')
     assert.equal(official.calls[0]!.query, 'file', 'the official query form crossed')
     // 2. An EMPTY Host answer stays authoritative empty — never a local fallback.
     const emptyService = new DirectHostFilePort(() => live, finder, { get: () => ({ list: async () => [] }) })
     assert.deepEqual(await emptyService.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file'),
       { kind: 'ok', items: [] })
-    // 3. An UNMOUNTED official capability stays unavailable — never a local fallback.
+    // 3. An UNMOUNTED official capability stays unavailable for a BARE query —
+    // never a local fallback.
     const unmounted = new DirectHostFilePort(() => live, finder)
     assert.equal((await unmounted.listReferences({ kind: 'session', sessionId: 'session-live' }, 'file')).kind,
       'unavailable')
@@ -427,8 +448,8 @@ test('the SESSION scope routes to the official service ONLY — the Direct works
     // Snapshot before the assertion: `deepEqual(x, [])` narrows x itself to
     // `never[]`, which would break the positive-control reads below.
     const sessionCalls = [...calls]
-    assert.deepEqual(sessionCalls, [], 'no workspace find/listDirectory call for any session scope')
-    assert.equal(existsSync(marker), false, 'the workspace finder process never spawned for a session scope')
+    assert.deepEqual(sessionCalls, [], 'no Host find/listDirectory call for a bare session query')
+    assert.equal(existsSync(marker), false, 'the Host finder process never spawned for a bare session query')
     // POSITIVE CONTROL: the WORKSPACE scope DOES enter the production driver (the
     // finder method AND the direct-child merge listing), so neither witness is
     // vacuous.
@@ -439,6 +460,84 @@ test('the SESSION scope routes to the official service ONLY — the Direct works
     assert.equal(existsSync(marker), true, 'the workspace scope runs the finder process')
   } finally {
     restoreDirect()
+  }
+})
+
+test('an EXPLICIT session path scope routes to the Host scanner ONLY — the official service is never entered', async (t) => {
+  const life = testLifecycle(t)
+  const { root } = nestedWorkspace(life)
+  const calls: string[] = []
+  const restoreDirect = spyDriver(DirectHostDiscoveryDriver.prototype, calls)
+  try {
+    const official = officialService([{ path: 'host-answer/only.ts', kind: 'file' }])
+    const live = { session: { header: { cwd: root } } }
+    // `null` pins the bounded Host fallback so the scan is deterministic.
+    const port = new DirectHostFilePort(
+      (sessionId) => sessionId === 'session-live' ? live : undefined,
+      null,
+      { get: (name: string) => name === 'fileReferences' ? official.service : undefined },
+    )
+    // A scoped listing reads ONLY the typed directory and keeps its prefix.
+    assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'src/'),
+      { kind: 'ok', items: [{ path: 'src/deep-nested.ts', kind: 'file' }] })
+    // A scoped recursive fuzzy query searches inside that scope.
+    assert.ok((await port.listReferences({ kind: 'session', sessionId: 'session-live' }, 'src/deep'))
+      .kind === 'ok')
+    // An explicit parent scope resolves against the HOST session cwd and keeps
+    // the `../` prefix the user typed.
+    assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 'session-live' }, '../shared/fo'),
+      { kind: 'ok', items: [{ path: '../shared/foo.txt', kind: 'file' }] })
+    // The official capability is never consulted on the explicit route.
+    assert.equal(official.calls.length, 0, 'no official Host list request for an explicit scope')
+    assert.ok(calls.some(entry => entry.startsWith('list:') || entry.startsWith('find:')),
+      `the explicit scope enters the Host driver: ${JSON.stringify(calls)}`)
+    // An UNMOUNTED official capability is irrelevant on the explicit route.
+    const unmounted = new DirectHostFilePort(() => live, null)
+    const scoped = await unmounted.listReferences({ kind: 'session', sessionId: 'session-live' }, 'src/')
+    assert.ok(scoped.kind === 'ok' && scoped.items.length > 0,
+      'an explicit scope route works without the official capability')
+  } finally {
+    restoreDirect()
+  }
+})
+
+test('the explicit session scope reaches excluded, symlinked and absolute Host directories through the port', async (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-hostfile-scopes-')
+  mkdirSync(join(root, 'dist'))
+  writeFileSync(join(root, 'dist', 'chunk.js'), 'x')
+  const target = life.tempDir('dsh-hostfile-target-')
+  writeFileSync(join(target, 'inside.ts'), 'x')
+  symlinkSync(target, join(root, 'shared-link'))
+  const outside = life.tempDir('dsh-hostfile-abs-')
+  mkdirSync(join(outside, 'logs'))
+  writeFileSync(join(outside, 'logs', 'a.log'), 'x')
+  const port = new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
+  const scope = { kind: 'session', sessionId: 'session-live' } as const
+  // An explicitly named directory the official workspace index excludes.
+  assert.deepEqual(okItems(await port.listReferences(scope, 'dist/ch')),
+    [{ path: 'dist/chunk.js', kind: 'file' }])
+  // An explicitly named symlink scope: searchable, never recursively descended.
+  assert.deepEqual(okItems(await port.listReferences(scope, 'shared-link/')),
+    [{ path: 'shared-link/inside.ts', kind: 'file' }])
+  // A Host-absolute scope outside the workspace, with no containment rule.
+  assert.deepEqual(okItems(await port.listReferences(scope, `${outside}/logs/`)),
+    [{ path: `${outside}/logs/a.log`, kind: 'file' }])
+})
+
+test('the Host-home shorthand returns an ABSOLUTE Host path, never a literal ~/... value', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const port = new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
+  const listed = await port.listReferences({ kind: 'session', sessionId: 's' }, '~/')
+  assert.equal(listed.kind, 'ok')
+  if (listed.kind === 'ok') {
+    assert.ok(listed.items.length > 0, 'the Host HOME directory lists')
+    for (const item of listed.items) {
+      assert.ok(isAbsolute(item.path) && !item.path.startsWith('~'),
+        `every home-shorthand candidate is an ABSOLUTE Host path: ${item.path}`)
+      assert.ok(item.path.startsWith(homedir()), `the Host HOME scope drives discovery: ${item.path}`)
+    }
   }
 })
 
@@ -455,7 +554,7 @@ test('the provider-level Session @ path never falls back to the Client filesyste
   // scope, and neither witness may be vacuous (positive controls below).
   const directCalls: string[] = []
   const clientCalls: string[] = []
-  const restoreDirect = spyDriver(DirectWorkspaceDiscoveryDriver.prototype, directCalls)
+  const restoreDirect = spyDriver(DirectHostDiscoveryDriver.prototype, directCalls)
   const restoreClient = spyDriver(ClientLocalDiscoveryDriver.prototype, clientCalls)
   const restore = () => {
     restoreClient()
