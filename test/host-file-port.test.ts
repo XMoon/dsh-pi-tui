@@ -17,7 +17,10 @@ import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { DirectWorkspaceDiscoveryDriver } from '../src/runtime/direct/file-completion/workspace-discovery.ts'
-import { MentionProvider } from '../src/mentions.ts'
+import { ClientLocalDiscoveryDriver } from '../src/client/file-completion/local-discovery.ts'
+import type { LocalDirectoryEntry } from '../src/domain/file-completion/discovery-policy.ts'
+import type { PathCandidate } from '../src/domain/file-completion/types.ts'
+import { MentionProvider, type MentionScope } from '../src/mentions.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** A throwaway workspace with known files. */
@@ -338,39 +341,40 @@ test('a failing fd falls back to the bounded scan (plan §6.2 fd-first-fallback)
 
 // ── session-vs-workspace routing (source -> route -> sink) ────────────────
 
+/** The two facts one discovery driver answers with (the spy target shape). */
+interface SpyableDiscoveryDriver {
+  find(baseDir: string, term: string, signal: AbortSignal): Promise<readonly PathCandidate[] | null>
+  listDirectory(baseDir: string, relativeDir: string, signal: AbortSignal): Promise<readonly LocalDirectoryEntry[] | null>
+}
+
 /**
- * Record every entry the PRODUCTION Direct workspace driver is asked for.
- * The port constructs its driver itself, so the spy is installed on the
- * class prototype the port's instances resolve through — the recorded calls
- * are the real consumer's, including the fs-only fallback path that never
- * spawns a finder.
+ * Record every entry the PRODUCTION discovery driver is asked for. The
+ * consumers construct their drivers themselves, so the spy is installed on the
+ * class prototype those instances resolve through — the recorded calls are the
+ * real consumer's, including the fs-only fallback path that never spawns a
+ * finder.
  *
  * The saved originals are deliberately NOT bound: `original.call(this, ...)`
  * keeps the real receiver (a `.bind` clone would pin the prototype and hide
  * instance state). Teardown restores the SAME function identities.
  */
-function spyWorkspaceDriver(): { readonly calls: string[]; restore(): void } {
-  const calls: string[] = []
-  const originalFind = DirectWorkspaceDiscoveryDriver.prototype.find
-  const originalList = DirectWorkspaceDiscoveryDriver.prototype.listDirectory
-  DirectWorkspaceDiscoveryDriver.prototype.find = function (baseDir, term, signal) {
+function spyDriver(target: SpyableDiscoveryDriver, calls: string[]): () => void {
+  const originalFind = target.find
+  const originalList = target.listDirectory
+  target.find = function (baseDir, term, signal) {
     calls.push(`find:${baseDir}:${term}`)
     return originalFind.call(this, baseDir, term, signal)
   }
-  DirectWorkspaceDiscoveryDriver.prototype.listDirectory = function (baseDir, relativeDir, signal) {
+  target.listDirectory = function (baseDir, relativeDir, signal) {
     calls.push(`list:${baseDir}:${relativeDir}`)
     return originalList.call(this, baseDir, relativeDir, signal)
   }
-  return {
-    calls,
-    restore: () => {
-      DirectWorkspaceDiscoveryDriver.prototype.find = originalFind
-      DirectWorkspaceDiscoveryDriver.prototype.listDirectory = originalList
-      if (DirectWorkspaceDiscoveryDriver.prototype.find !== originalFind
-        || DirectWorkspaceDiscoveryDriver.prototype.listDirectory !== originalList) {
-        throw new Error('the workspace driver spy was not fully restored')
-      }
-    },
+  return () => {
+    target.find = originalFind
+    target.listDirectory = originalList
+    if (target.find !== originalFind || target.listDirectory !== originalList) {
+      throw new Error('a discovery driver spy was not fully restored')
+    }
   }
 }
 
@@ -382,7 +386,8 @@ test('the SESSION scope routes to the official service ONLY — the Direct works
   const marker = join(life.tempDir('dsh-hostfile-route-'), 'finder-ran')
   const finder = fakeFd(life,
     `printf '%s' ran > ${JSON.stringify(marker)}\nprintf 'file-one.txt\\0'`)
-  const spy = spyWorkspaceDriver()
+  const calls: string[] = []
+  const restoreDirect = spyDriver(DirectWorkspaceDiscoveryDriver.prototype, calls)
   try {
     // The Host authority's own answer — deliberately NOT anything the local
     // workspace scan would return for the same query.
@@ -415,7 +420,7 @@ test('the SESSION scope routes to the official service ONLY — the Direct works
     // THE FORBIDDEN SINK (both the finder process and the fs-only scan) never ran.
     // Snapshot before the assertion: `deepEqual(x, [])` narrows x itself to
     // `never[]`, which would break the positive-control reads below.
-    const sessionCalls = [...spy.calls]
+    const sessionCalls = [...calls]
     assert.deepEqual(sessionCalls, [], 'no workspace find/listDirectory call for any session scope')
     assert.equal(existsSync(marker), false, 'the workspace finder process never spawned for a session scope')
     // POSITIVE CONTROL: the WORKSPACE scope DOES enter the production driver (the
@@ -423,44 +428,82 @@ test('the SESSION scope routes to the official service ONLY — the Direct works
     // vacuous.
     const workspace = await port.listReferences({ kind: 'workspace', cwd: root }, 'file')
     assert.ok(workspace.kind === 'ok' && workspace.items.length > 0, 'the workspace scope answers locally')
-    assert.ok(spy.calls.some(entry => entry.startsWith('find:')), `the workspace scope enters find(): ${JSON.stringify(spy.calls)}`)
-    assert.ok(spy.calls.some(entry => entry.startsWith('list:')), `the workspace merge lists children: ${JSON.stringify(spy.calls)}`)
+    assert.ok(calls.some(entry => entry.startsWith('find:')), `the workspace scope enters find(): ${JSON.stringify(calls)}`)
+    assert.ok(calls.some(entry => entry.startsWith('list:')), `the workspace merge lists children: ${JSON.stringify(calls)}`)
     assert.equal(existsSync(marker), true, 'the workspace scope runs the finder process')
   } finally {
-    spy.restore()
+    restoreDirect()
   }
 })
 
-test('the provider-level Session @ path reaches the official service only (port -> MentionProvider)', async (t) => {
+test('the provider-level Session @ path never falls back to the Client filesystem (port -> MentionProvider)', async (t) => {
   const life = testLifecycle(t)
+  // `fixtureWorkspace` holds file-one.txt / file-two.ts / my file.txt / src, so
+  // the local completion capability WOULD answer a `@file` query from the very
+  // same Client cwd — a fallback is visible in the suggestions AND in the Client
+  // witness below.
   const root = fixtureWorkspace(life)
   const finder = fakeFd(life, `printf 'file-one.txt\\0'`)
-  const spy = spyWorkspaceDriver()
+  // Both locality sinks are observed: the Direct WORKSPACE scanner (the Host
+  // side) and the CLIENT filesystem capability. Neither may run for a session
+  // scope, and neither witness may be vacuous (positive controls below).
+  const directCalls: string[] = []
+  const clientCalls: string[] = []
+  const restoreDirect = spyDriver(DirectWorkspaceDiscoveryDriver.prototype, directCalls)
+  const restoreClient = spyDriver(ClientLocalDiscoveryDriver.prototype, clientCalls)
+  const restore = () => {
+    restoreClient()
+    restoreDirect()
+  }
   try {
-    // The Host's own order, adversarially chosen so a local ranking would drop
-    // the second row for the query `zeta`.
+    const live = { session: { header: { cwd: root } } }
+    const sessionScope = (): MentionScope => ({ kind: 'session', sessionId: 'session-live' })
+    // The `/image` command makes the Client path-argument chain reachable on the
+    // SAME provider instance; `localFdPath = null` pins the Client finder to the
+    // bounded fallback so every local row would come from `root` itself.
+    const imageCommand = [{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }]
+    const providerOf = (fileReferences: DirectHostFilePort): MentionProvider =>
+      new MentionProvider(imageCommand, root, fileReferences, undefined, sessionScope, null)
+    // 1. A non-empty Host answer in an order a local ranking would change.
     const official = officialService([{ path: 'zeta.ts', kind: 'file' }, { path: 'alpha.ts', kind: 'file' }])
-    const port = new DirectHostFilePort(
-      (sessionId) => sessionId === 'session-live' ? { session: { header: { cwd: root } } } : undefined,
-      finder,
-      { get: () => official.service },
-    )
-    const provider = new MentionProvider([], root, port, undefined,
-      () => ({ kind: 'session', sessionId: 'session-live' }))
-    const result = await provider.getSuggestions(['@zeta'], 0, 5, { signal: abort })
-    assert.ok(result !== null, 'the Host answer must complete through the provider')
-    assert.deepEqual(result.items.map(item => item.value), ['@zeta.ts', '@alpha.ts'],
+    const port = new DirectHostFilePort(() => live, finder, { get: () => official.service })
+    const provider = providerOf(port)
+    const ordered = await provider.getSuggestions(['@zeta'], 0, 5, { signal: abort })
+    assert.ok(ordered !== null, 'the Host answer must complete through the provider')
+    assert.deepEqual(ordered.items.map(item => item.value), ['@zeta.ts', '@alpha.ts'],
       'the Host order is preserved with no local row and no local ranking')
-    const providerCalls = [...spy.calls]
-    assert.deepEqual(providerCalls, [], 'the provider never entered the workspace scanner')
-    // A Host capability that is unavailable presents as no candidates — still
-    // without a Client/Direct filesystem fallback.
-    const unmounted = new MentionProvider([], root, new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), finder),
-      undefined, () => ({ kind: 'session', sessionId: 'session-live' }))
-    assert.equal(await unmounted.getSuggestions(['@zeta'], 0, 5, { signal: abort }), null)
-    const unavailableCalls = [...spy.calls]
-    assert.deepEqual(unavailableCalls, [], 'an unavailable Host capability never falls back to the local scanner')
+    // 2.-4. An EMPTY, UNMOUNTED and FAILING Host capability must never fall back
+    // to the Client filesystem (nor to the Direct workspace scanner).
+    const emptyService = new DirectHostFilePort(() => live, finder, { get: () => ({ list: async () => [] }) })
+    assert.equal(await providerOf(emptyService).getSuggestions(['@file'], 0, 5, { signal: abort }), null,
+      'an authoritative-empty Host answer stays empty — `@file-one.txt` must not appear')
+    const unmounted = new DirectHostFilePort(() => live, finder)
+    assert.equal(await providerOf(unmounted).getSuggestions(['@file'], 0, 5, { signal: abort }), null,
+      'an unmounted Host capability stays unavailable — never a Client fallback')
+    const failing = new DirectHostFilePort(() => live, finder, {
+      get: () => ({ list: async () => { throw new Error('carrier down') } }),
+    })
+    assert.equal(await providerOf(failing).getSuggestions(['@file'], 0, 5, { signal: abort }), null,
+      'a failing Host carrier stays empty — never a Client fallback')
+    // THE FORBIDDEN SINKS: neither scanner was entered for ANY session-scope
+    // request. (`deepEqual(x, [])` narrows x itself to `never[]`, so the
+    // snapshots keep the positive-control reads below type-safe.)
+    const sessionDirect = [...directCalls]
+    const sessionClient = [...clientCalls]
+    assert.deepEqual(sessionDirect, [], 'no Direct workspace scan for a session scope')
+    assert.deepEqual(sessionClient, [], 'no Client filesystem scan for a session scope')
+    // POSITIVE CONTROLS: each witness fires on its OWN legitimate chain.
+    const image = await provider.getSuggestions(['/image file'], 0, 11, { signal: abort })
+    assert.ok(image !== null && image.items.some(item => item.value === 'file-one.txt'),
+      `the Client path-argument chain completes from the Client fixture: ${JSON.stringify(image)}`)
+    assert.ok(clientCalls.some(entry => entry.startsWith('find:')),
+      `the Client witness fires on the Client chain: ${JSON.stringify(clientCalls)}`)
+    assert.ok(clientCalls.some(entry => entry.startsWith('list:')),
+      `the Client witness observes the fallback listing too: ${JSON.stringify(clientCalls)}`)
+    const workspace = await port.listReferences({ kind: 'workspace', cwd: root }, 'file')
+    assert.ok(workspace.kind === 'ok' && workspace.items.length > 0, 'the workspace scope answers locally')
+    assert.ok(directCalls.length > 0, `the Direct witness fires on the workspace scope: ${JSON.stringify(directCalls)}`)
   } finally {
-    spy.restore()
+    restore()
   }
 })
