@@ -12,7 +12,7 @@
  * members renders every member inline; a larger phase renders aggregate
  * counts + a capped abnormal preview + a scoped Task Viewer entry, so a
  * 100+ agent run never grows the transcript linearly.
- * @module @xmoon76/dsh-pi-tui/workflow-presentation
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/workflow-presentation
  */
 
 import {
@@ -20,7 +20,7 @@ import {
   workflowReadablePhase,
   type WorkflowMemberView,
   type WorkflowRunStatus,
-} from './transcript.ts'
+} from '../../domain/transcript/workflow-projection.ts'
 
 /** A phase with at most this many members renders every member inline. */
 export const WORKFLOW_INLINE_MEMBER_LIMIT = 5
