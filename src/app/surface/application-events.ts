@@ -52,12 +52,9 @@ import {
   type TuiApp,
   type TuiAppEvents,
 } from '../../tui-app.ts'
-import { viewerActionCapability } from '../../subagent-viewer.ts'
-import {
-  viewerCanonicalizeScope,
-  type SubagentPromptOutcome,
-  type SubagentViewerSubmitRequest,
-} from '../../subagent-viewer-submit.ts'
+import { viewerActionCapability } from './viewer-policy.ts'
+import { viewerCanonicalizeScope } from './viewer-submission.ts'
+import type { SubagentPromptOutcome, SubagentViewerSubmitRequest } from '../../runtime/subagent-port.ts'
 import type { SessionForkOutcome } from '../session/runtime.ts'
 import type { SubmissionController } from '../submission/controller.ts'
 import type { ClientActions } from './client-actions.ts'

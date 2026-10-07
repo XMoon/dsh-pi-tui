@@ -6,10 +6,10 @@
  *
  * Pure and Host-free: the runner closure is not headless-drivable, so the
  * viewer lifecycle rules are pinned through these seams.
- * @module @xmoon76/dsh-pi-tui/subagent-viewer
+ * @module @xmoon76/dsh-pi-tui/app/surface/viewer-policy
  */
 
-import type { TuiAction } from './extension/public-types.ts'
+import type { TuiAction } from '../../extension/public-types.ts'
 /** One unsettled subagent delegation, in tool/call order. */
 export interface PendingSubagentCall {
   readonly callId: string
