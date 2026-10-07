@@ -9,7 +9,7 @@
  * — exporting it from the runner's public entry (src/index.ts) would drag
  * the private transcript declaration into the published `.d.mts` and fail
  * the tarball-smoke "no private pi-tui / internal path leaks" gate.
- * @module @xmoon76/dsh-pi-tui/search-overlay
+ * @module @xmoon76/dsh-pi-tui/app/surface/search-overlay
  */
 
 import {
@@ -17,7 +17,7 @@ import {
   transcriptSearchMatchKey,
   transcriptSearchSourceKey,
   type TranscriptSearchMatch,
-} from './transcript.ts'
+} from '../../transcript.ts'
 
 /** The runner's search-overlay state (the input of
  * {@link refreshedSearchState} / {@link steppedSearchOverlayState}). */

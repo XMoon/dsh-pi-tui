@@ -17,7 +17,7 @@
  * (there is nothing to project or scroll), and a same-window jump omits
  * `window`. That is enough for a real long-session before/after comparison
  * without a machine-dependent CI threshold.
- * @module @xmoon76/dsh-pi-tui/search-profile
+ * @module @xmoon76/dsh-pi-tui/app/surface/search-profile
  */
 
 /** A short-lived profiling window for ONE search operation. */

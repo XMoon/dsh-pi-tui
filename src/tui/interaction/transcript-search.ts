@@ -4,20 +4,39 @@
  * (Component + Focusable) so the main-screen overlay host can mount it; the
  * search itself runs in the runner against the folded transcript, not against
  * rendered lines (the terminal scrollback is not addressable programmatically).
- * @module @xmoon76/dsh-pi-tui/search
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/transcript-search
  */
 
 import { Input, dispatchMouseEvent, truncateToWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseDispatchResult, TuiMouseEvent } from '@xmoon76/pi-tui'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { color } from './tui/theme/runtime.ts'
+import { color } from '../../tui/theme/runtime.ts'
 
-/** The one-line navigation hint under the search input: Enter/S⇧Enter step
- * through matches, Esc/Ctrl+C close. Fixed text — the close/next/previous
- * keys are NON-configurable overlay contracts (scope 'search'), so there is
- * no effective binding to render (a remap of the configurable search TOGGLE
- * is deliberately not shown here). */
-const SEARCH_HINT = '↵ next · ⇧↵ prev · esc/ctrl+c close'
+import { componentKeymap } from '../keybindings/component-keymap.ts'
+
+/** The three non-configurable search-overlay actions (scope 'search',
+ * `configurable: false`). */
+type SearchHintAction =
+  | 'app.transcript.search.next'
+  | 'app.transcript.search.previous'
+  | 'app.transcript.search.close'
+
+/** One keymap-derived label in the overlay's compact glyph style: the base key
+ * becomes its glyph and a modified key keeps the modifier glyph (`Enter` ->
+ * `↵`, `Shift+Enter` -> `⇧↵`, `Esc / Ctrl+C` -> `esc/ctrl+c`). The labels come
+ * from the keymap's own definitions — never a hand-written key literal (the
+ * keybinding gate) — so the hint cannot lie about a binding. */
+const compactKeyHint = (action: SearchHintAction): string => {
+  const label = componentKeymap.keyHint(action).toLowerCase().replace('shift', '⇧').replace('enter', '↵')
+  // A modified key collapses `⇧+↵` to `⇧↵`; a multi-key list keeps its `+`
+  // inside each key id and joins with `/` (`esc / ctrl+c` -> `esc/ctrl+c`).
+  return label.includes('⇧') ? label.replace('+', '') : label.replace(' / ', '/')
+}
+
+/** The one-line navigation hint under the search input: Enter/Shift+Enter step
+ * through matches, Esc/Ctrl+C close. A remap of the configurable search TOGGLE
+ * is deliberately not shown. */
+const SEARCH_HINT = `${compactKeyHint('app.transcript.search.next')} next · ${compactKeyHint('app.transcript.search.previous')} prev · ${compactKeyHint('app.transcript.search.close')} close`
 
 /** One-line search input with a "Find transcript" title and N/M counter. */
 export class TranscriptSearchComponent implements Component, Focusable {
