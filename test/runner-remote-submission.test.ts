@@ -316,7 +316,7 @@ test('L6 §37 image: known staged bytes → PromptContentPart → Host durable a
   // L6 proves.
   const app = await (async (): Promise<{
     getDraft(): string; setDraft(text: string): void; submitDraft(): void
-    draftImageStoreForTest?: import('../src/image/draft-store.ts').DraftImageStore
+    draftImageStoreForTest?: import('../src/client/media/image/draft-store.ts').DraftImageStore
   }> => {
     for (let i = 0; i < 600; i++) {
       const candidate = fixture.runnerApp() as unknown as { draftImageStoreForTest?: unknown }
@@ -641,7 +641,7 @@ test('L6 PR5 image resend: a SECOND submission citing the recalled durable image
   const pngBytes = new Uint8Array(await sharp({ create: { width: 1, height: 1, channels: 3, background: '#c0ffee' } }).png().toBuffer())
   const app = fixture.runnerApp() as unknown as {
     getDraft(): string; setDraft(text: string): void; submitDraft(): void
-    draftImageStoreForTest?: import('../src/image/draft-store.ts').DraftImageStore
+    draftImageStoreForTest?: import('../src/client/media/image/draft-store.ts').DraftImageStore
   }
   await waitFor('draft store exposed', () => app.draftImageStoreForTest !== undefined, 10_000)
   const store = app.draftImageStoreForTest!

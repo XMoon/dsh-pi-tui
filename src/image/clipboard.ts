@@ -21,7 +21,7 @@ import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { ClipboardImageError } from '../domain/media/errors.ts'
 import type { ImageMediaType } from '../domain/media/types.ts'
-import { parseImageMetadata } from './intake.ts'
+import { parseImageMetadata } from '../client/media/image/intake.ts'
 
 /** One clipboard probe outcome. */
 export type ClipboardReadResult =

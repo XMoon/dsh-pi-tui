@@ -14,7 +14,7 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { ImageAdmissionError } from '../domain/media/errors.ts'
 import type { ImageAttachmentRefLike, ImageLimitsLike, ImageMediaType } from '../domain/media/types.ts'
-import type { DraftSegment } from './placeholder.ts'
+import type { DraftSegment } from '../client/media/image/placeholder.ts'
 
 /** Structural subset of `@deepseek-ai/dsh-attachment`'s `SaveImageAttachment`. */
 export interface SaveImageAttachmentLike {

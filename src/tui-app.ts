@@ -1544,11 +1544,11 @@ export interface TuiAppOptions {
    * (Kitty/iTerm2) with text fallbacks; absent, image blocks render as
    * their flat text only (the surface still works without the pipeline).
    */
-  imageLoader?: import('./image/loader.ts').ImageLoader
+  imageLoader?: import('./client/media/image/loader.ts').ImageLoader
   /** Headless-test seam (M3-4 PR3 image L6): the runner's live image draft
    * store, exposed so a mounted test can stage REAL draft bytes through the
    * production intake surface. Never read by production code paths. */
-  draftImageStoreForTest?: import('./image/draft-store.ts').DraftImageStore
+  draftImageStoreForTest?: import('./client/media/image/draft-store.ts').DraftImageStore
   imageTheme?: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme
   /**
    * The presentation scope the transcript being built belongs to (M3-5 PR2
@@ -2846,9 +2846,9 @@ export class TuiApp {
   /** M9: the editor seat holder (the atomic handoff + current occupant). */
   private readonly editorSeatHolder: EditorSeatHolder
   /** The durable-image loader (plan M8): optional, wired by the runner. */
-  private readonly imageLoader: import('./image/loader.ts').ImageLoader | undefined
+  private readonly imageLoader: import('./client/media/image/loader.ts').ImageLoader | undefined
   /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
-  readonly draftImageStoreForTest: import('./image/draft-store.ts').DraftImageStore | undefined
+  readonly draftImageStoreForTest: import('./client/media/image/draft-store.ts').DraftImageStore | undefined
   /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
   private readonly imageTheme: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
   private readonly imageScope: (() => unknown) | undefined

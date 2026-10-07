@@ -29,11 +29,11 @@
  * the CHILD Session's bound face, and a stale component of a replaced presentation
  * must fail closed against ITS OWN (possibly released) binding instead of asking
  * whoever is displayed now.
- * @module @xmoon76/dsh-pi-tui/image/loader
+ * @module @xmoon76/dsh-pi-tui/client/media/image/loader
  */
 
-import { ImageLoadError } from '../domain/media/errors.ts'
-import type { ImageAttachmentRefLike } from '../domain/media/types.ts'
+import { ImageLoadError } from '../../../domain/media/errors.ts'
+import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import { ImageCache } from './cache.ts'
 
 /** Cap on retained failure records (round-2 finding 3): failures are

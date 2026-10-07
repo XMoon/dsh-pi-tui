@@ -51,7 +51,7 @@ import type { TuiApp } from './tui-app.ts'
 import type { Diag } from './diag.ts'
 import { cancellationError, runDetached } from './detached.ts'
 import { safeErrorMessage } from './error-boundary.ts'
-import { consumeDraftAttachments, pinDraftAttachments } from './image/submit.ts'
+import { consumeDraftAttachments, pinDraftAttachments } from './client/media/draft-attachments.ts'
 import { suggestPathArgument } from './tui/file-completion/path-argument.ts'
 import { FILE_ARGUMENT_COMMANDS } from './domain/file-completion/path-argument-commands.ts'
 import type { OperationOwnership } from './runtime/write-outcome.ts'
@@ -438,9 +438,9 @@ export interface TuiCommandRunner {
    * the /image command, the clipboard intake and the submission path; the
    * runner clears it on submit/session-switch/dispose, never on durable
    * attachments. */
-  imageStore: import('./image/draft-store.ts').DraftImageStore
+  imageStore: import('./client/media/image/draft-store.ts').DraftImageStore
   /** The per-TUI metadata-only generic file draft registry. */
-  readonly fileStore?: import('./attachment/file-draft.ts').DraftFileStore
+  readonly fileStore?: import('./client/media/attachment/file-draft.ts').DraftFileStore
   /** The shared user-clipboard WRITE policy (issue #7). Delivers through
    * two independent legs — terminal-client OSC 52 and native/platform
    * helpers — and is the SAME policy the fullscreen drag selection uses. */

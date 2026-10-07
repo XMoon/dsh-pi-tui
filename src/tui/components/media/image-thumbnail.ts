@@ -23,7 +23,7 @@ import { Image, getCapabilities } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { formatBytes } from '../../../domain/media/format.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
-import type { ImageLoader } from '../../../image/loader.ts'
+import type { ImageLoader } from '../../../client/media/image/loader.ts'
 
 /** The thumbnail sizing constants (kimi parity, §17). */
 export const MAX_IMAGE_ROWS = 12

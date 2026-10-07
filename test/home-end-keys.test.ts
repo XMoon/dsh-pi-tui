@@ -19,7 +19,7 @@ import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } f
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../src/tui/keybindings/home-end-mode.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import { TuiApp } from '../src/tui-app.ts'

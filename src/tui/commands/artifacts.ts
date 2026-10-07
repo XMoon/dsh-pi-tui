@@ -12,10 +12,10 @@ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands
 import type { TuiApp } from '../../tui-app.ts'
 import { isCancellation, runDetached, runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { pruneUnreferencedDraftAttachments } from '../../image/submit.ts'
-import { readImageFile } from '../../image/intake.ts'
+import { pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
+import { readImageFile } from '../../client/media/image/intake.ts'
 import { FileInputError } from '../../domain/media/errors.ts'
-import { probeAttachment } from '../../attachment/intake.ts'
+import { probeAttachment } from '../../client/media/attachment/intake.ts'
 import { parseShellWords } from '../../shell-words.ts'
 import type { RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 

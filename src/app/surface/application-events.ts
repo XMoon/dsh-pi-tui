@@ -32,12 +32,12 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/application-events
  */
 
-import type { DraftFileStore } from '../../attachment/file-draft.ts'
+import type { DraftFileStore } from '../../client/media/attachment/file-draft.ts'
 import type { OwnedTaskOptions } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import type { DraftImageStore } from '../../image/draft-store.ts'
-import { checkImageLimits } from '../../image/intake.ts'
-import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../image/submit.ts'
+import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
+import { checkImageLimits } from '../../client/media/image/intake.ts'
+import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
 import { resolveComposerDelivery } from '../../commands.ts'
 import { rewindCandidateOfLoadedWindow, rewindOutlineRows } from '../../rewind.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'

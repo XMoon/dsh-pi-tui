@@ -27,7 +27,7 @@ import { sessionArtifactFilename, safeSessionIdSegment } from '../src/session-ar
 import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../src/client/artifact/save.ts'
 import { sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { DirectSessionArchive } from '../src/runtime/direct/session-archive-direct.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'

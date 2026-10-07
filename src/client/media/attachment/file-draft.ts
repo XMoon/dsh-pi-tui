@@ -4,11 +4,11 @@
  * A file draft keeps only the source identity and display metadata. The source
  * is reopened and streamed at submit time; durable bytes belong to the DSH
  * attachment service, never this TUI store.
- * @module @xmoon76/dsh-pi-tui/attachment/file-draft
+ * @module @xmoon76/dsh-pi-tui/client/media/attachment/file-draft
  */
 
-import { formatBytes } from '../domain/media/format.ts'
-import type { FileAttachmentRefLike } from '../domain/media/types.ts'
+import { formatBytes } from '../../../domain/media/format.ts'
+import type { FileAttachmentRefLike } from '../../../domain/media/types.ts'
 
 /** Identity captured when a local file is attached. */
 export interface DraftFileFingerprint {

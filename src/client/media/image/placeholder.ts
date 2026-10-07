@@ -7,7 +7,7 @@
  * hand-edited dimension or a stale id stays ordinary text (§6.2), so the
  * editor remains free-form text and nothing but a real staged draft can
  * become an image on submit.
- * @module @xmoon76/dsh-pi-tui/image/placeholder
+ * @module @xmoon76/dsh-pi-tui/client/media/image/placeholder
  */
 
 import type { DraftImage, DraftImageStoreLike } from './types.ts'
@@ -78,9 +78,4 @@ export function expandImagePlaceholders(
     }
   }
   return merged
-}
-
-/** Whether the draft text contains any resolvable image placeholder. */
-export function draftHasImage(text: string, store: DraftImageStoreLike): boolean {
-  return expandImagePlaceholders(text, store).some(segment => segment.type === 'image')
 }

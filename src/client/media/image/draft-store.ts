@@ -11,10 +11,10 @@
  * Bounded (plan §21): a per-draft byte cap and an aggregate byte cap reject
  * new drafts before they are staged, so repeated `/image`/Ctrl+V pastes can
  * never pin unbounded memory in the TUI.
- * @module @xmoon76/dsh-pi-tui/image/draft-store
+ * @module @xmoon76/dsh-pi-tui/client/media/image/draft-store
  */
 
-import { ImageAdmissionError, ImageTooLargeError } from '../domain/media/errors.ts'
+import { ImageAdmissionError, ImageTooLargeError } from '../../../domain/media/errors.ts'
 import { expandImagePlaceholders, formatImagePlaceholder } from './placeholder.ts'
 import type { DraftImage, DraftImageId, DraftImageInput } from './types.ts'
 

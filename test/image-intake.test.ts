@@ -11,11 +11,11 @@ import { symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { ImageDimensionError, ImageTooLargeError, UnsupportedImageTypeError } from '../src/domain/media/errors.ts'
 import {
   INTAKE_SAFETY_MAX_BYTES, checkImageLimits, expandHome, parseImageMetadata, readImageFile, resolveImagePath, sniffMediaType,
-} from '../src/image/intake.ts'
+} from '../src/client/media/image/intake.ts'
 import type { ImageLimitsLike, ImageMediaType } from '../src/domain/media/types.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 

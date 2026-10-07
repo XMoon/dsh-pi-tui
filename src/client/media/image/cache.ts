@@ -5,7 +5,7 @@
  * form (the pi-tui `Image` component consumes base64). The base64 expansion
  * (~33%) counts toward the byte budget. A fixed entry cap + a byte cap keep
  * a long transcript from pinning unbounded memory; eviction is LRU.
- * @module @xmoon76/dsh-pi-tui/image/cache
+ * @module @xmoon76/dsh-pi-tui/client/media/image/cache
  */
 
 /** One cached image payload (ready) or failure (error). */

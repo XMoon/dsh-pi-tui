@@ -16,14 +16,14 @@
  * - the harness's `ctx.attachments.imageLimits` is the ONLY limit source —
  *   nothing here hardcodes a deployment default (§21);
  * - metadata parsing is header-only; no image decoder is imported (§8).
- * @module @xmoon76/dsh-pi-tui/image/intake
+ * @module @xmoon76/dsh-pi-tui/client/media/image/intake
  */
 
 import { realpath, stat, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, resolve } from 'node:path'
-import { ImageDimensionError, ImageInputError, ImageTooLargeError, UnsupportedImageTypeError } from '../domain/media/errors.ts'
-import type { ImageLimitsLike, ImageMediaType } from '../domain/media/types.ts'
+import { ImageDimensionError, ImageInputError, ImageTooLargeError, UnsupportedImageTypeError } from '../../../domain/media/errors.ts'
+import type { ImageLimitsLike, ImageMediaType } from '../../../domain/media/types.ts'
 
 /** Sniffed + parsed raster facts for one byte buffer. */
 export interface ImageMetadata {

@@ -4,14 +4,14 @@
  * Generic files are classified from a bounded signature probe only. Image
  * signatures are handed to the existing image intake, while other regular
  * files retain metadata and are streamed later at submit time.
- * @module @xmoon76/dsh-pi-tui/attachment/intake
+ * @module @xmoon76/dsh-pi-tui/client/media/attachment/intake
  */
 
 import { open, realpath, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { basename, isAbsolute, resolve } from 'node:path'
-import { FileInputError } from '../domain/media/errors.ts'
-import type { ImageMediaType } from '../domain/media/types.ts'
+import { FileInputError } from '../../../domain/media/errors.ts'
+import type { ImageMediaType } from '../../../domain/media/types.ts'
 import { expandHome, sniffMediaType } from '../image/intake.ts'
 import type { DraftFileFingerprint } from './file-draft.ts'
 

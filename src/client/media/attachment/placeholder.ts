@@ -3,7 +3,7 @@
  *
  * Only exact, currently staged placeholders become attachment segments. Every
  * other character remains text, including edited or stale placeholder tokens.
- * @module @xmoon76/dsh-pi-tui/attachment/placeholder
+ * @module @xmoon76/dsh-pi-tui/client/media/attachment/placeholder
  */
 
 import type { DraftFile, DraftFileStoreLike } from './file-draft.ts'
@@ -66,15 +66,6 @@ export function expandAttachmentPlaceholders(
     }
   }
   return merged
-}
-
-/** Whether text contains a currently live image or file placeholder. */
-export function draftHasAttachments(
-  text: string,
-  imageStore: DraftImageStoreLike,
-  fileStore?: DraftFileStoreLike,
-): boolean {
-  return expandAttachmentPlaceholders(text, imageStore, fileStore).some(segment => segment.type !== 'text')
 }
 
 /** Whether text contains a currently live GENERIC-FILE placeholder (a

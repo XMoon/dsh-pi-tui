@@ -38,7 +38,7 @@ import { credentialOptionOf } from '../src/runtime/direct/config-direct.ts'
 import { QuestionFlow, type QuestionFlowQuestion } from '../src/tui/interaction/question.ts'
 import { createDiag } from '../src/diag.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 
