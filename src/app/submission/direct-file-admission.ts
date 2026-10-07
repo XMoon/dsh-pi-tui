@@ -1,16 +1,20 @@
 /**
- * Admit generic file drafts into the DSH attachment service (Stage C2).
+ * Direct Host generic-file admission (Stage C2; TS8-C).
  *
  * The application-owned Host sink: the source BYTES come from the Client-local
- * streamer (`client/media/attachment/file-stream.ts`); this module only
- * delegates each draft to the injected Direct Host `saveFileStream`. Recalled
- * drafts are already durable and are reused without a stream.
- * @module @xmoon76/dsh-pi-tui/attachment/file-admission
+ * streamer (`client/media/attachment/file-stream.ts`); this module performs no
+ * Client filesystem read itself and only delegates each draft to the injected
+ * Direct Host `saveFileStream`. Recalled drafts are already durable and are
+ * reused without a stream.
+ *
+ * No Remote upload receipt or new transport is introduced: Remote generic-file
+ * submission remains unsupported.
+ * @module @xmoon76/dsh-pi-tui/app/submission/direct-file-admission
  */
 
-import { streamDraftFile } from '../client/media/attachment/file-stream.ts'
-import type { DraftFile } from '../client/media/attachment/file-draft.ts'
-import type { FileAttachmentRefLike } from '../domain/media/types.ts'
+import { streamDraftFile } from '../../client/media/attachment/file-stream.ts'
+import type { DraftFile } from '../../client/media/attachment/file-draft.ts'
+import type { FileAttachmentRefLike } from '../../domain/media/types.ts'
 
 /** Structural subset of DSH's streamed file-admission service. */
 export interface FileAttachmentStoreLike {

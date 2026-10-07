@@ -339,7 +339,7 @@ test('orchestration: a real submit flow restores BEFORE unpin and survives a con
   const file2 = join(dir, 'second.png')
   writeFileSync(file2, pngBytes())
   const { app, imageStore, imageHandler } = setup()
-  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const { runReservedSubmit } = await import('../src/app/submission/submit-flow.ts')
   // Stage #1; the user submits a multimodal draft (the editor carries
   // the text).
   const draft1 = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
@@ -385,7 +385,7 @@ test('orchestration: a real submit flow restores BEFORE unpin and survives a con
 
 test('command fallback SUCCESS: the handoff pin transfers and releases exactly once', async () => {
   const { app, imageStore } = setup()
-  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const { runReservedSubmit } = await import('../src/app/submission/submit-flow.ts')
   const draft = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
   const text = `look at ${draft.placeholder}`
   // The handoff pin is acquired synchronously BEFORE commands.execute()
@@ -404,7 +404,7 @@ test('command fallback SUCCESS: the handoff pin transfers and releases exactly o
 
 test('command fallback FAILURE: restore keeps the draft; the pin releases; prune can collect it after the placeholder leaves', async () => {
   const { app, imageStore } = setup()
-  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const { runReservedSubmit } = await import('../src/app/submission/submit-flow.ts')
   const draft = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
   const text = `look at ${draft.placeholder}`
   const handoff = imageStore.pinReferenced(text)

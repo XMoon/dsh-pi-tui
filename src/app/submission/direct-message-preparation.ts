@@ -1,26 +1,31 @@
 /**
- * Draft → UserMessage preparation for every agent-bound path (plan M6,
- * §13): followup, steer and queue all receive the SAME prepared message, so
- * no path can silently drop an `ImageBlock` (queue messages are durable
+ * Draft → UserMessage preparation for every Direct agent-bound path (plan M6,
+ * §13; TS8-C): followup, steer and queue all receive the SAME prepared message,
+ * so no path can silently drop an `ImageBlock` (queue messages are durable
  * `UserMessage`s in the agent inbox — the queue never re-derives images
  * from drafts, §13.3).
  *
- * The pipeline: canonicalize mentions → expand mixed placeholders → (image
- * present) model capability gate → batched image admission and streamed file
- * admission → ordered ContentBlocks → `createUserMessage`. A text-only draft
- * keeps the exact legacy path (single text block, no service calls).
- * @module @xmoon76/dsh-pi-tui/image/submit
+ * This is the DIRECT application preparation: the composition root injects the
+ * structural Host attachment/llm services (only for the Direct backend) and
+ * this module never resolves `ctx`. The pipeline: canonicalize mentions →
+ * expand mixed placeholders → no attachments? create text UserMessage →
+ * attachment service required → (image present) Direct current-model capability
+ * preflight → Direct image admission → Direct generic-file admission → ordered
+ * ContentBlocks → `createUserMessage`. A text-only draft keeps the exact legacy
+ * path (single text block, no service calls). No behavior change to Direct
+ * attachment persistence.
+ * @module @xmoon76/dsh-pi-tui/app/submission/direct-message-preparation
  */
 
 import { createUserMessage, type ContentBlock, type MessageSource, type UserMessage } from '@deepseek-ai/dsh-llm'
-import { admitDraftImages, type AttachmentsLike } from './admission.ts'
-import { assertModelSupportsImages, type LlmLike } from './capability.ts'
-import { FileInputError, ImageAdmissionError } from '../domain/media/errors.ts'
-import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../domain/media/types.ts'
-import type { DraftImageStoreLike } from '../client/media/image/types.ts'
-import { expandAttachmentPlaceholders, type DraftAttachmentSegment } from '../client/media/attachment/placeholder.ts'
-import { admitDraftFiles, type FileAttachmentStoreLike } from '../attachment/file-admission.ts'
-import type { DraftFileStoreLike } from '../client/media/attachment/file-draft.ts'
+import { expandAttachmentPlaceholders, type DraftAttachmentSegment } from '../../client/media/attachment/placeholder.ts'
+import type { DraftFileStoreLike } from '../../client/media/attachment/file-draft.ts'
+import type { DraftImageStoreLike } from '../../client/media/image/types.ts'
+import { FileInputError, ImageAdmissionError } from '../../domain/media/errors.ts'
+import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import { admitDraftFiles, type FileAttachmentStoreLike } from './direct-file-admission.ts'
+import { admitDraftImages, type AttachmentsLike } from './direct-image-admission.ts'
+import { assertModelSupportsImages, type LlmLike } from './direct-image-capability.ts'
 
 /** The live provider/model pair (the runner's current selection). */
 export interface CurrentModelLike {
@@ -28,8 +33,8 @@ export interface CurrentModelLike {
   readonly model: string
 }
 
-/** Injectable service surface for draft preparation. */
-export interface PrepareInputDeps {
+/** Injectable service surface for the Direct draft preparation. */
+export interface DirectPrepareInputDeps {
   /** The live `ctx.attachments` service; undefined = attachment intake disabled. */
   readonly attachments: AttachmentsLike | undefined
   /** The live generic-file draft store, when the runner has one. */
@@ -41,13 +46,11 @@ export interface PrepareInputDeps {
   /** The CURRENT provider/model (re-read at submit time — the TUI supports
    * runtime model switching, plan §12). */
   currentModel(): CurrentModelLike | undefined
-  /** The session's working directory — the resolution base for send-time
-   * `@`-file mention canonicalization (the 2026-08-22 plan, item 7). */
-  sessionCwd(): string
   /** Send-time `@`-file mention canonicalization through the Host-file
    * port (migration M1.10) — the runner wires the live session scope. */
   canonicalizeMentions(text: string): Promise<string>
 }
+
 
 
 /**
@@ -68,7 +71,7 @@ export interface PrepareInputDeps {
 export async function prepareUserMessage(
   text: string,
   store: DraftImageStoreLike,
-  deps: PrepareInputDeps,
+  deps: DirectPrepareInputDeps,
   options: { readonly requestId?: string } = {},
 ): Promise<UserMessage> {
   const source = userSource(options.requestId)

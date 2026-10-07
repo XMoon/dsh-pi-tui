@@ -42,7 +42,7 @@ import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRunt
 import { copyToClipboard } from '../../clipboard.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../display-preset.ts'
 import { draftHasImages } from '../../client/media/draft-attachments.ts'
-import { prepareUserMessage } from '../../image/submit.ts'
+import { prepareUserMessage } from '../submission/direct-message-preparation.ts'
 import type { ModelSelectionValue } from '../../model-selection.ts'
 import type { SessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'

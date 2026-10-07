@@ -59,7 +59,7 @@ import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createUserShell } from './submission/user-shell.ts'
-import { preparePrompt } from '../image/prepared-prompt.ts'
+import { preparePrompt } from './submission/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from './surface/viewer-runtime.ts'
 import { createDirectChildViewSource } from './direct/child-view.ts'
@@ -91,7 +91,7 @@ import { checkImageLimits } from '../client/media/image/intake.ts'
 import { ImageLoadError } from '../domain/media/errors.ts'
 import type { ImageLimitsLike } from '../domain/media/types.ts'
 import { consumeDraftAttachments } from '../client/media/draft-attachments.ts'
-import type { PrepareInputDeps } from '../image/submit.ts'
+import type { DirectPrepareInputDeps } from './submission/direct-message-preparation.ts'
 import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
@@ -551,6 +551,17 @@ export function applyRunnerWithRuntime(
      */
     const disposeSelectedTransport = (): Promise<void> => selectedRuntime.disposeTransport()
     disposeSelectedTransportRef = disposeSelectedTransport
+    /**
+     * D12 (TS8-C): the Direct Host image policy is read ONLY on the Direct
+     * backend. Remote Client intake receives `undefined` and therefore uses its
+     * own safety/resident limits; the exact Session's official `imageLimits`
+     * projection is re-applied later by the Remote serializer before the Host
+     * `session/prompt`, which remains the final admission authority.
+     */
+    const directImageLimits = (): ImageLimitsLike | undefined =>
+      selectedRuntime.kind === 'direct'
+        ? ctx.get('attachments')?.imageLimits as ImageLimitsLike | undefined
+        : undefined
     /**
      * The Direct attachment of the CURRENT owner (A2 transitional projection):
      * a DERIVED read of the ownership core through the Direct registry, never a
@@ -1446,7 +1457,7 @@ export function applyRunnerWithRuntime(
       tuiSettings,
       displayState,
       get agents() { return lifecycleAgents },
-      imageLimits: () => ctx.get('attachments')?.imageLimits as ImageLimitsLike | undefined,
+      imageLimits: () => directImageLimits(),
       openRewindPicker: () => applicationEvents.openRewindPicker(),
       requestExit: () => requestExit(),
       exit,
@@ -1957,8 +1968,16 @@ export function applyRunnerWithRuntime(
       },
       model: { selected: { get current() { return model.selected.current } } },
       image: {
-        attachments: () => ctx.get('attachments') as PrepareInputDeps['attachments'],
-        llm: () => ctx.get('llm') as PrepareInputDeps['llm'],
+        // D12 (TS8-C): the Direct Host attachment/model services are injected
+        // ONLY on the Direct backend. The Remote submission path goes through
+        // `prepareTransport`/PreparedPrompt and must never call
+        // `ctx.attachments.saveImages` or `ctx.llm.resolveModelInfo`.
+        attachments: () => selectedRuntime.kind === 'direct'
+          ? ctx.get('attachments') as DirectPrepareInputDeps['attachments']
+          : undefined,
+        llm: () => selectedRuntime.kind === 'direct'
+          ? ctx.get('llm') as DirectPrepareInputDeps['llm']
+          : undefined,
       },
       tuiSettings,
       captureMatches,
@@ -2028,7 +2047,7 @@ export function applyRunnerWithRuntime(
       settings,
       client: clientActions,
       drafts: { get images() { return draftImages }, get files() { return draftFiles } },
-      imageLimits: () => ctx.get('attachments')?.imageLimits as Parameters<typeof checkImageLimits>[2] | undefined,
+      imageLimits: () => directImageLimits() as Parameters<typeof checkImageLimits>[2] | undefined,
       rewind: {
         // PR4 §4: the whole-log picker authority + the loadThrough detail
         // read, both behind the semantic SessionReader port (Direct reads

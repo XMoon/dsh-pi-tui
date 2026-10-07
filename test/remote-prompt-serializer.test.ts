@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { preparePrompt, type PreparedImageSource } from '../src/image/prepared-prompt.ts'
+import { preparePrompt, type PreparedImageSource } from '../src/app/submission/prepared-prompt.ts'
 import {
   detachedImageLimits,
   RemotePromptSerializerProduction,

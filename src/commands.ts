@@ -445,8 +445,13 @@ export interface TuiCommandRunner {
    * two independent legs — terminal-client OSC 52 and native/platform
    * helpers — and is the SAME policy the fullscreen drag selection uses. */
   copyToClipboard(text: string): Promise<boolean>
-  /** The deployment image policy (`ctx.attachments.imageLimits`), re-read
-   * dynamically; undefined when the attachment service is unavailable. */
+  /** The deployment image policy, re-read dynamically.
+   * Direct: the detached live Host deployment preflight
+   * (`ctx.attachments.imageLimits`); the Host re-checks at admission.
+   * Remote: `undefined` at Client intake — the Client applies only its own
+   * safety/resident caps, and the exact Session's official `imageLimits`
+   * projection is checked later by the Remote serializer before
+   * `session/prompt` (the final admission authority). */
   imageLimits(): import('./domain/media/types.ts').ImageLimitsLike | undefined
   /** Insert text at the editor cursor (the image placeholder path). */
   insertIntoEditor(text: string): void
