@@ -221,6 +221,29 @@ export function isRemoteComposition(resolved, specifier) {
 }
 
 /**
+ * The TS8-F process-lifetime sublayer (`src/runtime/process/**`): low-level
+ * process lifecycle / failure / diagnostics primitives (`tasks`, `diagnostics`,
+ * `disposal`, `errors`). It may use Node process/platform primitives, but it is
+ * the INNERMOST runtime layer — never application ownership, terminal
+ * presentation, Client-local capability or the Direct/Remote transport
+ * adapters. Its edges are owned by the two `runtime-process-*` rules below so
+ * each violation keeps exactly one rule id (the generic `runtime-imports-app|tui|client`
+ * rules carve this subtree out; `direct-import-outside-composition` never applied
+ * to `runtime/**`, so the process rule is what closes `runtime/process/**` ->
+ * `runtime/direct|remote/**`).
+ */
+export function isRuntimeProcessSubtree(srcRel) {
+  return srcRel.startsWith('runtime/process/')
+}
+
+/** A DSH business/service implementation package (`@deepseek-ai/dsh-*`). The
+ * infrastructure packages (`@deepseek-ai/cordis`, `schemastery`, …) and the
+ * vendored `@xmoon76/pi-tui` fork are not business/service implementations. */
+export function isDshImplementationPackage(specifier) {
+  return specifier.startsWith('@deepseek-ai/dsh-')
+}
+
+/**
  * The concrete renderer / TuiApp / chrome owners the backend-neutral transcript
  * presentation core must never reach. The forbidden TUI surface is the WHOLE
  * `src/tui/**` layer MINUS the core's own `tui/transcript/**` subtree — an
@@ -364,13 +387,13 @@ export const ARCHITECTURE_RULES = [
   {
     id: 'runtime-imports-app',
     message: 'src/runtime/** must not import src/app/** (application layer depends on runtime, never the reverse)',
-    applies: (srcRel) => srcRel.startsWith('runtime/'),
+    applies: (srcRel) => srcRel.startsWith('runtime/') && !isRuntimeProcessSubtree(srcRel),
     forbids: (resolved) => resolved.startsWith('app/'),
   },
   {
     id: 'runtime-imports-tui',
     message: 'src/runtime/** must not import src/tui/** (the semantic/adaptor layer never depends on terminal presentation)',
-    applies: (srcRel) => srcRel.startsWith('runtime/'),
+    applies: (srcRel) => srcRel.startsWith('runtime/') && !isRuntimeProcessSubtree(srcRel),
     forbids: (resolved) => resolved.startsWith('tui/'),
   },
   {
@@ -384,7 +407,7 @@ export const ARCHITECTURE_RULES = [
     message:
       'src/runtime/** must not import src/client/** (Client-local platform capability is the inner layer; '
       + 'the Host semantic/adaptor layer never depends on it)',
-    applies: (srcRel) => srcRel.startsWith('runtime/'),
+    applies: (srcRel) => srcRel.startsWith('runtime/') && !isRuntimeProcessSubtree(srcRel),
     forbids: (resolved) => resolved.startsWith('client/'),
     // A literal VALUE dynamic import reaches the same Client module as a
     // static one; without this opt-in `await import('.../client/...')` would
@@ -551,8 +574,10 @@ export const ARCHITECTURE_RULES = [
     // import; a rule that only consumed `parseImportSpecifiers()` would leave
     // an escape hatch for both the relative component target and the bare
     // package specifier. `checksBareDynamicImport` is therefore opted into here
-    // and NOWHERE else: the older rules keep their exact baseline scope, where a
-    // non-relative dynamic specifier was never resolved into a target.
+    // (and by the TS8-F `runtime-process-imports-dsh-implementation` rule, whose
+    // bare target is a DSH implementation package): the older rules keep their
+    // exact baseline scope, where a non-relative dynamic specifier was never
+    // resolved into a target.
     checksValueDynamicImport: true,
     checksBareDynamicImport: true,
   },
@@ -593,6 +618,46 @@ export const ARCHITECTURE_RULES = [
     applies: (srcRel) => EXTENSION_PUBLIC_DECLARATION_SOURCES.has(srcRel),
     forbids: (resolved) => resolved.startsWith('tui/') || resolved === 'tui-app.ts',
     checksValueDynamicImport: true,
+  },
+  {
+    // TS8-F creates the constrained `src/runtime/process/**` layer (process
+    // lifecycle/failure/diagnostics primitives). It is the innermost runtime
+    // layer: application ownership, terminal presentation, the Client-local
+    // capability and the Direct/Remote transport adapters are all off limits.
+    // A process primitive that needs one of them means the fact was
+    // misclassified and must be split, never allowlisted. The generic
+    // `runtime-imports-app|tui|client` rules carve this subtree out, so each edge
+    // has exactly one owning rule id.
+    id: 'runtime-process-imports-inner-layers',
+    message:
+      'src/runtime/process/** is the low-level process-lifetime layer: it must not import application ownership (app/**), '
+      + 'terminal presentation (tui/**), Client-local capability (client/**) or the Direct/Remote transport adapters '
+      + '(runtime/direct/**, runtime/remote/**)',
+    applies: (srcRel) => isRuntimeProcessSubtree(srcRel),
+    forbids: (resolved) => resolved.startsWith('app/')
+      || resolved.startsWith('tui/')
+      || resolved.startsWith('client/')
+      || resolved.startsWith('runtime/direct/')
+      || resolved.startsWith('runtime/remote/'),
+    checksValueDynamicImport: true,
+  },
+  {
+    // TS8-F: the process layer owns no DSH business/service fact. A structural
+    // TYPE-ONLY face of an official DSH package is allowed (mirroring the
+    // type-only discriminator the other rules carry); an implementation VALUE
+    // import is not — consuming the implementation would make this low-level
+    // layer a business owner. Node standard library imports stay allowed.
+    id: 'runtime-process-imports-dsh-implementation',
+    message:
+      'src/runtime/process/** is the low-level process-lifetime layer and must not VALUE-import a DSH business/service '
+      + 'implementation package (@deepseek-ai/dsh-*); a TYPE-ONLY structural face is allowed and Node standard library imports stay allowed',
+    applies: (srcRel) => isRuntimeProcessSubtree(srcRel),
+    forbids: (resolved, specifier, meta) => isDshImplementationPackage(specifier) && meta?.typeOnly !== true,
+    // A literal VALUE dynamic import reaches the same implementation package as
+    // a static one; without both opt-ins `await import('@deepseek-ai/dsh-agent')`
+    // would be an equivalent spelling that enters the layer with a green gate.
+    checksValueDynamicImport: true,
+    checksBareDynamicImport: true,
   },
 ]
 
