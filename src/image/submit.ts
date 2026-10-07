@@ -13,16 +13,16 @@
  */
 
 import { createUserMessage, type ContentBlock, type MessageSource, type UserMessage } from '@deepseek-ai/dsh-llm'
-import { admitDraftImages, type AttachmentsLike, type ImageAttachmentRefLike } from './admission.ts'
+import { admitDraftImages, type AttachmentsLike } from './admission.ts'
 import { assertModelSupportsImages, type LlmLike } from './capability.ts'
-import { ImageAdmissionError } from './errors.ts'
+import { FileInputError, ImageAdmissionError } from '../domain/media/errors.ts'
+import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../domain/media/types.ts'
 import { expandImagePlaceholders, type DraftSegment } from './placeholder.ts'
 import type { DraftImageStoreLike } from './types.ts'
 import type { DraftImageStore } from './draft-store.ts'
 import { expandAttachmentPlaceholders, type DraftAttachmentSegment } from '../attachment/placeholder.ts'
-import { admitDraftFiles, type FileAttachmentRefLike, type FileAttachmentStoreLike } from '../attachment/file-admission.ts'
+import { admitDraftFiles, type FileAttachmentStoreLike } from '../attachment/file-admission.ts'
 import type { DraftFileStore, DraftFileStoreLike } from '../attachment/file-draft.ts'
-import { FileInputError } from '../attachment/intake.ts'
 
 /** The live provider/model pair (the runner's current selection). */
 export interface CurrentModelLike {

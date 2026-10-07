@@ -19,9 +19,9 @@ import { join } from 'node:path'
 import { existsSync, rmSync, readFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { ClipboardImageError } from './errors.ts'
+import { ClipboardImageError } from '../domain/media/errors.ts'
+import type { ImageMediaType } from '../domain/media/types.ts'
 import { parseImageMetadata } from './intake.ts'
-import type { ImageMediaType } from './types.ts'
 
 /** One clipboard probe outcome. */
 export type ClipboardReadResult =

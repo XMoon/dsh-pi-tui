@@ -24,7 +24,8 @@ import { formatBytes } from '../../bounded-output.ts'
 import type { Diag } from '../../diag.ts'
 import { runOwned } from '../../detached.ts'
 import { safeErrorMessage } from '../../error-boundary.ts'
-import { ImageInputError } from '../../image/errors.ts'
+import { ImageInputError } from '../../domain/media/errors.ts'
+import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { runReservedSubmit } from '../../image/submit-flow.ts'
 import type { DraftImageStore } from '../../image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments, prepareUserMessage, type PrepareInputDeps } from '../../image/submit.ts'
@@ -1759,7 +1760,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           deps.backend.sessionWriter.updateQueue(sessionId, messageId, operation),
         deferQueueRecall: (recall) => deps.submissionRuntime.deferQueueRecall(recall),
         stageRecalledImage: (attachment) => {
-          const ref = attachment as import('../../image/admission.ts').ImageAttachmentRefLike
+          const ref = attachment as ImageAttachmentRefLike
           const draft = deps.drafts.images.add({
             mediaType: ref.mediaType,
             width: ref.width,
@@ -1771,7 +1772,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           return { id: draft.id, placeholder: draft.placeholder }
         },
         stageRecalledFile: (attachment) => {
-          const ref = attachment as import('../../attachment/file-admission.ts').FileAttachmentRefLike
+          const ref = attachment as FileAttachmentRefLike
           const draft = deps.drafts.files.add({
             name: ref.name,
             byteLength: ref.bytes,

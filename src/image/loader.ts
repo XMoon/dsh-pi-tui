@@ -32,9 +32,9 @@
  * @module @xmoon76/dsh-pi-tui/image/loader
  */
 
-import { ImageLoadError } from './errors.ts'
+import { ImageLoadError } from '../domain/media/errors.ts'
+import type { ImageAttachmentRefLike } from '../domain/media/types.ts'
 import { ImageCache } from './cache.ts'
-import type { ImageAttachmentRefLike } from './admission.ts'
 
 /** Cap on retained failure records (round-2 finding 3): failures are
  * diagnostic, never a growing leak on long transcripts. */

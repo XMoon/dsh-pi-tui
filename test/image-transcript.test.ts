@@ -12,7 +12,7 @@ import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { ImageLoader } from '../src/image/loader.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import type { ImageAttachmentRefLike } from '../src/image/admission.ts'
+import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file

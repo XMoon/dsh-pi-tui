@@ -447,7 +447,7 @@ export interface TuiCommandRunner {
   copyToClipboard(text: string): Promise<boolean>
   /** The deployment image policy (`ctx.attachments.imageLimits`), re-read
    * dynamically; undefined when the attachment service is unavailable. */
-  imageLimits(): import('./image/intake.ts').ImageLimitsLike | undefined
+  imageLimits(): import('./domain/media/types.ts').ImageLimitsLike | undefined
   /** Insert text at the editor cursor (the image placeholder path). */
   insertIntoEditor(text: string): void
   /**

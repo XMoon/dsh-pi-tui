@@ -34,8 +34,7 @@
  */
 
 import { expandAttachmentPlaceholders } from '../attachment/placeholder.ts'
-import type { ImageAttachmentRefLike } from './admission.ts'
-import type { ImageMediaType } from './types.ts'
+import type { ImageAttachmentRefLike, ImageMediaType } from '../domain/media/types.ts'
 
 /** One staged image snapshot: the bytes (when locally held) or the durable
  * ref (a recalled draft), plus the display facts both transports need. */

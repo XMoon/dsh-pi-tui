@@ -12,9 +12,9 @@
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { ImageAdmissionError } from './errors.ts'
+import { ImageAdmissionError } from '../domain/media/errors.ts'
+import type { ImageAttachmentRefLike, ImageLimitsLike, ImageMediaType } from '../domain/media/types.ts'
 import type { DraftSegment } from './placeholder.ts'
-import type { ImageMediaType } from './types.ts'
 
 /** Structural subset of `@deepseek-ai/dsh-attachment`'s `SaveImageAttachment`. */
 export interface SaveImageAttachmentLike {
@@ -23,26 +23,9 @@ export interface SaveImageAttachmentLike {
   readonly name?: string
 }
 
-/** Structural subset of `ImageAttachmentRef`. */
-export interface ImageAttachmentRefLike {
-  readonly attachmentId: string
-  readonly mediaType: ImageMediaType
-  readonly bytes: number
-  readonly width: number
-  readonly height: number
-  readonly name?: string
-}
-
 /** Structural subset of the `ctx.attachments` service surface. */
 export interface AttachmentsLike {
-  readonly imageLimits: {
-    readonly maxImageBytes: number
-    readonly maxImagesPerMessage: number
-    readonly maxMessageImageBytes: number
-    readonly maxImagePixels: number
-    readonly maxImageDimension: number
-    readonly mediaTypes: readonly ImageMediaType[]
-  }
+  readonly imageLimits: ImageLimitsLike
   saveImages(inputs: readonly SaveImageAttachmentLike[]): Promise<readonly ImageAttachmentRefLike[]>
 }
 

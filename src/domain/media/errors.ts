@@ -1,9 +1,14 @@
 /**
- * Image-pipeline error vocabulary (plan §20). Every error carries an
+ * Media-pipeline error vocabulary (plan §20). Every error carries an
  * ACTIONABLE message; callers surface them to the user verbatim (or as
  * notices), never as bare stack traces.
- * @module @xmoon76/dsh-pi-tui/image/errors
+ *
+ * The hierarchy is the historical one: TS8-C normalizes ownership, not the
+ * error API. `FileInputError` extends `ImageInputError` unchanged.
+ * @module @xmoon76/dsh-pi-tui/domain/media/errors
  */
+
+import { formatBytes } from './format.ts'
 
 /** Base class for every TUI image-pipeline failure. */
 export class ImageInputError extends Error {
@@ -69,9 +74,10 @@ export class ModelImageUnsupportedError extends ImageInputError {
   }
 }
 
-/** Human byte-size formatting for limit messages (1024-based). */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+/** User-facing error for local generic-file intake and admission failures. */
+export class FileInputError extends ImageInputError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'FileInputError'
+  }
 }

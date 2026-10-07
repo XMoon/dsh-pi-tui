@@ -22,19 +22,8 @@
 import { realpath, stat, readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, isAbsolute, resolve } from 'node:path'
-import { ImageDimensionError, ImageInputError, ImageTooLargeError, UnsupportedImageTypeError } from './errors.ts'
-import type { ImageMediaType } from './types.ts'
-
-/** The deployment image policy, structural subset of
- * `ctx.attachments.imageLimits` (AGENTS.md decision 7). */
-export interface ImageLimitsLike {
-  readonly maxImageBytes: number
-  readonly maxImagesPerMessage: number
-  readonly maxMessageImageBytes: number
-  readonly maxImagePixels: number
-  readonly maxImageDimension: number
-  readonly mediaTypes: readonly ImageMediaType[]
-}
+import { ImageDimensionError, ImageInputError, ImageTooLargeError, UnsupportedImageTypeError } from '../domain/media/errors.ts'
+import type { ImageLimitsLike, ImageMediaType } from '../domain/media/types.ts'
 
 /** Sniffed + parsed raster facts for one byte buffer. */
 export interface ImageMetadata {

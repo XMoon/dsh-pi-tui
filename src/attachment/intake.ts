@@ -10,18 +10,10 @@
 import { open, realpath, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { basename, isAbsolute, resolve } from 'node:path'
-import { ImageInputError } from '../image/errors.ts'
+import { FileInputError } from '../domain/media/errors.ts'
+import type { ImageMediaType } from '../domain/media/types.ts'
 import { expandHome, sniffMediaType } from '../image/intake.ts'
-import type { ImageMediaType } from '../image/types.ts'
 import type { DraftFileFingerprint } from './file-draft.ts'
-
-/** User-facing error for local generic-file intake and admission failures. */
-export class FileInputError extends ImageInputError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options)
-    this.name = 'FileInputError'
-  }
-}
 
 /** The outcome of the bounded local signature probe. */
 export type AttachmentProbe =

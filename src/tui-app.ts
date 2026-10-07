@@ -9629,7 +9629,7 @@ export class TuiApp {
    * of whichever subject is displayed by then.
    */
   private imageThumbnail(
-    ref: import('./image/admission.ts').ImageAttachmentRefLike,
+    ref: import('./domain/media/types.ts').ImageAttachmentRefLike,
     collapsedRef?: () => boolean,
   ): ImageThumbnail {
     // Callers gate on the loader/theme; the assertions mirror the call sites.
@@ -13869,7 +13869,7 @@ export class TuiApp {
         } else {
           flushText()
           const thumbnail = this.imageThumbnail(
-            block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+            block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -13936,7 +13936,7 @@ export class TuiApp {
         if (block.type === 'image') {
           if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
             const thumbnail = this.imageThumbnail(
-              block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+              block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
               this.occurrenceCollapsedRef(message, imageIndex),
             )
             this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -13964,7 +13964,7 @@ export class TuiApp {
         flushText()
         if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
           const thumbnail = this.imageThumbnail(
-            block.attachment as import('./image/admission.ts').ImageAttachmentRefLike,
+            block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
             this.occurrenceCollapsedRef(message, imageIndex),
           )
           this.thumbnailOccurrence.set(thumbnail, imageIndex)
@@ -15296,7 +15296,7 @@ export class TuiApp {
                   buffer += block.text
                 } else if (block.type === 'image') {
                   flush()
-                  card.addChild(this.imageThumbnail(block.attachment as import('./image/admission.ts').ImageAttachmentRefLike))
+                  card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
                 } else {
                   // Known process blocks keep their legacy JSON form;
                   // file and unknown blocks use their bounded presentation,
@@ -15444,7 +15444,7 @@ export class TuiApp {
             buffer += block.text
           } else if (block.type === 'image') {
             flush()
-            card.addChild(this.imageThumbnail(block.attachment as import('./image/admission.ts').ImageAttachmentRefLike))
+            card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
           } else {
             // Known process blocks keep their legacy JSON form; file and
             // unknown blocks use their bounded presentation, in order.
@@ -15485,7 +15485,7 @@ export class TuiApp {
     if (blocks === undefined || this.imageLoader === undefined || this.imageTheme === undefined) return
     for (const block of blocks) {
       if (block.type === 'image') {
-        card.addChild(this.imageThumbnail(block.attachment as import('./image/admission.ts').ImageAttachmentRefLike))
+        card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
       }
     }
   }

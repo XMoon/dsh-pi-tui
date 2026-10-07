@@ -12,12 +12,11 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
-import { ImageDimensionError, ImageTooLargeError, UnsupportedImageTypeError } from '../src/image/errors.ts'
+import { ImageDimensionError, ImageTooLargeError, UnsupportedImageTypeError } from '../src/domain/media/errors.ts'
 import {
   INTAKE_SAFETY_MAX_BYTES, checkImageLimits, expandHome, parseImageMetadata, readImageFile, resolveImagePath, sniffMediaType,
 } from '../src/image/intake.ts'
-import type { ImageLimitsLike } from '../src/image/intake.ts'
-import type { ImageMediaType } from '../src/image/types.ts'
+import type { ImageLimitsLike, ImageMediaType } from '../src/domain/media/types.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 /** A structural limit set mirroring the attachment-local defaults. */

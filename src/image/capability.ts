@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/image/capability
  */
 
-import { ModelImageUnsupportedError } from './errors.ts'
+import { ModelImageUnsupportedError } from '../domain/media/errors.ts'
 
 /** Structural subset of `LlmResolvedModelInfo` (`@deepseek-ai/dsh-llm`). */
 export interface ResolvedModelInfoLike {

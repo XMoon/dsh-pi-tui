@@ -9,15 +9,9 @@
 import { open, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import type { BigIntStats } from 'node:fs'
-import { FileInputError } from './intake.ts'
+import { FileInputError } from '../domain/media/errors.ts'
+import type { FileAttachmentRefLike } from '../domain/media/types.ts'
 import type { DraftFile, DraftFileFingerprint } from './file-draft.ts'
-
-/** Structural subset of DSH's durable file reference. */
-export interface FileAttachmentRefLike {
-  readonly attachmentId: string
-  readonly name: string
-  readonly bytes: number
-}
 
 /** Structural subset of DSH's streamed file-admission service. */
 export interface FileAttachmentStoreLike {

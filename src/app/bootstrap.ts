@@ -88,7 +88,8 @@ import { openExternalUrl } from '../open-url.ts'
 import { createStartupStatus } from '../startup-status.ts'
 import { iconStyleOf } from '../icons.ts'
 import { checkImageLimits } from '../image/intake.ts'
-import { ImageLoadError } from '../image/errors.ts'
+import { ImageLoadError } from '../domain/media/errors.ts'
+import type { ImageLimitsLike } from '../domain/media/types.ts'
 import { consumeDraftAttachments, type PrepareInputDeps } from '../image/submit.ts'
 import { dshVersion } from '../dsh-version.ts'
 import { createExitController } from '../exit.ts'
@@ -1444,7 +1445,7 @@ export function applyRunnerWithRuntime(
       tuiSettings,
       displayState,
       get agents() { return lifecycleAgents },
-      imageLimits: () => ctx.get('attachments')?.imageLimits as import('../image/intake.ts').ImageLimitsLike | undefined,
+      imageLimits: () => ctx.get('attachments')?.imageLimits as ImageLimitsLike | undefined,
       openRewindPicker: () => applicationEvents.openRewindPicker(),
       requestExit: () => requestExit(),
       exit,
