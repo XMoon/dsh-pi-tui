@@ -103,6 +103,17 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/tui/presentation/lines.ts` | terminal physical-row sanitation/presentation helpers (TS8-F5) |
 | `src/tui/diagnostics/scroll-profile.ts`, `transcript-render-profile.ts` | render-cost profilers, grouped as TUI diagnostics (TS8-F5) |
 | `src/domain/display/wheel-scroll.ts` | the persisted wheel-lines -> accepted wheel-step semantic (TS8-F5) |
+| `src/client/shell/output-capture.ts` | Client retention of authoritative Host shell output: the byte/line-capped tail and the disk-capped full-output capture (TS8-F6; the truncation report is a private settle helper of `app/submission/user-shell.ts` and the duplicate `formatBytes` is deleted in favour of `domain/media/format.ts`) |
+| `src/tui/process-slot.ts` | the process-local single-live-TUI slot guarding the fork's process-global keybindings (TS8-F6) |
+| `src/tui/transcript/diff-projection.ts` | backend-neutral bounded diff derivation (structurally typed input, so it no longer depends on `@deepseek-ai/dsh-tools FileDiff`) (TS8-F6) |
+| `src/tui/components/transcript/diff.ts` | concrete diff rendering: colors, optional absolute gutter and the folded-body cap (TS8-F6) |
+| `src/tui/components/transcript/local-shell-card.ts` | local `!`/`!!` shell card display policy; it reads `TranscriptMessage` from the canonical `domain/transcript/types.ts` (TS8-F6) |
+| `src/tui/components/indeterminate-progress.ts` | the ping-pong frame derivation for the working row's animated suffix (TS8-F6; it stays an independent animation source, not merged into `WorkingIndicator`) |
+| `src/tui/interaction/autocomplete/skill-reference.ts` | the pure inline `/skill-name` token grammar and apply replacement (TS8-F6) |
+| `src/app/surface/streaming-tool-preparing.ts` | the Preparing projection and the canonical `StreamingToolPreview`; the summary policy arrives as a REQUIRED injected `ToolSummaryKeys` (TS8-F6) |
+| `src/tui/terminal/title.ts` | the OSC 0 terminal-title policy (sanitize, visible-cell cap, write) (TS8-F6) |
+| `src/tui/transcript/client-tool-presenter.ts` | the Client-derived tool presenter for the Remote branch (TS8-F6) |
+| `src/tui/components/working-indicator.ts` | the animated working row shown above the editor (TS8-F6) |
 | remaining historical feature dirs (`…`) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
@@ -334,7 +345,13 @@ retires the twelve transcript/search/disclosure roots
 `long-message-disclosure.ts`, `presentation-lines.ts`,
 `scroll-render-profile.ts`, `search-overlay.ts`, `search-profile.ts`,
 `search.ts`, `thinking-preview.ts`, `transcript-render-profile.ts`,
-`wheel-scroll.ts`), reaching `stable = 6 / legacy = 11`.
+`wheel-scroll.ts`), reaching `stable = 6 / legacy = 11`; F6 then retires the
+ten remaining tool/shell/terminal/completion roots (`bounded-output.ts`,
+`diff.ts`, `local-shell-card.ts`, `process-tui-slot.ts`, `progress.ts`,
+`skill-reference-completion.ts`, `streaming-tool-preparing.ts`,
+`terminal-title.ts`, `tool-presentation-client.ts`, `working.ts`), reaching
+`stable = 6 / legacy = 1` — `builtins.ts` is the ONLY remaining legacy root
+until F7 reclassifies it.
 
 ## Existing directory convergence
 
@@ -821,6 +838,27 @@ The search three-layer contract stays: `domain/transcript/search.ts` semantics,
 `app/surface/search-overlay.ts` state/currentness, `tui/interaction/transcript-search.ts`
 interaction. `tui/transcript/focus-timing.ts` reads `TurnActivity` from the
 canonical `domain/transcript/types.ts`, never the root facade.
+
+TS8-F (PR F6) retires the ten remaining tool/shell/terminal/completion roots
+(legacy `11 -> 1`, no forwarding shim):
+
+```text
+src/bounded-output.ts        -> client/shell/output-capture.ts (formatTruncation became a private settle helper in app/submission/user-shell.ts; the duplicate formatBytes is deleted in favour of domain/media/format.ts)
+src/process-tui-slot.ts      -> tui/process-slot.ts
+src/diff.ts                  -> tui/transcript/diff-projection.ts (derivation) + tui/components/transcript/diff.ts (rendering)
+src/local-shell-card.ts      -> tui/components/transcript/local-shell-card.ts
+src/progress.ts              -> tui/components/indeterminate-progress.ts
+src/skill-reference-completion.ts -> tui/interaction/autocomplete/skill-reference.ts
+src/streaming-tool-preparing.ts -> app/surface/streaming-tool-preparing.ts (owns the canonical StreamingToolPreview; the summary policy is injected as ToolSummaryKeys, so app/** never imports tui/transcript/tool-presentation.ts)
+src/terminal-title.ts        -> tui/terminal/title.ts (status-runtime takes a required updateTerminalTitle seam; bootstrap applies terminalTitleOf -> setTerminalTitle)
+src/tool-presentation-client.ts -> tui/transcript/client-tool-presenter.ts
+src/working.ts               -> tui/components/working-indicator.ts
+```
+
+The two F6 composition seams are deliberate: the application owner supplies
+semantic facts (the summary candidate fields, the session title/cwd identity)
+and the composition applies the TUI policy, so `app/**` keeps its "no concrete
+`tui/**` import" direction. `builtins.ts` stays the only legacy root.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1
