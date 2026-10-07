@@ -128,14 +128,22 @@ The load-bearing rules:
 ```text
 src/runtime/** never imports src/app/**
 src/runtime/** never imports src/tui/**
+src/runtime/** never imports src/client/**
 application owners never import the bootstrap composition zone (facade or helper)
 application owners never import src/tui/** implementation
-src/domain/** never imports src/app/**, src/tui/** or experimental Remote composition
+src/domain/** never imports src/app/**, src/tui/**, src/client/** or experimental Remote composition
+src/client/** never imports experimental Remote composition
 src/tui/transcript/** never imports PiTui, Tern, TuiApp, theme/icons, the renderer
   registry or another concrete TUI mechanics module
 Remote is reached through one sanctioned lazy boundary
 Direct remains the production/default backend
 ```
+
+`src/client/**` is the Client-local platform capability and the INNER layer,
+exactly like `src/app/**` and `src/tui/**`: the neutral domain and the Host
+semantic/adaptor (`src/runtime/**`) layers never depend on it, and Client-local
+state never reaches the Host transport. The rule is enforced for value,
+type-only and literal value-dynamic imports, with no allowlist.
 
 The application/TUI direction (TS4) is one-way at the implementation level:
 

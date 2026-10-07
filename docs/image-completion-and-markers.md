@@ -30,10 +30,15 @@ nothing. Tab had two more gaps:
   completion entries (installed by `installCompletions` in commands.ts, gated
   by the `PATH_ARGUMENT_COMMANDS` set) carry it, backed by `suggestPathArgument`
   (`src/tui/file-completion/path-argument.ts`). This is CLIENT-local completion:
-  the Client cwd and the Client filesystem are read at CALL time, so a session
-  switch mid-edit stays correct and a Host/remote workspace is never consulted.
-- **`suggestPathArgument(argumentText, cwd)`** is shell-style and
-  directory-local (the fd whole-tree fuzzy search stays `@`'s job). It
+  the Client cwd is read at CALL time and stays independent of the Session/Host
+  cwd, so a session switch cannot retarget local attachment completion onto the
+  Host filesystem, and a Host/remote workspace is never consulted.
+- **`suggestPathArgument(argumentText, cwd)`** resolves the Client-local
+  argument through the same discovery policy as the rest of the local
+  completion: an unscoped query is answered finder-first
+  (`ClientLocalDiscoveryDriver`: fd/fdfind whole-tree fuzzy with the bounded
+  recursive fallback), a scoped one through a directory listing. The Session
+  `@` whole-tree search stays the Host authority's job. It
   resolves `~`, absolute and relative forms — including Windows drive
   (`C:\x`) and UNC (`\\server\share`) tokens, detected via
   `isAbsolute` + `win32.isAbsolute` and completed in the user's own path
