@@ -35,11 +35,13 @@ nothing. Tab had two more gaps:
   Host filesystem, and a Host/remote workspace is never consulted.
 - **`suggestPathArgument(argumentText, cwd)`** resolves the Client-local
   argument through the same discovery policy as the rest of the local
-  completion: a WHOLE-TREE or scoped NON-EMPTY term is answered finder-first
-  (`ClientLocalDiscoveryDriver`: fd/fdfind whole-tree fuzzy with the bounded
-  recursive subtree fallback; a Windows-dialect token stays on the scan path),
-  while a scoped EMPTY term (`src/`, `../pics/`)
-  directly lists that directory's own children. The Session
+  completion. An UNSCOPED (whole-tree) query is answered by finder-first fuzzy
+  discovery (`ClientLocalDiscoveryDriver`: fd/fdfind, or the bounded recursive
+  subtree fallback when the finder is unavailable). A scoped EMPTY term
+  (`src/`, `../pics/`) directly lists that directory's own children, while a
+  scoped NON-EMPTY term (`src/de`) uses the same finder/fallback search
+  constrained to that scoped base. A Windows-dialect token stays on the scan
+  path. The Session
   `@` whole-tree search stays the Host authority's job. It
   resolves `~`, absolute and relative forms — including Windows drive
   (`C:\x`) and UNC (`\\server\share`) tokens, detected via
