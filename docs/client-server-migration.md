@@ -5674,7 +5674,7 @@ mounted fatal:
   → exit(1)
 ```
 
-- **One synchronous disposal primitive** (`src/disposal.ts`):
+- **One synchronous disposal primitive** (`src/runtime/process/disposal.ts`):
   `runSyncDisposalSteps(label, steps)` invokes every step in caller order,
   collects synchronous thrown values, rethrows the single exact value by
   identity or `AggregateError(errors, label)` for multiple. No Remote import,

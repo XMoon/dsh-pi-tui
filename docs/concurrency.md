@@ -580,7 +580,7 @@ mounted fatal:
 
 Surface cleanup is **non-truncating**: every independent surface-owned
 resource is attempted in its original order even when a sibling throws
-(`src/disposal.ts::runSyncDisposalSteps` runs every step, then rethrows the
+(`src/runtime/process/disposal.ts::runSyncDisposalSteps` runs every step, then rethrows the
 single failure by identity or an `AggregateError`). The same primitive
 hardens each owner's own `dispose()` chain (viewer, command catalog, footer
 settings, Plugin Manager, Question, OverlayBroker, `TuiApp.stop/dispose`,
