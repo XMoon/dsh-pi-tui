@@ -276,11 +276,12 @@ const DOMAIN_TRANSCRIPT_FORBIDDEN_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/te
  * `domain/transcript/**` authority may still consume as VALUES: deterministic
  * pure helpers with no TUI/renderer/lifecycle state, owned by TS8 for their
  * final placement (plan §34.1). Every other relative `src/**` edge fails.
+ *
+ * TS8-D shrank this set to the ONE remaining transitional root (`present.ts`,
+ * whose `latestLine` was already extracted to `domain/transcript/text.ts`);
+ * the final commit retires it and the set disappears entirely.
  */
 const DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES = new Set([
-  'context.ts',
-  'content-block-presentation.ts',
-  'failure-presentation.ts',
   'present.ts',
 ])
 
@@ -301,7 +302,7 @@ const DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES = new Set([
  * The TS7 sublayer contract for `domain/transcript/**`, expressed CLOSED-WORLD:
  * every relative edge must be either
  *   - a `domain/transcript/**` sibling, or
- *   - one of {@link DOMAIN_TRANSCRIPT_ROOT_VALUE_EDGES}, or
+ *   - the ONE transitional root value (`present.ts`), or
  *   - a TYPE-ONLY import of one of {@link DOMAIN_TRANSCRIPT_ROOT_TYPE_ONLY_EDGES}.
  * Anything else (`tui/**`, `app/**`, `runtime/direct|remote/**`, `commands.ts`,
  * `display-preset.ts`, `search-overlay.ts`, `transcript.ts`, `theme.ts`,
@@ -559,8 +560,7 @@ export const ARCHITECTURE_RULES = [
     id: 'domain-transcript-imports-backend-mechanics',
     message:
       'src/domain/transcript/** is the transport/UI-neutral transcript semantic authority: it may import only its domain '
-      + 'siblings, the frozen transitional pure root helpers (value: context/content-block-presentation/failure-presentation/'
-      + 'present; type-only: icons/assistant-stream-port) and official DSH semantic packages — every other edge '
+      + 'siblings, the frozen transitional pure root helpers (value: present; type-only: icons/assistant-stream-port) and official DSH semantic packages — every other edge '
       + '(tui/**, app/**, runtime/direct|remote, commands.ts, display-preset.ts, transcript.ts, PiTui, Tern, …) must be split instead',
     applies: (srcRel) => isDomainTranscriptSubtree(srcRel),
     forbids: (resolved, specifier, meta) => isDomainTranscriptBackendMechanics(resolved, specifier, meta),

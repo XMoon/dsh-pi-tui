@@ -13,7 +13,8 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type {
   FileDiff, ToolCallView, ToolResult, ToolResultView, WebFetchResultView, WebSearchResultView,
 } from '@deepseek-ai/dsh-tools'
-import { finalizedBlockFallbackText, fileAttachmentSummary } from './content-block-presentation.ts'
+import { finalizedBlockFallbackText } from './domain/transcript/content-blocks.ts'
+import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 import { type IconSemantic } from './icons.ts'
 
 import type { JsonValue } from './domain/transcript/types.ts'
@@ -647,13 +648,6 @@ export function toolSummaryKeys(name: string): readonly string[] {
 export function firstLine(text: string): string {
   const newline = text.indexOf('\n')
   return newline === -1 ? text : text.slice(0, newline)
-}
-
-/** The last line of a text (the Web's running-reasoning summary). */
-export function latestLine(text: string): string {
-  const visible = text.trimEnd()
-  const newline = visible.lastIndexOf('\n')
-  return newline === -1 ? visible : visible.slice(newline + 1)
 }
 
 /**

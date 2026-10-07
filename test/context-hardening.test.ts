@@ -11,7 +11,7 @@ import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { contextPresentation, contextProvenance, contextSummary } from '../src/context.ts'
+import { contextPresentation, contextProvenance, contextSummary } from '../src/domain/transcript/context-semantics.ts'
 import { contextFormOf, isAmbientContext } from '../src/domain/transcript/context-semantics.ts'
 import {
   clusterAdjacentAmbientContext,

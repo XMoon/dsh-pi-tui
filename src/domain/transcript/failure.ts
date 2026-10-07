@@ -1,3 +1,13 @@
+/**
+ * Display-safe formatting for durable provider failures (TS8-D move out of
+ * the legacy root `src/failure-presentation.ts`).
+ *
+ * AUTH redaction is canonical SAFE transcript projection, not renderer
+ * decoration: both the TranscriptFolder and the Focus presentation consume
+ * this ONE mapping, so no duplicate redaction logic can drift.
+ * @module @xmoon76/dsh-pi-tui/domain/transcript/failure
+ */
+
 /** Display-safe formatting for durable provider failures. */
 export interface DisplayFailure {
   readonly code?: string

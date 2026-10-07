@@ -18,7 +18,7 @@ import {
   isRecallContext,
   isRelayContext,
 } from '../src/tui/transcript/context-structure.ts'
-import { contextPresentation, isTranscriptContextForm } from '../src/context.ts'
+import { contextPresentation, isTranscriptContextForm } from '../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'

@@ -23,7 +23,8 @@
 import { isReplacementSurfaceEvent, TOOL_NOT_STARTED } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { finalizedBlockFallbackText, fileAttachmentSummary, userBlocksVisibleNow, textWithAttachmentMarkers } from './content-block-presentation.ts'
+import { finalizedBlockFallbackText, textWithAttachmentMarkers, userBlocksVisibleNow } from './domain/transcript/content-blocks.ts'
+import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 import { WorkflowProjection } from './domain/transcript/workflow-projection.ts'
 import type { TranscriptWorkflowMessage } from './domain/transcript/workflow-projection.ts'
 

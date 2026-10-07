@@ -158,7 +158,6 @@ import { SelectedMarquee } from './tui/components/marquee.ts'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
 import {
   firstLine,
-  latestLine,
   parseCallPreview,
   parseReadEnvelopes,
   parseWriteEnvelope,
@@ -225,7 +224,9 @@ import {
   workflowStatusCounts,
   type WorkflowPhasePresentation,
 } from './workflow-presentation.ts'
-import { finalizedBlockFallbackText, fileAttachmentSummary, openOpaqueBlockFallbackText } from './content-block-presentation.ts'
+import { finalizedBlockFallbackText, openOpaqueBlockFallbackText } from './domain/transcript/content-blocks.ts'
+import { latestLine } from './domain/transcript/text.ts'
+import { fileAttachmentSummary } from './domain/media/file-summary.ts'
 import type { TranscriptWindowState } from './domain/transcript/window.ts'
 import { createTranscriptRenderProfiler } from './transcript-render-profile.ts'
 import { createScrollRenderProfiler } from './scroll-render-profile.ts'
