@@ -34,7 +34,7 @@ import {
 } from './compact-process-preview.ts'
 import { compactActionStatParts, formatCompactDuration, type CompactActionStats } from '../../transcript/process-summary.ts'
 import { displayFailureText } from '../../../domain/transcript/failure.ts'
-import { focusTiming, type FocusTimingStore } from '../../../focus-timing.ts'
+import type { FocusTimingStore } from '../../transcript/focus-timing.ts'
 import type { RunPhase } from '../../../domain/status/types.ts'
 import type { TurnActivity } from '../../../transcript.ts'
 
@@ -126,7 +126,7 @@ export function focusDurationText(
   activity: TurnActivity,
   phase: RunPhase,
   now: () => number,
-  timing: FocusTimingStore = focusTiming,
+  timing: FocusTimingStore,
 ): string | undefined {
   return formatFocusDuration(timing.activeMillis(activity, phase, now()))
 }
@@ -294,7 +294,7 @@ export class FocusActivityComponent {
     actionStats: CompactActionStats
     iconStyle?: IconStyle
     preparingSummary?: string
-    timing?: FocusTimingStore
+    timing: FocusTimingStore
   }) {
     this.activity = options.activity
     this.expanded = options.expanded
@@ -304,7 +304,7 @@ export class FocusActivityComponent {
     this.actionStats = options.actionStats
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.preparingSummary = options.preparingSummary
-    this.timing = options.timing ?? focusTiming
+    this.timing = options.timing
   }
 
   /** The Component interface requires invalidate(); the component keeps no

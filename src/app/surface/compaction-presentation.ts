@@ -14,10 +14,13 @@
  * byte-compatible (the published package and the regression suites import them
  * from the package root).
  *
- * @module @xmoon76/dsh-pi-tui/compaction-presentation
+ * @module @xmoon76/dsh-pi-tui/app/surface/compaction-presentation
  */
 
-import type { CompactionPhase } from './tui-app.ts'
+/** The canonical compaction phase the mounted surface renders (TS8-F5 moved
+ * the union out of the tui-app.ts stable root; the root type-re-exports it). */
+export type CompactionPhase = 'idle' | 'summarizing' | 'applying'
+
 
 /** One fold of a compaction lifecycle event over the in-flight compaction
  * state. Pure (the routing applies the returned surface effects):

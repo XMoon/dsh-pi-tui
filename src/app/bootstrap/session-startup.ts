@@ -21,7 +21,7 @@ import type { DirectAgentComposition } from '../direct/composition.ts'
 import type { RemoteApplicationSources } from '../application-runtime.ts'
 import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
-import { workingFromLog } from '../../compaction-presentation.ts'
+import { workingFromLog } from '../surface/compaction-presentation.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 

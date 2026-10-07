@@ -27,11 +27,11 @@
  * forbids fabricating past waits. A live turn first observed while
  * user-blocked with no pause-boundary evidence reports an UNKNOWN duration
  * (never a fake `0s`).
- * @module @xmoon76/dsh-pi-tui/focus-timing
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/focus-timing
  */
 
-import type { RunPhase } from './domain/status/types.ts'
-import type { TurnActivity } from './transcript.ts'
+import type { RunPhase } from '../../domain/status/types.ts'
+import type { TurnActivity } from '../../domain/transcript/types.ts'
 
 /** The user-blocked phases whose wait time is excluded from the live timer.
  * Every other phase (working, compacting, applying-compaction, idle gaps)
@@ -247,8 +247,3 @@ export class FocusTimingStore {
     return segment.accumulated + (segment.resumedAt === undefined ? 0 : Math.max(0, end - segment.resumedAt))
   }
 }
-
-/** The default timer for a Focus component constructed outside a TuiApp
- * (tests, direct rendering). The TUI owns a per-surface store so a fresh
- * surface never inherits another run's pause windows. */
-export const focusTiming = new FocusTimingStore()
