@@ -19,8 +19,8 @@ import {
   FOCUS_MODE_PROMPT,
   FOCUS_SECTION_NAME,
   FOCUS_SECTION_ORDER,
-  installFocusPrompt,
-} from '../src/focus.ts'
+} from '../src/domain/communication/focus.ts'
+import { installDirectTuiSystemPromptSections } from '../src/app/direct/system-prompt.ts'
 import { resolveDisplayPreset, type DisplayState } from '../src/domain/display/preset.ts'
 import {
   FocusActivityComponent,
@@ -4104,11 +4104,12 @@ function fakeAgentCtx(sections: Array<{ name: string; order: number; text: strin
   }
 }
 
-test('installFocusPrompt registers ONE dynamic section with the TUI-private name', () => {
+test('the Direct system-prompt installer registers ONE dynamic Focus section with the TUI-private name', () => {
   const sections: Array<{ name: string; order: number; text: string | (() => string); complete?: boolean }> = []
   const agentCtx = fakeAgentCtx(sections)
   const displayState: DisplayState = { preset: 'full' }
-  const dispose = installFocusPrompt(agentCtx as never, displayState)
+  const disposers = installDirectTuiSystemPromptSections(agentCtx as never, { displayState })
+  const dispose = disposers[0]
   assert.ok(dispose !== undefined)
   assert.equal(sections.length, 1)
   assert.equal(sections[0]!.name, FOCUS_SECTION_NAME)
@@ -4140,20 +4141,19 @@ test('installFocusPrompt registers ONE dynamic section with the TUI-private name
   assert.equal(sections.length, 0, 'the disposer removes the section')
 })
 
-test('installFocusPrompt degrades gracefully when the service is missing', () => {
-  const agentCtx = { get: () => undefined }
-  const dispose = installFocusPrompt(agentCtx as never, { preset: 'focus' })
-  assert.equal(dispose, undefined, 'no service → no section, no throw')
+test('the Direct system-prompt installer degrades gracefully when the service is missing', () => {
+  const disposers = installDirectTuiSystemPromptSections({ get: () => undefined } as never, { displayState: { preset: 'focus' } })
+  assert.deepEqual(disposers, [], 'no service → no section, no throw')
 })
 
-test('installFocusPrompt tolerates a throwing registration', () => {
+test('the Direct system-prompt installer tolerates a throwing Focus registration', () => {
   const agentCtx = {
     get: (name: string) => name === 'systemPrompt'
       ? { section: () => { throw new Error('duplicate name') } }
       : undefined,
   }
-  const dispose = installFocusPrompt(agentCtx as never, { preset: 'focus' })
-  assert.equal(dispose, undefined)
+  const disposers = installDirectTuiSystemPromptSections(agentCtx as never, { displayState: { preset: 'focus' } })
+  assert.deepEqual(disposers, [])
 })
 
 // ── Collapsed Focus Action slot (post-F6 presentation-convergence addendum v2 §51) ────────

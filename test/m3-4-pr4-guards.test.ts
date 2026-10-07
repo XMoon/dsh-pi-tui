@@ -303,7 +303,7 @@ test('PR5 §1C one classifier drives the submission siblings', () => {
   assert.ok(controller.includes("classification.kind === 'client-command' && classification.source === 'extension'"),
     'the contribution gate consumes the classification (the extension family alone)')
   // The policy module owns the classifier + the four-kind vocabulary.
-  const policy = code('command-policy.ts')
+  const policy = code('domain/command/policy.ts')
   assert.ok(policy.includes('export type CommandLineClassification'), 'the classification type is exported')
   for (const kind of ["'host-command'", "'client-command'", "'skill-invocation'", "'ordinary-submission'"]) {
     assert.ok(policy.includes(kind), `the ${kind} kind exists`)

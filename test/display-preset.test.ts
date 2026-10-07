@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { FOCUS_MODE_PROMPT, installFocusPrompt } from '../src/focus.ts'
+import { FOCUS_MODE_PROMPT } from '../src/domain/communication/focus.ts'
+import { installFocusPrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
@@ -76,11 +77,10 @@ test('one shared DisplayState drives the Focus prompt, TuiApp, and status projec
   const displayState: DisplayState = { preset: 'full' }
   const statusStore = new StatusStore()
   const sections: Array<{ text: string | (() => string) }> = []
-  const disposePrompt = installFocusPrompt({
-    get: (name: string) => name === 'systemPrompt'
-      ? { section: (section: { text: string | (() => string) }) => { sections.push(section); return () => {} } }
-      : undefined,
-  } as never, displayState)
+  const systemPrompt = {
+    section: (section: { text: string | (() => string) }) => { sections.push(section); return () => {} },
+  } as unknown as SystemPromptLike
+  const disposePrompt = installFocusPrompt(systemPrompt, displayState)
   assert.ok(disposePrompt !== undefined)
   const app = new TuiApp(new VirtualTerminal(80, 24), {
     onSubmit: () => {},

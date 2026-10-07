@@ -22,8 +22,8 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../src/domain/notification/settings.ts'
-import { installProgressUpdatesPrompt, installResponseStylePrompt, parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
-import { installFocusPrompt, type SystemPromptLike } from '../src/focus.ts'
+import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../src/domain/communication/policy.ts'
+import { installProgressUpdatesPrompt, installResponseStylePrompt, installFocusPrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
@@ -102,7 +102,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
   }
   installProgressUpdatesPrompt(systemPrompt, displayState, progressUpdatesState)
   installResponseStylePrompt(systemPrompt, responseStyleState)
-  installFocusPrompt({ get: () => systemPrompt } as never, displayState)
+  installFocusPrompt(systemPrompt, displayState)
   const prompt = (name = 'tui:progress-updates'): string => {
     const text = sections.get(name)!.text
     return typeof text === 'function' ? text({}) : text

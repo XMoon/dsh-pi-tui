@@ -15,7 +15,7 @@ import {
   providerOptionsFor,
   type ProviderCatalogEntry,
   type ProviderOption,
-} from '../src/provider-catalog.ts'
+} from '../src/domain/catalog/provider.ts'
 
 /** A settings section the pi-ai adapter would register. */
 const LLM_PI_AI_SECTION = {

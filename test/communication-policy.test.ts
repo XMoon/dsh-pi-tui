@@ -6,7 +6,7 @@ import { disposeContext, fakeSession, installVirtualProcessTerminal, makeHarness
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { composeAgent } from '../src/index.ts'
-import { FOCUS_MODE_PROMPT, type SystemPromptLike } from '../src/focus.ts'
+import { FOCUS_MODE_PROMPT } from '../src/domain/communication/focus.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
 import {
   DEFAULT_PROGRESS_UPDATES,
@@ -15,13 +15,12 @@ import {
   PROGRESS_UPDATES_SECTION_ORDER,
   RESPONSE_STYLE_SECTION_NAME,
   RESPONSE_STYLE_SECTION_ORDER,
-  installProgressUpdatesPrompt,
-  installResponseStylePrompt,
   parseProgressUpdates,
   parseResponseStyle,
   type ProgressUpdatesState,
   type ResponseStyleState,
-} from '../src/communication-policy.ts'
+} from '../src/domain/communication/policy.ts'
+import { installProgressUpdatesPrompt, installResponseStylePrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 
 function promptRegistry() {
   const sections = new Map<string, Parameters<SystemPromptLike['section']>[0]>()
