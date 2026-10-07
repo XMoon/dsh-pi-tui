@@ -25,7 +25,7 @@
  * seat. The FIRST logical line's leading slash-command seat (line 0 with
  * only whitespace before the `/`) is deliberately NOT claimed here — the
  * existing command completion owns it.
- * @module @xmoon76/dsh-pi-tui/skill-reference-completion
+ * @module @xmoon76/dsh-pi-tui/tui/interaction/autocomplete/skill-reference
  */
 
 /** One inline skill completion seat: the `/` position and the query text

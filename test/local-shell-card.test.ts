@@ -17,7 +17,7 @@ import {
   RUNNING_PREVIEW_LINES,
   RUNNING_PREVIEW_VISUAL_CEILING,
   SETTLED_PREVIEW_VISUAL_ROWS,
-} from '../src/local-shell-card.ts'
+} from '../src/tui/components/transcript/local-shell-card.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 

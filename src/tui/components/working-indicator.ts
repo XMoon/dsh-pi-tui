@@ -19,13 +19,13 @@
  * would silently bypass it. An EXPLICIT `frames` option (an
  * extension/advanced custom indicator) is never overwritten by an
  * icon-style change.
- * @module @xmoon76/dsh-pi-tui/working
+ * @module @xmoon76/dsh-pi-tui/tui/components/working-indicator
  */
 
 import { Text } from '@xmoon76/pi-tui'
-import { iconFor } from './tui/icons.ts'
-import type { IconStyle } from './domain/display/icons.ts'
-import { color } from './tui/theme/runtime.ts'
+import { iconFor } from '../icons.ts'
+import type { IconStyle } from '../../domain/display/icons.ts'
+import { color } from '../theme/runtime.ts'
 
 /** The DEFAULT animation frames for one icon style, DERIVED from the icon
  * registry — the single source of truth, so the palette's width gate also

@@ -21,10 +21,10 @@ import {
   settleCompactionSurface,
   type CompactionFold,
 } from '../src/index.ts'
-import { indeterminateProgressFrames } from '../src/progress.ts'
+import { indeterminateProgressFrames } from '../src/tui/components/indeterminate-progress.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp, type CompactionPhase } from '../src/tui-app.ts'
-import { WorkingIndicator } from '../src/working.ts'
+import { WorkingIndicator } from '../src/tui/components/working-indicator.ts'
 import {
   disposeContext,
   fakeSession,
