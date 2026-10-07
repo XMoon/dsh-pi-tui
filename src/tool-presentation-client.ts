@@ -26,7 +26,7 @@ import type {
   TerminalCallView,
   ToolCallView,
 } from '@deepseek-ai/dsh-tools'
-import type { ToolPresenter } from './present.ts'
+import type { ToolPresenter } from './tui/transcript/tool-presentation.ts'
 
 /** Parse one tool-call args JSON payload (undefined when malformed). */
 function parseArgs(argsRaw: string): Record<string, unknown> | undefined {

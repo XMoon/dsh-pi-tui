@@ -20,7 +20,7 @@ import { TranscriptFolder, windowMessages, type TranscriptToolMessage } from '..
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
-import type { ToolPresenter } from '../src/present.ts'
+import type { ToolPresenter } from '../src/tui/transcript/tool-presentation.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'

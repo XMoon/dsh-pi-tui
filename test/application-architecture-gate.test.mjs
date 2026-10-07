@@ -94,7 +94,7 @@ test('presentation/adjacent modules importing Direct wiring are rejected (enumer
     'task-panel.ts',
     'plugin-manager/panel.ts',
     'transcript.ts',
-    'present.ts',
+    'tui/transcript/tool-presentation.ts',
     'tui/icons.ts',
     // TS6 moved the rendered-search mechanics under the PiTui component tree;
     // the rule is enumeration-free, so the sample follows the real owner.
@@ -1342,6 +1342,9 @@ test('the transcript semantic domain is a closed-world purity contract (TS7)', (
     ['../../transcript.ts', 'transcript.ts'],
     ['../../commands.ts', 'commands.ts'],
     ['../../display-preset.ts', 'display-preset.ts'],
+    // TS8-D: the retired transitional roots are never legal inputs again.
+    ['../../present.ts', 'present.ts'],
+    ['../../context.ts', 'context.ts'],
     // TS8-D: only the TYPE-ONLY `domain/display/icons.ts` edge is open; the
     // neutral preset authority and the concrete palette stay closed.
     ['../../domain/display/preset.ts', 'domain/display/preset.ts'],
@@ -1405,13 +1408,12 @@ test('the transcript semantic domain is a closed-world purity contract (TS7)', (
     'a bare renderer-package dynamic import must be rejected',
   )
 
-  // 4. Positive controls: domain siblings, the ONE remaining frozen transitional
-  // pure root VALUE, official DSH semantic packages, and the correct
-  // `tui/transcript -> domain/transcript` direction stay open.
+  // 4. Positive controls: domain siblings, official DSH semantic packages, and
+  // the correct `tui/transcript -> domain/transcript` direction stay open.
+  // There is no transitional root VALUE edge left after TS8-D.
   const allowed = [
     ['./types.ts', 'domain/transcript/types.ts'],
     ['./search.ts', 'domain/transcript/search.ts'],
-    ['../../present.ts', 'present.ts'],
     ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-llm'],
     ['@deepseek-ai/dsh-tool-workflow/types', '@deepseek-ai/dsh-tool-workflow/types'],
   ]

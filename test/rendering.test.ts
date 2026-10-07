@@ -14,7 +14,7 @@ import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts
 import { isDiffResult, renderDiffLine } from '../src/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
-} from '../src/present.ts'
+} from '../src/tui/transcript/tool-presentation.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { RendererRegistry } from '../src/renderer-registry.ts'
 import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
@@ -4093,7 +4093,7 @@ test('goal card headers carry the goal identity, not the generic Tool call row',
 })
 
 test('goalResultSummary and goalResultLines parse the shared goal shape', async () => {
-  const { goalResultSummary, goalResultLines } = await import('../src/present.ts')
+  const { goalResultSummary, goalResultLines } = await import('../src/tui/transcript/tool-presentation.ts')
   assert.equal(goalResultSummary(GOAL_RESULT), 'phase active · revision 3 · 2/6 rounds')
   assert.equal(goalResultSummary(JSON.stringify({ goal: null })), 'no goal set')
   assert.equal(goalResultSummary('oops'), undefined)
@@ -4120,7 +4120,7 @@ test('goalResultSummary and goalResultLines parse the shared goal shape', async 
 })
 
 test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async () => {
-  const { foldedResultSummaryFor } = await import('../src/present.ts')
+  const { foldedResultSummaryFor } = await import('../src/tui/transcript/tool-presentation.ts')
   // ralph: the render text's friendly first line is the summary.
   assert.equal(
     foldedResultSummaryFor('ralph', 'Ralph worker reported completion after 2 rounds.\nFinal report:\n{"status":"complete"}'),
@@ -4193,7 +4193,7 @@ test('cancelled ask_user_question cards show the structured error identity', asy
 })
 
 test('askAnswersSummary counts answered entries and skips skipped ones', async () => {
-  const { askAnswersSummary } = await import('../src/present.ts')
+  const { askAnswersSummary } = await import('../src/tui/transcript/tool-presentation.ts')
   assert.equal(askAnswersSummary(JSON.stringify({ answers: [
     { id: 'a', selected: ['x'] },
     { id: 'b', selected: [], custom: 'freeform' },
@@ -4217,7 +4217,7 @@ test('askAnswersSummary counts answered entries and skips skipped ones', async (
 })
 
 test('askAnswersLines renders one line per answer, skipped entries dimmed', async () => {
-  const { askAnswersLines } = await import('../src/present.ts')
+  const { askAnswersLines } = await import('../src/tui/transcript/tool-presentation.ts')
   assert.deepEqual(askAnswersLines(JSON.stringify({ answers: [
     { id: 'q1', selected: ['x', 'y'] },
     { id: 'q2', selected: [], custom: 'freeform' },

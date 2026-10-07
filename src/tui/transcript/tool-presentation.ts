@@ -6,18 +6,22 @@
  * (presentCall/presentResult) exactly as the host apiproxy invokes them, so
  * a TUI card renders from the same source as a Web card. All pure: the
  * real tool registry is injected by the runner through toolPresenterFrom.
- * @module @xmoon76/dsh-pi-tui/present
+ *
+ * TS8-D moved this backend-neutral presentation module out of the retired
+ * root `src/present.ts` into the TS6 transcript core; it carries no PiTui,
+ * Tern or TuiApp mechanics.
+ * @module @xmoon76/dsh-pi-tui/tui/transcript/tool-presentation
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type {
   FileDiff, ToolCallView, ToolResult, ToolResultView, WebFetchResultView, WebSearchResultView,
 } from '@deepseek-ai/dsh-tools'
-import { finalizedBlockFallbackText } from './domain/transcript/content-blocks.ts'
-import { fileAttachmentSummary } from './domain/media/file-summary.ts'
-import { type IconSemantic } from './domain/display/icons.ts'
+import { finalizedBlockFallbackText } from '../../domain/transcript/content-blocks.ts'
+import { fileAttachmentSummary } from '../../domain/media/file-summary.ts'
+import { type IconSemantic } from '../../domain/display/icons.ts'
 
-import type { JsonValue } from './domain/transcript/types.ts'
+import type { JsonValue } from '../../domain/transcript/types.ts'
 
 /**
  * A JSON-serializable value (the tool-private presentation payload shape).

@@ -14,7 +14,7 @@ import {
   streamingToolPreviewSnapshot,
   upsertStreamingToolPreview,
 } from '../src/streaming-tool-preparing.ts'
-import { toolIconSemantic, toolSummaryKeys, toolTitle } from '../src/present.ts'
+import { toolIconSemantic, toolSummaryKeys, toolTitle } from '../src/tui/transcript/tool-presentation.ts'
 import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
 import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'

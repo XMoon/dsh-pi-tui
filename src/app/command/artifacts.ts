@@ -21,7 +21,7 @@ import type { Diag } from '../../diag.ts'
 import type { SessionArchivePort } from '../../runtime/session-archive-port.ts'
 import type { SaveLocationResult, TuiApp } from '../../tui-app.ts'
 import { sessionArtifactFilename } from '../../session-artifact-filename.ts'
-import { renderTranscriptMarkdown } from '../../transcript.ts'
+import { renderTranscriptMarkdown } from '../../client/artifact/transcript-markdown.ts'
 
 
 /** One artifact save workflow outcome. */

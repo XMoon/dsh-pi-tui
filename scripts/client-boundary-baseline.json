@@ -36,6 +36,9 @@
     "sessions",
     "subagents"
   ],
+  "client/artifact/transcript-markdown.ts": [
+    "import:dsh-session"
+  ],
   "commands.ts": [
     "import:dsh-agent",
     "import:dsh-session"
@@ -139,8 +142,5 @@
   ],
   "surface-catalog.ts": [
     "commands"
-  ],
-  "transcript.ts": [
-    "import:dsh-session"
   ]
 }

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { setKittyProtocolActive, visibleWidth } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../src/transcript.ts'
+import { renderTranscriptMarkdown } from '../src/client/artifact/transcript-markdown.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

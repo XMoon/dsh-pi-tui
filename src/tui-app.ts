@@ -189,7 +189,7 @@ import {
   toolTitle,
   webCardLines,
   type ToolPresenter,
-} from './present.ts'
+} from './tui/transcript/tool-presentation.ts'
 import { TranscriptSearchComponent } from './search.ts'
 import { CompactTextPreview } from './compact-text-preview.ts'
 import { longMessageDisclosureWindow } from './long-message-disclosure.ts'
