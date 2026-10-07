@@ -35,7 +35,7 @@
  * re-vendoring of the fork's keybinding manager (which stays upstream-
  * shaped; plan §10 explicitly excludes a generalized per-instance
  * KeybindingsManager refactor).
- * @module @xmoon76/dsh-pi-tui/process-tui-slot
+ * @module @xmoon76/dsh-pi-tui/tui/process-slot
  */
 
 /** The number of process-slot claims outstanding in this process (1 =

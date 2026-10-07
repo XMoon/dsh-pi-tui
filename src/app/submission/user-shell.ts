@@ -24,7 +24,8 @@ import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { createBoundedOutput, createFileCapture, formatBytes, formatTruncation, SHELL_OUTPUT_DISK_CAP_BYTES } from '../../bounded-output.ts'
+import { createBoundedOutput, createFileCapture, SHELL_OUTPUT_DISK_CAP_BYTES } from '../../client/shell/output-capture.ts'
+import { formatBytes } from '../../domain/media/format.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
@@ -87,6 +88,23 @@ export interface UserShellOwner {
   interrupt(): void
   /** Abort the run and remove every retained full-output temp file. */
   dispose(): void
+}
+
+/**
+ * The truncation report line. Reports ACTUAL retained values (measured
+ * from the tail), never the configured caps, and states each total in its
+ * own unit: retained display bytes / retained lines, decoded display total,
+ * and wire-received total.
+ */
+function formatTruncation(bounded: {
+  tail: string
+  totalBytes: number
+  totalWireBytes: number
+  totalLines: number
+}): string {
+  const retainedDisplay = Buffer.byteLength(bounded.tail, 'utf8')
+  const retainedLines = bounded.tail === '' ? 0 : bounded.tail.split('\n').length
+  return `… output truncated: retained ${formatBytes(retainedDisplay)} display / ${retainedLines} lines; decoded ${formatBytes(bounded.totalBytes)} display from ${formatBytes(bounded.totalWireBytes)} received (${bounded.totalLines} lines total)`
 }
 
 /** Format the settled Host run for the card: the drained bounded tail plus

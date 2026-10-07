@@ -16,7 +16,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { getKeybindings } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
-import { liveTuiCountForTest } from '../src/process-tui-slot.ts'
+import { liveTuiCountForTest } from '../src/tui/process-slot.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
