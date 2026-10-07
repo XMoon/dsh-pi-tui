@@ -1629,6 +1629,23 @@ test('TS8-F: the process layer rejects DSH implementation runtime edges but keep
     parseImportSpecifiers("import { type Agent } from '@deepseek-ai/dsh-agent'\n").map(s => [s.typeOnly, s.moduleTypeOnly]),
     [[true, false]],
   )
+  // An ordinary import-equals is a runtime require; a TYPE import-equals is
+  // fully erased under verbatimModuleSyntax (historical `typeOnly` stays false).
+  assert.equal(
+    findViolations([entry('runtime/process/tasks.mts', "import AgentModule = require('@deepseek-ai/dsh-agent')\n")])[0]?.rule,
+    'runtime-process-imports-dsh-implementation',
+    'an ordinary import-equals must be rejected as a runtime edge',
+  )
+  assert.deepEqual(
+    findViolations([entry('runtime/process/tasks.mts', "import type AgentModule = require('@deepseek-ai/dsh-agent')\nexport type Agent = AgentModule.Agent\n")]),
+    [],
+    'a fully erased type import-equals must be allowed',
+  )
+  assert.deepEqual(
+    parseImportSpecifiers("import type AgentModule = require('@deepseek-ai/dsh-agent')\n", 'runtime/process/tasks.mts').map(s => [s.typeOnly, s.moduleTypeOnly]),
+    [[false, true]],
+    'the type import-equals is erased (moduleTypeOnly) without changing the historical typeOnly flag',
+  )
   // Allowed: Node standard library, a FULLY ERASED DSH type face, a
   // non-business infrastructure package, and a process-layer sibling.
   assert.deepEqual(findViolations([entry('runtime/process/diagnostics.ts', "import { join } from 'node:path'\n")]), [])
