@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { TaskBrowserRuntime, type TaskBrowserSummary } from '../src/task-browser-runtime.ts'
+import { TaskBrowserRuntime, type TaskBrowserSummary } from '../src/app/surface/task-browser-runtime.ts'
 
 const entry = { kind: 'child' as const, id: 'child-1' as SessionId, label: 'child', mode: 'continuable' as const, activity: 'running' as const, hasChildren: false, depth: 1, parentId: '' as SessionId }
 

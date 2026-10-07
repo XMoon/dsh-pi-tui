@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { projectTaskItems } from '../src/task-presentation.ts'
+import { projectTaskItems } from '../src/app/surface/task-presentation.ts'
 import {
   QUESTION_ATTENTION_GROUP,
   fullQuestionRows,
@@ -12,8 +12,8 @@ import {
   questionIdentityOf,
   questionTaskRowValue,
   quickQuestionRows,
-  type QuestionAttentionRow,
-} from '../src/task-center-attention.ts'
+} from '../src/app/surface/task-attention.ts'
+import type { QuestionAttentionRow } from '../src/app/surface/question-controller.ts'
 
 const QUESTIONS = [
   { id: 'q1', question: 'Use staging or production?' },

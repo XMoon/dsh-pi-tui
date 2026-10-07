@@ -12,8 +12,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSubagentPort, type HostContextLike } from '../src/runtime/direct/subagent-direct.ts'
-import type { SubagentPromptContentPart, SubagentPromptService } from '../src/subagent-viewer-submit.ts'
-import type { SubagentPromptContext } from '../src/runtime/subagent-port.ts'
+import type { SubagentPromptService } from '../src/runtime/direct/subagent-direct.ts'
+import type { SubagentPromptContentPart, SubagentPromptContext } from '../src/runtime/subagent-port.ts'
 
 const request = {
   parentSessionId: 'session-parent',

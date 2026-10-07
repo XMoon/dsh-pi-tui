@@ -16,7 +16,7 @@ import {
   workflowRunSummaryText,
   workflowRunViewAllVisible,
   workflowStatusCounts,
-} from '../src/workflow-presentation.ts'
+} from '../src/tui/transcript/workflow-presentation.ts'
 import { workflowPhaseKey, workflowReadablePhase, type WorkflowMemberView, type WorkflowRunStatus } from '../src/transcript.ts'
 
 const member = (seq: number, label: string, phase: string | null, status: WorkflowRunStatus): WorkflowMemberView =>

@@ -58,7 +58,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 3000, stepMs = 10
 }
 
 /** A session id with a deterministic createdAt so sort order is stable. */
-function row(id: string, createdAt: number): import('../src/sessions.ts').SessionPickerRow {
+function row(id: string, createdAt: number): import('../src/tui/pickers/sessions.ts').SessionPickerRow {
   return { id, updatedAt: createdAt, createdAt, cwd: '/ws/project-a', live: false }
 }
 
