@@ -65,6 +65,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `@` file completion restores explicit path navigation: a query with a path
+  separator (such as `@src/`, `@./src/`, `@../shared/`, `@/tmp/` or
+  `@~/Downloads/`, plus Windows drive/UNC paths) now fuzzy-searches
+  recursively inside exactly the directory you named — including directories
+  the official workspace index excludes (`@dist/`), symlinked directories,
+  parent directories and absolute paths. `@~/` searches your host home
+  directory, but the inserted value is always an absolute path (DSH does not
+  expand `~`, so it never offers an unusable `@~/...` value). A bare query
+  without a separator (`@foo`, `@.env`) still goes through the official
+  workspace index, with its ranking, result bound, exclusion policy and cache
+  unchanged; an authoritative official empty stays empty and never falls back
+  to a local scan. Direct and Remote use the same routing semantics. On a POSIX
+  host a backslash is an ordinary filename character, so a query containing one
+  is not treated as an explicit path (better to leave that one capability
+  unrestored than to resolve the scope you typed into a different directory) and
+  stays with the official index.
+
 - Tern terminal compatibility: the pane's working directory now follows the
   current Session (OSC 7), re-reported after startup, a session switch, a
   fullscreen round-trip and an `$EDITOR` round-trip. A Direct session without

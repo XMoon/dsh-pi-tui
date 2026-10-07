@@ -272,6 +272,7 @@
     "smoke:remote-d2-closure": "node scripts/dsh-remote-d2-closure-smoke.mjs",
     "smoke:remote-session-lifecycle-parity": "node scripts/dsh-remote-session-lifecycle-parity-smoke.mjs",
     "smoke:boundary": "node scripts/dsh-runtime-boundary-smoke.mjs",
+    "smoke:pi-tui-file-reference-built": "node --import tsx/esm scripts/pi-tui-file-reference-built-smoke.mjs",
     "smoke:startup-strictness": "node scripts/startup-strictness-smoke.mjs",
     "dsh:source:pack": "node scripts/dsh-source-pack.mjs",
     "compat:dsh:source": "node scripts/dsh-source-verify.mjs",
