@@ -53,7 +53,11 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/tui/panels/**` | TUI panels (task browser, history, approval dialog, output viewer) |
 | `src/tui/pickers/**` | TUI pickers, the picker adapters and the marquee/filter seam |
 | `src/tui/plugin-manager/panel.ts` | the concrete Plugin Manager terminal panel (TS4) |
-| remaining historical feature dirs (`image/`, `attachment/`, `file-completion/`, …) | keep domain ownership until their assigned stage |
+| `src/domain/file-completion/**` | transport/UI-neutral file-completion query/ranking/discovery policy (TS8-A) |
+| `src/client/file-completion/**` | Client-local filesystem completion capability (`/attach`, `/image`, Save Location) (TS8-A) |
+| `src/tui/file-completion/**` | terminal trigger grammar + completion presentation/local pipeline (TS8-A) |
+| `src/runtime/direct/file-completion/**` | Direct Host WORKSPACE compatibility discovery (TS8-A) |
+| remaining historical feature dirs (`image/`, `attachment/`, …) | keep domain ownership until their assigned stage |
 
 `src/tui-app.ts` is still a large owner of its domain. That size is structural
 debt, not an invitation to move its semantics into a new layer.
@@ -204,7 +208,7 @@ owners:
 | `status/` | `domain/status/` (DONE — `src/status/` is absent) | TS3 DONE |
 | `image/` | `client/media/image/` | TS8 |
 | `attachment/` | `client/media/attachment/` | TS8 |
-| `file-completion/` | `domain/` + `tui/` + `runtime/direct/` | TS8 |
+| `file-completion/` | `domain/file-completion/` (pure query/ranking/discovery policy) + `client/file-completion/` (Client-local filesystem implementation) + `tui/file-completion/` (editor trigger + `AutocompleteItem` presentation) + `runtime/direct/file-completion/` (Direct Host WORKSPACE compatibility filesystem) (DONE — `src/file-completion/` is absent) | TS8-A DONE |
 
 The remaining directories stay where they are until their assigned stage; each row
 records the intended owner. A row marked DONE has no compatibility forwarding

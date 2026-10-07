@@ -28,10 +28,10 @@ afterEach(() => {
  * single result, while their full display paths overflow the editor row. */
 function marqueeFixture(life: TestLifecycle): string {
   const root = life.tempDir('dsh-ac-marquee-')
-  mkdirSync(join(root, 'src', 'file-completion'), { recursive: true })
+  mkdirSync(join(root, 'src', 'domain', 'file-completion'), { recursive: true })
   const stem = 'very-long-file-completion-path-'.repeat(4)
-  writeFileSync(join(root, 'src', 'file-completion', `${stem}alpha.ts`), 'x')
-  writeFileSync(join(root, 'src', 'file-completion', `${stem}beta.ts`), 'x')
+  writeFileSync(join(root, 'src', 'domain', 'file-completion', `${stem}alpha.ts`), 'x')
+  writeFileSync(join(root, 'src', 'domain', 'file-completion', `${stem}beta.ts`), 'x')
   return root
 }
 
@@ -148,7 +148,7 @@ async function assertMarqueeShift(
   await flushTerminal(vt)
   assert.ok(initialTimer !== undefined, `${label}: initial marquee timer must be armed`)
   const initial = selectedAutocompleteRow(vt.getViewport().join('\n'), `${label} initial`)
-  assert.ok(initial.includes('src/file-completion'), `${label}: the full path must be the primary row`)
+  assert.ok(initial.includes('src/domain/file-completion'), `${label}: the full path must be the primary row`)
   assert.ok(!initial.includes('…'), `${label}: selected overflow must use the marquee window, not ellipsis`)
 
   // Move the injected marquee clock past the initial pause and invoke the
@@ -210,7 +210,7 @@ test('fullscreen: selected @ file rows marquee on the active alt screen', async 
     vt,
     app,
     screen,
-    '@src/file-completion/very-long-file-completion-path-',
+    '@src/domain/file-completion/very-long-file-completion-path-',
     marqueeNow,
     '@ mention',
   )
@@ -231,7 +231,7 @@ test('fullscreen: selected /attach rows marquee on the active alt screen', async
     vt,
     app,
     screen,
-    '/attach src/file-completion/very-long-file-completion-path-',
+    '/attach src/domain/file-completion/very-long-file-completion-path-',
     marqueeNow,
     '/attach path argument',
   )
@@ -251,7 +251,7 @@ test('fullscreen: selected /image rows marquee on the active alt screen', async 
     vt,
     app,
     screen,
-    '/image src/file-completion/very-long-file-completion-path-',
+    '/image src/domain/file-completion/very-long-file-completion-path-',
     marqueeNow,
     '/image path argument',
   )
@@ -267,7 +267,7 @@ test('final app disposal disposes the host file-completion marquee', async (t) =
   const marqueeNow = { value: 0 }
   const { vt, app, screen } = await startFullscreen(life, root, 'image', marqueeNow)
 
-  app.setEditorText('/image src/file-completion/very-long-file-completion-path-')
+  app.setEditorText('/image src/domain/file-completion/very-long-file-completion-path-')
   vt.sendInput('\t')
   await pollImmediate(() => isAutocompleteActive(app), 'dispose: dropdown must open')
   resetFileMarqueeForTest(app)
