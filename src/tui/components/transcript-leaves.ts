@@ -15,11 +15,11 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui
 import type { Component } from '@xmoon76/pi-tui'
 import { iconLead } from '../icons.ts'
 import type { IconStyle } from '../../domain/display/icons.ts'
-import { longMessageDisclosureWindow } from '../../long-message-disclosure.ts'
+import { longMessageDisclosureWindow } from '../transcript/long-message-disclosure.ts'
 import { latestLine } from '../../domain/transcript/text.ts'
 import { relativizeToCwd } from '../transcript/tool-presentation.ts'
 import { color } from '../theme/runtime.ts'
-import { thinkingPreviewTail } from '../../thinking-preview.ts'
+import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 
 /** The assistant delivered-files tail folds after this many files. */

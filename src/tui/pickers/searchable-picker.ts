@@ -21,7 +21,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
-import { singlePhysicalLine } from '../../presentation-lines.ts'
+import { singlePhysicalLine } from '../presentation/lines.ts'
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32
 const PRIMARY_COLUMN_GAP = 2
