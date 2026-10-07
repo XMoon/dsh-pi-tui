@@ -16,7 +16,7 @@ import { pruneUnreferencedDraftAttachments } from '../../client/media/draft-atta
 import { readImageFile } from '../../client/media/image/intake.ts'
 import { FileInputError } from '../../domain/media/errors.ts'
 import { probeAttachment } from '../../client/media/attachment/intake.ts'
-import { parseShellWords } from '../../shell-words.ts'
+import { parseShellWords } from '../../client/shell/words.ts'
 import type { RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 
 /** The runner operations the artifact commands consume. */

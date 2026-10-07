@@ -16,7 +16,7 @@ import {
   submitShellResult,
   type ShellSubmitAgentLike,
   type ShellSubmitDeps,
-} from '../src/shell-context.ts'
+} from '../src/app/submission/shell-context.ts'
 import { TransitionInProgressError } from '../src/app/session/operation-barrier.ts'
 import { SessionScopeSupersededError } from '../src/app/session/scope.ts'
 

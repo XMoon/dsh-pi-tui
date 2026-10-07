@@ -36,7 +36,7 @@ import {
   formatShellSubmitText,
   submitShellResult,
   type ShellSubmitAgentLike,
-} from '../../shell-context.ts'
+} from './shell-context.ts'
 import type { PreparedMessage, SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
 import type { HostCommandOutcome } from '../../runtime/host-command-port.ts'

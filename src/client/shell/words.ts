@@ -9,7 +9,7 @@
  * This deliberately replaces naive `command.split(/\s+/)` splitting: an
  * editor path with spaces or a quoted argument would be mangled into
  * phantom arguments.
- * @module @xmoon76/dsh-pi-tui/shell-words
+ * @module @xmoon76/dsh-pi-tui/client/shell/words
  */
 
 /**

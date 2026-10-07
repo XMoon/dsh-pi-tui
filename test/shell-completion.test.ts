@@ -13,7 +13,7 @@ import { writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
-import { shellCompletionContext, suggestShellCompletion } from '../src/shell-completion.ts'
+import { shellCompletionContext, suggestShellCompletion } from '../src/tui/interaction/autocomplete/shell.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
@@ -231,7 +231,7 @@ test('shouldTriggerFileCompletion allows Tab on a leading / in a shell mode', as
 // --- injected-runner determinism (review finding 4/5: failed runs must not
 // be cached, and the spawn/cache must be testable without real bash) ---
 
-import { resetCommandCacheForTest, setCompgenRunnerForTest, type CompgenRun } from '../src/shell-completion.ts'
+import { resetCommandCacheForTest, setCompgenRunnerForTest, type CompgenRun } from '../src/client/shell/compgen.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 
 function fakeRunner(script: (expression: string, prefix: string) => CompgenRun): {

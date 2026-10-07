@@ -43,7 +43,7 @@ import {
   type ClipboardReadResult,
   type RunCommand,
 } from '../../client/clipboard/read.ts'
-import { parseShellWords } from '../../shell-words.ts'
+import { parseShellWords } from '../../client/shell/words.ts'
 
 /** The client-local platform policy as the rest of the application consumes it. */
 export interface ClientActions {
