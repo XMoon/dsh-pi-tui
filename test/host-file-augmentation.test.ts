@@ -258,23 +258,38 @@ test('a Session cwd that itself carries `..` keeps the physical spelling too', a
 
 test('the HOME shorthand searches exactly the directory its absolute value names', async (t) => {
   const life = testLifecycle(t)
+  // The two spellings of HOME must differ in their DIRECT CHILDREN (not merely in
+  // their inode): `~`/`~/` list direct children only, so a shared child name would
+  // make the assertions pass even while the search and the emitted value name two
+  // different directories.
   const real = life.tempDir('dsh-hfa-home-real-')
   mkdirSync(join(real, 'child'))
   mkdirSync(join(real, 'project', 'Downloads'), { recursive: true })
   writeFileSync(join(real, 'project', 'Downloads', 'loads.txt'), 'physical')
+  writeFileSync(join(real, 'project', 'physical-only.ts'), 'physical')
   const alias = life.tempDir('dsh-hfa-home-alias-')
   symlinkSync(join(real, 'child'), join(alias, 'link'))
   mkdirSync(join(alias, 'project', 'Downloads'), { recursive: true })
   writeFileSync(join(alias, 'project', 'Downloads', 'decoy.txt'), 'lexical')
+  writeFileSync(join(alias, 'project', 'lexical-only.ts'), 'lexical')
   // A HOME spelling that carries both a symlink and a `..`.
   const home = `${alias}/link/../project`
+  // The emitted value is an absolute `path.join`-normalized path, i.e. the LEXICAL
+  // home; both the search and the accepted value must name exactly that directory.
+  const lexical = join(alias, 'project')
+  const expected: Record<string, readonly string[]> = {
+    '~': [join(lexical, 'Downloads'), join(lexical, 'lexical-only.ts')],
+    '~/': [join(lexical, 'Downloads'), join(lexical, 'lexical-only.ts')],
+    '~/Down': [join(lexical, 'Downloads'), join(lexical, 'Downloads', 'decoy.txt')],
+  }
   const ctx = new Context()
   await ctx.plugin(LocalFileSystem)
   try {
-    for (const query of ['~', '~/', '~/Down']) {
+    for (const [query, paths] of Object.entries(expected)) {
       const h = harness(life, {}, { homeDir: home })
       const offered = okItems(await listPiTuiHostFileReferences(h.agent, query, abort, h.deps))
-      assert.ok(offered.length > 0, `@${query} offers the Host home's entries`)
+      assert.deepEqual(offered.map(item => item.path), [...paths],
+        `@${query} must offer exactly the entries of the directory its value names`)
       for (const item of offered) {
         assert.ok(isAbsolute(item.path) && !item.path.startsWith('~'),
           `@${query} emits an absolute Host path: ${item.path}`)
