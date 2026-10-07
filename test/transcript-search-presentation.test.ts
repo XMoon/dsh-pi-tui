@@ -19,7 +19,8 @@ import {
   type RenderedSearchSelector,
   type SearchSourceRegion,
 } from '../src/tui/components/transcript/search-presentation.ts'
-import { color, darkColors, setTheme } from '../src/theme.ts'
+import { darkColors } from '../src/domain/display/theme.ts'
+import { color, setTheme } from '../src/tui/theme/runtime.ts'
 
 /** The exact-current style for one run: bold + explicit themed fg/bg (never the
  * terminal's inverse attribute, plan S3 §6.2). */

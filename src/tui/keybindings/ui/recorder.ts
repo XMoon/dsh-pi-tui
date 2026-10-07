@@ -5,7 +5,7 @@ import { canonicalizeKeyId, isRuntimeBindableKeyId, isTextProducingKeyId, isVali
 import { isEditorSubmitPreSubmitKey, isPhysicalEscapeAction, isTerminalAmbiguousKeyId } from '../config.ts'
 import type { KeyId } from '@xmoon76/pi-tui'
 import type { AppKeybindingId } from '../types.ts'
-import { color } from '../../../theme.ts'
+import { color } from '../../theme/runtime.ts'
 
 export type KeyRecorderPurpose = 'direct' | 'leader-completion' | 'leader-key'
 

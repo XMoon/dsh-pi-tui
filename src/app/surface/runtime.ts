@@ -108,7 +108,6 @@ import {
   type TuiAppEvents,
   type TuiAppOptions,
 } from '../../tui-app.ts'
-import { color } from '../../theme.ts'
 import { runSyncDisposalSteps } from '../../disposal.ts'
 import type { TaskBrowserDatasetScope } from '../../task-browser-runtime.ts'
 import type { TaskBrowserViewState } from './task-runtime.ts'
@@ -218,6 +217,10 @@ export interface SurfaceMountDeps {
   readonly openExternalUrl: OptionCapability<'openExternalUrl'>
   /** Right-click clipboard read (the runner owns the platform policy). */
   readonly readClipboardText: OptionCapability<'readClipboardText'>
+  /** The dim fallback colour for the transcript image theme (TS8-E): the
+   * composition zone supplies it from `tui/theme/runtime.ts`, so no
+   * application owner imports a `tui/**` path. */
+  readonly imageFallbackColor: (text: string) => string
 }
 
 /** The creation options: the early surface state + the Client-local sinks. */
@@ -1118,7 +1121,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // dim fallback coloring.
     imageLoader: new ImageLoader((ref, context) => deps.readImage(ref, context)),
     imageScope: deps.imageScope,
-    imageTheme: { fallbackColor: color.textDim },
+    imageTheme: { fallbackColor: deps.imageFallbackColor },
     present: deps.present,
     workspaceRoot: deps.workspaceRoot,
     // The structural icon palette: read ONCE at startup from the persisted

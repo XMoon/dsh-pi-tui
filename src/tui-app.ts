@@ -116,8 +116,6 @@ import {
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
 import {
-  detectThemeFromBackground,
-  detectThemeFromColorFgBg,
   editorTheme,
   hexPaint,
   HOST_MARKDOWN_OPTIONS,
@@ -125,9 +123,9 @@ import {
   selectListTheme,
   settingsListTheme,
   setTheme,
-  themeOptOut,
-  type ColorPalette,
-} from './theme.ts'
+} from './tui/theme/runtime.ts'
+import { detectThemeFromBackground, type ColorPalette } from './domain/display/theme.ts'
+import { detectThemeFromColorFgBg, themeOptOut } from './client/theme/environment.ts'
 import { isDiffResult, renderDiffLines, renderDiffView, summarizeDiffs } from './diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
@@ -19086,8 +19084,8 @@ export class TuiApp {
   }
 }
 
-// Style helpers from the theme module's token functions.
-import { color } from './theme.ts'
+// Style helpers from the terminal theme runtime's token functions.
+import { color } from './tui/theme/runtime.ts'
 
 /**
  * Start the TUI on the process terminal (raw-mode stdin/stdout). The runner

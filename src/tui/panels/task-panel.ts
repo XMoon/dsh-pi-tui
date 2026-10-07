@@ -13,7 +13,7 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tu
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { color, taskStatusColor } from '../../theme.ts'
+import { color, taskStatusColor } from '../theme/runtime.ts'
 import { SelectedMarquee } from '../components/marquee.ts'
 import { singlePhysicalLine } from '../../presentation-lines.ts'
 import {

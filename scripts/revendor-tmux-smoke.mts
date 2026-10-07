@@ -24,7 +24,7 @@ import {
   type AutocompleteItem,
   type TuiInputListenerResult,
 } from '@xmoon76/pi-tui'
-import { editorTheme, markdownTheme } from '../src/theme.ts'
+import { editorTheme, markdownTheme } from '../src/tui/theme/runtime.ts'
 
 const terminal = new ProcessTerminal()
 const tui = new TuiMainScreen(terminal)

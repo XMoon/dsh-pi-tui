@@ -10,7 +10,7 @@
 
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import { color, hexPaint } from '../../theme.ts'
+import { color, hexPaint } from '../theme/runtime.ts'
 
 /** The whale mascot variants: five original designs; one is picked once
  * per process (see WelcomeCard.whaleVariant). */

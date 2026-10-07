@@ -28,7 +28,7 @@ import { iconPrefix } from '../../icons.ts'
 import type { IconStyle } from '../../../domain/display/icons.ts'
 import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from '../../../long-message-disclosure.ts'
 import { systemContextBody } from '../../transcript/tool-presentation.ts'
-import { color } from '../../../theme.ts'
+import { color } from '../../theme/runtime.ts'
 import type { TranscriptMessage } from '../../../transcript.ts'
 
 /** One surfaced `system` Context row narrowed for presentation. */

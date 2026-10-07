@@ -10,7 +10,7 @@
 
 import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 import type { PluginManagerController, PluginInstallView } from '../../app/plugin-manager/controller.ts'
 import type { PluginManagerRow } from '../../app/plugin-manager/model.ts'
 

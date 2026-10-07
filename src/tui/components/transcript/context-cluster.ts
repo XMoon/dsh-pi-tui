@@ -20,7 +20,7 @@ import type { ContextCluster } from '../../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../../transcript/context-summary.ts'
 import { iconLead } from '../../icons.ts'
 import { sectionDisclosureSemantic, type IconStyle } from '../../../domain/display/icons.ts'
-import { color } from '../../../theme.ts'
+import { color } from '../../theme/runtime.ts'
 
 /** The cluster header: `▸ 📎 Context · 6 injections`.
  *

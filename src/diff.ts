@@ -9,7 +9,7 @@
 
 import { structuredPatch } from 'diff'
 import type { FileDiff } from '@deepseek-ai/dsh-tools'
-import { color } from './theme.ts'
+import { color } from './tui/theme/runtime.ts'
 import { relativizeToCwd } from './tui/transcript/tool-presentation.ts'
 
 /**

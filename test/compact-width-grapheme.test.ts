@@ -17,7 +17,7 @@ import { ContextClusterComponent } from '../src/tui/components/transcript/contex
 import { clusterAdjacentAmbientContext } from '../src/tui/transcript/context-structure.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../src/tui/components/transcript/context-row.ts'
 import { UserBubbleComponent, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
-import { color } from '../src/theme.ts'
+import { color } from '../src/tui/theme/runtime.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

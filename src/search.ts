@@ -10,7 +10,7 @@
 import { Input, dispatchMouseEvent, truncateToWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseDispatchResult, TuiMouseEvent } from '@xmoon76/pi-tui'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { color } from './theme.ts'
+import { color } from './tui/theme/runtime.ts'
 
 /** The one-line navigation hint under the search input: Enter/S⇧Enter step
  * through matches, Esc/Ctrl+C close. Fixed text — the close/next/previous

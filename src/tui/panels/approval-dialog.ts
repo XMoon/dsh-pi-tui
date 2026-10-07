@@ -12,7 +12,7 @@
 
 import { Box, Text, truncateToWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import { color } from '../../theme.ts'
+import { color } from '../theme/runtime.ts'
 
 /**
  * Longest prefix of `text` whose WRAPPED height fits `budget` rows at

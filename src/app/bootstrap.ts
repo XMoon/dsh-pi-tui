@@ -74,7 +74,7 @@ import { sessionStatsFactsOf } from '../domain/status/stats.ts'
 import { isAssistantTokenDelta } from '../domain/transcript/usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/derive-plan.ts'
 import { migrateLegacySettings } from '../legacy-settings-migration.ts'
-import { color } from '../theme.ts'
+import { color } from '../tui/theme/runtime.ts'
 import type { TuiApp } from '../tui-app.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../extensions.ts'
 import { type CommandRegistryLike, type TuiCommandRunner } from '../commands.ts'
@@ -2258,6 +2258,10 @@ export function applyRunnerWithRuntime(
       // platform-aware policy as the image paste probe.
       openExternalUrl: (url) => openExternalUrl(url),
       readClipboardText: () => clientActions.readClipboardText(),
+      // TS8-E: the composition zone reads the live terminal palette here and
+      // injects the image fallback colour, so `app/surface/**` never imports a
+      // `tui/theme/**` path.
+      imageFallbackColor: color.textDim,
     })
     // The mounted surface is now live; the runner borrows the reference (the
     // surface owner keeps the lifetime).

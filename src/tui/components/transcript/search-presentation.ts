@@ -19,7 +19,7 @@ import {
   type AltScreenSearchSegment,
   type Component,
 } from '@xmoon76/pi-tui'
-import { color } from '../../../theme.ts'
+import { color } from '../../theme/runtime.ts'
 
 /** The weak highlight of a visible non-current occurrence — the native
  * fullscreen search default. */

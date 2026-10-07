@@ -13,7 +13,8 @@ import { safeErrorMessage } from '../../error-boundary.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { HumanSkillCatalog } from '../../skill-catalog.ts'
 import type { CatalogRefreshOutcome } from '../../skill-catalog-refresh.ts'
-import { resolveThemeSelection, normalizePersistedTheme } from '../../theme-source.ts'
+import { resolveThemeSelection } from '../../app/surface/theme-selection.ts'
+import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import type {
   DetachTask,
   LoadSkill,
