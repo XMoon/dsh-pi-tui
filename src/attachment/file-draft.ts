@@ -7,8 +7,8 @@
  * @module @xmoon76/dsh-pi-tui/attachment/file-draft
  */
 
-import { formatBytes } from '../image/errors.ts'
-import type { FileAttachmentRefLike } from './file-admission.ts'
+import { formatBytes } from '../domain/media/format.ts'
+import type { FileAttachmentRefLike } from '../domain/media/types.ts'
 
 /** Identity captured when a local file is attached. */
 export interface DraftFileFingerprint {

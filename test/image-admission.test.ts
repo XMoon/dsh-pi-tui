@@ -10,10 +10,10 @@ import { DraftImageStore } from '../src/image/draft-store.ts'
 import { expandImagePlaceholders } from '../src/image/placeholder.ts'
 import {
   admitDraftImages, buildContentBlocks, imageSegmentsBytes, type AttachmentsLike,
-  type ImageAttachmentRefLike,
 } from '../src/image/admission.ts'
 import { assertModelSupportsImages, modelSupportsImages, type LlmLike } from '../src/image/capability.ts'
-import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/image/errors.ts'
+import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/domain/media/errors.ts'
+import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
 import type { DraftSegment } from '../src/image/placeholder.ts'
 
 const LIMITS = {

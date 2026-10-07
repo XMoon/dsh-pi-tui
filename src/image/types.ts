@@ -6,15 +6,13 @@
  * attachment service. Nothing in this module persists; the durable boundary
  * is the harness's `ctx.attachments.saveImages()`.
  *
- * The media-type union mirrors `@deepseek-ai/dsh-attachment`'s
- * `ImageMediaType` structurally, so drafts flow into the harness without a
- * runtime dependency on the attachment package (AGENTS.md decision 7:
- * structural typing for dsh services).
+ * The neutral media vocabulary (the media-type union and the durable
+ * attachment ref) is owned by `domain/media/types.ts`; the draft layer only
+ * adds the Client-local draft shapes.
  * @module @xmoon76/dsh-pi-tui/image/types
  */
 
-/** Raster media types accepted by the TUI image intake. */
-export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+import type { ImageAttachmentRefLike, ImageMediaType } from '../domain/media/types.ts'
 
 /** Per-TUI draft image identity; only meaningful inside one TUI run. */
 export type DraftImageId = number
@@ -58,7 +56,7 @@ export interface DraftImage {
   readonly placeholder: string
   /** The durable ref this draft reuses on submit; present ONLY for
    * recalled drafts (already-durable images are never re-uploaded). */
-  readonly recalledRef?: import('./admission.ts').ImageAttachmentRefLike
+  readonly recalledRef?: ImageAttachmentRefLike
 }
 
 /** Input accepted by {@link DraftImageStore.add}. */
@@ -72,7 +70,7 @@ export interface DraftImageInput {
   readonly source?: DraftImageSource
   readonly name?: string
   /** The durable ref of a recalled (queue-pulled-back) image. */
-  readonly recalledRef?: import('./admission.ts').ImageAttachmentRefLike
+  readonly recalledRef?: ImageAttachmentRefLike
 }
 
 /** The store surface the placeholder expansion needs (structural). */

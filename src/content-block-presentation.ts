@@ -7,7 +7,7 @@
  */
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { formatBytes } from './image/errors.ts'
+import { formatBytes } from './domain/media/format.ts'
 
 /** Match the Web JsonBlock serialized-payload bound. */
 export const FINALIZED_BLOCK_PAYLOAD_MAX_CHARS = 20_000

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../src/image/draft-store.ts'
 import { pinDraftAttachments, pruneUnreferencedDrafts } from '../src/image/submit.ts'
-import { ImageTooLargeError } from '../src/image/errors.ts'
+import { ImageTooLargeError } from '../src/domain/media/errors.ts'
 import { expandImagePlaceholders, formatImagePlaceholder, type DraftSegment } from '../src/image/placeholder.ts'
 import type { DraftImage, DraftImageInput } from '../src/image/types.ts'
 

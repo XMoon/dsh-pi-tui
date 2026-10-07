@@ -14,7 +14,7 @@
  * @module @xmoon76/dsh-pi-tui/image/draft-store
  */
 
-import { ImageAdmissionError, ImageTooLargeError } from './errors.ts'
+import { ImageAdmissionError, ImageTooLargeError } from '../domain/media/errors.ts'
 import { expandImagePlaceholders, formatImagePlaceholder } from './placeholder.ts'
 import type { DraftImage, DraftImageId, DraftImageInput } from './types.ts'
 
