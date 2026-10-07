@@ -17,7 +17,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { ProcessTerminal } from '@xmoon76/pi-tui'
+import { ProcessTerminal, type TerminalProgressState } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { createSurfaceRuntime } from '../src/app/surface/runtime.ts'
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
@@ -47,15 +47,23 @@ async function drain(): Promise<void> {
 
 // ── TuiApp layer: dedupe + every TuiApp-owned screen restart ───────────────
 
-/** A started app whose injected VirtualTerminal records every setProgress. */
-function mountApp(): { vt: VirtualTerminal; app: TuiApp; progress: boolean[] } {
+/** A started app whose injected VirtualTerminal records every progress write.
+ *  `tern: true` mounts the same lifecycle as a Tern terminal (fork X059). */
+function mountApp(tern = false): {
+  vt: VirtualTerminal
+  app: TuiApp
+  progress: boolean[]
+  states: TerminalProgressState[]
+} {
   const vt = new VirtualTerminal(80, 24)
   const progress: boolean[] = []
+  const states: TerminalProgressState[] = []
   vt.setProgress = (active: boolean) => { progress.push(active) }
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  vt.setProgressState = (state: TerminalProgressState) => { states.push(state) }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { ternTerminal: tern })
   app.start()
   startedApps.add(app)
-  return { vt, app, progress }
+  return { vt, app, progress, states }
 }
 
 test('setTerminalProgress dedupes equal writes (no per-status churn)', () => {
@@ -269,6 +277,10 @@ interface SurfaceControls {
 
 interface SurfaceHarness extends SurfaceControls {
   readonly progress: boolean[]
+  /** Every effective OSC 9;4 state (fork X059) the mounted Tern app wrote. */
+  readonly progressStates: TerminalProgressState[]
+  /** The LIVE mounted app: real Question / Approval flows drive it. */
+  readonly app: TuiApp
   dispose(): void
 }
 
@@ -283,6 +295,13 @@ interface MountSurfaceOptions {
   readonly presentation?: TerminalNotificationPresentation
   readonly notificationMode?: string
   readonly notificationMethod?: string
+  /**
+   * Mount the surface as a Tern terminal (`TERM_PROGRAM=tern` around the app
+   * construction). The environment is restored immediately afterwards: the
+   * identity is read ONCE by the app, so the running scenario keeps its Tern
+   * projection without leaking the env into another suite.
+   */
+  readonly tern?: boolean
 }
 
 /**
@@ -297,20 +316,29 @@ function mountSurface(
 ): SurfaceHarness {
   const vt = new VirtualTerminal(100, 30)
   const progress: boolean[] = []
+  const progressStates: TerminalProgressState[] = []
   vt.setProgress = (active: boolean) => { progress.push(active) }
+  vt.setProgressState = (state: TerminalProgressState) => { progressStates.push(state) }
   const real = options.realProgress === true ? new ProcessTerminal() : undefined
   if (real !== undefined) {
     // Capture the REAL implementations BEFORE installVirtualProcessTerminal
     // replaces them on the prototype: the patched methods delegate back into
     // these virtual overrides, so calling them here would recurse.
     const realSetProgress = ProcessTerminal.prototype.setProgress
+    const realSetProgressState = ProcessTerminal.prototype.setProgressState
     const realStop = ProcessTerminal.prototype.stop
     // The app's patched ProcessTerminal delegates to this virtual terminal;
-    // only the two progress methods reach the REAL implementation, so the real
-    // OSC 9;4 write and the real keepalive interval run (§12.8 authority).
+    // only the progress methods reach the REAL implementation, so the real
+    // OSC 9;4 write and the real keepalive interval run (§12.8 authority). The
+    // REAL boolean method delegates to the REAL stateful one (X059), so BOTH
+    // must be routed or the delegation would land back on the patch.
     vt.setProgress = (active: boolean) => {
       progress.push(active)
       realSetProgress.call(real, active)
+    }
+    vt.setProgressState = (state: TerminalProgressState) => {
+      progressStates.push(state)
+      realSetProgressState.call(real, state)
     }
     const virtualStop = vt.stop.bind(vt)
     vt.stop = () => {
@@ -345,26 +373,35 @@ function mountSurface(
     routeStatus: (agentId, status) => surface.routeAgentStatus(agentId, status),
   }
   beforeStart?.(controls)
-  surface.start({
-    events: { onSubmit: () => {}, onExit: () => {} },
-    workspaceRoot: '/tmp',
-    iconStyle: 'emoji',
-    displayState: { preset: 'compact' },
-    historySearchSource: { search: () => Promise.reject(new Error('not exercised by this test')) },
-    readImage: () => Promise.reject(new Error('not exercised by this test')),
-    imageScope: () => undefined,
-    present: { call: () => undefined, result: () => undefined },
-    sessionCwd: () => '/tmp',
-    sessionId: () => 'session-terminal-progress-test',
-    onTerminalResize: () => {},
-    copySelection: async () => false,
-    openExternalUrl: () => {},
-    readClipboardText: async () => undefined,
-  })
+  const previousTermProgram = process.env.TERM_PROGRAM
+  if (options.tern === true) process.env.TERM_PROGRAM = 'tern'
+  try {
+    surface.start({
+      events: { onSubmit: () => {}, onExit: () => {} },
+      workspaceRoot: '/tmp',
+      iconStyle: 'emoji',
+      displayState: { preset: 'compact' },
+      historySearchSource: { search: () => Promise.reject(new Error('not exercised by this test')) },
+      readImage: () => Promise.reject(new Error('not exercised by this test')),
+      imageScope: () => undefined,
+      present: { call: () => undefined, result: () => undefined },
+      sessionCwd: () => '/tmp',
+      sessionId: () => 'session-terminal-progress-test',
+      onTerminalResize: () => {},
+      copySelection: async () => false,
+      openExternalUrl: () => {},
+      readClipboardText: async () => undefined,
+    })
+  } finally {
+    if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = previousTermProgram
+  }
 
   let disposed = false
   return {
     progress,
+    progressStates,
+    app: surface.app,
     ...controls,
     dispose: () => {
       if (disposed) return
@@ -375,22 +412,23 @@ function mountSurface(
   }
 }
 
-test('a pre-mount main running status is latched and projected exactly once at mount', async () => {
+test('a pre-mount main running status is latched and projected by the FIRST acquisition', async () => {
   const h = mountSurface((controls) => {
     controls.setOwner('main')
     controls.routeStatus('main', 'running')
   })
   try {
     await drain()
-    assert.deepEqual(h.progress, [false, true], 'the mount claim clears stale pane state, then the pre-mount running projects once')
+    assert.deepEqual(h.progress, [true],
+      'the FIRST acquisition already asserts the latched running state (plan addendum §25 — no idle -> working flash)')
     h.routeStatus('main', 'running')
     h.routeStatus('main', 'running')
     await drain()
-    assert.deepEqual(h.progress, [false, true], 'repeated running statuses never churn the indicator')
+    assert.deepEqual(h.progress, [true], 'repeated running statuses never churn the indicator')
     h.routeStatus('main', 'idle')
     h.routeStatus('main', 'idle')
     await drain()
-    assert.deepEqual(h.progress, [false, true, false], 'a repeated idle writes ONE clear')
+    assert.deepEqual(h.progress, [true, false], 'a repeated idle writes ONE clear')
   } finally {
     h.dispose()
   }
@@ -518,5 +556,292 @@ test('notification mode off suppresses the toast but never the pane progress (pl
     assert.deepEqual(notifications, [], 'mode off still suppresses the completion toast')
   } finally {
     h.dispose()
+  }
+})
+
+// ── Tern waiting_input refinement (PR B / fork X059) ────────────────────────
+//
+// The canonical RunPhase is the SECOND input of the pane-progress projection:
+// while the main Agent keeps RUNNING, a real user-blocked wait moves Tern to
+// `paused` (waiting_input) and its settlement moves it back to `indeterminate`.
+// Everything is driven through the REAL Question / Approval owners — the state
+// is never inferred from a tool name, a rendered string or a parked attention
+// count.
+
+test('a Tern approval pauses the pane and settling it returns to working', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'],
+      'the FIRST acquisition asserts the latched running state (no idle -> working flash)')
+
+    const controller = new AbortController()
+    const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'],
+      'the open approval projects the canonical waiting-approval phase immediately (no agent/status needed)')
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'indeterminate'],
+      'the settled wait returns to working while the Agent keeps running')
+    assert.deepEqual(h.progress, [], 'the Tern path never falls back to the boolean projection')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a Tern question flow pauses the pane and settling it returns to working', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    const controller = new AbortController()
+    const answer = h.app.askQuestions(
+      [{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }],
+      controller.signal,
+    )
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'],
+      'the presented question projects the canonical waiting-question phase immediately')
+    controller.abort()
+    await answer.catch(() => {})
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'indeterminate'],
+      'the settled question returns to working while the Agent keeps running')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a plan-review prompt reaches waiting_input through the real Approval port', async () => {
+  // The state comes from `approvals.isActive()`, NOT from matching the
+  // `exit_plan_mode` tool name: the SAME flow pauses for a `bash` prompt
+  // (previous test) and an unattended attention count does not.
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    const controller = new AbortController()
+    const decision = h.app.showApprovalPrompt({
+      toolName: 'exit_plan_mode',
+      reason: 'review the plan',
+      signal: controller.signal,
+    })
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'])
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'indeterminate'])
+  } finally {
+    h.dispose()
+  }
+})
+
+test('parked question ATTENTION alone never pauses the Tern pane', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'])
+    // A parked (not presented) Question is Task Center attention only: it owns
+    // no response surface, so the phase is NOT waiting-question.
+    h.app.setQuestionAttention(2)
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'],
+      'attention without a presented flow keeps the working state')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a Tern owner commit clears a paused state and a late retired owner cannot restore it', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('A')
+    controls.routeStatus('A', 'running')
+  }, { tern: true })
+  try {
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate'])
+    const controller = new AbortController()
+    const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused'])
+
+    h.setOwner('B')
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'clear'],
+      'the owner commit clears the retiree pause immediately')
+    controller.abort()
+    await decision
+    h.routeStatus('A', 'running')
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'clear'],
+      'a late retired owner status can restore neither paused nor working')
+    h.routeStatus('B', 'running')
+    await drain()
+    assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'clear', 'indeterminate'],
+      'the new owner proves running through its own status')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a stopped Tern app folds running and phase changes and projects the latest state once', async () => {
+  const { app, progress, states } = mountApp(true)
+  try {
+    app.setTerminalProgress(true)
+    assert.deepEqual(states, ['clear', 'indeterminate'], 'the mount claims idle, then running shows working')
+    app.stop()
+    app.setTerminalProgress(false)
+    app.setTerminalProgress(true)
+    assert.deepEqual(states, ['clear', 'indeterminate'], 'a stopped surface never writes physical progress')
+    app.start()
+    assert.deepEqual(states, ['clear', 'indeterminate', 'indeterminate'],
+      'the restart projects the latest effective state exactly once')
+    assert.deepEqual(progress, [], 'the Tern path never falls back to the boolean projection')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a $EDITOR-suspended Tern app folds a wait opening and resumes directly to paused', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const states: TerminalProgressState[] = []
+  const progress: boolean[] = []
+  vt.setProgress = (active: boolean) => { progress.push(active) }
+  vt.setProgressState = (state: TerminalProgressState) => { states.push(state) }
+  let release!: (text: string) => void
+  const gate = new Promise<string>(resolve => { release = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: () => gate,
+    runOwned: () => {},
+  }, { ternTerminal: true })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setTerminalProgress(true)
+    assert.deepEqual(states, ['clear', 'indeterminate'])
+
+    // $EDITOR takes the PTY for the whole time this promise is pending.
+    const pending = app.launchExternalEditor()
+
+    // The wait OPENS while the editor owns the terminal: only the desired
+    // state is folded, the editor's screen never receives progress bytes.
+    const controller = new AbortController()
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    assert.deepEqual(states, ['clear', 'indeterminate'],
+      'a suspended terminal receives no progress bytes for the opening wait')
+
+    release('edited')
+    await pending
+    assert.deepEqual(states, ['clear', 'indeterminate', 'paused'],
+      'the resume emits ONLY the latest effective state (the folded wait), exactly once')
+
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(states, ['clear', 'indeterminate', 'paused', 'indeterminate'],
+      'the settled wait returns to working on the resumed terminal')
+    assert.deepEqual(progress, [])
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a $EDITOR-suspended Tern app folds a wait settling and an idle round-trip, then resumes the latest state', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const states: TerminalProgressState[] = []
+  vt.setProgressState = (state: TerminalProgressState) => { states.push(state) }
+  let release!: (text: string) => void
+  const gate = new Promise<string>(resolve => { release = resolve })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    openExternalEditor: () => gate,
+    runOwned: () => {},
+  }, { ternTerminal: true })
+  app.start()
+  startedApps.add(app)
+  try {
+    app.setTerminalProgress(true)
+    assert.deepEqual(states, ['clear', 'indeterminate'])
+
+    const pending = app.launchExternalEditor()
+
+    // The wait opens AND settles while the editor owns the terminal, then the
+    // Agent goes idle: every change is folded, none is written.
+    const controller = new AbortController()
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    controller.abort()
+    await decision
+    await drain()
+    app.setTerminalProgress(false)
+    assert.deepEqual(states, ['clear', 'indeterminate'],
+      'a suspended terminal receives no progress bytes for the opened/settled wait or the idle change')
+
+    release('edited')
+    await pending
+    assert.deepEqual(states, ['clear', 'indeterminate', 'clear'],
+      'the resume emits ONLY the latest effective state (idle), not the stale working one')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a Tern terminal without the stateful projection fails soft to the working indicator', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const progress: boolean[] = []
+  vt.setProgress = (active: boolean) => { progress.push(active) }
+  // A terminal that does NOT implement the fork's richer projection (plan
+  // §9.3): the paused target must degrade to the boolean working/clear pair and
+  // never to a raw escape write.
+  Object.defineProperty(vt, 'setProgressState', { value: undefined, configurable: true })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { ternTerminal: true })
+  app.start()
+  startedApps.add(app)
+  try {
+    assert.deepEqual(progress, [false], 'the mount asserts idle through the boolean contract')
+    app.setTerminalProgress(true)
+    assert.deepEqual(progress, [false, true])
+
+    const controller = new AbortController()
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    assert.deepEqual(progress, [false, true, true],
+      'a paused target re-asserts the working indicator (idempotent bytes), never a clear or a raw sequence')
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(progress, [false, true, true, true],
+      'the settled wait is still working and the pane never left the active state')
+  } finally {
+    app.dispose()
+  }
+})
+
+test('a fullscreen swap while paused restores the paused state on the new screen', async () => {
+  const { app, states } = mountApp(true)
+  try {
+    app.setTerminalProgress(true)
+    const controller = new AbortController()
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal })
+    assert.deepEqual(states, ['clear', 'indeterminate', 'paused'])
+    app.setFullscreen(true)
+    app.setFullscreen(false)
+    assert.deepEqual(states, ['clear', 'indeterminate', 'paused', 'paused', 'paused'],
+      'every screen restart re-asserts the current paused state (the stop cleared the pane)')
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(states, ['clear', 'indeterminate', 'paused', 'paused', 'paused', 'indeterminate'])
+  } finally {
+    app.dispose()
   }
 })

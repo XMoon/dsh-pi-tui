@@ -238,21 +238,182 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 });
 
 describe("ProcessTerminal progress", () => {
-	it("writes a valid OSC 9;4 clear sequence", () => {
-		const terminal = new ProcessTerminal();
+	/** Capture every RAW stdout write of a case, restoring the real stream. */
+	const captureStdout = () => {
 		const writes: string[] = [];
 		const previousWrite = process.stdout.write;
-
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			writes.push(String(chunk));
 			return true;
 		}) as typeof process.stdout.write;
+		return {
+			writes,
+			restore: () => {
+				process.stdout.write = previousWrite;
+			},
+		};
+	};
+
+	it("writes a valid OSC 9;4 clear sequence", () => {
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
 
 		try {
 			terminal.setProgress(false);
-			assert.deepEqual(writes, ["\x1b]9;4;0\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;0\x07"]);
 		} finally {
-			process.stdout.write = previousWrite;
+			capture.restore();
+		}
+	});
+
+	it("setProgress(true/false) keeps its exact bytes and keepalive (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgress(true);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"]);
+			mock.timers.tick(1000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;3\x07"],
+				"the boolean active state keeps its 1 s keepalive");
+			terminal.setProgress(true);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07", "\x1b]9;4;3\x07", "\x1b]9;4;3\x07"],
+				"the boolean write stays unconditional (the host owns the dedupe)");
+			mock.timers.tick(1000);
+			assert.equal(capture.writes.length, 4, "a repeated boolean active starts no SECOND interval");
+			terminal.setProgress(false);
+			assert.equal(capture.writes.at(-1), "\x1b]9;4;0\x07");
+			mock.timers.tick(2000);
+			assert.equal(capture.writes.length, 5, "the clear stopped the keepalive");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("writes OSC 9;4;4 for paused with no intermediate clear (X059)", () => {
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07"]);
+		} finally {
+			capture.restore();
+		}
+	});
+
+	it("indeterminate -> paused stops the keepalive and writes paused directly (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;3\x07"]);
+			mock.timers.tick(1000);
+			assert.equal(capture.writes.length, 2, "the active keepalive is running");
+
+			terminal.setProgressState("paused");
+			assert.deepEqual(capture.writes.slice(1), ["\x1b]9;4;3\x07", "\x1b]9;4;4\x07"],
+				"paused follows active directly, with NO \u001b]9;4;0 between them");
+			mock.timers.tick(5000);
+			assert.equal(capture.writes.length, 3, "paused owns no keepalive of its own");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("paused -> indeterminate resumes the active keepalive (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			terminal.setProgressState("indeterminate");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;3\x07"]);
+			mock.timers.tick(1000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;3\x07", "\x1b]9;4;3\x07"],
+				"the resumed active state keeps re-asserting itself");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("paused -> clear writes the clear sequence and stops every timer (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			terminal.setProgressState("clear");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;0\x07"]);
+			mock.timers.tick(2000);
+			assert.equal(capture.writes.length, 2);
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("stop() clears a PHYSICALLY paused state exactly once and leaves no keepalive (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			terminal.stop();
+			const clears = capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07");
+			assert.equal(clears.length, 1, "a paused state must not leak into the shell/editor");
+			mock.timers.tick(2000);
+			assert.deepEqual(capture.writes.filter((chunk) => chunk.startsWith("\x1b]9;4;")),
+				["\x1b]9;4;4\x07", "\x1b]9;4;0\x07"], "no progress bytes after the stop");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("stop() clears an ACTIVE keepalive state and leaves no interval (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			mock.timers.tick(1000);
+			assert.equal(
+				capture.writes.filter((chunk) => chunk === "\x1b]9;4;3\x07").length,
+				2,
+				"the active keepalive is running before the stop",
+			);
+			terminal.stop();
+			assert.equal(capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07").length, 1);
+			const written = capture.writes.length;
+			mock.timers.tick(5000);
+			assert.equal(capture.writes.length, written, "stop() cleared the keepalive interval");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("stop() after an explicit clear writes no second clear (X059)", () => {
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgress(false);
+			terminal.stop();
+			assert.deepEqual(capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07"), ["\x1b]9;4;0\x07"]);
+		} finally {
+			capture.restore();
 		}
 	});
 });

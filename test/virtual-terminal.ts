@@ -1,6 +1,6 @@
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import xterm from "@xterm/headless";
-import type { Terminal } from "@xmoon76/pi-tui";
+import type { Terminal, TerminalProgressState } from "@xmoon76/pi-tui";
 
 // Extract Terminal class from the module
 const XtermTerminal = xterm.Terminal;
@@ -106,6 +106,11 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	setProgress(_active: boolean): void {}
+
+	/** The richer OSC 9;4 state projection (fork X059): a no-op here so a Tern
+	 *  fixture can observe `paused` instead of falling back to the boolean
+	 *  contract. Tests override it with their own recorder. */
+	setProgressState(_state: TerminalProgressState): void {}
 
 	// Test-specific methods not in Terminal interface
 
