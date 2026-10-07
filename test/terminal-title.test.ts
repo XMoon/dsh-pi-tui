@@ -13,10 +13,31 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   MAX_TERMINAL_TITLE_WIDTH,
   sanitizeTitleText,
+  setTerminalTitle,
   shortPathCwd,
   terminalTitleFits,
   terminalTitleOf,
 } from '../src/tui/terminal/title.ts'
+
+/** Run `body` with `process.stdout.write` captured and `isTTY` forced. */
+function withStdout(isTTY: boolean, body: () => void): string[] {
+  const writes: string[] = []
+  const originalWrite = process.stdout.write
+  const stdout = process.stdout as { isTTY?: boolean }
+  const originalIsTTY = stdout.isTTY
+  process.stdout.write = ((chunk: unknown) => {
+    writes.push(String(chunk))
+    return true
+  }) as typeof process.stdout.write
+  stdout.isTTY = isTTY
+  try {
+    body()
+  } finally {
+    process.stdout.write = originalWrite
+    stdout.isTTY = originalIsTTY
+  }
+  return writes
+}
 
 test('a session title leads the composed title', () => {
   assert.equal(terminalTitleOf({ sessionTitle: 'Fix queue bug', cwd: '/foo/bar' }), 'dsh · Fix queue bug')
@@ -130,4 +151,32 @@ test('shortPathCwd delegates to the footer formatter (single implementation, no 
   for (const cwd of ['/foo/bar', '/foo/bar/baz', '/', 'C:\\repo', 'C:\\repo\\work\\deep', '\\\\server\\share\\deep']) {
     assert.equal(shortPathCwd(cwd), shortCwd(cwd), `shortPathCwd must equal footer shortCwd for ${cwd}`)
   }
+})
+
+test('setTerminalTitle writes the OSC 0 payload on a TTY and is a no-op without one', () => {
+  const onTty = withStdout(true, () => {
+    setTerminalTitle(terminalTitleOf({ sessionTitle: 'Fix queue bug', cwd: '/repo/work' }))
+  })
+  assert.deepEqual(onTty, ['\x1b]0;dsh · Fix queue bug\x07'])
+  const offTty = withStdout(false, () => { setTerminalTitle('never written') })
+  assert.deepEqual(offTty, [], 'a non-TTY terminal receives no OSC 0 bytes')
+})
+
+test('a hostile session title cannot escape the OSC payload at the sink', () => {
+  // Derivation + sink together: the ONLY ESC is the introducer, the ONLY BEL
+  // the terminator, and the embedded sequence/payload is gone.
+  const writes = withStdout(true, () => {
+    setTerminalTitle(terminalTitleOf({
+      sessionTitle: 'pwned \x1b]0;INJECTED\x07\x1b[31mred',
+      cwd: '/repo',
+    }))
+  })
+  assert.equal(writes.length, 1)
+  const payload = writes[0]!
+  assert.ok(payload.startsWith('\x1b]0;') && payload.endsWith('\x07'), `the OSC frame must be intact:\n${JSON.stringify(payload)}`)
+  const text = payload.slice('\x1b]0;'.length, -'\x07'.length)
+  assert.equal(text.includes('\x1b'), false, 'no ESC may survive inside the payload')
+  assert.equal(text.includes('\x07'), false, 'no BEL may survive inside the payload')
+  assert.equal(text.includes('INJECTED'), false, 'the embedded sequence is stripped, not emitted')
+  assert.ok(text.includes('pwned'), 'the visible identity text survives')
 })
