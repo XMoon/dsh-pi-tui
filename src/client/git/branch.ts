@@ -3,7 +3,7 @@
  * `.git/HEAD` (the footer/status git item's source fact). Never a subprocess:
  * the file read is enough for the display value and keeps the TUI start free
  * of child spawns.
- * @module @xmoon76/dsh-pi-tui/git-branch
+ * @module @xmoon76/dsh-pi-tui/client/git/branch
  */
 
 import { readFileSync } from 'node:fs'

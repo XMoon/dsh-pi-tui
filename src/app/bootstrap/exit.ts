@@ -22,10 +22,10 @@
  * — every step (cleanup, preparation, hint, exit) and every error
  * observation is individually protected, so no throw can skip a later step,
  * leak a rejection, or leave the process running with a stopped TUI.
- * @module @xmoon76/dsh-pi-tui/exit
+ * @module @xmoon76/dsh-pi-tui/app/bootstrap/exit
  */
 
-import { safeErrorMessage } from './runtime/process/errors.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 
 /** Diagnostics sink used by the exit controller (subset of Diag). */
 export interface ExitDiagLike {

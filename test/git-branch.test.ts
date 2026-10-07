@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { gitBranch } from '../src/git-branch.ts'
+import { gitBranch } from '../src/client/git/branch.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 test('gitBranch: an empty cwd never reads the process cwd’s checkout', () => {

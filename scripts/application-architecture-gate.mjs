@@ -174,12 +174,13 @@ export const REMOTE_DYNAMIC_IMPORT_TARGET = 'app/remote/runtime.ts'
 /**
  * Existing historical exceptions as `"<src-relative file>:<resolved target>"`.
  * An allowlist entry excuses ONLY a TYPE-ONLY import of that target; a value
- * import of the same target still fails. Today exactly one: the legacy settings
- * migration reads the Direct TUI-settings facade's types (no wiring). A narrow
- * allowlist may record a proven historical exception; it must never
+ * import of the same target still fails. TS8-F2 emptied it: the legacy settings
+ * migration moved into the `app/bootstrap/**` composition zone, where the Direct
+ * import is legal, so the historical exception was removed rather than re-pointed.
+ * A narrow allowlist may record a proven historical exception; it must never
  * grow to absorb new debt.
  */
-export const ARCHITECTURE_ALLOWLIST = ['legacy-settings-migration.ts:runtime/direct/tui-settings-direct.ts']
+export const ARCHITECTURE_ALLOWLIST = []
 
 /**
  * True when `srcRel` belongs to the ONE application composition zone (TS2):
