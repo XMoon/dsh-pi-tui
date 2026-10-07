@@ -272,7 +272,7 @@ the `src/app/bootstrap.ts` + `src/app/bootstrap/**` composition zone,
 `src/app/direct/**` and `src/runtime/**` may import
 `app/direct/**` / `runtime/direct/**` — every other module (the non-Direct
 application owners `app/session`, `app/submission`, `app/command`, `app/surface`,
-`app/plugin-manager`, and all presentation such as `tui-app.ts`, `transcript.ts`, `present.ts`,
+`app/plugin-manager`, and all presentation such as `tui-app.ts`, `transcript.ts`, `tui/transcript/tool-presentation.ts`,
 `footer/**`, `components/**`) consumes semantic DTOs / Backend ports / narrow
 injected callbacks; the single proven historical exception is the type-only
 `legacy-settings-migration.ts` import, recorded in the gate allowlist (a value
@@ -451,8 +451,8 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/runtime/prepared-prompt.ts` | (none) | TS8-C transport-neutral `PreparedPrompt` contract consumed by `src/runtime/remote/prompt-serializer-remote.ts`; imports only `domain/media/types.ts`. No Client draft-store/placeholder type may enter it. |
 | `src/default-intent.ts` | (none) | The pure D2.3 sessionless `/model` default-intent state machine (operation ancestry + settle authority). It uses the structural `ModelSelectionValue` (generic over the caller's selection type) — no `ctx`, no Host services, no I/O, no Host import. |
 | `src/sessions.ts` | `import:dsh-session` | Type-only session types. |
-| `src/stats.ts` | `import:dsh-session` | Type-only. |
-| `src/transcript.ts` | `import:dsh-session` | Type-only; the stable TS7 facade and the Markdown exporter consume the client session event/window type, not transport (plan §20). |
+| `src/domain/status/stats.ts` | `import:dsh-session` | Type-only; the session stats fold/facts (moved from the retired `src/stats.ts` by TS8-D). |
+| `src/client/artifact/transcript-markdown.ts` | `import:dsh-session` | Type-only; the Client artifact Markdown formatter consumes the client session event/window type (moved out of the `src/transcript.ts` facade by TS8-D), not transport (plan §20). |
 | `src/domain/transcript/types.ts` | `import:dsh-session` | Type-only; the canonical session-event identity carriers (`CommandId` / `SessionEventSeq`) relocated by TS7 from `src/transcript.ts`. |
 | `src/domain/transcript/folder.ts` | `import:dsh-session` | Session event/window values (`isReplacementSurfaceEvent`, `TOOL_NOT_STARTED`) consumed by the ONE fold; relocated by TS7 from `src/transcript.ts`. |
 
@@ -484,7 +484,7 @@ Client-local policy over the semantic projection: the ephemeral steering lane's
 recovery notice in `src/steer.ts` explains the official next-wake path while
 performing no Host write. Representative files:
 `src/tui-app.ts`, `src/tui/interaction/tui-editor.ts`, `src/theme.ts`,
-`src/present.ts` (rendering half), `src/client/clipboard/copy.ts`, `src/history.ts`,
+`src/tui/transcript/tool-presentation.ts` (rendering half), `src/client/clipboard/copy.ts`, `src/history.ts`,
 `src/search.ts`, `src/tui/interaction/overlay-broker.ts`,
 `src/keybinding-registry.ts`, `src/editor-registry.ts`,
 `src/renderer-registry.ts`.
