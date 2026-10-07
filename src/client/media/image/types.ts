@@ -9,10 +9,10 @@
  * The neutral media vocabulary (the media-type union and the durable
  * attachment ref) is owned by `domain/media/types.ts`; the draft layer only
  * adds the Client-local draft shapes.
- * @module @xmoon76/dsh-pi-tui/image/types
+ * @module @xmoon76/dsh-pi-tui/client/media/image/types
  */
 
-import type { ImageAttachmentRefLike, ImageMediaType } from '../domain/media/types.ts'
+import type { ImageAttachmentRefLike, ImageMediaType } from '../../../domain/media/types.ts'
 
 /** Per-TUI draft image identity; only meaningful inside one TUI run. */
 export type DraftImageId = number

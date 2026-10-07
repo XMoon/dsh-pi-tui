@@ -6,8 +6,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ImageCache } from '../src/image/cache.ts'
-import { bytesToBase64, ImageLoader } from '../src/image/loader.ts'
+import { ImageCache } from '../src/client/media/image/cache.ts'
+import { bytesToBase64, ImageLoader } from '../src/client/media/image/loader.ts'
 import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
 
 function refOf(id: string, bytes = 3): ImageAttachmentRefLike {

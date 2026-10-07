@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { commandIsLocalForAttachments, commandRejectsImages, isLocalCommandLine, LOCAL_COMMANDS, normalizeSkillInvocation, resolveSubmitDelivery, SESSIONLESS_COMMANDS } from '../src/index.ts'
 
 function storeWithImage(): DraftImageStore {

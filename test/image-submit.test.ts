@@ -9,13 +9,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { DraftImageStore } from '../src/image/draft-store.ts'
-import { consumeDraftImages, draftHasImages, prepareUserMessage, type PrepareInputDeps } from '../src/image/submit.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
+import { consumeDraftAttachments, draftHasImages } from '../src/client/media/draft-attachments.ts'
+import { prepareUserMessage, type PrepareInputDeps } from '../src/image/submit.ts'
 import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/domain/media/errors.ts'
 import type { AttachmentsLike } from '../src/image/admission.ts'
 import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
 import type { LlmLike } from '../src/image/capability.ts'
-import type { DraftImage } from '../src/image/types.ts'
+import type { DraftImage } from '../src/client/media/image/types.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 const LIMITS = {
@@ -142,17 +143,17 @@ test('a draft referencing images without an attachment service rejects loudly', 
   await assert.rejects(() => prepareUserMessage(one.placeholder, store, deps), ImageAdmissionError)
 })
 
-test('consumeDraftImages removes ONLY the referenced drafts (round-5 finding 1)', () => {
+test('consumeDraftAttachments removes ONLY the referenced drafts (round-5 finding 1)', () => {
   const store = new DraftImageStore()
   const consumed = staged(store, 'consumed.png')
   const concurrent = staged(store, 'concurrent.png')
   // Submit text referencing only the first image: a concurrent intake's
   // draft must survive the consumption.
-  consumeDraftImages(consumed.placeholder, store)
+  consumeDraftAttachments(consumed.placeholder, store)
   assert.equal(store.get(consumed.id), undefined, 'the consumed draft is removed')
   assert.equal(store.get(concurrent.id)?.name, 'concurrent.png', 'the racing intake survives')
   // Nothing referenced → nothing removed.
-  consumeDraftImages('plain text', store)
+  consumeDraftAttachments('plain text', store)
   assert.equal(store.get(concurrent.id)?.name, 'concurrent.png')
 })
 

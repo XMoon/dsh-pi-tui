@@ -14,9 +14,9 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/diag.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
-import { DraftFileStore } from '../src/attachment/file-draft.ts'
-import { consumeDraftImages, pruneUnreferencedDrafts } from '../src/image/submit.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
+import { DraftFileStore } from '../src/client/media/attachment/file-draft.ts'
+import { consumeDraftAttachments, pruneUnreferencedDraftAttachments } from '../src/client/media/draft-attachments.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -395,7 +395,7 @@ test('command fallback SUCCESS: the handoff pin transfers and releases exactly o
   // leak the handoff forever (review finding).
   await runReservedSubmit({
     reserve: () => handoff,
-    run: async () => { consumeDraftImages(text, imageStore) },
+    run: async () => { consumeDraftAttachments(text, imageStore) },
     restore: () => {},
   }, text)
   assert.equal(imageStore.isPinned(draft.id), false, 'the handoff pin is released after the nested submit')
@@ -419,6 +419,6 @@ test('command fallback FAILURE: restore keeps the draft; the pin releases; prune
   // The user deletes the placeholder: prune can now collect it (no stale
   // pin holds it forever).
   app.setEditorText('')
-  pruneUnreferencedDrafts('', imageStore)
+  pruneUnreferencedDraftAttachments('', imageStore)
   assert.equal(imageStore.get(draft.id), undefined, 'the released draft is prunable after the placeholder leaves')
 })

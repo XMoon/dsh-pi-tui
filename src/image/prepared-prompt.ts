@@ -33,7 +33,7 @@
  * @module @xmoon76/dsh-pi-tui/image/prepared-prompt
  */
 
-import { expandAttachmentPlaceholders } from '../attachment/placeholder.ts'
+import { expandAttachmentPlaceholders } from '../client/media/attachment/placeholder.ts'
 import type { ImageAttachmentRefLike, ImageMediaType } from '../domain/media/types.ts'
 
 /** One staged image snapshot: the bytes (when locally held) or the durable

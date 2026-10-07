@@ -114,7 +114,7 @@ import type { TaskBrowserDatasetScope } from '../../task-browser-runtime.ts'
 import type { TaskBrowserViewState } from './task-runtime.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import { ImageLoader } from '../../image/loader.ts'
+import { ImageLoader } from '../../client/media/image/loader.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
 import type { StatusPatch } from '../../domain/status/types.ts'
@@ -213,7 +213,7 @@ export interface SurfaceMountDeps {
   /** Headless-test seam (M3-4 PR3 image L6): the runner's live image draft
    * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
    * paths never read it. */
-  readonly draftImageStoreForTest?: import('../../image/draft-store.ts').DraftImageStore
+  readonly draftImageStoreForTest?: import('../../client/media/image/draft-store.ts').DraftImageStore
   /** OSC 8 link activation (the runner owns the platform opener). */
   readonly openExternalUrl: OptionCapability<'openExternalUrl'>
   /** Right-click clipboard read (the runner owns the platform policy). */

@@ -37,7 +37,7 @@ import type { TuiCommandRunner, TuiSettingsLike } from '../src/commands.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import type { ModelSelectionValue } from '../src/model-selection.ts'
 
 process.env.NO_COLOR = ''

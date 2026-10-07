@@ -358,7 +358,7 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const vt = new VirtualTerminal(100, 30)
-  const { ImageLoader } = await import('../src/image/loader.ts')
+  const { ImageLoader } = await import('../src/client/media/image/loader.ts')
   const loader = new ImageLoader(async () => ({ ref: {}, data: pngBytes() }))
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     imageLoader: loader,

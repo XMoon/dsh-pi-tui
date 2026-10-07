@@ -14,7 +14,7 @@ import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepsee
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { ImageLoader } from '../src/image/loader.ts'
+import { ImageLoader } from '../src/client/media/image/loader.ts'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

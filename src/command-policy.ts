@@ -12,7 +12,7 @@
 
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { resolveComposerDelivery, type HostCommandClaim, type SubmitDelivery } from './commands.ts'
-import { draftHasImages } from './image/submit.ts'
+import { draftHasImages } from './client/media/draft-attachments.ts'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 /**
  * Slash commands that need no session: before the first user message
@@ -92,7 +92,7 @@ export const LOCAL_COMMANDS = new Set([
 export function commandRejectsImages(
   parsed: { name: string; rawInput?: string } | undefined,
   text: string,
-  store: import('./image/types.ts').DraftImageStoreLike,
+  store: import('./client/media/image/types.ts').DraftImageStoreLike,
   isLocal: boolean,
 ): boolean {
   return parsed !== undefined && isLocal && draftHasImages(text, store)

@@ -155,7 +155,7 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
   assert.ok(scopeProvider.includes('imageScopeChild.key === key'),
     'the CHILD lifetime token is memoized in its own slot, so a child visit never re-mints the main token')
   // The loader itself must key bytes/in-flight/errors by the captured scope.
-  const loader = readFileSync(new URL('../src/image/loader.ts', import.meta.url), 'utf8')
+  const loader = readFileSync(new URL('../src/client/media/image/loader.ts', import.meta.url), 'utf8')
   assert.ok(loader.includes('private scopeOf(scope: unknown): LoaderScope'),
     'the loader resolves one state scope per CALLER-PASSED scope')
   assert.ok(!loader.includes('captureContext'),

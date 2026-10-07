@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { ImageThumbnail, NARROW_WIDTH_THRESHOLD } from '../src/tui/components/media/image-thumbnail.ts'
-import { ImageLoader } from '../src/image/loader.ts'
+import { ImageLoader } from '../src/client/media/image/loader.ts'
 import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
 
 const REF: ImageAttachmentRefLike = {

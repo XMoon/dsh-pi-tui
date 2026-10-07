@@ -17,12 +17,10 @@ import { admitDraftImages, type AttachmentsLike } from './admission.ts'
 import { assertModelSupportsImages, type LlmLike } from './capability.ts'
 import { FileInputError, ImageAdmissionError } from '../domain/media/errors.ts'
 import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../domain/media/types.ts'
-import { expandImagePlaceholders, type DraftSegment } from './placeholder.ts'
-import type { DraftImageStoreLike } from './types.ts'
-import type { DraftImageStore } from './draft-store.ts'
-import { expandAttachmentPlaceholders, type DraftAttachmentSegment } from '../attachment/placeholder.ts'
+import type { DraftImageStoreLike } from '../client/media/image/types.ts'
+import { expandAttachmentPlaceholders, type DraftAttachmentSegment } from '../client/media/attachment/placeholder.ts'
 import { admitDraftFiles, type FileAttachmentStoreLike } from '../attachment/file-admission.ts'
-import type { DraftFileStore, DraftFileStoreLike } from '../attachment/file-draft.ts'
+import type { DraftFileStoreLike } from '../client/media/attachment/file-draft.ts'
 
 /** The live provider/model pair (the runner's current selection). */
 export interface CurrentModelLike {
@@ -51,104 +49,6 @@ export interface PrepareInputDeps {
   canonicalizeMentions(text: string): Promise<string>
 }
 
-/** Whether the draft text references any staged image (the image-only
- * prompt gate shared by every submit path). */
-export function draftHasImages(text: string, store: DraftImageStoreLike): boolean {
-  return expandImagePlaceholders(text, store).some(segment => segment.type === 'image')
-}
-
-/** Whether text references a live image or generic-file draft. */
-export function draftHasAttachments(
-  text: string,
-  imageStore: DraftImageStoreLike,
-  fileStore?: DraftFileStoreLike,
-): boolean {
-  return expandAttachmentPlaceholders(text, imageStore, fileStore).some(segment => segment.type !== 'text')
-}
-
-/** Reserve every live image and file draft referenced by one submission. */
-export function pinDraftAttachments(
-  text: string,
-  imageStore: DraftImageStore,
-  fileStore?: DraftFileStore,
-): () => void {
-  const releaseImage = imageStore.pinReferenced(text)
-  const releaseFile = fileStore?.pinReferenced(text)
-  let released = false
-  return () => {
-    if (released) return
-    released = true
-    releaseImage()
-    releaseFile?.()
-  }
-}
-
-/** Consume only the image/file drafts referenced by a successful submission. */
-export function consumeDraftAttachments(
-  text: string,
-  imageStore: DraftImageStore,
-  fileStore?: DraftFileStore,
-): void {
-  for (const segment of expandAttachmentPlaceholders(text, imageStore, fileStore)) {
-    if (segment.type === 'image') imageStore.remove(segment.image.id)
-    else if (segment.type === 'file') fileStore?.remove(segment.file.id)
-  }
-}
-
-/** Prune unreferenced, unpinned image and file drafts. */
-export function pruneUnreferencedDraftAttachments(
-  text: string,
-  imageStore: DraftImageStore,
-  fileStore?: DraftFileStore,
-): void {
-  const referencedImages = new Set<number>()
-  const referencedFiles = new Set<number>()
-  for (const segment of expandAttachmentPlaceholders(text, imageStore, fileStore)) {
-    if (segment.type === 'image') referencedImages.add(segment.image.id)
-    else if (segment.type === 'file') referencedFiles.add(segment.file.id)
-  }
-  for (const image of imageStore.values()) {
-    if (!referencedImages.has(image.id) && !imageStore.isPinned(image.id)) imageStore.remove(image.id)
-  }
-  if (fileStore !== undefined) {
-    for (const file of fileStore.values()) {
-      if (!referencedFiles.has(file.id) && !fileStore.isPinned(file.id)) fileStore.remove(file.id)
-    }
-  }
-}
-
-/**
- * Remove ONLY the drafts a submission actually consumed (plan §14): the
- * image ids referenced by the submitted text. Never a wholesale clear — a
- * concurrent /image or Ctrl+V intake racing a submission keeps its newly
- * staged draft (round-5 finding 1).
- */
-export function consumeDraftImages(text: string, store: DraftImageStore): void {
-  for (const segment of expandImagePlaceholders(text, store)) {
-    if (segment.type === 'image') store.remove(segment.image.id)
-  }
-}
-
-/**
- * Drop every draft the CURRENT editor text no longer references (review
- * finding 2): deleting a placeholder (or Ctrl+C clearing the editor) leaves
- * the staged bytes in the store until capacity runs out — 16 stale
- * attachments then block the next /image with "Too many staged images".
- * Called BEFORE a new attach (the editor text at that moment is the truth
- * of what is still wanted). Drafts pinned by an in-flight submission are
- * kept — the editor is cleared before dispatch, so an attach must never
- * delete the images a pending prepareUserMessage is about to admit
- * (review finding 1).
- */
-export function pruneUnreferencedDrafts(text: string, store: DraftImageStore): void {
-  const referenced = new Set<number>()
-  for (const segment of expandImagePlaceholders(text, store)) {
-    if (segment.type === 'image') referenced.add(segment.image.id)
-  }
-  for (const image of store.values()) {
-    if (!referenced.has(image.id) && !store.isPinned(image.id)) store.remove(image.id)
-  }
-}
 
 /**
  * Prepare the immutable `UserMessage` for one submission.

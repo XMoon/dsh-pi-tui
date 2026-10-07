@@ -20,7 +20,7 @@ import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../src/surfa
 import type { WriteOutcome } from '../src/runtime/session-writer-port.ts'
 import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
