@@ -20,7 +20,7 @@ import {
   registerTuiCommands,
   type TuiCommandRunner,
 } from '../src/commands.ts'
-import { credentialOptionsFor, resolveCredentialArg } from '../src/provider-catalog.ts'
+import { credentialOptionsFor, resolveCredentialArg } from '../src/domain/catalog/provider.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { DraftImageStore } from '../src/client/media/image/draft-store.ts'

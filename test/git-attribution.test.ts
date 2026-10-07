@@ -11,16 +11,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import { installFocusPrompt, type SystemPromptLike } from '../src/focus.ts'
 import {
   DEFAULT_GIT_ATTRIBUTION_MODE,
   GIT_ATTRIBUTION_SECTION_NAME,
   GIT_ATTRIBUTION_SECTION_ORDER,
-  installGitAttributionPrompt,
   parseGitAttributionMode,
   type GitAttributionState,
-} from '../src/git-attribution.ts'
-import { PROGRESS_UPDATES_SECTION_NAME, RESPONSE_STYLE_SECTION_NAME, installProgressUpdatesPrompt, installResponseStylePrompt, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
+} from '../src/domain/communication/git-attribution.ts'
+import { PROGRESS_UPDATES_SECTION_NAME, RESPONSE_STYLE_SECTION_NAME, type ProgressUpdatesState, type ResponseStyleState } from '../src/domain/communication/policy.ts'
+import { installFocusPrompt, installGitAttributionPrompt, installProgressUpdatesPrompt, installResponseStylePrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
 // The attribution state is a Direct-application internal concern: it is NOT part
 // of the public composeAgent() surface, so the composition regressions exercise
@@ -287,7 +286,7 @@ test('the `minimal` preset contract: a COMPLETE persona suppresses every TUI pro
     installProgressUpdatesPrompt(scopedPrompt, display, { mode: 'frequent' })
     installResponseStylePrompt(scopedPrompt, { style: 'concise' })
     // Production composition installs Focus whenever a display state exists.
-    installFocusPrompt(scoped.ctx, display)
+    installFocusPrompt(scopedPrompt, display)
     return renderPrompt(await systemPrompt.assemble({ scope: scopeKey }))
   }
   const MINIMAL_PERSONA = { prefix: 'You are a helpful software engineer assistant.', complete: true }

@@ -32,7 +32,7 @@ import {
   type AuthorizationSurface,
 } from '../src/app/command/authorization.ts'
 import { authorizationTargets } from '../src/runtime/direct/config-direct.ts'
-import { providerOptionsFor, type ProviderCatalogEntry } from '../src/provider-catalog.ts'
+import { providerOptionsFor, type ProviderCatalogEntry } from '../src/domain/catalog/provider.ts'
 import { credentialOptionOf } from '../src/runtime/direct/config-direct.ts'
 import { QuestionFlow, type QuestionFlowQuestion } from '../src/tui/interaction/question.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'

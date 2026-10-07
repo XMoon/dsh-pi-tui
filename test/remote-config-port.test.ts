@@ -18,7 +18,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { RemoteConfigPort } from '../src/runtime/remote/config-remote.ts'
-import type { ProviderCatalogEntry } from '../src/provider-catalog.ts'
+import type { ProviderCatalogEntry } from '../src/domain/catalog/provider.ts'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from './support/remote-generation.ts'
 

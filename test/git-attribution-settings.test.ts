@@ -26,11 +26,10 @@ import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import {
   GIT_ATTRIBUTION_SECTION_NAME,
-  installGitAttributionPrompt,
   parseGitAttributionMode,
   type GitAttributionState,
-} from '../src/git-attribution.ts'
-import type { SystemPromptLike } from '../src/focus.ts'
+} from '../src/domain/communication/git-attribution.ts'
+import { installGitAttributionPrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
