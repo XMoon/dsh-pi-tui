@@ -22,8 +22,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SubagentDescendantListEntry } from '@deepseek-ai/dsh-subagent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { TaskBrowserRuntime, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from '../src/task-browser-runtime.ts'
-import { AGENT_ROW_PREFIX, type TaskBrowserJobInput, type TaskBrowserRow } from '../src/tasks-browser.ts'
+import { TaskBrowserRuntime, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from '../src/app/surface/task-browser-runtime.ts'
+import { AGENT_ROW_PREFIX, type TaskBrowserJobInput, type TaskBrowserRow } from '../src/domain/task/browser.ts'
 
 const child = (overrides: Partial<SubagentDescendantListEntry> = {}): SubagentDescendantListEntry => ({
   kind: 'child',

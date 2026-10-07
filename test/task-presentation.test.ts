@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { projectTaskItems, type TaskPresentationProjectionOptions } from '../src/task-presentation.ts'
-import type { TaskPanelItem } from '../src/task-presentation.ts'
+import { projectTaskItems, type TaskPresentationProjectionOptions } from '../src/app/surface/task-presentation.ts'
+import type { TaskPanelItem } from '../src/app/surface/task-presentation.ts'
 
 const options = (patch: Partial<TaskPresentationProjectionOptions> = {}): TaskPresentationProjectionOptions => ({
   scope: 'all', query: '', typeFilter: null, expandedIds: new Set(), collapsedIds: new Set(), ...patch,

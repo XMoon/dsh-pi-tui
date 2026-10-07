@@ -12,16 +12,22 @@ import test from 'node:test'
 import {
   classifySubagentPromptError,
   classifySubagentPromptSettlement,
+} from '../src/runtime/subagent-outcome.ts'
+import {
   resolveSubagentSettleTarget,
   subagentPromptDisposition,
-  submitSubagentPrompt,
   viewerCanonicalizeScope,
-  type SubagentPromptContentPart,
-  type SubagentPromptService,
   type SubagentSettleViewerState,
+} from '../src/app/surface/viewer-submission.ts'
+import {
+  submitSubagentPrompt,
+  type SubagentPromptService,
   type SubagentViewerSubmitDeps,
-  type SubagentViewerSubmitRequest,
-} from '../src/subagent-viewer-submit.ts'
+} from '../src/runtime/direct/subagent-direct.ts'
+import type {
+  SubagentPromptContentPart,
+  SubagentViewerSubmitRequest,
+} from '../src/runtime/subagent-port.ts'
 
 const request: SubagentViewerSubmitRequest = {
   parentSessionId: 'session-parent',

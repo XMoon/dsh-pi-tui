@@ -9,16 +9,13 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   buildSessionTree,
-  headerToPickerRow,
   sessionLabelParts,
   sessionPickerItem,
   type SessionPickerItem,
   type SessionPickerRow,
-} from '../src/sessions.ts'
+} from '../src/tui/pickers/sessions.ts'
 import { sessionPickerCategories } from '../src/commands.ts'
 import { MARQUEE_STEP_MS } from '../src/tui/components/marquee.ts'
 import type { PickerCategory } from '../src/tui-app.ts'
@@ -452,12 +449,11 @@ test('typed, programmatic and cleared queries share one live canonical query', a
   handle.close()
 })
 
-test('headerToPickerRow + sessionPickerItem feed the Main category without subagent rows', () => {
-  const headers: SessionHeader[] = [
-    { version: SESSION_FORMAT_VERSION, isSeeded: false, id: SessionId('session-root-1'), createdAt: 5, cwd: '/w' },
-    { version: SESSION_FORMAT_VERSION, isSeeded: false, id: SessionId('session-child-1'), createdAt: 4, cwd: '/w', origin: 'subagent', parentSession: SessionId('session-root-1') },
+test('sessionPickerItem rows feed the Main category without subagent rows', () => {
+  const rows: SessionPickerRow[] = [
+    { id: 'session-root-1', updatedAt: 5, createdAt: 5, cwd: '/w', live: false },
+    { id: 'session-child-1', updatedAt: 4, createdAt: 4, cwd: '/w', origin: 'subagent', parentSession: 'session-root-1', live: false },
   ]
-  const rows = headers.map(header => headerToPickerRow(header, false))
   const main = rows.filter(row => row.origin !== 'subagent')
   assert.equal(main.length, 1, 'the Main category keeps only non-subagent rows')
   assert.equal(main[0]!.id, 'session-root-1')

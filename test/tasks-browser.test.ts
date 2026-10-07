@@ -12,25 +12,27 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   AGENT_ROW_PREFIX,
-  JOB_GROUP,
   JOB_ROW_PREFIX,
-  SUBAGENT_GROUP,
   buildTaskRows,
-  describeTaskRow,
   isSubagentRowInterruptible,
   isViewerAccessInteractive,
   projectSubagentActivity,
   resolveViewerAccess,
-  rowGroup,
   subagentInterruptParent,
-  taskRowLabel,
-  taskTreePrefix,
-  viewerAccessHint,
   viewerAccessOf,
   type TaskBrowserAgentInput,
   type TaskBrowserJobInput,
   type TaskBrowserRow,
-} from '../src/tasks-browser.ts'
+} from '../src/domain/task/browser.ts'
+import {
+  JOB_GROUP,
+  SUBAGENT_GROUP,
+  describeTaskRow,
+  rowGroup,
+  taskRowLabel,
+  taskTreePrefix,
+  viewerAccessHint,
+} from '../src/app/surface/task-presentation.ts'
 
 const job = (overrides: Partial<TaskBrowserJobInput> = {}): TaskBrowserJobInput => ({
   id: 'bash-1',

@@ -14,7 +14,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp, type WorkflowAction } from '../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type WorkflowMemberView, type WorkflowRunId, type WorkflowRunStatus } from '../src/transcript.ts'
-import { workflowMemberViewerTarget, type TaskBrowserRow } from '../src/tasks-browser.ts'
+import { workflowMemberViewerTarget, type TaskBrowserRow } from '../src/domain/task/browser.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
