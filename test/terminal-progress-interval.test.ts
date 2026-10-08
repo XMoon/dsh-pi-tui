@@ -123,7 +123,10 @@ test('reset discards the previous owner result', () => {
   interval.status(false)
   assert.deepEqual(interval.reset(), { active: false, outcome: 'idle' }, 'a rebind always commits idle')
   assert.deepEqual(interval.snapshot(), { active: false, outcome: 'idle' })
-  assert.equal(interval.turnEnd(1, 'completed'), undefined, 'the previous owner evidence cannot settle the new owner')
+  // `turnEnd` returns void: the effective witness is the interval's state, not
+  // its return value.
+  interval.turnEnd(1, 'completed')
+  assert.equal(interval.snapshot().outcome, 'idle', 'the previous owner evidence cannot settle the new owner')
   assert.equal(interval.status(true)?.outcome, 'idle', 'the new owner starts from a fresh interval')
   assert.equal(interval.status(false)?.outcome, 'idle', 'the new owner must prove its OWN turn evidence')
 })

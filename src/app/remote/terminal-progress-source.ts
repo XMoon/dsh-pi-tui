@@ -59,6 +59,73 @@ export interface RemoteTerminalProgressSource {
   open(sessionId: string, signal: AbortSignal): AsyncIterable<RemoteMainProgressFact>
 }
 
+/**
+ * One consumption of the Remote progress authority (plan §6.4/§7.1).
+ *
+ * The Host RETIRES a watch when the watched Agent lifetime ends (an Agent
+ * disposal — which rc.2 requires before a same-id replacement can be entered).
+ * The authority for the SAME owner must therefore be re-established: a fresh
+ * watch opens with a snapshot carrying the new `agentEpoch`, which the Surface
+ * re-baselines as a `restart`. A watch that ends WITHOUT a single frame is a
+ * broken authority, so those retries are bounded and reported as a failure
+ * instead of spinning.
+ */
+export interface RemoteTerminalProgressConsumer {
+  /** Re-checked before every fact AND before every re-open. `false` = the owner
+   *  moved (switch/reconnect/teardown) and this consumption must stop quietly. */
+  isCurrent(): boolean
+  onFact(fact: RemoteMainProgressFact): void
+}
+
+/** Consecutive frame-less watch endings tolerated before failing closed. */
+const EMPTY_WATCH_REOPEN_LIMIT = 3
+
+/**
+ * Consume the ONE Remote progress watch of one session for as long as the caller
+ * stays current, re-establishing it whenever the Host retires it.
+ *
+ * @param source - the Remote progress source.
+ * @param sessionId - the main session this authority belongs to.
+ * @param signal - the caller's lifetime; aborting it stops the consumption at
+ * the next fact and before any re-open.
+ * @param consumer - the currentness fence and the fact sink.
+ * @throws when the Host keeps ending the watch without ever delivering a frame.
+ */
+export async function consumeRemoteTerminalProgress(
+  source: RemoteTerminalProgressSource,
+  sessionId: string,
+  signal: AbortSignal,
+  consumer: RemoteTerminalProgressConsumer,
+): Promise<void> {
+  let emptyReopens = 0
+  for (;;) {
+    let frames = 0
+    try {
+      for await (const fact of source.open(sessionId, signal)) {
+        if (signal.aborted || !consumer.isCurrent()) return
+        frames += 1
+        consumer.onFact(fact)
+      }
+    } catch (error) {
+      // The caller's own abort cancels the Host invocation: that IS the expected
+      // end (teardown / owner switch), never a stream failure to report.
+      if (signal.aborted) return
+      throw error
+    }
+    if (signal.aborted || !consumer.isCurrent()) return
+    if (frames === 0) {
+      emptyReopens += 1
+      if (emptyReopens > EMPTY_WATCH_REOPEN_LIMIT) {
+        throw new Error(
+          `the Remote terminal-progress watch of ${sessionId} ended without a frame ${String(emptyReopens)} times`,
+        )
+      }
+    } else {
+      emptyReopens = 0
+    }
+  }
+}
+
 /** One accepted frame: the provenance the next frame is judged against. */
 interface AcceptedState {
   readonly sessionId: string

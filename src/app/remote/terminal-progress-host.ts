@@ -178,6 +178,9 @@ class FrameQueue {
 export class PiTuiTerminalProgressHostService extends TypertRemoteService {
   /** The Typert registry owns the explicit invocation definition. */
   static readonly inject = ['typert']
+  /** The narrow Host facts the composition resolved (explicit field: the
+   *  strip-only TS loader rejects parameter properties). */
+  private readonly deps: PiTuiTerminalProgressHostDeps
   /** One opaque identity per Host plugin instance: a Host restart, a new
    *  composition or a re-mounted fiber all invalidate older frames. */
   private readonly hostEpoch: string = `host-${randomEpoch()}`
@@ -191,8 +194,9 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
    * @param ctx - the Host context this row is mounted in.
    * @param deps - the narrow Host facts the composition resolved.
    */
-  constructor(ctx: Context, private readonly deps: PiTuiTerminalProgressHostDeps) {
+  constructor(ctx: Context, deps: PiTuiTerminalProgressHostDeps) {
     super(ctx, PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
+    this.deps = deps
     // The Typert contribution is owned by the composition (one contribution per
     // package identity; see runtime/remote/pi-tui-remote-contribution.ts).
     // `global: true` is the official Cordis option that skips the scope filter:
@@ -254,7 +258,11 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
   /** The live `agent/status` transition of one Agent (plan §6.4). */
   private onAgentStatus(agent: LiveAgentLike, status: string): void {
     const record = this.recordFor(agent.session.id)
-    if (record.agent === undefined) return
+    // The event's Agent must BE the bound Agent lifetime. rc.2 permits an
+    // `agent/disposed` while that Agent's final turn is still draining, so a
+    // stale `agent/status` can arrive AFTER a same-id replacement was bound:
+    // it must never move the new lifetime's interval (STOP-FENCE).
+    if (record.agent !== agent) return
     // Only the running/idle truth of the interval. The settlement happens on
     // the falling edge, from the evidence the durable events captured.
     this.publish(record, record.fold.status(status === 'running'))

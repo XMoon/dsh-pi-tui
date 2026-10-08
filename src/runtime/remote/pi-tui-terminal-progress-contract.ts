@@ -51,7 +51,10 @@ export const PI_TUI_TERMINAL_PROGRESS_WATCH_ENDPOINT = '@xmoon76/dsh-pi-tui#piTu
  * authoritative read the Host answers a fresh `watch` with; `update` is one
  * real subsequent Host-side change. `hostEpoch` identifies one Host plugin
  * instance, `agentEpoch` one Agent lifetime inside that Host, and `revision`
- * fences updates within `hostEpoch + sessionId`.
+ * fences updates within `hostEpoch + sessionId`. `revision` is NOT the durable
+ * session-log `seq`: it counts only the frames this Host row published for this
+ * session, starts at 0 and restarts with the Host plugin instance, whereas `seq`
+ * orders the durable event log across every producer and survives reconnects.
  */
 export interface PiTuiTerminalProgressFrame {
   readonly kind: 'snapshot' | 'update'

@@ -71,7 +71,14 @@ async function read(
 ): Promise<PiTuiTerminalProgressFrame[]> {
   const frames: PiTuiTerminalProgressFrame[] = []
   for (let index = 0; index < count; index += 1) {
-    const next = await iterator.next()
+    // Bounded: a missing frame must fail the assertion instead of hanging the run.
+    let timer: NodeJS.Timeout | undefined
+    const next = await Promise.race([
+      iterator.next(),
+      new Promise<'timeout'>(resolve => { timer = setTimeout(() => { resolve('timeout') }, 2_000) }),
+    ]).finally(() => { if (timer !== undefined) clearTimeout(timer) })
+    assert.notEqual(next, 'timeout', label + ' the watch must still yield frame ' + String(index))
+    if (next === 'timeout') assert.fail('unreachable')
     assert.equal(next.done, false, label + ' the watch must still yield frame ' + String(index))
     frames.push(next.value)
   }
@@ -236,6 +243,52 @@ test('an Agent replacement opens a new epoch and inherits nothing', async (t) =>
     { kind: 'update', running: false, outcome: 'idle', agentEpoch: 2 },
     'the replacement publishes a fresh idle interval under a new epoch',
   )
+  await iterator.return?.(undefined)
+})
+
+test('a stale status from a disposed Agent never moves the replaced lifetime', async (t) => {
+  // rc.2 permits `agent/disposed` while the disposed Agent's final turn still
+  // drains, so its own `agent/status` can arrive AFTER a same-id replacement was
+  // bound. That stale edge must be fenced off by OBJECT identity (STOP-FENCE).
+  const session = { id: SESSION_ID }
+  const first = agent('agent-a', session)
+  // A live Agent's `.status` already reads `running` when its running edge fires.
+  const second = agent('agent-b', session, 'running')
+  let live: LiveAgentLike = first
+  const host = await mountHost({ agentFor: () => live, onUnknownReason: () => {} })
+  t.after(async () => { await host.ctx.fiber.dispose() })
+  const controller = new AbortController()
+  t.after(() => { controller.abort() })
+  const iterator = host.service.watch(SESSION_ID, controller.signal)[Symbol.asyncIterator]()
+  const [baseline] = await read(iterator, 1, 'stale-baseline')
+  assert.deepEqual({ running: baseline.running, agentEpoch: baseline.agentEpoch }, { running: false, agentEpoch: 1 })
+
+  host.emit('agent/status', { agent: first, status: 'running' })
+  const [working] = await read(iterator, 1, 'stale-working')
+  assert.deepEqual({ running: working.running, agentEpoch: working.agentEpoch }, { running: true, agentEpoch: 1 })
+
+  // The same-id replacement is bound by its own running edge: a NEW epoch opens.
+  live = second
+  host.emit('agent/status', { agent: second, status: 'running' })
+  const [rebound] = await read(iterator, 1, 'stale-rebound')
+  assert.deepEqual({ running: rebound.running, agentEpoch: rebound.agentEpoch }, { running: true, agentEpoch: 2 })
+
+  // The DISPOSED first lifetime's late idle edge arrives BEFORE this interval's
+  // own durable evidence. Unfenced it would settle the new interval as `idle`
+  // (no evidence captured yet) and swallow the turn that follows; fenced, the
+  // evidence is captured and the BOUND Agent's idle edge settles `done`.
+  host.emit('agent/status', { agent: first, status: 'idle' })
+  host.emit('session/event', session, { type: 'turn/start', data: { turn: 1 } })
+  host.emit('session/event', session, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  host.emit('agent/status', { agent: second, status: 'idle' })
+  const [settled] = await read(iterator, 1, 'stale-control')
+  assert.deepEqual(
+    { running: settled.running, outcome: settled.outcome, agentEpoch: settled.agentEpoch },
+    { running: false, outcome: 'done', agentEpoch: 2 },
+    'the bound lifetime settles on its OWN turn evidence, untouched by the stale edge',
+  )
+  assert.equal(settled.revision, rebound.revision + 1,
+    'exactly one frame followed the rebound: the stale edge published nothing')
   await iterator.return?.(undefined)
 })
 

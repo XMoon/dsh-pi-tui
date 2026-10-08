@@ -46,12 +46,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createUserMessage, LlmAdapter, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { symbols } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { RemoteStreamHandle } from '@deepseek-ai/dsh-typert-protocol'
 import type { RemoteMainProgressFact } from '../src/app/application-runtime.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from '../src/app/remote/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../src/app/remote/host-runtime.ts'
 import {
+  consumeRemoteTerminalProgress,
   createRemoteTerminalProgressSource,
   type RemoteTerminalProgressSource,
 } from '../src/app/remote/terminal-progress-source.ts'
@@ -129,7 +131,10 @@ interface SurfaceProbe {
   dispose(): void
 }
 
-function minimalRoutingSource(sessionId: string): SurfaceEventRoutingSource<never> {
+function minimalRoutingSource(
+  sessionId: string,
+  viewedChildId: () => string | undefined = () => undefined,
+): SurfaceEventRoutingSource<never> {
   const emptyFolder = {
     apply: () => {},
     groupedTurns: () => [],
@@ -155,8 +160,8 @@ function minimalRoutingSource(sessionId: string): SurfaceEventRoutingSource<neve
     observeMainEvent: () => ({ refreshAgents: false }),
     appendOpeningViewerEvent: () => false,
     main: presentation,
-    viewedChildId: () => undefined,
-    viewedChild: () => { throw new Error('no viewed child in this suite') },
+    viewedChildId,
+    viewedChild: () => { throw new Error('no viewed-child presentation is routed in this suite') },
     mainFolder: () => emptyFolder,
     viewedChildFolder: () => emptyFolder,
     pendingSubjectId: () => undefined,
@@ -187,7 +192,11 @@ function minimalRoutingSource(sessionId: string): SurfaceEventRoutingSource<neve
   } as unknown as SurfaceEventRoutingSource<never>
 }
 
-function mountSurfaceProbe(sessionId: string, notificationMode?: string): SurfaceProbe {
+function mountSurfaceProbe(
+  sessionId: string,
+  notificationMode?: string,
+  viewedChildId: () => string | undefined = () => undefined,
+): SurfaceProbe {
   const vt = new VirtualTerminal(100, 30)
   const programWrites: string[] = []
   const progressStates: TerminalProgressState[] = []
@@ -213,7 +222,7 @@ function mountSurfaceProbe(sessionId: string, notificationMode?: string): Surfac
     mainProgressAuthority: 'host-snapshot',
     createPluginManagerPanel,
   })
-  surface.attachEventRouting(minimalRoutingSource(sessionId))
+  surface.attachEventRouting(minimalRoutingSource(sessionId, viewedChildId))
   surface.setCompletionOwner(sessionId)
   surface.start({
     events: { onSubmit: () => {}, onExit: () => {} },
@@ -264,7 +273,11 @@ interface RemoteLoop {
   dispose(): Promise<void>
 }
 
-async function mountRemoteLoop(life: TestLifecycle, sessionId: string): Promise<RemoteLoop> {
+async function mountRemoteLoop(
+  life: TestLifecycle,
+  sessionId: string,
+  viewedChildId: () => string | undefined = () => undefined,
+): Promise<RemoteLoop> {
   const host = await createRemoteApplicationHostFixture(life, 'r2-l6-preset', { llmAdapter: new CompletedAdapter() })
   const hostRuntime = await createRemoteHostRuntime(host.ctx)
   const client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
@@ -273,7 +286,7 @@ async function mountRemoteLoop(life: TestLifecycle, sessionId: string): Promise<
     generation: client.connection.generation,
     binding: id => client.sessions.binding(id as never) as object | undefined,
   })
-  const surface = mountSurfaceProbe(sessionId, 'unfocused')
+  const surface = mountSurfaceProbe(sessionId, 'unfocused', viewedChildId)
   let disposed = false
   return {
     host,
@@ -338,6 +351,16 @@ function scriptedSource(watches: ReadonlyArray<readonly unknown[]>): RemoteTermi
     generation: { getSnapshot: () => stableGeneration },
     binding: () => stableBinding,
   })
+}
+
+/** The raw production Host row (its Cordis reflect read is a traceable proxy). */
+function hostRowOf(ctx: { reflect: { get(key: string): unknown } }): {
+  readonly records: Map<string, { readonly subscribers: Set<unknown> }>
+} {
+  const proxied = ctx.reflect.get('piTuiTerminalProgress') as { readonly [symbols.original]?: unknown }
+  return (proxied[symbols.original] ?? proxied) as {
+    readonly records: Map<string, { readonly subscribers: Set<unknown> }>
+  }
 }
 
 /** Feed one whole watch into the production surface seam (bootstrap-shaped). */
@@ -405,6 +428,138 @@ test('L6: a real turn drives the full Host -> wire -> source -> Surface -> OSC 7
 })
 
 // ── PROOF 8 ────────────────────────────────────────────────────────────────
+
+test('L6: a displayed child viewer never takes over the main terminal root', async (t) => {
+  const life = testLifecycle(t)
+  const CHILD = 'r2-l6-child'
+  // The surface is displaying a CHILD viewer while the main Agent runs (plan §7.4).
+  const loop = await mountRemoteLoop(life, SESSION, () => CHILD)
+  const controller = new AbortController()
+  try {
+    const createAgent = async (sessionId: string) => loop.host.ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+      meta: { cwd: loop.host.anchorDir },
+    })
+    const handleMain = await createAgent(SESSION)
+    const handleChild = await createAgent(CHILD)
+    const reference = loop.client.sessions.retain(SessionId(SESSION), { source: 'tuiMainView' })
+    await reference.ready
+    const facts: RemoteMainProgressFact[] = []
+    // Exactly the bootstrap shape: the ONE watch is the MAIN session's.
+    const consumption = consumeRemoteTerminalProgress(loop.source, SESSION, controller.signal, {
+      isCurrent: () => true,
+      onFact: (fact) => { facts.push(fact); loop.surface.surface.applyRemoteMainProgress(fact, SESSION) },
+    })
+    await waitFor('the opening snapshot', () => facts.length >= 1, 10_000)
+    assert.deepEqual(loop.surface.programWrites, [IDLE], 'the main root starts idle')
+
+    // A CHILD turn while its viewer is displayed: it runs for real, but it owns no
+    // terminal watch, so the main root must not move at all.
+    handleChild.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'child' }], source: { kind: 'user' } }))
+    await handleChild.agent.whenIdle()
+    assert.deepEqual(loop.surface.programWrites, [IDLE],
+      'a child run never writes the main terminal root')
+    const hostRow = hostRowOf(loop.host.ctx)
+    assert.equal(hostRow.records.get(CHILD)?.subscribers.size ?? 0, 0,
+      'the child session holds NO terminal-progress subscriber')
+
+    // The MAIN turn still drives the root while the child viewer stays displayed.
+    handleMain.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'main' }], source: { kind: 'user' } }))
+    await handleMain.agent.whenIdle()
+    await waitFor('the main settle', () => loop.surface.programWrites.includes(DONE), 15_000)
+    assert.deepEqual(loop.surface.programWrites, [IDLE, WORKING, DONE],
+      'the main root keeps tracking the main Agent while a child viewer is displayed')
+
+    controller.abort()
+    await consumption
+    await handleChild.dispose()
+    await handleMain.dispose()
+    reference.release()
+  } finally {
+    controller.abort()
+    await loop.dispose()
+  }
+})
+
+test('L6: a same-id Agent replacement re-establishes the watch and drives the new turn', async (t) => {
+  const life = testLifecycle(t)
+  const loop = await mountRemoteLoop(life, SESSION)
+  const controller = new AbortController()
+  try {
+    const createAgent = async () => loop.host.ctx.agents.create({
+      sessionId: SessionId(SESSION),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+      meta: { cwd: loop.host.anchorDir },
+    })
+    // The Client retains a session the Host already published (the reference
+    // resolves through the official catalog), so the handle comes first.
+    const handleA = await createAgent()
+    const reference = loop.client.sessions.retain(SessionId(SESSION), { source: 'tuiMainView' })
+    await reference.ready
+    const facts: RemoteMainProgressFact[] = []
+    // The PRODUCTION consumption policy (the same helper `bootstrap.ts` runs):
+    // it re-establishes the authority when the Host retires the watch.
+    let consumptionError: unknown
+    const consumption = consumeRemoteTerminalProgress(loop.source, SESSION, controller.signal, {
+      isCurrent: () => true,
+      onFact: (fact) => { facts.push(fact); loop.surface.surface.applyRemoteMainProgress(fact, SESSION) },
+    })
+    void consumption.catch((error: unknown) => { consumptionError = error })
+    await waitFor('the opening snapshot', () => facts.length >= 1, 10_000)
+    handleA.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } }))
+    await handleA.agent.whenIdle()
+    await waitFor('the first settle', () => loop.surface.programWrites.includes(DONE), 15_000)
+    assert.deepEqual(loop.surface.programWrites, [IDLE, WORKING, DONE],
+      'the first Agent lifetime drives the screen')
+
+    // A REAL same-id replacement: rc.2 forbids a second Agent on the same id, so
+    // the holder's `dispose()` (which emits `agent/disposed`) must run first. The
+    // Host then retires the watch, and the consumption re-establishes it.
+    await handleA.dispose()
+    // The durable Session log survives the disposal, so the successor on the same
+    // id is a RESUME (a fresh Agent and a fresh Session object) — exactly the
+    // production replacement shape.
+    const handleB = await loop.host.ctx.agents.resume({
+      resumeSessionId: SessionId(SESSION),
+      agentOptions: { provider: 'smoke', model: 'smoke' },
+    })
+    handleB.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'second' }], source: { kind: 'user' } }))
+    await handleB.agent.whenIdle()
+    try {
+      await waitFor('the replacement settles on the screen',
+        () => loop.surface.programWrites.filter(entry => entry === DONE).length === 2, 15_000)
+    } catch (error) {
+      throw new Error(`${(error as Error).message} | facts=${JSON.stringify(facts)}`
+        + ` | writes=${JSON.stringify(loop.surface.programWrites)}`
+        + ` | consumptionError=${String(consumptionError)}`)
+    }
+
+    assert.deepEqual(
+      facts.map(fact => `${fact.kind}:${String(fact.restart)}:${String(fact.running)}:${fact.outcome}`),
+      [
+        'snapshot:true:false:idle',
+        'update:false:true:idle',
+        'update:false:false:done',
+        'snapshot:true:false:idle',
+        // The resumed Agent is a NEW lifetime: its first edge restarts the lineage.
+        'update:true:true:idle',
+        'update:false:false:done',
+      ],
+      `the replacement lifetime is observed through a re-established watch: ${JSON.stringify(facts)}`,
+    )
+    assert.deepEqual(loop.surface.programWrites, [IDLE, WORKING, DONE, IDLE, WORKING, DONE],
+      'the terminal keeps tracking the main Agent across the replacement')
+
+    controller.abort()
+    await consumption
+    await handleB.dispose()
+    reference.release()
+  } finally {
+    controller.abort()
+    await loop.dispose()
+  }
+})
 
 test('L6: opening/reconnect snapshots never notify; a real update running->idle notifies exactly once', async () => {
   const sessionId = 'r2-l6-notify'

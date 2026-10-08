@@ -121,6 +121,7 @@ import { commandSummaryOf, type SurfaceCatalogSnapshot } from '../domain/catalog
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
+import { consumeRemoteTerminalProgress } from './remote/terminal-progress-source.ts'
 import { type HumanSkillCatalog } from '../domain/catalog/skill.ts'
 import { dangerCommand } from '../domain/shell/danger.ts'
 import { resolveInitialCatalog } from './direct/initial-catalog.ts'
@@ -1305,21 +1306,30 @@ export function applyRunnerWithRuntime(
         dispose: () => { progressController.abort(new Error('remote terminal progress watch disposed')) },
       }
       runDetached('remote terminal progress watch', async () => {
-        let ended = false
+        let failed = true
         try {
-          for await (const fact of remoteSources.terminalProgress.open(sessionId, progressController.signal)) {
-            if (cleanedUp) return
-            if (ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration) return
-            surface.applyRemoteMainProgress(fact, sessionId)
-          }
-          ended = true
+          // The consumption RE-ESTABLISHES the authority when the Host retires
+          // the watch (an Agent disposal / same-id replacement) while this owner
+          // is still current; only an owner switch, a generation change, an abort
+          // or a real failure stops it (plan §6.4/§7.1).
+          await consumeRemoteTerminalProgress(
+            remoteSources.terminalProgress,
+            sessionId,
+            progressController.signal,
+            {
+              isCurrent: () => !cleanedUp
+                && ownership.currentSessionId() === sessionId
+                && ownership.generation() === initGeneration,
+              onFact: fact => { surface.applyRemoteMainProgress(fact, sessionId) },
+            },
+          )
+          failed = false
         } finally {
-          // A stream that FAILED (contract violation, lost transport identity,
-          // Host teardown mid-flight) must not leave a stale `working` on the
-          // terminal: fail closed to idle. A stream that ENDED normally has
-          // already delivered the Host's authoritative last state, so its
-          // retained `done`/`error` stays untouched.
-          if (!ended && !cleanedUp
+          // A FAILED stream (contract violation, lost transport identity, a Host
+          // that never answers) must not leave a stale `working` on the terminal:
+          // fail closed to idle. An expected stop (abort / owner or generation
+          // change) leaves the Host's last authoritative state untouched.
+          if (failed && !cleanedUp
             && ownership.currentSessionId() === sessionId
             && ownership.generation() === initGeneration) {
             surface.applyRemoteMainProgress(
