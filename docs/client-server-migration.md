@@ -6258,3 +6258,25 @@ The gates and the stage-final pipeline are green, and five deliberate mutations 
 the authority gate disabled, the fold's turn match dropped, the surface's
 `turn/end` forwarding removed, the completion re-baseline disabled and the watch
 re-establishment disabled — each turned its suite red before being reverted.
+
+## Open follow-up — Remote TSP projection observer over the real wire (deferred)
+
+The experimental Tern Surface Protocol seam in
+[`docs/tern-tsp.md`](./tern-tsp.md) (PR #257) observes the surface's already
+committed transcript projection; its Remote-branch hydration coverage is
+application-level (L3/L4) only.
+
+- **Owner:** this Remote qualification contract — the existing `smoke:remote-*`
+  lanes and the runner Remote L6 suites with their real Host/Client/Gateway
+  in-process carrier. PR2 must not grow a second Remote harness.
+- **Trigger:** before any work that mounts TSP on the Remote branch (a real
+  single-tty renderer selection, or presenting a Remote session through TSP).
+- **Closure condition:** a Remote L6 case that establishes the projection
+  observer, triggers a real `Connection` generation / binding rollover under the
+  same session id, and asserts that the old owner's frames are never published
+  into the new scope and that the new binding's projection reaches the observer
+  with a newly established source identity — never inferring view continuity
+  from an unchanged `sessionId`.
+
+This does not qualify the existing Remote reader's own fences; see
+[`PR2 evidence`](./tern-tsp/evidence/pr2.md) for what PR2 did and did not prove.
