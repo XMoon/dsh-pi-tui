@@ -257,6 +257,16 @@ export interface EventRoutingDeps<Event extends RoutedSessionEvent> {
    * surface evidence owner.
    */
   readonly observeMainTurnEnd: (turn: number, reasonKind: string) => void
+  /**
+   * Which adapter OWNS the main-Agent terminal outcome (R1 §5.3, the
+   * mutual-exclusion gate): the Direct local durable events, or the Remote
+   * Host evidence stream. Exactly ONE of them may write the interval, so the
+   * Remote durable ingress keeps feeding the transcript WITHOUT racing the
+   * Host evidence for the same terminal fact (STOP-DOUBLE). The value is
+   * decided once by the composition root and is immutable for the routing
+   * owner's lifetime — never a per-event guess.
+   */
+  readonly mainProgressAuthority: MainProgressAuthority
   /** The surface pending-input presentation refresh. */
   readonly refreshPendingInput: () => void
   readonly schedulePaint: () => void
@@ -282,6 +292,14 @@ export interface EventRoutingRuntime<Event extends RoutedSessionEvent> {
   /** The resumed-compaction routing (a startup/resume fact, not a session event). */
   applyResumedCompaction(id: string | undefined, active: boolean): void
 }
+
+/**
+ * Which adapter OWNS the main-Agent terminal outcome (R1 §5.3): the Direct
+ * local durable events, or the Remote Host evidence stream. Exactly one of
+ * them may write the shared interval. Decided once by the composition root;
+ * never a per-event guess.
+ */
+export type MainProgressAuthority = 'local-events' | 'host-snapshot'
 
 /**
  * The official `turn/start` / `turn/end` payload carries the numeric turn the
@@ -382,19 +400,26 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // main folder below — the viewer never starves the main transcript.
     }
     if (session.id !== ownerSessionId) return
-    // Main-Agent turn evidence (plan §4.3): the surface owns the interval fold
-    // and the outcome classification; the routing forwards ONLY the LIVE
-    // main-session turn boundary, after every existing fence above. A viewed
-    // child's events returned in the child branch, so viewing a child can never
-    // pollute the main evidence — while main events still reach this point
+    // Main-Agent turn evidence (plan §4.3, R1 §5.3): the surface owns the
+    // interval fold and the outcome classification; the routing forwards ONLY
+    // the LIVE main-session turn boundary, after every existing fence above. A
+    // viewed child's events returned in the child branch, so viewing a child can
+    // never pollute the main evidence — while main events still reach this point
     // while a child is displayed.
-    if (event.type === 'turn/start') {
-      const turn = sessionTurnOf(event.data)
-      if (turn !== undefined) options.observeMainTurnStart(turn)
-    } else if (event.type === 'turn/end') {
-      const turn = sessionTurnOf(event.data)
-      const reasonKind = sessionTurnEndReasonOf(event.data)
-      if (turn !== undefined && reasonKind !== undefined) options.observeMainTurnEnd(turn, reasonKind)
+    //
+    // The MUTUAL-EXCLUSION gate: on the Remote branch the Host evidence stream
+    // owns the terminal outcome, so these durable events keep feeding the
+    // transcript below WITHOUT touching the local fold — one interval, one
+    // authority (STOP-DOUBLE).
+    if (options.mainProgressAuthority === 'local-events') {
+      if (event.type === 'turn/start') {
+        const turn = sessionTurnOf(event.data)
+        if (turn !== undefined) options.observeMainTurnStart(turn)
+      } else if (event.type === 'turn/end') {
+        const turn = sessionTurnOf(event.data)
+        const reasonKind = sessionTurnEndReasonOf(event.data)
+        if (turn !== undefined && reasonKind !== undefined) options.observeMainTurnEnd(turn, reasonKind)
+      }
     }
     const main = source.main()
     main.applyToolPreview(event)

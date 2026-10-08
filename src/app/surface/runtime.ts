@@ -126,7 +126,8 @@ import { buildPendingPresentation } from './pending-presentation.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from './search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
-import { parseTerminalProgressMode, type TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
+import { parseTerminalProgressMode } from '../../domain/terminal-progress/settings.ts'
+import { createTerminalProgressInterval, type IntervalProgress } from '../../domain/terminal-progress/interval.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 // TS3 §31-§36: the surface's independent application-level owners. Each is
 // constructed exactly once here; none of them imports this aggregate's value
@@ -148,6 +149,7 @@ import {
 } from './task-runtime.ts'
 import {
   createEventRouting,
+  type MainProgressAuthority,
   type RoutedSessionEvent,
   type SurfaceEventRoutingSource,
 } from './event-routing.ts'
@@ -239,6 +241,15 @@ export interface SurfaceRuntimeOptions {
   /** The persisted native-terminal-progress preference at startup (dual
    *  protocol by default), parsed through the shared terminal-progress parser. */
   readonly terminalProgress: string | undefined
+  /**
+   * Which adapter OWNS the main-Agent terminal outcome (R1 §5.3): the Direct
+   * local durable events, or the Remote Host evidence stream. Decided once by
+   * the composition root from the selected backend — the durable `session/event`
+   * ingress feeds the transcript on both branches, but on the Remote branch it
+   * must NEVER feed the local interval, because the Host evidence owns it
+   * (STOP-DOUBLE).
+   */
+  readonly mainProgressAuthority: MainProgressAuthority
   /** The runner's diagnostics channel: the terminal-progress evidence fold
    *  reports an UNKNOWN upstream `turn/end.reason.kind` here instead of
    *  guessing an outcome. Optional for headless fixtures. */
@@ -503,9 +514,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   /**
-   * The main-Agent presentation evidence fold (plan §4.3): the running truth,
-   * the LIVE turn boundary evidence of the current interval and the settled
-   * outcome, projected onto the mounted app.
+   * The main-Agent presentation evidence fold (plan §4.3, R1 §5.3): the ONE
+   * shared interval semantics (`domain/terminal-progress/interval.ts`) is
+   * instantiated HERE as the DIRECT local-evidence instance. The Remote Host
+   * plugin instantiates the same fold for its own authority — one classifier,
+   * two instances, never two evolved copies.
    *
    * Presentation state only — never a second Agent lifecycle authority. The
    * interval scope uses exclusively the already-existing running latch and the
@@ -513,68 +526,31 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * evidence exists so the ONE settle commit can carry a PROVEN `done`/`error`
    * instead of guessing it from an idle status.
    */
-  let mainAgentProgressActive = false
-  /** The turn opened by the newest LIVE main-session `turn/start`. */
-  let openTurn: number | undefined
-  /** The classified outcome of the newest turn whose `turn/end` matched the
-   *  open turn — reset whenever a newer turn opens. */
-  let lastClosedTurnOutcome: TerminalProgressOutcome | undefined
-  /** The last SETTLED interval outcome: the retire/dedupe path and the
-   *  final-disposal retention read it. */
-  let settledMainAgentOutcome: TerminalProgressOutcome = 'idle'
+  const interval = createTerminalProgressInterval(
+    kind => options.diag?.warn('terminal progress: unknown turn/end reason', { kind }),
+  )
 
   /**
-   * Classify one official `turn/end.reason.kind` (plan §3.1). `completed` is
-   * the DSH turn result (not a claim about every business step); `error` and
-   * `max-tokens` (a resource ceiling, not success) are `error`; a cancelled /
-   * blocked / non-live closer is honestly `idle`. An UNKNOWN upstream kind is
-   * NOT guessed: the caller records it and the interval stays `idle`.
+   * The single commit: the fold ALREADY latched the logical evidence inside the
+   * command that returned `progress`, so a synchronous re-entrant read from the
+   * app write below sees the post-command state, never the pre-command one.
+   * `undefined` = that command changed nothing (a repeated status, an already
+   * idle interval), so no physical commit is attempted at all.
    */
-  const classifyTurnEnd = (kind: string): TerminalProgressOutcome | undefined => {
-    switch (kind) {
-      case 'completed': return 'done'
-      case 'error': return 'error'
-      case 'max-tokens': return 'error'
-      case 'aborted':
-      case 'blocked':
-      case 'interrupted':
-      case 'forked': return 'idle'
-      default: return undefined
-    }
+  const commitMainAgentProgress = (progress: IntervalProgress | undefined): void => {
+    if (progress === undefined) return
+    app?.setTerminalProgress(progress.active, progress.outcome)
   }
 
   /**
-   * The single commit: latch the logical evidence FIRST, then hand the ONE
-   * `(active, outcome)` pair to the mounted app. A synchronous terminal write
-   * on that call can re-enter nothing here, but the ordering keeps any
-   * re-entrant read from seeing the pre-commit latch.
-   */
-  const commitMainAgentProgress = (active: boolean, outcome: TerminalProgressOutcome): void => {
-    mainAgentProgressActive = active
-    settledMainAgentOutcome = outcome
-    app?.setTerminalProgress(active, outcome)
-  }
-
-  /**
-   * The `agent/status` transition (plan §4.3). A rising edge opens a fresh
-   * interval (the previous evidence is discarded) and forces `idle`; a falling
-   * edge settles from the matched turn/end evidence — an unmatched open turn
-   * has NO completion evidence and settles `idle`. A repeated status is inert
-   * (an idle notification must never re-settle).
+   * The `agent/status` transition (plan §4.3): the fold owns the semantics — a
+   * rising edge opens a fresh idle interval, a falling edge settles from the
+   * matched turn/end evidence (an unmatched open turn has NO completion
+   * evidence and settles `idle`), and a repeated status is inert (an idle
+   * notification must never re-settle).
    */
   const setMainAgentProgress = (active: boolean): void => {
-    if (active) {
-      if (mainAgentProgressActive) return
-      openTurn = undefined
-      lastClosedTurnOutcome = undefined
-      commitMainAgentProgress(true, 'idle')
-      return
-    }
-    if (!mainAgentProgressActive) return
-    const outcome = openTurn === undefined ? (lastClosedTurnOutcome ?? 'idle') : 'idle'
-    openTurn = undefined
-    lastClosedTurnOutcome = undefined
-    commitMainAgentProgress(false, outcome)
+    commitMainAgentProgress(interval.status(active))
   }
 
   /**
@@ -584,41 +560,27 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * retires to `idle`.
    */
   const retireMainAgentProgress = (): void => {
-    openTurn = undefined
-    lastClosedTurnOutcome = undefined
-    if (!mainAgentProgressActive && settledMainAgentOutcome === 'idle') return
-    commitMainAgentProgress(false, settledMainAgentOutcome)
+    commitMainAgentProgress(interval.retire())
   }
 
   /**
-   * Record one LIVE main-session `turn/start` (plan §4.3): only inside the
+   * Record one LIVE main-session `turn/start` (plan §4.3, §5.2): only inside the
    * current running interval, and it immediately invalidates any older closed
    * candidate. Events outside the interval (replay/hydration before the
    * running status) are ignored.
    */
   const observeMainTurnStart = (turn: number): void => {
-    if (!mainAgentProgressActive) return
-    openTurn = turn
-    lastClosedTurnOutcome = undefined
+    interval.turnStart(turn)
   }
 
   /**
-   * Record one LIVE main-session `turn/end` (plan §4.3): only inside the
+   * Record one LIVE main-session `turn/end` (plan §4.3, §5.2): only inside the
    * current running interval and only when it closes the turn this interval
-   * actually opened. An UNKNOWN reason kind is reported and settles `idle`
-   * rather than being guessed.
+   * actually opened. An UNKNOWN reason kind is reported (through the fold's
+   * injected reporter) and settles `idle` rather than being guessed.
    */
   const observeMainTurnEnd = (turn: number, reasonKind: string): void => {
-    if (!mainAgentProgressActive) return
-    if (openTurn !== turn) return
-    openTurn = undefined
-    const outcome = classifyTurnEnd(reasonKind)
-    if (outcome === undefined) {
-      options.diag?.warn('terminal progress: unknown turn/end reason', { kind: reasonKind })
-      lastClosedTurnOutcome = 'idle'
-      return
-    }
-    lastClosedTurnOutcome = outcome
+    interval.turnEnd(turn, reasonKind)
   }
 
   // The approval/question presentation owner (TS3 §35) holds the ONE
@@ -670,6 +632,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     setMainAgentProgress: (active) => setMainAgentProgress(active),
     observeMainTurnStart: (turn) => observeMainTurnStart(turn),
     observeMainTurnEnd: (turn, reasonKind) => observeMainTurnEnd(turn, reasonKind),
+    mainProgressAuthority: options.mainProgressAuthority,
     refreshPendingInput: () => refreshPendingInput(),
     schedulePaint: () => schedulePaint(),
     paintNow: () => paintNow(),
@@ -1305,11 +1268,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // through its own authoritative `agent/status` and never inherit the old
       // owner's `working` OR its retained `done`/`error`. The order is fixed:
       // evidence reset, controller owner, ONE atomic physical retire.
-      openTurn = undefined
-      lastClosedTurnOutcome = undefined
-      settledMainAgentOutcome = 'idle'
+      const reset = interval.reset()
       notification.setCompletionOwner(identity)
-      commitMainAgentProgress(false, 'idle')
+      commitMainAgentProgress(reset)
     },
     onAgentStatus(agentId, status) {
       notification.onAgentStatus(agentId, status)
@@ -1321,9 +1282,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // (a running Agent must not leave a working record), while a settled
       // `done`/`error` is kept for the mounted app's disposal to retain across
       // process exit. Only the interval EVIDENCE (open turn / candidate) is
-      // discarded, because no further turn can settle.
-      openTurn = undefined
-      lastClosedTurnOutcome = undefined
+      // discarded by the fold's `retire()`, because no further turn can settle.
       notification.setCompletionOwner(undefined)
       retireMainAgentProgress()
     },
@@ -1450,7 +1409,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // and being corrected one write later (an idle -> working flash).
       app = startProcessTui(events, {
         ...buildOptions(deps),
-        initialTerminalProgress: mainAgentProgressActive,
+        initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
     },

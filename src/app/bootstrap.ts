@@ -462,6 +462,13 @@ export function applyRunnerWithRuntime(
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
       terminalProgress: tuiSettings?.get().terminalProgress,
+      // R1 §5.3: exactly ONE adapter owns the main terminal outcome. Direct
+      // keeps the local durable-event evidence; the Remote branch hands the
+      // outcome to the Host evidence stream, so the Remote durable ingress
+      // feeds the transcript without ever racing the Host for the same fact.
+      // The internal selection seam passes `override` ONLY for the Remote
+      // composition (the surface is created before `remoteSources` below).
+      mainProgressAuthority: override === undefined ? 'local-events' : 'host-snapshot',
       // The terminal-progress evidence fold reports an unknown upstream
       // `turn/end.reason.kind` here instead of guessing an outcome.
       diag,

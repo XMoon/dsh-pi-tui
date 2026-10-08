@@ -27,9 +27,10 @@ import type { TerminalProgressMode } from '../src/domain/terminal-progress/setti
 import type { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import { createSurfaceRuntime, type SurfaceRuntime } from '../src/app/surface/runtime.ts'
+import { createTerminalProgressInterval } from '../src/domain/terminal-progress/interval.ts'
 import { createSurfaceLifecycle } from '../src/app/bootstrap/lifecycle.ts'
 import { createInteractionRuntime } from '../src/app/surface/interaction-runtime.ts'
-import type { RoutedSessionEvent, SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
+import type { MainProgressAuthority, RoutedSessionEvent, SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { TerminalNotificationPresentation } from '../src/app/surface/notification-runtime.ts'
 import type { ApprovalOutcome } from '../src/tui/panels/approval-dialog.ts'
 import type {
@@ -388,6 +389,12 @@ interface MountSurfaceOptions {
   /** The diagnostics channel the evidence fold reports unknown reason kinds
    *  through (absent in production-shaped fixtures without a runner). */
   readonly diag?: Diag
+  /**
+   * Which adapter owns the main terminal outcome (R1 §5.3). Defaults to the
+   * Direct local-evidence authority; a remote-authority mount proves the
+   * mutual-exclusion gate (the durable ingress never writes the local fold).
+   */
+  readonly mainProgressAuthority?: MainProgressAuthority
 }
 
 /**
@@ -529,6 +536,7 @@ function mountSurface(
     notificationMode: options.notificationMode,
     notificationMethod: options.notificationMethod,
     terminalProgress: options.terminalProgress,
+    mainProgressAuthority: options.mainProgressAuthority ?? 'local-events',
     ...(options.diag === undefined ? {} : { diag: options.diag }),
     createPluginManagerPanel,
   })
@@ -1540,6 +1548,90 @@ test('an unmatched turn/end never becomes the interval outcome', async () => {
       'no matched turn/end means NO completion evidence — never a guessed done/error')
   } finally {
     h.dispose()
+  }
+})
+
+test('the Remote authority keeps the durable ingress out of the local interval', async () => {
+  // R1 §5.3 (STOP-DOUBLE): on the Remote branch the Host evidence stream owns
+  // the main terminal outcome, so the durable `session/event` ingress may feed
+  // the transcript but must NEVER settle the local interval. The interval is
+  // activated the way the Host evidence will activate it; in this fixture the
+  // surface's own status routing stands in for that Host edge (production never
+  // installs the Direct `agent/status` channel on the Remote branch), while the
+  // DURABLE turn evidence below is the real ingress under test.
+  const h = mountSurface((controls) => controls.setOwner('main'), { mainProgressAuthority: 'host-snapshot' })
+  try {
+    await drain()
+    h.routeStatus('main', 'running')
+    await drain()
+    h.routeSession({ type: 'turn/start', data: { turn: 1 } })
+    h.routeSession({ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await drain()
+    assert.deepEqual(h.programWrites, [IDLE, WORKING],
+      'the durable turn evidence writes NOTHING under the Remote authority')
+    h.routeStatus('main', 'idle')
+    await drain()
+    assert.deepEqual(h.programWrites, [IDLE, WORKING, IDLE],
+      'the settled outcome cannot come from the durable ingress — the Host evidence owns it')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('L4: the Direct adapter publishes exactly the shared fold commits for the same evidence', async () => {
+  // R1 §5.4: the SAME explainable evidence sequence drives (a) the mounted
+  // surface's real Direct adapter and (b) a bare shared-fold instance. The two
+  // must agree commit for commit — this is the shared-semantics proof, not a
+  // pre-computed-outcome parity.
+  const labels = (active: boolean, outcome: string): string =>
+    active ? WORKING : (outcome === 'done' ? DONE : outcome === 'error' ? ERROR : IDLE)
+  type Step =
+    | { readonly status: boolean }
+    | { readonly turnStart: number }
+    | { readonly turnEnd: readonly [number, string] }
+  const scripts: ReadonlyArray<readonly Step[]> = [
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [1, 'completed'] }, { status: false }],
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [1, 'error'] }, { status: false }],
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [1, 'max-tokens'] }, { status: false }],
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [1, 'aborted'] }, { status: false }],
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [1, 'a-future-kind-not-in-this-repo'] }, { status: false }],
+    // The LAST valid closed turn decides; an unmatched end never does.
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [1, 'completed'] }, { turnStart: 2 }, { turnEnd: [2, 'error'] }, { status: false }],
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [9, 'completed'] }, { status: false }],
+    // An unclosed open turn has no evidence at all.
+    [{ status: true }, { turnStart: 1 }, { status: false }],
+    // Repeated statuses are inert in both directions.
+    [{ status: true }, { status: true }, { turnStart: 1 }, { turnEnd: [1, 'completed'] }, { status: false }, { status: false }],
+    // A second, independent interval settles on its own evidence.
+    [{ status: true }, { turnStart: 1 }, { turnEnd: [1, 'aborted'] }, { status: false }, { status: true }, { turnStart: 2 }, { turnEnd: [2, 'completed'] }, { status: false }],
+  ]
+  for (const [index, script] of scripts.entries()) {
+    const h = mountSurface((controls) => controls.setOwner('main'))
+    try {
+      await drain()
+      const fold = createTerminalProgressInterval()
+      const expected: string[] = []
+      for (const step of script) {
+        if ('status' in step) {
+          const progress = fold.status(step.status)
+          if (progress !== undefined) expected.push(labels(progress.active, progress.outcome))
+          h.routeStatus('main', step.status ? 'running' : 'idle')
+        } else if ('turnStart' in step) {
+          fold.turnStart(step.turnStart)
+          h.routeSession({ type: 'turn/start', data: { turn: step.turnStart } })
+        } else {
+          fold.turnEnd(step.turnEnd[0], step.turnEnd[1])
+          h.routeSession({ type: 'turn/end', data: { turn: step.turnEnd[0], reason: { kind: step.turnEnd[1] } } })
+        }
+        await drain()
+      }
+      // `slice(1)` drops the mount's initial idle assertion: the script drives
+      // the interval AFTER the mount, exactly like the fold instance.
+      assert.deepEqual(h.programWrites.slice(1), expected,
+        `script ${String(index)} must publish exactly the shared fold's commits`)
+    } finally {
+      h.dispose()
+    }
   }
 })
 
