@@ -261,6 +261,17 @@ export interface SurfaceRuntimeOptions {
 }
 
 /**
+ * PR2: one captured ACTIVE projection target: the subject identity AND the
+ * exact source instances, sampled together before the commit.
+ */
+interface ProjectionTarget {
+  readonly folder: TranscriptFolder
+  readonly controller: TranscriptWindowController
+  readonly subjectKind: 'main' | 'viewed-child'
+  readonly subjectId: string | undefined
+}
+
+/**
  * PR2: one already-SELECTED, already-windowed transcript projection, published
  * to the optional {@link SurfaceRuntimeOptions.onTranscriptProjected} observer
  * AFTER the mounted app received it.
@@ -750,7 +761,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * replaced fold's token be collected. This deliberately does NOT give the
    * read-only observer the mutable fold instance.
    */
-  const projectionTokens = new WeakMap<object, object>()
+  const projectionTokens = new Map<object, object>()
   const projectionTokenFor = (source: object): object => {
     let token = projectionTokens.get(source)
     if (token === undefined) {
@@ -761,28 +772,43 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   /**
-   * PR2: publish ONE already-computed projection to the optional read-only
-   * observer. It never re-windows, re-folds or re-reads the log: it hands over
-   * the SAME messages the mounted app just received, and re-checks the active
-   * target through the SAME owner reads the selection above used. A target the
-   * surface has already left, or a torn-down surface, publishes nothing — the
-   * currentness token is the target's own object identity, never an invented
-   * generation.
+   * PR2: capture the ACTIVE projection target — the selected subject AND the
+   * exact source instances — at ONE synchronous instant, so a frame can never
+   * mix one subject's messages with another subject's identity.
    */
-  const publishProjected = (
+  const captureProjectionTarget = (
     folder: TranscriptFolder,
     controller: TranscriptWindowController,
-    messages: readonly TranscriptMessage[],
-  ): void => {
-    if (projectionObserver === undefined || isCleanedUp()) return
-    // Re-sample AFTER the commit: `setTranscript()` can synchronously run
-    // plugin/modal callbacks that switch the viewed child or the session.
-    if (folder !== activeFolder() || controller !== activeWindow()) return
+  ): ProjectionTarget => {
     const viewedChildId = routing().viewedChildId()
-    projectionObserver({
+    return {
+      folder,
+      controller,
       subjectKind: viewedChildId === undefined ? 'main' : 'viewed-child',
       subjectId: viewedChildId ?? routing().currentSessionId(),
-      sourceIdentity: projectionTokenFor(folder),
+    }
+  }
+
+  /**
+   * PR2: publish ONE already-computed projection to the optional read-only
+   * observer. It never re-windows, re-folds or re-reads the log: it hands over
+   * the SAME messages the mounted app just received. The CAPTURED target must
+   * still be the live one in ALL FOUR parts — the source instances AND the
+   * subject identity: `setTranscript()` can synchronously run plugin/modal
+   * callbacks that hand the session over to another owner while the previous
+   * subject's fold/window are still mounted, and those messages must never be
+   * relabelled with the new subject's id. The frame carries the CAPTURED
+   * identity, never a re-read one; a torn-down surface publishes nothing.
+   */
+  const publishProjected = (target: ProjectionTarget, messages: readonly TranscriptMessage[]): void => {
+    if (projectionObserver === undefined || isCleanedUp()) return
+    const current = captureProjectionTarget(activeFolder(), activeWindow())
+    if (current.folder !== target.folder || current.controller !== target.controller
+      || current.subjectKind !== target.subjectKind || current.subjectId !== target.subjectId) return
+    projectionObserver({
+      subjectKind: target.subjectKind,
+      subjectId: target.subjectId,
+      sourceIdentity: projectionTokenFor(target.folder),
       messages,
     })
   }
@@ -813,13 +839,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       ...(endTurn === undefined ? {} : { endTurn }),
     })
     onProjected?.()
+    // Capture the subject identity and its source at ONE instant BEFORE the
+    // commit; the frame publishes only if all four are still live afterwards.
+    const target = projectionObserver === undefined ? undefined : captureProjectionTarget(folder, controller)
     mounted().setTranscript(projection.messages, folder.turnActivities(), {
       ...controller.state(),
       firstTurn: projection.firstTurn,
       lastTurn: projection.lastTurn,
       hasNewer: projection.hasNewer,
     }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.())
-    publishProjected(folder, controller, projection.messages)
+    if (target !== undefined) publishProjected(target, projection.messages)
   }
   /** Repaint the ACTIVE target (main or the mounted viewed child). */
   const repaintActive = (

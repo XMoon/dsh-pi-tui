@@ -44,6 +44,13 @@ import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import type { TranscriptMessage } from '../src/domain/transcript/types.ts'
 import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
+import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
+import {
+  createSessionPresentation,
+  type SessionPresentation,
+} from '../src/app/surface/session-presentation.ts'
+import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
+import type { Diag } from '../src/runtime/process/diagnostics.ts'
 import {
   createSurfaceRuntime,
   type SurfaceRuntime,
@@ -62,6 +69,8 @@ process.env.FORCE_COLOR = ''
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SESSION_ID = 'session-live-pr2'
 const CHILD_ID = 'session-child-pr2'
+/** The Remote-branch session id (the bounded-window hydration fixture). */
+const REMOTE_ID = 'remote-session-pr2'
 const T0 = 1_700_000_000_000
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -99,6 +108,22 @@ function toolResult(seq: number, id: string, text: string): SessionEvent {
       content: [{ type: 'text', text }],
       source: { kind: 'tool', callId: ToolCallId(id) },
     },
+  }, seq)
+}
+
+/** One settled assistant message (the hydrated cold-log shape). */
+function assistantMessage(seq: number, id: string, text: string): SessionEvent {
+  return ev('assistant/message', {
+    turn: 1,
+    step: 0,
+    message: {
+      id: MessageId(id),
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+    },
+    stream: [],
+    usage: { inputTokens: 1, outputTokens: 1 },
   }, seq)
 }
 
@@ -143,6 +168,11 @@ interface Harness {
   /** Replace the main fold under the SAME session id and re-bind the retained
    *  window controller (the session commit / cold rehydrate shape). */
   replaceMain(): void
+  /** Hand the session over to another id WITHOUT touching the fold/window —
+   *  the pre-hydration window of a session switch inside a commit. */
+  handoverOwner(sessionId: string): void
+  /** Install/replace the hook that runs inside the patched `setTranscript()`. */
+  armCommitHook(fn: (() => void) | undefined): void
   dispose(): void
 }
 
@@ -164,6 +194,8 @@ function mountHarness(options: {
   const committed: Array<readonly TranscriptMessage[]> = []
   let viewed: { id: string; folder: TranscriptFolder; window: TranscriptWindowController } | undefined
   let attached = true
+  let ownerSessionId = SESSION_ID
+  let commitHook = options.duringCommit
   let currentAgent: object | undefined
   const agents = new Map<string, object>()
   const previews = new Map()
@@ -196,8 +228,8 @@ function mountHarness(options: {
   const source: SurfaceEventRoutingSource<SessionEvent> = {
     isCleanedUp: () => false,
     isAttachedSession: session => attached
-      && (session.id === SESSION_ID || (viewed !== undefined && session.id === viewed.id)),
-    currentSessionId: () => SESSION_ID,
+      && (session.id === ownerSessionId || (viewed !== undefined && session.id === viewed.id)),
+    currentSessionId: () => ownerSessionId,
     hasLiveAgent: () => true,
     completionOwnerId: () => undefined,
     observeMainEvent: () => ({ refreshAgents: false }),
@@ -273,7 +305,7 @@ function mountHarness(options: {
   app.setTranscript = (...args: Parameters<TuiApp['setTranscript']>) => {
     committed.push(args[0])
     const result = originalSetTranscript.call(app, ...args)
-    options.duringCommit?.()
+    commitHook?.()
     return result
   }
 
@@ -298,6 +330,8 @@ function mountHarness(options: {
       folder = new TranscriptFolder()
       controller.setTurns(folder.groupedTurns())
     },
+    handoverOwner(sessionId) { ownerSessionId = sessionId },
+    armCommitHook(fn) { commitHook = fn },
     dispose() {
       surface.dispose()
       restoreTerminal()
@@ -660,6 +694,37 @@ test('P2-10: a subject switch performed synchronously inside setTranscript drops
   }
 })
 
+// ── P2-10: a synchronous OWNER change never relabels the stale frame ────────
+
+test('P2-10: an owner handover under the SAME fold/window never relabels the stale frame', () => {
+  const seen: TranscriptProjectionFrame[] = []
+  const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'owner A prompt'))
+    harness.surface.paintNow()
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0]!.subjectId, SESSION_ID)
+
+    // The commit's synchronous callback hands the session over to B while A's
+    // fold AND window are still mounted (B is not hydrated yet): the source
+    // objects are unchanged, only the SUBJECT identity moved.
+    harness.armCommitHook(() => harness.handoverOwner('session-owner-b'))
+    harness.surface.paintNow()
+    assert.equal(seen.length, 1, 'A\'s messages are never relabelled with B\'s subject id')
+    harness.armCommitHook(undefined)
+
+    // B's own valid projection publishes again, as B.
+    harness.surface.paintNow()
+    assert.equal(seen.length, 2, 'the current subject publishes normally')
+    assert.equal(seen[1]!.subjectId, 'session-owner-b')
+    assert.equal(seen[0]!.sourceIdentity, seen[1]!.sourceIdentity,
+      'the same fold keeps its identity: only the subject identity was re-scoped away')
+  } finally {
+    harness.dispose()
+  }
+})
+
 // ── P2-06 / P2-07: a replaced fold under the SAME session id ────────────────
 
 test('P2-06/P2-07: a replaced fold under the SAME session id is a new projection scope', () => {
@@ -805,4 +870,346 @@ test('P2-12/P2-14: the TSP sink owns its own tty and no product source imports t
   }
   const bootstrap = readFileSync(join(ROOT, 'src', 'app', 'bootstrap.ts'), 'utf8')
   assert.doesNotMatch(bootstrap, /onTranscriptProjected/u, 'the production composition never injects the PR2 observer')
+})
+
+// ── P2-01 / P2-07: the REAL SessionPresentation hydration paths ─────────────
+
+interface PresentationHarness {
+  readonly surface: SurfaceRuntime<SessionEvent>
+  readonly presentation: SessionPresentation<SessionEvent>
+  readonly app: TuiApp
+  readonly vt: VirtualTerminal
+  readonly frames: TranscriptProjectionFrame[]
+  readonly committed: Array<readonly TranscriptMessage[]>
+  /** Replace the Remote reader's CURRENT window with its real event range. */
+  setWindow(events: readonly SessionEvent[], hasMore: boolean): void
+  /** Flip the ownership-generation fence the Remote commit is checked against. */
+  setCurrent(value: boolean): void
+  /** Run `fn` while the NEXT Remote read is pending (fence captured, commit not run). */
+  onMidRead(fn: (() => void) | undefined): void
+  /** The production Direct cold hydration (`initLiveSession`). */
+  initDirect(events: readonly SessionEvent[]): Promise<void>
+  /** The production Remote cold hydration (`initLiveRemoteSession`). */
+  initRemote(): Promise<void>
+  /** The production Remote rehydrate after an older-history page (`rehydrateFromWindow`). */
+  rehydrate(): Promise<void>
+  mainFolder(): TranscriptFolder
+  mainWindow(): TranscriptWindowController
+  dispose(): void
+}
+
+/**
+ * Mount the REAL `SurfaceRuntime` + `TuiApp` over a REAL `SessionPresentation`:
+ * the production hydration owns the main transcript fold and its repaint goes
+ * through the same `repaintTarget()` the observer hangs off. Only the runners'
+ * capabilities (status/history/commands/viewer/diagnostics) and the Remote
+ * reader snapshot are stand-ins.
+ */
+function mountPresentationHarness(options: {
+  readonly sessionId: string
+  readonly onTranscriptProjected: (frame: TranscriptProjectionFrame) => void
+}): PresentationHarness {
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const frames: TranscriptProjectionFrame[] = []
+  const committed: Array<readonly TranscriptMessage[]> = []
+  let window: PresentationReadSnapshot | undefined
+  let current = true
+  let midRead: (() => void) | undefined
+  const liveTransportToken: unknown = { generation: 1 }
+
+  const surface = createSurfaceRuntime<SessionEvent>({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: nullPresentation,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    terminalProgress: undefined,
+    createPluginManagerPanel,
+    onTranscriptProjected: frame => {
+      frames.push(frame)
+      options.onTranscriptProjected(frame)
+    },
+  })
+
+  const noop = (): void => {}
+  const diag = { info: noop, warn: noop, error: noop, debug: noop, dispose: noop } as unknown as Diag
+  const presentation = createSessionPresentation<SessionEvent>({
+    surface,
+    diag,
+    summaryKeys: toolSummaryKeys,
+    isCleanedUp: () => false,
+    refreshStatusCheap: noop,
+    folds: { title: () => undefined },
+    direct: {
+      installModelSelection: noop,
+      assistantStreamBaselineFor: () => [],
+      planActive: () => false,
+    },
+    status: {
+      setGoalText: noop,
+      refresh: noop,
+      refreshTerminalTitle: noop,
+      refreshTerminalCwd: noop,
+      updateWelcomeCard: noop,
+      scheduleInitialMeasurement: noop,
+    },
+    history: { rememberCwd: noop, currentCwd: () => '/tmp', records: () => [], setLastContent: noop },
+    commands: { register: noop },
+    submission: { clearPending: noop },
+    viewer: { resetAutoPop: noop, teardownForSessionSwap: noop },
+    remote: {
+      read: async () => {
+        // Resolve on a later microtask so a mid-read hook can move the ownership
+        // generation between the fence capture (before the await) and the commit.
+        if (midRead !== undefined) {
+          const hook = midRead
+          midRead = undefined
+          await Promise.resolve()
+          hook()
+        }
+        return window
+      },
+      running: () => false,
+      plan: () => false,
+      facts: () => ({}),
+      captureTransportToken: () => liveTransportToken,
+      isTransportTokenCurrent: (_sessionId, token) => Object.is(token, liveTransportToken),
+      isStillCurrent: () => current,
+    },
+  })
+
+  const source: SurfaceEventRoutingSource<SessionEvent> = {
+    isCleanedUp: () => false,
+    isAttachedSession: session => session.id === options.sessionId,
+    currentSessionId: () => options.sessionId,
+    hasLiveAgent: () => true,
+    completionOwnerId: () => undefined,
+    observeMainEvent: () => ({ refreshAgents: false }),
+    appendOpeningViewerEvent: () => false,
+    main: () => presentation.main,
+    viewedChildId: () => undefined,
+    viewedChild: () => { throw new Error('the presentation fixture has no child viewer') },
+    mainFolder: () => presentation.mainFolder(),
+    viewedChildFolder: () => { throw new Error('the presentation fixture has no child viewer') },
+    pendingSubjectId: () => undefined,
+    pendingSnapshot: () => undefined,
+    submissionEchoes: () => undefined,
+    queueTextOf: () => '',
+    exitView: noop,
+    refreshStatusCheap: noop,
+    refreshStatusAndWelcome: noop,
+    applyGoalChange: noop,
+    sessionTitleOf: () => undefined,
+    extendLoadedHistory: () => false,
+    settleLocalSubmitAck: noop,
+    markSubmitLatency: noop,
+    observeDurableSubmission: noop,
+    markContextDirty: noop,
+    refreshContextMeasurement: noop,
+    currentWorkingFromLog: () => false,
+    flushTurn: noop,
+    registeredAgentIs: () => false,
+    isCurrentOwnerAgent: () => false,
+    viewedChildAgent: () => undefined,
+    setViewedChildAgent: noop,
+    setViewedQueueAgent: noop,
+    agentForSession: () => undefined,
+    applyViewedChildAssistantInput: noop,
+    applyMainAssistantInput: noop,
+  }
+  surface.attachEventRouting(source)
+  surface.start({
+    events: { onSubmit: () => {}, onExit: () => {} },
+    workspaceRoot: '/tmp',
+    iconStyle: 'emoji',
+    displayState: { preset: 'compact' },
+    historySearchSource: { search: () => Promise.reject(new Error('not exercised by this test')) },
+    readImage: () => Promise.reject(new Error('not exercised by this test')),
+    imageScope: () => undefined,
+    present: { call: () => undefined, result: () => undefined },
+    sessionCwd: () => '/tmp',
+    sessionId: () => options.sessionId,
+    onTerminalResize: () => {},
+    copySelection: async () => false,
+    openExternalUrl: () => {},
+    readClipboardText: async () => undefined,
+    imageFallbackColor: text => text,
+  })
+
+  const app = surface.app
+  const prototype = Object.getPrototypeOf(app) as { setTranscript: TuiApp['setTranscript'] }
+  const originalSetTranscript = prototype.setTranscript
+  app.setTranscript = (...args: Parameters<TuiApp['setTranscript']>) => {
+    committed.push(args[0])
+    return originalSetTranscript.call(app, ...args)
+  }
+
+  return {
+    surface,
+    presentation,
+    app,
+    vt,
+    frames,
+    committed,
+    setWindow(events, hasMore) {
+      window = Object.freeze({
+        sessionId: options.sessionId,
+        durableEvents: Object.freeze([...events]),
+        liveInputs: Object.freeze([] as readonly AssistantLiveInput[]),
+        revision: 1,
+        coverage: 'bounded',
+        hasMore,
+        loadingOlder: false,
+        openState: 'open',
+      })
+    },
+    setCurrent(value) { current = value },
+    onMidRead(fn) { midRead = fn },
+    async initDirect(events) {
+      await presentation.initLiveSession({
+        session: { id: options.sessionId, header: { cwd: '/tmp' }, snapshotEvents: () => events },
+      })
+    },
+    async initRemote() { await presentation.initLiveRemoteSession(options.sessionId) },
+    async rehydrate() { await presentation.rehydrateFromWindow(options.sessionId) },
+    mainFolder: () => presentation.mainFolder(),
+    mainWindow: () => presentation.mainWindow(),
+    dispose() {
+      surface.dispose()
+      restoreTerminal()
+    },
+  }
+}
+
+test('P2-01: the production Direct cold hydration publishes the first projection', async () => {
+  const tern = new ScriptedTern()
+  const { session, surface: sdk } = await openTern(tern)
+  const bridge = createBridge(sdk)
+  const harness = mountPresentationHarness({
+    sessionId: SESSION_ID,
+    onTranscriptProjected: frame => bridge.project(frame),
+  })
+  try {
+    const hydrated = [
+      ev('turn/start', { turn: 1 }, 0),
+      userMessage(1, 'user-1', 'cold hydrated prompt'),
+      assistantMessage(2, 'assistant-1', 'cold hydrated answer'),
+    ]
+    await harness.initDirect(hydrated)
+    await settle()
+
+    assert.equal(harness.committed.length, 1, 'the hydration commit is the ONLY commit')
+    assert.equal(harness.frames.length, 1, 'the cold hydration published exactly one frame')
+    const frame = harness.frames[0]!
+    assert.equal(frame.subjectKind, 'main')
+    assert.equal(frame.subjectId, SESSION_ID)
+    assert.equal(frame.messages, harness.committed[0], 'the frame carries the committed array itself')
+    assert.ok(hasUserText(frame.messages, 'cold hydrated prompt'), 'the hydrated prompt is in the first projection')
+    assert.ok(frame.messages.some(message => message.kind === 'assistant'), 'the hydrated answer is in the first projection')
+    assert.equal(harness.mainFolder().messages().length, frame.messages.length,
+      'the observed projection is the fold the production hydration installed')
+    assert.ok(tern.frames.length > 0, 'the hydrated first projection rendered through the real SDK')
+  } finally {
+    harness.dispose()
+    await sdk.close({ keep: false })
+    await session.close()
+  }
+})
+
+test('P2-07: the production Remote rehydrate publishes the widened window as a new scope', async () => {
+  const tern = new ScriptedTern()
+  const { session, surface: sdk } = await openTern(tern)
+  const bridge = createBridge(sdk)
+  const harness = mountPresentationHarness({
+    sessionId: REMOTE_ID,
+    onTranscriptProjected: frame => bridge.project(frame),
+  })
+  try {
+    const tail = [
+      ev('turn/start', { turn: 2 }, 8),
+      userMessage(9, 'u-tail', 'tail prompt'),
+      assistantMessage(10, 'a-tail', 'tail answer'),
+    ]
+    const older = [
+      ev('turn/start', { turn: 1 }, 0),
+      userMessage(1, 'u-older', 'older prompt'),
+      assistantMessage(2, 'a-older', 'older answer'),
+      ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+    ]
+
+    // The FIRST bounded window: the newer tail only, older history unpaged.
+    harness.setWindow(tail, true)
+    await harness.initRemote()
+    await settle()
+    assert.equal(harness.frames.length, 1)
+    const first = harness.frames[0]!
+    assert.equal(first.subjectId, REMOTE_ID)
+    assert.ok(hasUserText(first.messages, 'tail prompt'), 'the window tail is projected')
+    assert.equal(hasUserText(first.messages, 'older prompt'), false, 'the unpaged history is not projected')
+    const controllerBefore = harness.mainWindow()
+    const staleFolder = harness.mainFolder()
+
+    // The older page joins the reader window: the production rehydrate replaces
+    // the fold itself.
+    harness.setWindow([...older, ...tail], false)
+    await harness.rehydrate()
+    await settle()
+    assert.equal(harness.frames.length, 2, 'the widened window published')
+    const second = harness.frames[1]!
+    assert.equal(second.subjectId, REMOTE_ID, 'the Session id did not change')
+    assert.notEqual(second.sourceIdentity, first.sourceIdentity, 'the widened window is a NEW fold scope')
+    assert.notEqual(harness.mainFolder(), staleFolder, 'the production rehydrate installed a new fold')
+    assert.equal(harness.mainWindow(), controllerBefore, 'the ONE window controller is retained and re-bound')
+    assert.ok(hasUserText(second.messages, 'older prompt'), 'the widened window projects the earlier history')
+    assert.ok(hasUserText(second.messages, 'tail prompt'), 'the newer tail is preserved')
+    assert.equal(second.messages, harness.committed[1], 'the frame carries the committed array itself')
+
+    // A later ordinary repaint stays on the new scope.
+    harness.surface.paintNow()
+    assert.equal(harness.frames[2]!.sourceIdentity, second.sourceIdentity, 'the new source keeps one identity')
+    assert.ok(hasUserText(harness.frames[2]!.messages, 'older prompt'))
+  } finally {
+    harness.dispose()
+    await sdk.close({ keep: false })
+    await session.close()
+  }
+})
+
+test('P2-07: a stale Remote read installs no fold and publishes nothing', async () => {
+  const seen: TranscriptProjectionFrame[] = []
+  const harness = mountPresentationHarness({
+    sessionId: REMOTE_ID,
+    onTranscriptProjected: frame => void seen.push(frame),
+  })
+  try {
+    const tail = [
+      ev('turn/start', { turn: 2 }, 8),
+      userMessage(9, 'u-tail', 'tail prompt'),
+    ]
+    const older = [
+      ev('turn/start', { turn: 1 }, 0),
+      userMessage(1, 'u-older', 'older prompt'),
+      ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+    ]
+    harness.setWindow(tail, true)
+    await harness.initRemote()
+    assert.equal(seen.length, 1)
+    const installed = harness.mainFolder()
+
+    // The ownership generation moves (a session switch/rollover) while the
+    // widening read is in flight: the commit must be dropped by the §6.5 fence.
+    harness.setWindow([...older, ...tail], false)
+    harness.onMidRead(() => harness.setCurrent(false))
+    await harness.rehydrate()
+    assert.equal(seen.length, 1, 'the stale widening published nothing')
+    assert.equal(harness.mainFolder(), installed, 'the stale read installed no new fold')
+
+    // A current read still commits.
+    harness.setCurrent(true)
+    await harness.rehydrate()
+    assert.equal(seen.length, 2, 'the current widening commits')
+    assert.ok(hasUserText(seen[1]!.messages, 'older prompt'))
+  } finally {
+    harness.dispose()
+  }
 })
