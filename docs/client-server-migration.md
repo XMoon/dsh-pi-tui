@@ -6068,12 +6068,12 @@ removed.
 
 Root ledger: `stable = 5`, `legacy = 86`.
 
-## TS8-F status (local delivery accepted; root ledger closed — final CI and F7 merge PENDING) — stable = 7, legacy = 0
+## TS8-F status (DONE) — final source-root convergence (stable = 7, legacy = 0)
 
-TS8-F has closed the Post-M3 source-root migration locally: all 49 residual root
-modules carry an accepted final disposition — 48 retired into their canonical
-owners with no forwarding shim, and `builtins.ts` reclassified as a stable
-package/plugin entry — so the ledger ends at
+TS8-F is complete: the Post-M3 source-root convergence closed with all 49
+residual root modules carrying an accepted final disposition — 48 retired into
+their canonical owners with no forwarding shim, and `builtins.ts` reclassified
+as a stable package/plugin entry — so the ledger ends at
 
 ```text
 stable = 7   builtins.ts, commands.ts, extensions.ts, index.ts, startup.ts,
@@ -6081,11 +6081,14 @@ stable = 7   builtins.ts, commands.ts, extensions.ts, index.ts, startup.ts,
 legacy = 0
 ```
 
-The stage's DONE state is claimed only when the plan §19 exit ledger is met:
-F1–F7 merged sequentially, `next` current, and the final HEAD's CI green. At the
-time of writing, F1–F6 are merged, `refactor/ts8-f7-final-closure` (PR #250) is
-open against `next`, and its CI is re-running — so this section records the
-accepted local delivery, not a completed stage.
+The seven stages landed in the frozen order — F1 process foundation, F2
+bootstrap/config/launcher, F3 command/communication policy, F4
+session/viewer/task, F5 transcript/search/disclosure, F6
+tool/shell/terminal/completion, F7 final closure — and F1–F6 are merged into
+`next`; this section arrives on `next` with the F7 closure merge
+(`refactor/ts8-f7-final-closure`, PR #250), which is the stage's exit step.
+The plan §19 exit ledger is then satisfied: F1–F7 merged sequentially, `next`
+current, and the final HEAD's CI green.
 
 Delivery followed the frozen seven-PR order: F1 process foundation, F2
 bootstrap/config/launcher, F3 command/communication policy, F4
