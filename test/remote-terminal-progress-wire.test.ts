@@ -541,17 +541,42 @@ test('L5: the Client source validates every frame and fences provenance/transpor
     'a first snapshot is honestly idle',
   )
 
-  // A reconnect snapshot CONTINUING the observed interval carries the proven
-  // outcome and is NOT a restart; a different hostEpoch/agentEpoch forces idle
-  // and restarts the lineage.
-  const continued = sourceWithWatches([
-    [frameOf({ running: true, outcome: 'idle', revision: 1 })],
-    [frameOf({ running: false, outcome: 'done', revision: 2 })],
+  // OWNER REVIEW P1: a NEW watch never inherits a terminal state, even when the
+  // Host reports the SAME `hostEpoch` + `agentEpoch` (the TUI owner switched away
+  // and re-adopted the session while the Host Agent stayed the same instance).
+  // Provenance belongs to the interval ONE watch observed, so the re-adopted
+  // owner opens on the Host's current running truth and `idle`.
+  const reAdopted = sourceWithWatches([
+    [frameOf({ running: true, outcome: 'idle', revision: 1 }),
+      frameOf({ kind: 'update', running: false, outcome: 'done', revision: 2 })],
+    [frameOf({ running: false, outcome: 'done', revision: 3 })],
   ]).source
-  await drain(continued, sessionId)
-  assert.deepEqual(await drain(continued, sessionId),
-    [{ kind: 'snapshot', restart: false, running: false, outcome: 'done' }],
-    'a snapshot continuing the same interval carries the proven done')
+  assert.deepEqual(await drain(reAdopted, sessionId), [
+    { kind: 'snapshot', restart: true, running: true, outcome: 'idle' },
+    { kind: 'update', restart: false, running: false, outcome: 'done' },
+  ], 'the first watch proves its own done end to end')
+  assert.deepEqual(await drain(reAdopted, sessionId),
+    [{ kind: 'snapshot', restart: true, running: false, outcome: 'idle' }],
+    'a re-adopted owner never inherits the previous owner terminal state')
+
+  // A frame the consumer REJECTS (the owner moved mid-stream) leaves nothing
+  // behind: the rejection ends the watch and the next watch still opens idle.
+  const crossed = sourceWithWatches([
+    [frameOf({ running: true, outcome: 'idle', revision: 1 }),
+      frameOf({ kind: 'update', running: false, outcome: 'done', revision: 2 })],
+    [frameOf({ running: false, outcome: 'done', revision: 3 })],
+  ]).source
+  const crossedSeen: RemoteMainProgressFact[] = []
+  let stillCurrent = true
+  await consumeRemoteTerminalProgress(crossed, sessionId, new AbortController().signal, {
+    isCurrent: () => stillCurrent,
+    onFact: (fact) => { crossedSeen.push(fact); stillCurrent = false },
+  })
+  assert.deepEqual(crossedSeen, [{ kind: 'snapshot', restart: true, running: true, outcome: 'idle' }],
+    'a fact whose owner moved is never applied')
+  assert.deepEqual(await drain(crossed, sessionId),
+    [{ kind: 'snapshot', restart: true, running: false, outcome: 'idle' }],
+    'a rejected frame leaves no provenance for the next watch')
 
   const replaced = sourceWithWatches([
     [frameOf({ running: true, outcome: 'idle', revision: 1 })],

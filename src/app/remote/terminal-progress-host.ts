@@ -252,7 +252,20 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
     } finally {
       signal.removeEventListener('abort', onAbort)
       record.subscribers.delete(queue)
+      this.reclaim(record)
     }
+  }
+
+  /**
+   * Drop a record nobody watches and no Agent owns. A watch of a session that
+   * has no live Agent must not leave an empty record behind for the rest of the
+   * Host's life: it is observable by nothing, and the next Agent lifetime starts
+   * a FRESH record carrying a HIGHER `agentEpoch` (the epoch counter never
+   * rewinds), so no Client provenance can be resurrected across the gap.
+   */
+  private reclaim(record: SessionRecord): void {
+    if (record.subscribers.size > 0 || record.agent !== undefined) return
+    if (this.records.get(record.sessionId) === record) this.records.delete(record.sessionId)
   }
 
   /** The live `agent/status` transition of one Agent (plan §6.4). */

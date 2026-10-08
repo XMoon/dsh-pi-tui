@@ -63,6 +63,11 @@ async function mountHost(deps: {
   return { ctx, service, fiber, emit }
 }
 
+/** The row's per-session records (the production instance, not a reflection proxy). */
+function recordsOf(service: PiTuiTerminalProgressHostService): Map<string, unknown> {
+  return (service as unknown as { records: Map<string, unknown> }).records
+}
+
 /** Read exactly `count` frames from one watch. */
 async function read(
   iterator: AsyncIterator<PiTuiTerminalProgressFrame>,
@@ -347,6 +352,46 @@ test('a subscriber that stops draining fails explicitly instead of losing an edg
     /subscriber queue overflowed/u,
     'an overflowing subscriber stream fails explicitly',
   )
+})
+
+test('a session with no live Agent leaves no record behind once it is unwatched', async (t) => {
+  // A watch of a session whose Agent is gone must not grow an immortal record:
+  // nothing can observe it, and the next Agent lifetime opens a FRESH record with
+  // a higher epoch, so a reclaimed record can never resurrect older provenance.
+  const session = { id: SESSION_ID }
+  let live: LiveAgentLike | undefined
+  const host = await mountHost({ agentFor: () => live, onUnknownReason: () => {} })
+  t.after(async () => { await host.ctx.fiber.dispose() })
+  const controller = new AbortController()
+  t.after(() => { controller.abort() })
+
+  // Repeated subscribe/unsubscribe of an Agent-less session.
+  let firstEpoch = 0
+  for (let round = 0; round < 3; round += 1) {
+    const iterator = host.service.watch(SESSION_ID, controller.signal)[Symbol.asyncIterator]()
+    const [snapshot] = await read(iterator, 1, `empty-${String(round)}`)
+    if (round === 0) firstEpoch = snapshot.agentEpoch
+    assert.deepEqual(
+      { running: snapshot.running, agentEpoch: snapshot.agentEpoch },
+      { running: false, agentEpoch: 0 },
+      'an Agent-less session opens at epoch 0',
+    )
+    assert.equal(recordsOf(host.service).has(SESSION_ID), true, 'the subscribed watch holds the record')
+    await iterator.return?.(undefined)
+    assert.equal(recordsOf(host.service).has(SESSION_ID), false,
+      'the unwatched, Agent-less record is reclaimed')
+  }
+
+  // A real Agent starting afterwards still binds through a brand-new record.
+  live = agent('agent-a', session, 'running')
+  const reopened = host.service.watch(SESSION_ID, controller.signal)[Symbol.asyncIterator]()
+  const [bound] = await read(reopened, 1, 'empty-rebound')
+  assert.deepEqual(
+    { running: bound.running, agentEpoch: bound.agentEpoch > firstEpoch },
+    { running: true, agentEpoch: true },
+    'the next Agent lifetime binds a fresh record with a higher epoch',
+  )
+  await reopened.return?.(undefined)
 })
 
 test('the cut loses no edge and replays none, and the fiber disposal closes the watchers', async (t) => {

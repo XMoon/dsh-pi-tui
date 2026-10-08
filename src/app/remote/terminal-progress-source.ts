@@ -23,7 +23,6 @@
  */
 
 import type { RemoteStreamHandle } from '@deepseek-ai/dsh-typert-protocol'
-import type { TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
 import {
   parsePiTuiTerminalProgressFrame,
   type PiTuiTerminalProgressFrame,
@@ -136,33 +135,22 @@ interface AcceptedState {
 
 /**
  * Assemble the source over the ONE Remote Client graph. It constructs no
- * Client, owns no subscription of its own, and retains only the provenance of
- * the last accepted frame of the last watch (per session), so a reconnect can
- * recognise the interval it already observed without ever inventing one.
+ * Client and owns no subscription of its own; the provenance of an accepted
+ * frame lives only for the watch that observed it (see {@link createRemoteTerminalProgressSource}).
  */
 export function createRemoteTerminalProgressSource(
   deps: RemoteTerminalProgressSourceDeps,
 ): RemoteTerminalProgressSource {
-  /** The last accepted frame of the last watch, per session (one main session
-   *  owner per source instance). */
-  let accepted: AcceptedState | undefined
-
   /**
-   * The snapshot outcome rule: only a frame continuing the interval this Client
-   * already observed (same `hostEpoch` + same `agentEpoch`) may carry a proven
-   * `done`/`error`; everything else is honestly `idle`.
-   */
-  const snapshotOutcome = (frame: PiTuiTerminalProgressFrame, previous: AcceptedState | undefined): TerminalProgressOutcome => {
-    if (previous === undefined) return 'idle'
-    if (previous.hostEpoch !== frame.hostEpoch || previous.agentEpoch !== frame.agentEpoch) return 'idle'
-    if (frame.revision < previous.revision) {
-      throw new Error(`the Remote terminal-progress stream of ${frame.sessionId} moved its revision backwards`)
-    }
-    return frame.outcome
-  }
-
-  /**
-   * Judge one frame against the accepted provenance.
+   * Judge one frame against the provenance of THIS watch.
+   *
+   * @param previous - the last frame accepted by this watch, or `undefined`
+   * before its opening baseline. It deliberately never crosses watches: a
+   * settled `done`/`error` belongs to the interval ONE watch observed, so a new
+   * watch (a reconnect, a re-adopted session, a re-retained binding, another TUI
+   * owner) opens on the Host's current `running` truth and `idle` — the plan's
+   * "a new binding default to idle" — instead of inheriting a result it cannot
+   * prove.
    * @param opened - whether this watch already delivered its opening baseline.
    * @returns the fact to publish, or `undefined` for a frame that must be dropped.
    * @throws when the stream cannot be interpreted at all.
@@ -171,33 +159,20 @@ export function createRemoteTerminalProgressSource(
     frame: PiTuiTerminalProgressFrame,
     sessionId: string,
     opened: boolean,
+    previous: AcceptedState | undefined,
   ): RemoteMainProgressFact | undefined => {
-    const previous = accepted?.sessionId === sessionId ? accepted : undefined
-    const continues = previous !== undefined
-      && previous.hostEpoch === frame.hostEpoch
-      && previous.agentEpoch === frame.agentEpoch
     if (!opened) {
       if (frame.kind !== 'snapshot') {
         throw new Error(`the Remote terminal-progress stream of ${sessionId} did not open with a snapshot`)
       }
-      return {
-        kind: 'snapshot',
-        restart: !continues,
-        running: frame.running,
-        outcome: snapshotOutcome(frame, previous),
-      }
+      return { kind: 'snapshot', restart: true, running: frame.running, outcome: 'idle' }
     }
     if (previous !== undefined && frame.revision < previous.revision) {
       throw new Error(`the Remote terminal-progress stream of ${sessionId} moved its revision backwards`)
     }
     if (frame.kind === 'snapshot') {
-      // A second snapshot re-baselines the same watch under the same rules.
-      return {
-        kind: 'snapshot',
-        restart: !continues,
-        running: frame.running,
-        outcome: snapshotOutcome(frame, previous),
-      }
+      // A second snapshot re-baselines this same watch: same conservative rule.
+      return { kind: 'snapshot', restart: true, running: frame.running, outcome: 'idle' }
     }
     if (previous === undefined) return undefined
     if (frame.hostEpoch !== previous.hostEpoch) {
@@ -228,6 +203,8 @@ export function createRemoteTerminalProgressSource(
       const handle = deps.remote.piTuiTerminalProgress.watch(sessionId, signal)
       try {
         let opened = false
+        /** This watch's own provenance: it dies with the watch. */
+        let accepted: AcceptedState | undefined
         for await (const item of handle) {
           if (signal.aborted) return
           // §7.1 fence, re-checked per frame: a Connection generation rollover or
@@ -242,7 +219,7 @@ export function createRemoteTerminalProgressSource(
           if (frame.sessionId !== sessionId) {
             throw new Error(`the Remote terminal-progress stream of ${sessionId} delivered a frame of ${frame.sessionId}`)
           }
-          const fact = acceptFrame(frame, sessionId, opened)
+          const fact = acceptFrame(frame, sessionId, opened, accepted)
           if (fact === undefined) continue
           opened = true
           accepted = { sessionId, hostEpoch: frame.hostEpoch, agentEpoch: frame.agentEpoch, revision: frame.revision }
