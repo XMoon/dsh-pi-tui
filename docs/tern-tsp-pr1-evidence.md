@@ -22,7 +22,7 @@ launch path, profile, command, public export or Host port changed.
 |---|---|
 | `scripts/tern-tsp-transcript-spike.mts` | Manually runnable spike: SDK `connect` → one `inline` surface → deterministic replay → `n`/`q` → `close({keep:false})`. Exports `runTernTranscriptSpike` / `buildReplaySteps` / `applyReplayStep` for tests; direct execution is guarded. |
 | `scripts/support/tern-tsp-transcript-view.ts` | Pure `TranscriptStructureBlock[] → TSP view` mapper plus `TranscriptNodeKeys`, the one replay-local presentation-key allocator. |
-| `test/tern-tsp-transcript-spike.test.ts` | 22 tests: real fold → canonical projection → mapper → SDK `View.from`/`View.ops`, scripted-tty SDK composition, runner lifecycle, isolation. |
+| `test/tern-tsp-transcript-spike.test.ts` | 23 tests: real fold → canonical projection → mapper → SDK `View.from`/`View.ops`, scripted-tty SDK composition, runner lifecycle, isolation. |
 | `package.json` / `pnpm-lock.yaml` | `@stencil-hq/tern` added to `devDependencies` (not shipped; not reachable from `src/**`). |
 
 No `src/**` file, public export, `cordis.patch.yml`, startup path, DSH port,
@@ -77,8 +77,8 @@ hand-authored tree):
 
 | Command | Result |
 |---|---|
-| `node --test --import tsx/esm test/tern-tsp-transcript-spike.test.ts` | **22 pass / 0 fail** |
-| `node --test test/tern-tsp-transcript-spike.test.ts` (plain Node, the `test:product` path) | **22 pass / 0 fail** |
+| `node --test --import tsx/esm test/tern-tsp-transcript-spike.test.ts` | **23 pass / 0 fail** |
+| `node --test test/tern-tsp-transcript-spike.test.ts` (plain Node, the `test:product` path) | **23 pass / 0 fail** |
 | `node --test --import tsx/esm test/projection-convergence.test.ts test/transcript.test.ts test/compact-projection.test.ts test/transcript-reveal.test.ts test/tern-terminal.test.ts` | **280 pass / 0 fail** |
 | `pnpm typecheck:bundle` | exit 0 |
 | `pnpm build` (fork + bundle) | exit 0 |
@@ -103,7 +103,7 @@ review's P3 fix (20 spike tests). Every later delta touched only
 | `pnpm pack:release` → `prepack` `test:product` (`test/*.test.ts` + `test/tarball-smoke.test.mjs`) | pre-fix | **7262 tests / 7262 pass / 0 fail** |
 | `pnpm pack:release` → `postpack` `tarball-smoke`, `extension-fixture`, `advanced`, `phase4`, `unstable`, `vim`, `examples`, `compose-agent-compat` | pre-fix | exit 0 (`compose-agent-compat-smoke: verified xmoon76-dsh-pi-tui-0.5.1.tgz`) |
 | `pnpm typecheck:bundle` + `pnpm test:product` (re-run after the internal-review P3 fix) | post-P3 (21 spike tests) | exit 0 · **7263 tests / 7263 pass / 0 fail** |
-| `pnpm typecheck:bundle` + `pnpm test:product` (re-run after the external-review delta: the Context-coalescing identity test) | final (22 spike tests) | exit 0 · **7264 tests / 7264 pass / 0 fail** |
+| `pnpm typecheck:bundle` + `pnpm test:product` (re-run after the external-review delta: the Context-coalescing identity test and the shipped-SDK Ctrl+C decode test) | final (23 spike tests) | exit 0 · **7265 tests / 7265 pass / 0 fail** |
 
 Every delta so far touches only `scripts/**`, `test/**` and `docs/**`, none of
 which is packed (`files` = `dist`, `cordis.patch.yml`, `generated`,
@@ -182,7 +182,7 @@ again with a follow-up shell command.
 |---|---|
 | `kill -INT <node pid>` (real SIGINT) | process exits with status **130** in the pane; the recording holds `x {"id":"s1","keep":true}` and no further frames; `echo PANE_ALIVE_INT=$?` runs afterwards and the prompt returns — tty restored, no live surface, no input owner left |
 | `kill -TERM <node pid>` (real SIGTERM) | process reported `terminated` with status **143**; recording holds `x {"id":"s1","keep":true}`; `echo PANE_ALIVE_TERM=$?` runs and the prompt returns |
-| real Ctrl+C **keystroke** | NOT reproducible through the headless control tooling: a raw-byte probe showed `key n` delivers `BYTES 6e`, while `key Control+c` (and its accepted name variants) delivers **no byte at all** to the pty — Tern consumes the chord. The Ctrl+C path is therefore covered at the SDK/runner level (a stub key `{name:'c',ctrl:true}` reaches the same owned cleanup), not as a real keystroke; the SDK itself maps a terminal `0x03` in raw mode to that key |
+| real Ctrl+C **keystroke** | NOT reproducible through the headless control tooling: a raw-byte probe showed `key n` delivers `BYTES 6e`, while `key Control+c` (and its accepted name variants) delivers **no byte at all** to the pty — Tern consumes the chord. The key path is therefore pinned in two halves instead: a test feeds a real raw `0x03` byte through the SHIPPED SDK `KeyDecoder` and gets exactly `{name:'c', ctrl:true}` (the runner's quit shape), and the runner lifecycle test feeds that decoded key into the owned cleanup. Only real-Tern keystroke delivery itself remains unproven |
 
 Two different close semantics are visible and are SDK-owned, not spike logic:
 the normal `q` path closes with `keep:false` (the demo leaves no panel), while
@@ -230,7 +230,9 @@ error is never converted into `unsupported`.
   stubs: SIGINT exits with status 130 and SIGTERM with status 143, each leaving
   `x {"id":"s1","keep":true}` in the recording and a usable shell afterwards
   (§Interrupt / signal exit). A real Ctrl+C keystroke is not synthesizable
-  through `tern ctl` (raw-byte probe), so that key path stays stub-covered.
+  through `tern ctl` (raw-byte probe), so that key path is covered by the
+  shipped-SDK `0x03` → `{name:'c',ctrl:true}` decode test plus the runner's
+  injected-key cleanup test.
 
 ## Isolation (T10)
 
