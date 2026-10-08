@@ -2094,6 +2094,11 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.equal(subjectAfterTitle?.sessionId, childA.id)
   assert.equal(subjectAfterTitle?.title, 'child a retitled',
     'the EXTENSION-visible display-subject title must follow a lone child session/title immediately')
+  // The BAR follows the same title-only change even though no StatusStore
+  // SECTION changed (the store therefore does not notify); the presentation
+  // projection is re-read at the atomic commit point.
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('child a retitled'),
+    'a lone child session/title must refresh the subject bar without any store section change')
 
   // The same for a child `todo/write`: the display-subject todo list (and the
   // rendered summary line) must follow immediately.

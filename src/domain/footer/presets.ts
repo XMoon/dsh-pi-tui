@@ -2,8 +2,10 @@
  * The builtin footer presets (plan §10): `default` composes the status
  * row plus a stats row, `compact` drops the stats row. The legacy `full`
  * name maps to `default`. The VIEWER counterparts (`VIEWER_DEFAULT_…` /
- * `VIEWER_COMPACT_…`) deduplicate the child identity the subject bar
- * already carries: no model, no view-scope, no main-session leakage.
+ * `VIEWER_COMPACT_…`) drop the retired `view-scope` identity block and the
+ * main-only facts, but KEEP the `model` placement (plan-owner revision: the
+ * footer model capability is never removed; the subject bar may show the
+ * same model).
  * @module @xmoon76/dsh-pi-tui/domain/footer/presets
  */
 
@@ -98,19 +100,21 @@ export const COMPACT_FOOTER_LAYOUT: FooterLayoutV1 = {
   ],
 }
 
-/** The builtin VIEWER default layout (viewer UX plan §4.4): the viewer
- * subject bar already carries the child label/activity/model identity, so
- * the child footer deduplicates it — row 1 is the child permission /
- * preset / workspace, row 2 the child usage stats. No model, no
- * view-scope, no main-session plan/task/extension leakage. Same
- * `FooterLayoutV1` + `FooterComposer` as every other layout — never a
- * second footer renderer. */
+/** The builtin VIEWER default layout (viewer UX plan §4.4, plan-owner
+ * revision): the viewer subject bar carries the child identity, but the
+ * footer KEEPS its own `model` placement — the provider/model stays a full
+ * footer capability (format/responsive compact/drop and `/footer`
+ * customization untouched), and showing it beside the bar is intended. The
+ * footer drops only the retired viewer identity block (`view-scope`) and the
+ * main-only facts. Same `FooterLayoutV1` + `FooterComposer` as every other
+ * layout — never a second footer renderer. */
 export const VIEWER_DEFAULT_FOOTER_LAYOUT: FooterLayoutV1 = {
   schemaVersion: 1,
   rows: [
     {
       left: [
         { id: 'permission-preset' },
+        { id: 'model' },
         { id: 'agent-preset' },
         { id: 'cwd' },
         { id: 'git-branch' },
@@ -133,14 +137,16 @@ export const VIEWER_DEFAULT_FOOTER_LAYOUT: FooterLayoutV1 = {
 }
 
 /** The builtin VIEWER compact layout: one status row (child permission /
- * preset / workspace / context / counters), no stats row, no model and no
- * view-scope. */
+ * model / preset / workspace / context / counters), no stats row and no
+ * retired view-scope. The `model` placement is retained exactly like the
+ * MAIN compact preset. */
 export const VIEWER_COMPACT_FOOTER_LAYOUT: FooterLayoutV1 = {
   schemaVersion: 1,
   rows: [
     {
       left: [
         { id: 'permission-preset' },
+        { id: 'model' },
         { id: 'agent-preset' },
         { id: 'cwd' },
         { id: 'git-branch' },

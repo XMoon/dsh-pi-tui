@@ -2272,6 +2272,9 @@ export class TuiApp {
    * the pure `renderViewerSubjectBar` projection of the committed
    * StatusSnapshot. */
   private readonly viewerSubjectBar: Text
+  /** The bar text currently installed (the no-churn guard: an identical
+   * re-projection never invalidates the component or requests a frame). */
+  private viewerSubjectBarText = ''
   private readonly messagesView: Container
   private readonly footer: Text
   /** The M4 widget zones (extension widgets around the editor seat). */
@@ -11764,6 +11767,14 @@ export class TuiApp {
       this.renderGoalLine()
       this.syncExtensionState()
     }
+    // The presentation projection is part of the bar's INPUT but is NOT a
+    // StatusStore section: a title-only change (a child session/title, first
+    // appearance or clear) yields a content-equal/empty store patch, so the
+    // store does not notify and the listener alone would leave the bar stale.
+    // Re-project here at the ONE atomic commit point; the no-churn guard in
+    // renderViewerSubjectBar() keeps an identical result free, and the bar
+    // still reads the just-committed snapshot — never a second owner.
+    this.renderViewerSubjectBar()
     // A VISIBLE todo panel renders the projection that just changed: refresh
     // it inside the same commit (plain text — this publishes nothing), so the
     // open panel follows enter / child A→B / child todo changes / exit instead
@@ -16130,11 +16141,16 @@ export class TuiApp {
       && presentation.title !== ''
       ? presentation.title
       : undefined
-    this.viewerSubjectBar.setText(renderViewerSubjectBarLine({
+    const text = renderViewerSubjectBarLine({
       snapshot,
       ...childTitle === undefined ? {} : { childTitle },
       width: Math.max(1, this.terminal.columns),
-    }))
+    })
+    // No-churn: an identical re-projection (the common case on every status
+    // refresh) must not invalidate the component or request another frame.
+    if (text === this.viewerSubjectBarText) return
+    this.viewerSubjectBarText = text
+    this.viewerSubjectBar.setText(text)
     this.requestRender()
   }
 

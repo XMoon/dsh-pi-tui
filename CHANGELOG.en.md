@@ -71,10 +71,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   main session title, and the old `[viewing subagent · …]` marker plus the
   footer identity block (`view-scope`) are gone (a legacy custom layout that
   still references `view-scope` keeps loading/editing/saving; the placement
-  simply renders nothing). The builtin child footer therefore no longer
-  duplicates the model or the identity — only permission/preset/workspace/
-  context/usage stats remain. A custom footer that explicitly places `model`
-  still shows it.
+  simply renders nothing). The builtin child footer no longer shows the
+  retired identity block, but it KEEPS its `model` placement together with
+  permission/preset/workspace/context/usage stats: the subject bar and the
+  footer both show the same child model (duplication is intended), both read
+  the same `composition.model` and never fall back to the parent's model,
+  and the footer's existing formatting, narrow-screen compact/drop and
+  `/footer` customization are unchanged.
 
 ### Fixed
 

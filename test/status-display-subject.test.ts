@@ -326,7 +326,11 @@ function plain(text: string): string {
   return text.replace(/\x1b\[[0-9;:]*m/g, '')
 }
 
-test('L6: the viewer subject bar projects the SAME atomic snapshot the status runtime commits', () => {
+test('the viewer subject bar projects the SAME atomic snapshot the status runtime commits', () => {
+  // Unit-level authority check (a fake StatusRuntime harness + the pure
+  // renderer). The REAL L6 source→sink evidence lives in the runner suites
+  // (runner-viewer-task-integration / runner-remote-task-center); this test
+  // only pins the projection contract.
   const h = makeHarness()
   h.setStatus('main', {
     sessionId: 'main',

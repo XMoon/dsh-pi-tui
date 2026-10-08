@@ -3,8 +3,10 @@
  * switches the displayed Session, not the status OWNER — the footer, the
  * viewer subject bar and every derived surface read the SAME committed
  * StatusSnapshot. The builtin footer PRESENTATION layout may select a
- * viewer counterpart (no model/view-scope duplication), but that is a
- * layout choice over one snapshot, never a second child status owner.
+ * viewer counterpart (it drops the retired `view-scope` identity block but
+ * keeps the model placement), and the subject bar additionally shows the
+ * child identity — both are views over one snapshot, never a second child
+ * status owner.
  * This module resolves the current display subject from the mounted
  * viewer's identity — the ONE selector StatusRuntime's display-subject
  * derivation uses (M3-5 PR1).

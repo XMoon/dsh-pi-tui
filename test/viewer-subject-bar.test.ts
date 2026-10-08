@@ -188,3 +188,39 @@ test('wide glyphs (CJK / emoji / combining) stay within the cell budget without 
     }
   }
 })
+
+test('control characters and line breaks in Host strings never break the single-line contract', () => {
+  const label = 'review\ner'
+  const title = 'a\tb\rc'
+  for (const width of [20, 40, 100]) {
+    const line = renderViewerSubjectBar({ snapshot: childSnapshot({ label }), childTitle: title, width })
+    assert.ok(!line.includes('\n'), `width ${width}: no newline may survive:\n${JSON.stringify(line)}`)
+    assert.ok(!line.includes('\r') && !line.includes('\t'), `width ${width}: no control char may survive`)
+    assert.ok(visibleWidth(line) <= width, `width ${width}: fits (got ${visibleWidth(line)})`)
+  }
+  const text = plain(renderViewerSubjectBar({ snapshot: childSnapshot({ label }), childTitle: title, width: 100 }))
+  assert.ok(text.includes('review er'), `a line break normalizes to a space:\n${text}`)
+  assert.ok(text.includes('a b c'), `a tab/CR normalizes to spaces:\n${text}`)
+  // A model identity carrying a line break is normalized too.
+  const modelLine = plain(renderViewerSubjectBar({
+    snapshot: childSnapshot({ model: { provider: 'pro\nvider', id: 'mo\ndel' } }),
+    width: 100,
+  }))
+  assert.ok(!modelLine.includes('\n'), `the model fields normalize too:\n${JSON.stringify(modelLine)}`)
+  assert.ok(modelLine.includes('pro vider/mo del'), `the sanitized model renders on one line:\n${modelLine}`)
+})
+
+test('a long label and a long model leave the model identifiable at width 20', () => {
+  const snapshot = childSnapshot({
+    label: 'a-very-long-child-label-name',
+    model: { provider: 'deepseek', id: 'deepseek-chat', reasoningEffort: 'high' },
+  })
+  const line = renderViewerSubjectBar({ snapshot, width: 20 })
+  assert.ok(!line.includes('\n'), 'no wrap')
+  assert.ok(visibleWidth(line) <= 20, `fits 20 (got ${visibleWidth(line)})`)
+  const text = plain(line)
+  // The label is trimmed to its floor FIRST and the model keeps the rest, so
+  // the model stays identifiable instead of collapsing to a bare ellipsis.
+  assert.ok(text.includes('deep'), `the model must stay identifiable at width 20:\n${text}`)
+  assert.ok(!/●\s+…\s*$/u.test(text), `the model must not collapse to a bare ellipsis:\n${text}`)
+})

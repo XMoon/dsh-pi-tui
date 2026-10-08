@@ -178,3 +178,72 @@ test('a Question-owned modal inspection uses the SAME bar-inclusive transcript o
   app.setFullscreen(false)
   app.stop()
 })
+
+test('PageUp scrolls the transcript while the subject bar stays pinned', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(tallTranscript().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  await rows(vt)
+  const before = (await rows(vt)).join('\n')
+  vt.sendInput('\x1b[5~') // PageUp
+  await rows(vt)
+  const after = await rows(vt)
+  assert.notEqual(after.join('\n'), before, 'PageUp must scroll the transcript')
+  assert.equal(after.findIndex(row => row.includes('‹ parent')), 1,
+    `the bar must stay pinned across PageUp:\n${after.join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the transcript search overlay keeps the bar pinned through a reveal', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(tallTranscript().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  await rows(vt)
+  vt.sendInput('\x06') // Ctrl+F opens the transcript search
+  await rows(vt)
+  assert.equal((await rows(vt)).findIndex(row => row.includes('‹ parent')), 1,
+    'the bar must stay pinned with the search overlay open')
+  vt.sendInput('prompt 3')
+  await rows(vt)
+  vt.sendInput('\r') // reveal the match
+  await rows(vt)
+  const revealed = await rows(vt)
+  assert.equal(revealed.findIndex(row => row.includes('‹ parent')), 1,
+    `the bar must stay pinned across the search reveal:\n${revealed.join('\n')}`)
+  assert.ok(revealed.some(row => row.includes('prompt 3')),
+    `the revealed match must be visible in the viewport:\n${revealed.join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a transcript press is fenced when a resize lands before the release', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(longUserMessage().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  let view = await rows(vt)
+  assert.equal(compactMarkerCount(view), 1, `precondition: the bubble is collapsed:\n${view.join('\n')}`)
+  const y = view.findIndex(row => row.includes('‹ parent')) + 1
+  vt.sendInput(`\x1b[<0;10;${y + 1}M`) // press the first transcript row
+  vt.resize(100, 20) // a resize lands before the release
+  await rows(vt)
+  vt.sendInput(`\x1b[<0;10;${y + 1}m`) // release at the same cell
+  await rows(vt)
+  view = await rows(vt)
+  assert.equal(compactMarkerCount(view), 1,
+    `a release after a resize must be rejected by the stale-frame fence:\n${view.join('\n')}`)
+  // Let the double-click detector settle, then prove the CURRENT geometry
+  // still resolves the first transcript row correctly.
+  await new Promise(resolve => setTimeout(resolve, 600))
+  view = await rows(vt)
+  const barY = view.findIndex(row => row.includes('‹ parent'))
+  clickCell(vt, 10, barY + 1)
+  view = await rows(vt)
+  assert.equal(compactMarkerCount(view), 0,
+    `the fresh click at the current geometry must toggle the first transcript row:\n${view.join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
