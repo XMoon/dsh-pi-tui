@@ -103,7 +103,7 @@ published identity rather than issuing a second attempt.
 The ONLY bare-`void` exceptions are the terminal sinks inside
 `src/runtime/process/tasks.ts` (exempt **by filename** in `rules.test.ts` — the helpers'
 own sinks need no marker) and the two lifecycle roots (startup in
-`index.ts`, exit in `exit.ts`), which carry an `allowlist` comment on the
+`index.ts`, exit in `app/bootstrap/exit.ts`), which carry an `allowlist` comment on the
 same line. `test/rules.test.ts` statically detects COMMON SINGLE-LINE
 `void call()` discards (recursive over `src/`, with matcher self-tests). It
 is deliberately NOT a substitute for review or a type-aware lint

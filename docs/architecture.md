@@ -350,8 +350,41 @@ ten remaining tool/shell/terminal/completion roots (`bounded-output.ts`,
 `diff.ts`, `local-shell-card.ts`, `process-tui-slot.ts`, `progress.ts`,
 `skill-reference-completion.ts`, `streaming-tool-preparing.ts`,
 `terminal-title.ts`, `tool-presentation-client.ts`, `working.ts`), reaching
-`stable = 6 / legacy = 1` — `builtins.ts` is the ONLY remaining legacy root
-until F7 reclassifies it.
+`stable = 6 / legacy = 1` — `builtins.ts` was the ONLY remaining legacy root
+at that point; F7 then reclassifies it as a stable entry, closing the train at
+
+```text
+stable = 7   builtins.ts, commands.ts, extensions.ts, index.ts, startup.ts, transcript.ts, tui-app.ts
+legacy = 0
+```
+
+The migration is CLOSED and actively enforced (plan §11.4/§11.5): the checked-in
+`scripts/source-root-baseline.json` must be exactly that ledger, and
+`scripts/application-architecture-gate.mjs` additionally forbids all 48
+retired TS8-F root modules — neither a recreated file (a forwarding shim or a
+resurrected helper) nor a production import that still names a retired root
+path can pass. A new ordinary root module still fails as an unclassified root;
+growing the root set is a deliberate contract change (docs + ledger together).
+
+The final TS8-F assertion set (plan §11.4) and where each one is enforced:
+
+| # | Assertion | Enforced by |
+|---|---|---|
+| 1 | no legacy root remains | `findFinalSourceRootStateViolations` + `scripts/source-root-baseline.json` |
+| 2 | stable set is exactly the seven entries/facades | same |
+| 3 | no retired TS8-F root exists | `findRetiredSourceRootViolations` + `RETIRED_SOURCE_ROOTS` (48 names) |
+| 4 | no production import targets a retired root path | same function (the import half) |
+| 5 | no old-root forwarding shim | 3 + 4 (a shim is a recreated file that imports the old path) |
+| 6 | `runtime/process/**` cannot import app/tui/client/direct/remote | `runtime-process-imports-inner-layers`, `runtime-process-imports-dsh-implementation` |
+| 7 | `runtime/remote/**` cannot import `runtime/direct/**` | `direct-import-outside-composition` |
+| 8 | `app/**` outside the composition zone cannot import concrete `tui/**` | `app-imports-tui` |
+| 9 | `domain/task/**`, `domain/communication/**`, `domain/command/**` stay free of Host/TUI/app implementation | `domain-imports-app`/`-tui`/`-client`/`-remote-composition` + `scripts/client-boundary-gate.mjs` (no new Host-coupling debt) |
+| 10 | `domain/transcript/**` closed-world rules | `domain-transcript-imports-backend-mechanics` |
+| 11 | concrete extension registries live under `extension/internal/**` only | root ledger (a root registry would be an unclassified root) + `extension-public-declaration-imports-tui` |
+| 12 | package export set unchanged | `test/public-entrypoint-compat.test.ts` + `pnpm pack:release` |
+| 13 | packed declarations expose no private implementation dependency | `scripts/tarball-smoke.mjs` (postpack) + `typecheck:bundle` |
+| 14 | `startup.ts` remains a zero-dependency island | `startup-imports-remote-composition` + the startup reachability pass + `test/startup.test.ts` |
+| 15 | `client/**` stays Client-local (no Host durable authority) | `scripts/client-boundary-gate.mjs` + `client-imports-remote-composition` |
 
 ## Existing directory convergence
 

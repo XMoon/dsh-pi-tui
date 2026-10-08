@@ -826,8 +826,9 @@ export interface SubagentViewerTarget {
 }
 
 // The submit-gesture contract stays on this facade (TS5 §11.3 packaging
-// constraint): `resolveSubmitDelivery` in `src/command-policy.ts` exposes it
-// through the PUBLIC declaration surface, and tsdown emits a repository-private
+// constraint): `resolveSubmitDelivery` in `app/submission/command-policy.ts`
+// exposes it through the PUBLIC declaration surface, and tsdown emits a
+// repository-private
 // `src/<nested module>.d.ts` region for ANY publicly-referenced declaration that
 // is not declared in an allowlisted root module — `scripts/tarball-smoke.mjs`
 // rejects such a region as a packaging leak (verified for a pure type-only

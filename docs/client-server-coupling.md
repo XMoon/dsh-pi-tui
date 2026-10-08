@@ -485,7 +485,7 @@ recovery notice in `src/app/submission/steer.ts` explains the official next-wake
 performing no Host write. Representative files:
 `src/tui-app.ts`, `src/tui/interaction/tui-editor.ts`, `src/tui/theme/runtime.ts`,
 `src/tui/transcript/tool-presentation.ts` (rendering half), `src/client/clipboard/copy.ts`, `src/client/history/store.ts`,
-`src/search.ts`, `src/tui/interaction/overlay-broker.ts`,
+`src/tui/interaction/transcript-search.ts`, `src/tui/interaction/overlay-broker.ts`,
 `src/extension/internal/keybinding-registry.ts`, `src/extension/internal/editor-registry.ts`,
 `src/extension/internal/renderer-registry.ts`.
 `src/app/command/artifacts.ts` (the artifact-save owner; the fixed filename helpers were inlined by TS8-F4) carries the Pre-Stage-D export convergence policy — it is

@@ -676,7 +676,7 @@ class RemoteConfigMirror {
  * `tuiSettings` (the `tui-app` namespace).
  * ------------------------------------------------------------------------- */
 
-/** The tui-app Config defaults (src/tui-config.ts): the SAME fallbacks the
+/** The tui-app Config defaults (app/config/schema.ts): the SAME fallbacks the
  *  Direct adapter's live Cordis Config supplies for an absent field. Raw
  *  pass-through fields (footerLayout/footerCustomItems/footerCommand/
  *  keybindings) have no default and stay verbatim. */
