@@ -110,8 +110,10 @@ test('the live-agent identity resets at every commit site plus teardown', () => 
   // setCompletionOwner seam.
   assert.equal(commitOrderSource.split('seams.setCompletionOwner(').length - 1, 4,
     'all four commit shapes must reset the completion owner through the seam')
-  assert.equal(indexSource.split('surface.setCompletionOwner(undefined)').length - 1, 1,
-    'the cleanup fence must reset the completion identity to undefined exactly once')
+  assert.equal(indexSource.split('surface.retireCompletionOwner()').length - 1, 1,
+    'the cleanup fence must withdraw the completion identity exactly once through the final-teardown retirement')
+  assert.equal(indexSource.split('surface.setCompletionOwner(undefined)').length - 1, 0,
+    'the final teardown must NOT use the rebind seam (it would erase a retainable terminal outcome)')
   assert.equal(notificationSource.split('completionController.setLiveAgent').length - 1, 1,
     'the completion controller must be reached ONLY through the single setCompletionOwner seam')
   assert.equal(indexSource.split('completionController').length - 1, 0,
