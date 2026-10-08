@@ -1,0 +1,745 @@
+/**
+ * PR2 live-transcript-projection contract tests (Tern Surface Protocol).
+ *
+ * The chain under test is the PRODUCTION one:
+ *
+ *     realistic SessionEvent / AssistantLiveInput
+ *       -> the REAL `routeSessionEvent` / `applyAssistantInput` routing bodies
+ *       -> ONE real `TranscriptFolder` + `TranscriptWindowController`
+ *       -> the REAL `SurfaceRuntime.repaintTarget()` projection glue
+ *       -> the real mounted `TuiApp` (VirtualTerminal) committed the SAME array
+ *       -> the optional read-only observer (`onTranscriptProjected`)
+ *       -> PR1's pure mapper -> the real `@stencil-hq/tern` SDK surface
+ *
+ * STANDS-IN (never claimed as production): the runner-owned routing source
+ * (the fold/window instances, the session facts and the status/preview sinks)
+ * is a test fixture, exactly like `transcript-history-extension.test.ts`; the
+ * TSP pane is a scripted tty that answers the official handshake and acks
+ * frames under credit flow control. The two terminals are DIFFERENT objects:
+ * PiTui never shares stdin with the SDK. Nothing here is L5 (real Host wire) or
+ * L6 (a real pane running the app); see `docs/tern-tsp/evidence/pr2.md`.
+ *
+ * @module @xmoon76/dsh-pi-tui/tern-tsp-live-projection.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { EventEmitter } from 'node:events'
+import { readFileSync, readdirSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  concatBytes,
+  connect,
+  type Op,
+  type Renderable,
+  type SessionInput,
+  type TermInput,
+  type TermOutput,
+} from '@stencil-hq/tern'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { TuiApp } from '../src/tui-app.ts'
+import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
+import type { TranscriptMessage } from '../src/domain/transcript/types.ts'
+import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
+import {
+  createSurfaceRuntime,
+  type SurfaceRuntime,
+  type TranscriptProjectionFrame,
+} from '../src/app/surface/runtime.ts'
+import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
+import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
+import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { TranscriptNodeKeys, transcriptView } from '../scripts/support/tern-tsp-transcript-view.ts'
+import { installVirtualProcessTerminal } from './support/runner-harness.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+
+process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const SESSION_ID = 'session-live-pr2'
+const CHILD_ID = 'session-child-pr2'
+const T0 = 1_700_000_000_000
+const ENCODER = new TextEncoder()
+const DECODER = new TextDecoder()
+
+const SESSION = { id: SESSION_ID }
+const CHILD_SESSION = { id: CHILD_ID }
+
+// ── Fixtures ───────────────────────────────────────────────────────────────
+
+function ev(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
+  return { type, seq: SessionSeq(seq), time: T0 + seq, data } as SessionEvent
+}
+
+function userMessage(seq: number, id: string, text: string): SessionEvent {
+  return ev('user/message', {
+    id: MessageId(id),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }, seq)
+}
+
+function toolCall(seq: number, id: string, name: string, args: Record<string, unknown>): SessionEvent {
+  return ev('tool/call', { turn: 1, step: 0, callId: ToolCallId(id), name, arguments: JSON.stringify(args) }, seq)
+}
+
+function toolResult(seq: number, id: string, text: string): SessionEvent {
+  return ev('tool/result', {
+    turn: 1,
+    step: 0,
+    message: {
+      id: MessageId(`result-${id}`),
+      role: 'tool',
+      toolCallId: ToolCallId(id),
+      content: [{ type: 'text', text }],
+      source: { kind: 'tool', callId: ToolCallId(id) },
+    },
+  }, seq)
+}
+
+/** One live main-session delta of the streaming assistant message. */
+function liveChunk(chunk: unknown, sessionId = SESSION_ID): AssistantLiveInput {
+  return {
+    kind: 'chunk',
+    sessionId,
+    attemptId: 'attempt-pr2',
+    turn: 1,
+    step: 0,
+    time: T0 + 100,
+    chunk,
+  } as AssistantLiveInput
+}
+
+const nullPresentation = {
+  handleFocusReport: () => {},
+  markFocused: () => {},
+  focusState: () => 'focused' as const,
+  notify: () => {},
+  enableFocusReporting: () => {},
+  disableFocusReporting: () => {},
+}
+
+// ── The real mounted surface over a virtual PiTui terminal ──────────────────
+
+interface Harness {
+  readonly surface: SurfaceRuntime<SessionEvent>
+  readonly app: TuiApp
+  readonly vt: VirtualTerminal
+  readonly folder: TranscriptFolder
+  readonly window: TranscriptWindowController
+  /** Every frame the surface published, in order. */
+  readonly frames: TranscriptProjectionFrame[]
+  /** Every message array the mounted app was asked to commit, in order. */
+  readonly committed: Array<readonly TranscriptMessage[]>
+  viewChild(): TranscriptFolder
+  exitChild(): void
+  dispose(): void
+}
+
+/**
+ * Mount the REAL `SurfaceRuntime` + `TuiApp` (over a `VirtualTerminal`) with the
+ * PR2 observer attached, and route through the real application routing bodies.
+ * `duringCommit` runs inside the patched `setTranscript()`, so a test can make
+ * the commit itself switch the active subject (the re-entrancy case).
+ */
+function mountHarness(options: {
+  readonly onTranscriptProjected: (frame: TranscriptProjectionFrame) => void
+  readonly duringCommit?: () => void
+}): Harness {
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const folder = new TranscriptFolder()
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+  const frames: TranscriptProjectionFrame[] = []
+  const committed: Array<readonly TranscriptMessage[]> = []
+  let viewed: { id: string; folder: TranscriptFolder; window: TranscriptWindowController } | undefined
+  let attached = true
+  let currentAgent: object | undefined
+  const agents = new Map<string, object>()
+  const previews = new Map()
+  const stats = { apply: () => {} }
+
+  const mainPresentation = {
+    folder: { apply: (events: readonly SessionEvent[]) => folder.apply(events) },
+    stats,
+    window: controller,
+    previews,
+    applyToolPreview: () => {},
+    refreshRecentPerformanceAvailability: () => {},
+  }
+  const childPresentation = () => ({
+    id: viewed!.id,
+    folder: { apply: (events: readonly SessionEvent[]) => viewed!.folder.apply(events) },
+    stats,
+    window: viewed!.window,
+    previews,
+    applyToolPreview: () => {},
+    beginTurn: () => {},
+    endTurn: () => {},
+    refreshFooter: () => {},
+  })
+
+  const source: SurfaceEventRoutingSource<SessionEvent> = {
+    isCleanedUp: () => false,
+    isAttachedSession: session => attached
+      && (session.id === SESSION_ID || (viewed !== undefined && session.id === viewed.id)),
+    currentSessionId: () => SESSION_ID,
+    hasLiveAgent: () => true,
+    completionOwnerId: () => undefined,
+    observeMainEvent: () => ({ refreshAgents: false }),
+    appendOpeningViewerEvent: () => false,
+    main: () => mainPresentation,
+    viewedChildId: () => viewed?.id,
+    viewedChild: () => childPresentation(),
+    mainFolder: () => folder,
+    viewedChildFolder: () => viewed!.folder,
+    pendingSubjectId: () => undefined,
+    pendingSnapshot: () => undefined,
+    submissionEchoes: () => undefined,
+    queueTextOf: () => '',
+    exitView: () => { viewed = undefined },
+    refreshStatusCheap: () => {},
+    refreshStatusAndWelcome: () => {},
+    applyGoalChange: () => {},
+    sessionTitleOf: () => undefined,
+    extendLoadedHistory: () => false,
+    settleLocalSubmitAck: () => {},
+    markSubmitLatency: () => {},
+    observeDurableSubmission: () => {},
+    markContextDirty: () => {},
+    refreshContextMeasurement: () => {},
+    currentWorkingFromLog: () => false,
+    flushTurn: () => {},
+    registeredAgentIs: (sessionId, agent) => agent === agents.get(sessionId),
+    isCurrentOwnerAgent: agent => currentAgent === agent,
+    viewedChildAgent: () => undefined,
+    setViewedChildAgent: () => {},
+    setViewedQueueAgent: () => {},
+    agentForSession: sessionId => agents.get(sessionId),
+    applyViewedChildAssistantInput: input => viewed!.folder.applyLiveInput(input),
+    applyMainAssistantInput: input => folder.applyLiveInput(input),
+  }
+
+  const surface = createSurfaceRuntime<SessionEvent>({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: nullPresentation,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    terminalProgress: undefined,
+    createPluginManagerPanel,
+    onTranscriptProjected: frame => {
+      frames.push(frame)
+      options.onTranscriptProjected(frame)
+    },
+  })
+  surface.attachEventRouting(source)
+  surface.start({
+    events: { onSubmit: () => {}, onExit: () => {} },
+    workspaceRoot: '/tmp',
+    iconStyle: 'emoji',
+    displayState: { preset: 'compact' },
+    historySearchSource: { search: () => Promise.reject(new Error('not exercised by this test')) },
+    readImage: () => Promise.reject(new Error('not exercised by this test')),
+    imageScope: () => undefined,
+    present: { call: () => undefined, result: () => undefined },
+    sessionCwd: () => '/tmp',
+    sessionId: () => SESSION_ID,
+    onTerminalResize: () => {},
+    copySelection: async () => false,
+    openExternalUrl: () => {},
+    readClipboardText: async () => undefined,
+    imageFallbackColor: text => text,
+  })
+
+  // Instrument the MOUNTED production method (never a reimplementation): the
+  // observer must carry the exact array this call received.
+  const app = surface.app
+  const prototype = Object.getPrototypeOf(app) as { setTranscript: TuiApp['setTranscript'] }
+  const originalSetTranscript = prototype.setTranscript
+  app.setTranscript = (...args: Parameters<TuiApp['setTranscript']>) => {
+    committed.push(args[0])
+    const result = originalSetTranscript.call(app, ...args)
+    options.duringCommit?.()
+    return result
+  }
+
+  return {
+    surface,
+    app,
+    vt,
+    folder,
+    window: controller,
+    frames,
+    committed,
+    viewChild() {
+      const child = new TranscriptFolder()
+      viewed = { id: CHILD_ID, folder: child, window: new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 }) }
+      return child
+    },
+    exitChild() { viewed = undefined },
+    dispose() {
+      surface.dispose()
+      restoreTerminal()
+    },
+  }
+}
+
+/** Route one durable event of the main session through the REAL routing. */
+function route(harness: Harness, event: SessionEvent): void {
+  harness.surface.routeSessionEvent(SESSION, event)
+}
+
+// ── The real TSP sink: a scripted Tern pane ─────────────────────────────────
+
+class FakeInput extends EventEmitter implements TermInput {
+  readonly isTTY: boolean
+  isRaw = false
+  readonly raw: boolean[] = []
+  readonly received: string[] = []
+
+  constructor(isTTY = true) {
+    super()
+    this.isTTY = isTTY
+    this.on('data', (bytes: Uint8Array) => { this.received.push(DECODER.decode(bytes)) })
+  }
+
+  setRawMode(mode: boolean): void {
+    this.isRaw = mode
+    this.raw.push(mode)
+  }
+
+  type(text: string): void {
+    this.emit('data', ENCODER.encode(text))
+  }
+}
+
+class FakeOutput implements TermOutput {
+  readonly isTTY = true
+  readonly columns = 100
+  readonly chunks: Uint8Array[] = []
+  onWrite: ((bytes: Uint8Array) => void) | undefined
+
+  write(data: Uint8Array | string): boolean {
+    const bytes = typeof data === 'string' ? ENCODER.encode(data) : data
+    this.chunks.push(bytes)
+    this.onWrite?.(bytes)
+    return true
+  }
+
+  text(): string {
+    return DECODER.decode(concatBytes(this.chunks))
+  }
+}
+
+/** The `hello` reply a supported Tern pane sends (same frame shape PR1 used). */
+const HELLO = {
+  r: 'hello',
+  v: 1,
+  term: 'tern',
+  ver: '0.6.2',
+  kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool'],
+  features: ['flow', 'styles'],
+  apc: 65536,
+  credits: 2,
+  cols: 120,
+  cell: { w: 8, h: 17 },
+  dark: true,
+  reduceMotion: false,
+  hour12: false,
+}
+
+interface WireFrame {
+  readonly sf: string
+  readonly s: number
+  readonly ops: readonly Op[]
+}
+
+/** Every frame (`f`) message in one write, in order. */
+function decodeFrames(text: string): WireFrame[] {
+  const frames: WireFrame[] = []
+  for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
+    frames.push(JSON.parse(match[1]!) as WireFrame)
+  }
+  return frames
+}
+
+class ScriptedTern {
+  readonly input = new FakeInput()
+  readonly output = new FakeOutput()
+  /** Every frame the SDK wrote, decoded from the wire. */
+  readonly frames: WireFrame[] = []
+
+  constructor() {
+    this.output.onWrite = bytes => {
+      const text = DECODER.decode(bytes)
+      if (text.includes('\u001b[c')) {
+        // The official capability probe: answer as a supported Tern pane.
+        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c`), 1)
+        return
+      }
+      for (const frame of decodeFrames(text)) {
+        this.frames.push(frame)
+        // A real pane acks each frame it drew: credit flow control allows at
+        // most `credits` unacknowledged frames ahead.
+        setTimeout(() => this.input.type(
+          `\u001b_tsp;e;${JSON.stringify({ ev: 'ack', sf: frame.sf, s: frame.s })}\u001b\\`,
+        ), 0)
+      }
+    }
+  }
+}
+
+/** Open the real SDK surface on the scripted pane (an isolated tty owner). */
+async function openTern(tern: ScriptedTern) {
+  const session = await connect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+  assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
+  return { session, surface: session.open({ mode: 'inline' }) }
+}
+
+/**
+ * The dev/test TSP bridge: the ONLY consumer of the PR2 frame. It re-scopes its
+ * replay-local node keys per projection SOURCE (never across subjects) and
+ * renders through the REAL SDK surface. It reads no Host, fold or window state.
+ */
+function createBridge(surface: { render(view: Renderable): void }) {
+  const state = { keys: undefined as TranscriptNodeKeys | undefined, scope: undefined as object | undefined, renders: 0 }
+  return {
+    state,
+    project(frame: TranscriptProjectionFrame): void {
+      if (frame.sourceIdentity !== state.scope) {
+        state.scope = frame.sourceIdentity
+        state.keys = new TranscriptNodeKeys()
+      }
+      state.renders += 1
+      surface.render({ main: transcriptView(projectTranscriptStructure(frame.messages), state.keys!) })
+    },
+  }
+}
+
+/** Let queued input (handshake, acks) and the SDK's pumps settle. */
+async function settle(): Promise<void> {
+  for (let index = 0; index < 8; index += 1) await new Promise(resolve => setTimeout(resolve, 2))
+}
+
+/** Wait past the surface's ONE 50 ms repaint coalescing window. */
+async function flush(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 80))
+}
+
+// ── P2-01 / P2-02: the real application event chain reaches the real sink ──
+
+test('P2-01/P2-02: a routed durable tool call reaches the real SDK sink through the live projection', async () => {
+  const tern = new ScriptedTern()
+  const { session, surface: sdk } = await openTern(tern)
+  const bridge = createBridge(sdk)
+  const harness = mountHarness({ onTranscriptProjected: frame => bridge.project(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'Inspect the transcript projector boundary.'))
+    harness.surface.paintNow()
+    route(harness, toolCall(2, 'call-read-1', 'read', { file_path: 'src/tui/transcript/structure.ts' }))
+    harness.surface.paintNow()
+    const beforeResult = tern.frames.length
+
+    route(harness, toolResult(3, 'call-read-1', 'file content'))
+    harness.surface.paintNow()
+    await settle()
+
+    // The observer received exactly the arrays the mounted app committed.
+    assert.ok(harness.frames.length >= 3, 'every commit published one frame')
+    assert.equal(harness.frames.length, harness.committed.length)
+    for (const [index, frame] of harness.frames.entries()) {
+      assert.equal(frame.messages, harness.committed[index], `frame ${index} carries the committed array itself`)
+    }
+    assert.deepEqual(
+      harness.frames.map(frame => [frame.subjectKind, frame.subjectId]),
+      harness.frames.map(() => ['main', SESSION_ID]),
+      'every frame is scoped to the live main session, never inferred from a row',
+    )
+    assert.equal(harness.frames[0]!.sourceIdentity, harness.folder, 'the source identity is the live fold object')
+
+    // The REAL SDK surface rendered those frames on the wire: the settled tool
+    // card is a small delta on a retained node (no delete, no move).
+    assert.ok(tern.frames.length > beforeResult, 'the settled result reached the wire as a new frame')
+    const settled = tern.frames[tern.frames.length - 1]!
+    const ops = settled.ops
+    assert.equal(ops.filter(op => op[0] === 'del').length, 0, 'the settled update deletes nothing')
+    assert.equal(ops.filter(op => op[0] === 'move').length, 0, 'the settled update moves nothing')
+    const statusSets = ops.filter(op => op[0] === 'set'
+      && (op[2] as { readonly status?: unknown }).status === 'done')
+    assert.equal(statusSets.length, 1, 'exactly one retained tool node is settled to done')
+    assert.ok(tern.output.text().includes('"k":"tool"'), 'the wire carries the native tool node')
+    assert.deepEqual(tern.input.raw, [true], 'the SDK owns raw mode on its own tty while connected')
+
+    // The SDK session releases the tty it took (the product never does this on
+    // the PiTui terminal).
+    await sdk.close({ keep: false })
+    await session.close()
+    assert.deepEqual(tern.input.raw, [true, false], 'the SDK restored raw mode on its own tty')
+    assert.ok(tern.output.text().includes('\u001b_tsp;x;'), 'the surface closed with `x`')
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── P2-03: the live assistant input path ────────────────────────────────────
+
+test('P2-03: a live assistant delta routed by the real input path updates the same projection', async () => {
+  const tern = new ScriptedTern()
+  const { session, surface: sdk } = await openTern(tern)
+  const bridge = createBridge(sdk)
+  const harness = mountHarness({ onTranscriptProjected: frame => bridge.project(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'Explain the boundary.'))
+    harness.surface.paintNow()
+
+    // The identity fence the Direct install consults before routing a stream.
+    const agent = { session: { id: SESSION_ID } }
+    assert.equal(harness.surface.isCurrentAssistantAgent(agent), false, 'an unregistered Agent is never current')
+    const framesBefore = harness.frames.length
+    harness.surface.applyAssistantInput(liveChunk({ type: 'block-start', index: 0, blockType: 'text' }))
+    harness.surface.applyAssistantInput(liveChunk({ type: 'text-delta', index: 0, text: 'the projector' }))
+    harness.surface.paintNow()
+    assert.equal(harness.frames.length, framesBefore + 1, 'the live start and delta coalesced into the ONE commit')
+
+    harness.surface.applyAssistantInput(liveChunk({ type: 'text-delta', index: 0, text: ' boundary' }))
+    harness.surface.paintNow()
+    await settle()
+
+    assert.equal(harness.frames.length, framesBefore + 2, 'the second commit grew the same streaming card')
+    const frame = harness.frames[harness.frames.length - 1]!
+    const streaming = frame.messages.find(message => message.kind === 'assistant')
+    assert.ok(streaming !== undefined, 'the streaming assistant row is in the projection')
+    assert.equal(streaming.text, 'the projector boundary')
+
+    const last = tern.frames[tern.frames.length - 1]!
+    const textOps = last.ops.filter(op => op[0] === 'text')
+    assert.ok(textOps.length >= 1, 'the growing text rides an SDK text op on the retained card')
+    assert.equal(last.ops.filter(op => op[0] === 'del').length, 0, 'the stream never rebuilds the card')
+    assert.equal(last.ops.filter(op => op[0] === 'move').length, 0, 'the stream never moves the card')
+  } finally {
+    harness.dispose()
+    await sdk.close({ keep: false })
+    await session.close()
+  }
+})
+
+// ── P2-04: the existing fences still decide ─────────────────────────────────
+
+test('P2-04: an event from a session the surface is not attached to publishes nothing', async () => {
+  const seen: TranscriptProjectionFrame[] = []
+  const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    harness.surface.paintNow()
+    const baseline = seen.length
+    assert.equal(baseline, 1)
+
+    // A stale/late event for another Session never reaches the fold AND never
+    // schedules a repaint (asserted through the coalescing window, not a flag).
+    const other = { id: 'session-other' }
+    harness.surface.routeSessionEvent(other, userMessage(9, 'user-9', 'stale'))
+    // A live delta for another Session is dropped by the neutral routing too.
+    harness.surface.applyAssistantInput(liveChunk({ type: 'text-delta', index: 0, text: 'stale' }, 'session-other'))
+    await flush()
+    assert.equal(seen.length, baseline, 'neither the foreign durable event nor its stream repaints the surface')
+    assert.equal(harness.folder.messages().some(message => message.text === 'stale'), false, 'the foreign content never entered the fold')
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── P2-05: main <-> viewed child ────────────────────────────────────────────
+
+test('P2-05: the viewed child and the main session each publish their own scope', () => {
+  const seen: TranscriptProjectionFrame[] = []
+  const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'main prompt'))
+    harness.surface.paintNow()
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0]!.subjectKind, 'main')
+    assert.equal(seen[0]!.sourceIdentity, harness.folder)
+
+    const child = harness.viewChild()
+    harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/start', { turn: 1 }, 0))
+    harness.surface.routeSessionEvent(CHILD_SESSION, userMessage(1, 'child-1', 'child prompt'))
+    harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2))
+
+    const childFrames = seen.slice(1)
+    assert.ok(childFrames.length > 0, 'the viewed child published while mounted')
+    for (const frame of childFrames) {
+      assert.equal(frame.subjectKind, 'viewed-child')
+      assert.equal(frame.subjectId, CHILD_ID)
+      assert.equal(frame.sourceIdentity, child, 'the child frame is scoped to the child fold itself')
+    }
+    assert.ok(childFrames.some(frame => frame.messages.some(message => message.kind === 'user' && message.text === 'child prompt')))
+
+    // A main-session event still folds into the MAIN transcript while the child
+    // is displayed; the ACTIVE projection stays the child's (the displayed
+    // subject owns the pane), exactly as the production selection does.
+    route(harness, userMessage(4, 'user-4', 'main continues'))
+    harness.surface.paintNow()
+    assert.ok(harness.folder.messages().some(message => message.text === 'main continues'),
+      'the main fold kept updating behind the viewer')
+    assert.equal(seen[seen.length - 1]!.subjectKind, 'viewed-child', 'the displayed subject still owns the pane')
+
+    harness.exitChild()
+    harness.surface.paintNow()
+    const back = seen[seen.length - 1]!
+    assert.equal(back.subjectKind, 'main', 'leaving the viewer republishes the main subject')
+    assert.equal(back.sourceIdentity, harness.folder)
+    assert.ok(back.messages.some(message => message.text === 'main continues'), 'the main projection carries the hidden update')
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── P2-06 / P2-10: a commit that switches the subject drops the stale frame ─
+
+test('P2-06/P2-10: a subject switch performed synchronously inside setTranscript drops the stale frame', () => {
+  const seen: TranscriptProjectionFrame[] = []
+  let child: TranscriptFolder | undefined
+  const harness = mountHarness({
+    onTranscriptProjected: frame => void seen.push(frame),
+    duringCommit: () => {
+      // The commit runs plugin/modal callbacks: entering the viewer here must
+      // discard the frame that was projected for the OLD target.
+      child ??= harness.viewChild()
+    },
+  })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'main prompt'))
+    assert.equal(seen.length, 0, 'nothing is published before the mounted app committed')
+    harness.surface.paintNow()
+    assert.equal(seen.length, 0, 'the main frame was dropped: the surface had already left the main subject')
+
+    // The next commit projects the CHILD (the viewer is mounted now).
+    harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/start', { turn: 1 }, 0))
+    harness.surface.routeSessionEvent(CHILD_SESSION, userMessage(1, 'child-1', 'child prompt'))
+    harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2))
+    assert.ok(seen.length > 0, 'the child projection is published')
+    assert.equal(seen[seen.length - 1]!.sourceIdentity, child)
+    assert.equal(seen[seen.length - 1]!.subjectKind, 'viewed-child')
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── P2-09: coalescing and the unchanged projection ──────────────────────────
+
+test('P2-09: coalesced repaints keep one commit per flush, and an unchanged projection sends no ops', async () => {
+  const tern = new ScriptedTern()
+  const { session, surface: sdk } = await openTern(tern)
+  const bridge = createBridge(sdk)
+  const harness = mountHarness({ onTranscriptProjected: frame => bridge.project(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'one'))
+    harness.surface.paintNow()
+    assert.equal(harness.committed.length, 1)
+    await settle()
+    const wireBefore = tern.frames.length
+
+    // Three durable events inside one flush window: the surface still commits
+    // ONCE (the production 50 ms coalescing owns the schedule).
+    route(harness, userMessage(4, 'user-4', 'two'))
+    route(harness, toolCall(5, 'call-bash-1', 'bash', { command: 'true' }))
+    route(harness, toolResult(6, 'call-bash-1', 'ok'))
+    await flush()
+    assert.equal(harness.committed.length, 2, 'the three events coalesced into one commit')
+
+    // An extra repaint of the unchanged projection publishes a frame but the
+    // SDK sends NO ops for it: the wire grows by nothing.
+    const framesBeforeRepaint = tern.frames.length
+    harness.surface.paintNow()
+    await flush()
+    assert.equal(harness.committed.length, 3, 'the repaint committed again')
+    assert.equal(tern.frames.length, framesBeforeRepaint, 'an identical view is zero ops on the wire')
+    assert.ok(tern.frames.length > wireBefore)
+  } finally {
+    harness.dispose()
+    await sdk.close({ keep: false })
+    await session.close()
+  }
+})
+
+// ── P2-11: dispose releases the observer ────────────────────────────────────
+
+test('P2-11: dispose releases the read-only observer, so no later projection reaches the sink', async () => {
+  const seen: TranscriptProjectionFrame[] = []
+  const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    harness.surface.paintNow()
+    assert.equal(seen.length, 1)
+
+    harness.surface.dispose()
+    const before = harness.committed.length
+    harness.surface.routeSessionEvent(SESSION, userMessage(2, 'user-2', 'late'))
+    // The routing still schedules a repaint for the late event, so wait past
+    // the coalescing window: the frame must be dropped by the released
+    // observer, not merely by the timer never firing.
+    await flush()
+    assert.equal(seen.length, 1, 'no frame is published after dispose')
+    assert.ok(harness.committed.length >= before)
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── P2-12 / P2-14: tty isolation and the product boundary ───────────────────
+
+test('P2-12/P2-14: the TSP sink owns its own tty and no product source imports the SDK', async () => {
+  const tern = new ScriptedTern()
+  const { session, surface: sdk } = await openTern(tern)
+  const bridge = createBridge(sdk)
+  const harness = mountHarness({ onTranscriptProjected: frame => bridge.project(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'hello'))
+    harness.surface.paintNow()
+    await settle()
+
+    assert.notEqual(harness.vt, tern.input, 'PiTui and the SDK never share one input')
+    assert.notEqual(harness.vt, tern.output, 'PiTui and the SDK never share one output')
+    assert.ok(harness.vt.getViewport().some(line => line.length > 0), 'PiTui still renders to its own terminal')
+    const wire = tern.frames.length
+    const delivered = tern.input.received.length
+    harness.vt.sendInput('x')
+    await settle()
+    assert.equal(tern.frames.length, wire, 'a PiTui keystroke never reaches the TSP session')
+    assert.equal(tern.input.received.length, delivered, 'the SDK tty received nothing from the PiTui terminal')
+    await sdk.close({ keep: false })
+    await session.close()
+    assert.deepEqual(tern.input.raw, [true, false], 'only the SDK tty entered and left raw mode')
+  } finally {
+    harness.dispose()
+  }
+
+  // The SDK stays OUT of the product build graph and out of the production
+  // composition: the production path never injects the observer.
+  const sources: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (/\.(?:ts|tsx|mts|cts)$/u.test(entry.name)) sources.push(path)
+    }
+  }
+  walk(join(ROOT, 'src'))
+  assert.ok(sources.length > 0)
+  for (const path of sources) {
+    assert.doesNotMatch(readFileSync(path, 'utf8'), /@stencil-hq\/tern/u, `${relative(ROOT, path)} must not import the TSP SDK`)
+  }
+  const bootstrap = readFileSync(join(ROOT, 'src', 'app', 'bootstrap.ts'), 'utf8')
+  assert.doesNotMatch(bootstrap, /onTranscriptProjected/u, 'the production composition never injects the PR2 observer')
+})
