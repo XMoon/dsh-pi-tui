@@ -294,6 +294,11 @@ function route(harness: Harness, event: SessionEvent): void {
   harness.surface.routeSessionEvent(SESSION, event)
 }
 
+/** Whether one projection carries a user row with exactly this text. */
+function hasUserText(messages: readonly TranscriptMessage[], text: string): boolean {
+  return messages.some(message => message.kind === 'user' && message.text === text)
+}
+
 // ── The real TSP sink: a scripted Tern pane ─────────────────────────────────
 
 class FakeInput extends EventEmitter implements TermInput {
@@ -461,7 +466,10 @@ test('P2-01/P2-02: a routed durable tool call reaches the real SDK sink through 
       harness.frames.map(() => ['main', SESSION_ID]),
       'every frame is scoped to the live main session, never inferred from a row',
     )
-    assert.equal(harness.frames[0]!.sourceIdentity, harness.folder, 'the source identity is the live fold object')
+    assert.equal(harness.frames[0]!.sourceIdentity, harness.frames[1]!.sourceIdentity,
+      'one projection source keeps one identity across frames')
+    assert.notEqual(harness.frames[0]!.sourceIdentity, harness.folder,
+      'the observer never receives the mutable fold instance')
 
     // The REAL SDK surface rendered those frames on the wire: the settled tool
     // card is a small delta on a retained node (no delete, no move).
@@ -549,7 +557,7 @@ test('P2-04: an event from a session the surface is not attached to publishes no
     harness.surface.applyAssistantInput(liveChunk({ type: 'text-delta', index: 0, text: 'stale' }, 'session-other'))
     await flush()
     assert.equal(seen.length, baseline, 'neither the foreign durable event nor its stream repaints the surface')
-    assert.equal(harness.folder.messages().some(message => message.text === 'stale'), false, 'the foreign content never entered the fold')
+    assert.equal(hasUserText(harness.folder.messages(), 'stale'), false, 'the foreign content never entered the fold')
   } finally {
     harness.dispose()
   }
@@ -566,7 +574,7 @@ test('P2-05: the viewed child and the main session each publish their own scope'
     harness.surface.paintNow()
     assert.equal(seen.length, 1)
     assert.equal(seen[0]!.subjectKind, 'main')
-    assert.equal(seen[0]!.sourceIdentity, harness.folder)
+    const mainIdentity = seen[0]!.sourceIdentity
 
     const child = harness.viewChild()
     harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/start', { turn: 1 }, 0))
@@ -578,16 +586,18 @@ test('P2-05: the viewed child and the main session each publish their own scope'
     for (const frame of childFrames) {
       assert.equal(frame.subjectKind, 'viewed-child')
       assert.equal(frame.subjectId, CHILD_ID)
-      assert.equal(frame.sourceIdentity, child, 'the child frame is scoped to the child fold itself')
+      assert.equal(frame.sourceIdentity, childFrames[0]!.sourceIdentity, 'the child keeps one identity')
+      assert.notEqual(frame.sourceIdentity, mainIdentity, 'the child scope is not the main scope')
+      assert.notEqual(frame.sourceIdentity, child, 'the child fold itself is never handed out')
     }
-    assert.ok(childFrames.some(frame => frame.messages.some(message => message.kind === 'user' && message.text === 'child prompt')))
+    assert.ok(childFrames.some(frame => hasUserText(frame.messages, 'child prompt')))
 
     // A main-session event still folds into the MAIN transcript while the child
     // is displayed; the ACTIVE projection stays the child's (the displayed
     // subject owns the pane), exactly as the production selection does.
     route(harness, userMessage(4, 'user-4', 'main continues'))
     harness.surface.paintNow()
-    assert.ok(harness.folder.messages().some(message => message.text === 'main continues'),
+    assert.ok(hasUserText(harness.folder.messages(), 'main continues'),
       'the main fold kept updating behind the viewer')
     assert.equal(seen[seen.length - 1]!.subjectKind, 'viewed-child', 'the displayed subject still owns the pane')
 
@@ -595,8 +605,8 @@ test('P2-05: the viewed child and the main session each publish their own scope'
     harness.surface.paintNow()
     const back = seen[seen.length - 1]!
     assert.equal(back.subjectKind, 'main', 'leaving the viewer republishes the main subject')
-    assert.equal(back.sourceIdentity, harness.folder)
-    assert.ok(back.messages.some(message => message.text === 'main continues'), 'the main projection carries the hidden update')
+    assert.equal(back.sourceIdentity, mainIdentity, 'the main fold keeps its identity across the viewer round trip')
+    assert.ok(hasUserText(back.messages, 'main continues'), 'the main projection carries the hidden update')
   } finally {
     harness.dispose()
   }
@@ -627,8 +637,8 @@ test('P2-06/P2-10: a subject switch performed synchronously inside setTranscript
     harness.surface.routeSessionEvent(CHILD_SESSION, userMessage(1, 'child-1', 'child prompt'))
     harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2))
     assert.ok(seen.length > 0, 'the child projection is published')
-    assert.equal(seen[seen.length - 1]!.sourceIdentity, child)
     assert.equal(seen[seen.length - 1]!.subjectKind, 'viewed-child')
+    assert.notEqual(seen[seen.length - 1]!.sourceIdentity, child, 'the child fold itself is never handed out')
   } finally {
     harness.dispose()
   }
