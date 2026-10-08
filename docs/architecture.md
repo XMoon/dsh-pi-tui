@@ -855,10 +855,42 @@ src/tool-presentation-client.ts -> tui/transcript/client-tool-presenter.ts
 src/working.ts               -> tui/components/working-indicator.ts
 ```
 
-The two F6 composition seams are deliberate: the application owner supplies
-semantic facts (the summary candidate fields, the session title/cwd identity)
-and the composition applies the TUI policy, so `app/**` keeps its "no concrete
-`tui/**` import" direction. `builtins.ts` stays the only legacy root.
+The two F6 composition seams are deliberate, and they run in OPPOSITE
+directions:
+
+```text
+tui/transcript/tool-presentation.toolSummaryKeys (the canonical candidate-field policy)
+  -> bootstrap injection -> app/surface/streaming-tool-preparing fold -> DTO -> TuiApp
+
+app/surface/status-runtime (semantic identity facts: session title, official session workspace cwd)
+  -> injected composition policy (terminalTitleOf -> setTerminalTitle) -> OSC 0 sink
+```
+
+So `app/**` keeps its "no concrete `tui/**` import" direction: the canonical
+TUI summary policy is injected INTO the application fold, while the terminal
+write mechanics are injected OUT of the status owner. `builtins.ts` stays the
+only legacy root.
+
+The OSC 0 window title and the OSC 7 terminal-LOCAL cwd are DISTINCT
+authorities, and the F6 plan-owner ruling (2026-10-08) settled the contract:
+
+```text
+OSC 0 (window title, Session identity)   OSC 7 (terminal-local cwd, OSC 7 pane)
+1. session title non-empty        -> dsh · <sanitized session title>
+2. else official Session cwd known -> dsh · <shortCwd(official session cwd)>   (Direct and Remote alike)
+3. else (Remote projection absent) -> dsh        (never the Client launch cwd)
+4. else (sessionless Direct)       -> dsh · <shortCwd(Client launch cwd)>
+5. a Remote Host cwd may be shown as OSC 0 identity, but is never published as the OSC 7 terminal-local cwd
+```
+
+The frozen F6 plan §10.12 proof line "Remote Host cwd never becomes Client
+terminal title cwd" conflated those two authorities; the line is CORRECTED by
+this ruling and is not implemented as a title behavior change. The seam stays
+`updateTerminalTitle({ sessionTitle, cwd: sessionCwdFact() })` — the cwd
+source is never re-chosen in the terminal adapter. Pinned by
+`test/tern-terminal.test.ts` (the fact/observable matrix, including the
+`dsh · host/alpha` projected-Host-cwd case) and by the connected OSC 0 proof
+in `test/terminal-title.test.ts`.
 
 The Direct/Remote direction (`runtime/remote/**` must not depend on the Direct
 implementation) governs Client-side Remote ADAPTERS. The pre-existing HF1
