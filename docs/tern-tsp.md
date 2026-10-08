@@ -43,8 +43,8 @@ What the integration relies on, in the shape the pinned SDK exposes it:
 
 - `connect(options)` probes the terminal (DA1) and returns a session, or `null`
   when the environment is not a supporting pane (non-TTY, `TERN_TSP=0`, tmux,
-  screen, zellij). It takes raw mode only after the handshake is accepted and
-  restores it on close.
+  screen, zellij). The session enters raw mode for the probe and restores it
+  when the handshake fails or the session closes.
 - Handshake: the program sends a `q`/`hello` query; the pane answers `r` with
   `term`, `ver`, `kinds`, `features`, `apc`, `credits`, `cols` and cell size.
 - Surfaces: `session.open({ mode: 'inline' | 'screen' | 'flow' })` opens one
@@ -124,17 +124,20 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
   `folder.window()` and after `TuiApp.setTranscript()`, and carries:
   - `subjectKind` / `subjectId` — the active display subject, sampled from the
     same selection the repaint used (never inferred from a row's turn);
-  - `sourceIdentity` — the exact `TranscriptFolder` instance, for `===` only;
+  - `sourceIdentity` — an OPAQUE bare-object token, `===` only: the same fold
+    keeps one token, a replaced fold gets a new one, and the fold instance itself
+    is never handed to the observer;
   - `messages` — the exact array the mounted app just received (same reference).
 - It re-checks the active target after the commit, so a `setTranscript()` that
   synchronously switches the subject (viewer open/exit, session switch) drops
   the stale frame; `dispose()` releases the observer before the app dies.
-- `test/tern-tsp-live-projection.test.ts` (8 tests) drives the REAL routing
+- `test/tern-tsp-live-projection.test.ts` (9 tests) drives the REAL routing
   bodies, fold/window, `repaintTarget` and mounted `TuiApp`, and renders through
   the real SDK surface on a separate scripted TTY: routed durable events, live
   assistant input, the attachment/foreign-session fences, main ↔ viewed-child,
-  the re-entrancy drop, coalescing (one commit per 50 ms window; an identical
-  view is zero ops on the wire), dispose, and tty/product isolation.
+  a replaced fold/window under the same Session id, the re-entrancy drop,
+  coalescing (one commit per 50 ms window; an identical view is zero ops on the
+  wire), dispose, and tty/product isolation.
 - The dev/test consumer (frame → `projectTranscriptStructure` → PR1 mapper → SDK
   `Surface.render`) lives inside that test file; there is deliberately no
   production bridge module, no CLI option and no setting until the physical
