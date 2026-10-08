@@ -36,6 +36,17 @@ const GROUP_GAP_MIN_CELLS = 2
 /** The explicit unknown-model stand-in — never the parent's model. */
 const UNKNOWN_MODEL = 'model ?'
 
+/** Collapse one raw projection string into a SINGLE display line: line
+ *  breaks and tabs become spaces; other terminal control characters —
+ *  including ESC, so a session title/label can never inject terminal
+ *  sequences — are dropped. A Host projection string has no single-line
+ *  guarantee, so the bar enforces its own pinned-row contract here. */
+function oneLine(text: string): string {
+  return text
+    .replace(/[\u0009-\u000d]+/g, ' ')
+    .replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g, '')
+}
+
 /**
  * Render the viewer subject bar.
  *
@@ -55,12 +66,13 @@ export function renderViewerSubjectBar(input: {
   const subject = input.snapshot.view.subject
   if (subject.kind !== 'subagent') return ''
   const width = Number.isFinite(input.width) ? Math.max(1, Math.floor(input.width)) : 1
-  const label = subject.label !== undefined && subject.label !== '' ? subject.label : undefined
-  const title = input.childTitle !== undefined
-    && input.childTitle !== ''
-    && input.childTitle !== label
-    ? input.childTitle
-    : undefined
+  // Every rendered text field is a Host projection string (external data):
+  // normalize each to ONE display line before measuring. The single-physical-
+  // line contract must hold for any label/title/model a projection carries.
+  const labelText = subject.label === undefined ? '' : oneLine(subject.label)
+  const label = labelText === '' ? undefined : labelText
+  const titleText = input.childTitle === undefined ? '' : oneLine(input.childTitle)
+  const title = titleText === '' || titleText === label ? undefined : titleText
 
   const navigation = {
     full: color.textMuted(NAVIGATION_FULL),
@@ -136,16 +148,17 @@ function identityOf(label: string | undefined, title: string | undefined): strin
  * never fabricates one; a missing model yields the explicit unknown token. */
 function modelVariantsOf(model: StatusSnapshot['composition']['model']): string[] {
   if (model === undefined) return [UNKNOWN_MODEL]
-  const provider = model.provider
-  const effort = model.reasoningEffort
+  const provider = model.provider === undefined ? undefined : oneLine(model.provider)
+  const effort = model.reasoningEffort === undefined ? undefined : oneLine(model.reasoningEffort)
+  const id = oneLine(model.id)
   const variants: string[] = []
   if (provider !== undefined && provider !== '') {
-    variants.push(`${provider}/${model.id}${effort === undefined ? '' : ` @${effort}`}`)
-    variants.push(`${provider}/${model.id}`)
+    variants.push(`${provider}/${id}${effort === undefined ? '' : ` @${effort}`}`)
+    variants.push(`${provider}/${id}`)
   } else if (effort !== undefined) {
-    variants.push(`${model.id} @${effort}`)
+    variants.push(`${id} @${effort}`)
   }
-  variants.push(model.id)
+  variants.push(id)
   return [...new Set(variants)]
 }
 
@@ -178,25 +191,41 @@ function composeCandidate(input: {
   let identityWidth = identity === undefined ? 0 : visibleWidth(identity)
   let modelWidth = visibleWidth(modelText)
   if (identityWidth + modelWidth > flexWidth) {
-    let overflow = identityWidth + modelWidth - flexWidth
-    // The model id is ellipsized only on the LAST ladder step.
-    if (input.trimModel && modelWidth > 1) {
-      const target = Math.max(1, modelWidth - overflow)
-      modelText = truncateToWidth(modelText, target, '…')
-      overflow -= modelWidth - visibleWidth(modelText)
-      modelWidth = visibleWidth(modelText)
+    if (input.trimModel) {
+      // The LAST ladder step: the label has already been reduced as far as the
+      // earlier steps allowed, so it drops to its identifiability floor FIRST
+      // and the model then lives on the remaining budget. Trimming the model
+      // against the un-trimmed label would ellipsize the model to nothing while
+      // a needlessly long label survived (the model is the last thing to lose
+      // its identity, plan §2.3).
+      if (identity !== undefined) {
+        const floor = Math.min(LABEL_MIN_CELLS, identityWidth)
+        if (identityWidth > floor) {
+          identity = truncateToWidth(identity, floor, '…')
+          identityWidth = visibleWidth(identity)
+        }
+      }
+      const modelRoom = flexWidth - identityWidth
+      if (modelRoom < 1) return undefined
+      if (modelWidth > modelRoom) {
+        modelText = truncateToWidth(modelText, modelRoom, '…')
+        modelWidth = visibleWidth(modelText)
+      }
+    } else {
+      let overflow = identityWidth + modelWidth - flexWidth
+      // The label is trimmed only after the title was already dropped, and
+      // never below the minimum identifiability floor (the step then fails
+      // instead, so the NEXT step can spend the budget differently).
+      if (overflow > 0 && input.trimLabel && identity !== undefined) {
+        const floor = Math.min(LABEL_MIN_CELLS, identityWidth)
+        const target = Math.max(1, identityWidth - overflow)
+        if (target < floor) return undefined
+        identity = truncateToWidth(identity, target, '…')
+        overflow -= identityWidth - visibleWidth(identity)
+        identityWidth = visibleWidth(identity)
+      }
     }
-    // The label is trimmed only after the title was already dropped, and never
-    // below the minimum identifiability floor (the step then fails instead).
-    if (overflow > 0 && input.trimLabel && identity !== undefined) {
-      const floor = Math.min(LABEL_MIN_CELLS, identityWidth)
-      const target = Math.max(1, identityWidth - overflow)
-      if (target < floor) return undefined
-      identity = truncateToWidth(identity, target, '…')
-      overflow -= identityWidth - visibleWidth(identity)
-      identityWidth = visibleWidth(identity)
-    }
-    if (overflow > 0) return undefined
+    if (identityWidth + modelWidth > flexWidth) return undefined
   }
   const leftText = identity === undefined
     ? navigationText

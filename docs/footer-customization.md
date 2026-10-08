@@ -230,8 +230,9 @@ Common builtin Style sets include:
 The `default` preset composes two rows with a left and a right zone each.
 While a subagent viewer is open the builtin `default`/`compact` presets switch
 to their **viewer counterparts** (same composer, same snapshot — only the
-presentation layout differs), because the child identity/model already render
-in the subject bar. The **main** preset is unchanged:
+presentation layout differs): the retired viewer identity block and the
+main-only facts are gone, but the **model placement is kept**, exactly like
+the main preset. The **main** preset itself is unchanged:
 
 ```text
 MAIN default
@@ -244,18 +245,19 @@ MAIN compact
 row 1 left   view-scope(inert) · permission-preset · plan-state · model · tasks · cwd · git-branch · context · turns-steps · ext:*
 
 CHILD viewer default
-row 1 left   permission-preset · agent-preset · cwd · git-branch
+row 1 left   permission-preset · model · agent-preset · cwd · git-branch
 row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed · turns-steps
 row 2 right  context:full
 
 CHILD viewer compact
-row 1 left   permission-preset · agent-preset · cwd · git-branch · context · turns-steps
+row 1 left   permission-preset · model · agent-preset · cwd · git-branch · context · turns-steps
 ```
 
 A **custom** layout (and a command surface) is never swapped: it renders
-exactly as configured on both subjects. If a custom layout explicitly places
-`model`, the child model shows there again — duplication is the user's own
-choice, and the builtin child layout simply does not duplicate it.
+exactly as configured on both subjects. The child model therefore shows in the
+footer AND in the subject bar — that duplication is intended: the bar is the
+always-visible core identity, while the footer keeps its full existing model
+capability (format, responsive compact/drop and `/footer` configuration).
 
 Items of one zone are joined with two spaces; the right zone renders flush
 right. The second row decomposes the pi-vocabulary stats line into real
@@ -299,9 +301,11 @@ one pinned row directly under the global header:
   activity words collapse to a marker, then `parent` collapses to `‹`, then
   `@effort`, then `provider/`, and the model id is ellipsized last.
 
-Because the bar already carries the child identity and model, the builtin
-child Footer layouts omit both. A user custom layout may still place `model`
-(or any item) if they want it repeated.
+Because the bar is an independent, always-visible core identity, the builtin
+child Footer layouts KEEP their `model` placement: the same model may appear
+in both places, and that is intended. The bar and the footer read the same
+`StatusSnapshot.composition.model` (never a second model state, never the
+parent's model), while each applies its own degradation strategy.
 
 ## Custom Text items
 

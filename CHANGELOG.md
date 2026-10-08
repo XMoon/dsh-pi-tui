@@ -53,8 +53,10 @@
   主会话模型);主会话 Header 恢复显示主会话标题,旧的 `[viewing subagent · …]`
   标记与 footer 里的身份块 `view-scope` 不再出现(旧自定义布局中残留的
   `view-scope` 仍能正常载入/编辑/保存,只是不再渲染内容)。内建的子会话 footer
-  因此不再重复模型与身份,只保留权限/preset/工作目录/上下文/用量统计;自定义
-  footer 若显式摆放 `model` 仍会照常显示。
+  不再显示已退役的身份块,但**保留 `model`** 以及权限/preset/工作目录/上下文/
+  用量统计:主题栏与 footer 都会显示同一个子会话模型(重复为预期),两者读同一份
+  `composition.model`,绝不回退主会话模型;footer 原有的格式化、窄屏 compact/drop
+  与 `/footer` 自定义行为不变。
 
 ### 修复
 

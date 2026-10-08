@@ -80,17 +80,18 @@ function enterViewer(snap: StatusSnapshot, mode: 'one-shot' | 'continuable', act
   mutable.usage.context = { usedTokens: 100, windowTokens: 2000, percent: 5 }
 }
 
-test('the builtin viewer footer shows the child facts but never repeats the viewer identity or model', () => {
+test('the builtin viewer footer keeps the model and drops only the viewer identity block', () => {
   const snap = parentSnapshot()
   enterViewer(snap, 'one-shot', 'inactive')
   const text = composer.render({ snapshot: snap, layout: VIEWER_DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
-  // The child identity/activity/model moved to the subject bar, so the
-  // builtin child footer must NOT repeat them (viewer UX plan §4.4).
+  // Plan-owner revision: the footer keeps its FULL model capability (the bar
+  // may show the same model — duplication is expected). Only the retired
+  // viewer identity block (badge/label/activity) is gone.
+  assert.ok(text.includes('deepseek/child-model'), `the child provider/model must render in the footer:\n${text}`)
+  assert.ok(text.includes('@high'), `the child reasoning effort must render in the footer:\n${text}`)
   assert.ok(!text.includes('[subagent'), `the footer must not repeat the viewer badge:\n${text}`)
   assert.ok(!text.includes('research'), `the footer must not repeat the child label:\n${text}`)
   assert.ok(!text.includes('inactive'), `the footer must not repeat the activity:\n${text}`)
-  assert.ok(!text.includes('child-model'), `the footer must not repeat the child model:\n${text}`)
-  assert.ok(!text.includes('@high'), `the footer must not repeat the reasoning effort:\n${text}`)
   // The child's OWN Session-owned facts render in the viewer layout.
   assert.ok(text.includes('[read-only]'), `the child permission must render:\n${text}`)
   assert.ok(text.includes('[child-preset]'), `the child preset must render:\n${text}`)
@@ -111,17 +112,17 @@ test('the builtin viewer footer shows the child facts but never repeats the view
   assert.ok(!text.includes('10.0k'), `the parent context window must not leak:\n${text}`)
 })
 
-test('the builtin viewer compact layout keeps the child status row and drops the stats row', () => {
+test('the builtin viewer compact layout keeps the child status row (with model) and drops the stats row', () => {
   const snap = parentSnapshot()
   enterViewer(snap, 'one-shot', 'inactive')
   const text = composer.render({ snapshot: snap, layout: VIEWER_COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
   assert.ok(text.includes('[read-only]'), `the child permission must render:\n${text}`)
+  assert.ok(text.includes('deepseek/child-model'), `compact must KEEP the child model:\n${text}`)
   assert.ok(text.includes('[child-preset]'), `the child preset must render:\n${text}`)
   assert.ok(text.includes('ws'), `the child cwd must render:\n${text}`)
   assert.ok(text.includes('t3/s5'), `the child counters must render:\n${text}`)
   assert.ok(!text.includes('TTFB'), `compact must drop the stats row:\n${text}`)
   assert.ok(!text.includes('[subagent'), `compact must not repeat the viewer badge:\n${text}`)
-  assert.ok(!text.includes('child-model'), `compact must not repeat the child model:\n${text}`)
 })
 
 test('the viewer preset selection swaps only the builtin layout; main/custom stay put', () => {
@@ -130,10 +131,11 @@ test('the viewer preset selection swaps only the builtin layout; main/custom sta
   assert.equal(layoutForPreset('compact', false), COMPACT_FOOTER_LAYOUT)
   assert.equal(layoutForPreset('default', true), VIEWER_DEFAULT_FOOTER_LAYOUT)
   assert.equal(layoutForPreset('compact', true), VIEWER_COMPACT_FOOTER_LAYOUT)
-  // The viewer layouts carry no model and no view-scope placement.
+  // The viewer layouts KEEP the model placement and drop the retired
+  // view-scope (plan-owner revision).
   for (const layout of [VIEWER_DEFAULT_FOOTER_LAYOUT, VIEWER_COMPACT_FOOTER_LAYOUT]) {
     const ids = layout.rows.flatMap(row => [...row.left, ...row.right].map(ref => ref.id))
-    assert.ok(!ids.includes('model'), `the viewer layout must not place model:\n${ids.join(',')}`)
+    assert.ok(ids.includes('model'), `the viewer layout must keep the model placement:\n${ids.join(',')}`)
     assert.ok(!ids.includes('view-scope'), `the viewer layout must not place view-scope:\n${ids.join(',')}`)
   }
 })
@@ -521,5 +523,43 @@ test('the subject bar renders the committed child title and never a title naming
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('alpha-renamed'), `the renamed label must render (precondition):\n${view}`)
   assert.ok(!view.includes('Foreign title'), `a title naming another session must never render:\n${view}`)
+  app.stop()
+})
+
+test('a presentation-only child title change refreshes the bar with no store churn', async () => {
+  // The child title lives in the DisplaySubjectPresentation, NOT in a
+  // StatusStore section: a lone session/title update produces a
+  // content-equal view patch, so the store must NOT notify (no churn) — yet
+  // the bar must still follow the new/removed title.
+  const store = new StatusStore(emptyStatusSnapshot())
+  const vt = new VirtualTerminal(120, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { statusStore: store })
+  app.start()
+  startedApps.add(app)
+  const subject = { kind: 'subagent', id: 'child-1', label: 'research', mode: 'continuable', activity: 'running' } as const
+  const commitTitle = (title: string): void => {
+    app.commitDisplaySubject({ view: { subject } }, {}, {
+      sessionId: 'child-1', workspaceRoot: '/c', title, todos: [], goal: undefined,
+    })
+  }
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'research', mode: 'continuable', activity: 'running',
+    cwd: '/c', turns: 1, steps: 1, title: 'Alpha',
+  })
+  await vt.waitForRender()
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('Alpha'),
+    'the initial child title renders (precondition)')
+  const revision = store.revision()
+  commitTitle('Beta')
+  await vt.waitForRender()
+  const updated = app.viewerSubjectBarRenderRowsForTest().join('\n')
+  assert.ok(updated.includes('Beta'), `a lone title update must reach the bar:\n${updated}`)
+  assert.ok(!updated.includes('Alpha'), `the old title must leave the bar:\n${updated}`)
+  assert.equal(store.revision(), revision, 'a title-only change must not churn the store')
+  commitTitle('')
+  await vt.waitForRender()
+  const cleared = app.viewerSubjectBarRenderRowsForTest().join('\n')
+  assert.ok(!cleared.includes('Beta'), `a title removal must reach the bar:\n${cleared}`)
+  assert.equal(store.revision(), revision, 'a title removal must not churn the store')
   app.stop()
 })
