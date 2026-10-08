@@ -10,7 +10,7 @@
  * Evidence classification: the scripted-terminal cases below compose with a
  * SCRIPTED tty (`@stencil-hq/tern`'s documented test shape), not a real Tern
  * binary; real native rendering is the manual smoke recorded in
- * `docs/tern-tsp-pr1-evidence.md`. Neither is repository L5 DSH wire coverage.
+ * `docs/tern-tsp/evidence/pr1.md`. Neither is repository L5 DSH wire coverage.
  * @module @xmoon76/dsh-pi-tui/tern-tsp-transcript-spike.test
  */
 

@@ -1,5 +1,11 @@
 # Tern TSP PR1 evidence — standalone canonical-transcript TSP spike
 
+> **Historical snapshot.** Everything below is the PR1 record exactly as it was
+> written and verified on its own worktree; its paths and numbers are NOT
+> updated by later PRs. It moved from `docs/tern-tsp-pr1-evidence.md` to this
+> archive path in PR2; the long-term integration entry point is
+> [`docs/tern-tsp.md`](../../tern-tsp.md).
+
 Status of this document: **PR1 feasibility evidence record**, not a subsystem
 contract. It exists to make PR2 start from measured facts instead of a claim.
 PR1 shipped **only** an experimental, manually launched spike; no production
