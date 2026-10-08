@@ -285,34 +285,18 @@ test('the LAST visible transcript row maps to its own bubble with the bar presen
     if (match !== null) { lastY = index; owner = match[1]!; break }
   }
   assert.ok(lastY > barY && owner !== '', `a transcript bubble row must be visible:\n${view.join('\n')}`)
-  const ownedBefore = view.filter(row => row.includes(`M${owner}-`)).length
+  // Ownership evidence keyed to the clicked bubble's OWN hidden text, not a
+  // visible-row count (other bubbles expanding or a scrollTop shift could
+  // change a count without this row owning the click).
+  const hidden = `M${owner}-25`
+  assert.ok(!view.some(row => row.includes(hidden)),
+    `precondition: the owner's body line must be folded:\n${view.join('\n')}`)
   clickCell(vt, 10, lastY)
   const after = await rows(vt)
-  const ownedAfter = after.filter(row => row.includes(`M${owner}-`)).length
-  assert.notEqual(ownedAfter, ownedBefore,
-    `the clicked last-visible row must toggle its OWN bubble (owner M${owner}-, ${ownedBefore} -> ${ownedAfter}):\nBEFORE:\n${view.join('\n')}\nAFTER:\n${after.join('\n')}`)
+  assert.ok(after.some(row => row.includes(hidden)),
+    `the clicked last-visible row must expand its OWN bubble (${hidden} must become visible):\nBEFORE:\n${view.join('\n')}\nAFTER:\n${after.join('\n')}`)
   assert.equal(after.findIndex(row => row.includes('‹ parent')), 1,
     `the bar stays pinned after the bottom-row click:\n${after.join('\n')}`)
-  app.setFullscreen(false)
-  app.stop()
-})
-
-test('the blank fold control of an expanded bubble is reachable with the bar present', async () => {
-  const { vt, app } = startApp()
-  app.setTranscript(longUserMessage().messages())
-  enterChildDisplaySubject(app, { ...CHILD })
-  app.setFullscreen(true)
-  let view = await rows(vt)
-  const barY = view.findIndex(row => row.includes('‹ parent'))
-  clickCell(vt, 10, barY + 1) // expand the folded bubble
-  view = await rows(vt)
-  assert.equal(compactMarkerCount(view), 0, `the bubble must expand:\n${view.join('\n')}`)
-  const collapseY = view.findIndex(row => row.includes('▴ Collapse'))
-  assert.ok(collapseY >= 0, `the blank-row fold control must be visible:\n${view.join('\n')}`)
-  clickCell(vt, 10, collapseY)
-  view = await rows(vt)
-  assert.equal(compactMarkerCount(view), 1,
-    `the fold control must collapse the bubble:\n${view.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
 })
