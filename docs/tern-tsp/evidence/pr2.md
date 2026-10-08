@@ -20,7 +20,7 @@ below; the long-term entry point is [`docs/tern-tsp.md`](../../tern-tsp.md).
 | Path | What it is |
 |---|---|
 | `src/app/surface/runtime.ts` | The PR2 seam: `SurfaceRuntimeOptions.onTranscriptProjected?` + `TranscriptProjectionFrame`, published by `repaintTarget()` after the ONE existing `folder.window()`/`setTranscript()`; released by `dispose()`. |
-| `test/tern-tsp-live-projection.test.ts` | 8 tests: the real routing → fold/window → `repaintTarget` → mounted `TuiApp` → observer → PR1 mapper → real SDK surface chain, plus the fences, the re-entrancy drop, coalescing, dispose and tty/product isolation. |
+| `test/tern-tsp-live-projection.test.ts` | 9 tests: the real routing → fold/window → `repaintTarget` → mounted `TuiApp` → observer → PR1 mapper → real SDK surface chain, plus the fences, the replaced-fold/window re-scope, the re-entrancy drop, coalescing, dispose and tty/product isolation. |
 | `docs/tern-tsp.md` | The long-term TSP entry point (protocol boundary, ownership chain, status, contracts, capability matrix, ledger, PR3 questions). |
 | `docs/tern-tsp/evidence/pr1.md` | The PR1 record, `git mv`-archived verbatim (only a historical-snapshot note added). |
 | `docs/tern-tsp/evidence/pr2.md` | This document. |
@@ -57,11 +57,13 @@ readonly onTranscriptProjected?: (frame: TranscriptProjectionFrame) => void
 
 `test/tern-tsp-live-projection.test.ts` drives the REAL application bodies:
 `SurfaceRuntime.routeSessionEvent()` → `app/surface/event-routing.ts` (the
-attachment/currentness/exact-owner fences) → the real `TranscriptFolder` →
+attachment and live-owner fences) → the real `TranscriptFolder` →
 the real `repaintTarget()` → the real mounted `TuiApp` on a `VirtualTerminal` →
 the injected observer → `projectTranscriptStructure()` + the PR1 mapper → the
 real `@stencil-hq/tern` surface on a separate scripted tty (official handshake,
-credit acks, frame decoding from the wire).
+credit acks, frame decoding from the wire). The assistant-stream identity fence
+(`isCurrentAssistantAgent`, never on the `routeSessionEvent` path) is asserted
+separately, as the Direct install consults it before `applyAssistantInput`.
 
 | ID | Scenario | State | Where |
 |---|---|---|---|
@@ -70,37 +72,47 @@ credit acks, frame decoding from the wire).
 | P2-03 | Live assistant delta | DONE: `applyAssistantInput` → the same streaming card; the growth is an SDK `text` op | `P2-03` |
 | P2-04 | Wrong attached object / stale session | DONE: a foreign Session's durable event and stream neither fold nor schedule a repaint | `P2-04` |
 | P2-05 | main → viewed child → main | DONE: each subject carries its own id and identity token; the main fold keeps updating behind the viewer; leaving republishes the main projection | `P2-05` |
-| P2-06 | Same-id rebind / Remote transport rollover | NOT COVERED at the binding level (needs the real Remote binding fixture); the same-id *frame* hazard is covered by the re-entrancy drop | `P2-06/P2-10` |
-| P2-07 | Remote bounded window / `loadOlder` | NOT COVERED by PR2 (the reader is untouched; the pre-existing history-extension and Remote suites keep their own coverage) | — |
+| P2-06 | Same Session id, replaced ownership/window | SEAM-LEVEL DONE: replacing the main fold **and** its window under the same id produces a NEW identity scope (no cross-attribution, the stale fold stops receiving), so the seam carries no Direct/`same-id` assumption. The real Remote `Connection` generation/transport rollover over the wire stays with the existing Remote qualification suites — see *Deferred with owner* | `P2-06/P2-07` |
+| P2-07 | Remote bounded window / `loadOlder` | PARTIAL: the seam follows the committed window of whichever fold/window the routing exposes (covered by the same replacement case and by the ordinary window changes in `P2-02`/`P2-09`); the bounded reader's `hasMore`/`loadOlder` semantics are untouched and keep their own coverage in the history-extension and Remote suites | `P2-06/P2-07` |
 | P2-08 | Read merge / Context clustering | INHERITED from PR1 (mapper `View.ops` rebuild case, `test/tern-tsp-transcript-spike.test.ts`); not re-asserted through the live chain | PR1 T6 |
 | P2-09 | Repaint coalescing / unchanged view | DONE: three events in one flush window commit once; a repaint of an identical projection emits **zero ops** on the wire | `P2-09` |
-| P2-10 | Synchronous subject switch inside `setTranscript` | DONE (see the discrimination table) | `P2-06/P2-10` |
+| P2-10 | Synchronous subject switch inside `setTranscript` | DONE (see the discrimination table) | `P2-10` |
 | P2-11 | `dispose()` / late event / SDK close | DONE: a late routed event still schedules a repaint, and no frame is published; the SDK closes with `keep:false` and restores raw mode on its own tty | `P2-11`, `P2-01/P2-02` |
 | P2-12 | Physical stdin ownership | DONE as source lock + object identity: PiTui's `VirtualTerminal` and the SDK's `TermInput`/`TermOutput` are different objects; a PiTui keystroke reaches neither the SDK input nor the wire; production never handshakes | `P2-12/P2-14` |
 | P2-13 | Docs migration / index | DONE: one canonical entry, PR1 archived, no dangling reference (`docs/tern-tsp/evidence/pr1.md` keeps the old path only in its migration note) | `rg` check |
 | P2-14 | Release artifact boundary | DONE as a source lock: no file under `src/**` imports `@stencil-hq/tern`, and `bootstrap.ts` never injects the observer; the packaging smoke is part of the stage-final lane | `P2-12/P2-14` |
 
+### Deferred with owner
+
+| Item | Owner | Reason | Closure condition |
+|---|---|---|---|
+| Real Remote `Connection` generation / transport-token rollover driving the projection observer over the wire | The M3 Remote qualification contract (`docs/client-server-migration.md`; the existing `smoke:remote-*` / runner Remote L6 suites) | Those suites own the real binding/reader fixtures; PR2 must not build a second Remote harness, and the plan itself grades P2-06 as needing "a real binding fixture" | A Remote L6 case that replaces the binding mid-session and asserts the projected subject identity is re-scoped |
+
 ### Discrimination checks (mutations run against the final test file)
 
 | Temporary mutation | Observed |
 |---|---|
-| `publishProjected()`'s post-commit currentness re-check removed | `P2-06/P2-10` fails (`1 !== 0`): the stale main frame is published |
+| `publishProjected()`'s post-commit currentness re-check removed | `P2-10` fails (`1 !== 0`): the stale main frame is published |
 | `dispose()`'s observer release removed | `P2-11` fails: the late event's repaint publishes a frame |
 
-Both mutations were reverted; the committed tree has neither.
+Both mutations were reverted; the committed tree has neither. `P2-06/P2-07`
+asserts a direct property (the replaced fold must produce a different identity
+token while the Session id stays the same), so it cannot pass for the wrong
+reason: a dropped frame or a re-used token both fail it.
 
 ## Verification results (snapshot-qualified)
 
 | Lane | Command | Result | Snapshot |
 |---|---|---|---|
-| Types | `pnpm typecheck:bundle` | exit 0 | `7f06f7b5` |
-| PR2 suite | `node --test test/tern-tsp-live-projection.test.ts` | 8 pass / 0 fail | `7f06f7b5` |
-| Targeted (9 files) | `node --test test/tern-tsp-live-projection.test.ts test/tern-tsp-transcript-spike.test.ts test/transcript-history-extension.test.ts test/surface-lifecycle.test.ts test/status-ownership.test.ts test/projection-convergence.test.ts test/transcript.test.ts test/remote-live-ingress.test.ts test/session-ui-hydrate.test.ts` | 297 pass / 0 fail | `e373aeda` (pre-token refinement; superseded by the product lane below) |
-| Product suite | `pnpm test:product` | 7369 pass / 0 fail (includes the 8 PR2 tests) | `7f06f7b5` |
-| Architecture gate | `pnpm gate:architecture` | exit 0 | `7f06f7b5` |
-| Client-boundary gate | `pnpm gate:boundary` | exit 0 | `7f06f7b5` |
-| Naming / session-events / install-doc gates | `node scripts/naming-gate.mjs`, `node scripts/check-no-session-events.mjs`, `node scripts/installation-doc-gate.mjs` | exit 0 (all three) | `7f06f7b5` |
+| Types | `pnpm typecheck:bundle` | exit 0 | `7f06f7b5`, re-run green with the 9th test |
+| PR2 suite | `node --test test/tern-tsp-live-projection.test.ts` | 9 pass / 0 fail | R1-fix tree (see the commit list) |
+| Targeted (9 files) | `node --test test/tern-tsp-live-projection.test.ts test/tern-tsp-transcript-spike.test.ts test/transcript-history-extension.test.ts test/surface-lifecycle.test.ts test/status-ownership.test.ts test/projection-convergence.test.ts test/transcript.test.ts test/remote-live-ingress.test.ts test/session-ui-hydrate.test.ts` | 297 pass / 0 fail | `e373aeda` (earlier snapshot, 8-test file; superseded by the product lane) |
+| Product suite | `pnpm test:product` | 7370 pass / 0 fail (includes the 9 PR2 tests) | `7f06f7b5` (8-test file), re-run inside the stage-final pipeline below |
+| Architecture gate | `pnpm gate:architecture` | exit 0 | `7f06f7b5`, re-run inside the stage-final pipeline |
+| Client-boundary gate | `pnpm gate:boundary` | exit 0 | `7f06f7b5`, re-run inside the stage-final pipeline |
+| Naming / session-events / install-doc gates | `node scripts/naming-gate.mjs`, `node scripts/check-no-session-events.mjs`, `node scripts/installation-doc-gate.mjs` | exit 0 (all three) | `7f06f7b5`, re-run inside the stage-final pipeline |
 | Whitespace | `git diff --check`, `git diff --cached --check` | exit 0 (both) | `7f06f7b5` |
+| Stage-final `pnpm verify:prepush` (fork typechecks + `test:fork` + `test:docs` 364/0 + `test:tooling` + all gates + `pnpm audit` "No known vulnerabilities found" + `pack:release` prepack `typecheck:bundle` + `test:product` **7370/0** + the 8 postpack smokes) | `pnpm verify:prepush` | exit 0 | working tree committed as the R1-fix commits (content-identical) |
 
 ## Plan checklist mapping (§10 acceptance / §2 MUST / §9 stop conditions)
 
@@ -110,13 +122,13 @@ Both mutations were reverted; the committed tree has neither.
 | The ONE `repaintTarget` exit covers the active window; no second event/fold/window authority | `mounted().setTranscript(` exists exactly once in `src/**` (`src/app/surface/runtime.ts:816`); every `repaintTarget()` caller passes `activeFolder()`/`activeWindow()`; the publish point is inside that same function; PR2 adds no subscription, fold, window, reader or port |
 | Production keeps PiTui and never handshakes on its tty; the SDK stays dev/test-scoped | `docs/tern-tsp.md` + `P2-12/P2-14` test: no `src/**` file imports the SDK, `bootstrap.ts` never injects the observer, the two terminals are distinct objects; `@stencil-hq/tern` remains in `devDependencies` |
 | A real application event-routing source→fold→window→observer→SDK sink test, plus a stream live input positive | `P2-01/P2-02` and `P2-03` (real routing bodies, real fold/window, real `repaintTarget`, real mounted `TuiApp`, real SDK surface) |
-| main/viewer, same-id rebind, Remote bounded/currentness, rehydrate, late event, dispose — covered or level-marked | `P2-05`, `P2-06/P2-10`, `P2-11` for the seam; `P2-06` binding-level and `P2-07` marked NOT COVERED, `P2-08` inherited from PR1 |
+| main/viewer, same-id rebind, Remote bounded/currentness, rehydrate, late event, dispose — covered or level-marked | `P2-05`, `P2-06/P2-07` (replaced fold/window under the same id), `P2-10`, `P2-11` for the seam; the real Remote wire rollover is recorded as *Deferred with owner*; `P2-01` bulk cold-hydrate and `P2-08` are inherited/level-marked |
 | `View.ops` keeps increments; Read/Context reparenting may rebuild; no reinvented business id | `P2-09` (unchanged projection = zero ops) plus PR1's `View.ops` cases; the seam introduces no identity of its own |
-| Production repaint/search/status/input timing unchanged; no wider abstraction | One optional option + one call in `repaintTarget()`; with no observer the path is one `undefined` check; `pnpm test:product` 7369/0 on the same snapshot |
+| Production repaint/search/status/input timing unchanged; no wider abstraction | One optional option + one call in `repaintTarget()`; with no observer the path is one `undefined` check; `pnpm test:product` 7370/0 in the stage-final pipeline |
 | `docs/tern-tsp.md` created as the long-term entry | `docs/tern-tsp.md` (scope/status, upstream, ownership boundary, implementation, contracts, capability matrix, verification, ledger, next decisions) |
 | PR1 evidence archived; PR2 evidence written | `docs/tern-tsp/evidence/pr1.md` (verbatim `git mv` + snapshot note), `docs/tern-tsp/evidence/pr2.md` |
 | `docs/README.md` indexes one entry; no dangling internal links | One row pointing at `tern-tsp.md`; `rg 'tern-tsp-pr1-evidence\.md' docs scripts test src` matches only the archive's own migration note |
-| Targeted + gates + stage-final results recorded with SHA; CI green before merge | The snapshot table above (stage-final `pnpm verify:prepush` and CI recorded when they run) |
+| Targeted + gates + stage-final results recorded with SHA; CI green before merge | The snapshot table above; `pnpm verify:prepush` exit 0 on the R1-fix tree; CI recorded after the push |
 | Reviewer re-read `docs/code-review.md` and reviewed the whole PR | Review history appended below |
 | Docs separate verified from unverified scope with a PR3 handoff | "What PR2 proved / did NOT prove" and "PR3 handoff" above |
 
@@ -142,7 +154,8 @@ Proved (on the snapshots above):
    `append`, and an unchanged projection produces no frame at all.
 3. The existing fences stay in charge: a foreign Session, a stale live input, a
    synchronous subject switch inside the commit and a disposed surface publish
-   nothing.
+   nothing; and replacing the fold/window under the SAME Session id produces a
+   new identity scope, so the same id is never treated as the same view.
 4. The production path is unchanged and SDK-free: no `src/**` import, no
    composition wiring, PiTui keeps its own tty.
 
@@ -152,9 +165,10 @@ NOT proved (do not read the tests as these):
    PR1's scripted-then-manual smoke.
 2. **No product renderer.** PiTui is still the only renderer; nothing selects
    TSP at startup and there is no fallback path in the product.
-3. **No Remote binding rollover coverage.** P2-06's real `Connection`
-   generation/transport replacement was not exercised; PR2 only guarantees the
-   seam does not add a second authority.
+3. **No Remote binding rollover over the wire.** The seam-level replacement case
+   (P2-06/P2-07) covers what the surface sees; the real `Connection`
+   generation/transport replacement was not exercised — see *Deferred with
+   owner* above.
 4. **No bulk cold-hydrate coverage** through the live chain (P2-01 PARTIAL).
 5. **No editor/input, Question/Approval, search/reveal, ExtensionView or Focus
    work** inside TSP.
@@ -162,6 +176,10 @@ NOT proved (do not read the tests as these):
    consumer lifetime; Read-group/Context reparenting legitimately rebuilds ids.
 7. **No performance claim.** The only measured signal is the zero-op frame for an
    unchanged projection; no long-session refresh benchmark was run.
+8. **Read-only is type-level plus the opaque token**, with no defensive copy of
+   the committed array: a consumer that ignores the `readonly` type could still
+   mutate the array the app holds. That is out of the documented contract, and
+   the seam deliberately does not pay for a copy.
 
 ## PR3 handoff (recorded, not implemented)
 
@@ -186,6 +204,12 @@ NOT proved (do not read the tests as these):
 7. A real runner-level end-to-end test (the `mountRunner` fixture) needs the
    observer to be reachable from the composition root; that is a deliberate
    product-architecture decision, not a test detail.
+
+## Review history
+
+| Round | Verdict | Findings and disposition |
+|---|---|---|
+| Internal R1 (durable reviewer, reviewed `bfeac1d0`; code/test identical to `7f06f7b5`) | needs-fixes | P2 `docs/tern-tsp.md` still described `sourceIdentity` as the fold instance → corrected to the opaque token. P2 plan §2 MUST #1/#3 Remote ownership/window replacement + same-id rehydrate not delivered → `P2-06/P2-07` seam-level replacement test added; the real Remote wire rollover recorded as *Deferred with owner* above. P3 raw-mode timing → reworded against the shipped SDK's `handshake()`. P3 the `routeSessionEvent` fence list wrongly included the exact-Agent fence → split (with the note that `isCurrentAssistantAgent` is asserted separately). P3 the P2-06 parenthetical conflated a subject switch with a same-id rebind → rephrased. Non-blocking read-only observation → recorded as an explicit limit above. |
 
 ## Reproduction
 
