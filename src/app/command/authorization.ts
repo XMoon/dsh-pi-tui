@@ -20,7 +20,6 @@
  * @module @xmoon76/dsh-pi-tui/app/command/authorization
  */
 
-import type { AuthorizationNotice } from '@deepseek-ai/dsh-authorization'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
@@ -103,7 +102,7 @@ export function mergeLoginTargets(
  * output panel wraps, so the URL stays copyable. Notices never carry
  * secrets.
  */
-export function formatAuthorizationNotice(notice: AuthorizationNotice): string {
+export function formatAuthorizationNotice(notice: AuthorizationNoticeEvent): string {
   const lines = [notice.message]
   if (notice.url !== undefined && notice.url !== '') {
     lines.push('', 'Open this page to continue:', notice.url)
