@@ -24,7 +24,10 @@ import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import {
   DEFAULT_TERMINAL_PROGRESS_MODE,
+  emitsOsc7501,
+  emitsOsc94,
   parseTerminalProgressMode,
+  type TerminalProgressMode,
 } from '../src/domain/terminal-progress/settings.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
@@ -211,43 +214,79 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
   return { vt, app, settings, run, view, viewRow, appliedModes }
 }
 
-test('the parser is the single authority and fails safe to on', () => {
-  assert.equal(DEFAULT_TERMINAL_PROGRESS_MODE, 'on')
-  assert.equal(parseTerminalProgressMode(undefined), 'on')
-  assert.equal(parseTerminalProgressMode('on'), 'on')
+test('the parser is the single authority and fails safe to the dual-protocol default', () => {
+  assert.equal(DEFAULT_TERMINAL_PROGRESS_MODE, '9;4+7501')
+  assert.equal(parseTerminalProgressMode(undefined), '9;4+7501')
+  assert.equal(parseTerminalProgressMode('9;4+7501'), '9;4+7501')
+  assert.equal(parseTerminalProgressMode('9;4'), '9;4')
+  assert.equal(parseTerminalProgressMode('7501'), '7501')
   assert.equal(parseTerminalProgressMode('off'), 'off')
-  assert.equal(parseTerminalProgressMode('garbage'), 'on')
+  // The retired `on` value stays readable for older USER profiles and resolves
+  // to the dual-protocol default; it is never offered as a UI value.
+  assert.equal(parseTerminalProgressMode('on'), '9;4+7501')
+  assert.equal(parseTerminalProgressMode('garbage'), '9;4+7501')
 })
 
-test('the row renders on when the persisted value is absent', async () => {
+test('the two protocol predicates have a fixed truth table', () => {
+  const expected: Record<TerminalProgressMode, { osc94: boolean; osc7501: boolean }> = {
+    'off': { osc94: false, osc7501: false },
+    '9;4': { osc94: true, osc7501: false },
+    '7501': { osc94: false, osc7501: true },
+    '9;4+7501': { osc94: true, osc7501: true },
+  }
+  for (const mode of Object.keys(expected) as TerminalProgressMode[]) {
+    assert.equal(emitsOsc94(mode), expected[mode].osc94, `${mode} OSC 9;4`)
+    assert.equal(emitsOsc7501(mode), expected[mode].osc7501, `${mode} OSC 7501`)
+  }
+})
+
+test('the row renders the dual-protocol default when the persisted value is absent', async () => {
   const t = setupSettings()
   await t.run()
   const view = await t.viewRow()
-  const row = view.split('\n').find(line => /Terminal progress\s+on\b/.test(line))
-  assert.ok(row !== undefined, `absent value must render on:\n${view}`)
+  const row = view.split('\n').find(line => /Terminal progress\s+9;4\+7501\b/.test(line))
+  assert.ok(row !== undefined, `absent value must render 9;4+7501:\n${view}`)
   t.app.dispose()
 })
 
-test('the row renders on for an invalid persisted value and never the raw string', async () => {
+test('the row renders the default for an invalid persisted value and never the raw string', async () => {
   const t = setupSettings({ terminalProgress: 'garbage' })
   await t.run()
   const view = await t.viewRow()
-  const row = view.split('\n').find(line => /Terminal progress\s+on\b/.test(line))
-  assert.ok(row !== undefined, `invalid value must fall back to on:\n${view}`)
+  const row = view.split('\n').find(line => /Terminal progress\s+9;4\+7501\b/.test(line))
+  assert.ok(row !== undefined, `invalid value must fall back to 9;4+7501:\n${view}`)
   assert.ok(!view.includes('garbage'), 'the raw invalid value never renders')
   t.app.dispose()
 })
 
-test('cycling the row applies the runtime setter immediately and persists the whole document', async () => {
+test('the row renders the dual-protocol default for the retired on value', async () => {
+  const t = setupSettings({ terminalProgress: 'on' })
+  await t.run()
+  const view = await t.viewRow()
+  const row = view.split('\n').find(line => /Terminal progress\s+9;4\+7501\b/.test(line))
+  assert.ok(row !== undefined, `the retired on value must render as the default:\n${view}`)
+  assert.ok(!/\bTerminal progress\s+on\b/.test(view), 'on is not a UI value any more')
+  t.app.dispose()
+})
+
+test('cycling the row walks the four modes in the fixed order and persists each one', async () => {
+  // The UI order is part of the contract: the DEFAULT first, then 9;4, 7501, off.
+  // Starting from the retired `on` (read as the default) proves the first press
+  // lands on the 9;4 compatibility mode.
   const t = setupSettings({ terminalProgress: 'on' })
   await t.run()
   await t.viewRow()
-  t.vt.sendInput('\r') // cycle: on -> off
-  assert.deepEqual(t.appliedModes, ['off'], 'the runtime setter receives the chosen mode synchronously')
-  await t.view()
-  assert.equal(t.settings.writes.length, 1, 'exactly one whole-document write')
+  const order: string[] = ['9;4', '7501', 'off', '9;4+7501']
+  for (const [index, expectedMode] of order.entries()) {
+    t.vt.sendInput('\r')
+    await t.view()
+    assert.equal(t.appliedModes[index], expectedMode,
+      `press ${index + 1} must select ${expectedMode}`)
+    assert.equal(t.settings.writes[index]?.terminalProgress, expectedMode,
+      `press ${index + 1} must persist ${expectedMode}`)
+  }
+  assert.equal(t.settings.writes.length, 4, 'exactly one whole-document write per press')
   const write = t.settings.writes[0]!
-  assert.equal(write.terminalProgress, 'off', `wrote: ${JSON.stringify(write)}`)
   assert.equal(write.theme, 'auto', 'unrelated fields are preserved')
   assert.equal(write.progressUpdates, 'milestones', 'the narration cadence is never conflated with this gate')
   assert.deepEqual(write.keybindings, { 'app.transcript.toggle': ['ctrl+o'] })
@@ -259,14 +298,14 @@ test('reopening /settings shows the persisted value', async () => {
   const t = setupSettings({ terminalProgress: 'on' })
   await t.run()
   await t.viewRow()
-  t.vt.sendInput('\r') // on -> off
+  t.vt.sendInput('\r') // 9;4+7501 -> 9;4
   await t.view()
   t.vt.sendInput('\x1b') // Esc closes without writing
   await t.view()
   await t.run()
   const view = await t.viewRow()
-  const row = view.split('\n').find(line => /Terminal progress\s+off\b/.test(line))
-  assert.ok(row !== undefined, `reopened row must show the persisted off:\n${view}`)
+  const row = view.split('\n').find(line => /Terminal progress\s+9;4\b/.test(line))
+  assert.ok(row !== undefined, `reopened row must show the persisted 9;4:\n${view}`)
   t.app.dispose()
 })
 
@@ -277,7 +316,7 @@ test('a failed persistence write keeps the runtime change and notifies', async (
   await t.run()
   await t.viewRow()
   t.vt.sendInput('\r')
-  assert.deepEqual(t.appliedModes, ['off'], 'the runtime change survives the failed write')
+  assert.deepEqual(t.appliedModes, ['9;4'], 'the runtime change survives the failed write')
   await t.view()
   assert.ok(notifications.some(message => message.includes('settings unavailable')),
     `the write failure surfaces:\n${notifications.join('; ')}`)

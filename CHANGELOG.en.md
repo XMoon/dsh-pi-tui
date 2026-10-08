@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Terminal progress` becomes a four-mode native terminal status setting:
+  `9;4+7501` (default, both protocols), `9;4`, `7501` and `Off`. On top of the
+  existing OSC 9;4 progress bar, the default also reports the Agent's semantic
+  state through OSC 7501: working, waiting for approval (`kind=permission`),
+  waiting for an answer (`kind=question`), done and error. Done/error is
+  reported once a real run's last turn result is proven (`completed` → done,
+  `error` and `max-tokens` → error, an interrupted/cancelled/`blocked` closer →
+  idle) — an idle Agent never fakes a completion. Switching modes takes effect
+  immediately: the dropped protocol's residual state is cleared first, then the
+  newly selected protocol asserts the current state; a temporary handover
+  (`$EDITOR`, a fullscreen round-trip) clears the live state, while the final
+  exit retains a proven done/error record. A persisted `On` reads as the
+  dual-protocol default with no manual migration.
+
 - The DSH dependency baseline moves to the published `0.2.0-rc.2` family as
   a whole: every `@deepseek-ai/dsh-*` peer floor rises to `>=0.2.0-rc.2`,
   and the development/source qualification target pins exact `0.2.0-rc.2`.
@@ -124,9 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   progress state left by another program — no longer stays painted while the
   Agent is idle. Working is now reported as `OSC 9;4;1;0` (no strong
   indeterminate animation), and a new `/settings → Terminal progress` switch
-  (On by default) turns the native indicator off: disabling clears it
-  immediately and stops further reporting, while re-enabling restores the
-  current Agent state right away.
+  (four modes, both protocols reported by default — see the terminal status
+  entry above).
 
 - The fullscreen long user message bubble is now one local disclosure
   surface: a single click anywhere on a collapsed bubble (head text, marker,

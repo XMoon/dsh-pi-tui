@@ -60,6 +60,12 @@ M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
 M7  NOT STARTED   (default flip; direct rollback kept for >= 1 release)
 M8  NOT STARTED   (Direct ownership retirement — only after concurrency proof)
 
+OPEN GAP   NOT CLOSED  (terminal status on the Remote branch — see the "Open
+                       gap: terminal status on the Remote branch" section at the
+                       end: no correlatable main live status/result on Remote ⇒
+                       the OSC 7501 semantic state AND the OSC 9;4 main-progress
+                       projection stay Direct-only; owner STOP 2026-10-08)
+
 Current production backend: direct
 Experimental backend:      ONE complete Backend(kind='remote') assembly (M3-3B:
                            M3-3A semantics + interaction + config + archive + Plugin
@@ -6127,3 +6133,45 @@ tool/shell/terminal/completion, F7 final closure.
   lanes, `compat:dsh:npm`, `compat:dsh:client-family` and `git diff --check`.
 
 Root ledger: `stable = 7`, `legacy = 0`.
+
+## Open gap (NOT CLOSED) — terminal status on the Remote branch
+
+**Facts.** The terminal-status presentation (the OSC 7501 semantic state and the
+OSC 9;4 main-progress indicator) is driven by the main Agent's live status:
+`src/app/surface/event-routing.ts` consumes `agent/status` and settles the
+interval outcome from the main session's matched `turn/start` + `turn/end`. On
+the Remote branch that input does not exist:
+
+- `agent/status` is registered ONLY on the Direct branch
+  (`src/app/bootstrap/event-wiring.ts`, the `if (direct)` block); the Remote
+  branch's `liveIngress` delivers durable `session/event` only, and its
+  `onSessionSnapshotChanged` refreshes the pending-input pane.
+- the completion-owner identity resolves through the Direct registry
+  (`src/app/bootstrap.ts` — `completionOwnerId` → `directRuntime()?.owners`), so
+  the routing's main-identity gate cannot match on Remote.
+- the official Remote `SessionSnapshot.running` fact is a list/summary-pull
+  derived snapshot (the official Client updates it from `session.list` results
+  and lazy session construction); it is NOT delivered on the ordered durable
+  event channel, so "the closing `turn/end` is observed before `running` goes
+  false" is not guaranteed, and a short turn can start and end between two
+  summaries.
+
+Consequently, on Remote `mainAgentProgressActive` never becomes true: the OSC
+7501 record stays at the acquisition's `idle` and the OSC 9;4 indicator is never
+driven. The same gap already applied to the pre-existing OSC 9;4 projection and
+to completion notifications (both fed exclusively by the Direct `agent/status`
+channel) — it is not a regression introduced by the terminal-status work.
+
+**Disposition (owner ruling, 2026-10-08) — STOP maintained.** Per the terminal
+status implementation plan §6.4/§7, a Remote branch without a correlatable live
+main status/result is a STOP, not a silent degradation: the feature is
+**Direct-only**, Remote stays **NOT CLOSED**, no Host wire is added, no
+substitute Remote status path (polling / debounce / snapshot-derived running) is
+implemented, and no Remote success is claimed. The `terminalProgress` setting
+still round-trips on both branches (it is a Client-local preference); only the
+physical terminal projection is Direct-only.
+
+**Change condition.** Closing this gap requires an official, event-ordered main
+status/result channel on the Remote client — so the main `running → idle`
+transition and its matched `turn/end` can be correlated without a new
+TUI-specific wire — or an explicit owner scope revision.

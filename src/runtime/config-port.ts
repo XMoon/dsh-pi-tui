@@ -87,9 +87,10 @@ export interface TuiSettingsDoc {
   /** Completion-notification method: 'auto' (default) | 'osc9' |
    * 'osc777' | 'bell' — how the notification is delivered. */
   notificationMethod: string
-  /** Native terminal progress state projection ('on' default | 'off') for the
-   * OSC 9;4 pane state. A presentation gate only — deliberately distinct from
-   * `progressUpdates`, which controls the Agent's narration cadence. */
+  /** Terminal-progress protocol selection ('off' | '9;4' | '7501' | the
+   * '9;4+7501' default) for the native terminal status protocols. A
+   * presentation selection only — deliberately distinct from `progressUpdates`,
+   * which controls the Agent's narration cadence. */
   terminalProgress: string
   /** The fullscreen mouse-wheel step (`1/2/3/5/8`, default `1`). A
    * Client preference persisted in the TUI settings document — never a

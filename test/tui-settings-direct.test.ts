@@ -43,7 +43,7 @@ function refsOf(overrides: Partial<Record<keyof TuiConfigRefs, unknown>> = {}): 
     gitAttribution: ref('off'),
     notificationMode: ref('unfocused'),
     notificationMethod: ref('auto'),
-    terminalProgress: ref('on'),
+    terminalProgress: ref('9;4+7501'),
     wheelScrollLines: ref('1'),
     keybindings: ref(undefined),
     legacySettingsMigrationVersion: ref(0),
@@ -62,15 +62,25 @@ function refsOf(overrides: Partial<Record<keyof TuiConfigRefs, unknown>> = {}): 
 
 /** A SettingsForms fake with a scripted descriptor: the effective value
  * (the merged view the real projection serves), the USER section and the
- * revision come from ONE describe snapshot, exactly like production. */
-function formsOf(user: Record<string, unknown> = {}, revision = 2, value?: Record<string, unknown>) {
+ * revision come from ONE describe snapshot, exactly like production.
+ *
+ * `value` may be a provider so a committed mutation is visible on the NEXT
+ * describe, and `apply` lets a test simulate the Loader committing the
+ * mutation into the live volatile references (the authoritative round-trip). */
+function formsOf(
+  user: Record<string, unknown> = {},
+  revision = 2,
+  value?: Record<string, unknown> | (() => Record<string, unknown>),
+  apply?: (ops: readonly TuiSettingsPathOp[]) => void,
+) {
   const calls: Array<{ ns: string; ops: readonly TuiSettingsPathOp[]; revision?: number }> = []
   let conflict = false
-  const effective = value ?? { ...user }
+  const effective = (): Record<string, unknown> =>
+    typeof value === 'function' ? value() : (value ?? { ...user })
   const forms: SettingsFormsLike = {
     describe: () => [{
       ns: 'tui-app',
-      value: effective,
+      value: effective(),
       user,
       revision,
     }] satisfies TuiSettingsDescriptorLike[],
@@ -79,6 +89,7 @@ function formsOf(user: Record<string, unknown> = {}, revision = 2, value?: Recor
         throw Object.assign(new Error('settings namespace "tui-app" changed since it was read'), { code: 'SETTINGS_CONFLICT' })
       }
       calls.push({ ns, ops, revision: expectedRevision })
+      apply?.(ops)
     },
   }
   return {
@@ -110,7 +121,7 @@ function defaults(): TuiSettingsDoc {
     gitAttribution: 'off',
     notificationMode: 'unfocused',
     notificationMethod: 'auto',
-    terminalProgress: 'on',
+    terminalProgress: '9;4+7501',
     wheelScrollLines: '1',
     keybindings: undefined,
   }
@@ -177,20 +188,24 @@ test('a terminalProgress change crosses the DIFF_FIELDS mapping as its own path-
   const refs = refsOf()
   const forms = formsOf({}, 2, refs.snapshot())
   const settings = new DirectTuiSettings(refs, forms.forms)
-  assert.equal(settings.get().terminalProgress, 'on', 'fresh defaults include terminalProgress: on')
-  // get() reads the live reference (never a boot-time snapshot).
-  refs.write('terminalProgress', 'off')
-  assert.equal(settings.get().terminalProgress, 'off')
-  refs.write('terminalProgress', 'on')
-  await settings.replace({ ...settings.get(), terminalProgress: 'off' } as TuiSettingsDoc)
+  assert.equal(settings.get().terminalProgress, '9;4+7501', 'fresh defaults select both protocols')
+  // get() reads the live reference (never a boot-time snapshot), including the
+  // retired `on` value a USER profile may still carry: the four new modes AND
+  // the old value all read back verbatim through the Config volatile.
+  for (const mode of ['9;4', '7501', '9;4+7501', 'off', 'on']) {
+    refs.write('terminalProgress', mode)
+    assert.equal(settings.get().terminalProgress, mode, `the persisted ${mode} value reads back verbatim`)
+  }
+  refs.write('terminalProgress', '9;4+7501')
+  await settings.replace({ ...settings.get(), terminalProgress: '7501' } as TuiSettingsDoc)
   assert.deepEqual(forms.calls, [{
     ns: 'tui-app',
-    ops: [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
+    ops: [{ op: 'set', path: ['terminalProgress'], value: '7501' }],
     revision: 2,
   }], 'the mode change crosses as exactly one path-scoped set')
 
   // An UNRELATED write preserves terminalProgress (no spurious op).
-  const refs3 = refsOf({ terminalProgress: 'off' })
+  const refs3 = refsOf({ terminalProgress: '7501' })
   const forms3 = formsOf({}, 2, refs3.snapshot())
   const settings3 = new DirectTuiSettings(refs3, forms3.forms)
   await settings3.replace({ ...settings3.get(), theme: 'dark' } as TuiSettingsDoc)
@@ -198,12 +213,38 @@ test('a terminalProgress change crosses the DIFF_FIELDS mapping as its own path-
     'an unrelated write never touches terminalProgress')
 
   // Writing the inherited default over a USER override resets it (unset).
-  const refs2 = refsOf({ terminalProgress: 'on' })
+  const refs2 = refsOf({ terminalProgress: '9;4+7501' })
   const forms2 = formsOf({ terminalProgress: 'off' }, 2, refs2.snapshot())
   const settings2 = new DirectTuiSettings(refs2, forms2.forms)
-  await settings2.replace({ ...settings2.get(), terminalProgress: 'on' } as TuiSettingsDoc)
+  await settings2.replace({ ...settings2.get(), terminalProgress: '9;4+7501' } as TuiSettingsDoc)
   assert.deepEqual(forms2.calls[0]?.ops, [{ op: 'unset', path: ['terminalProgress'] }],
     'a reset-to-inherited unsets the override instead of pinning it')
+})
+
+test('every terminalProgress mode round-trips through the live Config authority', async () => {
+  // The authoritative write path: `replace` derives a path-scoped op, the
+  // mutation commits into the LIVE volatile references (the Loader), and the
+  // NEXT `get()` reads the committed value back. A fake that only RECORDS the
+  // mutation cannot prove that round-trip.
+  const refs = refsOf({ terminalProgress: '9;4+7501' })
+  const forms = formsOf({}, 2, () => refs.snapshot(), (ops) => {
+    for (const op of ops) {
+      if (op.path.length !== 1 || op.path[0] !== 'terminalProgress') continue
+      refs.write('terminalProgress', op.op === 'set' ? op.value : '9;4+7501')
+    }
+  })
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  for (const mode of ['9;4', '7501', 'off', '9;4+7501'] as const) {
+    await settings.replace({ ...settings.get(), terminalProgress: mode } as TuiSettingsDoc)
+    assert.equal(settings.get().terminalProgress, mode,
+      `the ${mode} write must be visible through the live Config authority`)
+  }
+  assert.deepEqual(forms.calls.map(call => call.ops), [
+    [{ op: 'set', path: ['terminalProgress'], value: '9;4' }],
+    [{ op: 'set', path: ['terminalProgress'], value: '7501' }],
+    [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
+    [{ op: 'set', path: ['terminalProgress'], value: '9;4+7501' }],
+  ], 'each mode change crosses as exactly ONE path-scoped op and nothing else')
 })
 
 test('§18.2 no effective→user promotion: a base-supplied theme stays out of the USER override', async () => {
@@ -352,6 +393,7 @@ test('the production schema defaults mount fullscreen ON (§5.5)', () => {
   assert.equal(resolved.displayPreset.get(), 'full')
   assert.equal(resolved.busyEnter.get(), 'queue')
   assert.equal(resolved.notificationMode.get(), 'unfocused')
+  assert.equal(resolved.terminalProgress.get(), '9;4+7501', 'a fresh profile reports both protocols')
   assert.equal(resolved.legacySettingsMigrationVersion.get(), 0)
 })
 

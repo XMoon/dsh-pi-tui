@@ -640,10 +640,10 @@ export interface TuiCommandRunner {
    * 'osc777' | 'bell') to the runtime controller (the /settings panel
    * write; the panel persists the raw string through the config port). */
   setNotificationMethod(method: string): void
-  /** Apply the native terminal-progress preference ('on' | 'off') to the
-   * mounted surface (the /settings panel write; the panel persists the raw
-   * string through the config port). Presentation gate only — it never
-   * changes the Agent lifecycle. */
+  /** Apply the terminal-progress protocol selection ('off' | '9;4' | '7501' |
+   * the dual '9;4+7501' default) to the mounted surface (the /settings panel
+   * write; the panel persists the raw string through the config port).
+   * Presentation selection only — it never changes the Agent lifecycle. */
   setTerminalProgressMode(mode: string): void
   /** Repaint the welcome card from the live agent's current facts (e.g. after a preset switch). */
   updateWelcomeCard(): void
