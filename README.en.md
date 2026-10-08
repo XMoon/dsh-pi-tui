@@ -54,18 +54,18 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.1` (in development, `next` line) | `dsh-v0.2.0-rc.2` | M3-3B line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
-| `0.5.0` (stable / `@latest`) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Current stable line; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
+| `0.5.1` (stable / `@latest`) | `dsh-v0.2.0-rc.2` | Current stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
+| `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. The M3-3B line on `next`
-lifts the whole DSH peer floor to `>=0.2.0-rc.2`: the Question lifecycle
+Do not mix the stable and `@next` prerelease lines. `0.5.1` lifts the whole DSH
+peer floor to `>=0.2.0-rc.2`: the Question lifecycle
 consumes contracts published only in rc.2 (the `userQuestions.attachWait`/
 `answer` Remotes and the `userQuestions` Session projection), so mixing in the
-rc.1 family would be a false compatibility statement. The published `0.5.0`
+rc.1 family would be a false compatibility statement. The previous stable `0.5.0`
 line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
 older runtimes fail at the normal
 incompatible-runtime boundary, so install the paired TUI line from the table

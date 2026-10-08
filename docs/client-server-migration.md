@@ -3000,7 +3000,7 @@ still reaches the Remote graph only through the dynamic
   deps exact `0.2.0-rc.2`), `pnpm-lock.yaml`, `test/compat/dsh-source.json`
   (`639ed015397290b3745d163aafe02ffee4aa3f84`), `test/dsh-peer-window.test.mjs`
   (accepts rc.2, explicitly rejects rc.1/0.1.7), `src/dsh-compat-matrix.json`
-  (reserved `0.5.1` row `dshFrom 0.2.0-rc.2`; the published `0.5.0` row keeps
+  (`0.5.1` row `dshFrom 0.2.0-rc.2`; the published `0.5.0` row keeps
   its `0.1.7-rc.2 … 0.2.0-rc.1` history), `docs/dsh-compatibility.md`,
   `README*.md`, `CHANGELOG*.md`.
 - the retired M3-0 entry contract §2.1 now carries SEPARATE Approval and Question

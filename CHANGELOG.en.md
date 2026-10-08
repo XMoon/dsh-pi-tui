@@ -7,152 +7,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-08
+
+### Installation and version pairing
+
+This stable release moves the exact DSH family used for development and
+compatibility validation to the published `0.2.0-rc.2`, and the runtime peer
+floor rises to `>=0.2.0-rc.2`; installing DSH requires explicitly allowing its
+native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.1
+dsh --profile pi-tui
+```
+
+Users who must keep an older DSH: `@deepseek-ai/dsh@0.2.0-rc.1` and `0.1.7-rc.2`
+use the released `@xmoon76/dsh-pi-tui@0.5.0`; `@deepseek-ai/dsh@0.1.7-rc.1` uses
+`@xmoon76/dsh-pi-tui@0.4.8`.
+
 ### Added
 
-- Optional official Git commit attribution guidance (off by default): when
+- **Terminal-native progress and status reporting.** `/settings → Terminal
+  progress` turns from a switch into four modes: `9;4+7501` (default), `9;4`,
+  `7501` and `Off`. On top of the existing OSC 9;4 progress bar, the default
+  also reports the Agent's semantic state through OSC 7501 (working, waiting
+  for approval, waiting for an answer, done, error, idle): done/error is
+  reported once a real run's last turn result is proven, an interrupted or
+  cancelled run returns to idle, a proven final state is retained until exit,
+  and a temporary handover (`$EDITOR`, a fullscreen round-trip) clears the live
+  state first. Switching modes takes effect immediately, and a persisted `On`
+  reads as the dual-protocol default. Both protocols are generic terminal
+  protocols, not tied to one terminal: other terminals show whatever they
+  support.
+
+- **The pane's working directory follows the current Session (OSC 7).** It is
+  re-reported after startup, a session switch, a fullscreen round-trip and an
+  `$EDITOR` round-trip; a Direct session without an official cwd falls back to the
+  launch directory, and a DSH Remote backend publishes nothing — a Host cwd is
+  never leaked into the Client terminal (currently enabled only for terminals
+  identified as Tern).
+
+- **The subagent viewer now treats the child session as a real display subject
+  and adds a single-line subject bar.** While a viewed child session is on
+  screen, its model/preset/permission, context pressure and window, cumulative
+  token usage, todos and working directory all come from that child session's
+  own session state (`model ?` while the child has no model yet — never the
+  parent's model) and update the moment their event lands; the main session's
+  identity head card is hidden while viewing and returns on exit. The subject
+  bar sits under the header and shows `‹ back`, the child label, `● running` /
+  `○ inactive` and the child's own `provider/model @effort`; the old
+  `[viewing subagent · …]` marker and the footer `view-scope` identity block no
+  longer render (legacy custom layouts still load/edit/save). The extension API
+  gains the optional `session.displaySubject` projection for the viewed child;
+  the released session-snapshot semantics are unchanged — plugins still see only
+  the live/main session, so entering or leaving a viewer never looks like a
+  session switch.
+
+- **Optional official Git commit attribution guidance (off by default).** When
   enabled, the Agent is instructed to add
   `Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>` to commits it
   creates; the `product-model` mode additionally adds
-  `Assisted-By: <provider>/<model>` (injected straight from DSH's official
-  model selection — a model switch takes effect on the next request). This is
-  Agent guidance (a prompt policy), not repository-level enforcement: no Git
-  hooks are installed, no commands are rewritten, no repositories are probed,
-  and manual commits stay untouched.
+  `Assisted-By: <provider>/<model>`. This is Agent guidance, not
+  repository-level enforcement: no Git hooks are installed, no commands are
+  rewritten, no repositories are probed, and manual commits stay untouched.
+
+- **Compact collapses settled historical process spans to their header.** Only
+  the live or Preparing newest span of the current window keeps its `Think:` /
+  `Action:` previews; a settled historical span collapses to its header (the
+  `N actions · …` statistics stay), and a historical think-only span shows
+  `Thought <duration>`.
+
+- **Context entries that have arrived but not yet entered the model history are
+  visible in the conversation tail.** A finished background job, a subagent
+  settlement or another non-user Context no longer waits silently: it shows one
+  bounded preview row in the original Context/User/Context order, leaves as soon
+  as the Host takes it over, and never pulls the viewport away from where you are
+  reading.
 
 ### Changed
 
-- `Terminal progress` becomes a four-mode native terminal status setting:
-  `9;4+7501` (default, both protocols), `9;4`, `7501` and `Off`. On top of the
-  existing OSC 9;4 progress bar, the default also reports the Agent's semantic
-  state through OSC 7501: working, waiting for approval (`kind=permission`),
-  waiting for an answer (`kind=question`), done and error. Done/error is
-  reported once a real run's last turn result is proven (`completed` → done,
-  `error` and `max-tokens` → error, an interrupted/cancelled/`blocked` closer →
-  idle) — an idle Agent never fakes a completion. Switching modes takes effect
-  immediately: the dropped protocol's residual state is cleared first, then the
-  newly selected protocol asserts the current state; a temporary handover
-  (`$EDITOR`, a fullscreen round-trip) clears the live state, while the final
-  exit retains a proven done/error record. A persisted `On` reads as the
-  dual-protocol default with no manual migration. This project's own Remote
-  composition (experimental, our Host) reports the same states through the SAME
-  interval classifier; a third-party Host without this extension's Host plugin is
-  not supported.
-
-- The DSH dependency baseline moves to the published `0.2.0-rc.2` family as
-  a whole: every `@deepseek-ai/dsh-*` peer floor rises to `>=0.2.0-rc.2`,
-  and the development/source qualification target pins exact `0.2.0-rc.2`.
-  This line's Question lifecycle depends on contracts published only in
-  rc.2 (the `userQuestions` Remotes and Session projection), so rc.1 and
-  older families are no longer inside this line's declared compatibility
-  range; older runtimes should keep using the paired `0.5.0` TUI line.
-
-- The Question tool's input semantics now split into selection / editing /
-  progression: multi-select questions toggle checkboxes with `Space` (or
+- **The Question tool's input semantics converge to selection / editing /
+  progression.** Multi-select questions toggle checkboxes with `Space` (or
   digits / clicks), while `Enter` only continues like `→` (skipping when
-  unanswered); digits and clicks still toggle in multi-select and still
-  select-and-advance in single-select. Free text saves live: an un-Enter-ed
-  draft survives `Esc` and cross-question navigation and stays editable; a
-  saved custom answer shows its value in the option list on revisit (masked
-  questions show bullets) instead of the bare placeholder. Hints now read
-  `space toggle · ↵ continue/review`, with the last question and the review
-  page distinguishing continue/review/submit.
+  unanswered); free text saves live, so an un-Enter-ed draft survives `Esc` and
+  cross-question navigation; a saved custom answer shows its value on revisit
+  (masked questions show bullets). Hints now read
+  `space toggle · ↵ continue/review`.
 
-- The subagent viewer is now a real display subject: while a viewed child session
-  is on screen, its model/preset/permission, context pressure and window,
-  cumulative token usage, todos and working directory all come from that child
-  session's own session state — never from the parent session and never from the
-  child's local stats fold. Those child facts update the moment their session
-  event lands, without waiting for a turn/step boundary. The parent's
-  corresponding facts no longer appear on the child surface, and while a child is
-  viewed the main session's identity head card (model / working directory /
-  session id) is hidden, returning with the main session's latest identity and
-  status (including any todo written while viewing) on exit. The released
-  extension snapshot semantics are unchanged: the session snapshot and the
-  activity todo facts still describe only the **live/main session**, so entering
-  or leaving a viewer never makes a plugin observe a session switch, and the live
-  model/permission/turns/steps keep updating while a child is displayed. The
-  session the user is currently looking at is published through the new optional
-  `session.displaySubject` projection (its identity — session id, title,
-  workspace root — plus its own model, permission, cwd, branch, turn/step
-  counters and todo count/summary, present only while a child viewer is
-  mounted); the
-  first-party todo dock item renders that projection when it exists and hides
-  when the mounted child has no todo to show — never falling back to the parent's
-  summary.
-
-- The subagent viewer now expresses the child identity in a single subject bar
-  pinned under the header: the `‹ back` navigation affordance, the child
-  label, its `● running` / `○ inactive` activity and the child's own real
-  `provider/model @effort` (showing `model ?` when the child status has no
-  model yet — never the parent's model). The header goes back to showing the
-  main session title, and the old `[viewing subagent · …]` marker plus the
-  footer identity block (`view-scope`) are gone (a legacy custom layout that
-  still references `view-scope` keeps loading/editing/saving; the placement
-  simply renders nothing). The builtin child footer no longer shows the
-  retired identity block, but it KEEPS its `model` placement together with
-  permission/preset/workspace/context/usage stats: the subject bar and the
-  footer both show the same child model (duplication is intended), both read
-  the same `composition.model` and never fall back to the parent's model,
-  and the footer's existing formatting, narrow-screen compact/drop and
-  `/footer` customization are unchanged.
-
-- The top header is now strictly ONE physical line: the app mark, plan badge
-  and extension header badges keep their semantics, while the SESSION TITLE is
+- **The top header is strictly ONE physical line.** The session title is
   ANSI/CJK/emoji-safe truncated to the remaining cell width (ellipsized, then
-  dropped when no cell remains). It no longer wraps at any width or on any
-  surface (regular/fullscreen) or display preset (full/compact/focus), fixing
-  a very long main title — especially while a child viewer is open — consuming
-  a narrow viewport and pushing the editor and pinned chrome off screen.
+  dropped when no cell remains) and no longer wraps at any width or display
+  preset — a very long main title (especially while a child viewer is open) can
+  no longer push the editor and pinned chrome off screen.
+
+- **A mid-turn notice inside a collapsed Focus now renders outside the Thought.**
+  The opening notice that woke the turn stays before the Thought; notices that
+  arrive mid-turn (a background job finishing, a subagent settling) now render
+  after the collapsed Thought (in raw chronological order when expanded) and
+  stay reachable through full-text search.
+
+- **Scrolling and repainting are faster in large sessions.** Plain scrolling and
+  paging at a history boundary no longer remeasure the whole transcript
+  geometry; a measured session of ~1.6 MB of text showed ~80% lower per-frame
+  scroll CPU (an observation, not a CI threshold). Scroll, click and copy
+  semantics are unchanged.
+
+- **Command and settings discovery copy states conditional capabilities
+  truthfully.** `!`/`!!`, the `/settings` local-shell sandbox row, `/title`,
+  `/login`, `/logout`, `/transcript`, `/attach` and `/model` now spell out the
+  "requires backend / Host support" condition; registration and behavior are
+  unchanged.
 
 ### Fixed
 
-- `@` file completion restores explicit path navigation: a query with a path
-  separator (such as `@src/`, `@./src/`, `@../shared/`, `@/tmp/` or
-  `@~/Downloads/`, plus Windows drive/UNC paths) now fuzzy-searches
-  recursively inside exactly the directory you named — including directories
-  the official workspace index excludes (`@dist/`), symlinked directories,
-  parent directories and absolute paths. `@~/` searches your host home
-  directory, but the inserted value is always an absolute path (DSH does not
-  expand `~`, so it never offers an unusable `@~/...` value). A bare query
-  without a separator (`@foo`, `@.env`) still goes through the official
-  workspace index, with its ranking, result bound, exclusion policy and cache
-  unchanged; an authoritative official empty stays empty and never falls back
-  to a local scan. Direct and Remote use the same routing semantics. On a POSIX
-  host a backslash is an ordinary filename character, so a query containing one
-  is not treated as an explicit path (better to leave that one capability
-  unrestored than to resolve the scope you typed into a different directory) and
-  stays with the official index.
+- **A long user message can be expanded and collapsed symmetrically.** A single
+  click anywhere on a collapsed bubble expands it, and a single click anywhere on
+  an expanded bubble collapses it (the tail `▴ Collapse` control stays
+  available); drag selection remains intact. Regular long-user markers advertise
+  the effective key as `expand/collapse`.
 
-- Tern terminal compatibility: the pane's working directory now follows the
-  current Session (OSC 7), re-reported after startup, a session switch, a
-  fullscreen round-trip and an `$EDITOR` round-trip. A Direct session without
-  an official cwd falls back to the launch directory; a DSH Remote backend
-  publishes nothing (a Host cwd is never leaked into the Client terminal).
+### Compatibility
 
-- Tern terminal compatibility: the Agent's running state now drives the
-  terminal's native progress indicator (OSC 9;4), and completion
-  notifications use Tern's native OSC 9 toast under `Auto`. While the Agent
-  waits for a user confirmation or answer (an approval or a question) the pane
-  shows Tern's "waiting for input" state instead of staying "running", and
-  returns to running as soon as the wait settles (idle still clears it). Every
-  time the TUI takes the terminal (startup, a fullscreen round-trip, an
-  `$EDITOR` round-trip) it also asserts the current progress state, so Tern's
-  initial "pane has a foreground command running" state — or any stale
-  progress state left by another program — no longer stays painted while the
-  Agent is idle. Working is now reported as `OSC 9;4;1;0` (no strong
-  indeterminate animation), and a new `/settings → Terminal progress` switch
-  (four modes, both protocols reported by default — see the terminal status
-  entry above).
+- **The DSH dependency baseline moves to the published `0.2.0-rc.2` family as a
+  whole.** Every `@deepseek-ai/dsh-*` peer floor rises to `>=0.2.0-rc.2`, and the
+  development/source qualification target pins exact `0.2.0-rc.2`. This line's
+  Question lifecycle depends on contracts published only in rc.2 (the
+  `userQuestions` Remotes and Session projection), so rc.1 and older families are
+  no longer inside this line's declared compatibility range; older runtimes
+  should pick their paired TUI line from the installation table above.
 
-- The fullscreen long user message bubble is now one local disclosure
-  surface: a single click anywhere on a collapsed bubble (head text, marker,
-  or tail text) expands that message, and a single click anywhere on an
-  expanded bubble collapses it; drag selection remains intact, and the
-  existing tail Collapse control stays available. Double-click word selection
-  is intentionally no longer available on the long-user bubble in either
-  state (the first complete click acts immediately).
-- Regular long-user markers now advertise the effective key as
-  `expand/collapse` instead of only "to expand".
+> **Known limitations:** Direct is still the production default; Remote is this
+> project's own experimental composition that requires explicit configuration and
+> its Host extension, and this release does not promise general availability. The
+> OSC 7 pane working directory and the OSC 9;4 "waiting for input" refinement are
+> currently enabled only for terminals identified as Tern.
 
 ## [0.5.0] - 2026-09-28
 
@@ -1713,7 +1702,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8

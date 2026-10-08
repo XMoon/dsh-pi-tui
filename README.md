@@ -52,18 +52,18 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.1`（开发中，`next` 线） | `dsh-v0.2.0-rc.2` | M3-3B 线；最低与精确验证目标均为 0.2.0-rc.2 family |
-| `0.5.0`（stable / `@latest`） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 当前稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
+| `0.5.1`（stable / `@latest`） | `dsh-v0.2.0-rc.2` | 当前稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
+| `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`next` 上的 M3-3B 线把整个 DSH peer
+不要把稳定线与 `@next` 预发布线混装。`0.5.1` 把整个 DSH peer
 floor 提升到 `>=0.2.0-rc.2`：Question 生命周期消费 rc.2 才发布的公开契约
 （`userQuestions.attachWait`/`answer` Remote 与 `userQuestions` Session
-projection），rc.1 family 不提供这些契约，混装属于虚假的兼容声明。已发布的
-`0.5.0` 线保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧
+projection），rc.1 family 不提供这些契约，混装属于虚假的兼容声明。上一稳定版
+`0.5.0` 保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧
 runtime 会在正常的不兼容边界以非零状态失败，
 请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
 [兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
