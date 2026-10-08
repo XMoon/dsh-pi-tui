@@ -1422,56 +1422,137 @@ export function findRetiredSourceRootViolations(
 }
 
 /**
+ * The concrete extension-registry IMPLEMENTATIONS (plan §11.4 assertion 11).
+ * The registry role is carried by these declared identities, NOT by a filename
+ * convention: a renamed module that still declares the same implementation is
+ * the same concrete registry and must stay under `extension/internal/**`.
+ */
+export const CONCRETE_EXTENSION_REGISTRY_IDENTITIES = [
+  'AutocompleteRegistry',
+  'EditorRegistry',
+  'KeybindingRegistry',
+  'RendererRegistry',
+  'SettingsRegistry',
+  'ThemeRegistry',
+]
+
+/** The conventional concrete-registry filename (a supplementary, not primary, signal). */
+const EXTENSION_REGISTRY_FILE_PATTERN = /(^|\/)[^/]*-registry\.[a-z]+$/
+
+/** Top-level declared names of one source file (classes, functions, consts, …). */
+function declaredTopLevelNames(source, rel) {
+  const file = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, false, scriptKindOf(rel))
+  const names = new Set()
+  for (const statement of file.statements) {
+    if (statement.name && ts.isIdentifier(statement.name)) {
+      names.add(statement.name.text)
+      continue
+    }
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text)
+      }
+    }
+  }
+  return names
+}
+
+/**
  * Fail-closed concrete-extension-registry placement check (plan §11.4
  * assertion 11): the concrete extension registries live under
  * `extension/internal/**` only. The root ledger governs the package root and
  * the public-declaration rule governs the published declaration sources, so a
- * NESTED concrete registry (e.g. `extension/keybinding-registry.ts`) would
- * otherwise slip through both — this is the positive-location companion.
- * @param files every source file under `src/`, src-relative.
+ * NESTED concrete registry would otherwise slip through both.
+ *
+ * The primary signal is the IMPLEMENTATION IDENTITY
+ * ({@link CONCRETE_EXTENSION_REGISTRY_IDENTITIES}); the conventional
+ * `*-registry.ts` filename is kept as a supplementary signal for a NEW
+ * registry that follows the naming convention. A module outside
+ * `extension/**` (an app/tui-owned registry with its own identity) is out of
+ * this assertion's scope.
+ * @param entries the collected `{ rel, source }` production entries.
  */
-export function findConcreteRegistryPlacementViolations(files = listSourceFilesUnder(SRC)) {
-  return files
-    .filter(rel => rel.startsWith('extension/'))
-    .filter(rel => /(^|\/)[^/]*-registry\.[a-z]+$/.test(rel))
-    .filter(rel => !rel.startsWith('extension/internal/'))
-    .map(rel => `src/${rel} is a concrete extension registry outside extension/internal/** — `
-      + 'the public extension entries stay declaration/service facades; the concrete registries live under '
-      + 'extension/internal/** (plan §11.4 assertion 11)')
+export function findConcreteRegistryPlacementViolations(entries = collectSourceEntries()) {
+  const identities = new Set(CONCRETE_EXTENSION_REGISTRY_IDENTITIES)
+  const violations = []
+  for (const { rel, source } of entries) {
+    if (!rel.startsWith('extension/') || rel.startsWith('extension/internal/')) continue
+    const declared = [...declaredTopLevelNames(source, rel)].filter(name => identities.has(name))
+    if (declared.length > 0) {
+      violations.push(`src/${rel} declares the concrete extension registry ${declared.join(', ')} outside `
+        + 'extension/internal/** — the registry role is carried by the implementation identity, not by its filename '
+        + '(plan §11.4 assertion 11)')
+      continue
+    }
+    if (EXTENSION_REGISTRY_FILE_PATTERN.test(rel)) {
+      violations.push(`src/${rel} is a concrete extension registry module outside extension/internal/** by naming `
+        + 'convention — the public extension entries stay declaration/service facades (plan §11.4 assertion 11)')
+    }
+  }
+  return violations
+}
+
+/**
+ * The optional implementation packages the startup compatibility island must
+ * never load (plan §11.4 assertion 14): the private vendored terminal/TUI
+ * toolkit and the Tern surface runtime. A bare specifier does not make them
+ * legal for the island — they are implementation, not neutral metadata.
+ */
+export const STARTUP_FORBIDDEN_IMPLEMENTATION_PACKAGES = ['@xmoon76/pi-tui', '@stencil-hq/tern']
+
+/** Whether one specifier names a startup-island forbidden implementation package. */
+function isStartupForbiddenPackage(specifier) {
+  return STARTUP_FORBIDDEN_IMPLEMENTATION_PACKAGES.some(pkg => specifier === pkg || specifier.startsWith(`${pkg}/`))
 }
 
 /**
  * Fail-closed startup-island check (plan §11.4 assertion 14): the
  * `src/startup.ts` compatibility island is isolated from the optional
  * application/runtime/backend/TUI runner graph. It may keep its existing
- * package, Node built-in, JSON-data and FULLY ERASED type imports (those build
- * no repository edge); a repository implementation module reached statically —
- * directly or transitively — is a violation, and an inline
+ * neutral package, Node built-in, JSON-data and FULLY ERASED type imports
+ * (those build no repository edge and load no implementation); a repository
+ * implementation module reached statically — directly or transitively — is a
+ * violation, and so is the optional implementation packages
+ * ({@link STARTUP_FORBIDDEN_IMPLEMENTATION_PACKAGES}), in both their static
+ * and statically knowable value-dynamic spellings. An inline
  * `import { type X } from './repo.ts'` counts because `verbatimModuleSyntax`
  * still emits a runtime module load for it.
  * @param entries the collected `{ rel, source }` production entries.
  */
 export function findStartupIslandViolations(entries = collectSourceEntries()) {
   const startupRel = 'startup.ts'
-  if (!entries.some(entry => entry.rel === startupRel)) return []
-  const known = new Set(entries.map(entry => entry.rel))
+  const sourceByRel = new Map(entries.map(entry => [entry.rel, entry.source]))
+  if (!sourceByRel.has(startupRel)) return []
+  const known = new Set(sourceByRel.keys())
   const edges = new Map()
+  const packageHits = new Map()
   for (const { rel, source } of entries) {
     const targets = new Set()
+    const hits = []
     for (const hit of parseImportSpecifiers(source, rel)) {
       if (hit.moduleTypeOnly === true) continue
+      if (isStartupForbiddenPackage(hit.specifier)) hits.push({ specifier: hit.specifier, line: hit.line })
       const resolved = resolveRelativeImport(rel, hit.specifier)
       if (resolved === undefined) continue
       const target = staticImportCandidates(resolved).find(candidate => known.has(candidate))
       if (target !== undefined) targets.add(target)
     }
+    for (const hit of parseValueDynamicImports(source, rel)) {
+      if (isStartupForbiddenPackage(hit.specifier)) hits.push({ specifier: hit.specifier, line: hit.line })
+    }
     edges.set(rel, targets)
+    if (hits.length > 0) packageHits.set(rel, hits)
   }
   const violations = []
   const seen = new Set([startupRel])
   const queue = [startupRel]
   while (queue.length > 0) {
     const current = queue.shift()
+    for (const hit of packageHits.get(current) ?? []) {
+      violations.push(`src/${current}:${hit.line} loads the optional implementation package ${hit.specifier} inside the `
+        + 'startup compatibility island — the island stays isolated from the TUI/terminal implementation '
+        + '(plan §11.4 assertion 14)')
+    }
     for (const next of edges.get(current) ?? []) {
       if (seen.has(next)) continue
       seen.add(next)
