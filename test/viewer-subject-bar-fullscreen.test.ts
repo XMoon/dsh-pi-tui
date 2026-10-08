@@ -69,6 +69,27 @@ function tallTranscript(): TranscriptFolder {
   return folder
 }
 
+/** Several folded user bubbles (head + `rows compacted` + tail), each with a
+ *  distinct `M<k>-` line prefix, so the fullscreen viewport overflows and the
+ *  identity of the bottom-most visible row is unambiguous. */
+function foldedMessages(count: number): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  const events: unknown[] = []
+  let seq = 0
+  for (let k = 0; k < count; k += 1) {
+    events.push({ type: 'turn/start', seq: seq++, time: k * 10, data: { turn: k } })
+    events.push({
+      type: 'user/message', seq: seq++, time: k * 10 + 1, data: {
+        content: [{ type: 'text', text: Array.from({ length: 30 }, (_, i) => `M${k}-${i + 1}`).join('\n') }],
+        source: { kind: 'user' },
+      },
+    })
+    events.push({ type: 'turn/end', seq: seq++, time: k * 10 + 2, data: { turn: k, reason: { kind: 'completed' } } })
+  }
+  folder.apply(events as never[])
+  return folder
+}
+
 async function rows(vt: VirtualTerminal): Promise<string[]> {
   await vt.waitForRender()
   return vt.getViewport().map(line => stripTerminalSequences(line).trimEnd())
@@ -244,6 +265,54 @@ test('a transcript press is fenced when a resize lands before the release', asyn
   view = await rows(vt)
   assert.equal(compactMarkerCount(view), 0,
     `the fresh click at the current geometry must toggle the first transcript row:\n${view.join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the LAST visible transcript row maps to its own bubble with the bar present', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(foldedMessages(8).messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  const view = await rows(vt)
+  const barY = view.findIndex(row => row.includes('‹ parent'))
+  assert.equal(barY, 1, `the bar is pinned under the header:\n${view.join('\n')}`)
+  // The bottom-most VISIBLE row that belongs to a transcript bubble.
+  let lastY = -1
+  let owner = ''
+  for (let index = view.length - 1; index > barY; index -= 1) {
+    const match = /M(\d)-\d+/u.exec(view[index]!)
+    if (match !== null) { lastY = index; owner = match[1]!; break }
+  }
+  assert.ok(lastY > barY && owner !== '', `a transcript bubble row must be visible:\n${view.join('\n')}`)
+  const ownedBefore = view.filter(row => row.includes(`M${owner}-`)).length
+  clickCell(vt, 10, lastY)
+  const after = await rows(vt)
+  const ownedAfter = after.filter(row => row.includes(`M${owner}-`)).length
+  assert.notEqual(ownedAfter, ownedBefore,
+    `the clicked last-visible row must toggle its OWN bubble (owner M${owner}-, ${ownedBefore} -> ${ownedAfter}):\nBEFORE:\n${view.join('\n')}\nAFTER:\n${after.join('\n')}`)
+  assert.equal(after.findIndex(row => row.includes('‹ parent')), 1,
+    `the bar stays pinned after the bottom-row click:\n${after.join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the blank fold control of an expanded bubble is reachable with the bar present', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(longUserMessage().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  let view = await rows(vt)
+  const barY = view.findIndex(row => row.includes('‹ parent'))
+  clickCell(vt, 10, barY + 1) // expand the folded bubble
+  view = await rows(vt)
+  assert.equal(compactMarkerCount(view), 0, `the bubble must expand:\n${view.join('\n')}`)
+  const collapseY = view.findIndex(row => row.includes('▴ Collapse'))
+  assert.ok(collapseY >= 0, `the blank-row fold control must be visible:\n${view.join('\n')}`)
+  clickCell(vt, 10, collapseY)
+  view = await rows(vt)
+  assert.equal(compactMarkerCount(view), 1,
+    `the fold control must collapse the bubble:\n${view.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
 })

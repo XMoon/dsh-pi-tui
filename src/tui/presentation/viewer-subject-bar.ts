@@ -17,7 +17,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/presentation/viewer-subject-bar
  */
 
-import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { color } from '../theme/runtime.ts'
 
@@ -36,13 +36,14 @@ const GROUP_GAP_MIN_CELLS = 2
 /** The explicit unknown-model stand-in — never the parent's model. */
 const UNKNOWN_MODEL = 'model ?'
 
-/** Collapse one raw projection string into a SINGLE display line: line
- *  breaks and tabs become spaces; other terminal control characters —
- *  including ESC, so a session title/label can never inject terminal
- *  sequences — are dropped. A Host projection string has no single-line
- *  guarantee, so the bar enforces its own pinned-row contract here. */
+/** Collapse one raw projection string into a SINGLE display line: complete
+ *  terminal escape sequences (CSI/OSC/… — a raw label/title/model must never
+ *  inject colour or control) are stripped WHOLE via the shared primitive,
+ *  then line breaks/tabs become spaces and any remaining control character is
+ *  dropped. A Host projection string has no single-line guarantee, so the bar
+ *  enforces its own pinned-row contract here. */
 function oneLine(text: string): string {
-  return text
+  return stripTerminalSequences(text)
     .replace(/[\u0009-\u000d]+/g, ' ')
     .replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g, '')
 }

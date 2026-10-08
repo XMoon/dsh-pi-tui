@@ -208,6 +208,17 @@ test('control characters and line breaks in Host strings never break the single-
   }))
   assert.ok(!modelLine.includes('\n'), `the model fields normalize too:\n${JSON.stringify(modelLine)}`)
   assert.ok(modelLine.includes('pro vider/mo del'), `the sanitized model renders on one line:\n${modelLine}`)
+  // A raw ANSI payload is stripped WHOLE (no visible `[31m` garbage), not just
+  // its ESC byte.
+  const ansiLabel = plain(renderViewerSubjectBar({
+    snapshot: childSnapshot({ label: '\x1b[31mreviewer\x1b[0m' }),
+    childTitle: '\x1b[1mbold\x1b[0m',
+    width: 100,
+  }))
+  assert.ok(!ansiLabel.includes('[31m') && !ansiLabel.includes('[0m') && !ansiLabel.includes('[1m'),
+    `raw ANSI must be stripped whole, not left as visible payload:\n${ansiLabel}`)
+  assert.ok(ansiLabel.includes('reviewer') && ansiLabel.includes('bold'),
+    `the plain text survives the strip:\n${ansiLabel}`)
 })
 
 test('a long label and a long model leave the model identifiable at width 20', () => {
