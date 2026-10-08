@@ -263,8 +263,22 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * The completion-owner fence (A2 seam): the notification controller fences by
    * the EXACT Direct `Agent.id` — a late `agent/status` from a retired agent
    * must never notify. `undefined` on the teardown path.
+   *
+   * This is the REBIND operation (session switch, resume, fork adoption, first
+   * session): the interval evidence is reset and the terminal root is retired
+   * to `idle`, because a newly committed owner must prove its own result and
+   * never inherit the previous owner's retained `done`/`error`.
    */
   setCompletionOwner(identity: string | undefined): void
+  /**
+   * The FINAL-TEARDOWN operation: withdraw the completion-notification owner
+   * (a late `agent/status` must never notify into a dying surface) WITHOUT
+   * discarding the proven terminal outcome. A still-live interval retires to
+   * `idle`; an already-settled `done`/`error` is kept so the mounted app's own
+   * disposal can retain it across process exit (plan §4.4). Distinct from
+   * {@link setCompletionOwner}, which is a rebind and always clears.
+   */
+  retireCompletionOwner(): void
   /** The ONLY completion-controller status feed (the `agent/status` handler). */
   onAgentStatus(agentId: string, status: AgentLifecycleStatus): void
   /**
@@ -1299,6 +1313,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     onAgentStatus(agentId, status) {
       notification.onAgentStatus(agentId, status)
+    },
+    retireCompletionOwner() {
+      // Final surface teardown (plan §4.4): the notification owner is withdrawn
+      // FIRST so a late status can never notify a dying surface, but the
+      // proven terminal outcome SURVIVES — a live interval retires to `idle`
+      // (a running Agent must not leave a working record), while a settled
+      // `done`/`error` is kept for the mounted app's disposal to retain across
+      // process exit. Only the interval EVIDENCE (open turn / candidate) is
+      // discarded, because no further turn can settle.
+      openTurn = undefined
+      lastClosedTurnOutcome = undefined
+      notification.setCompletionOwner(undefined)
+      retireMainAgentProgress()
     },
     commitStatus(patch, legacyFacts, presentation) {
       // A4-4 (plan §13.1): the semantic derivation stays with the runner; the

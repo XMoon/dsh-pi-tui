@@ -26,9 +26,10 @@ import type { RunPhase } from '../src/domain/status/types.ts'
 import type { TerminalProgressMode } from '../src/domain/terminal-progress/settings.ts'
 import type { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
-import { createSurfaceRuntime } from '../src/app/surface/runtime.ts'
+import { createSurfaceRuntime, type SurfaceRuntime } from '../src/app/surface/runtime.ts'
+import { createSurfaceLifecycle } from '../src/app/bootstrap/lifecycle.ts'
 import { createInteractionRuntime } from '../src/app/surface/interaction-runtime.ts'
-import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
+import type { RoutedSessionEvent, SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { TerminalNotificationPresentation } from '../src/app/surface/notification-runtime.ts'
 import type { ApprovalOutcome } from '../src/tui/panels/approval-dialog.ts'
 import type {
@@ -321,6 +322,9 @@ interface SurfaceHarness extends SurfaceControls {
   readonly programWrites: string[]
   /** ONE merged ordered timeline: `9;4:*`, `7501:*` and `terminal:stop`. */
   readonly timeline: string[]
+  /** The RAW surface runtime, so a test can drive the production composition
+   *  teardown (`createSurfaceLifecycle().disposeSurface()`). */
+  readonly surfaceRuntime: SurfaceRuntime<RoutedSessionEvent>
   /** The LIVE mounted app: real Question / Approval flows drive it. */
   readonly app: TuiApp
   /** The canonical activity phase the surface publishes (NOT the pane state). */
@@ -612,6 +616,7 @@ function mountSurface(
     progressStates,
     programWrites,
     timeline,
+    surfaceRuntime: surface,
     app: surface.app,
     phase: () => surface.status.snapshot().activity.phase,
     agentApproval: (request) => {
@@ -2664,4 +2669,99 @@ test('the production composition injects the diagnostics channel into the surfac
   const surface = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.ts'), 'utf8')
   assert.ok(surface.includes("options.diag?.warn('terminal progress: unknown turn/end reason'"),
     'the surface must record an unknown turn/end reason through the injected channel')
+})
+
+// ── Production exit path (external review P1) ───────────────────────────────
+
+/**
+ * Drive the REAL composition teardown over a mounted surface:
+ * `createSurfaceLifecycle(...).disposeSurface()` → the surface's final-teardown
+ * retirement → `SurfaceRuntime.dispose()` → `TuiApp.dispose()` → the injected
+ * terminal. The deps are the same narrow callbacks the composition root
+ * injects; the teardown face is the REAL surface runtime.
+ */
+function disposeThroughProductionLifecycle(h: SurfaceHarness): () => void {
+  let cleanedUp = false
+  const lifecycle = createSurfaceLifecycle({
+    diag: SILENT_DIAG as never,
+    isCleanedUp: () => cleanedUp,
+    markCleanedUp: () => { cleanedUp = true },
+    surface: h.surfaceRuntime,
+    abortLifecycle: () => {},
+    disposeViewer: () => {},
+    clearDraftImages: () => {},
+    clearDraftFiles: () => {},
+    disposeCommandCatalog: () => {},
+    cancelDeferredStatus: () => {},
+    disposeFooterCommand: () => {},
+    disposeLocalShell: () => {},
+    retireOwnedSession: async () => ({}) as never,
+    disposeSelectedTransport: async () => {},
+    registerDisposal: () => {},
+  })
+  return () => lifecycle.disposeSurface()
+}
+
+test('the production exit path retains a proven done/error and clears a live interval', async () => {
+  // done: the retained completion must survive the whole production exit chain.
+  const done = mountSurface((controls) => controls.setOwner('main'))
+  try {
+    await drain()
+    await driveInterval(done, 'completed')
+    assert.deepEqual(done.programWrites, [IDLE, WORKING, DONE])
+    const exit = disposeThroughProductionLifecycle(done)
+    exit()
+    assert.equal(done.programWrites[done.programWrites.length - 1], DONE,
+      'disposeSurface() must retain the proven completion, not reset it to idle')
+    assert.ok(!done.programWrites.includes(CLEAR),
+      'the retained completion must not be erased by the final physical record')
+    exit()
+    assert.equal(done.programWrites.length, 3, 'a repeated disposeSurface() is idempotent and writes nothing')
+  } finally {
+    done.dispose()
+  }
+
+  // error: the same retention for the error outcome.
+  const errored = mountSurface((controls) => controls.setOwner('main'))
+  try {
+    await drain()
+    await driveInterval(errored, 'error')
+    disposeThroughProductionLifecycle(errored)()
+    assert.equal(errored.programWrites[errored.programWrites.length - 1], ERROR,
+      'a proven error must also survive the production exit path')
+    assert.ok(!errored.programWrites.includes(CLEAR))
+  } finally {
+    errored.dispose()
+  }
+
+  // a live (still running) interval must NOT leave a working record behind.
+  const working = mountSurface((controls) => controls.setOwner('main'))
+  try {
+    await drain()
+    working.routeStatus('main', 'running')
+    await drain()
+    assert.deepEqual(working.programWrites, [IDLE, WORKING])
+    disposeThroughProductionLifecycle(working)()
+    assert.equal(working.programWrites[working.programWrites.length - 1], CLEAR,
+      'a live interval retires to idle and clears at disposal')
+  } finally {
+    working.dispose()
+  }
+
+  // session switch THEN exit: the rebind retires the old result; there is no
+  // proven completion left for the exit to retain.
+  const switched = mountSurface((controls) => controls.setOwner('main'))
+  try {
+    await drain()
+    await driveInterval(switched, 'completed')
+    assert.equal(switched.programWrites[switched.programWrites.length - 1], DONE)
+    switched.setOwner('next-owner')
+    assert.equal(switched.programWrites[switched.programWrites.length - 1], IDLE,
+      'an owner rebind still retires the previous completion')
+    disposeThroughProductionLifecycle(switched)()
+    assert.equal(switched.programWrites[switched.programWrites.length - 1], CLEAR,
+      'after a rebind the exit has no proven completion to retain')
+  } finally {
+    switched.dispose()
+  }
 })

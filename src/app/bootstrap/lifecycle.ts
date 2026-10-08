@@ -45,7 +45,7 @@ import type { SessionRetirementReport } from '../session/owner-access.ts'
  * entry points), never its render/task/plugin-manager state.
  */
 export interface SurfaceTeardownOwner {
-  setCompletionOwner(owner: undefined): void
+  retireCompletionOwner(): void
   disableFocusReporting(): void
   disposePluginManager(): void
   disposeJobEvents(): void
@@ -129,11 +129,19 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     // after teardown a late `agent/status` idle from the old live agent must
     // never emit a notification into a dead surface (the identity fence drops
     // every event once the live id is undefined).
+    //
+    // This is the FINAL-TEARDOWN retirement, not a rebind: it withdraws the
+    // notification owner while KEEPING the proven terminal outcome. A settled
+    // OSC 7501 `done`/`error` must survive process exit (plan §4.4), so this
+    // step must not reset the outcome to `idle` the way a session-switch
+    // `setCompletionOwner` does; a still-live interval is retired to `idle` by
+    // the same call, and the app's own `dispose()` writes the final physical
+    // record.
     // M3-6 PR3: ONE ordered non-truncating batch. A throwing sibling cleanup
     // must never skip a later surface owner, the Session retirement or the
     // selected transport disposal (the plan's frozen top-level order).
     runSyncDisposalSteps('surface disposal', [
-      () => surface.setCompletionOwner(undefined),
+      () => surface.retireCompletionOwner(),
       // Disable terminal focus reporting FIRST among the THROWABLE steps —
       // before any teardown step — so the mode can never leak into the shell
       // even when a later teardown operation throws (idempotent: a startup
