@@ -251,7 +251,7 @@ test('B04: a child log with a descriptor keeps its viewer identity without a fak
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('child prompt'), `the child transcript body renders:\n${view}`)
   assert.ok(view.includes('scout-child'), `the viewer chrome keeps the authoritative child label:\n${view}`)
-  assert.ok(view.includes('‹ parent'), `the mode identity lives in the viewer subject bar:\n${view}`)
+  assert.ok(view.includes('‹ back'), `the mode identity lives in the viewer subject bar:\n${view}`)
   assert.ok(view.includes('● running'), `the child activity stays in the viewer subject bar:\n${view}`)
   assert.ok(!view.includes('[subagent · continuable]'), `the retired footer badge must not render:\n${view}`)
   assert.ok(!view.includes('mode: continuable'), `no fake Subagent identity card renders:\n${view}`)

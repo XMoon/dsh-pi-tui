@@ -9929,6 +9929,13 @@ export class TuiApp {
     return [...this.viewerSubjectBar.render(Math.max(1, this.terminal.columns))]
   }
 
+  /** Test hook: the header's rendered rows. The header is contractually ONE
+   * physical row (long titles are truncated, never wrapped); a pure read so
+   * the single-line rule can be asserted at any width/surface. */
+  headerRenderRowsForTest(): readonly string[] {
+    return [...this.header.render(Math.max(1, this.terminal.columns))]
+  }
+
   /** Test hook: a COPY of the live Focus root disclosure set — the
    * fullscreen Ctrl+O bulk-toggle tests assert per-turn state; the
    * internal set is never handed out. */
@@ -16162,22 +16169,30 @@ export class TuiApp {
    * bar (DECISION B, viewer UX plan §1.2 — the old `[viewing subagent …]`
    * badge and the viewer-label override are retired). */
   private renderHeader(): void {
-    // Host-owned header budget (plan §19, follow-up P1): the badge run gets
-    // the width the HOST'S OWN header content leaves free — the fixed
-    // prefix PLUS the session title and the plan badge (a long title would
-    // otherwise consume the row and make the final header wrap even though
-    // the badge run fits its own budget). Re-derived on EVERY render so a
-    // resize or a title change re-bakes the budget.
-    const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
+    // STRICT one-physical-line header (external review P2): the app mark, the
+    // plan badge and the extension badge run keep their existing semantics,
+    // and the SESSION TITLE is the flexible element — ANSI/CJK/emoji-safe
+    // truncated to whatever those leave, dropped when no cell remains. The
+    // semantic sources are unchanged; only the title's rendered width is
+    // bounded. Re-derived on EVERY render so a resize/title change re-bakes it.
+    const beforeTitle = `🐋  dsh-pi-tui${this.planMode ? ` ${color.warning('[plan]')}` : ''}`
     const title = this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    const hostOwned = `🐋  dsh-pi-tui${title}${badge}`
-    // The badge run gets what the host chrome leaves; -2 reserves the
-    // trailing space + a safety cell so the composed row never wraps.
-    this.extensionHost?.setHeaderBudget(Math.max(1, this.terminal.columns - visibleWidth(hostOwned) - 2))
-    // Extension header badges append after the host chrome (M2): the host
-    // title stays host-owned; badges add semantics like `[plan]`.
+    // Host-owned header budget (plan §19, follow-up P1): the extension badge
+    // run gets what the FIXED chrome plus the (untruncated) title leaves;
+    // -2 reserves the trailing space + a safety cell.
+    this.extensionHost?.setHeaderBudget(Math.max(1,
+      this.terminal.columns - visibleWidth(beforeTitle) - visibleWidth(title) - 2))
     const extensionBadges = this.extensionHost?.headerBadgeText() ?? ''
-    this.header.setText(`${hostOwned}${extensionBadges}`)
+    // The title occupies whatever the fixed chrome and the badge run leave.
+    const titleBudget = this.terminal.columns - visibleWidth(beforeTitle) - visibleWidth(extensionBadges)
+    const fittedTitle = title === '' || titleBudget <= 0 ? '' : truncateToWidth(title, titleBudget, '…')
+    // Belt-and-braces: the composed row can never exceed the terminal width
+    // (a degenerate terminal narrower than the app mark included).
+    this.header.setText(truncateToWidth(
+      `${beforeTitle}${fittedTitle}${extensionBadges}`,
+      Math.max(1, this.terminal.columns),
+      '…',
+    ))
     this.requestRender()
   }
 

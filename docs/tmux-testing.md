@@ -95,7 +95,7 @@ private `/tmp/tui-demo.XXXXXX/` (`.txt` plain + `.html` colored).
    the label; a long label truncates, the mode never does). Enter on a
    **continuable** child opens the INTERACTIVE viewer:
    - the header keeps the MAIN session title and the subject bar under it
-     shows the child identity (`‹ parent  <label>  ● running  <provider/model>`),
+     shows the child identity (`‹ back  <label>  ● running  <provider/model>`),
      the empty editor shows the `Message <label>… — Enter send · Esc back`
      placeholder, and your main-session draft is preserved;
    - type a follow-up (paced `send-keys -l`, sleep, Enter — trap 1) and

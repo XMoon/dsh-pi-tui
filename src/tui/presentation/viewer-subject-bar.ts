@@ -22,7 +22,7 @@ import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { color } from '../theme/runtime.ts'
 
 /** The navigation affordance: Esc returns to the parent session. */
-const NAVIGATION_FULL = '‹ parent'
+const NAVIGATION_FULL = '‹ back'
 /** The narrow fallback of the navigation affordance. */
 const NAVIGATION_SHORT = '‹'
 /** The minimum cells a trimmed child label keeps (when the width allows). */
@@ -90,7 +90,7 @@ export function renderViewerSubjectBar(input: {
 
   // The fixed degradation ladder (viewer UX plan §2.3): hide the optional
   // title first, then trim the label, then collapse the activity words, then
-  // the `parent` word, then drop `@effort`, then fall back from
+  // the `back` word, then drop `@effort`, then fall back from
   // `provider/model` to the model id and finally ellipsize the id. The LAST
   // ladder entry truncates the model id so it can still fit an extreme width.
   const ladder: ReadonlyArray<{

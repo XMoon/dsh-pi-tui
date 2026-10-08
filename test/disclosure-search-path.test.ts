@@ -139,7 +139,7 @@ test('an expanded Compact Work internal spacer still collapses that Work under a
   app.toggleWorkSpan(owner)
   await viewport(vt)
   const view = vt.getViewport()
-  const barY = view.findIndex(line => line.includes('‹ parent'))
+  const barY = view.findIndex(line => line.includes('‹ back'))
   assert.equal(barY, 1, `the child bar must be the row under the header:\n${view.join('\n')}`)
   assert.ok(view.join('\n').includes('▾ Activity'), `precondition: the Work is open:\n${view.join('\n')}`)
   const toolY = view.findIndex(line => line.includes('Read'))

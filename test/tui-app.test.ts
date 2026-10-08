@@ -3569,7 +3569,7 @@ test('the one-shot subagent viewer covers the editor, consumes input, and restor
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('my precious draft'), `draft not restored:\n${view}`)
-  assert.ok(!view.includes('[viewing subagent') && !view.includes('‹ parent'), `the viewer identity survived leaving:\n${view}`)
+  assert.ok(!view.includes('[viewing subagent') && !view.includes('‹ back'), `the viewer identity survived leaving:\n${view}`)
   app.stop()
 })
 

@@ -354,7 +354,7 @@ test('the viewer subject bar projects the SAME atomic snapshot the status runtim
     width: 120,
   }))
   const barA = barOf()
-  assert.ok(barA.includes('‹ parent') && barA.includes('research'), `the child identity must render:\n${barA}`)
+  assert.ok(barA.includes('‹ back') && barA.includes('research'), `the child identity must render:\n${barA}`)
   assert.ok(barA.includes('● running'), `the child activity must render:\n${barA}`)
   assert.ok(barA.includes('deepseek/child-model'), `the child provider/model must render:\n${barA}`)
   assert.ok(barA.includes('@high'), `the child effort must render:\n${barA}`)

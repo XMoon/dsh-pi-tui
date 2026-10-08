@@ -367,7 +367,7 @@ test('L6 §11/§14.4-5-6: `/tasks` renders the REAL Remote descendant tree and t
   // component (a REGULAR surface can scroll the bar out of the captured
   // viewport; the retired `[subagent · …]` footer badge no longer exists).
   const barA = app.viewerSubjectBarRenderRowsForTest().join('\n')
-  assert.ok(barA.includes('‹ parent'), `the subject bar must render the navigation affordance:\n${barA}`)
+  assert.ok(barA.includes('‹ back'), `the subject bar must render the navigation affordance:\n${barA}`)
   assert.ok(barA.includes('child A m3-5-pr2-child-a'),
     `the subject bar must render the child identity:\n${barA}`)
   assert.ok(!barA.includes('[subagent · continuable]'), `the retired badge must not render:\n${barA}`)

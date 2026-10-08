@@ -61,7 +61,7 @@ test('a child renders one line with its own identity, activity and model', () =>
   assert.ok(!line.includes('\n'), `the bar must never wrap:\n${line}`)
   assert.ok(visibleWidth(line) <= 140, `the bar must fit 140 cells (got ${visibleWidth(line)})`)
   const text = plain(line)
-  assert.ok(text.includes('‹ parent'), `the navigation affordance is required:\n${text}`)
+  assert.ok(text.includes('‹ back'), `the navigation affordance is required:\n${text}`)
   assert.ok(text.includes('reviewer'), `the child label is required:\n${text}`)
   assert.ok(text.includes('Audit ownership'), `the committed child title must render when it fits:\n${text}`)
   assert.ok(text.includes('● running'), `the running activity is required:\n${text}`)
@@ -114,7 +114,7 @@ test('only running/inactive ever render — never a fabricated task outcome', ()
   assert.ok(inactive.includes('○ inactive'), `inactive renders its marker + word:\n${inactive}`)
 })
 
-test('the degradation order is title → label → status words → parent word → effort → provider → model tail', () => {
+test('the degradation order is title → label → status words → back word → effort → provider → model tail', () => {
   const snapshot = childSnapshot({ label: 'a-very-long-child-label-name', activity: 'running', model: { provider: 'deepseek', id: 'v4', reasoningEffort: 'high' } })
   const title = 'a-very-long-title'
   const at = (width: number): string => plain(renderViewerSubjectBar({ snapshot, childTitle: title, width }))
@@ -138,17 +138,17 @@ test('the degradation order is title → label → status words → parent word 
   assert.ok(trimmedLabel.includes('● running'), `activity words still intact:\n${trimmedLabel}`)
   assert.ok(trimmedLabel.includes('deepseek/v4'), `provider survives the label trim:\n${trimmedLabel}`)
 
-  // 3. the activity collapses to its marker before the parent word drops.
-  const markerOnly = at(45)
+  // 3. the activity collapses to its marker before the back word drops.
+  const markerOnly = at(40)
   assert.ok(!markerOnly.includes('running'), `activity words collapse next:\n${markerOnly}`)
   assert.ok(markerOnly.includes('●'), `the activity marker survives:\n${markerOnly}`)
-  assert.ok(markerOnly.includes('‹ parent'), `the parent word survives the activity collapse:\n${markerOnly}`)
+  assert.ok(markerOnly.includes('‹ back'), `the back word survives the activity collapse:\n${markerOnly}`)
 
-  // 4. the parent word drops before the effort.
-  const navShort = at(38)
-  assert.ok(!navShort.includes('parent'), `the parent word drops next:\n${navShort}`)
+  // 4. the back word drops before the effort.
+  const navShort = at(34)
+  assert.ok(!navShort.includes('back'), `the back word drops next:\n${navShort}`)
   assert.ok(navShort.includes('‹'), `the navigation marker survives:\n${navShort}`)
-  assert.ok(navShort.includes('@high'), `the effort survives the parent word:\n${navShort}`)
+  assert.ok(navShort.includes('@high'), `the effort survives the back word:\n${navShort}`)
 
   // 5. the effort drops before the provider.
   const noEffort = at(31)
@@ -172,7 +172,7 @@ test('the child title is only repeated when it differs from the label', () => {
 
 test('a child with no label still renders the navigation, activity and model', () => {
   const line = plain(renderViewerSubjectBar({ snapshot: childSnapshot({ label: '' }), width: 100 }))
-  assert.ok(line.includes('‹ parent'), `the navigation affordance survives:\n${line}`)
+  assert.ok(line.includes('‹ back'), `the navigation affordance survives:\n${line}`)
   assert.ok(line.includes('● running'), `the activity survives:\n${line}`)
   assert.ok(line.includes('deepseek/v4'), `the model survives:\n${line}`)
 })

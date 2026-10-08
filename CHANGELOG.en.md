@@ -64,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   summary.
 
 - The subagent viewer now expresses the child identity in a single subject bar
-  pinned under the header: the `‹ parent` navigation affordance, the child
+  pinned under the header: the `‹ back` navigation affordance, the child
   label, its `● running` / `○ inactive` activity and the child's own real
   `provider/model @effort` (showing `model ?` when the child status has no
   model yet — never the parent's model). The header goes back to showing the
@@ -78,6 +78,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same `composition.model` and never fall back to the parent's model,
   and the footer's existing formatting, narrow-screen compact/drop and
   `/footer` customization are unchanged.
+
+- The top header is now strictly ONE physical line: the app mark, plan badge
+  and extension header badges keep their semantics, while the SESSION TITLE is
+  ANSI/CJK/emoji-safe truncated to the remaining cell width (ellipsized, then
+  dropped when no cell remains). It no longer wraps at any width or on any
+  surface (regular/fullscreen) or display preset (full/compact/focus), fixing
+  a very long main title — especially while a child viewer is open — consuming
+  a narrow viewport and pushing the editor and pinned chrome off screen.
 
 ### Fixed
 
