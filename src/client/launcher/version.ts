@@ -41,6 +41,30 @@ export function dshVersion(): string | undefined {
 }
 
 /**
+ * The bundle's OWN manifest version (`@xmoon76/dsh-pi-tui`), resolved by
+ * walking up from THIS module's directory instead of assuming a fixed depth:
+ * the source layout (`src/client/launcher/**`, the depth TS8-F2 introduced)
+ * and the flat packed layout (`dist/*.mjs`) both reach the shipped manifest,
+ * and an installed copy reaches its own `node_modules` manifest first.
+ * @returns the version string, or undefined when no own manifest is reachable.
+ */
+function ownBundleVersion(): string | undefined {
+  let dir = import.meta.dirname
+  for (let depth = 0; depth < 8; depth += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: string; version?: string }
+      if (pkg.name === '@xmoon76/dsh-pi-tui' && typeof pkg.version === 'string') return pkg.version
+    } catch {
+      // Not a manifest directory; keep walking up.
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return undefined
+    dir = parent
+  }
+  return undefined
+}
+
+/**
  * The bundle's own version, read from package.json at runtime so the welcome
  * card never drifts from the shipped version. The DISPLAYED version prefers
  * the installed dsh version (`dshVersion` — shared with the header badge),
@@ -48,12 +72,7 @@ export function dshVersion(): string | undefined {
  * @returns the version string, or a fallback when the file is unreadable.
  */
 export function packageVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
-    return dshVersion() ?? pkg.version ?? '0.0.0'
-  } catch {
-    return dshVersion() ?? '0.0.0'
-  }
+  return dshVersion() ?? ownBundleVersion() ?? '0.0.0'
 }
 
 /**
@@ -67,10 +86,5 @@ export function packageVersion(): string {
  * @returns the bundle version string, or a fallback when the file is unreadable.
  */
 export function bundleVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
-    return pkg.version ?? '0.0.0'
-  } catch {
-    return '0.0.0'
-  }
+  return ownBundleVersion() ?? '0.0.0'
 }
