@@ -6238,3 +6238,25 @@ with this package's additive Host plugin installed: an arbitrary third-party DSH
 Host still has no Remote terminal status. Real GUI terminals (Ghostty/Tern) and
 the real Loader/official-wire packaging remain manual/pre-release qualification,
 not covered by the automated suites below.
+
+**Evidence (implementation branch `feat/remote-terminal-progress`).** Every count
+below was actually run on that branch:
+
+```text
+L1  test/terminal-progress-interval.test.ts            9/9
+L2  test/terminal-progress-event-order.test.ts         3/3    (real rc.2 AgentLoop order)
+L2  test/terminal-progress-lifecycle.test.ts          80/80   (+ Remote authority gate, L4 parity)
+L3  test/remote-terminal-progress-host.test.ts         8/8    (real Cordis dispatch; stale-Agent fence)
+L5  test/remote-terminal-progress-wire.test.ts         5/5    (production Host row + Client source + in-process carrier)
+L6  test/remote-terminal-progress-lifecycle.test.ts    6/6    (real AgentLoop -> ... -> OSC bytes; same-id replacement; child viewer; notification boundaries)
+    pnpm test:product                               7392/7392
+```
+
+The gates (`gate:architecture`, `gate:boundary`, `gate:keybindings`,
+`gate:installation-doc`, `gate:temp-hygiene`, `gate:raw-persistence`,
+`gate:pi-divergence-ledger`, `gate:pi-vendor-diff`, `gate:pi-surface-compat`,
+`gate:dsh-preset-parity`, `test:docs`, `typecheck:bundle`) are green, and five
+deliberate mutations — the authority gate disabled, the fold's turn match
+dropped, the surface's `turn/end` forwarding removed, the completion
+re-baseline disabled, the watch re-establishment disabled — each turned its
+suite red before being reverted.

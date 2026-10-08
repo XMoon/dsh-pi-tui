@@ -33,7 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   newly selected protocol asserts the current state; a temporary handover
   (`$EDITOR`, a fullscreen round-trip) clears the live state, while the final
   exit retains a proven done/error record. A persisted `On` reads as the
-  dual-protocol default with no manual migration.
+  dual-protocol default with no manual migration. This project's own Remote
+  composition (experimental, our Host) reports the same states through the SAME
+  interval classifier; a third-party Host without this extension's Host plugin is
+  not supported.
 
 - The DSH dependency baseline moves to the published `0.2.0-rc.2` family as
   a whole: every `@deepseek-ai/dsh-*` peer floor rises to `>=0.2.0-rc.2`,
