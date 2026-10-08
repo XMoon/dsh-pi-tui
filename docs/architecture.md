@@ -876,12 +876,19 @@ authorities, and the F6 plan-owner ruling (2026-10-08) settled the contract:
 
 ```text
 OSC 0 (window title, Session identity)   OSC 7 (terminal-local cwd, OSC 7 pane)
-1. session title non-empty        -> dsh · <sanitized session title>
-2. else official Session cwd known -> dsh · <shortCwd(official session cwd)>   (Direct and Remote alike)
-3. else (Remote projection absent) -> dsh        (never the Client launch cwd)
-4. else (sessionless Direct)       -> dsh · <shortCwd(Client launch cwd)>
+1. session title non-empty                     -> dsh · <sanitized session title>
+2. else session identity WITH an official cwd  -> dsh · <shortCwd(official session cwd)>   (Direct and Remote alike)
+3. else session identity WITHOUT an official cwd -> dsh        (never the Client launch cwd)
+4. else NO session identity (sessionless Direct OR Remote) -> dsh · <shortCwd(Client launch cwd)>
 5. a Remote Host cwd may be shown as OSC 0 identity, but is never published as the OSC 7 terminal-local cwd
 ```
+
+Step 3 is the negative control that separates identity from the OSC 7
+fallback: a session that exists but has no official cwd names itself with the
+bare brand, never with the local directory. Step 4 is legal on both branches —
+with no session identity there is no Host workspace to impersonate — and
+`sessionCwdFact()` intentionally returns the Client launch cwd for BOTH
+sessionless forms (Direct and the Remote surface with no current session id).
 
 The frozen F6 plan §10.12 proof line "Remote Host cwd never becomes Client
 terminal title cwd" conflated those two authorities; the line is CORRECTED by

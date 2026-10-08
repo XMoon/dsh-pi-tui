@@ -264,13 +264,19 @@ test('a real runner session title reaches the OSC 0 sink through the injected co
     `the composed title must reach stdout as one OSC 0 frame:\n${JSON.stringify(frames)}`)
 
   // The same live chain applies the sanitizer: a hostile title cannot escape.
+  // The frame BOUNDARY is recorded first, so a dropped second update cannot
+  // let this branch consume the earlier safe frame and pass.
+  const beforeHostile = frames.length
   context.emit('session/event', session as never, event('session/title', {
     title: 'pwned \x1b]0;INJECTED\x07', messageSeqs: [], source: { kind: 'user' },
   }, 2))
   await settle()
-  const last = frames.at(-1)!
-  assert.ok(last.startsWith('\x1b]0;') && last.endsWith('\x07'), `one intact OSC frame:\n${JSON.stringify(last)}`)
-  const payload = last.slice('\x1b]0;'.length, -'\x07'.length)
+  assert.equal(frames.length, beforeHostile + 1,
+    `the second title update must emit exactly ONE new frame:\n${JSON.stringify(frames)}`)
+  const hostile = frames.at(-1)!
+  assert.equal(hostile, '\x1b]0;dsh · pwned\x07',
+    `the live chain must sanitize before writing the frame:\n${JSON.stringify(hostile)}`)
+  const payload = hostile.slice('\x1b]0;'.length, -'\x07'.length)
   assert.equal(payload.includes('\x1b'), false, 'no ESC may survive inside the live payload')
   assert.equal(payload.includes('\x07'), false, 'no BEL may survive inside the live payload')
   assert.equal(payload.includes('INJECTED'), false, 'the live policy strips the embedded sequence')
