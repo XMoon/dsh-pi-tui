@@ -6189,3 +6189,52 @@ physical terminal projection is Direct-only.
 status/result channel on the Remote client — so the main `running → idle`
 transition and its matched `turn/end` can be correlated without a new
 TUI-specific wire — or an explicit owner scope revision.
+
+### Owner scope amendment (2026-10-08) — private Remote Host wire authorized
+
+The owner confirmed that the Remote Host is **dsh-pi-tui's own deployable Host
+composition**, that upstream DSH stays unmodified, and authorized the SAME
+private Typert mechanism `piTuiFileReferences` already uses for a Host-owned
+terminal-status wire. The disposition above stays on the record as the #255
+ruling and is not rewritten retroactively; **Remote is NOT CLOSED** until the
+follow-up implementation plan's acceptance tests pass.
+
+**Design — one shared classifier, two input adapters.**
+
+- `domain/terminal-progress/interval.ts` owns the interval evidence and the
+  outcome classification. Direct and Remote instantiate it separately; the
+  truth table (`completed` → `done`, `error`/`max-tokens` → `error`, the
+  cancelled/non-live closers → `idle`, unknown kind → reported + `idle`) is
+  defined exactly once, and the new `apply()` command lets the Remote adapter
+  adopt an already-classified fact without fabricating local turn evidence.
+- `app/remote/terminal-progress-host.ts` is the Host row of our own Host
+  composition. It observes the durable `turn/start` / `turn/end(reason.kind)`
+  and the live `agent/status` edges in their true synchronous order, fences them
+  by the EXACT live Agent object and the EXACT `agent.session` object (never a
+  same-id string match), and serves ONE per-session snapshot + ordered-update
+  stream (`piTuiTerminalProgress/watch`) carrying `hostEpoch` / `agentEpoch` /
+  `revision`. A replaced Agent lifetime opens a new epoch and inherits nothing;
+  an Agent disposal retires a live interval to `idle`, ends the watchers and
+  drops the record.
+- `app/remote/terminal-progress-source.ts` is the Client source. It validates
+  every frame structurally (rc.2 does NOT apply the descriptor's result codec to
+  stream downlink items), re-checks the Connection generation and the exact
+  retained binding per frame, and lets a snapshot carry a proven `done`/`error`
+  only when it continues an interval this Client already observed.
+- `Surface.applyRemoteMainProgress` is the ONE Remote commit: the Host's proven
+  `(running, outcome)` enters the same single terminal commit as Direct, and only
+  a real `update` frame feeds the completion controller, so an opening snapshot
+  can neither notify nor revive a historical result. `mainProgressAuthority`
+  keeps the durable Remote ingress feeding the transcript while it can no longer
+  settle the local interval (one outcome authority per branch).
+- rc.2 admits exactly ONE Typert contribution per package identity, so both
+  private descriptors are registered/mounted together
+  (`runtime/remote/pi-tui-remote-contribution.ts`); the file-reference row no
+  longer registers its own, and `test/a5-composition-inventory.test.ts` pins the
+  two sanctioned subscription owners (Direct-branch row / Remote Host row).
+
+**Limits, stated explicitly.** This works only with OUR Host composition, i.e.
+with this package's additive Host plugin installed: an arbitrary third-party DSH
+Host still has no Remote terminal status. Real GUI terminals (Ghostty/Tern) and
+the real Loader/official-wire packaging remain manual/pre-release qualification,
+not covered by the automated suites below.
