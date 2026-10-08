@@ -1,7 +1,8 @@
 /**
  * The subagent domain port (D2.1 extension) — the semantic contract
  * between the TUI and subagent control. Direct implements it over the dsh
- * official service today; a Remote adapter is a later milestone.
+ * official service; an experimental Remote adapter implements the same port
+ * over the wire. Direct remains the production/default backend.
  *
  * The port owns human prompt delivery and continuable-child interruption, and
  * the DETACHED wire/application DTOs that cross it (TS8-F4 owns them here so the

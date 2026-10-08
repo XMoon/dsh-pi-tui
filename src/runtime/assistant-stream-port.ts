@@ -6,9 +6,10 @@
  * (`agent/assistant-stream` frames) and durable settlement on the Session
  * log (`assistant/message` / `assistant/attempt` with embedded compact
  * streams). The TUI presentation (Transcript / Focus / Stats / streaming
- * tool previews) consumes ONLY this neutral input for the live plane, so a
- * future Remote adapter can map the official Client transient events onto
- * the same ingress without touching the UI domain.
+ * tool previews) consumes ONLY this neutral input for the live plane. Direct
+ * and experimental Remote ingress map live assistant-stream facts onto the
+ * same presentation contract without exposing backend mechanics to the UI
+ * domain.
  *
  * The port deliberately carries only what presentation needs — session
  * identity, attempt identity, turn/step, timing, and the chunk surface —
