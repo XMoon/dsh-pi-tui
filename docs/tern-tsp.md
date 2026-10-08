@@ -27,7 +27,7 @@ evidence ledger. Per-PR measurements live under
 | Item | State |
 |---|---|
 | PR1 replay spike → real Tern pane | DONE (manual, opt-in script) |
-| PR2 live application projection → isolated TSP surface | IMPLEMENTED on `feat/tern-tsp-pr2-live-presentation` (see the ledger; update to DONE when merged) |
+| PR2 live application projection → isolated TSP surface | IMPLEMENTED on `feat/tern-tsp-pr2-live-presentation` ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257); see the ledger; update to DONE when merged) |
 | TSP pane as the product renderer (one physical tty) | PLANNED (PR3) |
 | Editor/submit/Question/Approval inside TSP | PLANNED (PR3+) |
 
@@ -226,7 +226,7 @@ Evidence levels — do not merge these into a stronger claim:
 | PR | State | Proved | Not proved | Evidence |
 |---|---|---|---|---|
 | PR1 ([#256](https://github.com/XMoon/dsh-pi-tui/pull/256)) | DONE (merged) | Canonical transcript → native TSP nodes; real Tern 0.6.2 render, incremental ops, clean/signal close | Live application wiring; editor/input; durable identity | [./tern-tsp/evidence/pr1.md](./tern-tsp/evidence/pr1.md) |
-| PR2 | IMPLEMENTED (this PR) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty | Real Tern pane; product renderer selection; editor/input | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
+| PR2 ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) | IMPLEMENTED (this PR) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty | Real Tern pane; product renderer selection; editor/input | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
 | PR3+ | PLANNED | Renderer selection at one composition point; editor/input authority; Question/Approval hand-off | — | — |
 
 ## Next decisions

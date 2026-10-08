@@ -7,7 +7,7 @@ below; the long-term entry point is [`docs/tern-tsp.md`](../../tern-tsp.md).
 - **Date / environment:** 2026-10-08 (UTC+8); Node `24.20.0`, pnpm `11.7.0`,
   TypeScript `5.9.3`, `@xmoon76/dsh-pi-tui@0.5.1`, dev DSH deps `0.2.0-rc.2`
 - **Worktree / branch:** `/home/xmoon/project/dsh-pi-tui-tern-tsp-pr2` ·
-  `feat/tern-tsp-pr2-live-presentation`
+  `feat/tern-tsp-pr2-live-presentation` · PR [#257](https://github.com/XMoon/dsh-pi-tui/pull/257)
 - **Base:** `origin/next` @ `a4473563b0c97f0fc08dfc2ef9626a2a9f5705bc`
 - **Plan:** `temp/tern/dsh-pi-tui-tern-tsp-pr2-live-presentation-seam-plan-20261008.md`
 - **SDK:** `@stencil-hq/tern@0.1.0` (npm, `devDependencies` only — unchanged by
