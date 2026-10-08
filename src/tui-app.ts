@@ -136,6 +136,7 @@ import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
 import type { StatusStore } from './domain/status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
 import { displayPolicyFor } from './tui/transcript/display-policy.ts'
+import { renderViewerSubjectBar as renderViewerSubjectBarLine } from './tui/presentation/viewer-subject-bar.ts'
 import { isDisplayPresetAvailable, isFocusDisplayPreset } from './domain/display/preset.ts'
 import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './domain/status/types.ts'
 import { deriveActivityStatus } from './domain/status/derive-activity.ts'
@@ -2265,6 +2266,12 @@ export class TuiApp {
    */
   private readonly editorSeat: EditorSeatMount
   private readonly header: Text
+  /** The child-viewer SUBJECT BAR: one pinned physical line directly under
+   * the header while the committed display subject is a viewed child,
+   * zero rows on the main subject (viewer UX plan §4.1/§4.2). Its text is
+   * the pure `renderViewerSubjectBar` projection of the committed
+   * StatusSnapshot. */
+  private readonly viewerSubjectBar: Text
   private readonly messagesView: Container
   private readonly footer: Text
   /** The M4 widget zones (extension widgets around the editor seat). */
@@ -3040,6 +3047,10 @@ export class TuiApp {
     | {
         columns: number
         termRows: number
+        /** The pinned chrome rows ABOVE the transcript: the header PLUS the
+         * viewer subject bar. The name predates the subject bar (viewer UX
+         * plan §4.3 keeps it to avoid churning the existing consumers); the
+         * VALUE is the combined transcript-top offset. */
         headerHeight: number
         welcomeHeight: number
         footerHeight: number
@@ -3087,10 +3098,11 @@ export class TuiApp {
   /** The live session's auto-generated title, shown in the header when set. */
   private sessionTitleText = ''
   /** The mode-aware subagent viewer: while set, the editor bar shows the
-   * child's draft (continuable) or a read-only placeholder (one-shot),
-   * the editor border switches to the accent color, and the header
-   * carries a persistent badge — the transient notify line is not the
-   * only signal. */
+   * child's draft (continuable) or a read-only placeholder (one-shot), the
+   * editor border switches to the accent color, and the header-adjacent
+   * viewer subject bar carries the child identity/activity — the transient
+   * notify line is not the only signal. The SUBJECT BAR itself reads the
+   * committed StatusSnapshot, never this field. */
   private viewerMode: SubagentViewerTarget | undefined
   /** The MAIN session's real draft, preserved while the viewer covers the
    * editor bar (restored on exit). Never written by viewer editing. */
@@ -3197,9 +3209,16 @@ export class TuiApp {
     // WITHOUT a paired render, so run-state went stale until an unrelated
     // event repainted); the store's no-churn discipline keeps this
     // event-driven (a same-value refresh never notifies, never renders).
+    // The viewer subject bar rides the SAME listener and the SAME committed
+    // snapshot (viewer UX plan §4.2): the bar and the footer can never
+    // describe different subjects, and no second subscription or state
+    // machine is introduced.
     // The disposer is kept so dispose() drops the listener (a long-lived
     // externally supplied store must not retain the dead surface).
-    this.statusStoreUnsubscribe = this.statusStore.subscribe(() => this.renderFooter())
+    this.statusStoreUnsubscribe = this.statusStore.subscribe(() => {
+      this.renderViewerSubjectBar()
+      this.renderFooter()
+    })
     this.footerItemRegistry = createBuiltinFooterRegistry()
     // M4: the extension host's configurable footer items join the catalog
     // as a live external source (resolved on demand — replace()/dispose()
@@ -3546,6 +3565,7 @@ export class TuiApp {
     // M9: the editor seat holder's host adapter + view swap were built
     // above; the seat child mounts later (editorSeat is created below).
     this.header = new Text('🐋  dsh-pi-tui', 0, 0)
+    this.viewerSubjectBar = new Text('', 0, 0)
     this.messagesView = new Container()
     this.dock = new Text('', 0, 0)
     this.todoPanel = new Text('', 0, 0)
@@ -3581,6 +3601,7 @@ export class TuiApp {
     // seat: above between the working row and the seat, below between the
     // seat and the footer.
     this.tui.addChild(this.header)
+    this.tui.addChild(this.viewerSubjectBar)
     this.tui.addChild(this.messagesView)
     this.tui.addChild(this.dock)
     this.tui.addChild(this.todoPanel)
@@ -5912,6 +5933,10 @@ export class TuiApp {
         // stale-click guard's reference — see paintProbe).
         { component: this.paintProbe, shrink: 0 },
         { component: this.header, shrink: 0 },
+        // The viewer subject bar is the second pinned chrome row (zero rows
+        // on the main subject): it must never enter the ScrollView, so it
+        // sits between the header and the transcript pane.
+        { component: this.viewerSubjectBar, shrink: 0 },
         // grow is a stack-entry option: the transcript pane takes all the
         // height the pinned rows leave behind. basis: 0 skips the pane's
         // intrinsic-height measurement pass (the ScrollView's content
@@ -9893,6 +9918,14 @@ export class TuiApp {
     return [...this.footer.render(Math.max(1, this.terminal.columns))]
   }
 
+  /** Test hook: the viewer subject bar's rendered rows (empty on the main
+   * subject, exactly one line while a child is displayed). A pure read of
+   * the committed projection — usable from a REGULAR surface where the bar
+   * can have scrolled out of the captured viewport. */
+  viewerSubjectBarRenderRowsForTest(): readonly string[] {
+    return [...this.viewerSubjectBar.render(Math.max(1, this.terminal.columns))]
+  }
+
   /** Test hook: a COPY of the live Focus root disclosure set — the
    * fullscreen Ctrl+O bulk-toggle tests assert per-turn state; the
    * internal set is never handed out. */
@@ -10029,7 +10062,11 @@ export class TuiApp {
     this.fullscreenPaintSnapshot = {
       columns: this.terminal.columns,
       termRows: this.terminal.rows,
-      headerHeight: paintedHeight(this.header),
+      // The REAL transcript-top pinned chrome total (viewer UX plan §4.3):
+      // the header PLUS the viewer subject bar (zero rows on the main
+      // subject). The field name is kept for its existing consumers, but
+      // every reader now gets the combined top offset.
+      headerHeight: paintedHeight(this.header) + paintedHeight(this.viewerSubjectBar),
       welcomeHeight: this.welcomeCard.lastRenderedHeight,
       footerHeight: paintedHeight(this.footer),
       editorHeight: paintedHeight(this.editorSeat),
@@ -15515,6 +15552,10 @@ export class TuiApp {
       if (widthChanged) {
         this.lastTranscriptWidth = width
         if (this.messageRows.length > 0) this.rebuildMessages()
+        // The subject bar bakes its own width-aware truncation at setText
+        // time: a width change must re-project it at the new width on this
+        // same geometry pass (viewer UX plan §4.2).
+        this.renderViewerSubjectBar()
       }
       if (widthChanged) {
         // Queue/todo rows are width-baked strings, not merely live-wrapped
@@ -16065,6 +16106,7 @@ export class TuiApp {
     // every render, renderDock owns the dock row budget, and the footer
     // outlet is bounded by the terminal width inside its own refresh.
     this.renderHeader()
+    this.renderViewerSubjectBar()
     this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
@@ -16072,29 +16114,47 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /** Rebuild the child-viewer subject bar from the COMMITTED status
+   * snapshot (viewer UX plan §4.2): the bar and the footer read the SAME
+   * atomic snapshot, so neither can describe a different subject. The
+   * optional child title is only taken from the committed display-subject
+   * projection AND only when it names the SAME child (`sessionId ===
+   * view.subject.id`) — an unknown or foreign title is never rendered. */
+  private renderViewerSubjectBar(): void {
+    const snapshot = this.statusStore.snapshot()
+    const subject = snapshot.view.subject
+    const presentation = this.displaySubjectPresentation
+    const childTitle = subject.kind === 'subagent'
+      && presentation !== undefined
+      && presentation.sessionId === subject.id
+      && presentation.title !== ''
+      ? presentation.title
+      : undefined
+    this.viewerSubjectBar.setText(renderViewerSubjectBarLine({
+      snapshot,
+      ...childTitle === undefined ? {} : { childTitle },
+      width: Math.max(1, this.terminal.columns),
+    }))
+    this.requestRender()
+  }
+
   /** Rebuild the header from base + session title + plan badge + extension
    * badges. Colours are applied AT RENDER TIME from the live palette — the
    * semantic state (plan mode, title) is stored separately, so a theme
-   * switch only has to re-run this. */
+   * switch only has to re-run this. The header ALWAYS shows the main
+   * session title: the child viewer identity lives in the viewer subject
+   * bar (DECISION B, viewer UX plan §1.2 — the old `[viewing subagent …]`
+   * badge and the viewer-label override are retired). */
   private renderHeader(): void {
     // Host-owned header budget (plan §19, follow-up P1): the badge run gets
     // the width the HOST'S OWN header content leaves free — the fixed
-    // prefix PLUS the session/viewer title and the plan/viewer badges
-    // (a long title would otherwise consume the row and make the final
-    // header wrap even though the badge run fits its own budget). Re-derived
-    // on EVERY render so a resize or a title change re-bakes the budget.
+    // prefix PLUS the session title and the plan badge (a long title would
+    // otherwise consume the row and make the final header wrap even though
+    // the badge run fits its own budget). Re-derived on EVERY render so a
+    // resize or a title change re-bakes the budget.
     const badge = this.planMode ? ` ${color.warning('[plan]')}` : ''
-    const viewerBadge = this.viewerMode === undefined ? '' : ` ${color.accent(
-      isViewerAccessInteractive(resolveViewerAccess(this.viewerMode.mode, this.viewerMode.access))
-        ? '[viewing subagent · continuable]'
-        : this.viewerMode.access === 'readonly-nested'
-          ? '[viewing subagent · nested · read-only]'
-          : '[viewing subagent · one-shot · read-only]',
-    )}`
-    const title = this.viewerMode !== undefined
-      ? ` · ${color.textMuted(this.viewerMode.label)}`
-      : this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    const hostOwned = `🐋  dsh-pi-tui${title}${badge}${viewerBadge}`
+    const title = this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
+    const hostOwned = `🐋  dsh-pi-tui${title}${badge}`
     // The badge run gets what the host chrome leaves; -2 reserves the
     // trailing space + a safety cell so the composed row never wraps.
     this.extensionHost?.setHeaderBudget(Math.max(1, this.terminal.columns - visibleWidth(hostOwned) - 2))
@@ -16683,12 +16743,14 @@ export class TuiApp {
     return this.customFooterLayout
   }
 
-  /** M3: the CURRENT EFFECTIVE layout the composer renders (custom when
-   * set, else the builtin preset layout for the active mode) — the
-   * configurator must start from THIS, never from `getFooterLayout() ??
-   * default` (which would map a compact mode to the full default). */
+  /** M3: the layout the CONFIGURATOR edits: the custom layout when set,
+   * else the builtin preset for the active mode. Deliberately NOT the
+   * viewer counterpart the composer renders while a child is displayed
+   * (viewer UX plan §4.4): the builtin viewer layout is presentation-only
+   * and must never become the baseline a user saves, nor retarget the
+   * per-item command runners across a viewer transition. */
   getEffectiveFooterLayout(): FooterLayoutV1 {
-    return this.currentFooterLayout()
+    return this.customFooterLayout ?? layoutForPreset(this.footerPreset)
   }
 
   /** M3: the composer's item registry (the configurator lists the same
@@ -16786,9 +16848,15 @@ export class TuiApp {
   }
 
   /** The layout the composer renders: the custom layout when set, else
-   * the builtin preset layout. */
+   * the builtin preset layout — selecting the builtin VIEWER counterpart
+   * while the COMMITTED display subject is a viewed child (viewer UX plan
+   * §4.4). This is a presentation-layout choice over the same snapshot, not
+   * a second status owner; a custom layout and the command surface keep
+   * their existing semantics. */
   private currentFooterLayout(): FooterLayoutV1 {
-    return this.customFooterLayout ?? layoutForPreset(this.footerPreset)
+    if (this.customFooterLayout !== undefined) return this.customFooterLayout
+    const viewing = this.statusStore.snapshot().view.subject.kind === 'subagent'
+    return layoutForPreset(this.footerPreset, viewing)
   }
 
   /** Rebuild the footer from the unified status snapshot (M1): the
@@ -16892,7 +16960,7 @@ export class TuiApp {
       return { perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW, total: FOOTER_MAX_PHYSICAL_LINES }
     }
     let used = 0
-    for (const chrome of [this.header, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
+    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
       used += chrome.render(width).length
     }
     return {
@@ -18354,6 +18422,7 @@ export class TuiApp {
     // Extension outlets re-render with the live palette (theme revision).
     this.extensionHost?.refreshOutlets()
     this.renderHeader()
+    this.renderViewerSubjectBar()
     this.renderFooter()
     this.renderDock()
     this.renderTodoPanel()

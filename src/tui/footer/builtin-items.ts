@@ -4,13 +4,15 @@
  * callback is pure, synchronous, I/O-free and reads only the
  * StatusSnapshot + the host surface context.
  *
- * Default-preset composition: row 1 leads with the view-scope item and
- * composes the main-only identity badges (permission/model/tasks/branch)
- * and the extension bridge on the LEFT, with plan-state and display-preset on
- * the RIGHT; row 2 composes the stats-line facts as real semantic
- * placements (token-usage:pi, cache-hit:pi, performance:latency and
- * performance:speed — the RECENT performance contract) plus the turn/step
- * counters on the LEFT, with the full context pressure on the RIGHT. The
+ * Default-preset composition: row 1 composes the main-only identity badges
+ * (permission/model/tasks/branch) and the extension bridge on the LEFT, with
+ * plan-state and display-preset on the RIGHT; row 2 composes the stats-line
+ * facts as real semantic placements (token-usage:pi, cache-hit:pi,
+ * performance:latency and performance:speed — the RECENT performance
+ * contract) plus the turn/step counters on the LEFT, with the full context
+ * pressure on the RIGHT. The `view-scope` id stays REGISTERED but is retired
+ * (it renders nothing — the child identity now lives in the viewer subject
+ * bar), so legacy custom layouts that reference it stay loadable. The
  * data-source items (cwd/turns-steps/usage placements) follow the display
  * subject's section values. `stats-line` stays registered as the legacy
  * composite for existing custom layouts, never in the default preset.
@@ -338,27 +340,22 @@ const statsLineItem: FooterItemDefinition = {
   },
 }
 
-/** The viewer identity block (legacy form): `[subagent · one-shot] label
- * ● running` — the badge, the child label and the activity ride as one
- * composite item so the default preset reproduces the legacy viewer footer
- * with a single item (custom layouts may split them later). */
+/** The RETIRED viewer identity block (legacy form): the child
+ * label/activity identity now lives in the header-adjacent viewer subject
+ * bar, so this item renders nothing. It stays REGISTERED and parseable
+ * (existing user custom layouts that reference `view-scope` load, edit and
+ * save unchanged — the placement is inert), but it is no longer offered by
+ * the configurator's Add picker. */
 const viewScopeItem: FooterItemDefinition = {
   id: 'view-scope',
   label: 'View scope',
-  description: 'The subagent-viewer identity block (badge, label, activity).',
+  description: 'Retired: the viewer identity now renders in the subject bar.',
   defaultZone: 'left',
   defaultImportance: 115,
   formats: ['legacy'],
   defaultFormat: 'legacy',
-  render(snapshot: StatusSnapshot) {
-    const subject = snapshot.view.subject
-    if (subject.kind !== 'subagent') return null
-    const badge = subject.mode === 'one-shot' ? '[subagent · one-shot]' : '[subagent · continuable]'
-    const spans: { text: string; tone?: 'accent' | 'primary' | 'textMuted' }[] = [{ text: badge, tone: 'accent' }]
-    if (subject.label !== undefined && subject.label !== '') spans.push({ text: `  ${subject.label}` })
-    if (subject.activity === 'running') spans.push({ text: '  ● running', tone: 'primary' })
-    else if (subject.activity === 'inactive') spans.push({ text: '  inactive', tone: 'textMuted' })
-    return { spans }
+  render() {
+    return null
   },
 }
 

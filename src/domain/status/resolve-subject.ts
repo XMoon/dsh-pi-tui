@@ -1,9 +1,13 @@
 /**
- * Display subject resolution (plan §4.6): the footer layout does NOT change
- * when the user enters the subagent viewer — only the DATA SOURCE switches
- * to the viewed child. This module resolves the current display subject from
- * the mounted viewer's identity — the ONE selector StatusRuntime's
- * display-subject derivation uses (M3-5 PR1).
+ * Display subject resolution (plan §4.6): entering the subagent viewer
+ * switches the displayed Session, not the status OWNER — the footer, the
+ * viewer subject bar and every derived surface read the SAME committed
+ * StatusSnapshot. The builtin footer PRESENTATION layout may select a
+ * viewer counterpart (no model/view-scope duplication), but that is a
+ * layout choice over one snapshot, never a second child status owner.
+ * This module resolves the current display subject from the mounted
+ * viewer's identity — the ONE selector StatusRuntime's display-subject
+ * derivation uses (M3-5 PR1).
  * @module @xmoon76/dsh-pi-tui/domain/status/resolve-subject
  */
 

@@ -177,6 +177,8 @@ interface MountedApp {
       usage?: { turns?: number; steps?: number }
     }
   }
+  /** The viewer subject bar's rendered rows (the child-identity chrome). */
+  viewerSubjectBarRenderRowsForTest(): readonly string[]
 }
 
 interface ChildBinding {
@@ -360,10 +362,15 @@ test('L6 §11/§14.4-5-6: `/tasks` renders the REAL Remote descendant tree and t
   assert.equal(childView.includes('childa answer 30'), true, 'the child A transcript renders')
   assert.equal(childView.includes('parent answer 2'), false,
     `the parent transcript must never render as the child viewer:\n${childView}`)
-  // Display-subject facts are the CHILD's own: the header/footer badge + the
-  // committed StatusStore subject and workspace.
-  assert.match(childView, /\[subagent · continuable\]\s+child A m3-5-pr2-child-a/u,
-    `the child viewer badge must render the child identity:\n${childView}`)
+  // Display-subject facts are the CHILD's own: the subject bar identity + the
+  // committed StatusStore subject and workspace. The bar is read from its own
+  // component (a REGULAR surface can scroll the bar out of the captured
+  // viewport; the retired `[subagent · …]` footer badge no longer exists).
+  const barA = app.viewerSubjectBarRenderRowsForTest().join('\n')
+  assert.ok(barA.includes('‹ parent'), `the subject bar must render the navigation affordance:\n${barA}`)
+  assert.ok(barA.includes('child A m3-5-pr2-child-a'),
+    `the subject bar must render the child identity:\n${barA}`)
+  assert.ok(!barA.includes('[subagent · continuable]'), `the retired badge must not render:\n${barA}`)
   const childStatus = app.statusStore.snapshot()
   assert.deepEqual(childStatus.view?.subject, {
     kind: 'subagent', id: CHILD_A_ID, label: LABEL_A, mode: 'continuable', activity: 'inactive',
@@ -1712,10 +1719,11 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   }
   life.defer(() => { ingress.subscribe = realSubscribe })
 
-  // The footer's display-subject identity block renders the committed activity
-  // (`● running` / `inactive`) — the exact line P2 left stale.
-  const subjectLine = (): string => viewport().split('\n')
-    .find(line => line.includes('[subagent · continuable]')) ?? ''
+  // The display-subject identity bar renders the committed activity
+  // (`● running` / `inactive`) — the exact line P2 left stale. Read from the
+  // bar component: this is a REGULAR surface, so the bar can scroll out of
+  // the captured viewport.
+  const subjectLine = (): string => app.viewerSubjectBarRenderRowsForTest().join('\n')
   const subjectActivity = (): string | undefined => app.statusStore.snapshot().view?.subject?.activity
   const clientRunning = (): boolean | undefined => sessions.list.getSnapshot().byId[CHILD_A_ID]?.running
 
@@ -1735,7 +1743,7 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   assert.deepEqual(app.statusStore.snapshot().view?.subject, {
     kind: 'subagent', id: CHILD_A_ID, label: LABEL_A, mode: 'continuable', activity: 'running',
   }, 'the mounted viewer must commit the CHILD subject as running')
-  await waitFor('the footer identity block renders the running activity', () =>
+  await waitFor('the subject bar renders the running activity', () =>
     subjectLine().includes('● running'), 10_000)
 
   // ── (3) The official Session-snapshot flip to `running: false` (the held turn
@@ -1755,12 +1763,12 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     'a window prepend would independently re-derive the subject status in this window')
   assert.equal(subjectActivity(), 'inactive',
     'the committed display subject must follow the official running flip')
-  await waitFor('the footer converges to the inactive activity', () =>
+  await waitFor('the subject bar converges to the inactive activity', () =>
     subjectLine().includes('inactive') && !subjectLine().includes('● running'), 15_000)
   assert.equal(subjectLine().includes('inactive'), true,
-    `the rendered footer must show the converged activity:\n${viewport()}`)
+    `the rendered subject bar must show the converged activity:\n${subjectLine()}`)
   assert.equal(subjectLine().includes('● running'), false,
-    `the stale running line must leave the footer:\n${viewport()}`)
+    `the stale running line must leave the subject bar:\n${subjectLine()}`)
 
   // ── (4) The reverse flip through the same isolated channel.
   const suppressedBefore = suppressedDurableEvents
@@ -1773,7 +1781,7 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   })
   await waitFor('the official Client list reports the child running again', () => clientRunning() === true, 15_000)
   await waitFor('the committed subject converges back to running', () => subjectActivity() === 'running', 15_000)
-  await waitFor('the footer converges back to the running activity', () =>
+  await waitFor('the subject bar converges back to the running activity', () =>
     subjectLine().includes('● running'), 15_000)
   assert.ok(suppressedDurableEvents > suppressedBefore,
     'the reverse flip must also be observed with the durable sink suppressed')
@@ -1783,7 +1791,7 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   assert.equal(suppressedWindowPrepended, 0, 'no window prepend may fire on the reverse flip either')
   assert.equal(subjectActivity(), 'running', 'the reverse flip must converge as well')
   assert.equal(subjectLine().includes('● running'), true,
-    `the rendered footer must show running again:\n${viewport()}`)
+    `the rendered subject bar must show running again:\n${subjectLine()}`)
   releaseSecond()
 })
 

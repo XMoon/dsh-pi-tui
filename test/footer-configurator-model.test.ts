@@ -141,6 +141,21 @@ test('Space removes the active item; it returns to the Add pool', () => {
   assert.equal(idAtCursor(m), 'turns-steps')
 })
 
+test('the retired view-scope id is registered but never offered by the Add picker', () => {
+  const m = model()
+  assert.ok(registry.ids().includes('view-scope'), 'the id stays registered for legacy layouts')
+  assert.ok(!m.availableIds().includes('view-scope'), 'the Add picker must not offer the retired placement')
+  // A legacy draft that already references it still loads, previews and
+  // saves unchanged (the placement is inert, never a parse/round-trip error).
+  const legacy = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'view-scope' }, { id: 'model' }], right: [] }],
+  }, registry)
+  assert.deepEqual(legacy.state().layout.rows[0]!.left.map(ref => ref.id), ['view-scope', 'model'])
+  assert.deepEqual(legacy.preview().rows[0]!.left.map(ref => ref.id), ['view-scope', 'model'],
+    'the preview keeps the legacy placement (the renderer, not the editor, makes it inert)')
+})
+
 test('the Add picker: search, add, the definition remains addable, Esc clears then back', () => {
   const m = model()
   m.activate()

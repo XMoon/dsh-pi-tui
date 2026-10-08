@@ -2058,10 +2058,11 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   // the bounded fold's 10/2), the official context window, the child todo
   // count and the child workspace.
   const viewA = vt.getViewport().join('\n')
-  assert.ok(viewA.includes('[subagent · continuable]'), `the viewer badge must render:\n${viewA}`)
+  assert.ok(viewA.includes('‹ parent'), `the viewer subject bar must render:\n${viewA}`)
   assert.ok(viewA.includes('child display subject A'), `the child label must render:\n${viewA}`)
   assert.ok(viewA.includes('child-a-ws'), `the child workspace must render:\n${viewA}`)
   assert.ok(viewA.includes('deepseek/child-a-model'), `the child model must render:\n${viewA}`)
+  assert.ok(!viewA.includes('[subagent · continuable]'), `the retired viewer badge must not render:\n${viewA}`)
   assert.ok(viewA.includes('[read-only]'), `the child permission must render:\n${viewA}`)
   assert.ok(viewA.includes('↑11'), `the official child input tokens must render:\n${viewA}`)
   assert.ok(viewA.includes('↓5'), `the official child output tokens must render:\n${viewA}`)
@@ -2110,8 +2111,8 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   const viewTodoWrite = vt.getViewport().join('\n')
   assert.ok(viewTodoWrite.includes('3 active · CHILD-A-TODO-3'),
     `the rendered child todo summary must follow the lone todo/write:\n${viewTodoWrite}`)
-  assert.ok(viewTodoWrite.includes('child a retitled') === false,
-    'the child title is not rendered by the chrome (it is an extension fact)')
+  assert.ok(viewTodoWrite.includes('child a retitled'),
+    `the committed child title must render in the subject bar:\n${viewTodoWrite}`)
 
   // INVALIDATION (M3-5 PR1 review R4): a lone child `model/selection` — the
   // durable model-selection commit, which can land outside a turn — and a lone
@@ -2124,6 +2125,8 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   await vt.waitForRender()
   assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-model-v2',
     'a lone child model/selection must reach the committed display subject')
+  assert.ok(vt.getViewport().join('\n').includes('deepseek/child-a-model-v2'),
+    `the subject bar must follow a lone child model/selection:\n${vt.getViewport().join('\n')}`)
 
   childAPreset = 'child-a-preset-v2'
   context.emit('session/event', childA as never, event('agent-preset/selected', { agentPreset: 'child-a-preset-v2' }, 43))
@@ -2195,9 +2198,11 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.equal(probe.capturedDisplaySubject?.presentation?.goal, undefined, 'A’s goal must not survive into B')
   assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home, 'B’s commit keeps the LIVE legacy facts')
   const viewB = vt.getViewport().join('\n')
-  assert.ok(viewB.includes('child display subject B'), `the rendered footer must show B’s identity:\n${viewB}`)
+  assert.ok(viewB.includes('child display subject B'), `the rendered subject bar must show B’s identity:\n${viewB}`)
   assert.ok(viewB.includes('child-b-ws'), `the rendered footer must show B’s workspace:\n${viewB}`)
   assert.ok(!viewB.includes('child-a-ws'), `A’s workspace must not survive into B:\n${viewB}`)
+  assert.ok(!viewB.includes('child-a-model'), `A’s model must not survive into the subject bar:\n${viewB}`)
+  assert.ok(!viewB.includes('child a retitled'), `A’s title must not survive into B’s subject bar:\n${viewB}`)
 
   // Child → main restores the parent subject.
   input('\x1b')
@@ -2207,6 +2212,7 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(restored.includes('p/parent-model'), `the parent footer must return:\n${restored}`)
   assert.ok(restored.includes('display-subject-parent'), `the parent welcome card must return:\n${restored}`)
   assert.ok(!restored.includes('[subagent · continuable]'), `the viewer badge must clear:\n${restored}`)
+  assert.ok(!restored.includes('‹ parent'), `the subject bar must clear on exit:\n${restored}`)
   assert.ok(!restored.includes('child-b-ws'), `the child workspace must clear:\n${restored}`)
 
   // NEGATIVE CONTROL: with child A's official SessionStatus projection REMOVED,
@@ -2235,6 +2241,10 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(!viewNoOfficial.includes('↓'), `no token figures may render when the official usage is unavailable:\n${viewNoOfficial}`)
   assert.ok(!viewNoOfficial.includes('100/2.0k'), `no context window may render when the official child context is unavailable:\n${viewNoOfficial}`)
   assert.ok(viewNoOfficial.includes('child display subject A'), `the child identity must still render:\n${viewNoOfficial}`)
+  assert.ok(viewNoOfficial.includes('model ?'),
+    `an absent official child model must render the unknown token, never a parent value:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('child-a-model'),
+    `the removed official model must not linger in the subject bar:\n${viewNoOfficial}`)
 })
 
 test('F4-R1: a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {

@@ -3545,7 +3545,10 @@ test('the one-shot subagent viewer covers the editor, consumes input, and restor
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('viewing subagent: research — one-shot · read-only · Esc returns'), `placeholder missing:\n${view}`)
-  assert.ok(view.includes('[viewing subagent · one-shot · read-only]'), `header badge missing:\n${view}`)
+  // DECISION B (viewer UX plan §1.2): the header no longer badges the
+  // viewer. The child identity lives in the subject bar, which follows the
+  // COMMITTED display subject — a bare setViewerMode does not commit one.
+  assert.ok(!view.includes('[viewing subagent'), `the retired header badge must never render:\n${view}`)
   // Typing goes nowhere, Enter does not submit, ↓ does not open anything.
   vt.sendInput('hello')
   vt.sendInput('\r')
@@ -3566,7 +3569,7 @@ test('the one-shot subagent viewer covers the editor, consumes input, and restor
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('my precious draft'), `draft not restored:\n${view}`)
-  assert.ok(!view.includes('[viewing subagent'), `badge survived leaving:\n${view}`)
+  assert.ok(!view.includes('[viewing subagent') && !view.includes('‹ parent'), `the viewer identity survived leaving:\n${view}`)
   app.stop()
 })
 

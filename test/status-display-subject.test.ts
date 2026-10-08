@@ -16,6 +16,7 @@ import type { SessionStatusProjection } from '../src/runtime/session-reader-port
 import { StatsFolder } from '../src/domain/status/stats.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { emptyStatusSnapshot, type StatusPatch } from '../src/domain/status/types.ts'
+import { renderViewerSubjectBar } from '../src/tui/presentation/viewer-subject-bar.ts'
 import type { DisplaySubjectPresentation, StatusData, TuiApp } from '../src/tui-app.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
@@ -318,4 +319,63 @@ test('M3-5 PR1: the child context numerator/window are the SessionStatus facts, 
     'pressureTokens is the numerator when projectedTokens is absent')
   assert.deepEqual(usage.tokens, { input: 11, output: 22, cacheRead: 0, cacheWrite: 0 },
     'the cumulative tokens are the official projection’s, never a fold sum')
+})
+
+/** Strip ANSI SGR sequences for text-level bar assertions. */
+function plain(text: string): string {
+  return text.replace(/\x1b\[[0-9;:]*m/g, '')
+}
+
+test('L6: the viewer subject bar projects the SAME atomic snapshot the status runtime commits', () => {
+  const h = makeHarness()
+  h.setStatus('main', {
+    sessionId: 'main',
+    model: { provider: 'parent', model: 'parent-model' },
+    permission: 'danger-full-access',
+  })
+  const childAStatus = {
+    sessionId: 'child-a',
+    cwd: '/child-a/ws',
+    model: { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
+    preset: 'child-preset',
+    permission: 'read-only',
+    title: 'child title',
+  } as const
+  h.setStatus('child-a', childAStatus)
+  h.setChild(childRead('child-a', 'research'))
+  h.runtime.refresh()
+  const barOf = (): string => plain(renderViewerSubjectBar({
+    snapshot: h.store.snapshot(),
+    childTitle: h.commits.at(-1)?.presentation?.title,
+    width: 120,
+  }))
+  const barA = barOf()
+  assert.ok(barA.includes('‹ parent') && barA.includes('research'), `the child identity must render:\n${barA}`)
+  assert.ok(barA.includes('● running'), `the child activity must render:\n${barA}`)
+  assert.ok(barA.includes('deepseek/child-model'), `the child provider/model must render:\n${barA}`)
+  assert.ok(barA.includes('@high'), `the child effort must render:\n${barA}`)
+  assert.ok(barA.includes('child title'), `the committed child title must render:\n${barA}`)
+  assert.ok(!barA.includes('parent-model'), `the parent model must never fill the bar:\n${barA}`)
+
+  // A child model/selection update re-derives the same snapshot; the bar follows.
+  h.setStatus('child-a', { ...childAStatus, model: { provider: 'deepseek', model: 'child-model-v2' } })
+  h.runtime.refresh()
+  const barA2 = barOf()
+  assert.ok(barA2.includes('deepseek/child-model-v2'), `the updated model must render:\n${barA2}`)
+  assert.ok(!barA2.includes('child-model @'), `the old model must not linger:\n${barA2}`)
+
+  // child A → child B (no model) → main: no residue, no parent fallback.
+  h.setStatus('child-b', { sessionId: 'child-b', cwd: '/b' })
+  h.setChild(childRead('child-b', 'audit'))
+  h.runtime.refresh()
+  const barB = barOf()
+  assert.ok(barB.includes('audit'), `B’s label must render:\n${barB}`)
+  assert.ok(barB.includes('model ?'), `B’s absent model renders the unknown token:\n${barB}`)
+  assert.ok(!barB.includes('child-model'), `A’s model must not survive into B:\n${barB}`)
+  assert.ok(!barB.includes('parent-model'), `the parent model must never fill B:\n${barB}`)
+
+  h.setChild(undefined)
+  h.runtime.refresh()
+  assert.equal(renderViewerSubjectBar({ snapshot: h.store.snapshot(), width: 120 }), '',
+    'the main subject renders no bar (zero rows)')
 })
