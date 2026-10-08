@@ -256,10 +256,10 @@ Validation mechanics for this toolchain:
 * A publicly-exported helper therefore follows the canonical owner-layer placement
   (`## Repository boundaries` → `### Source module placement`) and is exposed through
   the public entry (`src/index.ts`) or an existing documented facade. Do not create a
-  new root `src/*.ts` module merely to satisfy declaration bundling. The legacy
-  top-level public helpers still listed in `scripts/source-root-baseline.json` keep
-  working until their own TS stage moves them, but they are not a template for new
-  modules. If the declaration/tarball boundary
+  new root `src/*.ts` module merely to satisfy declaration bundling. The root
+  ledger `scripts/source-root-baseline.json` is CLOSED at the seven stable
+  entries/facades with no legacy root left (the architecture gate also forbids
+  every retired root path); those entries are not a template for new modules. If the declaration/tarball boundary
   cannot expose the canonical nested owner, STOP and report the packaging constraint
   instead of growing the root baseline.
 

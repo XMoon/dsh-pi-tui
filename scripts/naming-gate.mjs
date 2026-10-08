@@ -105,7 +105,7 @@ for (const workflow of ['ci.yml', 'release.yml']) {
 //    contract; an import with no peer breaks the in-box resolution rule and
 //    can duplicate `@deepseek-ai` copies in the profile (first tool call
 //    crashes). `dsh-session-query` was removed by this rule: the picker
-//    types it structurally (src/sessions.ts) and reads the service off the
+//    types it structurally (src/tui/pickers/sessions.ts) and reads the service off the
 //    live context, so it never needed the package.
 const bundleSrc = join(ROOT, 'src')
 const srcFiles = (() => {
