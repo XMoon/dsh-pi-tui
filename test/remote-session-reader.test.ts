@@ -515,6 +515,28 @@ test('sessionStatus reads only the addressed session — no parent/main fallback
   assert.deepEqual(new RemoteSessionReader(bare, generation.source).sessionStatus('s'), { sessionId: 's' })
 })
 
+test('T8: the Remote branch never grows the Direct compat read — an absent binding face stays unknown', () => {
+  // The Direct reader now falls back to the exact Session's own durable facts
+  // while the official `modelSelection` unit is unregistered. The Remote branch
+  // has an OFFICIAL binding face instead, so it must stay strictly
+  // binding-driven: an absent face is unknown, never a local/log-derived value.
+  const generation = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state(['child'], { child: listRow('child', 1, { cwd: '/child' }) }),
+    // The retained child binding owns OTHER facts but not `modelSelection`.
+    bindings: { child: binding({ title: 'child title', contextPressure: { projectedTokens: 12 } }) },
+  })
+  const reader = new RemoteSessionReader(source, generation.source)
+  const status = reader.sessionStatus('child')
+  assert.equal(status?.model, undefined,
+    'an absent Remote modelSelection face reads UNKNOWN — the Direct compat read must not reach this branch')
+  assert.equal(status?.title, 'child title', 'the other binding facts are unaffected')
+  assert.equal(status?.cwd, '/child')
+  generation.set(undefined)
+  assert.equal(new RemoteSessionReader(source, generation.source).sessionStatus('child'), undefined,
+    'a lost Connection generation stays unavailable')
+})
+
 test('sessionStatus keeps the official todos null distinct from capability-absent', () => {
   const generation = createObservableGenerationHarness()
   const withNull = remoteSource({

@@ -33,6 +33,7 @@ import { contextPressureOccupancy, type SessionContentSearchPage, type SessionPr
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
 import { directTurnOutlineCompat } from './turn-outline-compat.ts'
 import { detachedSessionStatus } from '../session-status-projection.ts'
+import type { DurableModelSelectionReader } from './model-selection-direct.ts'
 
 /**
  * The narrow session-query surface the reader's listing and semantic search
@@ -116,11 +117,18 @@ function activityTimestamp(
   return Math.max(header.createdAt, lastPromptAt ?? 0)
 }
 
+/**
+ * Re-exported for the adapter tests that inject this REQUIRED dependency; the
+ * capability itself is declared by its owner (`model-selection-direct.ts`).
+ */
+export type { DurableModelSelectionReader }
+
 /** The Direct backend's session reader: Host query/persistence services plus
  * injected live-registry capabilities behind the semantic `SessionReader` interface. */
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
   private readonly liveResolvers: DirectSessionLiveResolvers | undefined
+  private readonly modelSelections: DurableModelSelectionReader
   /**
    * The most recent listing's complete `SessionHeader` values, keyed by
    * session id. `projectionBatch` reads the projection-cache hint from these
@@ -131,9 +139,22 @@ export class DirectSessionReader implements SessionReader {
    */
   private headerSnapshot = new Map<string, SessionHeader>()
 
-  constructor(ctx: HostContextLike, liveResolvers?: DirectSessionLiveResolvers) {
+  constructor(
+    ctx: HostContextLike,
+    /** The Direct-only live-registry resolvers; `undefined` for a reader whose
+     *  composition mounts no live registry. */
+    liveResolvers: DirectSessionLiveResolvers | undefined,
+    /**
+     * The Direct-only durable model-selection read (see
+     * {@link DurableModelSelectionReader}). REQUIRED: a composition that omits
+     * it must fail to compile rather than silently lose the viewed child's
+     * model with no error anywhere.
+     */
+    modelSelections: DurableModelSelectionReader,
+  ) {
     this.ctx = ctx
     this.liveResolvers = liveResolvers
+    this.modelSelections = modelSelections
   }
 
   private liveAgent(sessionId: string): LiveAgentLike | undefined {
@@ -388,7 +409,21 @@ export class DirectSessionReader implements SessionReader {
         'permissions',
       ])?.values
       if (values === undefined) return undefined
-      return detachedSessionStatus(sessionId, values, session.header.cwd)
+      // The official `modelSelection` unit is registered by the API
+      // SessionController row, which this profile does not compose, so the
+      // registry omits the key entirely. ABSENCE of the key — never a
+      // present-but-empty value, since the registered unit's legal
+      // `{ next: null, lastUsed: null }` must stay authoritative — is the one
+      // signal to read THIS Session's own durable selection facts as the
+      // compatible source. The shared DTO mapping is untouched: the compat value
+      // carries the official wire shape and loses to the official key whenever
+      // that key exists. Its approved scope is the latest USED route only (see
+      // `DurableModelSelectionReader`); the pending-intent slot is explicitly not
+      // part of this compat path.
+      const forDisplay = Object.prototype.hasOwnProperty.call(values, 'modelSelection')
+        ? values
+        : { ...values, modelSelection: this.modelSelections.durableProjectionForSession(session) }
+      return detachedSessionStatus(sessionId, forDisplay, session.header.cwd)
     } catch {
       // A projection authority failure is `undefined` (unknown), never a
       // crash and never partially invented facts.
