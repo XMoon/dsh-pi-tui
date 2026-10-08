@@ -394,6 +394,59 @@ test('a session with no live Agent leaves no record behind once it is unwatched'
   await reopened.return?.(undefined)
 })
 
+test('a late status from a disposed Agent leaves no orphan record and never perturbs a successor', async (t) => {
+  // Owner review of PR #258: `recordFor()` CREATES a record, so a stale
+  // `agent/status` from a disposed Agent used to leave an Agent-less, unwatched
+  // record behind that `reclaim()` could never reach. The event's Agent is now
+  // fenced against the registry BEFORE that side effect.
+  const session = { id: SESSION_ID }
+  // Idle at bind time, so the emitted running edge is a real transition.
+  const first = agent('agent-a', session)
+  let live: LiveAgentLike | undefined = first
+  const host = await mountHost({ agentFor: () => live, onUnknownReason: () => {} })
+  t.after(async () => { await host.ctx.fiber.dispose() })
+  const controller = new AbortController()
+  t.after(() => { controller.abort() })
+
+  const firstWatch = host.service.watch(SESSION_ID, controller.signal)[Symbol.asyncIterator]()
+  await read(firstWatch, 1, 'orphan-baseline')
+  host.emit('agent/status', { agent: first, status: 'running' })
+  await read(firstWatch, 1, 'orphan-working')
+
+  // A is disposed: its record goes away with the lifetime.
+  live = undefined
+  host.emit('agent/disposed', { agent: first })
+  assert.equal(recordsOf(host.service).has(SESSION_ID), false,
+    'the disposal dropped the record (a stale event may not resurrect it)')
+
+  // The disposed lifetime's late status: no record may reappear.
+  host.emit('agent/status', { agent: first, status: 'idle' })
+  assert.equal(recordsOf(host.service).has(SESSION_ID), false,
+    'a late status from a disposed Agent never leaves an orphan record')
+
+  // With a same-id successor bound, that late event must not perturb it either.
+  const second = agent('agent-b', session, 'running')
+  live = second
+  const secondWatch = host.service.watch(SESSION_ID, controller.signal)[Symbol.asyncIterator]()
+  const [baseline] = await read(secondWatch, 1, 'orphan-successor')
+  assert.deepEqual(
+    { running: baseline.running, agentEpoch: baseline.agentEpoch },
+    { running: true, agentEpoch: 2 },
+    'the successor binds a fresh record whose epoch outranks the retired one',
+  )
+  host.emit('agent/status', { agent: first, status: 'idle' })
+  host.emit('agent/status', { agent: second, status: 'idle' })
+  const [settled] = await read(secondWatch, 1, 'orphan-control')
+  assert.deepEqual(
+    { running: settled.running, agentEpoch: settled.agentEpoch },
+    { running: false, agentEpoch: 2 },
+    'the successor settles on its OWN edge',
+  )
+  assert.equal(settled.revision, baseline.revision + 1,
+    'the stale event neither rebound nor published anything')
+  await secondWatch.return?.(undefined)
+})
+
 test('the cut loses no edge and replays none, and the fiber disposal closes the watchers', async (t) => {
   const session = { id: SESSION_ID }
   const live = agent('agent-a', session)

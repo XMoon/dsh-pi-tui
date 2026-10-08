@@ -11,10 +11,16 @@
  *   -> TuiApp -> VirtualTerminal (OSC 7501 records + OSC 9;4 state calls)
  * ```
  *
- * It also pins the owner-review P1 at the production level: a Connection
- * generation change re-installs the live surface, and the settled `done` must NOT
- * be resurrected into the new generation — the re-established watch opens on the
- * Host's current truth with `idle`, and the authority still works afterwards.
+ * It also pins the owner-review P1 at the production level through a REAL owner
+ * switch (`/new`, then `/resume <first session>`): a retired owner and a
+ * re-adopted owner over the SAME Host Agent must NOT inherit a settled `done` —
+ * the re-established watch opens on the Host's current truth with `idle`, and the
+ * authority still works afterwards.
+ *
+ * SCOPE LIMIT (owner review): this covers the owner-switch half of the gate. It is
+ * NOT a real Connection generation rollover over the network; the in-process
+ * carrier is this product's Remote path today, and a real reconnect is not claimed
+ * here.
  *
  * FIXTURE MANIFEST: REAL runner composition, real aggregate, real AgentLoop, real
  * in-process carrier and the injected `VirtualTerminal`. STAND-IN: the scripted

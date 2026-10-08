@@ -270,11 +270,15 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
 
   /** The live `agent/status` transition of one Agent (plan §6.4). */
   private onAgentStatus(agent: LiveAgentLike, status: string): void {
+    // The event's Agent must still be the registry's CURRENT Agent for its
+    // session. rc.2 permits an `agent/disposed` while that Agent's final turn is
+    // still draining, so its `agent/status` can arrive after a replacement (or
+    // after the session lost its Agent entirely): such an event must neither
+    // move the new lifetime's interval (STOP-FENCE) NOR create a record through
+    // `recordFor()`'s side effect — an Agent-less record with no subscriber would
+    // never be reclaimed (owner review of PR #258).
+    if (this.deps.agentFor(agent.session.id) !== agent) return
     const record = this.recordFor(agent.session.id)
-    // The event's Agent must BE the bound Agent lifetime. rc.2 permits an
-    // `agent/disposed` while that Agent's final turn is still draining, so a
-    // stale `agent/status` can arrive AFTER a same-id replacement was bound:
-    // it must never move the new lifetime's interval (STOP-FENCE).
     if (record.agent !== agent) return
     // Only the running/idle truth of the interval. The settlement happens on
     // the falling edge, from the evidence the durable events captured.

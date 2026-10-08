@@ -6263,6 +6263,11 @@ L6  test/runner-remote-terminal-progress.test.ts     PRODUCTION runner: real sta
     pnpm verify:prepush                              typechecks, fork/docs/tooling, gates, audit, pack smokes
 ```
 
+SCOPE LIMIT (owner review): the production-runner L6 covers the OWNER-SWITCH half of
+the gate (`/new`, then `/resume <first session>`). It is NOT a real Connection
+generation rollover across a network transport — the in-process carrier is this
+product's Remote path today — and no real reconnect is claimed.
+
 The gates and the stage-final pipeline are green, and five deliberate mutations —
 the authority gate disabled, the fold's turn match dropped, the surface's
 `turn/end` forwarding removed, the completion re-baseline disabled and the watch
