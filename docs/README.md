@@ -39,7 +39,7 @@ knows where the rest lives.
 | `extension-unstable.md` | plugin authors | The UNSTABLE tier author guide (Phase 3): raw input interception, exclusive raw ownership, the emergency fail-safe, the low-level surface seam — NO compatibility guarantee |
 | `keybinding-architecture.md` | contributors | The user-orchestrable keybinding design: the semantic action inventory (`app.*`), the context-aware effective keymap, the input ladder, the leader (M6) machinery, user configuration, and the static gate |
 | `extension-tiers.md` | plugin authors | The three-tier contract table and the current tier status (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`) |
-| `tern-tsp-pr1-evidence.md` | contributors | The Tern TSP PR1 feasibility record: the experimental canonical-transcript → TSP spike, its scripted and real-Tern evidence, the honest identity limits, and the PR2 unknowns — no production wiring |
+| `tern-tsp.md` | contributors | The Tern Surface Protocol (TSP) integration entry point: the protocol/SDK boundary, the dsh-pi-tui ownership chain, the current PR1/PR2 implementation status and limits, the capability matrix, and the evidence ledger (per-PR measurements live under `tern-tsp/evidence/`) |
 | `tmux/` | — | Helper scripts (`ansi2html.mjs`, `tui-demo.sh`) with their own tests |
 | `dsh-pi-tui.png` | — | Screenshot used by the root README |
 
