@@ -130,7 +130,9 @@ interface Harness {
   readonly surface: SurfaceRuntime<SessionEvent>
   readonly app: TuiApp
   readonly vt: VirtualTerminal
+  /** The CURRENT main fold (a session commit/rehydrate replaces it). */
   readonly folder: TranscriptFolder
+  /** The CURRENT main window controller (replaced with the fold). */
   readonly window: TranscriptWindowController
   /** Every frame the surface published, in order. */
   readonly frames: TranscriptProjectionFrame[]
@@ -138,6 +140,9 @@ interface Harness {
   readonly committed: Array<readonly TranscriptMessage[]>
   viewChild(): TranscriptFolder
   exitChild(): void
+  /** Replace the main fold + its window under the SAME session id (the session
+   *  commit / cold rehydrate / Remote re-window shape). */
+  replaceMain(): void
   dispose(): void
 }
 
@@ -153,8 +158,8 @@ function mountHarness(options: {
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const restoreTerminal = installVirtualProcessTerminal(vt)
-  const folder = new TranscriptFolder()
-  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+  let folder = new TranscriptFolder()
+  let controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
   const frames: TranscriptProjectionFrame[] = []
   const committed: Array<readonly TranscriptMessage[]> = []
   let viewed: { id: string; folder: TranscriptFolder; window: TranscriptWindowController } | undefined
@@ -164,10 +169,13 @@ function mountHarness(options: {
   const previews = new Map()
   const stats = { apply: () => {} }
 
+  // The presentation target stays ONE object whose fold/window are LIVE reads:
+  // a session commit, cold rehydrate or Remote re-window replaces the instances
+  // underneath it, exactly as `session-presentation.ts` does.
   const mainPresentation = {
     folder: { apply: (events: readonly SessionEvent[]) => folder.apply(events) },
     stats,
-    window: controller,
+    get window() { return controller },
     previews,
     applyToolPreview: () => {},
     refreshRecentPerformanceAvailability: () => {},
@@ -272,8 +280,8 @@ function mountHarness(options: {
     surface,
     app,
     vt,
-    folder,
-    window: controller,
+    get folder() { return folder },
+    get window() { return controller },
     frames,
     committed,
     viewChild() {
@@ -282,6 +290,10 @@ function mountHarness(options: {
       return child
     },
     exitChild() { viewed = undefined },
+    replaceMain() {
+      folder = new TranscriptFolder()
+      controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+    },
     dispose() {
       surface.dispose()
       restoreTerminal()
@@ -612,9 +624,9 @@ test('P2-05: the viewed child and the main session each publish their own scope'
   }
 })
 
-// ── P2-06 / P2-10: a commit that switches the subject drops the stale frame ─
+// ── P2-10: a commit that switches the subject drops the stale frame ─────────
 
-test('P2-06/P2-10: a subject switch performed synchronously inside setTranscript drops the stale frame', () => {
+test('P2-10: a subject switch performed synchronously inside setTranscript drops the stale frame', () => {
   const seen: TranscriptProjectionFrame[] = []
   let child: TranscriptFolder | undefined
   const harness = mountHarness({
@@ -639,6 +651,43 @@ test('P2-06/P2-10: a subject switch performed synchronously inside setTranscript
     assert.ok(seen.length > 0, 'the child projection is published')
     assert.equal(seen[seen.length - 1]!.subjectKind, 'viewed-child')
     assert.notEqual(seen[seen.length - 1]!.sourceIdentity, child, 'the child fold itself is never handed out')
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── P2-06 / P2-07: a replaced ownership/window under the SAME session id ────
+
+test('P2-06/P2-07: a replaced fold and window under the SAME session id is a new projection scope', () => {
+  const seen: TranscriptProjectionFrame[] = []
+  const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
+  try {
+    route(harness, ev('turn/start', { turn: 1 }, 0))
+    route(harness, userMessage(1, 'user-1', 'before the replacement'))
+    harness.surface.paintNow()
+    const before = seen[seen.length - 1]!
+    assert.equal(before.subjectId, SESSION_ID)
+    const stale = harness.folder
+
+    // A session commit / cold rehydrate / Remote re-window replaces the fold and
+    // its window while the Session id stays the same.
+    harness.replaceMain()
+    assert.notEqual(harness.folder, stale, 'the fold instance really was replaced')
+
+    route(harness, userMessage(1, 'user-1', 'after the replacement'))
+    harness.surface.paintNow()
+    const after = seen[seen.length - 1]!
+    assert.equal(after.subjectId, SESSION_ID, 'the Session id did NOT change')
+    assert.notEqual(after.sourceIdentity, before.sourceIdentity,
+      'the replaced source is a NEW scope: the same id is never the same view')
+    assert.ok(hasUserText(after.messages, 'after the replacement'), 'the new fold projects its own window')
+    assert.ok(!hasUserText(after.messages, 'before the replacement'), 'the new fold does not inherit the old window')
+
+    // The replacement is stable and the stale fold receives nothing afterwards.
+    route(harness, userMessage(2, 'user-2', 'later'))
+    harness.surface.paintNow()
+    assert.equal(seen[seen.length - 1]!.sourceIdentity, after.sourceIdentity, 'the new source keeps one identity')
+    assert.equal(hasUserText(stale.messages(), 'later'), false, 'the replaced fold is no longer the projection source')
   } finally {
     harness.dispose()
   }
