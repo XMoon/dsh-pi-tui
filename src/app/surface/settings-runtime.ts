@@ -199,9 +199,18 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   // ONCE (bounded), never per repaint.
   
   let footerCommandItemWarningShown = false
+  /**
+   * Whether THIS runtime has handed the per-item command runners to a mounted
+   * `TuiApp` (the `footer: command` boot). Only the runtime arms them, so an
+   * unarmed runtime — the TSP renderer branch, or a teardown before the boot
+   * applied the stored document — has NO Pi footer resource to release, and the
+   * teardown must not read an app that does not exist there.
+   */
+  let footerCommandArmed = false
 
   const disableFooterCommand = (): void => {
     deps.surface.app.disableFooterCommand()
+    footerCommandArmed = false
   }
 
   const busyEnter = (): string | undefined => deps.tuiSettings?.get().busyEnter
@@ -245,6 +254,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
       // The TUI runtime reconciles the per-item runners against the trusted
       // definitions, the USER-authorized ids and the CURRENT effective layout.
       deps.surface.app.syncFooterCommandItems(trustedCommands, authorizedIds, deps.signal)
+      footerCommandArmed = true
       if (!footerCommandItemWarningShown) {
         const mergedCommands = parseFooterCustomItems(doc.footerCustomItems).items
           .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
@@ -321,6 +331,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
       // command (undefined rows) falls back to the user's OWN
       // default/compact/custom layout, never the builtin default.
       deps.surface.app.applyFooterCommandConfig(config, deps.signal)
+      footerCommandArmed = true
       return
     }
     disableFooterCommand()
@@ -548,11 +559,16 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * Release the footer command runner + per-item runtime. The lifecycle abort
    * already disposes an armed runner through its own abort listener; the
    * explicit unsubscribe + dispose keeps the release symmetric with the arm
-   * path and also covers the teardown-before-arm window (both idempotent).
-   * Every owner slot is retired before its callback runs, so a throwing
+   * path. Every owner slot is retired before its callback runs, so a throwing
    * unsubscribe/runner disposal cannot strand its siblings (M3-6 PR3).
    */
   const disposeFooterCommand = (): void => {
+    // Release only what this runtime actually ARMED: the runners live in the
+    // mounted `TuiApp`, and a renderer branch without one (the TSP renderer) or
+    // a teardown before the boot applied the document has no Pi footer resource
+    // — reading the app there throws `the surface is not mounted` and turns a
+    // legal exit into a recorded cleanup failure.
+    if (!footerCommandArmed) return
     // The TUI footer runtime retires its own slots before their callbacks run
     // (the whole-footer runner, its status subscription and every per-item
     // runner), so no child/timer/abort listener survives.

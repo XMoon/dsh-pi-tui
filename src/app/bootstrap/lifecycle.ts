@@ -178,6 +178,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     // M3-6 PR3: ONE ordered non-truncating batch. A throwing sibling cleanup
     // must never skip a later surface owner, the Session retirement or the
     // selected transport disposal (the plan's frozen top-level order).
+    let batchFailed = false
     let batchFailure: unknown
     try {
     runSyncDisposalSteps('surface disposal', [
@@ -237,6 +238,10 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     } catch (error) {
       // runSyncDisposalSteps already attempted EVERY sibling in the frozen
       // order; keep its aggregated failure to surface AFTER the release.
+      // The PRESENCE of a failure is tracked SEPARATELY from its value: a
+      // disposer may legally `throw undefined`, and the value alone cannot
+      // distinguish that from "nothing failed".
+      batchFailed = true
       batchFailure = error
     }
     // NOTE: diag.dispose() is NOT here — the Direct owned-session
@@ -248,7 +253,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     // restore; the aggregated sync failure is then rethrown to their
     // non-truncating recorder (awaited first, never dropped, never truncated).
     const release = surface.whenRendererReleased()
-    const composed = batchFailure === undefined
+    const composed = !batchFailed
       ? release
       : release.then(
         () => { throw batchFailure },

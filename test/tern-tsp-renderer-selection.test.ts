@@ -527,12 +527,22 @@ interface LifecycleHarness {
 
 function mountLifecycle(options: {
   readonly throwInViewer?: boolean
+  /** The EXACT value the viewer step throws (may legally be `undefined`). */
+  readonly viewerFailure?: unknown
+  /** When present, the renderer RELEASE rejects with this value. */
+  readonly releaseFailure?: unknown
   /** Runs SYNCHRONOUSLY from the batch's abort step — the R3-1 re-entry trigger. */
   readonly onAbort?: () => void
 } = {}): LifecycleHarness {
   const order: string[] = []
   let release!: () => void
-  const held = new Promise<void>(resolve => { release = () => { order.push('tty-released'); resolve() } })
+  const held = new Promise<void>((resolve, reject) => {
+    release = () => {
+      order.push('tty-released')
+      if ('releaseFailure' in options) reject(options.releaseFailure)
+      else resolve()
+    }
+  })
   let cleaned = false
   // The surface slot mirrors `SurfaceRuntime.rendererRelease`: it starts as an
   // already-resolved promise and only becomes the real release once `dispose()`
@@ -556,7 +566,11 @@ function mountLifecycle(options: {
     surface,
     abortLifecycle: () => { order.push('abort'); options.onAbort?.() },
     disposeViewer: () => {
-      if (options.throwInViewer === true) throw new Error('viewer disposal failed')
+      if (options.throwInViewer === true) {
+        // `viewerFailure` is an EXPLICIT option so that `throw undefined` (a
+        // legal JavaScript failure) is distinguishable from "no failure".
+        throw 'viewerFailure' in options ? options.viewerFailure : new Error('viewer disposal failed')
+      }
       order.push('disposeViewer')
     },
     clearDraftImages: noop,
@@ -677,4 +691,41 @@ test('R3-1b: the first and the re-entrant caller observe the SAME complete teard
     'the second caller no longer sees a FULFILLED raw release')
   assert.equal(outcomes[0]!.reason, outcomes[1]!.reason,
     'the SAME failure is surfaced to both callers')
+})
+
+test('R4-3: a sibling that throws `undefined` is a FAILURE, never a silent success', async () => {
+  // `throw undefined` is legal JavaScript: the batch cannot use the thrown
+  // VALUE as the presence test, or a broken disposer would report a clean
+  // teardown to every caller.
+  const { lifecycle, release } = mountLifecycle({ throwInViewer: true, viewerFailure: undefined })
+  const first = lifecycle.disposeSurface()
+  const second = lifecycle.disposeSurface()
+  assert.ok(first instanceof Promise && second instanceof Promise)
+  assert.equal(second, first, 'both callers await the SAME published transaction')
+
+  release()
+  const outcomes = await Promise.allSettled([first, second])
+  assert.equal(outcomes[0]!.status, 'rejected', 'the first caller sees the failure')
+  assert.equal(outcomes[1]!.status, 'rejected', 'the repeated caller sees the SAME failure')
+  assert.equal(outcomes[0]!.reason, undefined,
+    'the EXACT thrown value is rethrown, not wrapped and not dropped')
+  assert.equal(outcomes[1]!.reason, undefined)
+})
+
+test('R4-3b: a sibling `throw undefined` and a failing release aggregate BOTH', async () => {
+  const releaseFailure = new Error('tty release exploded')
+  const { lifecycle, release } = mountLifecycle({
+    throwInViewer: true,
+    viewerFailure: undefined,
+    releaseFailure,
+  })
+  const released = lifecycle.disposeSurface()
+  assert.ok(released instanceof Promise)
+  release()
+  const outcome = await Promise.allSettled([released])
+  assert.equal(outcome[0]!.status, 'rejected')
+  assert.ok(outcome[0]!.reason instanceof AggregateError,
+    'the undefined batch failure and the release failure are surfaced together')
+  assert.deepEqual((outcome[0]!.reason as AggregateError).errors, [undefined, releaseFailure],
+    'the batch failure keeps its position and the exact release failure is preserved')
 })
