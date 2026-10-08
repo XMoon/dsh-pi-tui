@@ -358,6 +358,43 @@ test('T6: a merged read-group replacement changes that card\'s key while neighbo
   assert.ok(!deleted.has(userNodeId) && !added.has(userNodeId), 'the untouched user card keeps its identity')
 })
 
+test('T6: dynamic Context clustering also rebuilds a retained row\'s node id', () => {
+  const folder = new TranscriptFolder()
+  const keys = new TranscriptNodeKeys()
+  folder.apply([ev('turn/start', { turn: 1 }, 0)])
+  folder.apply([ev('user/message', {
+    id: MessageId('ctx-a'),
+    role: 'user',
+    content: [{ type: 'text', text: 'AGENTS instructions body' }],
+    source: { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] },
+  }, 1)])
+
+  const before = viewOf(folder, keys)
+  const first = rowOf(folder, message => message.kind === 'system')
+  const firstKey = keys.keyFor(first)
+  assert.equal(nodeOf(before, `main.${firstKey}`).kind, 'card', 'a lone ambient row is standalone')
+
+  // The second raw-adjacent same-turn ambient row makes the projector coalesce
+  // BOTH into one cluster: the retained carrier keeps its allocation key but
+  // moves under a new parent, so its FULL node id legitimately changes.
+  folder.apply([ev('user/message', {
+    id: MessageId('ctx-b'),
+    role: 'user',
+    content: [{ type: 'text', text: 'Skill catalog body' }],
+    source: { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' },
+  }, 2)])
+
+  const after = viewOf(folder, keys)
+  const cluster = projectTranscriptStructure(folder.messages()).find(block => block.kind === 'context-cluster')
+  assert.ok(cluster !== undefined && cluster.kind === 'context-cluster')
+  assert.equal(cluster.cluster.owner, first, 'the carrier object is retained')
+  assert.equal(keys.keyFor(first), firstKey, 'its allocation key is unchanged')
+
+  const ops = before.ops(after, 's1')
+  assert.ok(opIds(ops, 'del').has(`main.${firstKey}`), 'the standalone node is legitimately removed')
+  assert.equal(nodeOf(after, `main.ctx-${firstKey}.${firstKey}`).kind, 'card', 'and re-added under the cluster')
+})
+
 test('T7: sibling Work spans sharing a turn, and repeated text, never collide', () => {
   const folder = new TranscriptFolder()
   const keys = new TranscriptNodeKeys()
