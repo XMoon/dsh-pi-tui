@@ -668,40 +668,54 @@ export const ARCHITECTURE_RULES = [
     checksValueDynamicImport: true,
     checksBareDynamicImport: true,
   },
-  {
-    // TS8-F final assertion 7 (plan §11.4): a Remote CLIENT adapter must not
-    // reach the Direct implementation. `direct-import-outside-composition`
-    // cannot express this because the whole `runtime/**` layer is treated as
-    // Direct composition there, so `runtime/remote/**` was silently exempt.
-    //
-    // The ONE approved exception is the pre-existing HF1 Host-side
-    // construction bridge (docs/client-server-coupling.md): it shares the
-    // existing Host authority and is the only reviewed remote -> direct edge.
-    // The exception is encoded as an explicit reviewed set (asserted to be
-    // exactly that one file by the gate tests), never as a broad allowlist.
-    id: 'runtime-remote-imports-direct',
-    message:
-      'src/runtime/remote/** is the Remote CLIENT adapter layer: it must not import the Direct implementation '
-      + '(runtime/direct/**). The only reviewed exception is the HF1 Host-side construction bridge in '
-      + 'REMOTE_TO_DIRECT_APPROVED_BRIDGES (docs/client-server-coupling.md) — a new remote -> direct edge means the '
-      + 'fact belongs behind a semantic port, not behind a new exception',
-    applies: (srcRel) => srcRel.startsWith('runtime/remote/') && !REMOTE_TO_DIRECT_APPROVED_BRIDGES.has(srcRel),
-    forbids: (resolved) => resolved.startsWith('runtime/direct/'),
-    // `await import('../direct/x.ts')` is the same edge as a static import.
-    checksValueDynamicImport: true,
-  },
 ]
 
 /**
- * The reviewed `runtime/remote/**` -> `runtime/direct/**` exceptions (plan
- * §11.4 assertion 7). Exactly one file today: the HF1 Host-side construction
- * bridge, whose Direct helper usage is an approved, documented exception
- * (`docs/client-server-coupling.md`). The gate tests assert this set stays
- * exactly one entry, so it cannot grow into a general allowlist.
+ * The reviewed `runtime/remote/**` -> `runtime/direct/**` EDGES (plan §11.4
+ * assertion 7), keyed by `source -> resolved target`. Exactly the two Direct
+ * helpers the HF1 Host-side construction bridge already used
+ * (`docs/client-server-coupling.md`), so the exception is scoped to the
+ * reviewed dependency EDGE and never to a whole file: the same bridge
+ * importing any other Direct module — or any other Remote adapter importing
+ * one of these two — is a violation. The gate tests assert this set stays
+ * exactly these two pairs.
  */
-export const REMOTE_TO_DIRECT_APPROVED_BRIDGES = new Set([
-  'runtime/remote/pi-tui-file-reference-host-bridge.ts',
+export const REMOTE_TO_DIRECT_APPROVED_EDGES = new Set([
+  'runtime/remote/pi-tui-file-reference-host-bridge.ts -> runtime/direct/file-completion/host-discovery.ts',
+  'runtime/remote/pi-tui-file-reference-host-bridge.ts -> runtime/direct/host-file-augmentation-direct.ts',
 ])
+
+/**
+ * Fail-closed Remote-client -> Direct check (plan §11.4 assertion 7). This is
+ * a dedicated check instead of an `ARCHITECTURE_RULES` entry because the
+ * exception must be judged on the (importing file, resolved target) PAIR:
+ * `direct-import-outside-composition` treats the whole `runtime/**` layer as
+ * Direct composition, so `runtime/remote/**` was silently exempt, and a
+ * source-file exemption would let the approved bridge import anything under
+ * `runtime/direct/**`.
+ * @param entries the collected `{ rel, source }` production entries.
+ */
+export function findRemoteToDirectViolations(entries = collectSourceEntries()) {
+  const violations = []
+  for (const { rel, source } of entries) {
+    if (!rel.startsWith('runtime/remote/')) continue
+    const specifiers = [
+      ...parseImportSpecifiers(source, rel).map(hit => ({ specifier: hit.specifier, line: hit.line })),
+      ...parseValueDynamicImports(source, rel),
+    ]
+    for (const { specifier, line } of specifiers) {
+      const resolved = resolveRelativeImport(rel, specifier)
+      if (resolved === undefined) continue
+      const target = staticImportCandidates(resolved).find(candidate => candidate.startsWith('runtime/direct/')) ?? resolved
+      if (!target.startsWith('runtime/direct/')) continue
+      if (REMOTE_TO_DIRECT_APPROVED_EDGES.has(`${rel} -> ${target}`)) continue
+      violations.push(`src/${rel}:${line} imports the Direct implementation ${target} — a Remote CLIENT adapter must `
+        + 'reach Direct behaviour behind a semantic port; the only reviewed edges are the two HF1 Host-side bridge '
+        + 'targets in REMOTE_TO_DIRECT_APPROVED_EDGES (plan §11.4 assertion 7)')
+    }
+  }
+  return violations
+}
 
 /**
  * The startup static-graph rule (evaluated over reachability, not per file):
@@ -1459,32 +1473,32 @@ function declaredTopLevelNames(source, rel) {
 
 /**
  * Fail-closed concrete-extension-registry placement check (plan §11.4
- * assertion 11): the concrete extension registries live under
- * `extension/internal/**` only. The root ledger governs the package root and
- * the public-declaration rule governs the published declaration sources, so a
- * NESTED concrete registry would otherwise slip through both.
+ * assertion 11): every known concrete extension registry implementation lives
+ * under `extension/internal/**` and nowhere else in `src/`.
  *
  * The primary signal is the IMPLEMENTATION IDENTITY
- * ({@link CONCRETE_EXTENSION_REGISTRY_IDENTITIES}); the conventional
- * `*-registry.ts` filename is kept as a supplementary signal for a NEW
- * registry that follows the naming convention. A module outside
- * `extension/**` (an app/tui-owned registry with its own identity) is out of
- * this assertion's scope.
+ * ({@link CONCRETE_EXTENSION_REGISTRY_IDENTITIES}) and it is checked across
+ * ALL of `src/**`, so moving one of those implementations to another layer
+ * (e.g. `app/surface/**`) cannot escape it; only `extension/internal/**` may
+ * declare them. The conventional `*-registry.ts` filename is a supplementary
+ * signal for a NEW registry and stays scoped to `extension/**` (a different
+ * layer's own registry — `ClientCommandRegistry`, `FooterItemRegistry`, … —
+ * carries its own identity and is out of this assertion's scope).
  * @param entries the collected `{ rel, source }` production entries.
  */
 export function findConcreteRegistryPlacementViolations(entries = collectSourceEntries()) {
   const identities = new Set(CONCRETE_EXTENSION_REGISTRY_IDENTITIES)
   const violations = []
   for (const { rel, source } of entries) {
-    if (!rel.startsWith('extension/') || rel.startsWith('extension/internal/')) continue
+    if (rel.startsWith('extension/internal/')) continue
     const declared = [...declaredTopLevelNames(source, rel)].filter(name => identities.has(name))
     if (declared.length > 0) {
       violations.push(`src/${rel} declares the concrete extension registry ${declared.join(', ')} outside `
-        + 'extension/internal/** — the registry role is carried by the implementation identity, not by its filename '
-        + '(plan §11.4 assertion 11)')
+        + 'extension/internal/** — the registry role is carried by the implementation identity, and every known '
+        + 'concrete extension registry is implemented under extension/internal/** (plan §11.4 assertion 11)')
       continue
     }
-    if (EXTENSION_REGISTRY_FILE_PATTERN.test(rel)) {
+    if (rel.startsWith('extension/') && EXTENSION_REGISTRY_FILE_PATTERN.test(rel)) {
       violations.push(`src/${rel} is a concrete extension registry module outside extension/internal/** by naming `
         + 'convention — the public extension entries stay declaration/service facades (plan §11.4 assertion 11)')
     }
@@ -1591,8 +1605,9 @@ function main() {
   const rootViolations = findSourceRootViolations(baseline, listSourceRootFiles())
   const finalStateViolations = findFinalSourceRootStateViolations(baseline)
   const retiredRootViolations = findRetiredSourceRootViolations(listSourceRootFiles(), entries)
-  const registryPlacementViolations = findConcreteRegistryPlacementViolations()
+  const registryPlacementViolations = findConcreteRegistryPlacementViolations(entries)
   const startupIslandViolations = findStartupIslandViolations(entries)
+  const remoteToDirectViolations = findRemoteToDirectViolations(entries)
   const retiredViolations = findRetiredSourceDirectoryViolations()
   if (process.argv.includes('--report')) {
     console.log(`application-architecture-gate: scanned ${entries.length} src file(s)`)
@@ -1601,6 +1616,7 @@ function main() {
     console.log('  rule remote-dynamic-import-owner')
     console.log('  rule surface-constructs-direct-adapter')
     console.log('  check concrete extension registries under extension/internal/**')
+    console.log('  check runtime/remote/** -> runtime/direct/** (two reviewed HF1 bridge edges only)')
     console.log('  check startup.ts does not statically reach a repository implementation module')
     console.log('  composition zone: app/bootstrap.ts + app/bootstrap/**')
     console.log(`  source-root baseline: ${baseline.stable.length} stable + ${baseline.legacy.length} legacy root module(s)`)
@@ -1638,6 +1654,12 @@ function main() {
     console.error('application-architecture-gate: startup compatibility island violated:')
     for (const detail of startupIslandViolations) console.error(`  ${detail}`)
     console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
+    process.exit(1)
+  }
+  if (remoteToDirectViolations.length > 0) {
+    console.error('application-architecture-gate: Remote client adapter reached the Direct implementation:')
+    for (const detail of remoteToDirectViolations) console.error(`  ${detail}`)
+    console.error('\nSee docs/architecture.md and docs/client-server-coupling.md (plan §11.4 assertion 7).')
     process.exit(1)
   }
   if (rootViolations.length > 0) {

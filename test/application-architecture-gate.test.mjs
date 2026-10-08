@@ -27,6 +27,7 @@ import {
   findConcreteRegistryPlacementViolations,
   findFinalSourceRootStateViolations,
   findRemoteDynamicImportViolations,
+  findRemoteToDirectViolations,
   findRetiredSourceDirectoryViolations,
   findRetiredSourceRootViolations,
   findSourceRootViolations,
@@ -48,7 +49,7 @@ import {
   resolveRelativeImport,
   RETIRED_SOURCE_DIRECTORIES,
   RETIRED_SOURCE_ROOTS,
-  REMOTE_TO_DIRECT_APPROVED_BRIDGES,
+  REMOTE_TO_DIRECT_APPROVED_EDGES,
   CONCRETE_EXTENSION_REGISTRY_IDENTITIES,
   FINAL_STABLE_SOURCE_ROOTS,
   scriptKindOf,
@@ -1855,28 +1856,41 @@ test('TS8-F retired roots: a recreated file or a dangling old-path import is rej
   ]), [])
 })
 
-test('TS8-F final assertion 7: a Remote adapter cannot import the Direct implementation (HF1 bridge excepted)', () => {
+test('TS8-F final assertion 7: a Remote adapter cannot import the Direct implementation (two HF1 edges excepted)', () => {
   // `direct-import-outside-composition` treats the whole runtime/** layer as
-  // Direct composition, so runtime/remote was silently exempt; this rule is
-  // the actual assertion.
+  // Direct composition, so runtime/remote was silently exempt; this check is
+  // the actual assertion, and its exception is scoped to the reviewed
+  // (source -> target) EDGE, never to a whole file.
+  const bridge = 'runtime/remote/pi-tui-file-reference-host-bridge.ts'
   for (const specifier of ['../direct/example.ts', '../direct/nested/deep.ts']) {
-    const violations = findViolations([entry('runtime/remote/example.ts', `import { x } from '${specifier}'\n`)])
+    const violations = findRemoteToDirectViolations([entry('runtime/remote/example.ts', `import { x } from '${specifier}'\n`)])
     assert.equal(violations.length, 1, `${specifier} from a Remote adapter must fail`)
-    assert.equal(violations[0].rule, 'runtime-remote-imports-direct')
+    assert.match(violations[0], /imports the Direct implementation/)
   }
   // The statically knowable dynamic edge is the same edge.
-  assert.equal(findViolations([
+  assert.equal(findRemoteToDirectViolations([
     entry('runtime/remote/example.ts', "const load = () => import('../direct/example.ts')\n"),
-  ]).filter(v => v.rule === 'runtime-remote-imports-direct').length, 1)
-  // The reviewed HF1 Host-side construction bridge keeps its direct helpers.
-  assert.deepEqual([...REMOTE_TO_DIRECT_APPROVED_BRIDGES], ['runtime/remote/pi-tui-file-reference-host-bridge.ts'],
-    'the exception set must stay exactly the one documented HF1 bridge')
-  for (const rel of REMOTE_TO_DIRECT_APPROVED_BRIDGES) {
-    assert.equal(findViolations([entry(rel, "import { x } from '../direct/x.ts'\n")]).length, 0,
-      `${rel} is the approved Host-construction exception`)
-  }
-  // A Remote adapter importing anything else stays legal.
-  assert.deepEqual(findViolations([
+  ]).length, 1)
+  // The reviewed HF1 Host-side construction bridge keeps EXACTLY its two
+  // reviewed Direct helpers — a new target from the same file must fail.
+  assert.deepEqual([...REMOTE_TO_DIRECT_APPROVED_EDGES].sort(), [
+    `${bridge} -> runtime/direct/file-completion/host-discovery.ts`,
+    `${bridge} -> runtime/direct/host-file-augmentation-direct.ts`,
+  ], 'the exception set must stay exactly the two documented HF1 edges')
+  assert.deepEqual(findRemoteToDirectViolations([
+    entry(bridge, "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
+    entry(bridge, "export type { Y } from '../direct/host-file-augmentation-direct.ts'\n"),
+  ]), [], 'the two reviewed edges stay legal (imports and the type re-export)')
+  assert.equal(findRemoteToDirectViolations([
+    entry(bridge, "import { x } from '../direct/session-direct.ts'\n"),
+  ]).length, 1, 'the approved bridge importing a THIRD Direct module must fail')
+  // The exception is per-edge: another Remote adapter may not use an approved
+  // target either.
+  assert.equal(findRemoteToDirectViolations([
+    entry('runtime/remote/other.ts', "import { x } from '../direct/file-completion/host-discovery.ts'\n"),
+  ]).length, 1, 'the exception must not transfer to another Remote adapter')
+  // A Remote adapter importing anything that is not Direct stays legal.
+  assert.deepEqual(findRemoteToDirectViolations([
     entry('runtime/remote/example.ts', "import { x } from '../backend-loader.ts'\n"),
   ]), [])
 })
@@ -1900,10 +1914,22 @@ test('TS8-F final assertion 11: a concrete extension registry must live under ex
   const movedViolations = findConcreteRegistryPlacementViolations([moved])
   assert.equal(movedViolations.length, 1, 'a renamed concrete registry must still fail')
   assert.match(movedViolations[0], /declares the concrete extension registry KeybindingRegistry/)
-  // The conventional filename stays a supplementary signal for a NEW registry.
+  // ... and the identity check spans ALL of src/**, so moving the same
+  // implementation into another layer cannot escape it either.
+  for (const rel of ['app/surface/keybindings.ts', 'tui/interaction/keybindings.ts']) {
+    const violations = findConcreteRegistryPlacementViolations([
+      entry(rel, 'export class KeybindingRegistry {}\n'),
+    ])
+    assert.equal(violations.length, 1, `${rel} must fail the identity check too`)
+    assert.match(violations[0], /declares the concrete extension registry KeybindingRegistry/)
+  }
+  // The conventional filename stays a supplementary signal for a NEW registry,
+  // scoped to extension/** so another layer's own registry is unaffected.
   const byName = findConcreteRegistryPlacementViolations([entry('extension/nested/renderer-registry.ts', '')])
   assert.equal(byName.length, 1)
   assert.match(byName[0], /by naming\s+convention/)
+  assert.deepEqual(findConcreteRegistryPlacementViolations([entry('app/command/other-registry.ts', '')]), [],
+    'the naming convention does not govern other layers')
   // The same identity under internal/** is the legal home, and an app/tui-owned
   // registry with its own identity is out of this assertion's scope.
   assert.deepEqual(findConcreteRegistryPlacementViolations([
