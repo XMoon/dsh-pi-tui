@@ -92,6 +92,10 @@ test('the header budget accounts for plan + extension badges, not only the title
   assert.equal(rows.length, 1, `a long title + plan + extension badge must stay one row:\n${rows.join('\n')}`)
   assert.ok(visibleWidth(rows[0]!) <= 40, `the row must fit 40 (got ${visibleWidth(rows[0]!)}):\n${rows[0]}`)
   assert.ok(plain(rows[0]!).includes('[plan]'), `the plan badge must survive:\n${rows[0]}`)
+  // A LONG title must not starve the extension badge run: the badges are
+  // budgeted before the title, which takes only the remainder.
+  assert.ok(plain(rows[0]!).includes('[B]'),
+    `the extension badge must survive a long title + plan:\n${rows[0]}`)
   // A short title leaves room for both the title and the badge run.
   app.setSessionTitle('short')
   app.refreshChrome()
@@ -102,6 +106,30 @@ test('the header budget accounts for plan + extension badges, not only the title
   assert.ok(plain(rows[0]!).includes('short'), `the short title must render:\n${rows[0]}`)
   assert.ok(plain(rows[0]!).includes('[B]'), `the extension badge must render when room allows:\n${rows[0]}`)
   app.dispose()
+})
+
+test('a state badge is shown whole or dropped, never half-cut, on a narrow header', async () => {
+  // 20 columns: the app mark (14 cells with the emoji) + ' [plan]' (7) does not
+  // fit -> the plan badge is DROPPED whole, never rendered as `[pla…`.
+  const narrow = startApp(20, 24)
+  narrow.app.setPlanMode(true)
+  narrow.app.setSessionTitle('x')
+  await narrow.vt.waitForRender()
+  let rows = narrow.app.headerRenderRowsForTest()
+  assert.equal(rows.length, 1, `20 cols: one row\n${rows.join('\n')}`)
+  assert.ok(visibleWidth(rows[0]!) <= 20, `20 cols: fits\n${rows[0]}`)
+  assert.ok(!plain(rows[0]!).includes('[pla'), `20 cols: the plan badge must be whole or absent:\n${rows[0]}`)
+  narrow.app.dispose()
+
+  // 21 columns: the app mark + ' [plan]' fits exactly and is shown whole.
+  const exact = startApp(21, 24)
+  exact.app.setPlanMode(true)
+  exact.app.setSessionTitle('x')
+  await exact.vt.waitForRender()
+  rows = exact.app.headerRenderRowsForTest()
+  assert.equal(rows.length, 1, `21 cols: one row\n${rows.join('\n')}`)
+  assert.ok(plain(rows[0]!).includes('[plan]'), `21 cols: the plan badge fits whole:\n${rows[0]}`)
+  exact.app.dispose()
 })
 
 test('a CJK / emoji / ANSI title is truncated cell-safely to one row', async () => {
@@ -177,4 +205,91 @@ test('regular, fullscreen and every display preset share the one-line header rul
     app.setFullscreen(false)
     app.dispose()
   }
+})
+
+test('a host-less resize re-bakes the header at the new width (shrink and widen)', async () => {
+  // No extension host: the width-change geometry pass must refresh the header
+  // itself (the host-backed refreshChrome path never runs here). A stale
+  // width-baked header would WRAP when the terminal shrinks and keep the old
+  // ellipsis when it grows.
+  const { vt, app } = startApp(80, 24)
+  app.setSessionTitle('L'.repeat(200))
+  await vt.waitForRender()
+  let rows = app.headerRenderRowsForTest()
+  assert.equal(rows.length, 1, `80 cols: one row\n${rows.join('\n')}`)
+  assert.equal(visibleWidth(rows[0]!), 80, '80 cols: the title fills the row')
+
+  vt.resize(20, 24)
+  await vt.waitForRender()
+  rows = app.headerRenderRowsForTest()
+  assert.equal(rows.length, 1, `shrunk to 20 cols: still ONE row (a stale bake would wrap):\n${rows.join('\n')}`)
+  assert.ok(visibleWidth(rows[0]!) <= 20, `shrunk to 20 cols: fits (got ${visibleWidth(rows[0]!)}):\n${rows[0]}`)
+
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  rows = app.headerRenderRowsForTest()
+  assert.equal(rows.length, 1, `widened to 120 cols: one row\n${rows.join('\n')}`)
+  assert.ok(visibleWidth(rows[0]!) > 80,
+    `widened to 120 cols: the header must re-bake (stale 80-col truncation detected, got ${visibleWidth(rows[0]!)}):\n${rows[0]}`)
+  app.dispose()
+})
+
+test('a multiline / control-laden session title stays one physical row', async () => {
+  const titles = ['first\nsecond', 'a\r\nb\tc', 'x\u0007y\u001b[31mz\u001b[0m']
+  for (const title of titles) {
+    for (const columns of [20, 120]) {
+      const { vt, app } = startApp(columns, 24)
+      app.setSessionTitle(title)
+      await vt.waitForRender()
+      const rows = app.headerRenderRowsForTest()
+      assert.equal(rows.length, 1,
+        `columns ${columns}: one row for ${JSON.stringify(title)}:\n${rows.join('\n')}`)
+      assert.ok(visibleWidth(rows[0]!) <= columns,
+        `columns ${columns}: fits (got ${visibleWidth(rows[0]!)}):\n${rows[0]}`)
+      assert.ok(!plain(rows[0]!).includes('\n') && !plain(rows[0]!).includes('\r'),
+        `columns ${columns}: no raw line break may survive:\n${JSON.stringify(rows[0])}`)
+      app.dispose()
+    }
+  }
+})
+
+test('a host-less shrink to 20x10 with a long/multiline title keeps the editor and the bar', async () => {
+  // MAIN: shrink 80x10 -> 20x10 in fullscreen with a long title.
+  const main = startApp(80, 10)
+  main.app.setSessionTitle('L'.repeat(200))
+  main.app.setStatus({ model: 'p/m', cwd: '/w', turns: 1, steps: 1 })
+  main.app.setFullscreen(true)
+  await main.vt.waitForRender()
+  main.vt.resize(20, 10)
+  await main.vt.waitForRender()
+  let lines = main.vt.getViewport()
+  assert.equal(main.app.headerRenderRowsForTest().length, 1, 'MAIN: header one row after shrink')
+  let editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1 && lines.slice(editorTop + 1).some(line => line.includes('─'.repeat(10))),
+    `MAIN: the editor frame must survive the shrink:\n${lines.map(plain).join('\n')}`)
+  main.app.setFullscreen(false)
+  main.app.dispose()
+
+  // CHILD viewer: same, with a multiline title and the bar under the header.
+  const child = startApp(80, 10)
+  child.app.setSessionTitle('first\nsecond\n' + 'L'.repeat(200))
+  child.app.setStatus({ model: 'p/m', cwd: '/w', turns: 1, steps: 1 })
+  enterChildDisplaySubject(child.app, {
+    id: 'child-1', label: 'research', mode: 'continuable', activity: 'running',
+    cwd: '/child', turns: 1, steps: 1,
+  })
+  child.app.setFullscreen(true)
+  await child.vt.waitForRender()
+  child.vt.resize(20, 10)
+  await child.vt.waitForRender()
+  lines = child.vt.getViewport()
+  const view = lines.map(plain)
+  assert.equal(child.app.headerRenderRowsForTest().length, 1, 'CHILD: header one row after shrink')
+  assert.equal(view.findIndex(line => line.includes('‹')), 1,
+    `CHILD: the subject bar must be the row under the header:\n${view.join('\n')}`)
+  editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1 && lines.slice(editorTop + 1).some(line => line.includes('─'.repeat(10))),
+    `CHILD: the editor frame must survive:\n${view.join('\n')}`)
+  child.app.setFullscreen(false)
+  child.app.dispose()
 })

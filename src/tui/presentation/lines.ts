@@ -4,6 +4,8 @@
  * @module @xmoon76/dsh-pi-tui/tui/presentation/lines
  */
 
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
+
 /**
  * Project arbitrary presentation text onto exactly one physical terminal
  * row.
@@ -22,4 +24,19 @@
  */
 export function singlePhysicalLine(text: string): string {
   return text.replace(/[\r\n]+/g, ' ')
+}
+
+/**
+ * The stricter sibling of {@link singlePhysicalLine} for text that may also
+ * carry terminal escape sequences or other control characters (a Host
+ * session title/label): COMPLETE CSI/OSC/… sequences are stripped whole via
+ * the shared primitive (so a raw `\x1b[31m` can never leave visible `[31m`
+ * payload), line breaks and tabs become spaces, and any remaining C0/C1
+ * control character is dropped. The result is guaranteed to be a single
+ * physical row with no terminal-control content.
+ */
+export function sanitizedPhysicalLine(text: string): string {
+  return stripTerminalSequences(text)
+    .replace(/[\u0009-\u000d]+/g, ' ')
+    .replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g, '')
 }
