@@ -37,7 +37,6 @@ import {
   isDshImplementationPackage,
   isRemoteComposition,
   isRuntimeProcessSubtree,
-  listSourceFilesUnder,
   listSourceRootDirectories,
   listSourceRootFiles,
   parseImportSpecifiers,
@@ -50,6 +49,7 @@ import {
   RETIRED_SOURCE_DIRECTORIES,
   RETIRED_SOURCE_ROOTS,
   REMOTE_TO_DIRECT_APPROVED_BRIDGES,
+  CONCRETE_EXTENSION_REGISTRY_IDENTITIES,
   FINAL_STABLE_SOURCE_ROOTS,
   scriptKindOf,
   SOURCE_EXTENSIONS,
@@ -1833,6 +1833,26 @@ test('TS8-F retired roots: a recreated file or a dangling old-path import is rej
   assert.deepEqual(findRetiredSourceRootViolations([], [
     entry('app/surface/example.ts', '// see src/diff.ts for the old derivation\n'),
   ]), [])
+  // The retired consumer must also reject the statically knowable VALUE
+  // dynamic spellings, not only the static import/re-export ones: literal,
+  // non-substitution template and a transparent wrapper. (The parser's own
+  // coverage is not a substitute for this production consumer's.)
+  for (const source of [
+    "const load = () => import('../../diff.ts')\n",
+    'const load = async () => { await import(`../../progress.ts`) }\n',
+    "const load = () => (import('../../working.ts'))\n",
+    "const load = () => import((('../../diff.ts')))\n",
+  ]) {
+    const violations = findRetiredSourceRootViolations([], [entry('tui/presentation/example.ts', source)])
+    assert.equal(violations.length, 1, `the retired consumer must reject:\n${source}`)
+    assert.match(violations[0], /imports the retired TS8-F root path/)
+  }
+  // A computed specifier stays out of scope, and a dynamic import of a nested
+  // sibling is not the retired root.
+  assert.deepEqual(findRetiredSourceRootViolations([], [
+    entry('tui/presentation/example.ts', 'const load = (path) => import(path)\n'),
+    entry('tui/presentation/example.ts', "const sibling = () => import('./lines.ts')\n"),
+  ]), [])
 })
 
 test('TS8-F final assertion 7: a Remote adapter cannot import the Direct implementation (HF1 bridge excepted)', () => {
@@ -1862,19 +1882,36 @@ test('TS8-F final assertion 7: a Remote adapter cannot import the Direct impleme
 })
 
 test('TS8-F final assertion 11: a concrete extension registry must live under extension/internal/**', () => {
-  assert.deepEqual(findConcreteRegistryPlacementViolations(listSourceFilesUnder('src')), [],
+  const real = collectSourceEntries()
+  assert.deepEqual(findConcreteRegistryPlacementViolations(real), [],
     'the real tree keeps every concrete extension registry under extension/internal/**')
-  for (const rel of ['extension/keybinding-registry.ts', 'extension/nested/renderer-registry.ts']) {
-    const violations = findConcreteRegistryPlacementViolations([rel])
-    assert.equal(violations.length, 1, `${rel} must fail the concrete-registry placement check`)
-    assert.match(violations[0], /outside extension\/internal\/\*\*/)
+  // Every declared identity must actually be implemented under internal/**:
+  // a rename or a move is caught as a violation or as this assertion failing.
+  for (const identity of CONCRETE_EXTENSION_REGISTRY_IDENTITIES) {
+    const declaring = real.filter(entryItem => entryItem.source.includes(`class ${identity}`))
+    assert.equal(declaring.length >= 1, true, `${identity} must still be implemented somewhere`)
+    assert.equal(declaring.every(entryItem => entryItem.rel.startsWith('extension/internal/')), true,
+      `${identity} must be declared under extension/internal/**`)
   }
-  assert.deepEqual(findConcreteRegistryPlacementViolations(['extension/internal/renderer-registry.ts']), [])
-  // Registry-shaped modules outside the extension tree are out of this
-  // assertion's scope (app/tui own their own registries).
+  // The reviewer's counterexample: the SAME real implementation, renamed to a
+  // file that does not match the `*-registry` convention, is still the same
+  // concrete registry and must fail by IDENTITY.
+  const moved = entry('extension/keybindings.ts', 'export class KeybindingRegistry {\n  bindings = new Map()\n}\n')
+  const movedViolations = findConcreteRegistryPlacementViolations([moved])
+  assert.equal(movedViolations.length, 1, 'a renamed concrete registry must still fail')
+  assert.match(movedViolations[0], /declares the concrete extension registry KeybindingRegistry/)
+  // The conventional filename stays a supplementary signal for a NEW registry.
+  const byName = findConcreteRegistryPlacementViolations([entry('extension/nested/renderer-registry.ts', '')])
+  assert.equal(byName.length, 1)
+  assert.match(byName[0], /by naming\s+convention/)
+  // The same identity under internal/** is the legal home, and an app/tui-owned
+  // registry with its own identity is out of this assertion's scope.
   assert.deepEqual(findConcreteRegistryPlacementViolations([
-    'app/command/client-command-registry.ts',
-    'tui/footer/item-registry.ts',
+    entry('extension/internal/keybindings.ts', 'export class KeybindingRegistry {}\n'),
+  ]), [])
+  assert.deepEqual(findConcreteRegistryPlacementViolations([
+    entry('app/command/client-command-registry.ts', 'export class ClientCommandRegistry {}\n'),
+    entry('tui/footer/item-registry.ts', 'export class FooterItemRegistry {}\n'),
   ]), [])
 })
 
@@ -1908,4 +1945,24 @@ test('TS8-F final assertion 14: the startup island must not reach a repository i
     entry('startup.ts', "import { type X } from './tui/x.ts'\n"),
     entry('tui/x.ts', ''),
   ]).length, 1)
+  // The private terminal/TUI toolkit is implementation, not neutral metadata:
+  // a bare specifier does not make it legal for the island (static, deep
+  // subpath and statically knowable dynamic spellings all fail).
+  for (const specifier of ['@xmoon76/pi-tui', '@xmoon76/pi-tui/lib/terminal', '@stencil-hq/tern']) {
+    const violations = findStartupIslandViolations([
+      entry('startup.ts', `import { ProcessTerminal } from '${specifier}'\n`),
+    ])
+    assert.equal(violations.length, 1, `${specifier} must fail the startup island check`)
+    assert.match(violations[0], /optional implementation package/)
+  }
+  assert.equal(findStartupIslandViolations([
+    entry('startup.ts', "const load = () => import('@xmoon76/pi-tui')\n"),
+  ]).length, 1, 'the statically knowable dynamic package load must fail too')
+  // A fully erased type face of the same package stays legal, like every other
+  // erased type face, and a package reached only from a NON-island module is
+  // outside this assertion.
+  assert.deepEqual(findStartupIslandViolations([
+    entry('startup.ts', "import type { Terminal } from '@xmoon76/pi-tui'\n"),
+    entry('tui/other.ts', "import { ProcessTerminal } from '@xmoon76/pi-tui'\n"),
+  ]), [])
 })
