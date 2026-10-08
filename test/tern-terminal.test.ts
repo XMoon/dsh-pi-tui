@@ -14,6 +14,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { isTernTerminal, ternCwdSequence, ternProgressState } from '../src/tui/terminal/tern.ts'
 import { terminalTitleOf } from '../src/tui/terminal/title.ts'
 import { createStatusRuntime, type StatusRuntimeDeps } from '../src/app/surface/status-runtime.ts'
+import { displaySeamStub } from './support/display-seam-stub.ts'
 import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -254,11 +255,11 @@ function cwdHarness(options: {
   const titles: { sessionTitle?: string; cwd?: string }[] = []
   const runtime = createStatusRuntime({
     surface: {
-      // Only setTerminalCwd / getSessionTitle are exercised here.
-      app: {
-        setTerminalCwd: (cwd: string | undefined) => { forwarded.push(cwd) },
+      // Only the display seam's cwd/title commits are exercised here.
+      display: displaySeamStub({
+        setTerminalCwd: cwd => { forwarded.push(cwd) },
         getSessionTitle: () => options.sessionTitle ?? '',
-      } as unknown as TuiApp,
+      }),
       status: { snapshot: () => emptyStatusSnapshot() },
       commitStatus: () => {},
     },

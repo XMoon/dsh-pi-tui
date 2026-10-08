@@ -50,8 +50,15 @@ import type { TodoItem, TranscriptSearchPresentation } from '../../tui-app.ts'
 import type { StreamingToolPreview } from '../../app/surface/streaming-tool-preparing.ts'
 import { TranscriptNodeKeys, transcriptView } from './transcript-view.ts'
 
-/** The banner the read-only renderer pins in its dock. */
-const READ_ONLY_BANNER = 'DSH TSP renderer · experimental read-only · q / Ctrl+C quits'
+/**
+ * The banner the read-only renderer pins in its dock. It names ONLY the
+ * renderer's bare `q` quit key: the chord-labelled form is deliberately not
+ * rendered here, because this renderer owns no keymap (so there is no
+ * authority to route a chord label through) and the host-keybindings gate
+ * closes its sanctioned-seam list to the keybinding authority tree. The full
+ * quit contract (q / Ctrl+C / Ctrl+D, see `isQuitKey`) stays in the code.
+ */
+const READ_ONLY_BANNER = 'DSH TSP renderer · experimental read-only · press q to quit'
 
 /** The renderer-local dock state (banner + status facts + welcome + notices). */
 interface DockState {
@@ -369,7 +376,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
 
   const inputLoop = (): void => {
-    void (async () => {
+    void (async () => { // allowlist: the mounted renderer's own loop — every rejection is caught and routed to onFatal/requestExit, never unhandled
       try {
         for await (const input of session) {
           if (disposed) return
@@ -402,13 +409,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     dispose: async () => {
       if (disposed) return
       disposed = true
+      // Both steps are ALWAYS attempted — the tty restore (and the SDK's own
+      // input drain) lives inside `session.close()`, so a surface-close
+      // failure must still reach it, exactly once. A `try/finally` would
+      // silently DISCARD the surface-close error in favour of the session
+      // error (R3-2); instead both are collected and surfaced with the
+      // repository's disposal contract: one failure rethrows the exact
+      // thrown value, two or more aggregate without truncating either.
+      const failures: unknown[] = []
       try {
         await surface.close({ keep: false })
-      } finally {
-        // A close failure still restores the tty (the SDK's #finish runs in
-        // its own finally); re-raise the FIRST error after both steps.
-        await session.close()
+      } catch (error) {
+        failures.push(error)
       }
+      try {
+        await session.close()
+      } catch (error) {
+        failures.push(error)
+      }
+      if (failures.length === 1) throw failures[0]
+      if (failures.length > 1) throw new AggregateError(failures, 'TSP renderer disposal')
     },
   }
 }

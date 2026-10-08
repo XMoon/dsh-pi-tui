@@ -65,6 +65,15 @@ export interface ProductionTspConnectorDeps {
   readonly onFatal: (error: unknown) => void
   readonly log: (message: string, fields?: Record<string, unknown>) => void
   readonly logError: (message: string, fields?: Record<string, unknown>) => void
+  /**
+   * The official SDK connect boundary (`TspRendererOptions.connect`): the
+   * production wiring leaves it unset, so the renderer module uses its own
+   * shipped `connect`. Tests supply the scripted pane HERE, so the REAL
+   * `connectTspRenderer` — and with it the owned-session mount-failure release
+   * and its secondary-restoration diagnostics — stays in the path instead of
+   * being bypassed by a hand-rolled mount.
+   */
+  readonly connect?: NonNullable<Parameters<(typeof import('../../tui/tsp/session.ts'))['connectTspRenderer']>[0]['connect']>
 }
 
 /** The PRODUCTION connector: lazy import + the official SDK connect. */

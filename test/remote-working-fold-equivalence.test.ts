@@ -32,6 +32,7 @@ import test from 'node:test'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
 import { createSessionPresentation, type SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
+import { displaySeamStub } from './support/display-seam-stub.ts'
 import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
 import type { Diag } from '../src/runtime/process/diagnostics.ts'
 
@@ -120,6 +121,14 @@ function harness(): Harness {
   }
   const surface = {
     app, openingJournal: { cut: () => undefined },
+    display: displaySeamStub({
+      // The busy/working facts commit through the renderer-neutral seam now; the
+      // harness keeps observing the same two UI facts it always did.
+      commitStatusFacts: facts => {
+        if (facts.busy !== undefined) busy = facts.busy
+        if (facts.working !== undefined) working = facts.working
+      },
+    }),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
     applyResumedCompaction: () => {}, repaint: () => {},
     refreshPendingInput: () => {

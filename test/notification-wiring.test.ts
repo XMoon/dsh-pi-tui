@@ -149,7 +149,8 @@ test('focus reporting is enabled at mount and disabled on EVERY exit path', () =
     'the fatal catch writes through the runner guarded notification writer')
   // The normal cleanup disables BEFORE the app dies (first teardown
   // step, before any throwable operation).
-  const cleanupStart = indexSource.indexOf('const disposeSurface = (): void => {')
+  const cleanupStart = indexSource.indexOf('const disposeSurface = (')
+  assert.ok(cleanupStart >= 0, 'the composition zone still owns the surface teardown')
   const cleanup = indexSource.slice(cleanupStart, indexSource.indexOf('diag.dispose()', cleanupStart) + 20)
   const disableIndex = cleanup.indexOf('surface.disableFocusReporting()')
   const disposeIndex = cleanup.indexOf('surface.dispose()')

@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionPresentation, type SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
+import { displaySeamStub } from './support/display-seam-stub.ts'
 import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
 import { createOpeningJournal } from '../src/app/surface/opening-journal.ts'
 import { hasEnoughRecentPerformanceSamples, RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../src/domain/status/stats.ts'
@@ -118,6 +119,7 @@ function harness(): Harness {
   const journal = createOpeningJournal<Record<string, unknown>>()
   const surface = {
     app, openingJournal: journal,
+    display: displaySeamStub(),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
     applyResumedCompaction: () => {}, repaint: () => {}, refreshPendingInput: () => {},
     refreshTasks: () => {}, refreshAgents: () => {},

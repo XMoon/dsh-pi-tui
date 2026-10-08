@@ -96,8 +96,8 @@ hand-authored tree):
 ## Product suite
 
 Snapshot qualifier (the repository's "a lane is green only on the state it ran
-against" rule): the release lane below ran on the tree **before** the internal
-review's P3 fix (20 spike tests). Every later delta touched only
+against" rule): the release lane below ran on the tree **before** the
+spike-fixture fix (20 spike tests). Every later delta touched only
 `scripts/**`, `test/**` and `docs/**`, so the lanes whose inputs are `src/**`,
 `dist/**` or the packed manifest are inherited explicitly while the invalidated
 `typecheck:bundle` / `test:product` lanes were re-run per snapshot.
@@ -108,8 +108,8 @@ review's P3 fix (20 spike tests). Every later delta touched only
 | `pnpm pack:release` → `prepack` `typecheck:bundle` (`tsc -p tsconfig.json --noEmit`) | pre-fix | exit 0 |
 | `pnpm pack:release` → `prepack` `test:product` (`test/*.test.ts` + `test/tarball-smoke.test.mjs`) | pre-fix | **7262 tests / 7262 pass / 0 fail** |
 | `pnpm pack:release` → `postpack` `tarball-smoke`, `extension-fixture`, `advanced`, `phase4`, `unstable`, `vim`, `examples`, `compose-agent-compat` | pre-fix | exit 0 (`compose-agent-compat-smoke: verified xmoon76-dsh-pi-tui-0.5.1.tgz`) |
-| `pnpm typecheck:bundle` + `pnpm test:product` (re-run after the internal-review P3 fix) | post-P3 (21 spike tests) | exit 0 · **7263 tests / 7263 pass / 0 fail** |
-| `pnpm typecheck:bundle` + `pnpm test:product` (re-run after the external-review delta: the Context-coalescing identity test and the shipped-SDK Ctrl+C decode test) | final (23 spike tests) | exit 0 · **7265 tests / 7265 pass / 0 fail** |
+| `pnpm typecheck:bundle` + `pnpm test:product` (re-run after the spike-fixture fix) | after the fix (21 spike tests) | exit 0 · **7263 tests / 7263 pass / 0 fail** |
+| `pnpm typecheck:bundle` + `pnpm test:product` (re-run after the delta that added the Context-coalescing identity test and the shipped-SDK Ctrl+C decode test) | final (23 spike tests) | exit 0 · **7265 tests / 7265 pass / 0 fail** |
 
 Every delta so far touches only `scripts/**`, `test/**` and `docs/**`, none of
 which is packed (`files` = `dist`, `cordis.patch.yml`, `generated`,
