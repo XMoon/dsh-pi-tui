@@ -6143,18 +6143,32 @@ interval outcome from the main session's matched `turn/start` + `turn/end`. On
 the Remote branch that input does not exist:
 
 - `agent/status` is registered ONLY on the Direct branch
-  (`src/app/bootstrap/event-wiring.ts`, the `if (direct)` block); the Remote
-  branch's `liveIngress` delivers durable `session/event` only, and its
-  `onSessionSnapshotChanged` refreshes the pending-input pane.
+  (`src/app/bootstrap/event-wiring.ts`, the `if (direct)` block). The Remote
+  branch's `liveIngress` subscription carries the durable `session/event`
+  stream (routed into `routeSessionEvent`) and the live assistant-stream input
+  (`applyAssistantInput`), and its snapshot / projection change callbacks
+  refresh the pending-input pane and the current-facts projections — but NONE
+  of those paths is mapped to the main-Agent progress/completion authority.
 - the completion-owner identity resolves through the Direct registry
   (`src/app/bootstrap.ts` — `completionOwnerId` → `directRuntime()?.owners`), so
   the routing's main-identity gate cannot match on Remote.
-- the official Remote `SessionSnapshot.running` fact is a list/summary-pull
-  derived snapshot (the official Client updates it from `session.list` results
-  and lazy session construction); it is NOT delivered on the ordered durable
-  event channel, so "the closing `turn/end` is observed before `running` goes
-  false" is not guaranteed, and a short turn can start and end between two
-  summaries.
+- the official Remote client DOES have a live running-status source, and it is
+  not wired into this TUI. In the installed official rc.2 packages the Host
+  relays `agent/status` as `api-session/status`
+  (`@deepseek-ai/dsh-api-session-controller` `lib/index.js`:
+  `ctx.on('agent/status', ({ agent, status }) => ctx.emit('api-session/status',
+  agent.id, status === 'running'))`), the official Client subscribes to it
+  (`lib/client.js`: `ctx.remote.$on('api-session/status', …)` →
+  `handleSessionStatus` → `session.handleRunning`, which updates the running bit
+  and notifies), and list / lazy-construction seeds also feed that bit. The
+  terminal-status work consumes NONE of it: there is no qualified
+  main-authoritative feed on Remote, and the `api-session/status` channel is
+  independent of the durable `session/event` (`turn/start` / `turn/end`)
+  delivery — the correlation "the closing `turn/end` is observed before
+  `running` goes false" is therefore NOT established (and a short turn can start
+  and end between two list reads). Promoting that live channel to the completion
+  authority would require defining and proving that ordering/identity
+  qualification — new work, not a wiring tweak, and not authorized here.
 
 Consequently, on Remote `mainAgentProgressActive` never becomes true: the OSC
 7501 record stays at the acquisition's `idle` and the OSC 9;4 indicator is never
