@@ -6068,18 +6068,24 @@ removed.
 
 Root ledger: `stable = 5`, `legacy = 86`.
 
-## TS8-F status (DONE) — final source-root convergence (stable = 7, legacy = 0)
+## TS8-F status (local delivery accepted; root ledger closed — final CI and F7 merge PENDING) — stable = 7, legacy = 0
 
-TS8-F closes the Post-M3 root convergence: all 49 residual root modules carry an
-accepted final disposition — 48 retired into their canonical owners with no
-forwarding shim, and `builtins.ts` reclassified as a stable package/plugin entry
-— so the ledger ends at
+TS8-F has closed the Post-M3 source-root migration locally: all 49 residual root
+modules carry an accepted final disposition — 48 retired into their canonical
+owners with no forwarding shim, and `builtins.ts` reclassified as a stable
+package/plugin entry — so the ledger ends at
 
 ```text
 stable = 7   builtins.ts, commands.ts, extensions.ts, index.ts, startup.ts,
              transcript.ts, tui-app.ts
 legacy = 0
 ```
+
+The stage's DONE state is claimed only when the plan §19 exit ledger is met:
+F1–F7 merged sequentially, `next` current, and the final HEAD's CI green. At the
+time of writing, F1–F6 are merged, `refactor/ts8-f7-final-closure` (PR #250) is
+open against `next`, and its CI is re-running — so this section records the
+accepted local delivery, not a completed stage.
 
 Delivery followed the frozen seven-PR order: F1 process foundation, F2
 bootstrap/config/launcher, F3 command/communication policy, F4
@@ -6106,11 +6112,13 @@ tool/shell/terminal/completion, F7 final closure.
 
 ### Qualification
 
-- `pnpm verify:prepush` on the final HEAD: the fork/tooling/docs suites, the
-  architecture / boundary / keybinding / naming / session-event /
+- `pnpm verify:prepush` ran on the code HEAD `1c5354f3`: the fork/tooling/docs
+  suites, the architecture / boundary / keybinding / naming / session-event /
   installation-doc / pi-divergence / pi-vendor gates, `pnpm audit`, and
   `pack:release` (`typecheck:bundle` + the product suite + the eight
-  public/postpack smokes).
+  public/postpack smokes). The code-input lanes are inherited unchanged by the
+  later docs-only HEAD; that delta ran `pnpm test:docs`,
+  `pnpm gate:installation-doc` and `git diff --check` on top.
 - Migration and compatibility lanes: `smoke:official-presets`,
   `smoke:boundary`, `smoke:startup-strictness`, the five `smoke:remote-*-parity`
   lanes, `compat:dsh:npm`, `compat:dsh:client-family` and `git diff --check`.
