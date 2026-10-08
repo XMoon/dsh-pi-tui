@@ -239,9 +239,9 @@ test('B04: a child log with a descriptor keeps its viewer identity without a fak
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
-  // The runner's viewer-open commit: the identity block renders the badge
-  // (mode), the label and the activity from the AUTHORITATIVE viewer state —
-  // the exact identity the descriptor card used to duplicate.
+  // The runner's viewer-open commit: the subject bar renders the child
+  // identity — navigation, label, activity — from the AUTHORITATIVE viewer
+  // state, the exact identity the descriptor card used to duplicate.
   enterChildDisplaySubject(app, {
     id: 'session-child', label: 'scout-child', mode: 'continuable', activity: 'running',
     parentSessionId: 'session-main', cwd: '', turns: 1, steps: 1,
@@ -251,8 +251,9 @@ test('B04: a child log with a descriptor keeps its viewer identity without a fak
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('child prompt'), `the child transcript body renders:\n${view}`)
   assert.ok(view.includes('scout-child'), `the viewer chrome keeps the authoritative child label:\n${view}`)
-  assert.ok(view.includes('[subagent · continuable]'), `the mode identity stays in the viewer footer:\n${view}`)
-  assert.ok(view.includes('running'), `the child activity stays in the viewer footer:\n${view}`)
+  assert.ok(view.includes('‹ parent'), `the mode identity lives in the viewer subject bar:\n${view}`)
+  assert.ok(view.includes('● running'), `the child activity stays in the viewer subject bar:\n${view}`)
+  assert.ok(!view.includes('[subagent · continuable]'), `the retired footer badge must not render:\n${view}`)
   assert.ok(!view.includes('mode: continuable'), `no fake Subagent identity card renders:\n${view}`)
   assert.ok(!view.toLowerCase().includes('deepseek-chat'), `the descriptor metadata never renders:\n${view}`)
   app.stop()

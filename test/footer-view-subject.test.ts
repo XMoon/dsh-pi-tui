@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { FooterComposer } from '../src/tui/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
-import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
+import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT, VIEWER_DEFAULT_FOOTER_LAYOUT, VIEWER_COMPACT_FOOTER_LAYOUT, layoutForPreset } from '../src/domain/footer/presets.ts'
 import { StatusStore } from '../src/domain/status/store.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -80,24 +80,26 @@ function enterViewer(snap: StatusSnapshot, mode: 'one-shot' | 'continuable', act
   mutable.usage.context = { usedTokens: 100, windowTokens: 2000, percent: 5 }
 }
 
-test('the viewer footer composes the SAME preset with the child data (one-shot)', () => {
+test('the builtin viewer footer shows the child facts but never repeats the viewer identity or model', () => {
   const snap = parentSnapshot()
   enterViewer(snap, 'one-shot', 'inactive')
-  const text = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
-  assert.ok(text.includes('[subagent · one-shot]'), `viewer badge missing:\n${text}`)
-  assert.ok(text.includes('research'), `child label missing:\n${text}`)
-  assert.ok(text.includes('inactive'), `activity missing:\n${text}`)
-  assert.ok(text.includes('ws'), `child cwd missing:\n${text}`)
-  assert.ok(text.includes('t3/s5'), `child counters missing:\n${text}`)
-  assert.ok(text.includes('TTFB 12.3s'), `child stats line missing:\n${text}`)
-  // M3-5 PR1 §5: the child's OWN Session-owned facts render — model/provider,
-  // configured preset, available permission, context pressure/window and the
-  // cumulative token figures.
-  assert.ok(text.includes('deepseek/child-model'), `the child model/provider must render:\n${text}`)
-  assert.ok(text.includes('@high'), `the child reasoning effort must render:\n${text}`)
+  const text = composer.render({ snapshot: snap, layout: VIEWER_DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+  // The child identity/activity/model moved to the subject bar, so the
+  // builtin child footer must NOT repeat them (viewer UX plan §4.4).
+  assert.ok(!text.includes('[subagent'), `the footer must not repeat the viewer badge:\n${text}`)
+  assert.ok(!text.includes('research'), `the footer must not repeat the child label:\n${text}`)
+  assert.ok(!text.includes('inactive'), `the footer must not repeat the activity:\n${text}`)
+  assert.ok(!text.includes('child-model'), `the footer must not repeat the child model:\n${text}`)
+  assert.ok(!text.includes('@high'), `the footer must not repeat the reasoning effort:\n${text}`)
+  // The child's OWN Session-owned facts render in the viewer layout.
   assert.ok(text.includes('[read-only]'), `the child permission must render:\n${text}`)
-  assert.ok(text.includes('↑11'), `the child cumulative input tokens must render:\n${text}`)
-  assert.ok(text.includes('↓5'), `the child cumulative output tokens must render:\n${text}`)
+  assert.ok(text.includes('[child-preset]'), `the child preset must render:\n${text}`)
+  assert.ok(text.includes('ws'), `the child cwd must render:\n${text}`)
+  assert.ok(text.includes('t3/s5'), `the child counters must render:\n${text}`)
+  assert.ok(text.includes('TTFB 12.3s'), `the child recent performance must render:\n${text}`)
+  assert.ok(text.includes('↑11') && text.includes('↓5'), `the child token figures must render:\n${text}`)
+  assert.ok(text.includes('5%'), `the child context pressure must render:\n${text}`)
+  // No parent leakage or main-only presentation.
   assert.ok(!text.includes('parent'), `the parent model must not leak:\n${text}`)
   assert.ok(!text.includes('[yolo]'), `the parent permission must not leak:\n${text}`)
   assert.ok(!text.includes('[plan]'), `the parent plan badge must not leak:\n${text}`)
@@ -107,6 +109,50 @@ test('the viewer footer composes the SAME preset with the child data (one-shot)'
   // The child context (numerator/window from its own projection) renders; the
   // parent's 1000/10000 window is nowhere.
   assert.ok(!text.includes('10.0k'), `the parent context window must not leak:\n${text}`)
+})
+
+test('the builtin viewer compact layout keeps the child status row and drops the stats row', () => {
+  const snap = parentSnapshot()
+  enterViewer(snap, 'one-shot', 'inactive')
+  const text = composer.render({ snapshot: snap, layout: VIEWER_COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+  assert.ok(text.includes('[read-only]'), `the child permission must render:\n${text}`)
+  assert.ok(text.includes('[child-preset]'), `the child preset must render:\n${text}`)
+  assert.ok(text.includes('ws'), `the child cwd must render:\n${text}`)
+  assert.ok(text.includes('t3/s5'), `the child counters must render:\n${text}`)
+  assert.ok(!text.includes('TTFB'), `compact must drop the stats row:\n${text}`)
+  assert.ok(!text.includes('[subagent'), `compact must not repeat the viewer badge:\n${text}`)
+  assert.ok(!text.includes('child-model'), `compact must not repeat the child model:\n${text}`)
+})
+
+test('the viewer preset selection swaps only the builtin layout; main/custom stay put', () => {
+  // The MAIN builtin golden is untouched by the viewer counterparts.
+  assert.equal(layoutForPreset('default', false), DEFAULT_FOOTER_LAYOUT)
+  assert.equal(layoutForPreset('compact', false), COMPACT_FOOTER_LAYOUT)
+  assert.equal(layoutForPreset('default', true), VIEWER_DEFAULT_FOOTER_LAYOUT)
+  assert.equal(layoutForPreset('compact', true), VIEWER_COMPACT_FOOTER_LAYOUT)
+  // The viewer layouts carry no model and no view-scope placement.
+  for (const layout of [VIEWER_DEFAULT_FOOTER_LAYOUT, VIEWER_COMPACT_FOOTER_LAYOUT]) {
+    const ids = layout.rows.flatMap(row => [...row.left, ...row.right].map(ref => ref.id))
+    assert.ok(!ids.includes('model'), `the viewer layout must not place model:\n${ids.join(',')}`)
+    assert.ok(!ids.includes('view-scope'), `the viewer layout must not place view-scope:\n${ids.join(',')}`)
+  }
+})
+
+test('a legacy custom layout with view-scope still loads and renders inert', () => {
+  const snap = parentSnapshot()
+  enterViewer(snap, 'continuable', 'running')
+  const custom = composer.render({
+    snapshot: snap,
+    layout: {
+      schemaVersion: 1,
+      rows: [{ left: [{ id: 'view-scope' }, { id: 'agent-preset' }, { id: 'cwd' }], right: [] }],
+    },
+    width: 100,
+    context: CONTEXT,
+  })
+  assert.ok(!custom.includes('[subagent'), `the retired view-scope must not render:\n${custom}`)
+  assert.ok(custom.includes('[child-preset]'), `the other custom items still render:\n${custom}`)
+  assert.ok(custom.includes('ws'), `the child cwd still renders:\n${custom}`)
 })
 
 test('a custom layout renders the child’s own preset/branch/context where configured (M3-5 PR1 §5)', () => {
@@ -133,20 +179,12 @@ test('a custom layout renders the child’s own preset/branch/context where conf
   assert.ok(!custom.includes('parent'), `the parent model must not leak:\n${custom}`)
 })
 
-test('the viewer footer shows the running activity for a continuable child', () => {
+test('the builtin viewer footer carries no viewer identity/activity (it moved to the bar)', () => {
   const snap = parentSnapshot()
   enterViewer(snap, 'continuable', 'running')
-  const text = composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
-  assert.ok(text.includes('[subagent · continuable]'), `viewer badge missing:\n${text}`)
-  assert.ok(text.includes('● running'), `running activity missing:\n${text}`)
-})
-
-test('the compact preset drops the child stats row while viewing', () => {
-  const snap = parentSnapshot()
-  enterViewer(snap, 'one-shot', 'inactive')
-  const text = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
-  assert.ok(text.includes('[subagent · one-shot]'), `viewer badge missing:\n${text}`)
-  assert.ok(!text.includes('TTFB 12.3s'), `compact must drop the stats line:\n${text}`)
+  const text = composer.render({ snapshot: snap, layout: VIEWER_DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
+  assert.ok(!text.includes('[subagent'), `the footer must not repeat the viewer badge:\n${text}`)
+  assert.ok(!text.includes('● running'), `the footer must not repeat the activity:\n${text}`)
 })
 
 test('returning to the main subject restores the parent footer', () => {
@@ -160,6 +198,24 @@ test('returning to the main subject restores the parent footer', () => {
   assert.ok(text.includes('main'), `parent branch missing:\n${text}`)
   assert.ok(text.includes('t9/s9'), `parent counters missing:\n${text}`)
   assert.ok(text.includes('[EXT]'), `extension segments must return:\n${text}`)
+})
+
+test('the effective footer layout stays the user preset while a child is displayed', () => {
+  // The viewer counterpart is presentation-only: the configurator baseline and
+  // the per-item command-runner reconciliation must keep reading the user's
+  // own effective layout, never the builtin viewer layout.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  assert.equal(app.getEffectiveFooterLayout(), DEFAULT_FOOTER_LAYOUT, 'main baseline first')
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'research', mode: 'one-shot', activity: 'running',
+    cwd: '/child-ws', turns: 5, steps: 9,
+  })
+  assert.equal(app.getEffectiveFooterLayout(), DEFAULT_FOOTER_LAYOUT,
+    'the child display subject must not retarget the user/configurator layout')
+  app.stop()
 })
 
 test('the FIRST frame after entering the viewer already shows the child subject', async () => {
@@ -183,7 +239,9 @@ test('the FIRST frame after entering the viewer already shows the child subject'
   // NO extra refresh: this is the first frame after the viewer opens.
   await vt.waitForRender()
   const first = vt.getViewport().join('\n')
-  assert.ok(first.includes('[subagent · one-shot]'), `the first frame must show the child identity:\n${first}`)
+  assert.ok(first.includes('‹ parent'), `the first frame must show the subject-bar navigation:\n${first}`)
+  assert.ok(first.includes('research'), `the first frame must show the child label:\n${first}`)
+  assert.ok(first.includes('model ?'), `an absent child model renders the unknown token, never the parent's:\n${first}`)
   assert.ok(first.includes('child-ws'), `the first frame must show the child workspace:\n${first}`)
   assert.ok(!first.includes('p/m'), `the parent model must not leak into the first frame:\n${first}`)
   assert.ok(!first.includes('parent-ws'), `the parent cwd must not leak into the first frame:\n${first}`)
@@ -191,6 +249,7 @@ test('the FIRST frame after entering the viewer already shows the child subject'
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('p/m'), `leaving the viewer must restore the parent footer immediately:\n${after}`)
+  assert.ok(!after.includes('‹ parent'), `leaving the viewer must clear the subject bar:\n${after}`)
   app.stop()
 })
 
@@ -431,5 +490,36 @@ test('the display-subject commit re-projects the activity todo count and an ALRE
         `a main snapshot must carry a MAIN todo count: ${JSON.stringify(snap.activity)}`)
     }
   }
+  app.stop()
+})
+
+test('the subject bar renders the committed child title and never a title naming another child', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  enterChildDisplaySubject(app, {
+    id: 'child-A', label: 'alpha', mode: 'one-shot', activity: 'running',
+    cwd: '/a', turns: 1, steps: 1, title: 'Alpha audit',
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Alpha audit'),
+    'the matching committed child title must render in the subject bar')
+  // Re-commit the SAME displayed child but with a presentation naming a
+  // DIFFERENT session: the foreign title must never render. The label change
+  // guarantees the store actually notifies (a content-equal view would not).
+  app.commitDisplaySubject(
+    {
+      view: {
+        subject: { kind: 'subagent', id: 'child-A', label: 'alpha-renamed', mode: 'one-shot', activity: 'running' },
+      },
+    },
+    {},
+    { sessionId: 'child-B', workspaceRoot: '/b', title: 'Foreign title', todos: [], goal: undefined },
+  )
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('alpha-renamed'), `the renamed label must render (precondition):\n${view}`)
+  assert.ok(!view.includes('Foreign title'), `a title naming another session must never render:\n${view}`)
   app.stop()
 })

@@ -551,9 +551,10 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
       deps.surface.app.enterFocusViewerScope()
       deps.surface.repaint()
       // The viewer bar covers the editor (a read-only placeholder for
-      // one-shot, the child's own draft for continuable) and the header
-      // badges the mode — the transient notify is no longer the only "you
-      // are elsewhere" signal.
+      // one-shot, the child's own draft for continuable) and the
+      // header-adjacent subject bar carries the child identity/activity —
+      // the transient notify is no longer the only "you are elsewhere"
+      // signal.
       deps.surface.app.setViewerMode({ parentSessionId, childSessionId: childId, label: label ?? childId, mode, activity: view.snapshot.activity, access })
       // M3-5 PR1 §9.7: the display-subject commit. StatusRuntime selects THIS
       // child as the display subject and publishes the child's own

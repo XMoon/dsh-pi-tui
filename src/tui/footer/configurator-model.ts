@@ -36,6 +36,11 @@ import { MAX_ITEMS_PER_ROW, stripControlChars } from '../../domain/footer/layout
 import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../../domain/footer/presets.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from './presentation-types.ts'
 
+/** Registered builtin ids that are RETIRED as placements: they stay in the
+ * registry (legacy custom layouts keep loading) but are never offered by the
+ * Add picker again. */
+const RETIRED_ADD_PICKER_IDS: ReadonlySet<string> = new Set(['view-scope'])
+
 /** The configurator's pages. */
 export type FooterConfiguratorMode =
   | 'rows'
@@ -515,9 +520,14 @@ export class FooterConfiguratorModel {
    * builtin and extension items alike). A definition may be PLACED any
    * number of times: adding an already-placed id appends an independent
    * placement (its own format/tone/prefix/suffix/importance), so the
-   * catalog is never filtered by what the draft layout already uses. */
+   * catalog is never filtered by what the draft layout already uses.
+   *
+   * RETIRED builtin ids are excluded: `view-scope` stays registered (an
+   * existing custom layout that references it still loads/edits/saves and
+   * renders inert), but the Add picker never offers the retired placement
+   * again. */
   availableIds(): string[] {
-    return this.registry.ids()
+    return this.registry.ids().filter(id => !RETIRED_ADD_PICKER_IDS.has(id))
   }
 
   /** Detached custom definitions in their persisted order. */

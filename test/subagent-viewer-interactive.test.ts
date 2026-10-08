@@ -91,7 +91,10 @@ test('a continuable viewer opens an EDITABLE editor with the child placeholder h
   app.setViewerMode(continuable())
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('[viewing subagent · continuable]'), `badge missing:\n${view}`)
+  // The retired header badge is gone; the subject bar renders only once the
+  // runner commits the child as the display subject (covered by the
+  // footer/subject-bar suites), not on a bare setViewerMode.
+  assert.ok(!view.includes('[viewing subagent'), `the retired header badge must never render:\n${view}`)
   assert.ok(view.includes('Message research'), `empty-draft placeholder missing:\n${view}`)
   // Typing edits the CHILD draft (and hides the placeholder).
   vt.sendInput('hello child')
@@ -622,8 +625,10 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   })
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
-  assert.ok(view.includes('[subagent · continuable]'), `subagent footer badge missing:\n${view}`)
-  assert.ok(view.includes('research'), `child label missing from the footer:\n${view}`)
+  // The child identity lives in the subject bar; the viewer footer carries
+  // the child's OWN usage facts (the model/identity is not duplicated).
+  assert.ok(view.includes('‹ parent'), `the subject-bar navigation is missing:\n${view}`)
+  assert.ok(view.includes('research'), `child label missing from the subject bar:\n${view}`)
   assert.ok(view.includes('t3/s5'), `child turn/step counters missing:\n${view}`)
   assert.ok(view.includes('TTFB 12.3s'), `child stats line missing:\n${view}`)
   assert.ok(!view.includes('parent-model'), `the parent model must not leak into the viewer footer:\n${view}`)
@@ -633,11 +638,12 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('parent-model'), `the parent footer must return:\n${view}`)
-  assert.ok(!view.includes('[subagent · continuable]'), `subagent footer badge must clear:\n${view}`)
+  assert.ok(!view.includes('‹ parent'), `the subject bar must clear on exit:\n${view}`)
+  assert.ok(!view.includes('[subagent'), `the retired viewer badge must never render:\n${view}`)
   app.stop()
 })
 
-test('the one-shot viewer footer carries the one-shot badge and no stats line under compact', async () => {
+test('the one-shot viewer footer drops the stats line under the compact preset', async () => {
   const { vt, app } = await startApp()
   app.setFooterPreset('compact')
   await vt.waitForRender()
@@ -655,7 +661,8 @@ test('the one-shot viewer footer carries the one-shot badge and no stats line un
   })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('[subagent · one-shot]'), `one-shot badge missing:\n${view}`)
+  assert.ok(view.includes('‹ parent') && view.includes('audit'), `the subject bar must show the child:\n${view}`)
+  assert.ok(!view.includes('[subagent'), `the retired viewer badge must never render:\n${view}`)
   assert.ok(!view.includes('TTFB 12.3s'), `compact preset must drop the stats line:\n${view}`)
   exitChildDisplaySubject(app)
   app.stop()

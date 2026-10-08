@@ -63,6 +63,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the mounted child has no todo to show — never falling back to the parent's
   summary.
 
+- The subagent viewer now expresses the child identity in a single subject bar
+  pinned under the header: the `‹ parent` navigation affordance, the child
+  label, its `● running` / `○ inactive` activity and the child's own real
+  `provider/model @effort` (showing `model ?` when the child status has no
+  model yet — never the parent's model). The header goes back to showing the
+  main session title, and the old `[viewing subagent · …]` marker plus the
+  footer identity block (`view-scope`) are gone (a legacy custom layout that
+  still references `view-scope` keeps loading/editing/saving; the placement
+  simply renders nothing). The builtin child footer therefore no longer
+  duplicates the model or the identity — only permission/preset/workspace/
+  context/usage stats remain. A custom footer that explicitly places `model`
+  still shows it.
+
 ### Fixed
 
 - `@` file completion restores explicit path navigation: a query with a path

@@ -189,16 +189,16 @@ test('stats-line renders the pi vocabulary from the structured usage', () => {
   assert.ok(!text.includes('LLM'))
 })
 
-test('view-scope renders the legacy viewer identity block', () => {
-  const oneShot = render('view-scope', snapshotWith(snap => {
-    snap.view.subject = { kind: 'subagent', id: 'c1', label: 'audit', mode: 'one-shot', activity: 'inactive' }
-  }))
-  assert.equal(oneShot, '[subagent · one-shot]  audit  inactive')
+test('view-scope is retired: it stays registered but renders nothing', () => {
+  // The child identity moved to the header-adjacent viewer subject bar. The
+  // id stays registered (and parseable) so a legacy custom layout that
+  // references it still loads/edits/saves, but it contributes no segment.
   const running = render('view-scope', snapshotWith(snap => {
     snap.view.subject = { kind: 'subagent', id: 'c1', label: 'research', mode: 'continuable', activity: 'running' }
   }))
-  assert.equal(running, '[subagent · continuable]  research  ● running')
+  assert.equal(running, '', 'the retired view-scope item renders nothing')
   assert.equal(render('view-scope', emptyStatusSnapshot()), '')
+  assert.ok(registry.ids().includes('view-scope'), 'the retired id stays registered for legacy layouts')
 })
 
 test('ext:* bridges the extension footer text; empty → nothing', () => {
