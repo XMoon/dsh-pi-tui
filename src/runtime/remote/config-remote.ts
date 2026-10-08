@@ -712,7 +712,7 @@ const TUI_SETTINGS_DEFAULTS: {
   responseStyle: 'default',
   notificationMode: 'unfocused',
   notificationMethod: 'auto',
-  terminalProgress: 'on',
+  terminalProgress: '9;4+7501',
   wheelScrollLines: '1',
 }
 

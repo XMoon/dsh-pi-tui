@@ -64,6 +64,19 @@ import {
 } from './tui/pickers/searchable-picker.ts'
 import { claimProcessTuiSlot, releaseProcessTuiSlot } from './tui/process-slot.ts'
 import { isTernTerminal, ternCwdSequence, ternProgressState } from './tui/terminal/tern.ts'
+import {
+  deriveProgramStatus,
+  programStatusSequence,
+  sameProgramStatus,
+  type ProgramStatus,
+} from './tui/terminal/program-status.ts'
+import {
+  DEFAULT_TERMINAL_PROGRESS_MODE,
+  emitsOsc7501,
+  emitsOsc94,
+  type TerminalProgressMode,
+  type TerminalProgressOutcome,
+} from './domain/terminal-progress/settings.ts'
 import { runSyncDisposalSteps } from './runtime/process/disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
 // The generic overlay frame now lives in the TUI component layer; the stable
@@ -1504,11 +1517,12 @@ export interface TuiAppOptions {
   initialTerminalProgress?: boolean
   /**
    * The persisted "Terminal progress" presentation preference already known
-   * before the mount (default true). While false the effective state is still
-   * folded but the physical OSC 9;4 projection is suppressed, and the FIRST
-   * acquisition asserts clear instead of the current effective state.
+   * before the mount (default {@link DEFAULT_TERMINAL_PROGRESS_MODE}). The mode
+   * selects which protocols are physically reported; a protocol the mode does
+   * NOT select is retired with one cleanup clear so a previous owner's residue
+   * cannot survive into this surface.
    */
-  terminalProgressEnabled?: boolean
+  terminalProgressMode?: TerminalProgressMode
   /**
    * The structural icon palette (emoji | symbols | minimal), read once at
    * startup from the persisted settings. Runtime switches go through
@@ -2187,7 +2201,7 @@ export class TuiApp {
   /**
    * The authoritative main-Agent RUNNING truth (OSC 9;4 — plan §6). It is the
    * fence that keeps a retired/child Agent from ever showing progress, and one
-   * of the THREE inputs {@link reconcileTerminalProgress} combines (this truth,
+   * of the inputs {@link convergeTerminalPresentation} folds (this truth,
    * the canonical `RunPhase` and the lifecycle-owned `agentInputWait` fact).
    * Presentation state only, never a second Agent lifecycle authority: it
    * survives a stop() because ProcessTerminal.stop() clears the physical
@@ -2196,26 +2210,41 @@ export class TuiApp {
    */
   private terminalProgressActive = false
   /**
+   * The already-SETTLED outcome of the current main-Agent running interval, as
+   * proven by the application evidence fold before this commit. It only
+   * qualifies the non-running presentation (`idle`/`done`/`error`) and is
+   * deliberately NOT a second Agent-state authority: the running truth stays
+   * {@link terminalProgressActive} and the classification stays upstream.
+   */
+  private terminalProgressOutcome: TerminalProgressOutcome = 'idle'
+  /**
    * The EFFECTIVE terminal progress state (OSC 9;4 — plan §9). For a Tern
    * terminal it is the main-running truth narrowed to an Agent-BLOCKING wait:
    * `paused` requires a wait phase AND the lifecycle-owned `agentInputWait`
    * fact, never the phase alone (a Client-local dialog or a CONTINUED
    * late-answer form stays `indeterminate`). Every other terminal only ever sees
-   * the PR #230 clear/indeterminate pair. Deduping on this field keeps both the
-   * byte stream and the phase-driven reconcile write-free when nothing effective
-   * changed.
+   * the PR #230 clear/indeterminate pair. This field is the LAST PHYSICAL 9;4
+   * value, so deduping on it keeps the byte stream and the phase-driven
+   * reconcile write-free when nothing effective changed.
    */
   private terminalProgressState: TerminalProgressState = 'clear'
   /**
-   * The persisted "Terminal progress" presentation preference (default true).
-   * A presentation GATE over the effective state, never a second Agent-state
-   * authority: while false the desired logical state keeps folding from the
-   * same authoritative inputs but no active/paused bytes are written, so
-   * re-enabling can immediately reproject the current truth. Disabling asserts
-   * one clear (through the same low-level path, which also retires any
-   * heartbeat) and every acquisition while disabled asserts clear.
+   * The LAST PHYSICAL OSC 7501 root record (including `blocked.kind`). Exactly
+   * one cache for the second protocol: the writer compares the full semantic
+   * record so a `blocked` kind switch or a settled `done` -> `idle` owner
+   * rebind is never mistaken for a repeat. It is terminal-presentation state,
+   * never Host/Session data.
    */
-  private terminalProgressEnabled = true
+  private terminalProgramStatus: ProgramStatus = { state: 'clear' }
+  /**
+   * The persisted "Terminal progress" protocol selection (default
+   * {@link DEFAULT_TERMINAL_PROGRESS_MODE}). A presentation SELECTION over the
+   * effective state, never a second Agent-state authority: a deselected
+   * protocol is retired with one clear (and OSC 9;4 keepalive stops through the
+   * terminal's own clear), while the selected protocols always project the
+   * current truth.
+   */
+  private terminalProgressMode: TerminalProgressMode = DEFAULT_TERMINAL_PROGRESS_MODE
   /**
    * Whether the shared ProcessTerminal is currently OWNED for presentation by
    * this TuiApp (started, not suspended/stopped). A suspended screen must
@@ -2226,6 +2255,22 @@ export class TuiApp {
    * re-asserts it.
    */
   private terminalPresentationActive = false
+  /**
+   * Per-protocol PHYSICAL write counters (plan §4.4 / STOP-10). Each
+   * `applyTerminalProgress94` / `applyProgramStatus` increments its own counter
+   * when it actually emits a record.
+   *
+   * A FORCED assert is qualified by the counters captured when its force was
+   * granted: the force stays valid until a newer operation has PHYSICALLY
+   * asserted THAT protocol — an operation merely occurring (a phase projection
+   * that writes nothing) must not consume the force, or a mandatory acquisition
+   * cleanup clear would be skipped. Conversely, once a newer operation did
+   * assert the protocol, the stale force is void and the write falls back to the
+   * semantic dedupe, so a duplicate active record can never be emitted.
+   * Mandatory RETIREMENTS are never gated by these counters.
+   */
+  private terminalProgress94Writes = 0
+  private terminalProgramWrites = 0
   /**
    * Tern terminal identity (plan §3.1), read once from the injected option.
    * Tern is the only terminal that receives the OSC 7 cwd projection; a
@@ -3178,7 +3223,7 @@ export class TuiApp {
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.ternTerminal = options.ternTerminal === true
     this.terminalProgressActive = options.initialTerminalProgress === true
-    this.terminalProgressEnabled = options.terminalProgressEnabled !== false
+    this.terminalProgressMode = options.terminalProgressMode ?? DEFAULT_TERMINAL_PROGRESS_MODE
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
@@ -3755,6 +3800,11 @@ export class TuiApp {
     } else {
       this.tui.stop()
     }
+    // A synchronous sink on the retirement write may have re-entered with a
+    // NEW acquisition (start()); releasing ownership HERE — after the screen is
+    // stopped — keeps the latch consistent with the physical screen no matter
+    // how the reentry ordered itself. A no-op when nothing re-acquired.
+    this.leaveTerminalPresentation()
   }
 
   /**
@@ -3821,6 +3871,13 @@ export class TuiApp {
       () => this.tui.stop(),
       () => this.fullscreen?.stop(),
       () => { this.fullscreen = undefined },
+      // A synchronous sink on the retirement write (or on a screen stop) may
+      // have re-entered with a NEW acquisition. A lifecycle operation that ends
+      // by stopping the screen must end with ownership RELEASED, so the latch
+      // can never claim a terminal whose screen this stop just killed (and a
+      // live record can never outlive it). Independent cleanup above is never
+      // truncated; a no-op when nothing re-acquired.
+      () => this.leaveTerminalPresentation(),
     ])
   }
 
@@ -3873,70 +3930,154 @@ export class TuiApp {
   }
 
   /**
-   * Project the authoritative main-Agent running state onto the terminal's
-   * native progress indicator (plan §6/§8). The terminal protocol — OSC 9;4
-   * plus its keepalive — stays owned by the injected `Terminal`; this method
-   * only carries the desired running truth. Tern additionally refines an
-   * already-running state with the canonical phase (a user-blocked phase
-   * becomes `paused` — plan §9); every other terminal keeps the plain boolean
-   * projection byte-for-byte. Presentation only: an equal state is deduped
-   * (repeated `agent/status=running` must not churn the indicator), and a
-   * synchronous terminal-write failure is contained (plan §16 — a broken
-   * stdout must never crash the TUI).
+   * Project the authoritative main-Agent running truth and the ALREADY SETTLED
+   * outcome of the current interval onto the terminal's native presentation
+   * (plan §4.4). The terminal protocols — OSC 9;4 plus its keepalive, and the
+   * OSC 7501 record — stay owned by the injected `Terminal` and this writer;
+   * the application evidence fold owns the OUTCOME decision, so this method
+   * never classifies a turn itself.
+   *
+   * ONE atomic commit: `active` and `outcome` are the two halves of one
+   * semantic presentation. `active=true` forces the stale settled outcome back
+   * to `idle`; `active=false` accepts the proven outcome (or defaults to
+   * `idle` on a retire path with no settlement evidence). A repeated
+   * `(active, outcome)` pair is a no-op — repeated `agent/status` transitions
+   * must never churn the indicator, and an owner rebind that changes only the
+   * outcome (a retained `done` -> `idle`) is NEVER swallowed by an
+   * active-boolean-only comparison.
    *
    * While the TuiApp does NOT own the terminal (stopped, or suspended for the
-   * external editor) the desired state is still folded — a
-   * running → idle → running sequence inside the $EDITOR round-trip is
+   * external editor) the desired state is still folded from the live inputs —
+   * a running → idle → running sequence inside the `$EDITOR` round-trip is
    * correct — but nothing is written; the next screen start re-asserts it.
    */
-  setTerminalProgress(active: boolean): void {
-    if (this.terminalProgressActive === active) return
+  setTerminalProgress(active: boolean, outcome?: TerminalProgressOutcome): void {
+    const settled = active ? 'idle' : (outcome ?? 'idle')
+    if (this.terminalProgressActive === active && this.terminalProgressOutcome === settled) return
     this.terminalProgressActive = active
-    this.reconcileTerminalProgress()
+    this.terminalProgressOutcome = settled
+    this.convergeTerminalPresentation(false)
   }
 
   /**
-   * Apply the persisted "Terminal progress" presentation preference live.
-   * Same value is a no-op. Turning it OFF while the TUI owns the terminal
-   * asserts ONE clear (which also retires any heartbeat through the same
-   * low-level state path) but NEVER rewrites the desired logical state, so
-   * re-enabling can reproject the current truth without a new Agent status.
-   * Turning it ON recomputes the effective state from the authoritative
-   * inputs and writes it immediately (running -> working, a proven Agent
-   * wait -> paused, idle -> clear). While the TUI does not own the terminal
-   * only the preference is folded — the next acquisition projects it.
+   * Apply the persisted "Terminal progress" protocol selection live. The same
+   * mode is a no-op. A real transition performs the plan's FORCED actions in
+   * the fixed order — retirements first (9;4 then 7501), then the newly enabled
+   * protocols' current state (9;4 then 7501) — and finishes by converging
+   * whatever the transition did not cover (disabled residue under the newest
+   * mode, or a desired state that moved while the transition ran). While the
+   * TUI does not own the terminal only the selection is folded.
+   *
+   * Reentrancy: this transition owns the per-protocol physical-write tokens it
+   * captured. A newer operation that PHYSICALLY asserts a protocol consumes
+   * that protocol's force (the stale assert falls back to the semantic dedupe),
+   * while a merely-occurring operation that writes nothing cannot cancel a
+   * required retirement or a mandatory acquisition cleanup. A released
+   * ownership / `dispose` stops the remaining writes outright.
    */
-  setTerminalProgressEnabled(enabled: boolean): void {
-    if (this.terminalProgressEnabled === enabled) return
-    this.terminalProgressEnabled = enabled
-    if (!this.terminalPresentationActive) return
-    if (!enabled) {
-      this.writeTerminalProgress('clear')
-      return
+  setTerminalProgressMode(mode: TerminalProgressMode): void {
+    if (this.terminalProgressMode === mode) return
+    const previous = this.terminalProgressMode
+    this.terminalProgressMode = mode
+    const osc94Token = this.terminalProgress94Writes
+    const programToken = this.terminalProgramWrites
+    if (!this.ownsTerminalPresentation()) return
+    const dropped94 = emitsOsc94(previous) && !emitsOsc94(mode)
+    const dropped7501 = emitsOsc7501(previous) && !emitsOsc7501(mode)
+    const enabled94 = !emitsOsc94(previous) && emitsOsc94(mode)
+    const enabled7501 = !emitsOsc7501(previous) && emitsOsc7501(mode)
+    // 1. Retire the dropped protocols (9;4 first) — the plan's mandatory
+    //    cleanup, emitted even when the protocol already looks clear. It is
+    //    deliberately NOT gated by the physical-write tokens; it IS re-scoped
+    //    to the CURRENT selection, so a newer operation that re-selected the
+    //    protocol makes this stale retirement unnecessary (convergence then
+    //    asserts the newest mode's truth instead of clearing it).
+    if (dropped94 && !emitsOsc94(this.terminalProgressMode)) {
+      this.applyTerminalProgress94('clear')
+      if (!this.ownsTerminalPresentation()) return
     }
-    this.terminalProgressState = this.effectiveTerminalProgressState()
-    this.writeTerminalProgress(this.terminalProgressState)
+    if (dropped7501 && !emitsOsc7501(this.terminalProgressMode)) {
+      this.applyProgramStatus({ state: 'clear' })
+      if (!this.ownsTerminalPresentation()) return
+    }
+    // 2. Assert each newly enabled protocol's current truth (9;4 first). The
+    //    assert is re-scoped to the CURRENT selection (read at write time): a
+    //    nested mode change that disabled the protocol must never receive an
+    //    active record, and the trailing convergence retires its residue
+    //    instead. It is FORCED only while no newer operation has physically
+    //    asserted that protocol; otherwise the dedupe decides.
+    if (enabled94 && emitsOsc94(this.terminalProgressMode)) {
+      const state = this.effectiveTerminalProgressState()
+      if (this.terminalProgress94Writes === osc94Token || this.terminalProgressState !== state) {
+        this.applyTerminalProgress94(state)
+      }
+      if (!this.ownsTerminalPresentation()) return
+    }
+    if (enabled7501 && emitsOsc7501(this.terminalProgressMode)) {
+      const program = this.effectiveProgramStatus()
+      if (this.terminalProgramWrites === programToken || !sameProgramStatus(this.terminalProgramStatus, program)) {
+        this.applyProgramStatus(program)
+      }
+      if (!this.ownsTerminalPresentation()) return
+    }
+    this.convergeTerminalPresentation(false)
   }
 
   /**
-   * Reconcile the EFFECTIVE terminal progress state from the TWO independent
-   * facts that can change it (plan §9.1): the authoritative main-Agent running
-   * truth and the canonical activity phase. Called from the running-truth
-   * setter and from every activity projection (a question/approval opening or
-   * settling changes the phase while the running truth is unchanged). The
-   * effective state is deduped, so a non-Tern surface never writes here and a
-   * repeated phase commit is inert. The desired state keeps folding while the
-   * presentation preference is off — only the physical write is gated.
+   * Converge the terminal presentation to the CURRENT desired state, protocol
+   * by protocol (plan §4.4). Every input — the mode, the running truth, the
+   * settled outcome, the canonical phase and the Agent-wait fact — is read at
+   * WRITE time, and each protocol is compared against its own LAST PHYSICAL
+   * value. Therefore:
+   *
+   * - a protocol the mode does not select is RETIRED (residue left by an
+   *   interrupted transition or a previous owner is cleared);
+   * - an enabled protocol writes only what actually changed, so a repeated
+   *   status/phase commit is physically inert;
+   * - a synchronous sink re-entering this owner during the 9;4 write can never
+   *   be overwritten by a stale 7501 decision: ownership is re-checked and the
+   *   7501 branch folds the newest inputs and the newest mode.
+   *
+   * `force` asserts both protocols once (a terminal acquisition must overwrite
+   * a pane painted by another owner). It is qualified per protocol by the write
+   * tokens supplied by the ACQUISITION (captured before any of its writes,
+   * including the OSC 7 cwd write): once a newer operation has PHYSICALLY
+   * asserted that protocol, the stale force is void and that protocol falls
+   * back to the dedupe — while a physically-inert nested projection leaves the
+   * force intact so a mandatory cleanup clear is never skipped.
    */
-  private reconcileTerminalProgress(
-    phase: RunPhase = this.statusStore.snapshot().activity.phase,
+  private convergeTerminalPresentation(
+    force: boolean,
+    tokens?: { readonly osc94: number; readonly program: number },
   ): void {
-    const state = this.effectiveTerminalProgressState(phase)
-    if (this.terminalProgressState === state) return
-    this.terminalProgressState = state
-    if (!this.terminalPresentationActive) return
-    if (!this.terminalProgressEnabled) return
-    this.writeTerminalProgress(state)
+    const osc94Token = tokens?.osc94 ?? this.terminalProgress94Writes
+    const programToken = tokens?.program ?? this.terminalProgramWrites
+    if (!this.ownsTerminalPresentation()) return
+    // OSC 9;4 first (plan §2 fixed order). A deselected protocol's retired
+    // value is the normal clear, so convergence also cleans up residue.
+    const state = emitsOsc94(this.terminalProgressMode)
+      ? this.effectiveTerminalProgressState()
+      : 'clear'
+    const forced94 = force && this.terminalProgress94Writes === osc94Token
+    if (forced94 || this.terminalProgressState !== state) this.applyTerminalProgress94(state)
+    // A synchronous sink may have released presentation ownership (stop /
+    // suspend / dispose); re-check before the second protocol.
+    if (!this.ownsTerminalPresentation()) return
+    const program: ProgramStatus = emitsOsc7501(this.terminalProgressMode)
+      ? this.effectiveProgramStatus()
+      : { state: 'clear' }
+    const forced7501 = force && this.terminalProgramWrites === programToken
+    if (forced7501 || !sameProgramStatus(this.terminalProgramStatus, program)) {
+      this.applyProgramStatus(program)
+    }
+  }
+
+  /** Whether this app currently owns the terminal for presentation: not
+   *  stopped/suspended and not finally disposed. Every forced/multi-write path
+   *  re-checks this, so a synchronous sink that hands the PTY away or disposes
+   *  the app can never receive a further record. */
+  private ownsTerminalPresentation(): boolean {
+    return this.terminalPresentationActive && !this.disposed
   }
 
   /**
@@ -3956,6 +4097,23 @@ export class TuiApp {
   }
 
   /**
+   * The effective OSC 7501 record for the current inputs: the running truth,
+   * the canonical phase, the lifecycle-owned `agentInputWait` fact and the
+   * already-settled outcome. Pure projection — the classification stays with
+   * the application evidence fold.
+   */
+  private effectiveProgramStatus(
+    phase: RunPhase = this.statusStore.snapshot().activity.phase,
+  ): ProgramStatus {
+    return deriveProgramStatus(
+      this.terminalProgressActive,
+      phase,
+      this.agentInputWaitActive(),
+      this.terminalProgressOutcome,
+    )
+  }
+
+  /**
    * Whether the interaction currently owning the response surface is a wait the
    * main Agent is BLOCKED on. A CONTINUED (late-answer) Agent question and every
    * Client-local flow are `false`: the phase alone cannot tell them apart, so the
@@ -3971,44 +4129,81 @@ export class TuiApp {
    * Claim terminal presentation ownership for the cwd/progress projections.
    * Called immediately after EVERY TuiApp-owned screen start (plan §4.6/§7).
    *
-   * EVERY acquisition asserts the current EFFECTIVE desired state (the running
-   * truth refined by the canonical phase, see
-   * {@link reconcileTerminalProgress}) — not just the first one. The progress
-   * indicator is terminal-side state that outlives an
-   * ownership window and can be changed while this TuiApp does not own the
-   * terminal: Tern marks a pane "running" while a foreground command runs (and
-   * `dsh` itself is such a command), and during an `$EDITOR` round-trip the
-   * editor — or a crashed process, before this one — can leave `OSC 9;4;1;0`
-   * behind. Re-asserting on each acquisition makes the indicator authoritative
-   * for the whole ownership window, exactly as `CSI ? 1004` focus reporting is
-   * asserted at mount and released on every exit; the writes stay on ownership
-   * boundaries only, never on the status/repaint hot path.
+   * EVERY acquisition asserts the current FINAL desired presentation (the
+   * running truth refined by the canonical phase and settled outcome, see
+   * {@link convergeTerminalPresentation}) — not just the first one. The
+   * indicator is terminal-side state that outlives an ownership window and can
+   * be changed while this TuiApp does not own the terminal: Tern marks a pane
+   * "running" while a foreground command runs (and `dsh` itself is such a
+   * command), and during an `$EDITOR` round-trip the editor — or a crashed
+   * process, before this one — can leave protocol state behind. Re-asserting on
+   * each acquisition makes the presentation authoritative for the whole
+   * ownership window, exactly as `CSI ? 1004` focus reporting is asserted at
+   * mount and released on every exit; the writes stay on ownership boundaries
+   * only, never on the status/repaint hot path.
    *
-   * While the terminalProgress preference is OFF the desired state is still
-   * folded, but the acquisition asserts CLEAR instead: "off" must mean no dsh
-   * progress indicator is left active, not merely that dsh stopped updating
-   * one (a prior owner may have painted the pane).
+   * A protocol the mode does NOT select is still retired with ONE cleanup clear
+   * here: residue from a previous owner must not survive into this surface, and
+   * a cleanup clear is not "enabling" that protocol's working state. OSC 9;4 is
+   * asserted before OSC 7501. A synchronous sink that re-enters this owner
+   * (e.g. a custom Terminal whose 9;4 write calls `stop()`) supersedes this
+   * acquisition: convergence re-checks ownership and folds the newest inputs,
+   * so no further record is leaked into a terminal this app no longer owns.
    */
   private enterTerminalPresentation(): void {
     this.terminalPresentationActive = true
+    // The acquisition's force qualification starts HERE, before the OSC 7 cwd
+    // write: a synchronous sink on that write may settle a status, and the
+    // acquisition must not re-assert a record that newer operation already
+    // physically emitted.
+    const tokens = { osc94: this.terminalProgress94Writes, program: this.terminalProgramWrites }
     this.restoreTerminalCwd()
-    // Recompute the effective state from the live inputs FIRST, then write it
-    // unconditionally (PR #231): an acquisition must assert the final state on
-    // the very first write, so a progress state observed before the mount — or
-    // one left behind by another terminal owner — never needs a corrective
-    // second write.
-    this.terminalProgressState = this.effectiveTerminalProgressState()
-    this.writeTerminalProgress(this.terminalProgressEnabled ? this.terminalProgressState : 'clear')
+    // Assert the final state from the live inputs directly (PR #231): an
+    // acquisition must assert the final state on the very first write, so a
+    // state observed before the mount — or one left behind by another terminal
+    // owner — never needs a corrective second write.
+    this.convergeTerminalPresentation(true, tokens)
   }
 
   /**
    * Relinquish terminal presentation ownership BEFORE any screen stops. From
    * here on `setTerminalProgress` only folds the desired state, so a stopped
    * or `$EDITOR`-suspended terminal never receives progress bytes; the
-   * terminal's own `stop()` owns the physical clear.
+   * terminal's own `stop()` owns the physical OSC 9;4 clear.
+   *
+   * OSC 7501 is retired with ONE clear here whenever the last physical record
+   * is not already clear, because the record outlives the PTY: a live
+   * `working`/`blocked` must never leak into `$EDITOR`, the next screen or a
+   * successor process — including residue left by a transition that a
+   * synchronous sink interrupted. The one exception is the FINAL disposal of a
+   * proven `done`/`error` — the protocol's retainable completion record, which
+   * survives process exit. The `disposed` latch is the real terminal-owner
+   * lifetime discriminator; "stop() was called" alone is not.
    */
   private leaveTerminalPresentation(): void {
+    const wasActive = this.terminalPresentationActive
     this.terminalPresentationActive = false
+    if (!wasActive) return
+    const finalReport = this.terminalProgramStatus
+    if (finalReport.state === 'clear') return
+    if (this.disposed && (finalReport.state === 'done' || finalReport.state === 'error')) return
+    this.applyProgramStatus({ state: 'clear' })
+  }
+
+  /** Commit one OSC 9;4 physical state: cache it, count the physical assert,
+   *  then write it. */
+  private applyTerminalProgress94(state: TerminalProgressState): void {
+    this.terminalProgressState = state
+    this.terminalProgress94Writes += 1
+    this.writeTerminalProgress(state)
+  }
+
+  /** Commit one OSC 7501 physical record: cache it, count the physical assert,
+   *  then write it. */
+  private applyProgramStatus(report: ProgramStatus): void {
+    this.terminalProgramStatus = report
+    this.terminalProgramWrites += 1
+    this.writeProgramStatus(report)
   }
 
   /**
@@ -4026,6 +4221,21 @@ export class TuiApp {
         return
       }
       this.terminal.setProgress(state !== 'clear')
+    } catch {
+      // Terminal presentation only: the semantic agent lifecycle continues.
+    }
+  }
+
+  /**
+   * Write one OSC 7501 record through the injected terminal. The protocol has
+   * no keepalive and no stateful terminal-side projection: exactly one byte
+   * sequence per semantic change, and a synchronous write failure is contained
+   * (the async stream error is already contained by the runner's guarded
+   * stdout listener).
+   */
+  private writeProgramStatus(report: ProgramStatus): void {
+    try {
+      this.terminal.write(programStatusSequence(report))
     } catch {
       // Terminal presentation only: the semantic agent lifecycle continues.
     }
@@ -15937,13 +16147,17 @@ export class TuiApp {
     // paint the transcript rarely, so a render-driven freeze could miss the
     // whole wait and over-count it (plan §5.3).
     this.observeFocusTiming(activity.phase)
-    // Tern only (plan §9.1): the phase is the SECOND input of the pane-progress
-    // projection, so a wait that opens or settles while the main Agent keeps
-    // running moves the pane state immediately. The derived phase is passed in
-    // directly — the store commit above is not a read-back contract. A non-Tern
-    // terminal's effective state does not depend on the phase, so this is inert
-    // there (the reconcile dedupes before any write).
-    if (this.ternTerminal) this.reconcileTerminalProgress(activity.phase)
+    // The activity phase is an input of BOTH projections: a wait that opens or
+    // settles while the main Agent keeps running moves the Tern pane state AND
+    // the OSC 7501 blocked record immediately. Convergence reads the phase from
+    // the store at WRITE time (the commit above is synchronous), so a
+    // re-entrant write that moves the phase again also invalidates this
+    // projection's remaining branches. On a non-Tern terminal whose mode does
+    // not select OSC 7501 the effective 9;4 state does not depend on the phase,
+    // so this stays inert there (each protocol dedupes before any write).
+    if (this.ternTerminal || emitsOsc7501(this.terminalProgressMode)) {
+      this.convergeTerminalPresentation(false)
+    }
   }
 
   /**

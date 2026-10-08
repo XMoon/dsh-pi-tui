@@ -93,7 +93,7 @@ const TUI_DEFAULTS = {
   responseStyle: 'default',
   notificationMode: 'unfocused',
   notificationMethod: 'auto',
-  terminalProgress: 'on',
+  terminalProgress: '9;4+7501',
   wheelScrollLines: '1',
 }
 
@@ -814,37 +814,73 @@ test('raw settings fields round-trip verbatim and an unrelated write never touch
   assert.deepEqual(after.footerLayout, VALID_LAYOUT)
 })
 
-test('terminalProgress keeps Direct/Remote parity: missing resolves on, explicit off reads back, one path-scoped op', async () => {
+test('terminalProgress keeps Direct/Remote parity: missing resolves dual and the persisted value reads back', async () => {
   // A section that omits the field (an older saved document) still resolves to
-  // the schema default `on` through the adapter's own defaults.
+  // the schema default `9;4+7501` through the adapter's own defaults.
   const { terminalProgress: _omitted, ...withoutProgress } = TUI_DEFAULTS
   const missing = createBackend(current => {
     current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...withoutProgress }, revision: 1 })
   })
   await missing.port.describe()
-  assert.equal(missing.port.tuiSettings?.get().terminalProgress, 'on',
-    'a missing remote terminalProgress resolves to the on default')
+  assert.equal(missing.port.tuiSettings?.get().terminalProgress, '9;4+7501',
+    'a missing remote terminalProgress resolves to the dual-protocol default')
 
-  // An explicit off is read back verbatim.
-  const explicit = createBackend(current => {
-    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, terminalProgress: 'off' }, revision: 1 })
-  })
-  await explicit.port.describe()
-  assert.equal(explicit.port.tuiSettings?.get().terminalProgress, 'off')
+  // Every persisted mode is read back verbatim — including the retired `on`
+  // value an older USER profile may still carry.
+  for (const mode of ['9;4', '7501', '9;4+7501', 'off', 'on']) {
+    const explicit = createBackend(current => {
+      current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, terminalProgress: mode }, revision: 1 })
+    })
+    await explicit.port.describe()
+    assert.equal(explicit.port.tuiSettings?.get().terminalProgress, mode,
+      `the persisted ${mode} value reads back verbatim`)
+  }
+})
 
-  // A replace writes exactly one path-scoped op and leaves every other field
-  // untouched.
+test('every terminalProgress mode round-trips through the Remote authority with ONE path-scoped op', async () => {
+  // The write must go to the OFFICIAL face and the value must come back from a
+  // refreshed authority (never from an optimistic local write): the fake
+  // `mutate` applies the ops to the namespace, and the mirror re-describes.
   const { port, state } = createBackend(current => {
     current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS }, revision: 1 })
   })
   await port.describe()
   const settings = port.tuiSettings
   assert.ok(settings !== undefined)
-  assert.equal(settings.get().terminalProgress, 'on')
-  await settings.replace({ ...settings.get(), terminalProgress: 'off' })
-  assert.deepEqual(state.mutateCalls[state.mutateCalls.length - 1].ops,
+  assert.equal(settings.get().terminalProgress, '9;4+7501')
+  const mutatesBefore = state.mutateCalls.length
+  for (const mode of ['9;4', '7501', 'off', '9;4+7501'] as const) {
+    await settings.replace({ ...settings.get(), terminalProgress: mode })
+    assert.equal(settings.get().terminalProgress, mode,
+      `the ${mode} write must read back from the refreshed Remote authority`)
+  }
+  assert.deepEqual(state.mutateCalls.slice(mutatesBefore).map(call => call.ops), [
+    [{ op: 'set', path: ['terminalProgress'], value: '9;4' }],
+    [{ op: 'set', path: ['terminalProgress'], value: '7501' }],
     [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
-    'only the changed field crosses')
+    [{ op: 'set', path: ['terminalProgress'], value: '9;4+7501' }],
+  ], 'each mode change crosses as exactly ONE path-scoped op and nothing else')
+  assert.equal(state.mutateCalls.length, mutatesBefore + 4,
+    'no extra write RPC is issued per mode change')
+
+  // Writing the inherited default over a USER override resets it (unset).
+  const reset = createBackend(current => {
+    current.namespaces.set(TUI_NS, {
+      ns: TUI_NS,
+      value: { ...TUI_DEFAULTS, terminalProgress: '9;4+7501' },
+      user: { terminalProgress: 'off' },
+      revision: 1,
+    })
+  })
+  await reset.port.describe()
+  const resetSettings = reset.port.tuiSettings
+  assert.ok(resetSettings !== undefined)
+  assert.equal(resetSettings.get().terminalProgress, '9;4+7501',
+    'the effective value serves the inherited default while the USER override shadows it')
+  const resetMutates = reset.state.mutateCalls.length
+  await resetSettings.replace({ ...resetSettings.get(), terminalProgress: '9;4+7501' })
+  assert.deepEqual(reset.state.mutateCalls[resetMutates]?.ops, [{ op: 'unset', path: ['terminalProgress'] }],
+    'restating the inherited value unsets the USER override instead of pinning it')
 })
 
 test('tuiSettings is undefined until the tui-app namespace is present', async () => {

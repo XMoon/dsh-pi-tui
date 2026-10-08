@@ -462,6 +462,9 @@ export function applyRunnerWithRuntime(
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
       terminalProgress: tuiSettings?.get().terminalProgress,
+      // The terminal-progress evidence fold reports an unknown upstream
+      // `turn/end.reason.kind` here instead of guessing an outcome.
+      diag,
       // TS4 §10: the composition zone selects the CONCRETE Plugin Manager panel
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.

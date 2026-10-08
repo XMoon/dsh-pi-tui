@@ -236,11 +236,27 @@ export interface EventRoutingDeps<Event extends RoutedSessionEvent> {
   /** The ONLY completion-controller status feed (the `agent/status` main branch). */
   readonly feedCompletionStatus: (agentId: string, status: AgentLifecycleStatus) => void
   /**
-   * The main-Agent pane-progress projection (plan §8.1): a narrow boolean
-   * presentation hint, called ONLY for the current main Agent. The routing
-   * emits no terminal bytes and never learns which terminal consumes it.
+   * The main-Agent pane-progress transition (plan §4.3): a narrow presentation
+   * hint, called ONLY for the current main Agent. The surface evidence owner
+   * resets the interval's turn evidence on the rising edge and settles the
+   * already-captured outcome on the falling edge, then makes ONE terminal
+   * commit. The routing emits no terminal bytes and never learns which
+   * terminal consumes it.
    */
   readonly setMainAgentProgress: (active: boolean) => void
+  /**
+   * Open one LIVE main-session turn in the running interval's evidence fold
+   * (plan §4.3). Only the routing's structural read arrives here; the interval
+   * scope, the turn matching and the outcome classification stay with the
+   * surface evidence owner.
+   */
+  readonly observeMainTurnStart: (turn: number) => void
+  /**
+   * Close one LIVE main-session turn in the running interval's evidence fold.
+   * The `reason.kind` is forwarded verbatim; classification stays with the
+   * surface evidence owner.
+   */
+  readonly observeMainTurnEnd: (turn: number, reasonKind: string) => void
   /** The surface pending-input presentation refresh. */
   readonly refreshPendingInput: () => void
   readonly schedulePaint: () => void
@@ -265,6 +281,22 @@ export interface EventRoutingRuntime<Event extends RoutedSessionEvent> {
   applyAssistantInput(input: AssistantLiveInput): void
   /** The resumed-compaction routing (a startup/resume fact, not a session event). */
   applyResumedCompaction(id: string | undefined, active: boolean): void
+}
+
+/**
+ * The official `turn/start` / `turn/end` payload carries the numeric turn the
+ * event opens/closes. This is the structural boundary read; the internal
+ * contract above it stays typed.
+ */
+function sessionTurnOf(data: unknown): number | undefined {
+  const turn = (data as { readonly turn?: unknown } | null | undefined)?.turn
+  return typeof turn === 'number' ? turn : undefined
+}
+
+/** `turn/end.reason.kind` is the merge-extensible turn-end discriminant. */
+function sessionTurnEndReasonOf(data: unknown): string | undefined {
+  const reason = (data as { readonly reason?: { readonly kind?: unknown } } | null | undefined)?.reason
+  return typeof reason?.kind === 'string' ? reason.kind : undefined
 }
 
 /**
@@ -350,6 +382,20 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // main folder below — the viewer never starves the main transcript.
     }
     if (session.id !== ownerSessionId) return
+    // Main-Agent turn evidence (plan §4.3): the surface owns the interval fold
+    // and the outcome classification; the routing forwards ONLY the LIVE
+    // main-session turn boundary, after every existing fence above. A viewed
+    // child's events returned in the child branch, so viewing a child can never
+    // pollute the main evidence — while main events still reach this point
+    // while a child is displayed.
+    if (event.type === 'turn/start') {
+      const turn = sessionTurnOf(event.data)
+      if (turn !== undefined) options.observeMainTurnStart(turn)
+    } else if (event.type === 'turn/end') {
+      const turn = sessionTurnOf(event.data)
+      const reasonKind = sessionTurnEndReasonOf(event.data)
+      if (turn !== undefined && reasonKind !== undefined) options.observeMainTurnEnd(turn, reasonKind)
+    }
     const main = source.main()
     main.applyToolPreview(event)
 
@@ -538,10 +584,11 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // per-turn flips (and any stale post-switch event) do not re-list it.
     if (currentAgentId !== undefined && agentId === currentAgentId) {
       // The main Agent's own running/idle is ALSO the pane-progress fact
-      // (plan §8.1): project it BEFORE the completion feed, so a settled
+      // (plan §4.3): project it BEFORE the completion feed, so a settled
       // transition clears the busy state before the controller may emit its
       // toast — never "busy + Turn complete" for the same transition. The
-      // child/stale branch below never calls this.
+      // surface evidence owner turns this ONE transition into the single
+      // settled commit; the child/stale branch below never calls it.
       options.setMainAgentProgress(status === 'running')
       options.feedCompletionStatus(agentId, status)
       queueMicrotask(() => options.refreshPendingInput())

@@ -538,11 +538,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             {
               id: 'terminal-progress',
               label: 'Terminal progress',
-              description: 'Show native terminal/tab Agent status with OSC 9;4. On (default) reports working, waiting for input, and idle; Off clears and suppresses native progress state.',
+              description: 'Native terminal status: 9;4+7501 (default) reports both the OSC 9;4 progress bar and the OSC 7501 semantic state (working, waiting for input, done, error); 9;4 reports only the progress-bar compatibility protocol; 7501 reports only the semantic state; Off clears and suppresses both.',
               // An invalid persisted value must never render as a row outside
-              // the values list: the parser resolves it to the default.
+              // the values list: the parser resolves it to the default (a
+              // retired `on` value resolves to the dual-protocol default too).
               currentValue: parseTerminalProgressMode(settingsDoc?.terminalProgress),
-              values: ['on', 'off'],
+              values: ['9;4+7501', '9;4', '7501', 'off'],
             },
             {
               id: 'fullscreen',

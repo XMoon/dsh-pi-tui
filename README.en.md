@@ -340,6 +340,24 @@ The `Icon style` option in `/settings` switches the TUI's structural icons:
 symbols), or `Minimal` (decorative icons hidden; only status/interaction
 markers remain). Switching applies immediately and persists.
 
+The `Terminal progress` row in `/settings` selects the native terminal status
+reporting in four modes: `9;4+7501` (default — both the OSC 9;4 progress bar and
+the OSC 7501 semantic state), `9;4` (progress-bar compatibility only), `7501`
+(semantic state only: working, waiting for approval/answer, done, error) and
+`Off` (clear and stop reporting). Switching applies immediately; done and error
+are reported only once a real run's last turn result is proven, while a
+cancelled or interrupted run returns to idle. A persisted `On` reads as the
+dual-protocol default.
+
+Terminal compatibility: a terminal that does not know OSC 7501 simply ignores
+it — Ghostty's GUI currently shows the OSC 9;4 progress bar and not the 7501
+semantic state, which is expected and not a reporting failure. Inside tmux and
+other terminal multiplexers an unknown OSC may not be forwarded to the outer
+terminal (this feature deliberately implements no tmux DCS passthrough and does
+not change multiplexer settings); use an outer terminal that supports it when
+the state must survive a multiplexer. The OSC 7501 semantic state describes the
+current Main Agent only.
+
 Slash Commands registered by other plugins through `ctx.commands` are discovered automatically.
 
 ### Footer customization
