@@ -135,7 +135,7 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
   bodies, fold/window, `repaintTarget` and mounted `TuiApp`, and renders through
   the real SDK surface on a separate scripted TTY: routed durable events, live
   assistant input, the attachment/foreign-session fences, main ↔ viewed-child,
-  a replaced fold/window under the same Session id, the re-entrancy drop,
+  a replaced fold under the same Session id, the re-entrancy drop,
   coalescing (one commit per 50 ms window; an identical view is zero ops on the
   wire), dispose, and tty/product isolation.
 - The dev/test consumer (frame → `projectTranscriptStructure` → PR1 mapper → SDK
