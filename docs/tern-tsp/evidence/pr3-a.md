@@ -242,12 +242,35 @@ this is the recorded manual proof.
 
 | Case | Result | Evidence |
 |---|---|---|
-| Opt-in deferred start (`DSH_PI_TUI_RENDERER=tsp`, no session) | **DONE** — real hello reply, `o` open, dock frames acked; the renderer stays live (no fatal); the read-only banner (which names the bare `q` quit key — the chord-labelled form is deliberately not rendered: this renderer owns no keymap to route a chord label through, and the host-keybindings gate closes its sanctioned-seam list to the keybinding authority tree) AND the fail-closed modals notice render natively in the dock (screenshot `live2.png`); `expect` on the banner times out by design (the dock is native chrome, not grid text — the recording is the evidence) | rec: `q hello` → `r hello` (kinds 45, features incl. dock/settle/adopt, credits 2) → `o s1 inline` → `f s1` dock banner → `f s2` modals notice → acks |
+| Opt-in deferred start (`DSH_PI_TUI_RENDERER=tsp`, no session) | **DONE on the build below; OPEN on the current one — see "Pane re-run"** — real hello reply, `o` open, dock frames acked; the renderer stays live (no fatal); the read-only banner (which names the bare `q` quit key — the chord-labelled form is deliberately not rendered: this renderer owns no keymap to route a chord label through, and the host-keybindings gate closes its sanctioned-seam list to the keybinding authority tree) AND the fail-closed modals notice render natively in the dock (screenshot `live2.png`); `expect` on the banner times out by design (the dock is native chrome, not grid text — the recording is the evidence) | rec: `q hello` → `r hello` (kinds 45, features incl. dock/settle/adopt, credits 2) → `o s1 inline` → `f s1` dock banner → `f s2` modals notice → acks |
 | Command registration under TSP | **DONE** — no crash; the completions install degrades to diagnostics: `command completions install skipped: no PiTui editor surface` (twice: initial + skills install); the command catalog itself registers | diag log (`INFO` lines) |
 | Resume with a bad session id | **DONE (legal failure path)** — `resume failed … not found` surfaces through the seam as a dock notice (`! session … could not be resumed: … not found`), no fatal, no PiTui fallback | rec3: `f s2` adds `dock.notice-n0` with the failure text |
 | Resume of a REAL persisted session (`--session session-823a…`, seq 167) | **DONE** — `resume ok seq=167`; 3 frames carry **168 `main.*` node ops**: the historical transcript (assistant markdown cards, tool rows) renders natively through the PR1 mapper; the dock shows the welcome facts (`DSH session … · ollama/deepseek-v4.1-flash:cloud`), the session title (`Rust GUI`) in the status line, the read-only banner (which names the bare `q` quit key — the chord-labelled form is deliberately not rendered: this renderer owns no keymap to route a chord label through, and the host-keybindings gate closes its sanctioned-seam list to the keybinding authority tree) and the modals notice | rec4 (10 lines); screenshots `resumed-full-id.png` (post-close scrollback) and `live-now.png` (the LIVE native render: assistant card + `/copy` receipt + dock) |
 | Quit key (`q`) | **DONE** — `q` routes the exit intent; the wire shows `x {"id":"s1","keep":false}` exactly once, raw mode restored, the process exits and the shell prompt returns; no protocol bytes leak to the shell (unlike the earlier failed runs, where a fatal teardown left ack/resize events echoing into the grid) | rec4 tail; pane usable afterwards |
 | Earlier fatal teardown observation (fixed) | The first smoke runs exposed the two boot-sequence couplings (§A0.3b rows 5 and 8) — after the fatal, `x keep:false` fired but a `resize` event then ECHOED into the cooked shell (`pi-tui-pr3atsp e:{"ev":"ack"…}` garbage in the grid). With the fixes the teardown is clean; the SDK's own 50 ms input drain (DRAIN_MS) covers late events | screenshots of the failed runs (kept for the record) |
+
+### Pane re-run on the teardown/qualification delta — OPEN defect
+
+The rows above were recorded on the build of the earlier review rounds. A
+re-run on the current build does **not** reproduce the deferred start: the same
+command fails before the mount is reached, and the teardown itself throws:
+
+```text
+ERROR cleanup failed error=the surface is not mounted              (the exit controller)
+ERROR surface dispose failed error=the surface is not mounted      (the fiber/fatal recorder)
+ERROR fatal error=the surface is already disposed
+      at Object.start (dist/index.mjs) / at startRunner (dist/index.mjs)
+```
+
+An instrumented run shows an `exit` intent reaching `createExitController`
+**before** `surface.start`: the exit tears the surface down, so `start()` finds
+it already disposed and the startup root reports a FATAL, while the pre-mount
+teardown reads the not-yet-mounted surface and fails too. Latching the renderer's
+own quit key on the mount was not sufficient (the intent arrives from another
+entry), and the exit caller inside that window is **not yet identified**. The
+scripted suite cannot see this window (the deferred mount is driven by real
+startup timing). **Treat this as an open defect: the pane rows above must be
+re-established on the fixed build before the manual smoke is claimed again.**
 
 Read-only live updates: the resumed-session smoke proves the FULL chain (fold →
 canonical structure → PR1 mapper → SDK surface → real Tern render, ack loop
@@ -257,6 +280,11 @@ smoke will exercise a real interactive turn end-to-end.
 
 ### Known limits (recorded, not claimed done)
 
+- **OPEN defect (pane re-run, current build):** an exit intent inside the
+  SDK-handshake window disposes the surface before `surface.start`, which then
+  reports a FATAL and the pre-mount teardown fails against an unmounted surface
+  (details and the log above). The exit caller is not yet identified and the
+  scripted suite cannot reach the window.
 - The lanes above are the LOCAL stage-final pass. CI has not run for this branch,
   and the published-DSH compatibility lanes (`compat:dsh:npm`,
   `compat:dsh:client-family`) plus the migration smokes (`smoke:remote-*`,
