@@ -1553,13 +1553,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // A4-4 (plan §13.1): the semantic derivation stays with the runner; the
       // commit coordination is surface-owned. The three parts are ONE atomic
       // display-subject commit (M3-5 PR1 §9.7).
-      // PR3-A (F9): the SEMANTIC patch lands in the shared StatusStore HERE —
-      // the ONE surface-owned commit point — so every renderer (and every
-      // store observer: the footer composer, /status) sees the same facts.
-      // The PiTui app's own commitDisplaySubject re-projects the same patch
-      // plus its activity section (an idempotent store merge); a renderer
-      // without chrome projection (the TSP mount) still commits the store.
-      status.update(patch)
+      //
+      // OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
+      // `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
+      // projection published together). Committing the patch here as well
+      // would SPLIT that transaction into two publications (an observer would
+      // see the child view beside the parent activity/presentation). So the
+      // surface only supplies the store commit for a renderer that has no such
+      // chrome projection — the TSP mount — keeping exactly ONE store update
+      // per commit on BOTH branches.
+      if (app === undefined) status.update(patch)
       displaySeam().commitDisplaySubject(patch, legacyFacts, presentation)
     },
     setNotificationMode(mode) {

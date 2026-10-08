@@ -43,6 +43,8 @@ import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createSurfaceLifecycle } from '../src/app/bootstrap/lifecycle.ts'
+import { createExitController } from '../src/app/bootstrap/exit.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -148,23 +150,49 @@ class ScriptedTern {
 }
 
 /** The selection seam under test: the SAME logic bootstrap.ts runs. */
+/**
+ * Drive the PRODUCTION selection seam (`selectRendererMount` +
+ * `productionTspConnector`) — never a hand-copied selector. The connector's
+ * lazy import and the SDK `connect` are the shipped ones; only the tty is the
+ * scripted pane and `connect` may be replaced to force a failure.
+ */
 async function selectRenderer(options: {
   readonly env: Record<string, string | undefined>
   readonly tern: ScriptedTern
   readonly requestExit?: () => void
-  readonly importSession?: () => Promise<Session | null>
+  readonly onFatal?: (error: unknown) => void
+  /** A forced connector outcome: `null` = the SDK declined; a throw = fatal. */
+  readonly connectOutcome?: () => Promise<Session | null>
+  /** Records the connector invocation (proves the default path never probes). */
+  readonly onConnect?: () => void
 }): Promise<SurfaceRendererMount | undefined> {
-  if (options.env.DSH_PI_TUI_RENDERER !== 'tsp') return undefined
-  const { connectTspRenderer } = await import('../src/tui/tsp/session.ts')
-  const connect = options.importSession === undefined ? undefined
-    : async () => options.importSession!()
-  const tsp = await connectTspRenderer({
-    ...(connect === undefined ? {} : { connect: connect as typeof sdkConnect }),
+  const { selectRendererMount, productionTspConnector } = await import('../src/app/bootstrap/renderer-selection.ts')
+  const production = productionTspConnector({
+    cwd: '/tmp',
     requestExit: options.requestExit ?? ((): void => {}),
-    connectTimeout: 500,
+    onFatal: options.onFatal ?? ((): void => {}),
+    log: (): void => {},
+    logError: (): void => {},
   })
-  if (tsp === undefined) return undefined
-  return { mount: () => ({ display: tsp.display, dispose: () => tsp.dispose() }), releaseUnmounted: () => tsp.dispose() }
+  const connectTsp = async () => {
+    options.onConnect?.()
+    if (options.connectOutcome === undefined) return await production()
+    const session = await options.connectOutcome()
+    if (session === null) return undefined
+    const { mountTspRenderer } = await import('../src/tui/tsp/session.ts')
+    return mountTspRenderer(session, {
+      requestExit: options.requestExit ?? ((): void => {}),
+      ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
+    })
+  }
+  return selectRendererMount({
+    cwd: '/tmp',
+    requestExit: options.requestExit ?? ((): void => {}),
+    onFatal: options.onFatal ?? ((): void => {}),
+    log: (): void => {},
+    connectTsp: connectTsp as never,
+    env: options.env,
+  })
 }
 
 // ── The real app-graph harness (the PR2 shape, minimal) ─────────────────────
@@ -298,27 +326,25 @@ async function settle(): Promise<void> {
 
 // ── A-01: opt-in + real SDK connect success ⇒ TSP-only mount ────────────────
 
-test('A-01: opt-in + SDK connect success mounts the TSP renderer and never starts a TuiApp', async () => {
+test('A-01: the PRODUCTION selection + a real SDK connect mounts the TSP renderer and never starts a TuiApp', async () => {
   const tern = new ScriptedTern()
-  // A REAL SDK connect against the scripted pane (the shipped connect path).
-  const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
-  assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
-
-  const mountCalls: string[] = []
-  const { mountTspRenderer } = await import('../src/tui/tsp/session.ts')
-  const renderer: SurfaceRendererMount = {
-    mount: () => {
-      mountCalls.push('tsp')
-      return mountTspRenderer(session, { requestExit: () => {} })
+  // The PRODUCTION selector, with the shipped SDK connect over the scripted pane.
+  const mount = await selectRenderer({
+    env: { DSH_PI_TUI_RENDERER: 'tsp' },
+    tern,
+    connectOutcome: async () => {
+      const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+      assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
+      return session
     },
-    releaseUnmounted: async () => { await session.close() },
-  }
+  })
+  assert.ok(mount !== undefined, 'the production selection produced the renderer mount')
+
   const harness = mountHarness()
   try {
-    harness.mount(renderer)
+    harness.mount(mount)
     await settle()
 
-    assert.deepEqual(mountCalls, ['tsp'], 'the TSP renderer mounted exactly once')
     // NO TuiApp exists: reading surface.app throws, the display seam answers.
     assert.throws(() => harness.surface.app, /the surface is not mounted/,
       'no TuiApp exists on the TSP branch')
@@ -335,7 +361,6 @@ test('A-01: opt-in + SDK connect success mounts the TSP renderer and never start
     assert.ok(tern.output.text().includes('selects the renderer'), 'the routed message rendered on the TSP wire')
   } finally {
     harness.dispose()
-    await session.close()
   }
 })
 
@@ -349,7 +374,7 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
   const renderer = await selectRenderer({
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
     tern,
-    importSession: async () => await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 50 }),
+    connectOutcome: async () => await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 50 }),
   })
   assert.equal(renderer, undefined, 'the selection seam yields no renderer mount on null')
 
@@ -370,13 +395,14 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
 
 // ── A-03: no opt-in ⇒ no SDK probe at all ───────────────────────────────────
 
-test('A-03: without the opt-in the selection never imports/connects the SDK', async () => {
+test('A-03: without the opt-in the PRODUCTION selection never invokes the connector', async () => {
   const tern = new ScriptedTern()
-  const imports: string[] = []
-  const renderer = await selectRenderer({ env: {}, tern })
+  let connectorCalls = 0
+  const renderer = await selectRenderer({ env: {}, tern, onConnect: () => { connectorCalls += 1 } })
   assert.equal(renderer, undefined, 'no renderer mount without the opt-in')
+  assert.equal(connectorCalls, 0,
+    'the production selection never reached the TSP connector (so no SDK import/connect/probe)')
   assert.equal(tern.probed, false, 'the SDK probe never ran')
-  assert.deepEqual(imports, [])
 
   const harness = mountHarness()
   try {
@@ -395,7 +421,7 @@ test('A-07: a SDK connect THROW propagates — never mapped to null or a fallbac
     selectRenderer({
       env: { DSH_PI_TUI_RENDERER: 'tsp' },
       tern,
-      importSession: async () => { throw new Error('handshake exploded') },
+      connectOutcome: async () => { throw new Error('handshake exploded') },
     }),
     /handshake exploded/,
     'the connect failure escapes the selection seam (the runner fatal path owns it)',
@@ -494,4 +520,112 @@ test('F8: the public settleCompactionSurface keeps its three-setter structural c
   assert.deepEqual(calls, ['phase:idle', 'busy:true', 'working:true'],
     'the public surface still calls the three setters')
   assert.equal(refreshes, 1, 'the settle still refreshes once')
+})
+
+// ── R2-1: the REAL surface lifecycle waits for the renderer release ────────
+
+interface LifecycleHarness {
+  readonly lifecycle: import('../src/app/bootstrap/lifecycle.ts').SurfaceLifecycle
+  readonly order: string[]
+  release(): void
+}
+
+function mountLifecycle(options: { readonly throwInViewer?: boolean } = {}): LifecycleHarness {
+  const order: string[] = []
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = () => { order.push('tty-released'); resolve() } })
+  let cleaned = false
+  const surface = {
+    retireCompletionOwner: () => { order.push('retireCompletionOwner') },
+    disableFocusReporting: () => { order.push('disableFocusReporting') },
+    disposePluginManager: () => { order.push('disposePluginManager') },
+    disposeJobEvents: () => { order.push('disposeJobEvents') },
+    disposeJobObservation: () => { order.push('disposeJobObservation') },
+    disposeTaskBrowser: () => { order.push('disposeTaskBrowser') },
+    dispose: () => { order.push('surface.dispose') },
+    whenRendererReleased: () => held,
+  }
+  const noop = (): void => {}
+  const lifecycle = createSurfaceLifecycle({
+    diag: { debug: noop, info: noop, warn: noop, error: () => { order.push('cleanup-error') }, dispose: noop },
+    isCleanedUp: () => cleaned,
+    markCleanedUp: () => { cleaned = true },
+    surface,
+    abortLifecycle: () => { order.push('abort') },
+    disposeViewer: () => {
+      if (options.throwInViewer === true) throw new Error('viewer disposal failed')
+      order.push('disposeViewer')
+    },
+    clearDraftImages: noop,
+    clearDraftFiles: noop,
+    disposeCommandCatalog: noop,
+    cancelDeferredStatus: noop,
+    disposeFooterCommand: noop,
+    disposeLocalShell: noop,
+    retireOwnedSession: async () => ({ } as never),
+    disposeSelectedTransport: async () => {},
+    registerDisposal: () => {},
+  })
+  return { lifecycle, order, release: () => release() }
+}
+
+test('R2-1a: a SECOND cleanup awaits the SAME renderer release (never races to retirement)', async () => {
+  const { lifecycle, order, release } = mountLifecycle()
+  const first = lifecycle.disposeSurface()
+  const second = lifecycle.disposeSurface()
+  assert.ok(first instanceof Promise, 'the first teardown returns the release promise')
+  assert.ok(second instanceof Promise, 'the idempotent second cleanup STILL returns a promise')
+
+  const hintOrder: string[] = []
+  const { requestExit } = createExitController({
+    diag: { info: () => {}, error: () => {} },
+    cleanup: () => lifecycle.disposeSurface(),
+    hint: () => hintOrder.push('hint'),
+    resumeHint: () => 'resume',
+    exit: () => hintOrder.push('exit'),
+  })
+  requestExit()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(hintOrder, [], 'no hint/appExit while the renderer still owns the tty')
+  assert.ok(!order.includes('tty-released'))
+
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(hintOrder, ['hint', 'exit'], 'the hint and appExit run only after the release')
+})
+
+test('R2-1b: a THROWING sibling still awaits the release before surfacing its failure', async () => {
+  const { lifecycle, order, release } = mountLifecycle({ throwInViewer: true })
+  const released = lifecycle.disposeSurface()
+  assert.ok(released instanceof Promise)
+  let failure: unknown
+  let settled = false
+  void (released as Promise<void>).then(() => { settled = true }, error => { settled = true; failure = error })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(settled, false, 'the throwing sibling does NOT settle the teardown before the tty release')
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(settled, true, 'the teardown settles after the release')
+  assert.ok(failure instanceof Error, 'the aggregated sync failure is surfaced to the caller')
+  assert.match((failure as Error).message, /viewer disposal failed/)
+  assert.ok(order.includes('tty-released'), 'the release actually ran')
+})
+
+test('R2-1c: the exit path with a throwing sibling still orders release -> hint -> exit', async () => {
+  const { lifecycle, release } = mountLifecycle({ throwInViewer: true })
+  const seen: string[] = []
+  const { requestExit } = createExitController({
+    diag: { info: () => {}, error: () => { seen.push('cleanup-error') } },
+    cleanup: () => lifecycle.disposeSurface(),
+    hint: () => seen.push('hint'),
+    resumeHint: () => 'resume',
+    exit: () => seen.push('exit'),
+  })
+  requestExit()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(seen, [], 'nothing runs before the release when a sibling threw')
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(seen, ['cleanup-error', 'hint', 'exit'],
+    'the failure is recorded AFTER the release, and the hint/exit follow it')
 })

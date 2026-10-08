@@ -134,8 +134,16 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
   // path. The Direct owned-session retirement is a SEPARATE step
   // (retireOwnedSession below) that runs after the surface stops — diag
   // stays open until the retirement diagnostics are recorded.
+  /**
+   * The release promise of the FIRST teardown, kept so an idempotent SECOND
+   * cleanup (a second fiber disposer, a late fatal) still AWAITS the same
+   * renderer release instead of racing ahead to retirement/transport.
+   */
+  let disposeRelease: Promise<void> | undefined
   const disposeSurface = (): Promise<void> | void => {
-    if (isCleanedUp()) return
+    // Already torn down: hand back the SAME release promise (never `void` —
+    // a second caller must still await the tty restore).
+    if (isCleanedUp()) return disposeRelease ?? surface.whenRendererReleased()
     markCleanedUp()
     // Fence the completion-notification controller (surface-owned, A4-4):
     // after teardown a late `agent/status` idle from the old live agent must
@@ -152,6 +160,8 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     // M3-6 PR3: ONE ordered non-truncating batch. A throwing sibling cleanup
     // must never skip a later surface owner, the Session retirement or the
     // selected transport disposal (the plan's frozen top-level order).
+    let batchFailure: unknown
+    try {
     runSyncDisposalSteps('surface disposal', [
       () => surface.retireCompletionOwner(),
       // Disable terminal focus reporting FIRST among the THROWABLE steps —
@@ -206,14 +216,28 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // still owns.
       () => surface.dispose(),
     ])
+    } catch (error) {
+      // runSyncDisposalSteps already attempted EVERY sibling in the frozen
+      // order; keep its aggregated failure to surface AFTER the release.
+      batchFailure = error
+    }
     // NOTE: diag.dispose() is NOT here — the Direct owned-session
     // retirement (retireOwnedSession) records its diagnostics first and
     // closes diag last (see below).
-    // PR3-A: return the ONE renderer-release promise (immediate on PiTui; the
-    // SDK tty release on the TSP branch) so the exit/fatal/fiber
-    // orchestrations AWAIT it. A rejection is that step's own failure and is
-    // recorded by the caller, never swallowed here.
-    return surface.whenRendererReleased()
+    // PR3-A: the ONE renderer-release promise (immediate on PiTui; the SDK tty
+    // release on the TSP branch). Captured on EVERY path — including a
+    // throwing sibling — so the exit/fatal/fiber callers always await the tty
+    // restore; the aggregated sync failure is then rethrown to their
+    // non-truncating recorder (awaited first, never dropped, never truncated).
+    const release = surface.whenRendererReleased()
+    disposeRelease = release
+    if (batchFailure !== undefined) {
+      return release.then(
+        () => { throw batchFailure },
+        releaseError => { throw new AggregateError([batchFailure, releaseError], 'surface disposal') },
+      )
+    }
+    return release
   }
 
   // Stop the TUI when this fiber is disposed (a loader hot-reload unloads

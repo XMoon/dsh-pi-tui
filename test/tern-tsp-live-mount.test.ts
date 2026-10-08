@@ -29,7 +29,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
-import { connect as sdkConnect, concatBytes } from '@stencil-hq/tern'
+import { connect as sdkConnect, concatBytes, ui } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -341,6 +341,12 @@ async function mountTspHarness(options: { requestExit?: () => void; onFatal?: (e
   }
 }
 
+
+/** Feed one official TSP event frame into the scripted pane's input. */
+function harnessFreeInput(tern: ScriptedTern, event: Record<string, unknown>): void {
+  tern.input.type(`\u001b_tsp;e;${JSON.stringify(event)}\u001b\\`)
+}
+
 async function settle(): Promise<void> {
   for (let index = 0; index < 40; index += 1) await new Promise(resolve => setTimeout(resolve, 3))
 }
@@ -595,26 +601,38 @@ test('A-10: the joined pending presentation (queued + tail) renders in the dock'
 
 // ── A-11 (F6): a mounted input-loop failure is FATAL, not a normal exit ─────
 
-test('A-11: an SDK input-loop failure routes the FATAL intent, never a normal exit', async () => {
+test('A-11: a real SDK iterator failure routes the SAME error to the FATAL intent', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let fatal: unknown
+  let fatalCount = 0
   let exits = 0
-  const surface = mountTspRenderer(session, {
+  const renderer = mountTspRenderer(session, {
     requestExit: () => { exits += 1 },
-    onFatal: error => { fatal = error },
+    onFatal: error => { fatal = error; fatalCount += 1 },
   })
   try {
     await settle()
-    // Killing the session's input side makes the iterator fail/end.
-    await session.close()
+    // Manufacture a REAL mounted failure through the shipped SDK route: a node
+    // handler that throws. The SDK's #chain catches it and rejects the next
+    // iterator read with that exact error (session.ts #fail).
+    const sdkSurface = session.surface('s1')
+    assert.ok(sdkSurface !== undefined, 'the mounted renderer owns surface s1')
+    sdkSurface.render(ui.col(
+      { key: 'probe' },
+      ui.text({ key: 'boom', onAction: { boom: () => { throw new Error('mounted tty died') } } } as never, 'x'),
+    ))
     await settle()
-    // The loop either observed the close (iterator end, no quit key) or a
-    // failure; neither may report a normal exit.
-    assert.equal(exits, 0, 'no normal exit intent was raised')
-    void fatal
+    harnessFreeInput(tern, { ev: 'action', sf: 's1', id: 'main.probe.boom', act: 'boom', mods: [] })
+    await settle()
+
+    assert.equal(fatalCount, 1, 'the input loop surfaced the failure exactly once')
+    assert.ok(fatal instanceof Error, 'the FATAL intent received the error')
+    assert.equal((fatal as Error).message, 'mounted tty died',
+      'the SAME SDK error reaches the fatal route (not a re-wrap, not a normal exit)')
+    assert.equal(exits, 0, 'a mounted failure NEVER reports a normal exit intent')
   } finally {
-    await surface.dispose()
+    await renderer.dispose()
   }
 })
 
@@ -647,19 +665,30 @@ test('A-12: a rejected mount closes the connected SDK session (no leaked tty own
   }
 })
 
-test('A-12b: the ownership handshake releases an unmounted renderer (rejected handoff)', async () => {
+test('A-12b: the PRODUCTION selection handshake releases a rejected mount', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let closes = 0
   const originalClose = session.close.bind(session)
   session.close = async () => { closes += 1; await originalClose() }
+  const { selectRendererMount, productionTspConnector } = await import('../src/app/bootstrap/renderer-selection.ts')
   const { mountTspRenderer } = await import('../src/tui/tsp/session.ts')
-  const renderer = mountTspRenderer(session, { requestExit: () => {} })
-  // The surface rejected the mount (already disposed) — the composition
-  // releases the connected renderer through the handshake.
-  await renderer.dispose()
-  await renderer.dispose()
-  assert.equal(closes, 1, 'releaseUnmounted/dispose is idempotent and closes once')
+  const requestExit = (): void => {}
+  const mount = await selectRendererMount({
+    cwd: '/tmp',
+    requestExit,
+    onFatal: () => {},
+    log: () => {},
+    env: { DSH_PI_TUI_RENDERER: 'tsp' },
+    connectTsp: async () => mountTspRenderer(session, { requestExit }),
+  })
+  assert.ok(mount !== undefined, 'the handshake produced a mount')
+  // The surface REJECTED the mount (the HMR-disposed case): the composition
+  // releases the connected renderer through the SAME handshake accessor.
+  await mount.releaseUnmounted()
+  await mount.releaseUnmounted()
+  assert.equal(closes, 1, 'the handshake release is idempotent and closes exactly once')
+  void productionTspConnector
 })
 
 // ── A-13 (F3): the hydrate-tail reset never clears hydrated facts ───────────

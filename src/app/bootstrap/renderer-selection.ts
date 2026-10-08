@@ -58,15 +58,21 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
   }
 }
 
+/** The PRODUCTION connector inputs: lazy import + the official SDK connect. */
+export interface ProductionTspConnectorDeps {
+  readonly cwd: string
+  readonly requestExit: () => void
+  readonly onFatal: (error: unknown) => void
+  readonly log: (message: string, fields?: Record<string, unknown>) => void
+  readonly logError: (message: string, fields?: Record<string, unknown>) => void
+}
+
 /** The PRODUCTION connector: lazy import + the official SDK connect. */
 export function productionTspConnector(
-  cwd: string,
-  requestExit: () => void,
-  onFatal: (error: unknown) => void,
-  log: (message: string, fields?: Record<string, unknown>) => void,
+  deps: ProductionTspConnectorDeps,
 ): () => Promise<{ readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam; readonly dispose: () => Promise<void> } | undefined> {
   return async () => {
     const { connectTspRenderer } = await import('../../tui/tsp/session.ts')
-    return connectTspRenderer({ cwd, requestExit, onFatal, log })
+    return connectTspRenderer(deps)
   }
 }

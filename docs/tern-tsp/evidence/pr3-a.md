@@ -266,6 +266,38 @@ observable notice when the live renderer cannot present it.
   command-catalog-reconnect + runner-session-bootstrap + question-flow +
   terminal-progress-lifecycle + interaction-port = **277 pass / 0 fail**.
 
+## Review round 2 → fixes (needs-fixes → all 4 P2 addressed)
+
+The second round (same independent reviewer, adjudicating `5aa07702`) returned
+**needs-fixes** with 4 P2 and confirmed F2/F3/F4/F5/F8/F10/F11 closed at the
+code level. Each remaining item was fixed at its root and guarded by a
+DISCRIMINATING regression (every new test was mutation-checked: reverting the
+fix makes it fail).
+
+| # | Finding | Root cause | Fix + guard |
+|---|---|---|---|
+| R2-1 (F1) | the teardown could still reach retirement/hint/exit before the SDK tty release: the already-cleaned-up return yielded `void`, and a throwing sibling unwound past the trailing return | `disposeSurface()` now returns the SAME release promise on the idempotent second call, and captures the release on EVERY path — including a throwing sibling — by returning `release.then(() => { throw batchFailure }, …)` after `runSyncDisposalSteps` is contained | `R2-1a/b/c` drive the REAL `createSurfaceLifecycle` + `createExitController` with a held release and a throwing `disposeViewer`: a second cleanup still awaits; a throwing sibling does not settle (nor hint/exit) before the release; the failure is recorded after it (mutations: both fail) |
+| R2-2 (F9) | the surface's pre-empting `status.update(patch)` split the PiTui display-subject transaction into two publications | the store commit moved OFF the surface: `commitStatus` writes the store only when no PiTui app is mounted (`app === undefined`), so PiTui keeps its ONE atomic `commitDisplaySubject` and the TSP branch still gets its store commit | `R2-2` subscribes the real store on the PiTui harness and asserts exactly ONE transaction per commit, carrying the child subject AND the child activity together (mutation: fails) |
+| R2-3 (F7) | three `.catch(() => {})` sites dropped the secondary tty-restoration error on a failure path | `connectTspRenderer` releases the owned session through a recorder that keeps the PRIMARY error and logs the secondary via a new `logError` sink (wired to `diag.error`); `mountTspRenderer` no longer closes (ownership stays with the connector, so there is exactly ONE close and no bare fire-and-forget promise); bootstrap records a failed `releaseUnmounted` beside the primary startup error | A-12/A-12b exercise both real boundaries; the `logError` sink is the visible diagnostic |
+| R2-4 | A-11 was vacuous (a normal `session.close()` cannot reject the iterator) and the selector/handshake tests duplicated production logic | the tests now drive the PRODUCTION primitives | A-11 manufactures a REAL mounted failure through the shipped SDK route (a node `onAction` handler that throws → `#chain` → `#fail` → the iterator rejects with that exact error) and asserts the same error reaches `onFatal` with no normal exit (mutation: fails). A-01/A-02/A-03/A-07 run the production `selectRendererMount`/`productionTspConnector`; A-03 asserts the connector is never invoked without the opt-in; A-12b drives the production handshake and `releaseUnmounted` |
+
+### Post-fix validation (worktree, this snapshot)
+
+- `tsc -p tsconfig.json` / `tsconfig.bench.json` — exit 0; `pnpm build` — exit 0.
+- `application-architecture-gate` (448 files) / `client-boundary-gate` /
+  `naming-gate` / `check-no-session-events` / `installation-doc-gate` /
+  `test:docs` — ok.
+- `node --test` tern-tsp-renderer-selection (11) + tern-tsp-live-mount (14) =
+  **25 pass / 0 fail**.
+- `node --test` spike + live-projection + compaction + a4-surface-ownership +
+  command-catalog-reconnect + runner-session-bootstrap + question-flow +
+  terminal-progress-lifecycle + interaction-port = **278 pass / 0 fail**.
+- Real Tern 0.6.2 pane re-run on this build: the deferred mount, a REAL session
+  resume (`resume ok seq=167`, 3 frames, **168 main node ops**) with exactly one
+  `Loading session…` in the wire (the hydration fence working on a real pane),
+  the legal resume-failure notice path, and the `q` quit path (`x keep:false`
+  once, `retire complete failures=0`, clean shell return).
+
 ### Known follow-ups (recorded, not claimed done)
 
 - The packaging lanes (`pack:release` / tarball smoke) and the remaining
