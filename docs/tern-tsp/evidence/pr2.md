@@ -20,7 +20,7 @@ below; the long-term entry point is [`docs/tern-tsp.md`](../../tern-tsp.md).
 | Path | What it is |
 |---|---|
 | `src/app/surface/runtime.ts` | The PR2 seam: `SurfaceRuntimeOptions.onTranscriptProjected?` + `TranscriptProjectionFrame`, published by `repaintTarget()` after the ONE existing `folder.window()`/`setTranscript()`; released by `dispose()`. |
-| `test/tern-tsp-live-projection.test.ts` | 9 tests: the real routing → fold/window → `repaintTarget` → mounted `TuiApp` → observer → PR1 mapper → real SDK surface chain, plus the fences, the replaced-fold/window re-scope, the re-entrancy drop, coalescing, dispose and tty/product isolation. |
+| `test/tern-tsp-live-projection.test.ts` | 9 tests: the real routing → fold/window → `repaintTarget` → mounted `TuiApp` → observer → PR1 mapper → real SDK surface chain, plus the fences, the replaced-fold re-scope, the re-entrancy drop, coalescing, dispose and tty/product isolation. |
 | `docs/tern-tsp.md` | The long-term TSP entry point (protocol boundary, ownership chain, status, contracts, capability matrix, ledger, PR3 questions). |
 | `docs/tern-tsp/evidence/pr1.md` | The PR1 record, `git mv`-archived verbatim (only a historical-snapshot note added). |
 | `docs/tern-tsp/evidence/pr2.md` | This document. |
@@ -72,8 +72,8 @@ separately, as the Direct install consults it before `applyAssistantInput`.
 | P2-03 | Live assistant delta | DONE: `applyAssistantInput` → the same streaming card; the growth is an SDK `text` op | `P2-03` |
 | P2-04 | Wrong attached object / stale session | DONE: a foreign Session's durable event and stream neither fold nor schedule a repaint | `P2-04` |
 | P2-05 | main → viewed child → main | DONE: each subject carries its own id and identity token; the main fold keeps updating behind the viewer; leaving republishes the main projection | `P2-05` |
-| P2-06 | Same Session id, replaced ownership/window | SEAM-LEVEL DONE: replacing the main fold **and** its window under the same id produces a NEW identity scope (no cross-attribution, the stale fold stops receiving), so the seam carries no Direct/`same-id` assumption. The real Remote `Connection` generation/transport rollover over the wire stays with the existing Remote qualification suites — see *Deferred with owner* | `P2-06/P2-07` |
-| P2-07 | Remote bounded window / `loadOlder` | PARTIAL: the seam follows the committed window of whichever fold/window the routing exposes (covered by the same replacement case and by the ordinary window changes in `P2-02`/`P2-09`); the bounded reader's `hasMore`/`loadOlder` semantics are untouched and keep their own coverage in the history-extension and Remote suites | `P2-06/P2-07` |
+| P2-06 | Same Session id, replaced fold (the production session-commit/rehydrate shape) | SEAM-LEVEL DONE: replacing the main fold under the same id — with the ONE retained window controller re-bound to it, exactly as `session-presentation.ts` does — produces a NEW identity scope (no cross-attribution, the stale fold stops receiving), so the seam carries no Direct/`same-id` assumption. The real Remote `Connection` generation/transport rollover over the wire stays with the existing Remote qualification suites — see *Deferred with owner* | `P2-06/P2-07` |
+| P2-07 | Remote bounded window / `loadOlder` | PARTIAL: the observer publishes whatever committed window the routing exposes, so ordinary window changes are exercised by `P2-02`/`P2-09` and a re-bound fold by `P2-06/P2-07`; the production window CONTROLLER is never replaced within one subject, and the bounded reader's `hasMore`/`loadOlder` semantics are untouched, keeping their own coverage in the history-extension and Remote suites | `P2-06/P2-07` |
 | P2-08 | Read merge / Context clustering | INHERITED from PR1 (mapper `View.ops` rebuild case, `test/tern-tsp-transcript-spike.test.ts`); not re-asserted through the live chain | PR1 T6 |
 | P2-09 | Repaint coalescing / unchanged view | DONE: three events in one flush window commit once; a repaint of an identical projection emits **zero ops** on the wire | `P2-09` |
 | P2-10 | Synchronous subject switch inside `setTranscript` | DONE (see the discrimination table) | `P2-10` |
@@ -122,7 +122,7 @@ reason: a dropped frame or a re-used token both fail it.
 | The ONE `repaintTarget` exit covers the active window; no second event/fold/window authority | `mounted().setTranscript(` exists exactly once in `src/**` (`src/app/surface/runtime.ts:816`); every `repaintTarget()` caller passes `activeFolder()`/`activeWindow()`; the publish point is inside that same function; PR2 adds no subscription, fold, window, reader or port |
 | Production keeps PiTui and never handshakes on its tty; the SDK stays dev/test-scoped | `docs/tern-tsp.md` + `P2-12/P2-14` test: no `src/**` file imports the SDK, `bootstrap.ts` never injects the observer, the two terminals are distinct objects; `@stencil-hq/tern` remains in `devDependencies` |
 | A real application event-routing source→fold→window→observer→SDK sink test, plus a stream live input positive | `P2-01/P2-02` and `P2-03` (real routing bodies, real fold/window, real `repaintTarget`, real mounted `TuiApp`, real SDK surface) |
-| main/viewer, same-id rebind, Remote bounded/currentness, rehydrate, late event, dispose — covered or level-marked | `P2-05`, `P2-06/P2-07` (replaced fold/window under the same id), `P2-10`, `P2-11` for the seam; the real Remote wire rollover is recorded as *Deferred with owner*; `P2-01` bulk cold-hydrate and `P2-08` are inherited/level-marked |
+| main/viewer, same-id rebind, Remote bounded/currentness, rehydrate, late event, dispose — covered or level-marked | `P2-05`, `P2-06/P2-07` (replaced fold under the same id), `P2-10`, `P2-11` for the seam; the real Remote wire rollover is recorded as *Deferred with owner*; `P2-01` bulk cold-hydrate and `P2-08` are inherited/level-marked |
 | `View.ops` keeps increments; Read/Context reparenting may rebuild; no reinvented business id | `P2-09` (unchanged projection = zero ops) plus PR1's `View.ops` cases; the seam introduces no identity of its own |
 | Production repaint/search/status/input timing unchanged; no wider abstraction | One optional option + one call in `repaintTarget()`; with no observer the path is one `undefined` check; `pnpm test:product` 7370/0 in the stage-final pipeline |
 | `docs/tern-tsp.md` created as the long-term entry | `docs/tern-tsp.md` (scope/status, upstream, ownership boundary, implementation, contracts, capability matrix, verification, ledger, next decisions) |
@@ -154,7 +154,7 @@ Proved (on the snapshots above):
    `append`, and an unchanged projection produces no frame at all.
 3. The existing fences stay in charge: a foreign Session, a stale live input, a
    synchronous subject switch inside the commit and a disposed surface publish
-   nothing; and replacing the fold/window under the SAME Session id produces a
+   nothing; and replacing the fold under the SAME Session id produces a
    new identity scope, so the same id is never treated as the same view.
 4. The production path is unchanged and SDK-free: no `src/**` import, no
    composition wiring, PiTui keeps its own tty.
@@ -210,6 +210,7 @@ NOT proved (do not read the tests as these):
 | Round | Verdict | Findings and disposition |
 |---|---|---|
 | Internal R1 (durable reviewer, reviewed `bfeac1d0`; code/test identical to `7f06f7b5`) | needs-fixes | P2 `docs/tern-tsp.md` still described `sourceIdentity` as the fold instance → corrected to the opaque token. P2 plan §2 MUST #1/#3 Remote ownership/window replacement + same-id rehydrate not delivered → `P2-06/P2-07` seam-level replacement test added; the real Remote wire rollover recorded as *Deferred with owner* above. P3 raw-mode timing → reworded against the shipped SDK's `handshake()`. P3 the `routeSessionEvent` fence list wrongly included the exact-Agent fence → split (with the note that `isCurrentAssistantAgent` is asserted separately). P3 the P2-06 parenthetical conflated a subject switch with a same-id rebind → rephrased. Non-blocking read-only observation → recorded as an explicit limit above. |
+| Internal R2 (same reviewer, delta `bfeac1d0..67f13aae`) | **accepted-with-followups** | All five R1 findings verified fixed; it ran `node --test test/tern-tsp-live-projection.test.ts` itself (9/0) and accepted the wire-level Remote rollover as `DEFERRED_WITH_OWNER` (subject to the plan owner's confirmation). New P3: the fixture's `replaceMain()` also swapped the window controller, which production never does — fixed by replacing only the fold and re-binding the ONE retained controller (`session-presentation.ts`), with the comments and the P2-07 row corrected. |
 
 ## Reproduction
 

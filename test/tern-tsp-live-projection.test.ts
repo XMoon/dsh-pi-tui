@@ -132,7 +132,7 @@ interface Harness {
   readonly vt: VirtualTerminal
   /** The CURRENT main fold (a session commit/rehydrate replaces it). */
   readonly folder: TranscriptFolder
-  /** The CURRENT main window controller (replaced with the fold). */
+  /** The ONE retained main window controller (`session-presentation.ts`). */
   readonly window: TranscriptWindowController
   /** Every frame the surface published, in order. */
   readonly frames: TranscriptProjectionFrame[]
@@ -140,8 +140,8 @@ interface Harness {
   readonly committed: Array<readonly TranscriptMessage[]>
   viewChild(): TranscriptFolder
   exitChild(): void
-  /** Replace the main fold + its window under the SAME session id (the session
-   *  commit / cold rehydrate / Remote re-window shape). */
+  /** Replace the main fold under the SAME session id and re-bind the retained
+   *  window controller (the session commit / cold rehydrate shape). */
   replaceMain(): void
   dispose(): void
 }
@@ -159,7 +159,7 @@ function mountHarness(options: {
   const vt = new VirtualTerminal(100, 30)
   const restoreTerminal = installVirtualProcessTerminal(vt)
   let folder = new TranscriptFolder()
-  let controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
   const frames: TranscriptProjectionFrame[] = []
   const committed: Array<readonly TranscriptMessage[]> = []
   let viewed: { id: string; folder: TranscriptFolder; window: TranscriptWindowController } | undefined
@@ -170,8 +170,9 @@ function mountHarness(options: {
   const stats = { apply: () => {} }
 
   // The presentation target stays ONE object whose fold/window are LIVE reads:
-  // a session commit, cold rehydrate or Remote re-window replaces the instances
-  // underneath it, exactly as `session-presentation.ts` does.
+  // a session commit or cold rehydrate replaces the folder instance underneath
+  // it and re-binds the ONE retained window controller, exactly as
+  // `session-presentation.ts` does.
   const mainPresentation = {
     folder: { apply: (events: readonly SessionEvent[]) => folder.apply(events) },
     stats,
@@ -291,8 +292,11 @@ function mountHarness(options: {
     },
     exitChild() { viewed = undefined },
     replaceMain() {
+      // `session-presentation.ts` replaces the FOLD and re-binds the ONE
+      // retained window controller (`windowController.setTurns(...)`); the
+      // controller instance is never swapped within one subject.
       folder = new TranscriptFolder()
-      controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+      controller.setTurns(folder.groupedTurns())
     },
     dispose() {
       surface.dispose()
@@ -656,9 +660,9 @@ test('P2-10: a subject switch performed synchronously inside setTranscript drops
   }
 })
 
-// ── P2-06 / P2-07: a replaced ownership/window under the SAME session id ────
+// ── P2-06 / P2-07: a replaced fold under the SAME session id ────────────────
 
-test('P2-06/P2-07: a replaced fold and window under the SAME session id is a new projection scope', () => {
+test('P2-06/P2-07: a replaced fold under the SAME session id is a new projection scope', () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -669,8 +673,8 @@ test('P2-06/P2-07: a replaced fold and window under the SAME session id is a new
     assert.equal(before.subjectId, SESSION_ID)
     const stale = harness.folder
 
-    // A session commit / cold rehydrate / Remote re-window replaces the fold and
-    // its window while the Session id stays the same.
+    // A session commit / cold rehydrate replaces the fold while the Session id
+    // stays the same (the ONE window controller is re-bound to the new fold).
     harness.replaceMain()
     assert.notEqual(harness.folder, stale, 'the fold instance really was replaced')
 
