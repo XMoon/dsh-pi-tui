@@ -69,6 +69,16 @@ export interface TerminalProgressInterval {
    * @returns the commit to publish, or `undefined` when nothing changed.
    */
   retire(): IntervalProgress | undefined
+  /**
+   * Apply one ALREADY-AUTHORIZED complete fact from the authority owner that
+   * classified it (the Remote Host evidence stream). It carries no local turn
+   * evidence, so the interval's open-turn/candidate state is discarded: the
+   * fact itself IS the state. The local-evidence adapter never uses this — its
+   * outcome comes only from the fold's own `status`/`turnStart`/`turnEnd`.
+   * @param fact - the owner's proven `(active, outcome)` pair.
+   * @returns the committed state.
+   */
+  apply(fact: IntervalProgress): IntervalProgress
   /** Discard every result of the previous owner (new Session / Agent rebind). */
   reset(): IntervalProgress
   /** Read the current presentation state without changing it. */
@@ -163,6 +173,13 @@ export function createTerminalProgressInterval(
       lastClosed = undefined
       if (!active && outcome === 'idle') return undefined
       active = false
+      return state()
+    },
+    apply(fact: IntervalProgress): IntervalProgress {
+      active = fact.active
+      outcome = fact.outcome
+      openTurn = undefined
+      lastClosed = undefined
       return state()
     },
     reset(): IntervalProgress {

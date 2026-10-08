@@ -126,7 +126,7 @@ import { buildPendingPresentation } from './pending-presentation.ts'
 import { refreshedSearchState, steppedSearchOverlayState } from './search-overlay.ts'
 import { createSearchProfiler, searchProfilingEnabled, type SearchProfile } from './search-profile.ts'
 import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
-import { parseTerminalProgressMode } from '../../domain/terminal-progress/settings.ts'
+import { parseTerminalProgressMode, type TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
 import { createTerminalProgressInterval, type IntervalProgress } from '../../domain/terminal-progress/interval.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 // TS3 §31-§36: the surface's independent application-level owners. Each is
@@ -292,6 +292,24 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   retireCompletionOwner(): void
   /** The ONLY completion-controller status feed (the `agent/status` handler). */
   onAgentStatus(agentId: string, status: AgentLifecycleStatus): void
+  /**
+   * The ONE Remote Host terminal-progress feed (plan R2 §7.2/§7.3). On the
+   * Remote branch the Host evidence stream owns the main outcome, so this is
+   * the only entry that writes the interval there — with the SAME single
+   * `(active, outcome)` commit the Direct path uses, never a second writer.
+   *
+   * `kind` is the wire frame kind: `snapshot` is the opening authoritative read
+   * (display truth only — it NEVER feeds the completion controller, so a
+   * reconnect can neither notify nor revive a historical result), while
+   * `update` is a real Host edge and feeds the controller exactly like a Direct
+   * `agent/status` transition. `identity` is the committed main-session identity
+   * the controller must recognize.
+   */
+  applyRemoteMainProgress(
+    kind: 'snapshot' | 'update',
+    identity: string,
+    progress: { readonly running: boolean; readonly outcome: TerminalProgressOutcome },
+  ): void
   /**
    * A4-4 status COMMIT coordination (plan §13.1): the runner keeps the
    * semantic derivation; the surface commits the derived patch, the legacy
@@ -1274,6 +1292,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     onAgentStatus(agentId, status) {
       notification.onAgentStatus(agentId, status)
+    },
+    applyRemoteMainProgress(kind, identity, progress) {
+      // The Remote Host already classified this fact with the shared fold: the
+      // interval ADOPTS it (no local turn evidence is fabricated) and publishes
+      // it through the one commit. The progress commit lands BEFORE the
+      // completion feed, so a settled transition clears the busy state before
+      // the controller may emit its toast (the same order as Direct).
+      commitMainAgentProgress(interval.apply({ active: progress.running, outcome: progress.outcome }))
+      if (kind === 'update') notification.onAgentStatus(identity, progress.running ? 'running' : 'idle')
     },
     retireCompletionOwner() {
       // Final surface teardown (plan §4.4): the notification owner is withdrawn

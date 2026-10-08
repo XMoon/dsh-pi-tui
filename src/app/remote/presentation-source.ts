@@ -38,6 +38,7 @@ import { CURRENT_STATUS_PROJECTION_KEYS } from '../../runtime/remote/session-rea
 import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
 import { createRemoteLiveIngress, type RemoteLiveIngress } from './live-ingress.ts'
 import { createRemoteChildViewSource } from './child-view.ts'
+import { createRemoteTerminalProgressSource } from './terminal-progress-source.ts'
 import { createRemoteCommandSource, type RemoteCommandSource } from './command-source.ts'
 import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from './runtime.ts'
 import type { RemoteApplicationSources,
@@ -154,6 +155,13 @@ export function createRemotePresentationSource(
       bindings: sessions,
     }),
     submissionPresentation: new RemoteSubmissionPresentation(sessions, generation),
+    // R2 §7.1: the ONE Host evidence stream, over the SAME wire faces and the
+    // SAME retained-binding accessor every other Remote read borrows.
+    terminalProgress: createRemoteTerminalProgressSource({
+      remote: wire.client.remote,
+      generation,
+      binding: sessionId => sessions.binding(sessionId as never) as object | undefined,
+    }),
     liveIngress,
     sessionFacts: {
       sessionStatus: sessionId => sessionReader.sessionStatus(sessionId),

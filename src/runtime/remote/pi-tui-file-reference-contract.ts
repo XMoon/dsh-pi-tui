@@ -27,9 +27,7 @@ import type {
   InvocationDescriptor,
   RemoteResult,
   TypertCodec,
-  TypertRemoteContribution,
 } from '@deepseek-ai/dsh-typert-protocol'
-import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 import type { HostFileListResult } from '../host-file-port.ts'
 
 /** The npm package that owns the private Remote methods. */
@@ -132,20 +130,12 @@ export const PI_TUI_FILE_REFERENCES_LIST: InvocationDescriptor = {
   result: HOST_FILE_LIST_RESULT_CODEC,
 }
 
-/** The explicit Host contribution registered with `ctx.typert.register`. */
-export const PI_TUI_FILE_REFERENCES_HOST_CONTRIBUTION: TypertContribution = {
-  package: PI_TUI_FILE_REFERENCE_PACKAGE,
-  face: 'host',
-  schemas: [],
-  model: { services: [], events: [], objects: [] },
-  invocations: [PI_TUI_FILE_REFERENCES_LIST],
-}
-
-/** The explicit Client contribution mounted with `ctx.remote.$mount`. */
-export const PI_TUI_FILE_REFERENCES_CLIENT_CONTRIBUTION: TypertRemoteContribution = {
-  package: PI_TUI_FILE_REFERENCE_PACKAGE,
-  descriptors: [PI_TUI_FILE_REFERENCES_LIST],
-}
+/*
+ * The Host/Client contributions are NOT declared here: rc.2 admits exactly one
+ * contribution per package identity, so the package's single contribution —
+ * this descriptor together with the terminal-progress one — lives in
+ * `pi-tui-remote-contribution.ts`.
+ */
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {

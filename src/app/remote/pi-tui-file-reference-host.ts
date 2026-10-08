@@ -4,9 +4,14 @@
  *
  * ```text
  * the Host service key + wire namespace (piTuiFileReferences)
- * the EXPLICIT Typert Host contribution registration (never decorator discovery)
- * the row's lifetime (the registration is withdrawn with this fiber)
+ * the `list` implementation behind the private endpoint
+ * the row's lifetime
  * ```
+ *
+ * The Typert CONTRIBUTION (the descriptor the Gateway dispatches on) is owned
+ * by the composition, not by this row: rc.2 admits exactly one contribution per
+ * package identity, so all of this package's private invocations are registered
+ * together in `runtime/remote/pi-tui-remote-contribution.ts`.
  *
  * The actual completion semantics live behind the transport-neutral bridge
  * (`runtime/remote/pi-tui-file-reference-host-bridge.ts`): the SAME Host-scoped
@@ -29,10 +34,7 @@ import {
   type PiTuiHostFileReferenceBridgeDeps,
   type PiTuiHostFileReferenceRuntime,
 } from '../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
-import {
-  PI_TUI_FILE_REFERENCES_HOST_CONTRIBUTION,
-  PI_TUI_FILE_REFERENCES_NAMESPACE,
-} from '../../runtime/remote/pi-tui-file-reference-contract.ts'
+import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import type { HostFileListResult } from '../../runtime/host-file-port.ts'
 
 export type {
@@ -60,9 +62,6 @@ export class PiTuiFileReferenceHostService extends TypertRemoteService {
   constructor(ctx: Context, deps: PiTuiFileReferenceHostDeps) {
     super(ctx, PI_TUI_FILE_REFERENCES_NAMESPACE)
     this.runtime = createPiTuiHostFileReferenceRuntime(deps)
-    // Registered in THIS fiber: disposal withdraws the endpoint, so a second
-    // Host composition can never collide with a stale first one.
-    ctx.effect(() => ctx.typert.register(PI_TUI_FILE_REFERENCES_HOST_CONTRIBUTION), 'pi-tui-file-references-host')
   }
 
   /**

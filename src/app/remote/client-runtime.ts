@@ -41,7 +41,7 @@ import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
-import { PI_TUI_FILE_REFERENCES_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
+import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause, type InProcessHostCarrier } from './host-runtime.ts'
 
 type TypertClientModule = typeof typertRegistryClient
@@ -391,12 +391,14 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     for (const contribution of REMOTE_CONTRIBUTIONS) {
       contributionDisposers.push(await context.remote.$mount(contribution))
     }
-    // 4b. The private pi-tui contribution (TS8-HF1): mounted explicitly,
-    //     AFTER the official generated contributions and deliberately kept
-    //     separate from that list. It adds the `piTuiFileReferences`
-    //     augmentation namespace only — the official `fileReferences`
-    //     namespace stays mounted and authoritative for bare queries.
-    contributionDisposers.push(await context.remote.$mount(PI_TUI_FILE_REFERENCES_CLIENT_CONTRIBUTION))
+    // 4b. The private pi-tui contribution: mounted explicitly, AFTER the
+    //     official generated contributions and deliberately kept separate from
+    //     that list. It is the package's ONE contribution (rc.2 admits exactly
+    //     one per package), carrying BOTH private descriptors — the
+    //     `piTuiFileReferences` augmentation (the official `fileReferences`
+    //     namespace stays mounted and authoritative for bare queries) and the
+    //     `piTuiTerminalProgress` status stream.
+    contributionDisposers.push(await context.remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
     // 5./6./7. Domain Clients - fileUpload before Sessions is contractual
     // (the Session Client injects `fileUpload`).
     fileUploadFiber = context.plugin(modules.fileUpload)

@@ -1180,11 +1180,16 @@ export function applyRunnerWithRuntime(
      *  history boundary seam coalesces repeated gestures for the SAME subject
      *  into one official page; another subject pages independently). */
     let remoteHistoryLoadingFor: string | undefined
-    const disposeRemoteIngress = (): void => {
+    /** R2 §7.1: the ONE Remote Host terminal-progress watch of the CURRENT main
+     *  session owner. Its controller is the watch's cancellation lifetime. */
+    let remoteProgressHandle: { dispose(): void } | undefined
+    const disposeRemoteLiveSurface = (): void => {
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
+      remoteProgressHandle?.dispose()
+      remoteProgressHandle = undefined
     }
-    lifecycleController.signal.addEventListener('abort', disposeRemoteIngress, { once: true })
+    lifecycleController.signal.addEventListener('abort', disposeRemoteLiveSurface, { once: true })
 
     /**
      * Initialize the WHOLE Remote live surface for one session: hydrate
@@ -1196,7 +1201,7 @@ export function applyRunnerWithRuntime(
      */
     const initRemoteLiveSurface = async (sessionId: string): Promise<void> => {
       if (remoteSources === undefined || cleanedUp) return
-      disposeRemoteIngress()
+      disposeRemoteLiveSurface()
       // §6.5 lifecycle fence (subscribe side): the token is captured BEFORE
       // the hydrate await; a superseded owner (switch/new/fork or a same-id
       // rollover — every commit shape bumps the generation) must not install
@@ -1284,6 +1289,43 @@ export function applyRunnerWithRuntime(
           })
         },
       }, hydrate.revision)
+      // R2 §7.1/§7.2/§7.3: the Remote terminal-progress authority. The Host
+      // evidence stream is the ONLY writer of the main interval on this branch
+      // (the durable ingress above keeps feeding the transcript and is gated
+      // out of the local fold by `mainProgressAuthority`). The completion owner
+      // is re-committed to THIS session id here, so an owner switch, a
+      // window/reconnect re-init and an Agent replacement all reset the
+      // controller's `seenRunning` — an earlier running edge plus a later idle
+      // can never fabricate a completion. The snapshot the watch opens with
+      // re-asserts the Host's authoritative display state; a settled snapshot is
+      // committed by `Surface.applyRemoteMainProgress` (never notified).
+      surface.setCompletionOwner(sessionId)
+      const progressController = new AbortController()
+      remoteProgressHandle = {
+        dispose: () => { progressController.abort(new Error('remote terminal progress watch disposed')) },
+      }
+      runDetached('remote terminal progress watch', async () => {
+        let ended = false
+        try {
+          for await (const fact of remoteSources.terminalProgress.open(sessionId, progressController.signal)) {
+            if (cleanedUp) return
+            if (ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration) return
+            surface.applyRemoteMainProgress(fact.kind, sessionId, fact)
+          }
+          ended = true
+        } finally {
+          // A stream that FAILED (contract violation, lost transport identity,
+          // Host teardown mid-flight) must not leave a stale `working` on the
+          // terminal: fail closed to idle. A stream that ENDED normally has
+          // already delivered the Host's authoritative last state, so its
+          // retained `done`/`error` stays untouched.
+          if (!ended && !cleanedUp
+            && ownership.currentSessionId() === sessionId
+            && ownership.generation() === initGeneration) {
+            surface.applyRemoteMainProgress('snapshot', sessionId, { running: false, outcome: 'idle' })
+          }
+        }
+      }, { diag, sessionId: () => sessionId })
     }
 
     /** The transition gate protects ordinary session surface changes — `/new`,

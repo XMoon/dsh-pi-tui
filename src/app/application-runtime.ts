@@ -147,6 +147,9 @@ export interface RemoteApplicationSources {
    *  Session (exact scoped lifetime, never an ambient "currently displayed"
    *  subject). */
   readonly attachments: RemoteAttachmentSource
+  /** The R2 Remote terminal-progress Host evidence stream (the ONLY main
+   *  terminal-outcome authority on this branch). */
+  readonly terminalProgress: RemoteTerminalProgressSource
 }
 
 /**
@@ -159,6 +162,34 @@ export interface RemoteApplicationSources {
 export interface RemoteTransportLifetime {
   readonly generation: unknown
   readonly binding: unknown
+}
+
+/**
+ * One authorized Remote main-Agent progress fact (R2 §7.1/§7.2): the Host
+ * already classified the outcome with the shared interval fold, so the Client
+ * only carries the proven `(running, outcome)` pair. `kind` distinguishes the
+ * opening authoritative SNAPSHOT (display truth only, NEVER completion
+ * evidence) from a real Host `update` edge.
+ */
+export interface RemoteMainProgressFact {
+  readonly kind: 'snapshot' | 'update'
+  readonly running: boolean
+  readonly outcome: 'idle' | 'done' | 'error'
+}
+
+/**
+ * The neutral Remote terminal-progress source (R2 §7.1): the ONE Host evidence
+ * stream of the current main session, fenced by the exact transport identity.
+ * The CALLER owns the iteration, so cancellation and failure ownership stay
+ * with the bootstrap (the same shape as the live-ingress subscription).
+ */
+export interface RemoteTerminalProgressSource {
+  /**
+   * Open the Host evidence stream of one session.
+   * @throws when the session has no retained binding, when a frame violates the
+   * private contract, or when the transport identity moved mid-stream.
+   */
+  open(sessionId: string, signal: AbortSignal): AsyncIterable<RemoteMainProgressFact>
 }
 
 /**

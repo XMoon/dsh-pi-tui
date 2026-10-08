@@ -128,6 +128,24 @@ test('reset discards the previous owner result', () => {
   assert.equal(interval.status(false)?.outcome, 'idle', 'the new owner must prove its OWN turn evidence')
 })
 
+test('apply adopts an already-classified fact and drops the local turn evidence', () => {
+  const interval = createTerminalProgressInterval()
+  interval.status(true)
+  interval.turnStart(1)
+  // The Remote Host owner classified the settle for its own interval: the
+  // applied fact IS the state, and the local candidate cannot survive it.
+  assert.deepEqual(interval.apply({ active: false, outcome: 'done' }), { active: false, outcome: 'done' })
+  assert.deepEqual(interval.snapshot(), { active: false, outcome: 'done' })
+  interval.apply({ active: true, outcome: 'idle' })
+  assert.deepEqual(interval.snapshot(), { active: true, outcome: 'idle' })
+  // The discarded local candidate can never re-settle the adopted interval.
+  interval.turnEnd(1, 'completed')
+  assert.deepEqual(interval.snapshot(), { active: true, outcome: 'idle' })
+  assert.deepEqual(interval.apply({ active: false, outcome: 'error' }), { active: false, outcome: 'error' })
+  assert.deepEqual(interval.retire(), { active: false, outcome: 'error' }, 'retire republishes the retained state')
+  assert.deepEqual(interval.snapshot(), { active: false, outcome: 'error' }, 'the applied result survives retire')
+})
+
 test('the fold latches before the reporter re-enters it', () => {
   // The reporter runs synchronously from inside `turnEnd`; the real caller
   // commits physically right after each command returns (TuiApp may re-enter
