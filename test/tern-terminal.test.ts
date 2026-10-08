@@ -245,6 +245,10 @@ function cwdHarness(options: {
   sessionTitle?: string
   /** The OFFICIAL session projection's cwd the Remote branch reads. */
   projectedCwd?: string
+  /** The current owner session id; `undefined` is the REAL sessionless state
+   *  (the Remote branch reads the Client launch cwd there). Defaults to
+   *  `'main'` for the session-bearing cases. */
+  currentSessionId?: string
 }): CwdHarness {
   const forwarded: (string | undefined)[] = []
   const titles: { sessionTitle?: string; cwd?: string }[] = []
@@ -268,7 +272,7 @@ function cwdHarness(options: {
       options: {},
     },
     generation: () => 1,
-    currentSessionId: () => 'main',
+    currentSessionId: () => ('currentSessionId' in options ? options.currentSessionId : 'main'),
     measureContext: () => undefined,
     sessionStatus: () => options.projectedCwd === undefined ? undefined : { cwd: options.projectedCwd },
     model: {
@@ -371,12 +375,34 @@ test('a Remote session with a projected Host cwd uses it as OSC 0 identity (plan
 })
 
 test('a Remote session without a projected cwd falls back to the bare brand, never the Client launch cwd', () => {
-  // The official projection is the ONLY workspace authority on the Remote
-  // branch: with no projected cwd the fact is undefined, so the title policy
-  // falls back to the bare brand instead of impersonating a Host workspace
-  // with the Client machine's launch directory.
+  // A session IDENTITY exists but its official cwd is unavailable: the fact
+  // is undefined, so the title falls back to the bare brand instead of
+  // impersonating a Host workspace with the Client machine's launch
+  // directory. (The REAL sessionless Remote case is the next test.)
   const h = cwdHarness({ remote: true, clientCwd: '/client/launch' })
   h.refreshTitle()
   assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: undefined }])
   assert.equal(composedTitle(h), 'dsh')
+})
+
+test('a Direct live session whose official header carries no cwd falls back to the bare brand, not the launch cwd', () => {
+  // The negative control that separates OSC 0 identity from the OSC 7
+  // terminal-local fallback: OSC 7 may use the Client launch cwd, the title
+  // must not (there IS a session identity; it simply has no official cwd).
+  const h = cwdHarness({ live: {}, clientCwd: '/client/launch' })
+  h.refreshTitle()
+  assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: undefined }])
+  assert.equal(composedTitle(h), 'dsh')
+})
+
+test('a truly sessionless Remote surface uses the Client launch cwd as local identity', () => {
+  // `currentSessionId()` undefined is a legal state (`status-runtime` names
+  // "the sessionless Remote surface"): with NO session identity there is no
+  // Host workspace to impersonate, so the local launch directory is
+  // legitimate OSC 0 identity — exactly as for a sessionless Direct surface.
+  // OSC 7 still publishes no Remote Host cwd.
+  const h = cwdHarness({ remote: true, currentSessionId: undefined, clientCwd: '/client/beta' })
+  h.refreshTitle()
+  assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: '/client/beta' }])
+  assert.equal(composedTitle(h), 'dsh · client/beta')
 })
