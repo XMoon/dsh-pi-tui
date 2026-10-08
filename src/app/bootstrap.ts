@@ -2253,7 +2253,13 @@ export function applyRunnerWithRuntime(
       requestExit: () => requestExit(),
       onFatal: rendererOnFatal,
       log: (message, fields) => diag.info(message, fields),
-      connectTsp: productionTspConnector(cwd, () => requestExit(), rendererOnFatal, (message, fields) => diag.info(message, fields)),
+      connectTsp: productionTspConnector({
+        cwd,
+        requestExit: () => requestExit(),
+        onFatal: rendererOnFatal,
+        log: (message, fields) => diag.info(message, fields),
+        logError: (message, fields) => diag.error(message, fields),
+      }),
       env: process.env,
     })
     // A4: mount through the surface owner. The surface builds the surface-local
@@ -2402,7 +2408,23 @@ export function applyRunnerWithRuntime(
       // flight). The connected session is OWNED and must be closed before the
       // error reaches the fatal path — otherwise raw-mode stdin stays held
       // with no registered disposer.
-      if (rendererMount !== undefined) await rendererMount.releaseUnmounted().catch(() => {})
+      if (rendererMount !== undefined) {
+        // R2-3: the PRIMARY startup error keeps propagating; a secondary
+        // release failure is recorded (a silent `catch {}` would hide a tty
+        // that stayed in raw mode).
+        try {
+          await rendererMount.releaseUnmounted()
+        } catch (releaseError) {
+          try {
+            diag.error('tsp renderer: release failed after a rejected mount', {
+              error: safeErrorMessage(releaseError),
+              primary: safeErrorMessage(error),
+            })
+          } catch {
+            // A throwing diagnostics channel must not replace the primary.
+          }
+        }
+      }
       throw error
     }
     // The mounted surface is now live. On the PiTui branch the runner borrows

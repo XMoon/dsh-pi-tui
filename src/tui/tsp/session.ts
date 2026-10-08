@@ -85,6 +85,12 @@ export interface TspRendererOptions {
   readonly connect?: typeof sdkConnect
   /** Diagnostics sink for the renderer's own lifecycle facts. */
   readonly log?: (message: string, fields?: Record<string, unknown>) => void
+  /**
+   * Diagnostics sink for FAILURES (R2-3): a secondary tty-restoration error on
+   * a failure path is recorded here while the PRIMARY error stays the one that
+   * propagates — never a silent `catch {}`, never a fallback/retry.
+   */
+  readonly logError?: (message: string, fields?: Record<string, unknown>) => void
 }
 
 /** The mounted TSP renderer (the display seam + the one-shot disposer). */
@@ -113,23 +119,54 @@ export async function connectTspRenderer(options: TspRendererOptions): Promise<T
   if (session === null) return undefined
   try {
     return mountTspRenderer(session, options)
-  } catch (error) {
+  } catch (primary) {
     // The session is an OWNED resource from the moment connect returned it:
-    // a mount failure must not leak its raw-mode stdin listener.
-    await session.close().catch(() => {})
-    throw error
+    // a mount failure must not leak its raw-mode stdin listener. The PRIMARY
+    // mount error stays the one that propagates; a secondary tty-restoration
+    // failure is recorded (R2-3) and never replaces it.
+    await closeRestoring(session, options.logError, primary)
+    throw primary
+  }
+}
+
+/**
+ * Close one owned session on a failure path. The `primary` error keeps
+ * propagating; a secondary restore failure is recorded through `logError`
+ * (R2-3) — never swallowed, never a retry/fallback.
+ */
+async function closeRestoring(
+  session: Session,
+  logError: ((message: string, fields?: Record<string, unknown>) => void) | undefined,
+  primary: unknown,
+): Promise<void> {
+  try {
+    await session.close()
+  } catch (restorationFailure) {
+    logError?.('tsp renderer: tty restore failed while releasing an owned session', {
+      error: errorText(restorationFailure),
+      primary: errorText(primary),
+    })
+  }
+}
+
+/** A safe one-line error text (never throws on a hostile value). */
+function errorText(value: unknown): string {
+  try {
+    if (value instanceof Error) return typeof value.message === 'string' ? value.message : '<error>'
+    return String(value)
+  } catch {
+    return '<unprintable error>'
   }
 }
 
 /** Mount the renderer over an already-connected SDK session. */
 export function mountTspRenderer(session: Session, options: TspRendererOptions): TspRenderer {
-  let surface: Surface
-  try {
-    surface = session.open({ mode: 'inline', title: 'dsh' })
-  } catch (error) {
-    void session.close().catch(() => {})
-    throw error
-  }
+  // Ownership rule (R2-3): the session belongs to the CALLER until this mount
+  // succeeds. A throwing `open` therefore re-raises WITHOUT closing here —
+  // `connectTspRenderer` (the owner that connected it) performs the recorded
+  // release, so there is exactly ONE close and no bare fire-and-forget
+  // promise inside this synchronous function.
+  const surface: Surface = session.open({ mode: 'inline', title: 'dsh' })
   let disposed = false
   let exitRequested = false
   /** Monotonic renderer-local identities (notices; scope epochs). */

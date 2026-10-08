@@ -1319,3 +1319,53 @@ test('F10: a background pending refresh never yanks the reader; a new own echo d
     harness.dispose()
   }
 })
+
+// ── R2-2: ONE atomic display-subject commit on the PiTui branch ─────────────
+
+test('R2-2: surface.commitStatus publishes ONE atomic store transaction on PiTui', async () => {
+  const harness = mountHarness({ onTranscriptProjected: () => {} })
+  try {
+    // A MAIN commit first, so the store starts from a known subject.
+    harness.surface.commitStatus({ workspace: { cwd: '/w' } } as never, {}, undefined)
+    const notifications: { subject: string; todoCount: number }[] = []
+    const unsubscribe = harness.surface.status.subscribe(() => {
+      const snapshot = harness.surface.status.snapshot()
+      notifications.push({
+        subject: snapshot.view.subject.kind,
+        todoCount: snapshot.activity.todoCount,
+      })
+    })
+    try {
+      // The CHILD commit: the presentation projection plus the store patch are
+      // ONE transaction. A pre-empting store write would publish an
+      // intermediate snapshot (child subject beside the parent activity).
+      harness.surface.commitStatus(
+        {
+          collaboration: { plan: { effective: true } },
+          view: { subject: { kind: 'subagent', id: CHILD_ID, mode: 'continuable' } },
+        } as never,
+        {},
+        {
+          sessionId: CHILD_ID,
+          title: 'child title',
+          workspaceRoot: '/w',
+          todos: [
+            { content: 'child todo one', status: 'pending' },
+            { content: 'child todo two', status: 'pending' },
+          ],
+        } as never,
+      )
+      await settle()
+    } finally {
+      unsubscribe()
+    }
+    assert.equal(notifications.length, 1,
+      `exactly ONE store transaction per commitStatus (saw ${JSON.stringify(notifications)})`)
+    assert.equal(notifications[0]!.subject, 'subagent',
+      'the single published snapshot already carries the child display subject')
+    assert.equal(notifications[0]!.todoCount, 2,
+      'and the SAME snapshot already carries the child activity (never a parent-activity intermediate)')
+  } finally {
+    harness.dispose()
+  }
+})
