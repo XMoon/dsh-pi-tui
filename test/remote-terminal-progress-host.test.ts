@@ -275,6 +275,27 @@ test('an Agent disposal retires a live interval, ends the watchers and drops the
   await reopened.return?.(undefined)
 })
 
+test('a subscriber that stops draining fails explicitly instead of losing an edge', async (t) => {
+  const session = { id: SESSION_ID }
+  const live = agent('agent-a', session)
+  const host = await mountHost({ agentFor: () => live, onUnknownReason: () => {} })
+  t.after(async () => { await host.ctx.fiber.dispose() })
+  const controller = new AbortController()
+  t.after(() => { controller.abort() })
+  const iterator = host.service.watch(SESSION_ID, controller.signal)[Symbol.asyncIterator]()
+  await read(iterator, 1, 'overflow-baseline')
+  // The consumer never reads again: the queue must fail the stream instead of
+  // dropping the edges it cannot hold.
+  for (let index = 0; index < 200; index += 1) {
+    host.emit('agent/status', { agent: live, status: index % 2 === 0 ? 'running' : 'idle' })
+  }
+  await assert.rejects(
+    async () => { await read(iterator, 1, 'overflow') },
+    /subscriber queue overflowed/u,
+    'an overflowing subscriber stream fails explicitly',
+  )
+})
+
 test('the cut loses no edge and replays none, and the fiber disposal closes the watchers', async (t) => {
   const session = { id: SESSION_ID }
   const live = agent('agent-a', session)

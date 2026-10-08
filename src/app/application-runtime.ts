@@ -24,6 +24,7 @@
 
 import type { PresentationReader } from '../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../runtime/session-reader-port.ts'
+import type { TerminalProgressOutcome } from '../domain/terminal-progress/settings.ts'
 import type { SubmissionPresentationSource } from './submission/presentation.ts'
 import type { Backend, BackendKind } from '../runtime/backend.ts'
 import type { SessionOwnerAccess, SessionOwnerRetirement } from './session/owner-access.ts'
@@ -174,7 +175,9 @@ export interface RemoteTransportLifetime {
 export interface RemoteMainProgressFact {
   readonly kind: 'snapshot' | 'update'
   readonly running: boolean
-  readonly outcome: 'idle' | 'done' | 'error'
+  /** The SAME settled-outcome vocabulary the Direct adapter uses (declared
+   *  once in `domain/terminal-progress/settings.ts`). */
+  readonly outcome: TerminalProgressOutcome
 }
 
 /**

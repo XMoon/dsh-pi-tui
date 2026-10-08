@@ -110,17 +110,37 @@ function reasonKindOf(data: unknown): string | undefined {
 }
 
 /**
+ * Frames one subscriber may fall behind by before the stream is failed instead
+ * of silently losing an edge. A real run produces a handful of transitions, so
+ * only a consumer that stopped draining can reach it.
+ */
+const SUBSCRIBER_QUEUE_LIMIT = 64
+
+/**
  * One subscriber's ordered frame queue. The Host ALWAYS mutates the record
  * before pushing, so a queue can never observe a frame the record has not
  * committed, and `close()` is idempotent.
+ *
+ * An overflowing queue FAILS the reader: dropping frames and continuing would
+ * let a stream report a settlement whose running edge it lost (plan §6.5).
  */
 class FrameQueue {
   private readonly frames: PiTuiTerminalProgressFrame[] = []
   private wake: (() => void) | undefined
   private closed = false
+  private failure: Error | undefined
+  private readonly limit = SUBSCRIBER_QUEUE_LIMIT
 
   push(frame: PiTuiTerminalProgressFrame): void {
-    if (this.closed) return
+    if (this.closed || this.failure !== undefined) return
+    if (this.frames.length >= this.limit) {
+      this.failure = new Error('piTuiTerminalProgress: the subscriber queue overflowed')
+      this.frames.length = 0
+      const wake = this.wake
+      this.wake = undefined
+      wake?.()
+      return
+    }
     this.frames.push(frame)
     const wake = this.wake
     this.wake = undefined
@@ -144,6 +164,7 @@ class FrameQueue {
     for (;;) {
       const frame = this.frames.shift()
       if (frame !== undefined) return { value: frame, done: false }
+      if (this.failure !== undefined) throw this.failure
       if (this.closed) return { value: undefined, done: true }
       await new Promise<void>(resolve => { this.wake = resolve })
     }
