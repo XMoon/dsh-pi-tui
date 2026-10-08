@@ -27,7 +27,7 @@ evidence ledger. Per-PR measurements live under
 | Item | State |
 |---|---|
 | PR1 replay spike → real Tern pane | DONE (manual, opt-in script) |
-| PR2 live application projection → isolated TSP surface | IMPLEMENTED on `feat/tern-tsp-pr2-live-presentation` ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257); see the ledger; update to DONE when merged) |
+| PR2 live application projection (routed events, production cold hydration, Remote re-window) → isolated TSP surface | IMPLEMENTED on `feat/tern-tsp-pr2-live-presentation` ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257); see the ledger; update to DONE when merged) |
 | TSP pane as the product renderer (one physical tty) | PLANNED (PR3) |
 | Editor/submit/Question/Approval inside TSP | PLANNED (PR3+) |
 
@@ -128,16 +128,20 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
     keeps one token, a replaced fold gets a new one, and the fold instance itself
     is never handed to the observer;
   - `messages` — the exact array the mounted app just received (same reference).
-- It re-checks the active target after the commit, so a `setTranscript()` that
-  synchronously switches the subject (viewer open/exit, session switch) drops
-  the stale frame; `dispose()` releases the observer before the app dies.
-- `test/tern-tsp-live-projection.test.ts` (9 tests) drives the REAL routing
+- It CAPTURES the active target (folder, window controller, subject kind and
+  id) at one instant before the commit and publishes only if all four are still
+  live afterwards, so a `setTranscript()` that synchronously switches the
+  subject (viewer open/exit), hands the session over to another owner while the
+  previous fold/window are still mounted, or tears the surface down drops the
+  stale frame; `dispose()` releases the observer before the app dies.
+- `test/tern-tsp-live-projection.test.ts` (13 tests) drives the REAL routing
   bodies, fold/window, `repaintTarget` and mounted `TuiApp`, and renders through
   the real SDK surface on a separate scripted TTY: routed durable events, live
   assistant input, the attachment/foreign-session fences, main ↔ viewed-child,
-  a replaced fold under the same Session id, the re-entrancy drop,
-  coalescing (one commit per 50 ms window; an identical view is zero ops on the
-  wire), dispose, and tty/product isolation.
+  an owner handover and a replaced fold under the same Session id, the
+  production cold hydration and the production Remote re-window
+  (`rehydrateFromWindow`), coalescing (one commit per 50 ms window; an identical
+  view is zero ops on the wire), dispose, and tty/product isolation.
 - The dev/test consumer (frame → `projectTranscriptStructure` → PR1 mapper → SDK
   `Surface.render`) lives inside that test file; there is deliberately no
   production bridge module, no CLI option and no setting until the physical
@@ -226,7 +230,7 @@ Evidence levels — do not merge these into a stronger claim:
 | PR | State | Proved | Not proved | Evidence |
 |---|---|---|---|---|
 | PR1 ([#256](https://github.com/XMoon/dsh-pi-tui/pull/256)) | DONE (merged) | Canonical transcript → native TSP nodes; real Tern 0.6.2 render, incremental ops, clean/signal close | Live application wiring; editor/input; durable identity | [./tern-tsp/evidence/pr1.md](./tern-tsp/evidence/pr1.md) |
-| PR2 ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) | IMPLEMENTED (this PR) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty | Real Tern pane; product renderer selection; editor/input | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
+| PR2 ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) | IMPLEMENTED (this PR) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty, including the production cold hydration and the Remote re-window (`rehydrateFromWindow`) | Real Tern pane; product renderer selection; editor/input; Remote wire rollover (deferred with owner) | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
 | PR3+ | PLANNED | Renderer selection at one composition point; editor/input authority; Question/Approval hand-off | — | — |
 
 ## Next decisions
