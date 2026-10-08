@@ -102,6 +102,34 @@ Both mutations were reverted; the committed tree has neither.
 | Naming / session-events / install-doc gates | `node scripts/naming-gate.mjs`, `node scripts/check-no-session-events.mjs`, `node scripts/installation-doc-gate.mjs` | exit 0 (all three) | `7f06f7b5` |
 | Whitespace | `git diff --check`, `git diff --cached --check` | exit 0 (both) | `7f06f7b5` |
 
+## Plan checklist mapping (§10 acceptance / §2 MUST / §9 stop conditions)
+
+| Plan item | Where it is satisfied |
+|---|---|
+| Branch off the actual `next` with no unexpected worktree changes | Base `a4473563`; `git status` clean; the diff touches 7 files (3 code/test, 4 docs) |
+| The ONE `repaintTarget` exit covers the active window; no second event/fold/window authority | `mounted().setTranscript(` exists exactly once in `src/**` (`src/app/surface/runtime.ts:816`); every `repaintTarget()` caller passes `activeFolder()`/`activeWindow()`; the publish point is inside that same function; PR2 adds no subscription, fold, window, reader or port |
+| Production keeps PiTui and never handshakes on its tty; the SDK stays dev/test-scoped | `docs/tern-tsp.md` + `P2-12/P2-14` test: no `src/**` file imports the SDK, `bootstrap.ts` never injects the observer, the two terminals are distinct objects; `@stencil-hq/tern` remains in `devDependencies` |
+| A real application event-routing source→fold→window→observer→SDK sink test, plus a stream live input positive | `P2-01/P2-02` and `P2-03` (real routing bodies, real fold/window, real `repaintTarget`, real mounted `TuiApp`, real SDK surface) |
+| main/viewer, same-id rebind, Remote bounded/currentness, rehydrate, late event, dispose — covered or level-marked | `P2-05`, `P2-06/P2-10`, `P2-11` for the seam; `P2-06` binding-level and `P2-07` marked NOT COVERED, `P2-08` inherited from PR1 |
+| `View.ops` keeps increments; Read/Context reparenting may rebuild; no reinvented business id | `P2-09` (unchanged projection = zero ops) plus PR1's `View.ops` cases; the seam introduces no identity of its own |
+| Production repaint/search/status/input timing unchanged; no wider abstraction | One optional option + one call in `repaintTarget()`; with no observer the path is one `undefined` check; `pnpm test:product` 7369/0 on the same snapshot |
+| `docs/tern-tsp.md` created as the long-term entry | `docs/tern-tsp.md` (scope/status, upstream, ownership boundary, implementation, contracts, capability matrix, verification, ledger, next decisions) |
+| PR1 evidence archived; PR2 evidence written | `docs/tern-tsp/evidence/pr1.md` (verbatim `git mv` + snapshot note), `docs/tern-tsp/evidence/pr2.md` |
+| `docs/README.md` indexes one entry; no dangling internal links | One row pointing at `tern-tsp.md`; `rg 'tern-tsp-pr1-evidence\.md' docs scripts test src` matches only the archive's own migration note |
+| Targeted + gates + stage-final results recorded with SHA; CI green before merge | The snapshot table above (stage-final `pnpm verify:prepush` and CI recorded when they run) |
+| Reviewer re-read `docs/code-review.md` and reviewed the whole PR | Review history appended below |
+| Docs separate verified from unverified scope with a PR3 handoff | "What PR2 proved / did NOT prove" and "PR3 handoff" above |
+
+MUST-NOT audit (all held; see `git diff a4473563..HEAD`): no change to
+`src/startup.ts`, `src/index.ts`, `cordis.patch.yml`, the public extension API,
+Host ports/wire, `src/tui/terminal/tern.ts`; no SDK handshake in the product
+path; no second fold/subscription/reader; no editor/command/Question/search/
+Focus work; no `try`/`catch` swallowing observer or SDK failures.
+
+§9 stop conditions: none triggered — the observer consumes the existing
+`folder.window()` output, needs no `TuiApp` facsimile, needs no new generation
+authority, and the tests keep PiTui and the SDK on separate ttys.
+
 ## What PR2 proved, and what it did NOT prove
 
 Proved (on the snapshots above):
