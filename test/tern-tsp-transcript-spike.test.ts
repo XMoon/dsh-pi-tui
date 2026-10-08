@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
 import {
+  KeyDecoder,
   View,
   ViewError,
   connect,
@@ -629,6 +630,17 @@ test('T9: the runner releases the surface with keep:false and the session on qui
   assert.deepEqual(result, { kind: 'closed', rendered: 2, steps: STEPS.length })
   assert.deepEqual(handle.keepOptions, [false])
   assert.equal(handle.closeCalls(), 1)
+})
+
+test('T9: the real SDK decodes a raw Ctrl+C byte into the key the runner quits on', () => {
+  // A real terminal sends 0x03 for Ctrl+C while the tty is in raw mode. This
+  // pins that the SHIPPED SDK decode lands on exactly the key shape the runner
+  // test above feeds in (`{name:'c', ctrl:true}`) — so the Ctrl+C key path is a
+  // real-SDK fact, not only a stubbed one.
+  const keys = new KeyDecoder().feed(new Uint8Array([0x03]))
+  assert.equal(keys.length, 1)
+  const key = keys[0]!
+  assert.deepEqual({ name: key.name, ctrl: key.ctrl }, { name: 'c', ctrl: true })
 })
 
 test('T9: Ctrl+C closes cleanly, and a session that ends by itself still closes the surface', async () => {
