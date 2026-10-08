@@ -6,12 +6,15 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -45,9 +48,10 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
     cwd: '/ws',
     sessionCwd: () => '/ws',
     progressUpdatesState: { mode: 'milestones' },
-    responseStyleState: { style: 'default' },
+    responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     signal: new AbortController().signal,
     commandRegistry: commands,
+    clientCommands: createClientCommandRegistry(parseCommand),
     recordExtensionError: () => {},
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
@@ -64,6 +68,7 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
       return { render: () => [], invalidate: () => {} }
     },
     config: {
+      configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
       subagentModelSelection: { available: () => false },
     },
@@ -72,7 +77,7 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
   const runner = new Proxy(base, {
     get: (target, property) => property in target ? target[property as string] : () => undefined,
   }) as unknown as TuiCommandRunner
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const invoke = (name: string): unknown => {
     const definition = defs.find(candidate => candidate.name === name)
     assert.ok(definition?.handler !== undefined, `${name} must be registered`)

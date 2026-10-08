@@ -24,21 +24,26 @@
  * @module @xmoon76/dsh-pi-tui/app/command/surface
  */
 
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import type { BackendKind } from '../../runtime/backend.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
-import { runOwned } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import { normalizeSkillInvocation } from '../../command-policy.ts'
-import { readSurfaceCatalog, type SurfaceCatalogContext } from '../../surface-catalog.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import { runOwned } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import { normalizeSkillInvocation } from '../../domain/command/policy.ts'
+import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
-import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest } from '../../skill-catalog-refresh.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
+import type { ClientCommandRegistry } from './client-command-registry.ts'
+import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
-import { copyToClipboard } from '../../clipboard.ts'
-import { isFocusDisplayPreset, type DisplayState } from '../../display-preset.ts'
-import { draftHasImages, prepareUserMessage } from '../../image/submit.ts'
-import type { ModelSelectionValue } from '../../model-selection.ts'
+import { copyToClipboard } from '../../client/clipboard/copy.ts'
+import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
+import { draftHasImages } from '../../client/media/draft-attachments.ts'
+import { prepareUserMessage } from '../submission/direct-message-preparation.ts'
+import type { ModelSelectionValue } from '../../domain/session/model-selection.ts'
 import type { SessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
@@ -104,9 +109,6 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
    *  member (the composition root also uses it for service lookups on its own
    *  side of the seam). */
   readonly ctx: TuiCommandRunner['ctx']
-  /** The surface-catalog read context (a narrow view of the Cordis context,
-   *  cast once by the composition root). */
-  readonly surfaceCatalogContext: SurfaceCatalogContext
   /** The diagnostic sink for command registration failures. */
   readonly logError: (message: string) => void
   readonly diag: Diag
@@ -131,6 +133,22 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The command registry lookup (the Host commands service), or undefined. */
   readonly commandsRegistry: () => CommandRegistryLike | undefined
+  /** The Client-owned command registry (M3-4 PR4 §D2): the TUI's OWN
+   *  definitions register here on BOTH branches; on Remote this is their
+   *  ONLY registration surface (the Host commands service never receives a
+   *  TUI callback). */
+  readonly clientCommands: ClientCommandRegistry
+  /** The Remote branch's command authority read (PR4 §2.1/§2.2): Host
+   *  command + human-skill metadata behind one generation-fenced snapshot.
+   *  Absent on Direct (the Direct seams below own that branch's reads). */
+  readonly remoteCommandSource?: RemoteCommandSourceFace
+  /** The Remote branch's official Session facts (PR4 §2.2/§3): running,
+   *  routing (modelSelection projection + session cwd) and the session
+   *  status projection. Absent on Direct. */
+  readonly remoteFacts?: {
+    running(sessionId: string): boolean | undefined
+    sessionStatus(sessionId: string): import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined
+  }
   /** The narrow Direct seams the command runtime binding needs. These stay in
    *  the composition root: they read the in-process Host session log and the
    *  Host command registry. */
@@ -140,6 +158,24 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     lastAssistantText: CommandRuntimeSurface['lastAssistantText']
     promptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T> | T): Promise<T>
   }
+  /**
+   * The narrow Direct CATALOG capability (TS8-E): the composition root captures
+   * the Direct catalog context and the in-process `commands.list(undefined)`
+   * convention and injects both as neutral-DTO operations, so this application
+   * owner never imports a `runtime/direct/**` path. Absent on the Remote branch
+   * (the Remote read goes through the generation-fenced command source).
+   */
+  readonly directCatalog?: {
+    /** The Direct effective catalog read for one exact Agent. */
+    readSurfaceCatalog(agent: ExactAgent, signal: AbortSignal): Promise<SurfaceCatalogSnapshot>
+    /** The Direct Host global-layer command summaries (already detached). */
+    listGlobalCommands(): readonly SurfaceCommandSummary[]
+  }
+  /** The TRANSPORT-AWARE prepared-prompt builder (PR4 review round): on Remote
+   *  the session writer's serializer requires the PreparedPrompt the ordinary
+   *  submission path builds — a raw UserMessage fails its preflight. Wired to
+   *  the SAME builder; absent on Direct (the UserMessage stays authoritative). */
+  readonly prepareTransportMessage?: (text: string, requestId: string) => Promise<unknown>
   /** The semantic catalog capability (skills/change + standing read). */
   readonly catalog: CommandCatalogCapability
   /** Map one exact Agent onto the semantic catalog port's agent field. The
@@ -156,21 +192,38 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The resolved CLIENT working directory (the standing read scope). */
   readonly clientCwd: string
+  /**
+   * PR5 (plan §3.2): the presentation-owned recent-performance availability
+   * of the current main window (one bit beside the stats fold). Provided on
+   * the Remote branch; absent on Direct (the complete log is authoritative).
+   */
+  readonly recentPerformanceAvailable?: () => boolean
   /** The mounted-surface seams the runner facade delegates to. */
   readonly surface: {
     setNotificationMode(mode: string): void
     setNotificationMethod(method: string): void
+    setTerminalProgressMode(mode: string): void
     openJobView(jobId: string): void
     openTasksBrowser(viewMode: 'quick' | 'full'): void
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
+    readonly kind: BackendKind
     readonly sessionReader: TuiCommandRunner['sessionReader']
     readonly sessionWriter: TuiCommandRunner['sessionWriter']
     readonly interaction: TuiCommandRunner['interaction']
     readonly catalog: TuiCommandRunner['catalog']
     readonly config: TuiCommandRunner['config']
     readonly hostFile: TuiCommandRunner['hostFile']
+    /** Shell amendment (M3-4 PR3): whether Host-shell completion facts are
+     * reachable on the selected backend (Direct true / Remote false). */
+    readonly hostShellCompletion: boolean
+    /** M3-4 PR4 round 5: whether the readable-transcript artifact is
+     * renderable on the selected backend (Direct true — the renderer reads
+     * the in-process Session history; Remote false — no transport-neutral
+     * whole-history seam yet). An explicit business capability, never
+     * derived from the M8-retiring Host-registry compatibility mirror. */
+    readonly transcriptExportAvailable: boolean
   }
   /** The bound session runtime entries the runner drives. */
   readonly session: {
@@ -235,6 +288,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly promptState: {
     readonly progressUpdates: TuiCommandRunner['progressUpdatesState']
     readonly responseStyle: TuiCommandRunner['responseStyleState']
+    readonly gitAttribution: TuiCommandRunner['gitAttributionState']
   }
   /** The Direct TUI-settings facade (a Host value forwarded opaquely). */
   readonly tuiSettings: TuiCommandRunner['tuiSettings']
@@ -258,10 +312,22 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   register(initial?: InitialCommandCatalog): void
   /** Refresh the live owner's scoped catalog through the coordinator. */
   refreshLiveCatalog(agent: ExactAgent): Promise<void>
+  /** Refresh the live owner's catalog by SESSION id (the Remote branch:
+   *  the coordinator target wraps the id; no Direct Agent is resolved). */
+  refreshLiveCatalogById(sessionId: string): Promise<void>
   /** Is a slash name advertised by the CURRENT completion list? */
   wasAdvertisedClaim(name: string): boolean
-  /** Does the CURRENT effective host catalog claim this line? */
+  /** Does the CURRENT effective host catalog claim this line? (The
+   *  advertised union view — completion/advertised-miss semantics.) */
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** PR5 v2 §1C-4: the GENUINE Host-origin line authority (this TUI's own
+   *  Direct compatibility mirrors excluded; Client synthesis can never
+   *  overwrite it) — the ROUTING primitive. */
+  hostOriginClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** §D3 precedence: does a GENUINE HOST-ORIGIN command resolve the name?
+   *  (The claim-set union cannot answer this — it also carries this
+   *  surface's own Client registrations.) */
+  hostCatalogResolves(name: string): boolean
   /** Is a slash name a LIVE TUI-owned skill wrapper? */
   isSkillWrapperName(name: string): boolean
   /** Consume one TUI-local command draft disposition. */
@@ -276,6 +342,14 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   catalogRefreshAvailable(): boolean
   /** Whether one submission is a TUI-owned skill invocation. */
   isSkillInvocation(parsed: { name: string } | undefined, text: string): boolean
+  /** The Client-owned command registry (PR4 §1.3): the submission route's
+   *  TUI_BUILTIN execution owner on the Remote branch. */
+  readonly clientCommands: ClientCommandRegistry
+  /** §1C-6: the LIVE Client registry's exact-line claim — the ONLY source the
+   *  line classification may read for TUI ownership. Never a static name
+   *  list: a name in `LOCAL_COMMANDS` without a live registration owns no
+   *  production line. */
+  clientClaimsLine(parsed: { name: string; rawInput?: string } | undefined): boolean
   /** The exact Direct attachment of a fenced live scope. */
   agentForLiveScope(scope: SessionScope): ExactAgent
   /** The exact Direct attachment of an already-fenced live session id. */
@@ -353,6 +427,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   
   let hostClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
 
+  /** PR5 v2 §1C-4: the installed GENUINE Host-origin line authority. */
+  let hostOriginClaimOf: ((parsed: { name: string; rawInput?: string }) => HostCommandClaim | undefined) | undefined
+
+  /** The §D3 precedence discriminator installed by registerTuiCommands: does
+   *  the AUTHORITATIVE HOST catalog resolve the name (never the union claim
+   *  set, which also carries this surface's own Client registrations)? */
+  let hostCatalogResolves: ((name: string) => boolean) | undefined
+
   /** The skill-wrapper test installed by registerTuiCommands: is a slash
    * name a LIVE TUI-owned skill wrapper? The steer path consults it to
    * decide whether a composition without the host skill-body loader must
@@ -392,6 +474,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * ownership (live agent vs standing preset). */
   
   let skillsChangeSubscribed = false
+
+  // M3-6 PR2 §13.3.1: the Remote-only Connection-generation invalidation
+  // lifetime. `observedRemoteConnectionGeneration` is the last token the
+  // callback saw (the identity authority — never a `firstEvent` boolean);
+  // `disposeRemoteConnectionGeneration` is the official unsubscribe slot,
+  // released by `disposeCatalog()` BEFORE the coordinator goes away.
+  let observedRemoteConnectionGeneration: unknown | undefined
+  let disposeRemoteConnectionGeneration: (() => void) | undefined
 
   const skillsChangeGate = new CoalescingRefreshGate(() => {
     runOwned('skills/change refresh', async () => {
@@ -446,6 +536,60 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
   }
 
   /**
+   * PR4 §2.2: the Remote coordinator target — an opaque wrapper carrying the
+   * session id (never an Agent). The coordinator's readAgent unwraps it and
+   * reads through the generation-fenced command source.
+   */
+  const REMOTE_CATALOG_TARGET = Symbol('remote-catalog-target')
+  const remoteCatalogTargetOf = (sessionId: string): object => ({
+    [REMOTE_CATALOG_TARGET]: sessionId,
+  })
+  const remoteSessionIdOfCatalogTarget = (target: object): string | undefined => {
+    const record = target as { [REMOTE_CATALOG_TARGET]?: string }
+    return typeof record[REMOTE_CATALOG_TARGET] === 'string' ? record[REMOTE_CATALOG_TARGET] : undefined
+  }
+  /**
+   * The Remote live-catalog read: the command source's generation-fenced
+   * snapshot mapped onto the coordinator's snapshot shape (scoped overrides
+   * do not exist on the Remote branch — the whole catalog is the effective
+   * view; scopedCommands is empty). The composition itself lives in
+   * {@link composeRemoteSurfaceCatalog} so the production read is directly
+   * regression-testable.
+   */
+  const readRemoteSurfaceCatalog = async (
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<import('../../domain/catalog/surface.ts').SurfaceCatalogSnapshot> => {
+    const source = deps.remoteCommandSource
+    if (source === undefined) throw new Error('the Remote command source is unavailable')
+    return composeRemoteSurfaceCatalog({
+      source,
+      listHumanSkills: (id, readSignal) => deps.catalog.skills.listHumanSkills(id, readSignal),
+      sessionId,
+      signal,
+    })
+  }
+  /**
+   * The Remote scoped-commands view (the command runtime's display/collision
+   * baseline): the Client registry's OWN descriptors are the only
+   * synchronously-readable authority (the Host catalog arrives through
+   * async snapshots; its claim precedence is enforced separately by
+   * hostClaimOf against the installed claims). Name-only summaries keep the
+   * collision baseline honest without inventing Host metadata.
+   */
+  const remoteListScopedCommands = (): readonly import('../../domain/catalog/surface.ts').SurfaceCommandSummary[] =>
+    deps.clientCommands.list().map(definition => ({
+      name: definition.name,
+      description: definition.description,
+      ...definition.input === undefined ? {} : {
+        input: {
+          hint: definition.input.hint,
+          ...definition.input.attachments === true ? { attachments: true } : {},
+        },
+      },
+    }))
+
+  /**
    * The exact Direct attachment of a scope, validated in ONE synchronous
    * admission step: a stale scope throws `SupersededReadError` (never
    * retargets to the current owner), a sessionless scope has no live read,
@@ -497,15 +641,45 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     })
   }
 
+  /** PR4 §2.2: the Remote live refresh — the coordinator target wraps the
+   *  session id (the command source reads the Host metadata generation-fenced).
+   *  M3-6 PR2 §13.3.2: `source` names the refresh trigger for diagnostics
+   *  ('invalidation' for the reconnect callback); existing callers keep the
+   *  default 'live-session' behavior. */
+  const refreshLiveCatalogById = async (
+    sessionId: string,
+    source: CatalogRefreshSource = 'live-session',
+  ): Promise<void> => {
+    const refresh = catalogRefreshRequest
+    if (refresh === undefined) return
+    await refresh({
+      source,
+      target: { kind: 'agent', key: deps.ownership.generation() },
+      agent: remoteCatalogTargetOf(sessionId),
+    })
+  }
+
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
-    const commands = deps.commandsRegistry()
-    if (commands === undefined) return
     commandsRegistered = true
     try {
-      const installed = registerTuiCommands(runner(), initial)
+      const installed = registerTuiCommands(runner(), initial, {
+        ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }),
+      })
+      // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
+      // Remote Host composition mounts `/export` itself) fails only ITS own
+      // registration — later commands still installed. The user sees the
+      // exact names, never a generic whole-pass failure.
+      if (installed.registrationFailures.length > 0) {
+        const names = installed.registrationFailures.join('; ')
+        deps.logError(`tui-runner: commands not registered (claimed by the Host composition): ${names}`)
+        deps.diag.warn('command name collisions', { failures: [...installed.registrationFailures] })
+        deps.app().notify(`not registered (claimed elsewhere): ${names}`, 'error')
+      }
       wasAdvertisedClaim = installed.wasAdvertised
       hostClaimOf = installed.hostClaimOf
+      hostOriginClaimOf = installed.hostOriginClaimOf
+      hostCatalogResolves = installed.hostCatalogResolves
       isSkillWrapperName = installed.isSkillWrapper
       refreshCommandCompletions = installed.refreshCommandCompletions
       withCommandDelivery = installed.withDelivery
@@ -514,7 +688,22 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the command runtime's refresh facades (and the switch/first-session
       // path) route every post-mount refresh through `catalogRefreshRequest`.
       catalogCoordinator = new CatalogRefreshCoordinator({
-        readAgent: (agent, readSignal) => readSurfaceCatalog(agent, readSignal, deps.surfaceCatalogContext),
+        // PR4 §2.2: the coordinator target is branch-opaque. Direct feeds the
+        // exact Agent to readSurfaceCatalog; Remote wraps its session id in a
+        // target object and reads through the generation-fenced command
+        // source (Host command + human-skill metadata, no Agent, no
+        // Client-side fold).
+        readAgent: (agent, readSignal) => {
+          const remoteSessionId = remoteSessionIdOfCatalogTarget(agent)
+          if (remoteSessionId !== undefined) {
+            return readRemoteSurfaceCatalog(remoteSessionId, readSignal)
+          }
+          const directCatalog = deps.directCatalog
+          if (directCatalog === undefined) {
+            throw new Error('BUG: the Direct catalog read capability is unavailable')
+          }
+          return directCatalog.readSurfaceCatalog(agent as unknown as ExactAgent, readSignal)
+        },
         // The sessionless (preset) target reads the STANDING skill catalog
         // through the catalog capability (migration M1.8) — the
         // capability-gated cold path (standing key → global → degraded
@@ -523,11 +712,60 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // docs/surface-catalog.md).
         readStanding: (presetId, readSignal) =>
           deps.catalog.skills.standing(presetId, deps.clientCwd, readSignal),
+        // §2.2/§16 final-install fence: the Remote target's admission
+        // transport identity (captured ONCE at refresh admission, only ever
+        // COMPARED before installSnapshot — a same-id binding rollover in
+        // the settle→install gap must not commit the retired read; review
+        // round 2's final-gap finding). The Direct agent-scoped target has
+        // no transport identity here — its reader owns the checks.
+        ...(deps.remoteCommandSource === undefined ? {} : {
+          captureTargetIdentity: () => {
+            const sessionId = deps.ownership.currentSessionId()
+            return sessionId === undefined ? undefined : deps.remoteCommandSource!.captureTransportToken(sessionId)
+          },
+          isTargetCurrent: (identity: unknown) => {
+            const sessionId = deps.ownership.currentSessionId()
+            return sessionId !== undefined
+              && deps.remoteCommandSource!.isTransportTokenCurrent(sessionId, identity)
+          },
+        }),
         installSnapshot: (next) => installed.installSnapshot(next),
         enterCatalogTransition: () => installed.enterTransition(),
       }, deps.signal, deps.diag)
       catalogRefreshRequest = (request) => catalogCoordinator!.refresh(request)
       subscribeSkillsChangeEvents()
+      // M3-6 PR2 §13.3.3: the Remote-only Connection-generation
+      // invalidation subscription, installed AFTER the coordinator and the
+      // refresh request slot exist. Capture-before-subscribe is mandatory
+      // (§13.3.4): the official observable may notify SYNCHRONOUSLY at
+      // subscription time, and the token identity (never a `firstEvent`
+      // boolean) makes that immediate callback a no-op — no duplicate
+      // startup refresh. The callback reads the CURRENT session id at
+      // execution time (§6 Must 4), never a startup-captured id.
+      if (deps.remoteCommandSource !== undefined) {
+        observedRemoteConnectionGeneration = deps.remoteCommandSource.connectionGeneration()
+        disposeRemoteConnectionGeneration =
+          deps.remoteCommandSource.subscribeConnectionGeneration(() => {
+            const source = deps.remoteCommandSource
+            if (source === undefined) return
+            const next = source.connectionGeneration()
+            if (Object.is(next, observedRemoteConnectionGeneration)) return
+            observedRemoteConnectionGeneration = next
+            // Disconnected / connecting (§6 Must 2): keep the last-good
+            // Host claims; NO catalog RPC, no Session retain, no UI clear.
+            if (next === undefined) return
+            const sessionId = deps.ownership.currentSessionId()
+            if (sessionId === undefined) return
+            runOwned(
+              'remote reconnect catalog refresh',
+              () => refreshLiveCatalogById(sessionId, 'invalidation'),
+              {
+                diag: deps.diag,
+                sessionId: () => deps.ownership.currentSessionId(),
+              },
+            )
+          })
+      }
     } catch (error) {
       // A failed registration must not lock the surface forever (a locked
       // flag would leave every later command resolving to a plain message
@@ -564,9 +802,28 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       },
       skills: deps.catalog.skills,
       surface: {
-        listScopedCommands: () => deps.direct.listScopedCommands(),
-        sessionRunning: (sessionId) => attachmentForSession(sessionId).status === 'running',
+        // PR4 §2.2: the Direct seams above (scoped commands, running, routing,
+        // stats, last assistant text) are Direct-only; the Remote branch
+        // supplies its own projection-backed equivalents below through the
+        // injected remote facts. The DISCRIMINATOR is the backend kind.
+        listScopedCommands: () => deps.backend.kind === 'direct'
+          ? deps.direct.listScopedCommands()
+          : remoteListScopedCommands(),
+        sessionRunning: (sessionId) => deps.backend.kind === 'direct'
+          ? attachmentForSession(sessionId).status === 'running'
+          : (deps.remoteFacts?.running(sessionId) ?? false),
         sessionRouting: (sessionId) => {
+          if (deps.backend.kind !== 'direct') {
+            // §3.2: provider/model from the modelSelection projection, cwd
+            // from the official session row — never the Client cwd as if it
+            // were the Host session cwd.
+            const facts = deps.remoteFacts?.sessionStatus(sessionId)
+            return {
+              provider: facts?.model?.provider,
+              model: facts?.model?.model,
+              cwd: facts?.cwd ?? '',
+            }
+          }
           const agent = attachmentForSession(sessionId)
           // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
           // the Direct composition may leave them unset: their absence is real
@@ -582,10 +839,20 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         sessionStats: (sessionId) => deps.direct.sessionStats(sessionId),
         lastAssistantText: (sessionId) => deps.direct.lastAssistantText(sessionId),
         refreshLiveCatalog: async (sessionId, source) => {
+          if (!catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
+          // PR4 §2.2: the Remote live refresh reads the command source
+          // (generation-fenced metadata) with the session id as the target —
+          // never a Direct Agent resolution.
+          if (deps.backend.kind !== 'direct') {
+            return requestCatalogRefresh({
+              source,
+              target: { kind: 'agent', key: deps.ownership.generation() },
+              agent: remoteCatalogTargetOf(sessionId),
+            })
+          }
           // SYNC admission: the exact Direct owner is captured HERE, before the
           // read awaits (§10.2).
           const agent = attachmentForSession(sessionId)
-          if (!catalogRefreshAvailable()) return { kind: 'failed', error: 'catalog refresh unavailable' }
           return requestCatalogRefresh({
             source,
             target: { kind: 'agent', key: deps.ownership.generation() },
@@ -597,7 +864,16 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             ? requestCatalogRefresh({ source, target: { kind: 'preset', presetId } })
             : Promise.resolve({ kind: 'failed', error: 'catalog refresh unavailable' }),
         promptAdmission: (sessionId, line, task) =>
-          deps.direct.promptAdmission(attachmentForSession(sessionId), draftHasImages(line, deps.drafts.images), async () => task()),
+          // M3-4 PR3 (§10.2): the Remote branch RETIRES the Direct-Agent
+          // admission hook — the exact-owner resolution must not even run
+          // (argument evaluation would throw); Host business admission lives
+          // in the official Session write path. The DISCRIMINATOR is the
+          // explicit backend kind, never a capability flag (a future Remote
+          // shell-completion carrier must not silently re-open Direct
+          // attachment admission).
+          deps.backend.kind === 'direct'
+            ? deps.direct.promptAdmission(attachmentForSession(sessionId), draftHasImages(line, deps.drafts.images), async () => task())
+            : Promise.resolve(task()) as never,
       },
     })
     buildRunner(runtime)
@@ -618,6 +894,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the panel persists the raw string through the config port.
       setNotificationMode: (mode) => deps.surface.setNotificationMode(mode),
       setNotificationMethod: (method) => deps.surface.setNotificationMethod(method),
+      setTerminalProgressMode: (mode) => deps.surface.setTerminalProgressMode(mode),
       ensureSession: () => deps.session.ensureSession(),
       get selected() { return deps.model.selected },
       // Legacy/display facade: the newest SESSIONLESS `/model` intent (pending
@@ -666,10 +943,26 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The Host-file port (migration M1.10): `@`-mention discovery and
       // send-time canonicalization against the Host filesystem.
       hostFile: deps.backend.hostFile,
+      hostShellCompletion: deps.backend.hostShellCompletion,
+      // PR5 (plan §3.2): the presentation-owned recent-performance
+      // availability of the CURRENT main window — the /status panel reads
+      // it beside the composed stats. Absent on Direct-shaped compositions
+      // (the full log is authoritative by construction).
+      ...(deps.recentPerformanceAvailable === undefined ? {} : {
+        recentPerformanceAvailable: deps.recentPerformanceAvailable,
+      }),
+      // The readable-transcript business capability (round 5): explicitly
+      // backend-owned, NEVER derived from the commandRegistry mirror below
+      // (that mirror retires with M8).
+      transcriptExportAvailable: deps.backend.transcriptExportAvailable,
       // The minimal commands registry for the TUI's OWN registrations
       // (migration M1.11) — the runner assembly dependency, never a Host
-      // capability exposed to command handlers.
+      // capability exposed to command handlers. Direct-only on PR4: the
+      // Remote branch registers nothing into the Host service.
       commandRegistry: deps.commandsRegistry(),
+      // The Client-owned registry (PR4 §D2): the TUI's OWN execution surface
+      // on Remote; the shared definition owner on both branches.
+      clientCommands: deps.clientCommands,
       cwd: deps.clientCwd,
       imageStore: deps.drafts.images,
       fileStore: deps.drafts.files,
@@ -683,6 +976,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The shared prepared-input pipeline (skills build their message
       // through this — review finding 4).
       prepareDraftMessage: (text) => prepareUserMessage(text, deps.drafts.images, deps.submission.prepareDeps()),
+      // PR4 review round: the Remote branch's skill-gesture delivery must use
+      // the transport-aware preparation (PreparedPrompt), exactly like an
+      // ordinary prompt; absent on Direct.
+      ...(deps.prepareTransportMessage === undefined ? {} : {
+        prepareTransportMessage: (text: string, requestId: string) => deps.prepareTransportMessage!(text, requestId),
+      }),
       // M5: the extension registries (commands/themes/settings/autocomplete/
       // keybindings), when the extension service is mounted. The /settings
       // and /theme pickers read them; undefined degrades to the host-only
@@ -698,6 +997,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       signal: deps.signal,
       progressUpdatesState: deps.promptState.progressUpdates,
       responseStyleState: deps.promptState.responseStyle,
+      gitAttributionState: deps.promptState.gitAttribution,
       /** Canonical display surface: /display and /focus compatibility both
        * read and mutate the shared DisplayState through one setter. */
       displayPreset: () => deps.displayState.preset,
@@ -715,7 +1015,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       applyPermissionPreset: async (scope, presetId, presetSignal) => {
         // A stale scope BEFORE the dispatch proves nothing ran: report `refused`.
         if (!deps.sessionScope.isCurrent(scope)) return { ownership: 'refused' as const }
-        agentForLiveScope(scope)
+        // PR5 v2 §1D: NO Direct-Agent prerequisite — the permission preset
+        // apply is transport-neutral (ConfigPort → the official
+        // /permission path); a Remote session must reach it without any
+        // in-process Agent resolution.
         const outcome = await deps.backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
         // The operation WAS dispatched. Losing the surface after the fact must NOT
         // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and
@@ -792,21 +1095,37 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     return catalogRefreshRequest(request)
   }
   const disposeCatalog = (): void => {
-    catalogCoordinator?.dispose()
+    // M3-6 PR2 §13.3.6: release the Remote generation listener FIRST (a
+    // late generation callback after disposal must not start a read), then
+    // dispose the coordinator. M3-6 PR3: both one-shot slots and the refresh
+    // request are retired BEFORE either callback runs, so a throwing official
+    // unsubscribe can neither skip the coordinator disposal nor leave a live
+    // refresh path behind this surface; the collected failure is surfaced
+    // after both attempts.
+    const generationUnsubscribe = disposeRemoteConnectionGeneration
+    const coordinator = catalogCoordinator
+    disposeRemoteConnectionGeneration = undefined
     catalogCoordinator = undefined
     // The Direct `skills/change` capability offers no unsubscribe, so a late
     // event can still reach the coalescing gate after teardown. Clearing the
     // request slot makes both refresh paths no-ops (they guard on undefined)
     // instead of touching the disposed coordinator.
     catalogRefreshRequest = undefined
+    runSyncDisposalSteps('command catalog disposal', [
+      () => generationUnsubscribe?.(),
+      () => coordinator?.dispose(),
+    ])
   }
 
   return {
     attachRuntime,
     register: registerCommands,
     refreshLiveCatalog,
+    refreshLiveCatalogById,
     wasAdvertisedClaim: (name) => wasAdvertisedClaim?.(name) === true,
     hostClaimOf: (parsed) => hostClaimOf?.(parsed),
+    hostOriginClaimOf: (parsed) => hostOriginClaimOf?.(parsed),
+    hostCatalogResolves: (name) => hostCatalogResolves?.(name) === true,
     isSkillWrapperName: (name) => isSkillWrapperName?.(name) === true,
     takeCommandDraftDisposition: (commandId) => takeCommandDraftDisposition?.(commandId),
     refreshCompletions: () => refreshCommandCompletions?.(),
@@ -816,10 +1135,97 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,
+    clientCommands: deps.clientCommands,
+    clientClaimsLine: (parsed) => deps.clientCommands.claimsLine(parsed),
     agentForLiveScope,
     attachmentForSession,
     disposeCatalog,
     buildRunner,
     runner,
   }
+}
+
+/**
+ * The Remote live-catalog composition (PR4 §2.2/§16), extracted so the
+ * PRODUCTION read is directly regression-testable (review round 3: a
+ * hand-made snapshot cannot prove the reader's provider isolation).
+ *
+ * Provider isolation is symmetric: a rejected commands provider degrades to
+ * an `issues` entry — the coordinator's `mergePartial` then keeps the
+ * last-good Host claims — while a FULFILLED skills provider still updates its
+ * own field. A transport supersession (the admission token no longer live
+ * after BOTH settles, or an authoritative `undefined` from the commands read)
+ * invalidates the whole snapshot instead: it may mix two bindings' facts.
+ * @param input - the production seams and the session/signal.
+ * @returns the composed snapshot for the coordinator.
+ */
+export async function composeRemoteSurfaceCatalog(input: {
+  readonly source: {
+    readCommands(sessionId: string, signal?: AbortSignal): Promise<readonly import('../../domain/catalog/surface.ts').SurfaceCommandSummary[] | undefined>
+    captureTransportToken(sessionId: string): unknown
+    isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  }
+  readonly listHumanSkills: (sessionId: string, signal?: AbortSignal) => Promise<import('../../domain/catalog/skill.ts').HumanSkillCatalog | undefined>
+  readonly sessionId: string
+  readonly signal: AbortSignal
+}): Promise<import('../../domain/catalog/surface.ts').SurfaceCatalogSnapshot> {
+  const { source, listHumanSkills, sessionId, signal } = input
+  // §2.2 admission capture: the transport identity (Connection generation +
+  // exact binding) is taken BEFORE any provider read; every settle is
+  // re-checked against THIS frozen token (§16: a same-id binding rollover or a
+  // Connection replacement must invalidate the refresh — the reader's own
+  // fences cover each provider's round-trip, this covers the COMBINED settle:
+  // one provider may settle before the rollover and the other after).
+  const admissionToken = source.captureTransportToken(sessionId)
+  const [commandsResult, skillsResult] = await Promise.allSettled([
+    source.readCommands(sessionId, signal),
+    listHumanSkills(sessionId, signal),
+  ])
+  signal.throwIfAborted()
+  // Combined-settle fence: after BOTH providers settled, the admission
+  // transport must still be live.
+  if (!source.isTransportTokenCurrent(sessionId, admissionToken)) {
+    throw new SupersededReadError('the connection changed during the catalog refresh')
+  }
+  const issues: Array<import('../../domain/catalog/surface.ts').SurfaceCatalogIssue> = []
+  let commands: readonly import('../../domain/catalog/surface.ts').SurfaceCommandSummary[] = []
+  if (commandsResult.status === 'rejected') {
+    const reason = commandsResult.reason
+    if (reason instanceof SupersededReadError) throw reason
+    // A FAILED commands provider degrades to an issue (never an empty
+    // success): mergePartial keeps the last-good Host claims for this field.
+    issues.push({ provider: 'commands', message: safeErrorMessage(reason) })
+  } else if (commandsResult.value === undefined) {
+    throw new SupersededReadError('the connection changed during the catalog refresh')
+  } else {
+    commands = [...commandsResult.value].sort((left, right) => left.name < right.name ? -1 : 1)
+  }
+  // The skills provider is handled INDEPENDENTLY: its fulfilled result is
+  // always used (a commands failure never discards it), and its own failure
+  // / incompleteness / unavailability degrades only its field. An
+  // `undefined` fulfillment is the port's declared "no skill registry
+  // reachable for this session" (catalog-port §listHumanSkills) — a
+  // truthful-unavailable OBSERVATION, never an empty success: it degrades
+  // to a skills issue so the coordinator's merge keeps the last-good
+  // skills (a same-target transient registry loss must not erase the
+  // installed set; a genuinely empty-but-complete catalog still clears it).
+  let skills: readonly import('../../domain/catalog/skill.ts').HumanSkillSummary[] = []
+  if (skillsResult.status === 'fulfilled') {
+    if (skillsResult.value === undefined) {
+      issues.push({ provider: 'skills', message: 'the skill registry is unreachable for this session' })
+    } else {
+      skills = skillsResult.value.skills
+      if (skillsResult.value.complete !== true) {
+        issues.push({ provider: 'skills', message: 'incomplete skill observation' })
+      }
+    }
+  } else {
+    issues.push({ provider: 'skills', message: safeErrorMessage(skillsResult.reason) })
+  }
+  return Object.freeze({
+    commands: Object.freeze(commands),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze([...skills]),
+    issues: Object.freeze(issues.map(issue => Object.freeze({ ...issue }))),
+  })
 }

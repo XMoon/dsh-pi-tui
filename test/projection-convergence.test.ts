@@ -1,7 +1,7 @@
 /**
  * PR5/F5 Projection Convergence.
  *
- * The canonical transcript structure (`transcript-projection.ts`) is the ONE
+ * The canonical transcript structure (`tui/transcript/structure.ts`) is the ONE
  * authority for where a raw chronology forms a Work span, a Context cluster
  * and a surfaced-interaction boundary. Compact, Full and expanded Focus
  * materialize that same structure with different presentation depth; none of
@@ -12,17 +12,17 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { projectCompact } from '../src/compact-projection.ts'
-import { summarizeWorkSpan } from '../src/compact-work.ts'
-import { clusterAdjacentAmbientContext } from '../src/context-presentation.ts'
-import { focusExpandedTailStructure, focusThoughtLeadBoundary, projectFocus } from '../src/focus-activity.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
+import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
+import { clusterAdjacentAmbientContext } from '../src/tui/transcript/context-structure.ts'
+import { focusExpandedTailStructure, focusThoughtLeadBoundary, projectFocus } from '../src/tui/transcript/focus-projection.ts'
 import {
   clusterByMemberOf,
   isTranscriptWorkMember,
   projectTranscriptStructure,
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
-} from '../src/transcript-projection.ts'
+} from '../src/tui/transcript/structure.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -381,7 +381,9 @@ function show(app: TuiApp, messages: readonly TranscriptMessage[]): void {
   app.setTranscript(messages, new Map())
 }
 
-const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line))
+// A Work header is `Activity`, or `Thought` for a historical think-only span
+// (the 2026-09-29 compact historical compaction).
+const workHeader = (view: string): boolean => view.split('\n').some(line => /^\s*[▸▾] (?:Activity|Thought)(?: | ·|$)/.test(line))
 
 /** A short window that fits one viewport: one Work span, one ambient cluster
  * and a trailing Work span, so surface presentation is directly observable. */

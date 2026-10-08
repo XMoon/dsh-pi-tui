@@ -6,11 +6,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DraftImageStore } from '../src/image/draft-store.ts'
-import { pinDraftAttachments, pruneUnreferencedDrafts } from '../src/image/submit.ts'
-import { ImageTooLargeError } from '../src/image/errors.ts'
-import { expandImagePlaceholders, formatImagePlaceholder, type DraftSegment } from '../src/image/placeholder.ts'
-import type { DraftImage, DraftImageInput } from '../src/image/types.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
+import { pinDraftAttachments, pruneUnreferencedDraftAttachments } from '../src/client/media/draft-attachments.ts'
+import { ImageTooLargeError } from '../src/domain/media/errors.ts'
+import { expandImagePlaceholders, formatImagePlaceholder, type DraftSegment } from '../src/client/media/image/placeholder.ts'
+import type { DraftImage, DraftImageInput } from '../src/client/media/image/types.ts'
 
 /** One canonical PNG-ish draft (bytes content is irrelevant to M1). */
 function addImage(store: DraftImageStore, width = 800, height = 600, name?: string): DraftImage {
@@ -212,18 +212,18 @@ test('recalled drafts never count toward the resident byte budget (review findin
   assert.equal(recalledDraft.byteLength, 20 * 1024 * 1024)
 })
 
-test('pruneUnreferencedDrafts drops drafts whose placeholder left the editor (review finding 2)', () => {
+test('pruneUnreferencedDraftAttachments drops drafts whose placeholder left the editor (review finding 2)', () => {
   const store = new DraftImageStore()
   const kept = store.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
   const deleted = store.add({ bytes: new Uint8Array([2]), mediaType: 'image/png', width: 1, height: 1 })
   // The editor text references `kept` ONLY (the other placeholder was
   // deleted or Ctrl+C cleared it).
-  pruneUnreferencedDrafts(`keep ${kept.placeholder}`, store)
+  pruneUnreferencedDraftAttachments(`keep ${kept.placeholder}`, store)
   assert.equal(store.get(deleted.id), undefined, 'the unreferenced draft is pruned')
   assert.equal(store.get(kept.id), kept, 'the referenced draft survives')
   // Pruning with a fully-cleared editor drops EVERYTHING.
   const another = store.add({ bytes: new Uint8Array([3]), mediaType: 'image/png', width: 1, height: 1 })
-  pruneUnreferencedDrafts('', store)
+  pruneUnreferencedDraftAttachments('', store)
   assert.equal(store.size(), 0)
   void another
 })
@@ -235,12 +235,12 @@ test('pinned drafts survive pruning; release unpins (review finding 1)', () => {
   // A submission in flight pins the staged draft (the editor is already
   // cleared): prune must keep it even though the editor text is empty.
   const release = store.pinReferenced(staged.placeholder)
-  pruneUnreferencedDrafts('', store)
+  pruneUnreferencedDraftAttachments('', store)
   assert.equal(store.get(staged.id), staged, 'the in-flight draft survives the prune')
   assert.equal(store.get(other.id), undefined, 'an unpinned unreferenced draft is pruned')
   // After the submission settles, the pin releases and prune can collect.
   release()
-  pruneUnreferencedDrafts('', store)
+  pruneUnreferencedDraftAttachments('', store)
   assert.equal(store.get(staged.id), undefined, 'released drafts are prunable again')
 })
 
@@ -302,17 +302,17 @@ test('recalled refs stay pinned while delayed queue removal is in flight', async
   const pendingRemoval = removal.then(() => ({ kind: 'committed' as const }))
 
   await Promise.resolve()
-  pruneUnreferencedDrafts('', store)
+  pruneUnreferencedDraftAttachments('', store)
   assert.equal(store.get(recalled.id), recalled, 'pruning must not delete a staged recalled ref before removal settles')
   releaseRemoval()
   assert.deepEqual(await pendingRemoval, { kind: 'committed' })
 
   // The committed dequeue installs the placeholder before releasing its pin;
   // a later prune still sees a live editor reference.
-  pruneUnreferencedDrafts(recalled.placeholder, store)
+  pruneUnreferencedDraftAttachments(recalled.placeholder, store)
   assert.equal(store.get(recalled.id), recalled, 'the committed recalled draft remains owned by the restored editor')
   release()
-  pruneUnreferencedDrafts('', store)
+  pruneUnreferencedDraftAttachments('', store)
   assert.equal(store.get(recalled.id), undefined, 'once the restored editor drops the ref, pruning may collect it')
 })
 
@@ -325,11 +325,11 @@ test('a submission pinned BEFORE its async phase survives concurrent pruning (de
   // During the async session-creation window the user attaches a new image:
   // the attach-time prune sees an EMPTY editor — the pinned in-flight
   // draft must survive, or the submission's placeholders degrade to text.
-  pruneUnreferencedDrafts('', store)
+  pruneUnreferencedDraftAttachments('', store)
   assert.equal(store.get(draft.id), draft, 'the in-flight draft survives the deferred-start window')
   // The submission's prepare then resolves (draft still present), commits,
   // consumes, and finally releases the pin.
-  store.remove(draft.id) // consumeDraftImages equivalent
+  store.remove(draft.id) // consumeDraftAttachments equivalent
   release()
   assert.equal(store.isPinned(draft.id), false)
 })

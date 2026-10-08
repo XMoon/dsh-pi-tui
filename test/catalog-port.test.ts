@@ -46,8 +46,6 @@ function port(services: Record<string, unknown>): DirectCatalogPort {
 test('models degrade to empty DTOs when the llm service is absent', async () => {
   const models = port({}).models
   assert.equal(models.available(), false)
-  assert.deepEqual(models.listProviders(), [])
-  assert.deepEqual(await models.listModels('p'), [])
   assert.deepEqual(await models.loadDirectory(), { default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] })
   assert.deepEqual(await models.discoverModels({ baseURL: 'x' }), [])
   assert.equal(models.listConfigurableProviders(), undefined)
@@ -72,8 +70,6 @@ test('models surface detached provider/model DTOs and forward discovery', async 
     },
   }).models
   assert.equal(models.available(), true)
-  assert.deepEqual(models.listProviders(), [{ id: 'deepseek', name: 'DeepSeek' }])
-  assert.deepEqual(await models.listModels('deepseek'), [{ id: 'deepseek-chat', name: 'Chat' }])
   assert.deepEqual(await models.loadDirectory(), {
     default: { provider: 'deepseek', model: 'deepseek-chat' },
     routableProviders: ['deepseek'],
@@ -115,7 +111,42 @@ test('loadDirectory keeps a failing provider as an isolated failure beside usabl
   const directory = await models.loadDirectory()
   assert.deepEqual(directory.groups.map(group => group.id), ['good'])
   assert.deepEqual(directory.failures, [{ id: 'bad', name: 'Bad', message: 'route unavailable' }])
-  assert.deepEqual(directory.routableProviders, ['good', 'bad'])
+  // Official `buildModelCatalog` semantics: only NON-EMPTY loaded groups are
+  // routable — a provider whose lookup failed is not currently serving a
+  // catalog model.
+  assert.deepEqual(directory.routableProviders, ['good'])
+})
+
+test('a successful provider that loads ZERO models is present but NOT routable', async () => {
+  let saved: unknown
+  const models = port({
+    llm: {
+      resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+      listProviders: () => [
+        { id: 'full', name: 'Full' },
+        { id: 'empty', name: 'Empty' },
+      ],
+      listModels: async (providerId: string) => providerId === 'full'
+        ? [{ id: 'm1', name: 'M1' }]
+        : [],
+      resolveModelInfo: async () => ({}),
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    agentDefaultModel: {
+      currentSelection: () => ({ provider: 'full', model: 'm1' }),
+      saveSelection: async (next: unknown) => { saved = next },
+    },
+  }).models
+  const directory = await models.loadDirectory()
+  // The official rule's BOTH exclusion conditions, distinctly locked:
+  // a SUCCESSFUL empty load contributes NO group and is NOT routable
+  // (exactly like the failed provider — but through the empty filter,
+  // not the failure row); only the non-empty loaded group is routable.
+  assert.deepEqual(directory.groups.map(group => group.id), ['full'])
+  assert.deepEqual(directory.routableProviders, ['full'])
+  assert.deepEqual(directory.failures, [], 'an empty success is not a failure row')
+  void saved
 })
 
 test('model catalog separates global default from live Session selection', async () => {
@@ -238,12 +269,6 @@ test('catalog DTOs are DETACHED — mutating a returned value never aliases Host
       saveSelection: async () => {},
     },
   }).models
-  const listed = modelsPort.listProviders()
-  ;(listed as Array<{ id: string; name: string }>)[0]!.name = 'MUTATED'
-  assert.equal(providers[0]!.name, 'DeepSeek', 'the provider registry array is never aliased')
-  const modelList = await modelsPort.listModels('deepseek')
-  ;(modelList as Array<{ id: string }>)[0]!.id = 'MUTATED'
-  assert.equal(models[0]!.id, 'deepseek-chat', 'the model list is never aliased')
   const modelDir = await modelsPort.loadDirectory()
   ;(modelDir.groups as unknown as Array<{ models: Array<{ id: string }> }>)[0]!.models[0]!.id = 'MUTATED'
   assert.equal(models[0]!.id, 'deepseek-chat', 'the directory model list is never aliased')

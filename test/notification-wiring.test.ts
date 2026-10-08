@@ -22,6 +22,17 @@ import { compositionSource } from './support/composition-surface.ts'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const indexSource = compositionSource()
 const surfaceSource = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.ts'), 'utf8')
+// TS3 §31: the completion-notification controller, the terminal-focus tracker
+// and the notifier moved into their own surface owner (`notification-runtime.ts`),
+// so the focus/feed locks read that module. The aggregate only FORWARDS the
+// delegate calls; the runner still never reaches the controller.
+const notificationSource = readFileSync(join(root, 'src', 'app', 'surface', 'notification-runtime.ts'), 'utf8')
+// TS5 §14: the terminal sequences, the focus tracker and the notifier moved to
+// the TUI presentation owner; the application owner now delegates through the
+// injected structural presentation, so the terminal locks read that module.
+const presentationSource = readFileSync(join(root, 'src', 'tui', 'notification', 'runtime.ts'), 'utf8')
+// TS3 §36: the presentation event routing moved into its own surface owner.
+const routingSource = readFileSync(join(root, 'src', 'app', 'surface', 'event-routing.ts'), 'utf8')
 // A5b-5: the TuiApp event adapter (onUserInput / onTerminalFocus / ...) moved
 // into its owner, so the per-method wiring locks read the owner module.
 const eventsSource = readFileSync(join(root, 'src', 'app', 'surface', 'application-events.ts'), 'utf8')
@@ -42,6 +53,7 @@ function methodBody(source: string, name: string): string {
   return source.slice(start, end)
 }
 const surfaceMethodBody = (name: string): string => methodBody(surfaceSource, name)
+const notificationMethodBody = (name: string): string => methodBody(notificationSource, name)
 
 test('the per-method body slicer is exact (mutation guard for the focus locks)', () => {
   // Prove the slicer isolates ONE member with a unique SENTINEL — body content
@@ -49,11 +61,11 @@ test('the per-method body slicer is exact (mutation guard for the focus locks)',
   // would not prove isolation: a degenerate whole-file slice would also stop
   // finding the removed text.)
   const SENTINEL = 'SENTINEL_TERMINAL_FOCUS_BODY'
-  const sentineled = surfaceSource.replace(
+  const sentineled = notificationSource.replace(
     /    handleTerminalFocus\(focused\) \{[\s\S]*?\n    \},/u,
     `    handleTerminalFocus(focused) {\n      ${SENTINEL}\n    },`,
   )
-  assert.notEqual(sentineled, surfaceSource, 'the fixture must actually rewrite handleTerminalFocus')
+  assert.notEqual(sentineled, notificationSource, 'the fixture must actually rewrite handleTerminalFocus')
   const focusSlice = methodBody(sentineled, 'handleTerminalFocus')
   assert.ok(focusSlice.includes(SENTINEL), 'the target method slice must contain its own body')
   assert.ok(!focusSlice.includes('terminalFocusTracker.markFocused()'),
@@ -68,8 +80,8 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
   // agent/status handler. Session events (turn/end, turn/start, compaction/…)
   // are never forwarded, so they can never trigger a notification (plan:
   // turn/end is outcome recording only).
-  assert.equal(surfaceSource.split('completionController.onAgentStatus').length - 1, 1,
-    'the surface must expose exactly one controller feed')
+  assert.equal(notificationSource.split('completionController.onAgentStatus').length - 1, 1,
+    'the surface notification owner must expose exactly one controller feed')
   // A4-7: the routing decision is surface-owned; the runner keeps a thin
   // delegation. The single controller feed is inside the surface routing body.
   assert.equal(indexSource.split('surface.routeAgentStatus(').length - 1, 1,
@@ -77,15 +89,16 @@ test('the ONLY completion-controller feed is agent/status (turn/end can never no
   const marker = "ctx.on('agent/status', ({ agent, status }) => surface.routeAgentStatus(agent.id, status))"
   assert.ok(indexSource.includes(marker),
     'the agent/status handler must delegate to the surface routing')
-  const routing = surfaceSource.slice(
-    surfaceSource.indexOf('const routeAgentStatus = '),
-    surfaceSource.indexOf('const routeProviderRefresh = '),
+  // TS3 §36: the routing body moved into the presentation event router owner.
+  const routing = routingSource.slice(
+    routingSource.indexOf('const routeAgentStatus = '),
+    routingSource.indexOf('const routeProviderRefresh = '),
   )
-  assert.ok(routing.includes('feedCompletionStatus(agentId, status)'),
+  assert.ok(routing.includes('options.feedCompletionStatus(agentId, status)'),
     'the agent/status handler must route the main agent to the controller')
-  assert.ok(routing.includes('if (!taskHasChild(agentId)) return'),
+  assert.ok(routing.includes('if (!options.hasTaskChild(agentId)) return'),
     'the child membership gate must stay (children never notify and never repaint)')
-  assert.ok(routing.includes('refreshAgentRuntimeOnly()'),
+  assert.ok(routing.includes('options.refreshAgentRuntimeOnly()'),
     'the child runtime refresh must stay')
 })
 
@@ -97,26 +110,43 @@ test('the live-agent identity resets at every commit site plus teardown', () => 
   // setCompletionOwner seam.
   assert.equal(commitOrderSource.split('seams.setCompletionOwner(').length - 1, 4,
     'all four commit shapes must reset the completion owner through the seam')
-  assert.equal(indexSource.split('surface.setCompletionOwner(undefined)').length - 1, 1,
-    'the cleanup fence must reset the completion identity to undefined exactly once')
-  assert.equal(surfaceSource.split('completionController.setLiveAgent').length - 1, 1,
+  assert.equal(indexSource.split('surface.retireCompletionOwner()').length - 1, 1,
+    'the cleanup fence must withdraw the completion identity exactly once through the final-teardown retirement')
+  assert.equal(indexSource.split('surface.setCompletionOwner(undefined)').length - 1, 0,
+    'the final teardown must NOT use the rebind seam (it would erase a retainable terminal outcome)')
+  assert.equal(notificationSource.split('completionController.setLiveAgent').length - 1, 1,
     'the completion controller must be reached ONLY through the single setCompletionOwner seam')
   assert.equal(indexSource.split('completionController').length - 1, 0,
     'the runner must not reach the notification controller directly (A4-4 surface ownership)')
 })
 
 test('focus reporting is enabled at mount and disabled on EVERY exit path', () => {
-  // A4-4: the surface owns the mount enable + the normal-cleanup disable; the
+  // A4-4 + TS5 §14.2: the TUI presentation owns the mount enable and the
+  // disable write; the application surface delegates through the injected
+  // presentation (so no terminal sequence reaches the application owner); the
   // terminal-total fatal catch (outside the startup IIFE) keeps its own guarded
   // write, because the surface owner is not in scope on that path.
-  assert.equal(surfaceSource.split('ENABLE_FOCUS_REPORTING').length - 1, 2,
-    'the surface enables focus reporting exactly once (the constant use + import)')
-  assert.equal(surfaceSource.split('DISABLE_FOCUS_REPORTING').length - 1, 2,
-    'the surface disables focus reporting exactly once (the constant use + import)')
+  assert.equal(presentationSource.split('ENABLE_FOCUS_REPORTING').length - 1, 2,
+    'the terminal presentation enables focus reporting exactly once (the constant use + import)')
+  assert.equal(presentationSource.split('DISABLE_FOCUS_REPORTING').length - 1, 2,
+    'the terminal presentation disables focus reporting exactly once (the constant use + import)')
+  assert.equal(notificationSource.split('ENABLE_FOCUS_REPORTING').length - 1, 0,
+    'the application notification owner must not carry a terminal sequence')
+  assert.equal(notificationSource.split('DISABLE_FOCUS_REPORTING').length - 1, 0,
+    'the application notification owner must not carry a terminal sequence')
+  assert.equal(notificationSource.split('presentation.enableFocusReporting()').length - 1, 1,
+    'the application owner delegates the mount enable to the injected presentation')
   assert.equal(indexSource.split('notificationWriter.write(ENABLE_FOCUS_REPORTING)').length - 1, 0,
     'the runner no longer enables focus reporting itself')
-  assert.equal(indexSource.split('notificationWriter.write(DISABLE_FOCUS_REPORTING)').length - 1, 1,
+  // TS2 §11 moved the terminal-total fatal catch into the bootstrap composition
+  // zone (`app/bootstrap/lifecycle.ts`); it keeps exactly ONE runner-side
+  // disable of focus reporting. The write goes through the INJECTED guarded
+  // writer, and that seam's wiring is asserted too — so "some writeOutput call
+  // exists" can never stand in for the real guarded write.
+  assert.equal(indexSource.split('writeOutput(DISABLE_FOCUS_REPORTING)').length - 1, 1,
     'the fatal catch keeps the one runner-side disable')
+  assert.equal(indexSource.split('writeOutput: (text) => { notificationWriter.write(text) }').length - 1, 1,
+    'the fatal catch writes through the runner guarded notification writer')
   // The normal cleanup disables BEFORE the app dies (first teardown
   // step, before any throwable operation).
   const cleanupStart = indexSource.indexOf('const disposeSurface = (): void => {')
@@ -128,7 +158,7 @@ test('focus reporting is enabled at mount and disabled on EVERY exit path', () =
   // The startup-failure catch disables too (the body may have thrown
   // AFTER the mount enabled the mode).
   const fatalCatch = indexSource.slice(indexSource.indexOf('Terminal-total final catch'))
-  assert.ok(fatalCatch.includes('notificationWriter.write(DISABLE_FOCUS_REPORTING)'),
+  assert.ok(fatalCatch.includes('writeOutput(DISABLE_FOCUS_REPORTING)'),
     'the fatal catch must disable focus reporting')
 })
 
@@ -144,10 +174,10 @@ test('user activity restores the tracker to focused (the onUserInput wiring)', (
   const wiring = eventsSource.slice(wiringStart, wiringStart + 300)
   assert.ok(wiring.includes('deps.surface.noteUserInput()'),
     'onUserInput must route to the surface tracker restore')
-  const restoreBody = surfaceMethodBody('noteUserInput')
-  assert.ok(restoreBody.includes('terminalFocusTracker.markFocused()'),
-    'noteUserInput must restore the tracker to focused')
-  assert.ok(restoreBody.includes('completionController.setFocus(terminalFocusTracker.state)'),
+  const restoreBody = notificationMethodBody('noteUserInput')
+  assert.ok(restoreBody.includes('presentation.markFocused()'),
+    'noteUserInput must restore the terminal tracker to focused through the presentation')
+  assert.ok(restoreBody.includes('completionController.setFocus(presentation.focusState())'),
     'noteUserInput must re-sync the controller focus')
   // The onTerminalFocus wiring keeps feeding the tracker + controller.
   const focusStart = eventsSource.indexOf('onTerminalFocus: (focused) => {')
@@ -155,9 +185,9 @@ test('user activity restores the tracker to focused (the onUserInput wiring)', (
   const focusWiring = eventsSource.slice(focusStart, focusStart + 300)
   assert.ok(focusWiring.includes('deps.surface.handleTerminalFocus(focused)'),
     'onTerminalFocus must route to the surface tracker')
-  const focusBody = surfaceMethodBody('handleTerminalFocus')
-  assert.ok(focusBody.includes('terminalFocusTracker.handleFocusReport('),
-    'handleTerminalFocus must feed the tracker')
-  assert.ok(focusBody.includes('completionController.setFocus(terminalFocusTracker.state)'),
+  const focusBody = notificationMethodBody('handleTerminalFocus')
+  assert.ok(focusBody.includes('presentation.handleFocusReport('),
+    'handleTerminalFocus must feed the terminal tracker through the presentation')
+  assert.ok(focusBody.includes('completionController.setFocus(presentation.focusState())'),
     'handleTerminalFocus must re-sync the controller focus')
 })

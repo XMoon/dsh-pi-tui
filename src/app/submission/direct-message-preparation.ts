@@ -1,0 +1,167 @@
+/**
+ * Draft → UserMessage preparation for every Direct agent-bound path (plan M6,
+ * §13; TS8-C): followup, steer and queue all receive the SAME prepared message,
+ * so no path can silently drop an `ImageBlock` (queue messages are durable
+ * `UserMessage`s in the agent inbox — the queue never re-derives images
+ * from drafts, §13.3).
+ *
+ * This is the DIRECT application preparation: the composition root injects the
+ * structural Host attachment/llm services (only for the Direct backend) and
+ * this module never resolves `ctx`. The pipeline: canonicalize mentions →
+ * expand mixed placeholders → no attachments? create text UserMessage →
+ * attachment service required → (image present) Direct current-model capability
+ * preflight → Direct image admission → Direct generic-file admission → ordered
+ * ContentBlocks → `createUserMessage`. A text-only draft keeps the exact legacy
+ * path (single text block, no service calls). No behavior change to Direct
+ * attachment persistence.
+ * @module @xmoon76/dsh-pi-tui/app/submission/direct-message-preparation
+ */
+
+import { createUserMessage, type ContentBlock, type MessageSource, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { expandAttachmentPlaceholders, type DraftAttachmentSegment } from '../../client/media/attachment/placeholder.ts'
+import type { DraftFileStoreLike } from '../../client/media/attachment/file-draft.ts'
+import type { DraftImageStoreLike } from '../../client/media/image/types.ts'
+import { FileInputError, ImageAdmissionError } from '../../domain/media/errors.ts'
+import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import { admitDraftFiles, type FileAttachmentStoreLike } from './direct-file-admission.ts'
+import { admitDraftImages, type AttachmentsLike } from './direct-image-admission.ts'
+import { assertModelSupportsImages, type LlmLike } from './direct-image-capability.ts'
+
+/** The live provider/model pair (the runner's current selection). */
+export interface CurrentModelLike {
+  readonly provider: string
+  readonly model: string
+}
+
+/** Injectable service surface for the Direct draft preparation. */
+export interface DirectPrepareInputDeps {
+  /** The live `ctx.attachments` service; undefined = attachment intake disabled. */
+  readonly attachments: AttachmentsLike | undefined
+  /** The live generic-file draft store, when the runner has one. */
+  readonly fileStore?: DraftFileStoreLike
+  /** The optional submit cancellation signal. */
+  readonly signal?: AbortSignal
+  /** The live `ctx.llm` service; undefined = capability gate skipped. */
+  readonly llm: LlmLike | undefined
+  /** The CURRENT provider/model (re-read at submit time — the TUI supports
+   * runtime model switching, plan §12). */
+  currentModel(): CurrentModelLike | undefined
+  /** Send-time `@`-file mention canonicalization through the Host-file
+   * port (migration M1.10) — the runner wires the live session scope. */
+  canonicalizeMentions(text: string): Promise<string>
+}
+
+
+
+/**
+ * Prepare the immutable `UserMessage` for one submission.
+ * @param text - the editor draft text.
+ * @param store - the live draft store.
+ * @param deps - the service surface.
+ * @param options - the optional request identity: an ordinary human prompt
+ *   participating in the local-submission echo flow persists the id minted
+ *   before its first asynchronous await as the message source `rpcId`, so the
+ *   local echo and the authoritative occurrence share one correlation key.
+ *   Injected context and non-prompt workflows omit it.
+ * @returns the frozen user message.
+ * @throws ImageAdmissionError/FileInputError when the deployment has no
+ *   attachment service but the live draft references an attachment;
+ *   capability/admission errors otherwise.
+ */
+export async function prepareUserMessage(
+  text: string,
+  store: DraftImageStoreLike,
+  deps: DirectPrepareInputDeps,
+  options: { readonly requestId?: string } = {},
+): Promise<UserMessage> {
+  const source = userSource(options.requestId)
+  // Host `@`-mention canonicalization must run before strict local
+  // attachment-placeholder expansion. Canonical placeholders contain no `@`.
+  deps.signal?.throwIfAborted()
+  const canonical = await deps.canonicalizeMentions(text)
+  deps.signal?.throwIfAborted()
+  const segments = expandAttachmentPlaceholders(canonical, store, deps.fileStore)
+  const imageSegments = segments
+    .filter((segment): segment is Extract<DraftAttachmentSegment, { type: 'image' }> => segment.type === 'image')
+    .map(segment => ({ type: 'image' as const, image: segment.image }))
+  const fileSegments = segments
+    .filter((segment): segment is Extract<DraftAttachmentSegment, { type: 'file' }> => segment.type === 'file')
+    .map(segment => segment.file)
+  const hasImage = imageSegments.length > 0
+  const hasFile = fileSegments.length > 0
+  if (!hasImage && !hasFile) {
+    return createUserMessage({
+      content: [{ type: 'text', text: canonical }],
+      source,
+    })
+  }
+  if (deps.attachments === undefined) {
+    throw hasImage
+      ? new ImageAdmissionError('Image attachments are unavailable in this deployment.')
+      : new FileInputError('File attachment storage is unavailable.')
+  }
+  // Only image-bearing messages use the model capability gate. Generic files
+  // are valid for text-only models and must not probe image capabilities.
+  if (hasImage) {
+    const current = deps.currentModel()
+    if (deps.llm !== undefined && current !== undefined) {
+      await assertModelSupportsImages(deps.llm, current.provider, current.model)
+      deps.signal?.throwIfAborted()
+    }
+  }
+  deps.signal?.throwIfAborted()
+  const imageRefs: readonly ImageAttachmentRefLike[] = hasImage
+    ? (await admitDraftImages(imageSegments, deps.attachments)).refs
+    : []
+  deps.signal?.throwIfAborted()
+  const fileRefs: readonly FileAttachmentRefLike[] = hasFile
+    ? await admitDraftFiles(fileSegments, deps.attachments as unknown as FileAttachmentStoreLike, deps.signal)
+    : []
+  deps.signal?.throwIfAborted()
+  return createUserMessage({
+    content: [...buildAttachmentContentBlocks(segments, imageRefs, fileRefs)],
+    source,
+  })
+}
+
+/**
+ * The Direct user-message source. `MessageSourceMap` is documented
+ * merge-extensible; this Direct adaptation of the official `user-rpc` source
+ * carries the plain correlation id so a local submission echo can be retired
+ * by an authoritative occurrence. The cast keeps the extra field out of the
+ * base `@deepseek-ai/dsh-llm` shape, which does not yet declare `rpcId`.
+ */
+function userSource(requestId: string | undefined): MessageSource {
+  return (requestId === undefined
+    ? { kind: 'user' }
+    : { kind: 'user', rpcId: requestId }) as MessageSource
+}
+
+function buildAttachmentContentBlocks(
+  segments: readonly DraftAttachmentSegment[],
+  imageRefs: readonly ImageAttachmentRefLike[],
+  fileRefs: readonly FileAttachmentRefLike[],
+): readonly ContentBlock[] {
+  const blocks: ContentBlock[] = []
+  let imageIndex = 0
+  let fileIndex = 0
+  for (const segment of segments) {
+    if (segment.type === 'text') {
+      if (segment.text !== '') blocks.push({ type: 'text', text: segment.text })
+      continue
+    }
+    if (segment.type === 'image') {
+      const ref = imageRefs[imageIndex++]
+      if (ref === undefined) throw new ImageAdmissionError('An image draft could not be admitted (reference mismatch).')
+      blocks.push({ type: 'image', attachment: ref as never })
+      continue
+    }
+    const ref = fileRefs[fileIndex++]
+    if (ref === undefined) throw new FileInputError('A file draft could not be admitted (reference mismatch).')
+    blocks.push({ type: 'file', attachment: ref as never })
+  }
+  if (imageIndex !== imageRefs.length || fileIndex !== fileRefs.length) {
+    throw new ImageAdmissionError('The attachment service returned mismatched references.')
+  }
+  return blocks
+}

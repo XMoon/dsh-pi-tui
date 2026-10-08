@@ -28,10 +28,10 @@
 
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { SkillCatalogCapability, SkillDefinitionResult } from '../../runtime/catalog-port.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../../skill-catalog-refresh.ts'
-import type { HumanSkillCatalog } from '../../skill-catalog.ts'
-import type { SessionStats } from '../../stats.ts'
-import type { SurfaceCommandSummary } from '../../surface-catalog.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshSource } from './catalog-refresh.ts'
+import type { HumanSkillCatalog } from '../../domain/catalog/skill.ts'
+import type { SessionStats, SessionStatsFacts } from '../../domain/status/stats.ts'
+import type { SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type { LiveSessionScope, SessionScope, SessionScopeAuthority } from '../session/scope.ts'
 
 /** The session-runtime entries the command runtime drives. */
@@ -62,10 +62,19 @@ export interface CommandRuntimeSurface {
   }
   /** The live owner's approval-policy override, or `undefined`. */
   approvalOverride(sessionId: string): 'ask' | 'never' | undefined
-  /** The live owner's folded stats, or `undefined`. */
-  sessionStats(sessionId: string): SessionStats | undefined
-  /** The live owner's last assistant text, or `undefined`. */
-  lastAssistantText(sessionId: string): string | undefined
+  /**
+   * The live owner's whole-log stats, or `undefined`. Async since M3-4
+   * PR4 §3.3/§12.4: the Remote branch composes the official whole-log
+   * projections (sessionStats + tokenUsage + context) with bounded paging
+   * for the recent performance window — never a synchronous facade that
+   * weakens the semantics.
+   */
+  sessionStats(sessionId: string, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
+  /** The live owner's last assistant text, or `undefined` ('' = the
+   *  message carries no text; undefined = no assistant message yet). Async
+   *  since PR4 §3.6: the Remote branch pages loadOlder until the newest
+   *  durable assistant message is inside the window. */
+  lastAssistantText(sessionId: string, signal?: AbortSignal): Promise<string | undefined>
   /** The LIVE agent-scoped catalog refresh (exact owner + generation captured
    *  in the same synchronous step). */
   refreshLiveCatalog(sessionId: string, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
@@ -112,8 +121,8 @@ export interface CommandRuntime {
     readonly cwd: string
   }
   currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
-  currentSessionStats(scope: LiveSessionScope): SessionStats | undefined
-  lastAssistantText(scope: LiveSessionScope): string | undefined
+  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
+  lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   /** Refresh the LIVE Session's scoped catalog. The scope is validated at the
    *  SYNC admission (the exact owner is captured there) and again after the
    *  read settles. Accepts a sessionless-capable capture so /preset's live
@@ -189,8 +198,29 @@ export function bindCommandRuntime(deps: CommandRuntimeDeps): CommandRuntime {
     // The scope's owner is proven current before the read; the port resolves
     // the session id to its exact live Agent internally.
     currentApprovalOverride: (scope) => deps.surface.approvalOverride(liveSessionId(scope)),
-    currentSessionStats: (scope) => deps.surface.sessionStats(liveSessionId(scope)),
-    lastAssistantText: (scope) => deps.surface.lastAssistantText(liveSessionId(scope)),
+    // PR5 (plan §3.7): the async whole-log stats read re-checks the ORIGINAL
+    // scope after settle — the Remote transport fences answer binding
+    // identity, not VISIBLE TUI ownership, so a session switch mid-read must
+    // never deliver the old subject's figures to the /status panel.
+    currentSessionStats: async (scope, signal) => {
+      const sessionId = liveSessionId(scope)
+      const stats = await deps.surface.sessionStats(sessionId, signal)
+      if (!deps.scope.isCurrent(scope)) {
+        throw new SupersededReadError('the session changed while reading the session stats')
+      }
+      return stats
+    },
+    // PR5 (plan §3.7): the paged last-assistant-text read applies the SAME
+    // post-await original-scope fence — a /copy that began on session A
+    // must never clipboard A's text after the visible owner became B.
+    lastAssistantText: async (scope, signal) => {
+      const sessionId = liveSessionId(scope)
+      const text = await deps.surface.lastAssistantText(sessionId, signal)
+      if (!deps.scope.isCurrent(scope)) {
+        throw new SupersededReadError('the session changed while reading the last assistant text')
+      }
+      return text
+    },
     refreshSessionCatalog: async (scope, source) => {
       // SYNC admission: the scope must still be the current owner, and the
       // exact Direct owner is captured by the surface in this same step.

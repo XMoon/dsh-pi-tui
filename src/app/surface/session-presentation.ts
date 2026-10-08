@@ -29,18 +29,67 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/session-presentation
  */
 
-import { compactingFromLog, workingFromLog } from '../../compaction-presentation.ts'
-import { foldGoal } from '../../status/derive-goal.ts'
-import { recallHistoryForSession, type ParsedHistoryRecord } from '../../history.ts'
-import { hydrateSessionUi } from '../../session-ui-hydrate.ts'
-import { StatsFolder } from '../../stats.ts'
-import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep } from '../../streaming-tool-preparing.ts'
-import { TranscriptFolder } from '../../transcript.ts'
-import { TranscriptWindowController } from '../../transcript-window.ts'
-import type { Diag } from '../../diag.ts'
+import { compactingFromLog, workingFromLog } from './compaction-presentation.ts'
+import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
+import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
+import { hydrateSessionUi } from './session-ui-hydrate.ts'
+import { StatsFolder } from '../../domain/status/stats.ts'
+import { applyStreamingToolPreviewEvent, applyStreamingToolPreviewInput, clearStreamingToolPreviewsForStep, type StreamingToolPreview, type ToolSummaryKeys } from './streaming-tool-preparing.ts'
+import { TranscriptFolder } from '../../domain/transcript/folder.ts'
+import { TranscriptWindowController } from '../../domain/transcript/window.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import type { StreamingToolPreview, TuiApp } from '../../tui-app.ts'
+import type { PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
+import type { TuiApp } from '../../tui-app.ts'
 import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from './runtime.ts'
+
+/**
+ * The official CURRENT-VALUE facts of a session (M3-4 PR2) that a bounded
+ * event window cannot own, because their source event may precede the window:
+ * the title, the goal, the todo list and the workspace cwd. Each field is
+ * present only when its official projection ANSWERED, and this object is
+ * supplied on the Remote branch ALWAYS (an empty one means "the projections
+ * cannot answer right now"): an absent field is therefore OMITTED — the
+ * bounded window NEVER stands in for it (a recent window is not a session's
+ * current value). A legal `null` (no goal / no todo write yet) hides the fact
+ * the same way. Only the DIRECT branch folds these facts from its COMPLETE log
+ * (there the object is absent altogether).
+ */
+export interface PresentationCurrentFacts {
+  readonly cwd?: string
+  readonly title?: string
+  readonly goal?: { readonly objective: string; readonly phase: 'active' | 'paused' | 'blocked' | 'complete' } | null
+  readonly todos?: readonly { readonly content: string; readonly status: 'pending' | 'in_progress' | 'completed' }[] | null
+}
+
+/** Apply the projection-owned current facts to the surface. ONE rule for the
+ *  cold hydrate, the window replacement and the projection store's own change
+ *  channel: an absent field means the projection cannot answer, so the fact is
+ *  OMITTED (never the bounded window's guess); a legal `null` goal / todos
+ *  means "no goal" / "no write yet" and hides the fact the same way. */
+function applyCurrentFacts(
+  facts: PresentationCurrentFacts,
+  status: { setGoalText: (text: string | undefined) => void },
+  app: TuiApp,
+): void {
+  status.setGoalText(facts.goal === undefined || facts.goal === null ? undefined : goalTextOf(facts.goal))
+  app.setSessionTitle(facts.title)
+  app.setTodoSummary(facts.todos ?? [])
+}
+
+/**
+ * The committed Remote hydration outcome (M3-4 PR2): the window revision (the
+ * live-ingress gap baseline), the proven working fold (the compaction-cache
+ * seed) and the TRANSPORT TOKEN the read was fenced under — the token
+ * travels with the fold so no consumer can re-stamp it with a newer
+ * Connection/binding identity.
+ */
+export interface RemoteHydrationOutcome {
+  readonly revision: number
+  readonly working: boolean
+  readonly proven: boolean
+  readonly transportToken: unknown
+}
 
 /** The presentation event shape: exactly the event the transcript fold accepts,
  *  narrowed to the routing discriminant. The Host `SessionEvent` satisfies it,
@@ -65,8 +114,19 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
   readonly surface: SurfaceRuntime<Event>
   /** Process diagnostics for the cold-scan timings. */
   readonly diag: Diag
+  /** The injected canonical tool summary-key policy the Preparing projection
+   *  extracts argument summaries with (`toolSummaryKeys`). Required: the
+   *  application owner must not import the TUI transcript presentation module,
+   *  and a silent `[]` fallback would change Preparing summary semantics. */
+  readonly summaryKeys: ToolSummaryKeys
   /** True once the runner is disposing: no hydration may start. */
   readonly isCleanedUp: () => boolean
+  /** F10 (round 4): re-derive the footer status from the CURRENT folds —
+   *  the composition root's `refreshStatusCheap` (it owns the semantic
+   *  derivation and the commit). The re-hydrate path calls it after
+   *  replacing the stats fold, so the footer never keeps rendering the
+   *  pre-page figures. */
+  readonly refreshStatusCheap: () => void
   /** Official DSH log folds the composition root owns. */
   readonly folds: {
     readonly title: (events: readonly Event[]) => string | undefined
@@ -85,8 +145,11 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly setGoalText: (text: string | undefined) => void
     readonly refresh: () => void
     readonly refreshTerminalTitle: () => void
+    /** The terminal-local cwd projection (OSC 7): the same identity lifecycle
+     *  as the title, but a title-only rename must call the title alone. */
+    readonly refreshTerminalCwd: () => void
     readonly updateWelcomeCard: () => void
-    readonly scheduleInitialMeasurement: (agent: LiveSessionAgent<Event>) => void
+    readonly scheduleInitialMeasurement: (sessionId: string) => void
   }
   /** The per-session client-local input history (A5b-2 owns it). */
   readonly history: {
@@ -107,6 +170,52 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
   readonly viewer: {
     readonly resetAutoPop: () => void
     readonly teardownForSessionSwap: () => void
+  }
+  /**
+   * The Remote-branch presentation reads (M3-4 PR2): absent on Direct. When
+   * present, `initLiveSession` hydrates through the semantic reader (the
+   * bounded official window + the live baseline) instead of a Direct Agent
+   * full-log snapshot, and the working/busy fallback reads the official
+   * `running` bit when the bounded window cannot prove a turn boundary.
+   */
+  readonly remote?: {
+    /** Read the current official window snapshot for the session. */
+    readonly read: (sessionId: string) => Promise<PresentationReadSnapshot | undefined>
+    /** The official `running` bit of the exact retained binding. */
+    readonly running: (sessionId: string) => boolean | undefined
+    /** The official `plan` projection active bit of the exact retained
+     *  binding (absent capability reads inactive). */
+    readonly plan?: (sessionId: string) => boolean | undefined
+    /** The official CURRENT-VALUE facts (title/goal/todos/cwd) of the exact
+     *  retained session: their source events may precede the bounded window,
+     *  so the projection — never the window — owns them. On the Remote branch
+     *  this ALWAYS answers: an empty object means "the projections cannot
+     *  answer right now", and the fact is then OMITTED rather than folded from
+     *  a bounded window (a recent window is not a session's current value). */
+    readonly facts: (sessionId: string) => PresentationCurrentFacts
+    /** The ownership generation captured BEFORE the reader await (the
+     *  §6.5 fence token; absent when the caller provides no generation). */
+    readonly captureGeneration?: () => number
+    /**
+     * The §6.5 REMOTE TRANSPORT token capture (Connection generation +
+     * exact binding object), taken before the reader await. Absent on a
+     * Direct-shaped remote group.
+     */
+    readonly captureTransportToken?: (sessionId: string) => unknown
+    /** Whether the captured transport token still matches the live identity
+     *  (a Connection/binding rollover WITHOUT a TUI owner commit still
+     *  invalidates the pending visible commit — plan §6.5). */
+    readonly isTransportTokenCurrent?: (sessionId: string, token: unknown) => boolean
+    /**
+     * The VISIBLE-COMMIT fence token (plan §6.5/§7.5): the caller captures
+     * the ownership GENERATION before starting the hydration; after the
+     * reader await, the commit may run only while the CURRENT owner reads
+     * the SAME session id AND the captured generation is still current.
+     * The generation bumps on EVERY owner commit (ordinary/fork/first-
+     * session/resume — including a same-id binding rollover), so this is
+     * exact-generation currentness, never sessionId alone.
+     */
+    readonly isStillCurrent?: (sessionId: string, generation: number) => boolean
   }
 }
 
@@ -132,6 +241,48 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
   restoreMainTranscriptAnchor(): void
   /** Rebuild every live-session surface after resume, create or swap. */
   initLiveSession(agent: LiveSessionAgent<Event>): Promise<void>
+  /**
+   * The Remote-branch cold hydration (M3-4 PR2): the same ONE cold-hydration
+   * path over the semantic `PresentationReader` window (bounded coverage,
+   * official hasMore/loadingOlder), the opening-journal merge, the live
+   * baseline replay and the same presentation-only folds. Absent remote
+   * deps make this a no-op (the Direct branch owns `initLiveSession`).
+   */
+  initLiveRemoteSession(sessionId: string): Promise<RemoteHydrationOutcome | undefined>
+  /** Re-apply the OFFICIAL current-value facts (title/goal/todos) of one
+   *  session — the projection store's own change channel. The cold hydrate,
+   *  the window replacement and a live projection update therefore share ONE
+   *  projection-authority rule (and never a bounded-window fold). */
+  applySessionCurrentFacts(sessionId: string): void
+  /**
+   * Re-hydrate the main transcript from the CURRENT reader window after an
+   * older-history extension (Remote `loadOlder`): the append-only fold cannot
+   * take a front-joined page incrementally, so the bounded window re-folds
+   * (the honest model for a bounded window; the fold stays cheap).
+   */
+  rehydrateFromWindow(sessionId: string): Promise<void>
+  /**
+   * PR5 truthfulness (plan §3.2): whether the main stats fold's
+   * RECENT-performance figures are AUTHORITATIVE for presentation. `true`
+   * on Direct (the fold reads the COMPLETE in-process session log) and on a
+   * Remote window that proved its recent-sample evidence (the window
+   * reached the history start, or the fold retained enough valid samples —
+   * the SAME fold's retained evidence). `false` while a bounded Remote
+   * window cannot prove either: the footer/status must OMIT the recent
+   * metrics (never a numeric `0s · 0 tok/s` stand-in). This is the ONE
+   * presentation-owned availability authority beside the stats fold; it is
+   * committed in the SAME fenced hydrate that commits the fold itself, so
+   * a stale hydrate can never flip the replacement subject's bit.
+   */
+  mainRecentPerformanceAvailable(): boolean
+  /**
+   * F1 (PR5 §3.2): re-answer the availability bit off the SAME fold the live
+   * ingress just mutated, so a bounded window that committed `false` can flip
+   * on ordinary appended evidence without a `loadOlder`/rehydrate. It answers in
+   * BOTH directions (the fold's evidence is not monotonic), and it re-derives the
+   * status whenever the answered value changes.
+   */
+  refreshRecentPerformanceAvailability(): void
   /** The synchronous surface reset that follows a generation bump (A2 seam). */
   resetForGeneration(): void
 }
@@ -147,11 +298,12 @@ export function applyAssistantLiveInput(
   stats: StatsFolder,
   previews: Map<string, StreamingToolPreview>,
   input: AssistantLiveInput,
+  summaryKeys: ToolSummaryKeys,
 ): void {
   if (input.kind === 'end' && (input.status === 'abandoned' || input.settlement === 'attempt')) {
     clearStreamingToolPreviewsForStep(previews, input.turn, input.step)
   } else if (!(input.kind === 'chunk' && owner.turnActivity(input.turn)?.completed === true)) {
-    applyStreamingToolPreviewInput(previews, input)
+    applyStreamingToolPreviewInput(previews, input, summaryKeys)
   }
   owner.applyLiveInput(input)
   stats.applyLiveInput(input)
@@ -196,6 +348,30 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
 
   let statsFolder = new StatsFolder()
 
+  /**
+   * PR5 (plan §3.2): the presentation-owned recent-performance availability of
+   * the CURRENT main stats fold (see `mainRecentPerformanceAvailable`). Starts
+   * `false` (no authoritative window is committed yet), is answered inside every
+   * fenced hydrate commit that replaces `statsFolder`, and is re-answered in
+   * BOTH directions by the live refresh as the SAME fold's evidence moves.
+   */
+  let recentPerformanceAvailable = false
+  /**
+   * F1 (PR5 §3.2): the LAST COMMITTED fold's COVERAGE-completeness fact — the
+   * ONE second authority beside the fold's own evidence. It is `true` where the
+   * committed event set provably covers the whole session (Direct's complete
+   * log; a Remote window that reached the history start), in which case
+   * availability is authoritative even with ZERO valid recent samples, and
+   * `false` for a truncated Remote window that must be judged by the SAME
+   * fold's retained evidence alone.
+   *
+   * It is committed inside the SAME fenced hydrate block that replaces the fold
+   * (never pre-computed by the caller, so a merge that adds opening-journal
+   * events cannot drift it), and it is cleared by the generation reset exactly
+   * like the fold.
+   */
+  let recentCoverageComplete = false
+
   // Coalesced repaint is surface-owned (A4-8): the runner no longer owns
   // the flush timer; the surface routing schedules its own repaint.
   // Ephemeral previews are isolated per presentation owner: the main live
@@ -223,6 +399,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     get window() { return windowController },
     get previews() { return mainStreamingToolPreviews },
     applyToolPreview: (event: Event) => applyStreamingToolPreviewEvent(mainStreamingToolPreviews, event),
+    // Forwarded to the owner's own live refresh (declared below the fold state
+    // it reads); a live accessor so a session commit cannot capture a stale one.
+    refreshRecentPerformanceAvailability: () => refreshRecentPerformanceAvailability(),
   }
 
   // Tool-call arguments by callId, for the approval-preview dialog.
@@ -239,6 +418,12 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const resetForGeneration = (): void => {
     callArgs.clear()
     mainStreamingToolPreviews.clear()
+    // PR5 (plan §3.2): the replacement subject has NO authoritative window
+    // yet — the recent-performance availability bit returns to `false` until
+    // the new subject's own fenced hydrate proves otherwise (the old
+    // subject's `true` must not leak into the hydrate-pending window).
+    recentPerformanceAvailable = false
+    recentCoverageComplete = false
     // The new session's subagent delegations are a fresh namespace: stale
     // pending calls from the old session would consume viewer match slots,
     // and dead callId→child maps would silently disable the auto-pop.
@@ -289,34 +474,62 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * plus every switch await the coordinator refresh themselves.
    */
   
-  const initLiveSession = async (agent: LiveSessionAgent<Event>): Promise<void> => {
-    if (deps.isCleanedUp()) return
-    // Session transitions invalidate transient keyboard confirmation before
-    // any asynchronous hydration or bootstrap work begins.
-    deps.surface.app.clearExitConfirmation()
-    // Setup installs this before publication; the idempotent call also
-    // covers test/direct adapters that hand an already-live Agent back to
-    // the runner. Its fold is the resume source of truth.
-    deps.direct.installModelSelection(agent)
-    // The session's own workspace joins the known-cwd set (Rule 2 for
-    // the all-directory search): a legacy-only history file in this cwd
-    // becomes recoverable immediately, even if it predates this process.
-    deps.history.rememberCwd(agent.session.header.cwd ?? '')
-    const opening = deps.surface.openingJournal.cut(agent.session.id)
-     const events = opening === undefined
-       ? agent.session.snapshotEvents()
-       : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
+  /**
+   * The shared cold-hydrate body both branches converge on (M3-4 PR2): fold
+   * the events into the transcript/stats folders, replay the live baseline,
+   * derive the presentation-only folds (goal/working/plan/title/todo/
+   * compaction) and commit/repaint. The CALLER owns the event-source
+   * resolution (Direct: the full Agent log + its live baseline; Remote: the
+   * bounded reader window + its live inputs) and the working/plan values.
+   */
+  const hydratePresentation = async (input: {
+    readonly sessionId: string
+    readonly cwd: string | undefined
+    readonly events: readonly Event[]
+    readonly liveBaseline: readonly AssistantLiveInput[]
+    readonly planActive: boolean
+    readonly working: boolean
+    /**
+     * F1 (PR5 §3.2): whether the event set being committed provably COVERS the
+     * whole session — Direct's complete log, or a Remote window that reached
+     * the history start (`!snapshot.hasMore`). Committed with the fold so the
+     * availability answer below is always taken from the SAME committed fold,
+     * never from a caller pre-computation over a pre-merge snapshot.
+     */
+    readonly recentCoverageComplete?: boolean
+    /**
+     * The official CURRENT-VALUE facts (M3-4 PR2). Present on the Remote
+     * branch, where `events` is only a BOUNDED window: the title/goal/todos of
+     * a long session may have been written before the window and must come
+     * from the projection, not from a fold that would read them as absent.
+     * Absent on Direct, whose `events` is the complete log.
+     */
+    readonly facts?: PresentationCurrentFacts
+  }): Promise<void> => {
+    const events = input.events
     // This is the single cold-hydration path for a live session. Do not
     // pre-apply the same event log during runner wiring: a resumed session
     // otherwise pays for two full transcript and stats replays before its
     // first usable frame.
     const hydrated = hydrateSessionUi(events)
     folder = hydrated.folder
-     windowController.setTurns(folder.groupedTurns())
+    windowController.setTurns(folder.groupedTurns())
     statsFolder = hydrated.statsFolder
-     for (const input of deps.direct.assistantStreamBaselineFor(agent)) {
-       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
-     }
+    // PR5: the availability bit commits with the SAME fold it describes —
+    // one fenced commit, one subject (a stale hydrate cannot flip the
+    // replacement subject's bit because the §6.5 fences above already
+    // dropped it before reaching this line).
+    // F1: the ONE availability formula, answered from the fold THIS commit just
+    // installed (`statsFolder` is already `hydrated.statsFolder` above) plus the
+    // coverage fact. A merge that added opening-journal events therefore cannot
+    // drift the answer, and Direct's unconditional `true` cannot be revoked by a
+    // fold-local shrink.
+    recentCoverageComplete = input.recentCoverageComplete ?? false
+    recentPerformanceAvailable = recentCoverageComplete
+      || statsFolder.hasEnoughRecentEvidence()
+    for (const liveInput of input.liveBaseline) {
+      applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
+    }
     deps.diag.debug('session bootstrap scan', {
       scan: 'transcript',
       eventCount: events.length,
@@ -327,24 +540,27 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       eventCount: events.length,
       elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
     })
-    deps.status.setGoalText(timedBootstrapScan(deps.diag, 'goal', events.length, () => foldGoal(events)))
-    const working = timedBootstrapScan(deps.diag, 'working', events.length, () => workingFromLog(events))
-    const planMode = timedBootstrapScan(deps.diag, 'plan', events.length, () => deps.direct.planActive(agent))
-    const title = timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events))
-    deps.surface.app.setPlanMode(planMode)
-    deps.surface.app.setWorking(working)
-    deps.surface.app.setBusy(working)
-    deps.surface.app.setSessionTitle(title)
-    // Session-local bootstrap state must not leak across a switch. Fold the
-    // latest todo snapshot once from the same log (an empty log clears it).
-    const todos = timedBootstrapScan(deps.diag, 'todo', events.length, () => {
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const event = events[index]
-        if (event?.type === 'todo/write') return (event.data as { readonly todos: Parameters<TuiApp['setTodoSummary']>[0] }).todos
-      }
-      return []
-    })
-    deps.surface.app.setTodoSummary(todos)
+    deps.surface.app.setPlanMode(input.planActive)
+    deps.surface.app.setWorking(input.working)
+    deps.surface.app.setBusy(input.working)
+    if (input.facts !== undefined) {
+      // REMOTE: the official projections ARE the current-value authority. An
+      // unavailable one is OMITTED — the bounded window never stands in for a
+      // session-global fact (a recent window is not a session's current title,
+      // goal or standing todo list).
+      applyCurrentFacts(input.facts, deps.status, deps.surface.app)
+    } else {
+      // DIRECT: the COMPLETE log is the fold authority for the same facts.
+      deps.status.setGoalText(timedBootstrapScan(deps.diag, 'goal', events.length, () => foldGoal(events)))
+      deps.surface.app.setSessionTitle(timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events)))
+      deps.surface.app.setTodoSummary(timedBootstrapScan(deps.diag, 'todo', events.length, () => {
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          const event = events[index]
+          if (event?.type === 'todo/write') return (event.data as { readonly todos: Parameters<TuiApp['setTodoSummary']>[0] }).todos
+        }
+        return []
+      }))
+    }
     // A resumed session may be mid-compaction. Reset the old phase first;
     // then re-arm only the newest live bracket, matching the log fold.
     const resumedCompaction = timedBootstrapScan(deps.diag, 'compaction', events.length, () => compactingFromLog(events))
@@ -362,13 +578,17 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // cold resume never blocks first paint on a long-session scan.
     deps.status.refresh()
     deps.surface.refreshPendingInput()
-    deps.status.scheduleInitialMeasurement(agent)
+    deps.status.scheduleInitialMeasurement(input.sessionId)
     // Repaint both task channels (the JobRegistry roster + the subagent
     // catalog): the dock/badge are owner-fenced,
     // and a session switch must not leave the previous session's tasks
     // or subagents on screen until the next registry event.
     deps.surface.refreshTasks()
     deps.surface.refreshAgents()
+    // The session's own workspace joins the known-cwd set (Rule 2 for
+    // the all-directory search): a legacy-only history file in this cwd
+    // becomes recoverable immediately, even if it predates this process.
+    if (input.cwd !== undefined && input.cwd !== '') deps.history.rememberCwd(input.cwd)
     // The recall history is per-workspace AND per-session: REPLACE it
     // with the live session's rows ONLY (the CWD file's rows filtered to
     // this sessionId — session-scoped editor recall), so ↑/↓ in a live
@@ -381,16 +601,207 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     deps.history.setLastContent(historyRecords.at(-1)?.content)
     // File order is oldest-first; TuiApp's recall API takes newest-first,
     // so the session-filtered projection is reversed at the seed.
-    const sessionRecall = recallHistoryForSession(historyRecords, agent.session.id)
+    const sessionRecall = recallHistoryForSession(historyRecords, input.sessionId)
     deps.surface.app.resetInputHistory([...sessionRecall].reverse())
+    // Session identity commit (create/resume/switch): the title AND the
+    // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()
+    deps.status.refreshTerminalCwd()
     deps.status.updateWelcomeCard()
     deps.commands.register()
   }
 
+  const initLiveSession = async (agent: LiveSessionAgent<Event>): Promise<void> => {
+    if (deps.isCleanedUp()) return
+    // Session transitions invalidate transient keyboard confirmation before
+    // any asynchronous hydration or bootstrap work begins.
+    deps.surface.app.clearExitConfirmation()
+    // Setup installs this before publication; the idempotent call also
+    // covers test/direct adapters that hand an already-live Agent back to
+    // the runner. Its fold is the resume source of truth.
+    deps.direct.installModelSelection(agent)
+    const opening = deps.surface.openingJournal.cut(agent.session.id)
+    const events = opening === undefined
+      ? agent.session.snapshotEvents()
+      : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
+    await hydratePresentation({
+      sessionId: agent.session.id,
+      cwd: agent.session.header.cwd,
+      events,
+      liveBaseline: deps.direct.assistantStreamBaselineFor(agent),
+      planActive: deps.direct.planActive(agent),
+      working: workingFromLog(events),
+      // F1 (v4 §3.2, Direct): the Direct `events` IS the complete log, so its
+      // coverage is COMPLETE by construction — the availability formula then
+      // answers `true` unconditionally and a fold-local shrink (a route change
+      // clears the retained windows) can never revoke it.
+      recentCoverageComplete: true,
+    })
+  }
+
+  /**
+   * The Remote-branch cold hydration (M3-4 PR2): capture-free by design —
+   * the CALLER (the bootstrap seam) proves the owner current before and
+   * after this call; this body only reads the semantic reader snapshot and
+   * folds. The bounded window is honest: `hasMore` older history stays
+   * unpaged until the user asks, and the working/busy fold falls back to
+   * the official `running` bit when the window starts mid-turn and cannot
+   * prove a boundary (an official fact, never a guess).
+   */
+  const initLiveRemoteSession = async (sessionId: string): Promise<RemoteHydrationOutcome | undefined> => {
+    if (deps.isCleanedUp()) return undefined
+    if (deps.remote === undefined) return undefined
+    deps.surface.app.clearExitConfirmation()
+    // The fence tokens are captured BEFORE the await (plan §7.5 order:
+    // capture subject/generation/transport identity → read → verify →
+    // hydrate): the TUI ownership generation AND the Remote transport
+    // identity (Connection generation + exact binding object).
+    const fenceGeneration = deps.remote.captureGeneration?.()
+    const fenceTransport = deps.remote.captureTransportToken?.(sessionId)
+    const snapshot = await deps.remote.read(sessionId)
+    if (deps.isCleanedUp() || snapshot === undefined) return undefined
+    // §6.5 visible-commit fence: an await elapsed; the owner may have been
+    // replaced (switch/new/fork or a same-id generation rollover — the
+    // generation bumps on every commit), or the Remote transport may have
+    // rolled over (Connection/binding replacement WITHOUT a TUI owner
+    // commit). Same id alone proves nothing; each token must still match.
+    if (deps.remote.isStillCurrent?.(sessionId, fenceGeneration ?? 0) === false) return undefined
+    if (fenceTransport !== undefined
+      && deps.remote.isTransportTokenCurrent?.(sessionId, fenceTransport) === false) return undefined
+    const opening = deps.surface.openingJournal.cut(sessionId)
+    const events: Event[] = opening === undefined
+      ? [...snapshot.durableEvents as readonly Event[]]
+      : mergeSessionEventCut(snapshot.durableEvents as readonly Event[], opening.events as readonly Event[])
+    // The working-fold proof hierarchy (M3-4 PR2 equivalence contract, see
+    // test/remote-working-fold-equivalence.test.ts):
+    // 1. A COMPLETE window (hasMore=false) proves the fold — the last visible
+    //    boundary IS the global latest.
+    // 2. A window with hasMore=true proves nothing about the LATEST boundary:
+    //    its last visible boundary may be an old one (the running turn's
+    //    turn/start may be beyond the window front or not yet durable), so
+    //    the official `running` bit is the authoritative presentation fact.
+    //    (running=false ⇒ every turn ended ⇒ fold-false agrees; running=true
+    //    covers the wake window before turn/start lands — both directions
+    //    are the UI working fact.)
+    // A COMPLETE window (hasMore=false) ALWAYS proves the fold - including
+    // the empty window (the fold is false by definition: no turn is open).
+    // Only a TRUNCATED window (hasMore) defers to the official running bit.
+    const foldProven = !snapshot.hasMore
+    const working = foldProven ? workingFromLog(events) : (deps.remote.running(sessionId) ?? false)
+    // PR5 (plan §3.2): the bounded window's recent-performance authority —
+    // the window reaches the history start (its zero is a measured zero) OR
+    // the fold retained enough valid samples for both recent windows. A
+    // truncated window short of both keeps the footer's recent metrics
+    // OMITTED (unknown), never a numeric zero stand-in.
+    const recentCoverageComplete = foldProven
+    // The official CURRENT-VALUE facts (title/goal/todos/cwd) — their source
+    // events may precede this bounded window, so the projection owns them.
+    const facts = deps.remote.facts?.(sessionId)
+    await hydratePresentation({
+      sessionId,
+      // The session's OWN workspace fact: the bounded window cannot carry it.
+      cwd: facts?.cwd,
+      events,
+      liveBaseline: snapshot.liveInputs,
+      ...(facts === undefined ? {} : { facts }),
+      // The `plan` projection is the plan authority on the Remote branch;
+      // its absence reads inactive (the projection capability is absent),
+      // which hydratePresentation expresses through the injected value.
+      planActive: planActiveRemote(sessionId),
+      working,
+      // PR5 (F1): only the COVERAGE fact travels with the fold; the availability
+      // answer itself is taken inside the commit, from the fold it installs.
+      recentCoverageComplete,
+    })
+    // The committed window revision: the caller feeds it to the live ingress
+    // so the hydrate→subscribe gap is detected and recovered (never lost).
+    // The proven fold rides along so the caller seeds its compaction cache on
+    // the FIRST hydrate (no first-use running window) — stamped with the
+    // SAME transport token this read was fenced under, so a later caller can
+    // never label an old window's fold with a newer transport identity.
+    return { revision: snapshot.revision, working, proven: foldProven, transportToken: fenceTransport }
+  }
+
+  /** The Remote-branch plan fact: the official `plan` projection read is
+   *  injected by the bootstrap (status facts bundle); absent deps read
+   *  inactive. Kept as a late-bound read so the projection updates between
+   *  hydration and commit are honored. */
+  const planActiveRemote = (sessionId: string): boolean => deps.remote?.plan?.(sessionId) ?? false
+
+  /**
+   * Re-hydrate the main transcript from the CURRENT reader window after an
+   * older-history extension (Remote `loadOlder`): the append-only fold
+   * cannot take a front-joined page incrementally, so the bounded window
+   * re-folds. Status/pending/goal folds keep their live state (the window
+   * grew at the FRONT; the live tail is unchanged), so this path only
+   * rebuilds the transcript/stats presentation and repaints.
+   */
+  const applySessionCurrentFacts = (sessionId: string): void => {
+    if (deps.remote === undefined) return
+    applyCurrentFacts(deps.remote.facts(sessionId), deps.status, deps.surface.app)
+  }
+
+  const rehydrateFromWindow = async (sessionId: string): Promise<void> => {
+    if (deps.isCleanedUp()) return
+    if (deps.remote === undefined) return
+    const fenceGeneration = deps.remote.captureGeneration?.()
+    const fenceTransport = deps.remote.captureTransportToken?.(sessionId)
+    const snapshot = await deps.remote.read(sessionId)
+    if (deps.isCleanedUp() || snapshot === undefined) return
+    // §6.5 visible-commit fence (same double rule as the cold hydrate).
+    if (deps.remote.isStillCurrent?.(sessionId, fenceGeneration ?? 0) === false) return
+    if (fenceTransport !== undefined
+      && deps.remote.isTransportTokenCurrent?.(sessionId, fenceTransport) === false) return
+    const hydrated = hydrateSessionUi(snapshot.durableEvents as readonly Event[])
+    folder = hydrated.folder
+    windowController.setTurns(folder.groupedTurns())
+    statsFolder = hydrated.statsFolder
+    // PR5: the widened window re-proves (or disproves) its recent-sample
+    // evidence in the SAME fenced commit that replaced the fold — a
+    // `loadOlder` that reaches enough samples (or the history start) flips
+    // the footer's omitted metrics on with the new fold, never after it.
+    recentCoverageComplete = !snapshot.hasMore
+    recentPerformanceAvailable = recentCoverageComplete
+      || statsFolder.hasEnoughRecentEvidence()
+    for (const liveInput of snapshot.liveInputs) {
+      applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
+    }
+    // F10 (round 4): the stats fold was just REPLACED by the wider window —
+    // the footer's status derivation still reads the pre-hydrate snapshot,
+    // so a repaint alone would keep rendering the stale (often all-zero)
+    // recent figures. Re-derive the status from the NEW fold in the same
+    // step; the cheap refresh's own fences own the session/binding rules.
+    deps.refreshStatusCheap()
+    deps.surface.repaint()
+  }
 
   const mainFolder = (): TranscriptFolder => folder
   const mainStats = (): StatsFolder => statsFolder
+  const mainRecentPerformanceAvailable = (): boolean => recentPerformanceAvailable
+  /**
+   * F1 (PR5 §3.2): the availability bit must follow the SAME fold's LIVE
+   * evidence. A bounded Remote window that committed `false` (truncated, not
+   * enough valid samples yet) can cross the completeness threshold through
+   * ordinary appended events — with no `loadOlder` and no rehydrate. Re-answer
+   * the predicate off the fold the append already updated (never a second scan
+   * or a second fold) and, when it flips, re-derive the status in the same step
+   * so the footer and `/status` stop omitting the recent figures immediately.
+   *
+   * A replacement subject returns to `false` in `resetForGeneration`, and the
+   * next fenced hydrate re-proves it (or disproves it) as before.
+   */
+  const refreshRecentPerformanceAvailability = (): void => {
+    // The fold's evidence is NOT monotonic: a route change clears BOTH recent
+    // windows, and a late authoritative message replacement can drop a
+    // throughput candidate. So the answer is re-answered in BOTH directions off
+    // the SAME fold (`recentCoverageComplete` still keeps a fully-covered window
+    // available, as v4 requires), and the status is re-derived whenever the bit
+    // actually changes — never only on the way up.
+    const next = recentCoverageComplete || statsFolder.hasEnoughRecentEvidence()
+    if (next === recentPerformanceAvailable) return
+    recentPerformanceAvailable = next
+    deps.refreshStatusCheap()
+  }
   const mainWindow = (): TranscriptWindowController => windowController
   const restoreMainTranscriptAnchor = (): void => {
     windowController.isLatest()
@@ -398,7 +809,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       : deps.surface.app.scrollToTop({ disableFollow: true })
   }
   const applyAssistantInput = (input: AssistantLiveInput): void => {
-    applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input)
+    applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, input, deps.summaryKeys)
   }
   const setToolArgs = (callId: string, args: string): void => { callArgs.set(callId, args) }
   const deleteToolArgs = (callId: string): void => { callArgs.delete(callId) }
@@ -408,6 +819,8 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     main: mainPresentation,
     mainFolder,
     mainStats,
+    mainRecentPerformanceAvailable,
+    refreshRecentPerformanceAvailability,
     mainWindow,
     applyAssistantInput,
     setToolArgs,
@@ -415,6 +828,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     toolArgs,
     restoreMainTranscriptAnchor,
     initLiveSession,
+    initLiveRemoteSession,
+    applySessionCurrentFacts,
+    rehydrateFromWindow,
     resetForGeneration,
   }
 }

@@ -3,11 +3,17 @@
  * (requirement 5): the transcript card (start → summary → end folding),
  * the working-row "Compacting context…" label, and the firehose state
  * pairing (a stale compaction/end never clears a newer compaction).
+ *
+ * The final case is the connected proof (plan §9.11): a real mounted runner
+ * receives `session/event`, the application routing owns the phase, and the
+ * mounted Tui renders it.
  * @module @xmoon76/dsh-pi-tui/compaction.test
  */
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   busyAfterTurnBoundary,
   compactingFromLog,
@@ -15,17 +21,28 @@ import {
   settleCompactionSurface,
   type CompactionFold,
 } from '../src/index.ts'
-import { indeterminateProgressFrames } from '../src/progress.ts'
+import { indeterminateProgressFrames } from '../src/tui/components/indeterminate-progress.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
-import { TuiApp } from '../src/tui-app.ts'
-import { WorkingIndicator } from '../src/working.ts'
+import { TuiApp, type CompactionPhase } from '../src/tui-app.ts'
+import { WorkingIndicator } from '../src/tui/components/working-indicator.ts'
+import {
+  disposeContext,
+  fakeSession,
+  installVirtualProcessTerminal,
+  makeHarness,
+  mountRunner,
+  sessionEvents,
+  settle,
+} from './support/runner-harness.ts'
+import { installProbe } from './support/runner-session-fixtures.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -498,4 +515,91 @@ test('a stale compaction/end never reaches the settle refresh', () => {
   assert.equal(fresh.clear, true)
   const errEnd = foldCompactionEvent({ id: 'c3' }, { type: 'compaction/end', data: { compactionId: 'c3', error: 'MAX_TOKENS' } })
   assert.equal(errEnd.clear, true, 'an error settle is still a matched settle: it must refresh too')
+})
+
+test('the real session/event routing drives the mounted compaction phases (plan §9.11)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-compaction-routing-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const session = fakeSession({
+    id: 'compaction-routing-session',
+    header: {
+      id: 'compaction-routing-session',
+      cwd: home,
+      createdAt: 1_700_000_000_000,
+      version: SESSION_FORMAT_VERSION,
+    },
+    events: sessionEvents('answer'),
+  })
+  const harness = makeHarness(home, [session], { provider: 'p', model: 'm' })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+
+  // Instrument the MOUNTED production sink: the routing calls THIS app's
+  // `setCompactionPhase`, so the recorded values are exactly the phase the Tui
+  // received from the application owner — never a test-local re-derivation.
+  // The forwarder is bound to this SAME production instance, and teardown
+  // restores the untouched prototype function.
+  const phases: CompactionPhase[] = []
+  const originalSetCompactionPhase = app.setCompactionPhase
+  const forwardSetCompactionPhase = originalSetCompactionPhase.bind(app)
+  app.setCompactionPhase = (phase: CompactionPhase): void => {
+    phases.push(phase)
+    forwardSetCompactionPhase(phase)
+  }
+  life.defer(() => { app.setCompactionPhase = originalSetCompactionPhase })
+
+  const emitDurable = (type: string, data: unknown): void => {
+    const next = session.append!(type, data) as SessionEvent
+    context!.emit('session/event', session as never, next)
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
+
+  await vt.waitForRender()
+  assert.ok(!view().includes('Compacting'), `no compaction label before the start:\n${view()}`)
+  // The mount bootstrap may reset the resumed phase; record only the phases the
+  // routed stages below produce.
+  phases.length = 0
+
+  // compaction/start -> summarizing.
+  emitDurable('compaction/start', { compactionId: 'cpt-route', turn: null })
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('Working... · Compacting context…'), `the mounted row must show summarizing:\n${view()}`)
+
+  // compaction/summary -> applying.
+  emitDurable('compaction/summary', {
+    compactionId: 'cpt-route',
+    summary: [{ type: 'text', text: 'compacted body' }],
+    shadowedSeqs: [0],
+    shadowedTokenCount: 10,
+  })
+  await settle()
+  await vt.waitForRender()
+  assert.ok(view().includes('Working... · Applying compacted context…'), `the mounted row must show applying:\n${view()}`)
+
+  // compaction/end -> idle (the matched settle clears the row).
+  emitDurable('compaction/end', { compactionId: 'cpt-route' })
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!view().includes('Compacting') && !view().includes('Applying'), `the row must clear on the matched settle:\n${view()}`)
+
+  assert.deepEqual(phases, ['summarizing', 'applying', 'idle'],
+    'the Tui must receive exactly one application-owned phase per routed stage')
 })

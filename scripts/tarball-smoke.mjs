@@ -375,17 +375,26 @@ function main() {
       // legitimately inlines the TuiApp implementation (src/tui-app.d.ts)
       // for the Loader row — it is NOT a third-party SDK entry. Its region
       // is exempted; everything else (chunks, extensions, builtins) must
-      // name only the public modules below. The image modules
-      // (src/image/admission.d.ts, src/image/types.d.ts) are also
-      // legitimately inlined into the root entry: the public
+      // name only the public modules below. The media vocabulary modules
+      // (src/client/media/image/types.d.ts, src/domain/media/types.d.ts) are
+      // also legitimately inlined into the root entry: the public
       // `commandRejectsImages` signature references `DraftImageStoreLike`,
       // which pulls in the draft vocabulary (and the recalled-ref shape).
+      // When a root module named here is retired to its canonical owner, this
+      // list must move WITH it — TS8-F1: diag -> runtime/process/diagnostics;
+      // TS8-F2: tui-config -> app/config/schema, dsh-profile ->
+      // app/bootstrap/profile + client/launcher/profile; TS8-F3: command-policy
+      // -> domain/command/policy + domain/shell/danger + app/submission/command-policy,
+      // communication-policy -> domain/communication/policy; TS8-F4: subagent-viewer
+      // -> app/surface/viewer-policy, task-presentation -> app/surface/task-presentation;
+      // TS8-F5: compaction-presentation -> app/surface/compaction-presentation — never
+      // gain a new entry for an internal implementation path.
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(builtins|command-policy|commands|communication-policy|compaction-presentation|diag|display-preset|dsh-profile|dsh-profile|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|image\/admission|image\/types|index|interrupt|pending-presentation|skill-catalog|startup|subagent-viewer|surface-catalog|task-presentation|tui-config)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }

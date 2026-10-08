@@ -6,8 +6,8 @@ import { disposeContext, fakeSession, installVirtualProcessTerminal, makeHarness
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { composeAgent } from '../src/index.ts'
-import { FOCUS_MODE_PROMPT, type SystemPromptLike } from '../src/focus.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import { FOCUS_MODE_PROMPT } from '../src/domain/communication/focus.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 import {
   DEFAULT_PROGRESS_UPDATES,
   DEFAULT_RESPONSE_STYLE,
@@ -15,13 +15,12 @@ import {
   PROGRESS_UPDATES_SECTION_ORDER,
   RESPONSE_STYLE_SECTION_NAME,
   RESPONSE_STYLE_SECTION_ORDER,
-  installProgressUpdatesPrompt,
-  installResponseStylePrompt,
   parseProgressUpdates,
   parseResponseStyle,
   type ProgressUpdatesState,
   type ResponseStyleState,
-} from '../src/communication-policy.ts'
+} from '../src/domain/communication/policy.ts'
+import { installProgressUpdatesPrompt, installResponseStylePrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 
 function promptRegistry() {
   const sections = new Map<string, Parameters<SystemPromptLike['section']>[0]>()
@@ -50,6 +49,7 @@ function communicationRegistry(display: DisplayState = { preset: 'full' }) {
     display,
     progressUpdatesState,
     responseStyleState,
+    gitAttributionState: { mode: 'off' },
     progress: () => registry.text(PROGRESS_UPDATES_SECTION_NAME),
     response: () => registry.text(RESPONSE_STYLE_SECTION_NAME),
     dispose: () => { disposeProgress(); disposeResponse() },
@@ -354,5 +354,6 @@ test('production startup resolves both settings before compose and settings swit
   await commands.handler('display')({ rawInput: 'full' })
   await settle()
   assert.match(registry.text('tui:progress-updates'), /# Progress updates: Off/)
-  assert.equal(registry.sections.size, 3, 'neither setting recomposes the agent')
+  assert.equal(registry.sections.size, 4, 'neither setting recomposes the agent')
+  assert.equal(registry.text('tui:git-attribution'), '', 'the default-off attribution section is empty')
 })

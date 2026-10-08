@@ -7,6 +7,104 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-08
+
+### 安装与版本对应
+
+本稳定版把开发与兼容验证使用的精确 DSH family 推进到已发布的 `0.2.0-rc.2`，
+运行时最低版本（peer floor）随之提升到 `>=0.2.0-rc.2`；安装 DSH 时需要显式
+允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.1
+dsh --profile pi-tui
+```
+
+仍需保留旧版 DSH 的用户：`@deepseek-ai/dsh@0.2.0-rc.1` 与 `0.1.7-rc.2` 使用
+已发布的 `@xmoon76/dsh-pi-tui@0.5.0`；`@deepseek-ai/dsh@0.1.7-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.8`。
+
+### 新增
+
+- **终端原生进度与状态上报。** `/settings → Terminal progress` 由开关改为四档：
+  `9;4+7501`（默认）、`9;4`、`7501`、`Off`。默认在既有 OSC 9;4 进度条之外，同时
+  通过 OSC 7501 上报 Agent 的语义状态（运行中、等待审批、等待回答、完成、出错、
+  空闲）：完成/出错只在真实运行的最后一个 turn 结果被证实后上报一次，中断或取消
+  回到空闲，退出前保留已证实的终态，`$EDITOR`、全屏往返等临时移交前清除运行中
+  状态。切换档位立即生效，旧配置 `On` 读作默认双协议。两个协议都是通用终端协议，
+  不限于某个终端，其他终端按自己支持的协议显示。
+
+- **窗格工作目录跟随当前 Session（OSC 7）。** 直接启动、会话切换、全屏往返与
+  `$EDITOR` 往返后都会重新上报；Direct 会话没有官方工作目录时回退到启动目录，
+  DSH Remote 后端不发布任何目录，不把 Host 工作目录泄漏到 Client 终端（当前只在
+  识别为 Tern 的终端启用）。
+
+- **子代理查看器把子会话当作真正的显示主体，并新增单行主题栏。** 查看子会话时，
+  它的模型/预设/权限、上下文占用与窗口、累计 token 用量、待办与工作目录都取自该
+  子会话自己的会话状态（子会话尚无模型时显示 `model ?`，绝不借用主会话模型），并
+  在对应事件落地当下更新；主会话的身份头卡在查看期间隐藏、退出后立即恢复。主题栏
+  固定在 Header 下方，显示 `‹ back`、子会话标签、`● running` / `○ inactive` 与
+  子会话自己的 `provider/model @effort`；旧的 `[viewing subagent · …]` 标记与
+  footer 的 `view-scope` 身份块不再渲染（旧自定义布局仍可载入/编辑/保存）。扩展
+  API 新增可选 `session.displaySubject` 投影发布当前查看的子会话；已发布的会话快照
+  语义不变：插件仍然只看到主/活会话，查看器进出不会表现为会话切换。
+
+- **可选的官方 Git 提交署名指引（默认关闭）。** 开启后 Agent 创建提交时会加入
+  `Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>`；`product-model`
+  模式额外加入 `Assisted-By: <provider>/<model>`。这是 Agent 指引而非仓库级强制：
+  不安装 Git 钩子、不改写命令、不探测仓库，手动提交不受影响。
+
+- **Compact 下已结算的历史过程段只保留头部。** 只有当前窗口里仍在运行或正在
+  Preparing 的最新过程段保留 `Think:` / `Action:` 预览；已结算的历史段折叠为头部
+  （`N actions · …` 统计仍在），纯思考的历史段显示为 `Thought <时长>`。
+
+- **已到达但尚未落进模型历史的 Context 条目在会话尾部立即可见。** 后台任务完成、
+  子代理结算等非用户 Context 不再无声等待：它们按 Context/User/Context 原顺序显示
+  一行有界预览，宿主一旦接管即按权威事件退场，也不会把视口从你正在看的位置拉走。
+
+### 变更
+
+- **Question 工具的输入语义收敛为「选择 / 编辑 / 前进」。** 多选题用 `Space`
+  （或数字键、单击）切换勾选项，`Enter` 与 `→` 一样只负责前进（未答则跳过）；
+  自由文本实时保存，未按 `Enter` 的草稿在 `Esc`、跨题往返后依然存在；回看列表里
+  已保存的自定义答案直接显示值（密码题显示掩码圆点）。提示文案相应改为
+  `space toggle · ↵ continue/review`。
+
+- **顶部 Header 严格保持单行。** 主会话标题按终端 cell 宽度做 ANSI/CJK/Emoji 安全
+  截断（空间不足时省略号截断，再不足则整体省略），在任何宽度与显示预设下都不再
+  换行——超长主标题（尤其打开子代理查看器时）不再把编辑器与固定 chrome 挤出屏幕。
+
+- **折叠 Focus 里的回合中途通知改为渲染在 Thought 之外。** 唤醒本回合的开头通知仍
+  在 Thought 之前；进行中到达的后台任务完成、子代理结算等通知现在显示在折叠
+  Thought 之后（展开后仍按原始时间顺序），并仍可被全文搜索定位。
+
+- **大会话下滚动与重绘更快。** 纯滚动与到达历史边界时的翻页不再重复测量整份转录
+  几何；约 1.6 MB 文本的会话实测滚动帧 CPU 下降约 80%（观测值，非 CI 门槛），
+  滚动、点击与复制的语义不变。
+
+- **命令与设置的发现文案如实标注条件能力。** `!`/`!!`、`/settings` 的本地 shell
+  沙箱行、`/title`、`/login`、`/logout`、`/transcript`、`/attach` 与 `/model`
+  把「依赖后端 / Host 支持」的条件写清楚；注册与行为不变。
+
+### 修复
+
+- **长用户消息可以对称地展开与收起。** 折叠时单击气泡任意位置展开；展开后同样可
+  单击任意位置收起（尾部 `▴ Collapse` 仍然可用），拖拽选文不受影响。常规模式下
+  折叠标记把生效按键如实写作 `expand/collapse`。
+
+### 兼容性
+
+- **DSH 依赖基线整体升级到已发布的 `0.2.0-rc.2` family。** 全部
+  `@deepseek-ai/dsh-*` peer floor 提升到 `>=0.2.0-rc.2`，开发与源码验证目标精确
+  锁定 `0.2.0-rc.2`。本线的 Question 生命周期依赖 rc.2 才发布的公开契约
+  （`userQuestions` Remote 与 Session projection），因此 rc.1 及更早 family 不再
+  属于本线声明的兼容范围；旧 runtime 请按上方安装对应表选择配对的 TUI 线。
+
+> **已知限制：** 生产默认后端仍是 Direct；Remote 是本项目自有的实验性组合，需要
+> 显式配置与配套 Host 扩展，本版不承诺其通用可用性。OSC 7 窗格工作目录与 OSC 9;4
+> 的「等待输入」细化当前只在识别为 Tern 的终端启用。
+
 ## [0.5.0] - 2026-09-28
 
 ### 安装与版本对应
@@ -1246,7 +1344,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8

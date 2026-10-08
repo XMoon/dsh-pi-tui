@@ -1,0 +1,856 @@
+/**
+ * Unit tests for the editor autocomplete provider: `@`-mention prefix
+ * extraction, the Host-file port presentation (official order, quoting,
+ * directory continuation, scope/currentness fences), slash-command and
+ * `/image` path-argument completion, and inline skill reference routing.
+ * @module @xmoon76/dsh-pi-tui/autocomplete-provider.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join, win32 } from 'node:path'
+import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
+import { suggestPathArgument } from '../src/tui/file-completion/path-argument.ts'
+import { extractAtPrefix } from '../src/tui/file-completion/context.ts'
+import { resolvePathQuery, type PathQueryEnvironment } from '../src/domain/file-completion/query.ts'
+import { MAX_LOCAL_COMPLETION_SUGGESTIONS } from '../src/domain/file-completion/ranking.ts'
+import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
+import { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } from '@deepseek-ai/dsh-file-reference-local/search'
+import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+
+/** The explicit path-query environment for the pure resolver pins: the domain
+ * layer never discovers `homeDir`/`windowsHost` itself. */
+const QUERY_ENV: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
+
+/** A throwaway workspace with known files. */
+function fixtureWorkspace(life: TestLifecycle): string {
+  const root = life.tempDir('dsh-mentions-')
+  writeFileSync(join(root, 'file-one.txt'), 'one')
+  writeFileSync(join(root, 'file-two.ts'), 'two')
+  writeFileSync(join(root, 'my file.txt'), 'spaced')
+  mkdirSync(join(root, 'src'))
+  writeFileSync(join(root, 'src', 'deep-nested.ts'), 'deep')
+  mkdirSync(join(root, '.git'))
+  writeFileSync(join(root, '.git', 'config'), 'ignored')
+  return root
+}
+
+const abort = new AbortController().signal
+
+/** A Direct adapter whose SESSION scope runs the OFFICIAL search over the
+ * fixture tree (`WorkspaceFileSearch`: path text after `@`, deterministic
+ * ranked path-only candidates — the Host authority's own order). `queries`
+ * records the official-form query each service call received. */
+function officialSeam(root: string, queries?: string[]): DirectHostFilePort {
+  const search = new WorkspaceFileSearch(root, {
+    maxResults: 20,
+    maxEntries: 50_000,
+    excludedDirectories: [...DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES],
+  })
+  return new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null, {
+    get: (name: string) => name === 'fileReferences'
+      ? {
+          list: (agent: unknown, query: string, signal: AbortSignal) => {
+            queries?.push(query)
+            return search.list(query, signal)
+          },
+        }
+      : undefined,
+  })
+}
+
+/** A workspace-scoped LEGACY-scanner seam (fd forced absent) — the
+ * Direct-only sessionless compatibility path, never the session
+ * semantics. */
+function fallbackSeam(): DirectHostFilePort {
+  return new DirectHostFilePort(() => undefined, null)
+}
+
+test('extractAtPrefix finds @ tokens at token boundaries only', () => {
+  assert.equal(extractAtPrefix('@'), '@')
+  assert.equal(extractAtPrefix('see @fi'), '@fi')
+  assert.equal(extractAtPrefix('see @fi more'), null, 'the cursor is past the @ token')
+  assert.equal(extractAtPrefix('email@x'), null, 'a bare @ inside a word is not a mention')
+  assert.equal(extractAtPrefix('plain text'), null)
+  // `=` splits tokens, so `key=@x` starts a fresh mention (kimi semantics).
+  assert.equal(extractAtPrefix('a=@x'), '@x')
+  // Quoted mentions (`@"my file`) complete through the Host-file port
+  // with the fork's quoted-prefix grammar (migration M1.10 parity).
+  assert.equal(extractAtPrefix('see @"my file'), '@"my file')
+  assert.equal(extractAtPrefix('@"closed" then @next'), '@next', 'a CLOSED quote is not an open quoted prefix')
+  // CJK-glued mentions complete too (the CJK-glued trigger grammar: a CJK
+  // sentence glues the mention to the previous character).
+  assert.equal(extractAtPrefix('看看@src/foo'), '@src/foo')
+  assert.equal(extractAtPrefix('看@'), '@')
+  assert.equal(extractAtPrefix('a@b.c'), null, 'an ASCII word never starts a mention (email parity)')
+  assert.equal(extractAtPrefix('see @fi more'), null, 'the cursor is past the @ token')
+})
+
+test('resolveFdPath finds an executable fd on PATH and returns null otherwise', (t) => {
+  const life = testLifecycle(t)
+  const saved = process.env.PATH
+  try {
+    const dir = life.tempDir('dsh-fd-')
+    const fd = join(dir, 'fd')
+    writeFileSync(fd, '#!/bin/sh\nexit 0\n')
+    chmodSync(fd, 0o755)
+    process.env.PATH = dir
+    assert.equal(resolveFdPath(), fd, 'the fd binary must resolve')
+    process.env.PATH = '/nonexistent-dir'
+    assert.equal(resolveFdPath(), null, 'a PATH without fd must yield null')
+  } finally {
+    if (saved === undefined) delete process.env.PATH
+    else process.env.PATH = saved
+  }
+})
+
+test('resolveFdPath honors PATHEXT-style executable suffixes', (t) => {
+  const life = testLifecycle(t)
+  const savedPath = process.env.PATH
+  const savedPathExt = process.env.PATHEXT
+  try {
+    const dir = life.tempDir('dsh-fd-ext-')
+    const fd = join(dir, 'fd.exe')
+    writeFileSync(fd, '#!/bin/sh\nexit 0\n')
+    chmodSync(fd, 0o755)
+    process.env.PATH = dir
+    process.env.PATHEXT = '.EXE'
+    const resolved = resolveFdPath()
+    assert.ok(resolved !== null, 'the suffixed fd binary must resolve')
+    assert.equal(resolved?.toLowerCase(), fd.toLowerCase())
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH
+    else process.env.PATH = savedPath
+    if (savedPathExt === undefined) delete process.env.PATHEXT
+    else process.env.PATHEXT = savedPathExt
+  }
+})
+
+test('the session scope completes @ mentions through the OFFICIAL Host service order', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // SESSION scope through the OFFICIAL service: the provider's scope
+  // source pins a live session so the port routes to ctx.fileReferences
+  // (the WorkspaceFileSearch stand-in), and the recorded queries prove the
+  // grammar-stripped official form — including the quoted case.
+  const queries: string[] = []
+  const official = officialSeam(root, queries)
+  const provider = new MentionProvider([], root, official, undefined, () => ({ kind: 'session', sessionId: 'session-live' }), undefined, undefined, [], true)
+  // Prefix match on the basename (cursor at the end of '@file').
+  const file = await provider.getSuggestions(['look at @file'], 0, 13, { signal: abort })
+  assert.ok(file !== null, `@file must suggest:\n${JSON.stringify(file)}`)
+  assert.equal(file.prefix, '@file')
+  assert.ok(file.items.some(item => item.value === '@file-one.txt'), `file-one missing:\n${JSON.stringify(file.items)}`)
+  assert.ok(file.items.some(item => item.value === '@file-two.ts'), `file-two missing:\n${JSON.stringify(file.items)}`)
+  // Substring match reaches nested files too (the recursive scan).
+  const nested = await provider.getSuggestions(['@nested'], 0, 7, { signal: abort })
+  assert.ok(nested !== null, `@nested must suggest:\n${JSON.stringify(nested)}`)
+  assert.ok(nested.items.some(item => item.value === '@src/deep-nested.ts'), `nested file missing:\n${JSON.stringify(nested.items)}`)
+  // Directories rank with a trailing slash so @dir/ continues completion.
+  const dirs = await provider.getSuggestions(['@src'], 0, 5, { signal: abort })
+  assert.ok(dirs !== null, `@src must suggest:\n${JSON.stringify(dirs)}`)
+  assert.ok(dirs.items.some(item => item.value === '@src/' && item.label === 'src/'), `directory item missing:\n${JSON.stringify(dirs.items)}`)
+  // No matches: null.
+  const none = await provider.getSuggestions(['@zzz-nope'], 0, 9, { signal: abort })
+  assert.equal(none, null, 'no match must return null')
+  // The port received the OFFICIAL query form on every call — the path
+  // text after `@` — never the at-prefixed editor grammar, including the
+  // QUOTED editor form (the quotes are grammar, not query).
+  const quoted = await provider.getSuggestions(['@"my file'], 0, 9, { signal: abort })
+  assert.ok(quoted !== null, 'the quoted form completes through the official path')
+  assert.ok(queries.includes('my file'), `the quoted form strips to the official query: ${JSON.stringify(queries)}`)
+  assert.ok(queries.every(entry => !entry.startsWith('@')), `no at-prefixed query crosses: ${JSON.stringify(queries)}`)
+})
+
+/** A Session-scoped Direct adapter whose EXPLICIT route runs the Host scanner
+ * (fd pinned OFF for determinism). No official provider is mounted, so a BARE
+ * query is unavailable — every assertion below therefore proves the scoped
+ * route. */
+function scopedSeam(root: string): DirectHostFilePort {
+  return new DirectHostFilePort(() => ({ session: { header: { cwd: root } } }), null)
+}
+
+test('the session scope completes an EXPLICIT scoped query through the Host scanner (TS8-HF1)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, scopedSeam(root), undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }), null)
+  // `@src/deep` has a separator: the Host scanner searches ONLY `<ws>/src`,
+  // recursively, and the accepted value keeps the typed prefix.
+  const scoped = await provider.getSuggestions(['@src/deep'], 0, 9, { signal: abort })
+  assert.ok(scoped !== null, `@src/deep must suggest:\n${JSON.stringify(scoped)}`)
+  assert.equal(scoped.prefix, '@src/deep')
+  assert.deepEqual(scoped.items.map(item => item.value), ['@src/deep-nested.ts'])
+  // The same term WITHOUT the separator is a bare query — unavailable here, so
+  // the witness above cannot come from the official path.
+  assert.equal(await provider.getSuggestions(['@deep'], 0, 5, { signal: abort }), null,
+    'the scoped witness is not vacuous: the same term is not served on the bare route')
+})
+
+test('an explicit parent scope keeps its ../ display prefix through the provider (TS8-HF1)', async (t) => {
+  const life = testLifecycle(t)
+  const parent = life.tempDir('dsh-mentions-parent-')
+  const root = join(parent, 'ws')
+  mkdirSync(root)
+  mkdirSync(join(parent, 'shared'))
+  writeFileSync(join(parent, 'shared', 'foo.txt'), 'x')
+  const provider = new MentionProvider([], root, scopedSeam(root), undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }), null)
+  const result = await provider.getSuggestions(['@../shared/fo'], 0, 13, { signal: abort })
+  assert.ok(result !== null, `@../shared/fo must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, '@../shared/fo')
+  assert.deepEqual(result.items.map(item => item.value), ['@../shared/foo.txt'],
+    'the user-facing ../ prefix survives presentation')
+})
+
+test('the HOME shorthand completes to an ABSOLUTE Host value — never ~/... (TS8-HF1)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const home = life.tempDir('dsh-mentions-home-')
+  mkdirSync(join(home, 'Downloads'))
+  writeFileSync(join(home, 'Downloads', 'loads.txt'), 'x')
+  // The Direct adapter reads the HOST home directory; pin it so the accepted
+  // value is asserted exactly instead of against the developer's real $HOME.
+  const savedHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const provider = new MentionProvider([], root, scopedSeam(root), undefined,
+      () => ({ kind: 'session', sessionId: 'session-live' }), null)
+    const result = await provider.getSuggestions(['@~/Down'], 0, 7, { signal: abort })
+    assert.ok(result !== null, `@~/Down must suggest:\n${JSON.stringify(result)}`)
+    assert.equal(result.prefix, '@~/Down')
+    const values = result.items.map(item => item.value)
+    assert.ok(values.includes(`@${join(home, 'Downloads')}/`),
+      `the home scope drives discovery: ${JSON.stringify(values)}`)
+    assert.ok(values.includes(`@${join(home, 'Downloads', 'loads.txt')}`),
+      `the nested candidate is absolute: ${JSON.stringify(values)}`)
+    assert.ok(values.every(value => !value.startsWith('@~')),
+      `no value may reintroduce the ~/ shorthand DSH cannot resolve: ${JSON.stringify(values)}`)
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME
+    else process.env.HOME = savedHome
+  }
+})
+
+/** An official-service stand-in that returns FIXED candidates in a FIXED
+ * order (the Host authority's answer for a query), for order/subsequence
+ * preservation proofs. */
+function fixedOfficialSeam(candidates: readonly { path: string; kind: 'file' | 'directory' }[], calls?: string[]): DirectHostFilePort {
+  return new DirectHostFilePort(() => ({ session: { header: { cwd: '/ws' } } }), null, {
+    get: (name: string) => name === 'fileReferences'
+      ? {
+          list: async (_agent: unknown, query: string, _signal: AbortSignal) => {
+            calls?.push(query)
+            return candidates
+          },
+        }
+      : undefined,
+  })
+}
+
+test('Host-ordered candidates pass through UNFILTERED and UNREORDERED (no second ranking authority)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // The Host authority deliberately returns: a SUBSEQUENCE-only match the
+  // official fuzzy accepts (s→src, d→deep, t→nested), then an
+  // alphabetically-earlier candidate — its own ranking, its own order.
+  const hostAnswer: readonly { path: string; kind: 'file' | 'directory' }[] = [
+    { path: 'src/deep-nested.ts', kind: 'file' },
+    { path: 'somedir/other.ts', kind: 'file' },
+  ]
+  const queries: string[] = []
+  const provider = new MentionProvider(
+    [],
+    root,
+    fixedOfficialSeam(hostAnswer, queries),
+    undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }),
+  )
+  const result = await provider.getSuggestions(['@sdt'], 0, 4, { signal: abort })
+  assert.ok(result !== null, 'the Host answer must complete')
+  // 1. The subsequence-only candidate the Host returned is NOT dropped:
+  //    the legacy client scorer would have scored it 0 and filtered it.
+  assert.ok(result.items.some(item => item.value === '@src/deep-nested.ts'),
+    `the Host's subsequence match survives: ${JSON.stringify(result.items.map(item => item.value))}`)
+  // 2. The Host's ORDER is preserved verbatim — no client-side re-sort.
+  assert.deepEqual(result.items.map(item => item.value), ['@src/deep-nested.ts', '@somedir/other.ts'])
+  assert.deepEqual(queries, ['sdt'], 'the official query form crossed')
+})
+
+test('a Host answer larger than the local completion cap is presented in FULL (no client-side slice)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // One row more than MAX_LOCAL_COMPLETION_SUGGESTIONS: the LOCAL ranking
+  // pipeline would slice this list, so the count is a discriminating witness
+  // that the Session `@` path never runs through it.
+  const hostAnswer: readonly { path: string; kind: 'file' | 'directory' }[] =
+    Array.from({ length: MAX_LOCAL_COMPLETION_SUGGESTIONS + 1 }, (_value, index) => ({
+      path: `host-row-${String(index).padStart(2, '0')}.ts`,
+      kind: 'file' as const,
+    }))
+  const provider = new MentionProvider(
+    [],
+    root,
+    fixedOfficialSeam(hostAnswer),
+    undefined,
+    () => ({ kind: 'session', sessionId: 'session-live' }),
+  )
+  const result = await provider.getSuggestions(['@host'], 0, 5, { signal: abort })
+  assert.ok(result !== null, 'the Host answer must complete')
+  assert.deepEqual(result.items.map(item => item.value), hostAnswer.map(candidate => `@${candidate.path}`),
+    'every Host row is presented, in the Host order, with no local cap applied')
+  assert.equal(result.items.length, MAX_LOCAL_COMPLETION_SUGGESTIONS + 1)
+})
+
+test('the provider completes the QUOTED @ form through the port (quoted values)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  const result = await provider.getSuggestions(['@"my'], 0, 4, { signal: abort })
+  assert.ok(result !== null, `@"my must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, '@"my')
+  assert.ok(result.items.some(item => item.value === '@"my file.txt"'), `quoted value must stay quoted:\n${JSON.stringify(result.items)}`)
+})
+
+test('the provider completes a CJK-glued @ mention (the CJK-glued trigger grammar)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  const result = await provider.getSuggestions(['看看@file'], 0, 7, { signal: abort })
+  assert.ok(result !== null, `看看@file must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, '@file')
+  assert.ok(result.items.some(item => item.value === '@file-one.txt'), `CJK-glued completion missing:\n${JSON.stringify(result.items)}`)
+})
+
+test('the fallback quotes mention values that contain spaces', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  // A space-free query matching a file whose NAME has a space must produce a
+  // quoted value (`@"my file.txt"`) so the submitted mention stays one token.
+  const result = await provider.getSuggestions(['@my'], 0, 3, { signal: abort })
+  assert.ok(result !== null, `@my must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value === '@"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(result.items)}`)
+})
+
+test('the provider delegates indented slash-command completion without losing indentation', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
+    root,
+    fallbackSeam(),
+  )
+  const result = await provider.getSuggestions(['  /ex'], 0, 5, { signal: abort })
+  assert.ok(result !== null, `indented /ex must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value === 'exit'), `the exit command missing:\n${JSON.stringify(result.items)}`)
+  const applied = provider.applyCompletion(['  /ex'], 0, 5, result.items[0]!, result.prefix)
+  assert.equal(applied.lines[0], '  /exit ', 'the command apply must preserve indentation')
+})
+
+test('the provider delegates slash-command completion to the inner provider', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
+    root,
+    fallbackSeam(),
+  )
+  const result = await provider.getSuggestions(['/ex'], 0, 3, { signal: abort })
+  assert.ok(result !== null, `/ex must suggest:\n${JSON.stringify(result)}`)
+  assert.ok(result.items.some(item => item.value === 'exit'), `the exit command missing:\n${JSON.stringify(result.items)}`)
+})
+
+// ── slash-command path-argument completion (`/image <path>`) ──────────────
+
+test('a late port result is dropped when the request was aborted; a port rejection degrades to null', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const controller = new AbortController()
+  const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async (_scope, _query, options) => {
+      await gate
+      options?.signal?.throwIfAborted()
+      return { kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }
+    },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const provider = new MentionProvider([], root, seam, undefined, undefined, undefined, undefined, [], true)
+  const pending = provider.getSuggestions(['@file'], 0, 5, { signal: controller.signal })
+  controller.abort() // the request is cancelled while discovery is in flight
+  release!()
+  assert.equal(await pending, null, 'an aborted request must never commit a late result')
+  const throwing: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async () => { throw new Error('discovery exploded') },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  const resilient = new MentionProvider([], root, throwing, undefined, undefined, undefined, undefined, [], true)
+  assert.equal(
+    await resilient.getSuggestions(['@file'], 0, 5, { signal: abort }),
+    null,
+    'a discovery rejection degrades to no suggestions, never a crash',
+  )
+})
+
+test('suggestPathArgument completes a bare prefix in the cwd', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const items = await suggestPathArgument('fi', root)
+  assert.ok(items !== null, `'fi' must suggest:\n${JSON.stringify(items)}`)
+  assert.ok(items.some(item => item.value === 'file-one.txt'), `file-one missing:\n${JSON.stringify(items)}`)
+  assert.ok(items.some(item => item.value === 'file-two.ts'), `file-two missing:\n${JSON.stringify(items)}`)
+  // Directories sort FIRST and keep the trailing slash so Tab continues.
+  const dirs = await suggestPathArgument('s', root)
+  assert.ok(dirs !== null, `'s' must suggest:\n${JSON.stringify(dirs)}`)
+  assert.equal(dirs[0]!.value, 'src/', 'directories lead the list')
+  assert.equal(dirs[0]!.label, 'src/')
+})
+
+test('suggestPathArgument completes directory continuations', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const contents = await suggestPathArgument('src/', root)
+  assert.ok(contents !== null, `'src/' must suggest:\n${JSON.stringify(contents)}`)
+  assert.ok(contents.some(item => item.value === 'src/deep-nested.ts'), `nested file missing:\n${JSON.stringify(contents)}`)
+  // A partial basename inside a directory keeps the directory prefix.
+  const partial = await suggestPathArgument('src/deep', root)
+  assert.ok(partial !== null, `'src/deep' must suggest:\n${JSON.stringify(partial)}`)
+  assert.ok(partial.some(item => item.value === 'src/deep-nested.ts'), `prefixed value missing:\n${JSON.stringify(partial)}`)
+})
+
+test('suggestPathArgument handles absolute and ~ forms', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const absolute = await suggestPathArgument(`${root}/file`, root)
+  assert.ok(absolute !== null, `absolute must suggest:\n${JSON.stringify(absolute)}`)
+  assert.ok(absolute.some(item => item.value === `${root}/file-one.txt`), `absolute value missing:\n${JSON.stringify(absolute)}`)
+  const home = life.tempDir('dsh-mentions-home-')
+  const savedHome = process.env.HOME
+  try {
+    process.env.HOME = home
+    mkdirSync(join(home, 'pics'))
+    writeFileSync(join(home, 'pics', 'a.png'), 'x')
+    const tilde = await suggestPathArgument('~/p', root)
+    assert.ok(tilde !== null, `'~/p' must suggest:\n${JSON.stringify(tilde)}`)
+    assert.ok(tilde.some(item => item.value === '~/pics/'), `tilde value missing:\n${JSON.stringify(tilde)}`)
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME
+    else process.env.HOME = savedHome
+  }
+})
+
+test('suggestPathArgument tolerates leading separator whitespace (multi-space / tab-expanded)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // The fork's argument branch passes everything after the FIRST space, so
+  // a multi-space separator yields leading whitespace in the argument; the
+  // completed VALUE keeps it so the fork's apply never glues the path to
+  // the command.
+  const multi = await suggestPathArgument('  fi', root)
+  assert.ok(multi !== null, `'  fi' must suggest:\n${JSON.stringify(multi)}`)
+  assert.ok(multi.some(item => item.value === '  file-one.txt'), `leading whitespace must survive in the value:\n${JSON.stringify(multi)}`)
+  // A tab-expanded directory continuation (tabs normalize to four spaces).
+  const dir = await suggestPathArgument('    src/', root)
+  assert.ok(dir !== null, `'    src/' must suggest:\n${JSON.stringify(dir)}`)
+  assert.ok(dir.some(item => item.value === '    src/deep-nested.ts'), `padded continuation missing:\n${JSON.stringify(dir)}`)
+  // Pure separator (no token) stays quiet.
+  assert.equal(await suggestPathArgument('   ', root), null, 'separator-only arguments complete nothing')
+})
+
+test('POSIX and Windows ROOT partials keep their separator as the search dir', () => {
+  // dirname leaves a trailing separator ONLY on roots, and a root must
+  // stay a root: `/et` reads `/` (a stripped `/` would read `''`),
+  // `C:\Wi` reads `C:\` (not the drive-relative `C:`), and the UNC share
+  // root keeps its trailing separator. Pure — no filesystem involved, and the
+  // resolver receives its environment facts explicitly.
+  const scope = (raw: string) => {
+    const query = resolvePathQuery(raw, '/ws', QUERY_ENV)
+    return { searchDir: query.searchBase, searchPrefix: query.searchTerm, winAbsolute: query.winAbsolute }
+  }
+  assert.deepEqual(scope('/et'), { searchDir: '/', searchPrefix: 'et', winAbsolute: false })
+  assert.deepEqual(scope('C:\\Wi'), { searchDir: 'C:\\', searchPrefix: 'Wi', winAbsolute: true })
+  assert.deepEqual(scope('\\\\server\\share\\fo'), {
+    searchDir: '\\\\server\\share\\',
+    searchPrefix: 'fo',
+    winAbsolute: true,
+  })
+  // Ordinary dirs carry no trailing separator anyway.
+  assert.deepEqual(scope('C:\\Users\\sh'), { searchDir: 'C:\\Users', searchPrefix: 'sh', winAbsolute: true })
+  assert.deepEqual(scope('/tmp/fi'), { searchDir: '/tmp', searchPrefix: 'fi', winAbsolute: false })
+  assert.deepEqual(scope('sub/fi'), { searchDir: join('/ws', 'sub'), searchPrefix: 'fi', winAbsolute: false })
+  // The host-platform FACT is injected: the same relative Windows-dialect
+  // token joins with the explicit windowsHost, never with process.platform.
+  const windows = resolvePathQuery('sub\\fi', '/ws', { homeDir: '/home/fixture', windowsHost: true })
+  const posix = resolvePathQuery('sub\\fi', '/ws', { homeDir: '/home/fixture', windowsHost: false })
+  assert.equal(windows.searchBase, win32.join('/ws', 'sub'))
+  assert.equal(posix.searchBase, join('/ws', 'sub'))
+})
+
+test('a POSIX root partial completes from `/` (fs level, when /tmp exists)', async (t) => {
+  const life = testLifecycle(t)
+  if (!existsSync('/tmp')) return // the machine has no /tmp to complete
+  const root = fixtureWorkspace(life)
+  const items = await suggestPathArgument('/tm', root)
+  assert.ok(items !== null && items.length > 0, `'/tm' must list root entries:\n${JSON.stringify(items)}`)
+  assert.ok(items.some(item => item.value.startsWith('/tmp')), `the root completion stays absolute:\n${JSON.stringify(items)}`)
+})
+
+test('suggestPathArgument treats Windows drive and UNC tokens as absolute', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const savedCwd = process.cwd()
+  try {
+    // win32-absolute tokens resolve against the process CWD on POSIX (a
+    // backslash is an ordinary character there), so literal
+    // backslash-named directories stand in for the Windows drive/share.
+    // chdir is safe here: node --test runs each FILE in its own process
+    // and this test restores the cwd in `finally`.
+    process.chdir(root)
+    mkdirSync(join(root, 'C:\\Users'))
+    writeFileSync(join(root, 'C:\\Users', 'shot.png'), 'x')
+    // The UNC share ROOT keeps its trailing separator (win32 root form):
+    // readdirSync('\\server\share\') is legal on Windows, and the root
+    // must not be stripped into a different path.
+    mkdirSync(join(root, '\\\\server\\share\\'))
+    writeFileSync(join(root, '\\\\server\\share\\', 'foo.png'), 'x')
+    const drive = await suggestPathArgument('C:\\Users\\sh', root)
+    assert.ok(drive !== null, `a drive token must complete:\\n${JSON.stringify(drive)}`)
+    assert.ok(drive.some(item => item.value === 'C:\\Users\\shot.png'), `drive value keeps the backslash dialect:\\n${JSON.stringify(drive)}`)
+    const unc = await suggestPathArgument('\\\\server\\share\\fo', root)
+    assert.ok(unc !== null, `a UNC token must complete:\\n${JSON.stringify(unc)}`)
+    assert.ok(unc.some(item => item.value === '\\\\server\\share\\foo.png'), `UNC value keeps the share form:\\n${JSON.stringify(unc)}`)
+  } finally {
+    process.chdir(savedCwd)
+  }
+})
+
+test('a drive ROOT keeps `C:\\` — never degrades to the drive-relative `C:`', async (t) => {
+  const life = testLifecycle(t)
+  // `C:\` is the drive root; `C:` is the drive-relative current directory
+  // — different directories on Windows. win32.dirname('C:\\Wi') returns
+  // `C:\\`, and the search target must stay `C:\\` (the earlier
+  // unconditional strip turned it into `C:` and read the wrong place).
+  assert.equal(win32.dirname('C:\\Wi'), 'C:\\', 'the win32 dirname root form')
+  const root = fixtureWorkspace(life)
+  const savedCwd = process.cwd()
+  try {
+    process.chdir(root)
+    // A POSIX dir literally named `C:\` stands in for the drive root.
+    mkdirSync(join(root, 'C:\\'))
+    writeFileSync(join(root, 'C:\\', 'Win.exe'), 'x')
+    const items = await suggestPathArgument('C:\\Wi', root)
+    assert.ok(items !== null, `the drive root must complete:\\n${JSON.stringify(items)}`)
+    assert.ok(items.some(item => item.value === 'C:\\Win.exe'), `drive-root value stays rooted:\\n${JSON.stringify(items)}`)
+  } finally {
+    process.chdir(savedCwd)
+  }
+})
+
+test('suggestPathArgument quotes values with spaces and stays quiet otherwise', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const spaced = await suggestPathArgument('my', root)
+  assert.ok(spaced !== null, `'my' must suggest:\n${JSON.stringify(spaced)}`)
+  assert.ok(spaced.some(item => item.value === '"my file.txt"'), `spaced value must be quoted:\n${JSON.stringify(spaced)}`)
+  assert.equal(await suggestPathArgument('', root), null, 'an empty argument completes nothing')
+  assert.equal(await suggestPathArgument('a b', root), null, 'embedded spaces cannot complete (single-token only)')
+  assert.equal(await suggestPathArgument('no/such/dir', root), null, 'an unreadable directory stays quiet')
+})
+
+test('the provider completes /image arguments through the fork command branch', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [{ name: 'image', description: 'Attach', getArgumentCompletions: (arg) => suggestPathArgument(arg, root) }],
+    root,
+    fallbackSeam(),
+  )
+  const result = await provider.getSuggestions(['/image fi'], 0, 9, { signal: abort })
+  assert.ok(result !== null, `/image fi must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, 'fi', 'the argument prefix is the completion prefix')
+  assert.ok(result.items.some(item => item.value === 'file-one.txt'), `file missing:\n${JSON.stringify(result.items)}`)
+})
+
+test('the provider lets Tab file-complete an explicit PATH argument only (plan §2.1)', (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [
+      { name: 'image', description: 'Attach', getArgumentCompletions: () => null },
+      { name: 'help', description: 'Help' },
+    ],
+    root,
+    fallbackSeam(),
+  )
+  assert.equal(provider.shouldTriggerFileCompletion(['/image'], 0, 6), false, 'a bare command name stays command completion')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image '], 0, 7), true, 'a trailing-space PATH argument is a file-completion site')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image\t'], 0, 7), true, 'a trailing-TAB PATH argument is a file-completion site too')
+  assert.equal(provider.shouldTriggerFileCompletion(['/image\tfo'], 0, 9), true, 'a TAB-separated PATH argument completes files')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help '], 0, 6), true, 'a non-file command still runs the request (the extension chain is consulted — only the HOST file branch is closed)')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help\t'], 0, 6), true, 'a NON-file command keeps the request for a trailing TAB too')
+  assert.equal(provider.shouldTriggerFileCompletion(['/help foo'], 0, 9), true, 'a NON-file command argument still runs the request')
+  assert.equal(provider.shouldTriggerFileCompletion(['see /tmp/'], 0, 9), true, 'a plain path line still runs the request')
+  assert.equal(provider.shouldTriggerFileCompletion(['foo'], 0, 3), true, 'an ordinary word still runs the request')
+  assert.equal(provider.shouldTriggerFileCompletion(['./foo'], 0, 5), true, 'a `./` path still runs the request')
+  // THE PROOF (plan §2.1): the HOST's own file branch stays closed for
+  // every ordinary position — a forced request never produces a host file
+  // dropdown there.
+  const probe = new MentionProvider([{ name: 'image', description: 'Attach', getArgumentCompletions: () => null }], root, fallbackSeam(), undefined, undefined, undefined, undefined, [], true)
+  return Promise.all([
+    probe.getSuggestions(['/help foo'], 0, 9, { signal: abort, force: true }),
+    probe.getSuggestions(['see /tmp/'], 0, 9, { signal: abort, force: true }),
+    probe.getSuggestions(['foo'], 0, 3, { signal: abort, force: true }),
+    probe.getSuggestions(['./foo'], 0, 5, { signal: abort, force: true }),
+  ]).then((results) => {
+    for (const result of results) {
+      assert.equal(result, null, 'an ordinary position must never open the HOST file dropdown')
+    }
+  })
+})
+
+test('the completion scope is resolved at SUGGESTION time, so a session switch needs no reinstall', async (t) => {
+  const life = testLifecycle(t)
+  // The reviewer repro (rebase review round 1): the provider is installed
+  // while session A is live, then the runner switches to session B. A
+  // scope captured at INSTALL time would keep resolving A (stale session,
+  // fail-closed empty discovery after the switch); a LIVE scope source
+  // resolves the CURRENT session on the very next suggestion.
+  const root = fixtureWorkspace(life)
+  const scopes: import('../src/runtime/host-file-port.ts').HostFileScope[] = []
+  const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async (scope) => {
+      scopes.push(scope)
+      return { kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }
+    },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  // The runner's live agent — the scope source reads it at suggestion time.
+  let liveAgent: { session: { id: string } } | undefined = { session: { id: 'session-a' } }
+  const provider = new MentionProvider([], root, seam, undefined, () =>
+    liveAgent === undefined
+      ? { kind: 'workspace', cwd: root }
+      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], true)
+  await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.deepEqual(scopes[0], { kind: 'session', sessionId: 'session-a' }, 'the first suggestion resolves session A')
+  // The session switch: the SAME provider instance is queried again (no
+  // reinstall — the editor keeps the installed provider across the switch).
+  liveAgent = { session: { id: 'session-b' } }
+  await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.deepEqual(scopes[1], { kind: 'session', sessionId: 'session-b' }, 'the switch is picked up without a reinstall')
+  // And a sessionless install (deferred start) resolves the workspace.
+  liveAgent = undefined
+  await provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  assert.deepEqual(scopes[2], { kind: 'workspace', cwd: root }, 'the sessionless fallback resolves the workspace')
+})
+
+test('a scope switch MID-FLIGHT drops the in-flight candidate list (no cross-session commit)', async (t) => {
+  const life = testLifecycle(t)
+  // The reviewer repro (rebase review round 3): a discovery started under
+  // session A settles AFTER the live agent moved to B. The request is NOT
+  // aborted (a session switch does not cancel editor completion), so the
+  // port's own abort check cannot help — the provider must re-verify the
+  // scope identity after the await and drop A's candidates.
+  const root = fixtureWorkspace(life)
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const seam: import('../src/runtime/host-file-port.ts').HostFilePort = {
+    listReferences: async () => {
+      await gate
+      return { kind: 'ok', items: [{ path: 'file-one.txt', kind: 'file' }] }
+    },
+    resolveReference: async () => ({ kind: 'missing' }),
+    canonicalizeMentions: async (_scope, text) => text,
+  }
+  let liveAgent: { session: { id: string } } | undefined = { session: { id: 'session-a' } }
+  const provider = new MentionProvider([], root, seam, undefined, () =>
+    liveAgent === undefined
+      ? { kind: 'workspace', cwd: root }
+      : { kind: 'session', sessionId: liveAgent.session.id }, undefined, undefined, [], true)
+  const pending = provider.getSuggestions(['@file'], 0, 5, { signal: abort })
+  // The switch lands while the discovery is in flight (no abort).
+  liveAgent = { session: { id: 'session-b' } }
+  release!()
+  assert.equal(await pending, null, 'a result resolved for the OLD session must never commit')
+})
+
+// ── inline skill reference completion (the 2026-09-07 next plan) ──────────
+
+/** The detached human skill catalog used by the inline tests. */
+const SKILLS = [
+  { name: 'eli5', description: 'Explain like I am five' },
+  { name: 'html-maker', description: 'Make HTML' },
+  { name: 'diagnosing-skills', description: 'Diagnose skills' },
+]
+
+test('inline skill completion returns ONLY skill candidates at ordinary positions', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
+    root,
+    fallbackSeam(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    SKILLS,
+  )
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null, `请用 /el must suggest:\n${JSON.stringify(result)}`)
+  assert.equal(result.prefix, 'el', 'the inline prefix is the QUERY part, never /-prefixed')
+  assert.deepEqual(result.items.map(item => item.value), ['eli5'], 'only skill names, never commands')
+  assert.equal(result.items[0]!.description, 'Explain like I am five', 'the skill description rides along')
+  // A later line's leading `/` is an inline seat too.
+  const second = await provider.getSuggestions(['foo', '/ht'], 1, 3, { signal: abort })
+  assert.ok(second !== null, `line-2 /ht must suggest:\n${JSON.stringify(second)}`)
+  assert.deepEqual(second.items.map(item => item.value), ['html-maker'])
+  // An empty query lists the whole catalog (typing a bare `/`).
+  const all = await provider.getSuggestions(['请用 /'], 0, 4, { signal: abort })
+  assert.ok(all !== null, `请用 / must suggest:\n${JSON.stringify(all)}`)
+  assert.equal(all.prefix, '')
+  assert.deepEqual(all.items.map(item => item.value), ['eli5', 'html-maker', 'diagnosing-skills'])
+})
+
+test('inline skill completion never leaks commands and never claims the command seat', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [{ name: 'exit', description: 'Quit' }, { name: 'settings', description: 'Panel' }],
+    root,
+    fallbackSeam(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    SKILLS,
+  )
+  // The inline namespace is the skill catalog ONLY: `/set` in prose must
+  // not surface the `/settings` command — with no matching skill the
+  // dropdown stays closed (a command-leaking implementation would list
+  // `settings` here).
+  const inline = await provider.getSuggestions(['请执行 /set'], 0, 8, { signal: abort })
+  assert.equal(inline, null, `请执行 /set must not leak commands:\n${JSON.stringify(inline)}`)
+  // The FIRST logical line's leading command seat stays command completion.
+  const leading = await provider.getSuggestions(['/se'], 0, 3, { signal: abort })
+  assert.ok(leading !== null, `/se must suggest:\n${JSON.stringify(leading)}`)
+  assert.ok(leading.items.some(item => item.value === 'settings'), `the command must answer the command seat:\n${JSON.stringify(leading.items)}`)
+  assert.ok(leading.items.every(item => item.value !== 'eli5'), `skills must not claim the command seat:\n${JSON.stringify(leading.items)}`)
+  // A path-like token is never a skill seat.
+  assert.equal(await provider.getSuggestions(['foo /usr/lo'], 0, 10, { signal: abort }), null)
+  assert.equal(await provider.getSuggestions(['foo 5/8'], 0, 7, { signal: abort }), null)
+})
+
+test('inline skill completion stays closed in shell mode (shell/path logic unchanged)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider(
+    [],
+    root,
+    fallbackSeam(),
+    () => 'shell-context',
+    undefined,
+    undefined,
+    undefined,
+    SKILLS,
+  )
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result === null || result.items.every(item => item.value !== 'eli5'),
+    `shell mode must never answer inline skills:\n${JSON.stringify(result)}`)
+})
+
+test('inline skill accept applies the reference and never submits', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null)
+  const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /eli5 '], cursorLine: 0, cursorCol: 9 },
+    'the accept must insert the reference with a separator and keep the draft')
+  // A non-skill item value is never applied as an inline reference: the
+  // inline branch requires catalog membership, so a foreign value falls
+  // through to the fork's argument-apply (the pre-existing fallback).
+  const foreign = provider.applyCompletion(['请用 /el'], 0, 6, { value: 'not-a-skill', label: 'not-a-skill' }, 'el')
+  assert.deepEqual(foreign, { lines: ['请用 /not-a-skill'], cursorLine: 0, cursorCol: 15 },
+    'a value outside the skill catalog must not take the inline path')
+  // A suffix already separated by whitespace keeps exactly one space.
+  const spaced = await provider.getSuggestions(['请用 /el 看看'], 0, 6, { signal: abort })
+  assert.ok(spaced !== null)
+  const appliedSpaced = provider.applyCompletion(['请用 /el 看看'], 0, 6, spaced.items[0]!, spaced.prefix)
+  assert.deepEqual(appliedSpaced, { lines: ['请用 /eli5 看看'], cursorLine: 0, cursorCol: 9 })
+})
+
+test('a scope switch fences the open inline dropdown (no stale accept)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  let scope: import('../src/runtime/host-file-port.ts').HostFileScope = { kind: 'workspace', cwd: root }
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, () => scope, undefined, undefined, SKILLS, true)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null)
+  // The session/workspace generation changes while the dropdown is open.
+  scope = { kind: 'workspace', cwd: '/other-workspace' }
+  const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
+    'a switched scope must fence the old dropdown')
+})
+
+test('a changed draft fences the open inline dropdown (no stale accept)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null)
+  // The user typed more after the dropdown opened: the strict snapshot
+  // fence must reject the accept.
+  const applied = provider.applyCompletion(['请用 /eli'], 0, 7, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /eli'], cursorLine: 0, cursorCol: 7 },
+    'a changed draft must fence the old dropdown')
+})
+
+test('an inline no-match clears the previous snapshot (no stale accept after null)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  const provider = new MentionProvider([], root, fallbackSeam(), undefined, undefined, undefined, undefined, SKILLS, true)
+  const result = await provider.getSuggestions(['请用 /el'], 0, 6, { signal: abort })
+  assert.ok(result !== null, `请用 /el must suggest:\n${JSON.stringify(result)}`)
+  // A later request at an inline seat with NO matching candidates returns
+  // null and must clear the snapshot (the null-clears contract).
+  assert.equal(await provider.getSuggestions(['请用 /zz'], 0, 6, { signal: abort }), null)
+  // The old dropdown must no longer apply — even to the exact document
+  // state that produced it.
+  const applied = provider.applyCompletion(['请用 /el'], 0, 6, result.items[0]!, result.prefix)
+  assert.deepEqual(applied, { lines: ['请用 /el'], cursorLine: 0, cursorCol: 6 },
+    'a null result must clear the previous inline snapshot')
+})
+
+test('a NON-STRICT legacy snapshot never feeds the inline apply (shell/command leak)', async (t) => {
+  const life = testLifecycle(t)
+  const root = fixtureWorkspace(life)
+  // The command `git` and the skill `git` share a name: a stale non-strict
+  // command snapshot must not be consumable at an inline seat.
+  const provider = new MentionProvider(
+    [{ name: 'git', description: 'VCS' }],
+    root,
+    fallbackSeam(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    [{ name: 'git', description: 'Git skill' }],
+  )
+  // The command seat produces a NON-STRICT snapshot (strict=false).
+  const command = await provider.getSuggestions(['/gi'], 0, 3, { signal: abort })
+  assert.ok(command !== null, `/gi must suggest:\n${JSON.stringify(command)}`)
+  assert.ok(command.items.some(item => item.value === 'git'))
+  // A later inline accept at a DIFFERENT document position must be
+  // rejected: the snapshot is not the strict inline one.
+  const applied = provider.applyCompletion(['foo /g'], 0, 6, { value: 'git', label: 'git' }, 'g')
+  assert.deepEqual(applied, { lines: ['foo /g'], cursorLine: 0, cursorCol: 6 },
+    'a non-strict legacy snapshot must never feed the inline apply')
+})

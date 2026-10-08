@@ -13,14 +13,14 @@ import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TuiApp, type SubagentViewerTarget } from '../src/tui-app.ts'
-import { EditorRegistry } from '../src/editor-registry.ts'
-import { EditorSeatHolder } from '../src/editor-seat-holder.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
+import { EditorSeatHolder } from '../src/tui/interaction/editor-seat-holder.ts'
 import { Text } from '@xmoon76/pi-tui'
 import type { EditorHost, ExtensionEditor } from '../src/extension/public-types.ts'
-import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
-import { createDiag } from '../src/diag.ts'
-import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../src/shell-completion.ts'
-import { MentionProvider } from '../src/mentions.ts'
+import { runOwned, type OwnedTaskOptions } from '../src/runtime/process/tasks.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { resetCommandCacheForTest, setCompgenRunnerForTest } from '../src/client/shell/compgen.ts'
+import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -29,7 +29,7 @@ import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -1634,7 +1634,7 @@ test('MentionProvider completes a multiline shell draft with the wire line-0 pre
   const root = fixtureWorkspace(life)
   let mode: 'prompt' | 'shell-context' | 'shell-local' = 'shell-context'
   const source = (): 'prompt' | 'shell-context' | 'shell-local' => mode
-  const provider = new MentionProvider([], root, null, source)
+  const provider = new MentionProvider([], root, null, source, undefined, undefined, undefined, [], true)
   // Cursor on line 0: the virtual prefix applies.
   const first = await provider.getSuggestions(['gi', 'more'], 0, 2, { signal: abort })
   assert.ok(first !== null && first.items.some(item => item.value === 'git'), 'line 0 completes as a shell command')
@@ -2009,7 +2009,7 @@ test('a continuation-line /u in shell-local is a PATH (no slash commands, no dou
 test('provider-level: a continuation-line /u applies as a path on any shell line', async (t) => {
   const life = testLifecycle(t)
   const root = fixtureWorkspace(life)
-  const provider = new MentionProvider([], root, null, () => 'shell-context' as const)
+  const provider = new MentionProvider([], root, null, () => 'shell-context' as const, undefined, undefined, undefined, [], true)
   const applied = provider.applyCompletion(['git status', '/u'], 1, 2, { value: '/usr/', label: 'usr' }, '/u')
   assert.deepEqual(applied, { lines: ['git status', '/usr/'], cursorLine: 1, cursorCol: 5 },
     'the synthetic prefix never enters a continuation line and the slash is never doubled')

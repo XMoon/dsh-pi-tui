@@ -12,8 +12,8 @@ import test from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { readJsonlReverseBatch, ReverseJsonlRevisionError } from '../src/history-reverse-reader.ts'
-import type { ReverseJsonlCursor, ReverseJsonlLine } from '../src/history-reverse-reader.ts'
+import { readJsonlReverseBatch, ReverseJsonlRevisionError } from '../src/client/history/reverse-reader.ts'
+import type { ReverseJsonlCursor, ReverseJsonlLine } from '../src/client/history/reverse-reader.ts'
 
 function tempFile(life: TestLifecycle, content: string | Buffer): { file: string; dir: string } {
   const dir = life.tempDir('pi-tui-reverse-jsonl-')

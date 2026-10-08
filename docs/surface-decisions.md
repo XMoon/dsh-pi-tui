@@ -37,7 +37,7 @@ remaining gaps where a card fell back to raw JSON or raw result text:
   of a raw args dump (Web TodoRow parity), so the folded row does not
   repeat it.
 
-Pure helpers live in `src/present.ts` (`webCardLines`,
+Pure helpers live in `src/tui/transcript/tool-presentation.ts` (`webCardLines`,
 `genericRawInputLines`, `resultTextLines`, `foldedCallPreview`,
 `summarizeToolArgs`); the render layer in `src/tui-app.ts` owns colors
 and layout. Pinned by `test/rendering.test.ts`.
@@ -93,8 +93,22 @@ accepted but has no authoritative representation yet:
   occurrence yet and always keeps `steering…`. The parked row stays visible and
   only the label changes — the occurrence keeps its identity, and a later
   ordinary prompt is what wakes the Agent and consumes it.
-- **Context** — `placement === 'context'` has no pending user surface; it
-  presents through its normal conversation/context surface once materialized.
+- **Context** — `placement === 'context'` is not pending USER input, but
+  authoritative occurrences are exposed in a NON-USER ephemeral Context tail
+  for background/injected-input observability (2026-09-30 TUI presentation
+  closure, intentionally extending the official Web policy — see the
+  migration doc's D2.1 addendum). The row renders generic
+  `context-generic` chrome plus a bounded body preview (max 2 width-aware
+  body rows, ellipsized) and a waiting status derived from the subject's
+  activity (`waiting for next step…` while running, `waiting for next turn…`
+  once parked). It is never in the queue pane, has no local optimistic echo,
+  never exposes the raw DSH `source` (or infers a producer from text), is
+  not searchable, not durable, never inside `TranscriptFolder`, Work spans or
+  Context clusters, and does not steal the viewport (a reader browsing
+  history stays put). The Host claim removes it — the pending-input snapshot
+  is the ONLY lifecycle authority, there is no TUI-owned retained row — and
+  the durable Context returns through the normal transcript path after
+  materialization.
 - **Identity, never text** — each human submission mints a request id before its
   first async preparation await and persists it as the Direct user-message
   source `rpcId`. Local echoes and authoritative occurrences correlate by that
@@ -104,9 +118,11 @@ accepted but has no authoritative representation yet:
   pre-step emits the durable message, the echo is re-presented in that window
   rather than deleted — the accepted content stays continuously visible. Two
   same-text submissions stay two distinct pending rows.
-- **One atomic update** — the runner publishes queued rows, steering rows and
-  activity in a single `setPendingInputPresentation` call, so a handoff never
-  paints an intermediate blank/duplicate frame.
+- **One atomic update** — the runner publishes queue rows, the ONE ordered
+  tail (user steering rows interleaved with non-user context occurrences, in
+  the join's projection order) and activity in a single
+  `setPendingInputPresentation` call, so a handoff never paints an
+  intermediate blank/duplicate frame.
 - **Gesture-captured delivery** — a Ctrl+S/steer draft resolves its delivery
   mode at the gesture boundary and uses that SAME mode for both the local echo
   placement and the written prompt, so an agent status flip while the gesture
@@ -132,28 +148,32 @@ accepted but has no authoritative representation yet:
   (`… to steer accepted`) so `sending…` rows are never implied to participate.
   The `sending…` suffix already communicates the state.
 
-Per-occurrence QueueDock controls: the TUI intentionally does NOT expose a
-per-occurrence queue action UI. `Alt+Up` is recall-all over authoritative
-occurrences and `Ctrl+S` is FIFO steer-all; there is no row selection,
-single-row edit/remove/steer, row action button/keybinding, per-row busy state,
-edit overlay, selection clamp, or edit-target-disappearance lifecycle. D2.2
-still keeps the queue-action SEMANTIC (`SessionWriter.updateQueue` `edit` /
-`remove` / `steer`) fully aligned for both Direct and Remote adapters with
-adapter tests and same-Host proof. The migration preserves DSH capabilities and
-expresses them with a TUI-native surface; it is not a React/Web affordance
-clone, so adapter-level `edit` without an edit UI is expected, not a gap.
+Per-occurrence QueueDock controls: per-occurrence QueueDock Edit / Remove /
+Steer is a CURRENT PRODUCT GAP. The semantic adapters already support exact
+occurrence operations: D2.2 keeps the queue-action SEMANTIC
+(`SessionWriter.updateQueue` `edit` / `remove` / `steer`) fully aligned for both
+Direct and Remote adapters with adapter tests and same-Host proof. `Alt+Up` is
+recall-all over authoritative occurrences and `Ctrl+S` is FIFO steer-all; both
+are useful bulk terminal-native affordances but do NOT substitute for exact
+occurrence actions. There is no row selection, single-row edit/remove/steer, row
+action button/keybinding, per-row busy state, edit overlay, selection clamp, or
+edit-target-disappearance lifecycle.
+
+Owner: Post-M3 Q1.
 
 ### Remote presentation keeps exactly one optimistic identity
 
 D2.2 makes the client-local optimistic-echo source a seam
-(`src/submission-presentation.ts`): production Direct reads the existing
+(`src/app/submission/presentation.ts`): production Direct reads the existing
 `PendingSubmissions` ledger; the experimental Remote path reads the official
 `SessionSnapshot.pendingSubmissions`. The single join
-(`src/pending-presentation.ts`) correlates authoritative occurrences with local
+(`src/app/surface/pending-presentation.ts`) correlates authoritative occurrences with local
 echoes by request/rpc identity only and routes `queued` to the queue pane and
-`steering`/`transcript` to the conversation-tail lane; `context` has no pending
-user surface. The Remote path therefore never runs a second optimistic ledger
-beside the official one, and a steer echo can never render as a queued row.
+`steering`/`transcript` to the conversation-tail lane; a non-user `context`
+occurrence renders in the same ordered tail with its generic non-user Context
+identity and never correlates with a local echo. The Remote path therefore
+never runs a second optimistic ledger beside the official one, and a steer
+echo can never render as a queued row.
 
 ## D2.3 model / preset / new presentation decisions
 
@@ -271,7 +291,7 @@ here — or edited externally in `settings.yaml` / `.credentials.yaml` —
 shows up without a restart. `/login` supports both CredentialRef
 (API-key) and CredentialKey authorization-flow targets.
 
-Resolution helpers: `src/provider-catalog.ts` (`providerOptionsFor`,
+Resolution helpers: `src/domain/catalog/provider.ts` (`providerOptionsFor`,
 `credentialOptionsFor`, `resolveCredentialArg`, `deriveKeyRef`,
 `ROUTE_PATTERN`), pinned by `test/provider-catalog.test.ts` and
 `test/login-credentials.test.ts`.
@@ -304,7 +324,7 @@ future change must not silently reverse:
   intake) are consumed by the host BEFORE the ladder reaches the editor, so
   the viewer can never act on the parent session.
 - **Non-empty viewer prompt writes have exactly one path**: the runner's `onSubagentSubmit` →
-  `submitSubagentPrompt` (src/subagent-viewer-submit.ts) → the official
+  `submitSubagentPrompt` (internal to src/runtime/direct/subagent-direct.ts) → the official
   `ctx.subagents.prompt`. Never `ctx.subagents.sendMessage(...)` (that is
   the Agent-authored Steer path — a human prompt must queue as its own
   turn), never `ctx.agents.get(childId).followup(...)` (bypasses the
@@ -316,9 +336,12 @@ future change must not silently reverse:
   `subagent/unauthorized`, `subagent/delivery-unavailable`,
   `gateway/cancelled`, …).
 - **Child queue occurrence access is separately fenced.** Reader and queue
-  mutation calls may use only the exact live Agent mounted by the current
-  interactive direct-child continuable viewer, with the pinned direct parent
-  and registry identity still matching. This queue-only resolver never grants
+  mutation calls may use only the SEMANTIC writer subject of the child mounted
+  by the current interactive continuable viewer — the backend-neutral authority
+  the writes are addressed to, never a merely name-matched identity. Backend
+  mapping: Direct supplies the exact live Agent (with the pinned direct parent
+  and registry identity still matching); Remote supplies the writer subject of
+  the exact retained child Session. This queue-only resolver never grants
   ordinary child prompt authority; non-empty prompts remain parent-authorized
   through `SubagentPort`. The current TUI viewer exposes the child queue rows
   and Ctrl+S steer-all subset; selectable edit/remove controls remain a later
@@ -339,14 +362,85 @@ future change must not silently reverse:
   draft store is deliberately never shared with the child (a per-child
   image store is a later milestone).
 - **The footer switches to the VIEWED child while a subagent viewer is
-  open.** The parent session's status (permission/model/plan/task badges,
-  extension footer segments) describes a session the user is not looking
-  at, so the runner pushes a `SubagentViewerFooter` (label, mode badge
-  `[subagent · continuable]` / `[subagent · one-shot]`, activity, cwd,
-  the child's OWN turns/steps and stats line from a per-viewer StatsFolder
-  fed only the child's own events) and clears it on exit / session swap.
-  The footer is refreshed at step/end and turn/end (never on streaming
-  deltas). **Extension footer segments do not render while viewing**:
+  open** (M3-5 PR1: the child is a first-class DISPLAY SUBJECT). The parent
+  session's status (permission/model/plan/task badges, extension footer
+  segments) describes a session the user is not looking at. The split is:
+  - **Viewer-owned identity + presentation folds.** `ViewerRuntime` supplies
+    the child id/label/mode/activity/access and the child transcript fold
+    (its own `StatsFolder`: turn/step counters, recent presentation
+    performance, the stats line). These never become authority for the
+    child's Session-scoped facts.
+  - **Session-owned facts come from `SessionReader.sessionStatus(childId)`.**
+    `StatusRuntime`'s ONE display-subject selector resolves the main Session
+    or the viewed child, reads ONE `SessionStatus(childId)` cut, and derives
+    the child's composition (model/preset), access (projection-authoritative
+    permission), workspace (its own cwd — a Remote child's Host cwd never
+    implies a local branch), cumulative tokens and context
+    (numerator = `projectedTokens ?? pressureTokens`, window = the projection's)
+    and the todo/title/goal presentation. An absent child fact stays ABSENT —
+    the parent's value, the sessionless default and the bounded fold's total
+    are never stand-ins.
+  - **One atomic commit.** The view subject, the Session-owned sections, the
+    activity section (its `todoCount` is the display-subject list length), the
+    legacy display fields and a disposable display-subject PRESENTATION
+    projection (todo list / session title / session identity, which otherwise
+    live as durable MAIN state) travel in ONE `TuiApp.commitDisplaySubject`
+    call; the StatusStore publishes them in a single synchronous `update()`
+    before any notification, so no observer reads `view=child` beside the
+    parent's facts (or the reverse). An ALREADY-OPEN todo panel is re-rendered
+    from the same committed projection (enter, child A→B, a child todo change
+    and exit alike — it never waits for an unrelated event). The main durable
+    presentation state is never overwritten — clearing the projection restores
+    its LATEST values.
+  - **The main session's welcome card (head) is hidden while a child is the
+    display subject.** That card names the main session's model/workspace/
+    session id; leaving it up would show two different sessions at once. Its
+    facts are never overwritten, so the LATEST main identity reappears on exit.
+    Hiding re-measures the transcript rows (`transcriptWelcomeHeight`, the
+    fullscreen row map and the scroll anchor ride the same measurement), so
+    regular and fullscreen geometry stay consistent.
+  - **The existing footer consumers render the display subject's own facts.**
+    The `model`, `agent-preset`, `permission-preset`, `context`, `git-branch`
+    and `todo` items read the section the commit just published, so a viewed
+    child's model/provider, configured preset, available permission,
+    context pressure/window, branch and todo count are displayed where the user
+    configured them (the default preset shows model/permission/cwd/context/
+    tokens/branch; `agent-preset` and the separate `todo` count appear in custom
+    layouts). An absent child fact renders nothing — never the parent's value.
+    Genuinely MAIN-only chrome keeps its subject gate and stays hidden while
+    viewing: the Task Center badge, plan state, the `ext:*` extension bridge,
+    queue, agents and run-state.
+  - **Extension: v2 live-session semantics stay, the display subject is
+    published ADDITIVELY.** The released Stable `SessionSnapshot` (API_VERSION
+    2) means "the live session's identity and mode" and its semantics are
+    UNCHANGED: `sessionId`/`workspaceRoot`/`title`/`model`/`cwd`/`branch`/
+    `permission`/`turns`/`steps` and the activity `todoCount`/`todoSummary`
+    keep describing the LIVE session owner — a viewer transition never
+    re-points them (the M3-5 PR1 contract decision; see
+    `docs/extension-api.md`). The session the user is LOOKING AT is published
+    beside it as the optional `session.displaySubject` (`sessionId`, `title`,
+    `workspaceRoot`, `cwd`, `branch`, `model`, `permission`, `turns`, `steps`,
+    `todoCount`, `todoSummary`), present only while a child viewer is mounted
+    (`viewerMode`). The first-party todo dock item prefers
+    `displaySubject.todoSummary`, so the chrome still follows the subject while
+    the live-session fields stay truthful. Direct/current viewer composition is
+    qualified by PR1; the Remote child viewer stays PR2 (no Remote
+    child-viewer L6 is claimed here).
+  The display-subject status is re-derived on EVERY durable event of the viewed
+  child (never on streaming deltas, which do not reach that path): the child's
+  Session-owned facts come from the official projections, and any durable event
+  of that Session may move one of them — `model/selection` / `request/header`
+  (modelSelection), `agent-preset/selected` (agentPreset), `request/context`,
+  usage-bearing `assistant/message`/`assistant/attempt`, the `surfaceOp`
+  message/tool-result family (contextPressure/contextBreakdown), `todo/write` /
+  `session/title` / `goal/change`, the permission knobs and the turn/step
+  counters. Enumerating that family set proved fragile, so the primitive is the
+  whole durable event stream (`app/surface/runtime.ts`, the viewer branch).
+  While a child viewer is mounted, every durable event of the LIVE session also
+  refreshes the status: the extension's v2 live-session snapshot is derived from
+  the same refresh (one that does not re-project the live sections into the
+  child store), so a cheap live event such as `step/end` can no longer leave the
+  published live counters behind the live fold. **Extension footer segments do not render while viewing**:
   viewer mode is host-owned chrome, the extension surface already exposes
   `viewerMode` in its session state, and the first-party builtin's
   turn/step segment would otherwise duplicate the child counters with the
@@ -358,11 +452,15 @@ future change must not silently reverse:
 The `/tasks` browser (and the ↓ empty-editor trigger, and the footer badge)
 read the DURABLE descendant catalog, not the live-child list:
 
-- **The lineage source is `subagents.listDescendants`**, never a
-  re-implemented traversal over session headers, and never `listChildren`
-  for the browser (the badge may scope to running descendants of the same
-  listing). `parentId` + `depth` ride every row from the catalog facts —
-  never guessed from labels or order.
+- **The semantic lineage source is the DURABLE descendant catalog** — one root
+  Session plus its complete descendant tree in the official stable pre-order —
+  never a re-implemented traversal over session headers. `parentId` + `depth`
+  ride every row from the catalog facts, never guessed from labels or order.
+  Backend mapping (M3-5 PR2): Direct composes the official
+  `subagents.listDescendants`; Remote walks the recursive official
+  `subagentCatalog` projection (the released Client carrier cannot expose
+  `listDescendants`). Both feed the SAME semantic Task contract — a row's shape
+  must not encode which backend produced it.
 - **Subagent rows keep the DSH stable pre-order VERBATIM.** Activity never
   re-sorts a row above its parent (a running grandchild stays under its
   inactive parent). The "first running subagent" rule is a CURSOR policy
@@ -370,29 +468,32 @@ read the DURABLE descendant catalog, not the live-child list:
 - **A finished one-shot child stays reachable.** `inactive` is never an
   outcome; Enter opens its persisted transcript read-only. No activity
   filter exists in `buildTaskRows`.
-- **Runtime activity is projected, never read from the catalog.**
-  `listDescendants().activity` is live-STORE presence, not driver
-  activity: an idle continuable child stays live in the session store and
-  would otherwise read as `running` forever. Every child row's
-  `running` / `inactive` is re-projected from the Agent registry
-  (`ctx.agents.get(id)?.status === 'running'`) AT COMMIT TIME by the
-  `TaskBrowserRuntime` coordinator (`projectSubagentActivity`), so a slow
-  catalog response can never overwrite a newer runtime state. The
-  coordinator splits CATALOG refreshes (subagent lifecycle events, the
-  subagent tool call, jobs changes — the only paths that re-list) from
-  RUNTIME-only refreshes (`agent/status` — the cached catalog is reused,
-  membership/tree/mode never move). The runner's `agent/status` handler
-  is membership-gated: only flips of children in the cached catalog
-  refresh the surface, so the MAIN agent's own per-turn flips never
-  repaint. A session switch closes the open browser, clears the badge
+- **Runtime activity is a commit-time RUNTIME fact, never read from the
+  catalog.** A catalog's own activity field is live-STORE presence, not driver
+  activity: an idle continuable child stays live in the session store and would
+  otherwise read as `running` forever. Every child row's `running` / `inactive`
+  is therefore taken AT COMMIT TIME by the `TaskBrowserRuntime` coordinator
+  (`projectSubagentActivity`) from the backend's live-run authority, so a slow
+  catalog response can never overwrite a newer runtime state. Backend mapping:
+  Direct reads the Agent registry (`ctx.agents.get(id)?.status === 'running'`);
+  Remote reads the official Session-list `running` bit. The coordinator splits
+  CATALOG refreshes (the only paths that re-list) from RUNTIME-only refreshes
+  (the cached catalog is reused; membership/tree/mode never move). Backend
+  mapping of the triggers: Direct takes subagent lifecycle + `agent/status`
+  events and is membership-gated (only flips of children in the cached catalog
+  refresh the surface, so the MAIN agent's own per-turn flips never repaint);
+  Remote subscribes the official Session list and the Jobs state through the
+  surface owner. A session switch closes the open browser, clears the badge
   SYNCHRONOUSLY and drops the cached catalog — the old session's running
   badge never hangs on the footer until the new session's first listing
   lands (the fence key = session generation + id; a failed listing never
   leaves a stale badge).
 - **Catalog invalidation is coalesced by the SURFACE owner, never the
-  coordinator.** Every production trigger (the mount seed, `subagent/start`
-  / `subagent/end`, the subagent tool-call fallback, Job membership events,
-  opening the browser, the Full Task Center `R`) funnels through one
+  coordinator.** Every production trigger (the mount seed, the backend's
+  lifecycle/membership invalidations — Direct's `subagent/start` /
+  `subagent/end` and the subagent tool-call fallback, Remote's official Session
+  list and Jobs state — Job membership events, opening the browser, the Full
+  Task Center `R`) funnels through one
   surface-owned single-flight gate: at most ONE `refreshCatalog()` traversal
   is in flight per session generation, an invalidation arriving mid-flight
   only marks the gate `dirty`, and the traversal's settle starts at most ONE
@@ -577,16 +678,20 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   Human user/steer rows and CAUSAL surfaced context are persistent
   boundaries in collapsed Focus, where they remain visible in raw relative
   order. A MID-TURN `form:'notice'` (a background job or subagent settling
-  while the Agent already works) is process feedback, not causal input: it is
-  hidden inside the collapsed Thought and restored at its exact raw position
-  when the Thought opens (2026-09-21 addendum; the decision reads the
-  semantic `form` and raw position, never a source kind). A notice inside the
-  opening foundation and a mid-turn relay stay visible.
+  while the Agent works) is visible process feedback: it renders AFTER the
+  Thought as a post-Thought row while collapsed (2026-09-30 closure; the
+  decision reads the semantic `form` and raw position, never a source kind),
+  never enters the Thought's hidden Action candidate set, and returns to its
+  exact raw position when the Thought opens. A notice inside the
+  opening foundation stays before the Thought, and a mid-turn relay stays
+  visible.
   Expanded Focus preserves process chronology after the foundation: later
   steers and surfaced context return to their real positions and remain
-  unmarked as owner-only process content. Searching a hidden mid-turn notice
-  surfaces it through a presentation-only temporary reveal (`projectFocus`
-  `forcedVisible`) without opening the Thought or writing a manual owner.
+  unmarked as owner-only process content. Searching a mid-turn notice needs
+  no Focus-root reveal and no special forced-visible path (retired 2026-09-30)
+  — the row is already visible, so ordinary search addresses it like any
+  other surfaced Context card; a match inside the folded Notice payload opens
+  through the row's own message disclosure.
   The durable `steer`/source facts are never rewritten, and injected
   context still does not occupy Think/Action/Message slots and never counts
   as a tool.
@@ -617,9 +722,13 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   the latest reasoning tail (one visual row, following the tail while
   streaming); the Action row is the latest meaningful non-Thinking Process
   evidence (one visual row — see the collapsed Action slot decision below).
-  Counts describe the span, not the turn; no fact renders a placeholder
-  row; span-local duration is omitted rather than faked from whole-turn timing.
-  Expanding the span re-uses the ordinary message renderers for its members.
+  This full preview body belongs to the live/Preparing/true-latest Work; a
+  settled historical Work collapses to its header only (the 2026-09-29
+  compact historical compaction, below). Counts describe the span, not the
+  turn; no fact renders a placeholder row; span-local duration is omitted
+  when no per-span timing evidence exists, never faked from whole-turn
+  timing. Expanding the span re-uses the ordinary message renderers for its
+  members.
 - **The Work header keeps the plain triangle** (`▸`/`▾`, the
   `section-collapsed`/`section-expanded` semantics in every icon style) — the
   Focus root keeps its whale identity. The Context CLUSTER header composes the
@@ -656,8 +765,8 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   a turn boundary so no Activity span ever inherits another turn's count or
   timing (a group's action cardinality and wall span stay on the turn that
   renders the card). The shared Think/Action/Preparing slot geometry lives
-  in `src/compact-process-preview.ts` (one authority for Focus and
-  Activity); the Think slot shows the LATEST logical line of the bounded
+  in `src/tui/components/transcript/compact-process-preview.ts` (TS6; one
+  authority for Focus and Activity); the Think slot shows the LATEST logical line of the bounded
   reasoning tail in both states (running follows the right edge, settled
   head-truncates).
 - **Collapsed Action slot + `actions` header stats (2026-09-22
@@ -693,7 +802,9 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   interactions (`ask_user_question` / `exit_plan_mode`) remain externally
   owned, never duplicate themselves in Action and never count. Focus and
   Activity share ONE classifier, ONE latest-candidate rule, ONE Action
-  formatter and ONE subtype-stat formatter (`compact-process-preview.ts` —
+  formatter and ONE subtype-stat formatter (`src/tui/transcript/process-summary.ts`
+  for the renderer-neutral classifier and stats; the physical Action slot line in
+  `src/tui/components/transcript/compact-process-preview.ts` —
   count-desc/name-asc, max 3 named subtypes, `+N` counts remaining SUBTYPES),
   and their component caches key on bounded Action + ActionStats signatures
   so a synthetic Action repaints even when the turn's tool state is
@@ -794,6 +905,15 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   nested Work disclosure, search reveal path). Compact is not the default (F7);
   the post-F6 Compact UX/identity review decides whether Work gains an identity
   icon or Compact gains progress-update narration guidance.
+- **Compact historical process compaction (2026-09-29):** only the true
+  latest/live Work keeps Think/Action previews. Settled historical Work
+  collapses to its header. A historical Work with Thinking but zero Action
+  evidence uses `Thought` as a presentation-only identity so header-only
+  compaction does not erase its semantic meaning. Canonical Work
+  ownership/projection is unchanged. The full behavior matrix, the
+  window-authority (`hasNewer`) true-latest rule and the component-cache
+  invalidation contract are owned by
+  `docs/transcript-display-disclosure.md`.
 
 ## F4 hardening (2026-09-21 PR4)
 
@@ -851,7 +971,8 @@ F4 behavior and documents the guarantees in
 PR5 extracts the ONE preset-neutral semantic segmentation and makes Compact,
 Full and expanded Focus materialize it instead of each re-deriving boundaries:
 
-- **`transcript-projection.ts` is the canonical authority.**
+- **`src/tui/transcript/structure.ts` (TS6; formerly `transcript-projection.ts`)
+  is the canonical authority.**
   `projectTranscriptStructure(raw window)` returns `Message | Work span |
   Context cluster` and reads no preset, surface, Ctrl+O, mouse, search,
   disclosure, viewport or width state. `isTranscriptWorkMember()` is the single
@@ -875,11 +996,13 @@ Full and expanded Focus materialize it instead of each re-deriving boundaries:
   cluster presentation obeys the surface capability exactly like Full. Collapsed
   Focus keeps its hoist policy and substitutes the canonical cluster identity in
   Focus-projected order.
-- **`displayPolicyFor()` is the runtime authority** for materialization:
-  `isFocusDisplayPreset()` delegates to `focusBehavior`, and `projectedBlocks()`
-  selects the Compact / Focus / Full materializer from `turnLayer`,
-  `processLayer` and `focusBehavior`, so the policy table and the runtime cannot
-  drift.
+- **`displayPolicyFor()` is the runtime materialization authority**
+  (`src/tui/transcript/display-policy.ts`): `projectedBlocks()` selects the
+  Compact / Focus / Full materializer from `turnLayer`, `processLayer` and
+  `focusBehavior`, so the policy table and the runtime cannot drift.
+  `isFocusDisplayPreset()` is the NEUTRAL behavioral answer
+  (`src/domain/display/preset.ts`), exactly `preset === 'focus'` — it must not
+  depend on the terminal disclosure policy (TS8-D).
 - **Search reveals a canonical container PATH.** Every preset resolves the
   hiding containers through the same neutral ancestry (Focus root via
   `searchTargetTurn()`, nested Work, Context cluster); a flat/fail-open
@@ -1104,15 +1227,16 @@ The composer's attachment policy is the DSH client contract
 - A command submission CONSUMES its attachments only after handler success
   (web parity): an error outcome restores the draft and KEEPS the staged
   attachments, so a failed command never swallows the user's image.
-- TUI/core local commands AND `!`/`!!` local shell lines keep refusing
+- TUI/core local commands AND `!`/`!!` user-shell lines keep refusing
   attachments outright: their line is a UI control, never agent-facing input.
-  The shell has no attachment delivery path (`runLocalShell` neither admits nor
-  consumes drafts), so the refusal is what keeps a placeholder from becoming
-  shell arguments. A client command contribution needs no refusal: its
-  invocation is the BARE token only, so an attachment-bearing `/deploy [image
-  #1]` line is never its invocation — it is an ordinary multimodal submission.
-  A skill wrapper, a `/skill <name>` invocation and a plain prompt stay
-  agent-facing and deliver their attachments to the model.
+  The shell has no attachment delivery path (the user-shell owner in
+  `src/app/submission/user-shell.ts` neither admits nor consumes drafts), so
+  the refusal is what keeps a placeholder from becoming shell arguments. A
+  client command contribution needs no refusal: its invocation is the BARE
+  token only, so an attachment-bearing `/deploy [image #1]` line is never its
+  invocation — it is an ordinary multimodal submission. A skill wrapper, a
+  `/skill <name>` invocation and a plain prompt stay agent-facing and deliver
+  their attachments to the model.
 - The policy is applied against the FINAL authority, not only at submit time.
   A deferred start may commit a session-scoped host command the standing view
   could not see, so the dispatch RE-APPLIES the policy after
@@ -1228,21 +1352,22 @@ single-row slots, history cwd rows, and attachment/file-name fallbacks.
 Do not move this normalization into runtime/domain models: search, persistence,
 replay, exports, and semantic projections must keep the original text.
 
-## Local shell display policy
+## User shell display policy
 
-- The capture layer (bounded-output byte/line/disk caps) is the memory
+- The capture layer (client/shell/output-capture byte/line/disk caps) is the memory
   safety boundary and is UNCHANGED; this policy only bounds what the card
   PRESENTS: a running card collapses to the newest 5 source lines, a
   settled card to at most 20 VISUAL rows, with an honest hidden-line
   marker. Ctrl+O (the existing master switch) expands to the retained
   buffer — everywhere EXCEPT fullscreen Focus, where Ctrl+O owns the
-  Thought-root bulk and the shell cards keep their folded state (their
-  local `!`/`!!` presentation is otherwise unchanged); a running card's
+  Thought-root bulk and the shell cards keep their folded state (the
+  `!`/`!!` card presentation is otherwise unchanged); a running card's
   result is re-chained to the bounded tail on a throttle.
 - Quick dismiss (Alt+K) removes SETTLED cards only: a running card is
   never dismissed, the shell process is never cancelled (Esc owns that),
   no session event is deleted, and an already-submitted `!` context
-  payload is untouched. `!!` stays local-only.
+  payload is untouched. `!!` stays Session/model-excluded: the Host
+  executes it, while the completed result remains presentation-only.
 
 ## One live TUI per process (the vendored keybindings are process-global)
 
@@ -1256,7 +1381,7 @@ registrations/handles valid across stop/start round-trips). Two surfaces
 sharing one process would therefore fight over one keybinding state —
 App A's submit remap would hijack App B's Enter — even when one of them
 is merely stopped, not disposed. The host enforces the invariant
-fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
+fail-fast (re-vendor lifecycle follow-up P3, `src/tui/process-slot.ts`):
 
 - `TuiApp.start()` CLAIMS the process slot at the first successful start
   (a failed `start()` never leaks the claim); `TuiApp.stop()` NEVER
@@ -1270,7 +1395,14 @@ fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
 - Exclusivity is FAIL-CLOSED: if the final teardown throws, the slot
   stays claimed (a half-torn-down surface must never be publicly
   replaceable by a new one). `stop()` never releases, so a throwing stop
-  teardown cannot fail open either.
+  teardown cannot fail open either. **Fail-closed slot ownership is not
+  fail-fast cleanup** (M3-6 PR3): `TuiApp.dispose()` attempts EVERY final
+  cleanup step (the non-truncating `runSyncDisposalSteps` batch), and only
+  a completely successful batch releases the slot. Any collected
+  final-dispose error therefore keeps the slot claimed while the remaining
+  independent resources were still released. A sibling surface-cleanup
+  error that leaves `TuiApp.dispose()` itself successful does NOT poison the
+  slot: the surface records the failure and retirement/transport continue.
 - The external-editor suspend/resume and ordinary stop/start cycles keep
   the claim (same generation, same ownership — no trip); fullscreen
   main/alt-screen swaps stop/start the SCREENS (not the app) and never
@@ -1280,7 +1412,41 @@ fail-fast (re-vendor lifecycle follow-up P3, `src/process-tui-slot.ts`):
 
 Quick Tasks is the footer-triggered, Active-scope view; `/tasks` opens the full
 Task Center in Tracked scope. Both surfaces consume the same durable preorder and
-runtime projection. Scope, type, search, selection, and disclosure are
+runtime projection.
+
+**Attention dataset (M3-3B).** Task Center is current actionable state, not
+execution history, and different sources own their own retention:
+
+```text
+Work dataset:       the shared Job/Subagent catalog + runtime projection
+Attention dataset:  surface-composed current human interactions
+                    (M3-3B starts with the continued Question)
+Quick:              hidden actionable attention + active work
+Full:               every current actionable attention row + tracked work
+```
+
+The Question controller owns the authority interpretation and exposes a
+detached presentation model (`QuestionAttentionRow`); the pure
+`app/surface/task-attention.ts` maps it onto panel rows (stable
+`question:<sessionId>:<callId>` identity, `Needs attention` group, `?` glyph,
+`awaiting answer` / `answering`), and the surface composes attention ABOVE the
+work rows before the browser's first frame.
+
+**Footer attention fact.** A parked actionable Question publishes its own `?N`
+figure in the Task Center badge (`[? 1 awaiting · ↓ view]`, compact `[?1·↓]`),
+together with the `↓ view` hint when the editor seat is available. It is a
+fourth independent fact: it never joins the task/agent counts or the failure
+count, and a visible Question is NOT counted because it already owns the
+response seat (queued/settled/unavailable Questions are not counted either). A
+Questions-only session therefore still advertises — and can open — its Task
+Center reopen path.
+
+Question rows are NOT work rows:
+they carry no `startedAt`, never join the active-work count, never inherit stop
+semantics, and the panel includes them by an explicit rule so a running Job can
+never hide a pending Question. `Enter` on such a row reopens the controller
+entry (closing the browser and returning the seat); a row that went stale
+between rendering and selection fails closed and keeps the browser usable. Scope, type, search, selection, and disclosure are
 presentation state, so promoting Quick to Full never reorders or deduplicates
 rows and Esc can restore the prior context. Their keyboard ownership is
 deliberately asymmetric: Quick is navigation-only (arrows, `←`/`→` tree,
@@ -1433,9 +1599,19 @@ A regular surface WITH the key keeps its reveal across the swap. A search
 reveal is not a permanent pin: the next explicit Ctrl+O collapse hides it
 again, and a later search jump reveals it afresh.
 
-Only the marker row and the tail control row are click targets; every other
-row of the bubble has an inert hit identity so ordinary user text keeps
-selection/copy semantics. A search hit inside the collapsed middle expands the
+The long-user bubble is ONE local disclosure surface in fullscreen: collapsed,
+a plain single click anywhere on the bubble (head text, compact marker, or
+tail text) expands that message; expanded, a plain single click anywhere on
+the bubble collapses it, with the existing tail Collapse row as an explicit
+fallback. The compact marker stays as the visual affordance naming the
+behavior — it is not the only hit target. Every non-bubble row (the pending
+status line included) has an inert hit identity. Drag selection retains
+selection ownership, and the bubble intentionally gives plain single-click to
+disclosure in BOTH states, so double-click word selection is not available on
+the long-user bubble in either state. Regular remains keyboard-only and
+terminal-native: its marker advertises the effective key as the bidirectional
+`expand/collapse` verb instead of an expand-only promise. A search hit inside
+the collapsed middle expands the
 message on jump, including outside Focus mode, because the search corpus is the
 full text.
 
@@ -1491,3 +1667,111 @@ tool whose outcome was not durably recorded stays a normal Tool card with
 error outcome. Pinned by `test/session-v4-tool-result.test.ts`,
 `test/transcript-semantics.test.ts`, `test/compact-process-preview.test.ts`,
 `test/compact-display.test.ts`, and `test/focus-ui.test.ts`.
+
+## Timed / continued Question (M3-3B terminal-native contract)
+
+The rc.2 `ask_user_question` tool may declare a FOREGROUND WAIT (`timeout`
+seconds). The Host keeps the durable deadline and the durable answerability;
+the Client owns only presentation while it holds a claim. The TUI therefore
+splits the lifecycle into three explicit layers:
+
+```text
+userQuestions projection  -> whether a question is open / continued / settled
+inbox projection          -> whether a late reply is durably queued
+QuestionSurfaceController -> the mounted card, the local countdown, the
+                             wire-preserved rejection, reachability
+QuestionFlow              -> the current form state / navigation only
+```
+
+Decisions (all terminal-native; none of them copies a Web button):
+
+1. **Claim before countdown.** A timed request claims the Host wait
+   (`userQuestions.attachWait`) and only then starts its local clock, seeded
+   from the first frame's Host-computed `remainingMs`. Until that frame
+   arrives the flow shows a non-destructive "claiming" line and NEVER guesses
+   a duration. A refused/absent claim keeps the blocking flow without a
+   countdown.
+2. **The countdown is presentation only.** A local countdown reaching zero
+   ends the FOREGROUND answer attempt. It never cancels the Turn and never
+   cancels the question: the provider rejects the forwarded waterfall with
+   the wire-preserved `ASK_TIMED_OUT` (matching the released Client), the Host
+   returns pending, and the question stays durably answerable as `continued`.
+   `Esc` rejects `ASK_CANCELLED`; a Host/delivery abort rejects `ASK_ABORTED`.
+3. **First real answer mutation freezes the clock.** A selection toggle, a
+   real free-text change, or a skip freezes the local deadline into indefinite
+   local editing while the claim remains held; cursor moves, focus changes and
+   other read-only operations never freeze it. No synthetic Host timer write is
+   made. Focus/blur never releases the claim; teardown/disconnect does.
+4. **Reachability is projection-driven and REACTIVE.** The port exposes
+   `snapshot(sessionId)` plus `subscribe(sessionId, listener)`: Direct observes
+   the Host projection registry's change feed, Remote observes BOTH Client
+   projection faces (`userQuestions` + `inbox`) AND the Connection generation
+   (a disconnect notifies even though the Client only clears its stores when a
+   NEW generation connects; a generation change re-arms the faces against the
+   current binding). The controller keeps exactly one registration for the
+   session it presents and re-derives answerability from authority — never from
+   a local timer, an old transcript card or a local store.
+5. **A queued late reply removes the interaction.** While the Inbox holds a
+   `user-question-reply` for the call, the controller keeps no entry and no
+   editable submission; `REPLY_QUEUED` keeps the intent as a read-only notice.
+   Discarding the queued reply (Host-side) makes the call answerable again.
+6. **Final answers come from the projection.** A settled card renders the
+   authoritative `userQuestions.settled` batch — a timed-out call's own tool
+   result records the timeout, not the answer — as a presentation enrichment
+   over the unchanged durable transcript event. An EMPTY settled batch is a
+   real authoritative outcome (a late reply settled the call with no readable
+   batch): only an ABSENT settled entry falls back to the call's own result.
+7. **The Question outlives its editor seat (park / reopen).** Answerability and
+   seat ownership are separate facts, exactly as in the released Web client:
+   the controller keeps one `ContinuedQuestionEntry` per `(sessionId, callId)`
+   with local presentation state `visible | parked`, and an entry outlives the
+   mounted `QuestionFlow`.
+   - `Esc` on a continued form PARKS it: the Host question is untouched, no
+     `ASK_CANCELLED` is sent, the editor seat returns, and the user's answers /
+     free text / current question are preserved.
+   - **A parked Question never auto-reopens.** Projection invalidation, session
+     events, assistant chunks, job updates, agent status, Task Center refreshes
+     and repaints may update the row or remove the interaction, but only an
+     explicit human reopen turns it back into a panel. Cold recovery (a
+     reconnect, a session switch, or the initial attach discovering a
+     still-continued call) creates the entry PARKED; only a live foreground
+     interaction that locally transitions into `continued` keeps its form
+     visible, because the user was already handling it.
+   - The keyboard reopen path is the Task Center (`↓` Quick / `/tasks` Full):
+     a parked actionable Question appears as a `Needs attention` row and
+     `Enter` reopens the SAME entry (with its preserved draft). No `/answer`
+     command and no dedicated global Question shortcut exist.
+   - A queued reply, a settlement, a vanished call, or an unreadable authority
+     removes the entry and its rows immediately; the transcript remains the
+     durable historical/context anchor.
+   - The mounted form owns an abort controller: authority withdrawal and user
+     parking are different outcomes, and neither is reported as the other.
+8. **The claim outlives nothing it shouldn't.** The claim attempt receives the
+   caller's lifetime from the first moment, so a surface teardown (or a
+   countdown end) during the opening frame releases the Host wait instead of
+   leaving it held; a torn-down surface never mounts a countdown after the
+   fact. A Host-driven claim end is reported as `ASK_ABORTED` — never as
+   `ASK_CANCELLED`, which would record a cancellation the human never made —
+   and the call is then re-derived from the projection.
+9. **A superseded completion is silent.** A late answer whose Connection
+   generation was replaced reports nothing: no "answer queued" line and no
+   repaint, because the answer no longer describes the live surface (the new
+   generation re-derives its own truth). A disconnected Connection likewise
+   presents no answerable card from a last-known binding.
+
+## A credential backend that cannot enumerate records still has a usable /logout
+
+Remote rc.2 publishes no record-read Remote, so the Remote credential adapter
+REJECTS `listRecords()` rather than reporting an empty list (an empty list
+would assert "you have no stored records").
+
+The terminal-native consequence: the no-argument `/logout` picker opens with
+the references it CAN clear (`describeReference`), offers no fabricated record
+row, and the outcome text states that stored credential records cannot be
+enumerated or removed on this backend. Clearing a reference never implies that
+stored records were cleaned up. `/logout <ref>` remains the direct path.
+
+Credential operations also re-check the Connection generation before reporting
+their outcome: a `setReference` that completed against a replaced Host is
+reported as unconfirmed (never as a new-Host success), and a superseded
+`describeReference` degrades to "not configured" in the picker.

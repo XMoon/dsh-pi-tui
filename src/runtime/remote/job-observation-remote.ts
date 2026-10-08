@@ -13,12 +13,17 @@
  * - `state.rows[sessionId]`  -> kind / label / status / progress / detail
  * - `state.observed[jobId]`  -> text / gapBefore / streaming / error
  *
+ * and maps the one human mutation, `IJobs.kill` -> `job.kill`, onto the
+ * {@link JobStopOutcome} taxonomy without retrying an unproven settlement.
+ *
  * NOT composed into production: M3 owns Remote backend composition.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/job-observation-remote
  */
 
-import type { JobObservationPort, JobObservedSnapshot } from '../job-observation-port.ts'
+import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../job-observation-port.ts'
+import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
+import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 /** One official client-safe Job roster row (`JobView`) subset used here. */
 export interface RemoteObservedJobRow {
@@ -52,6 +57,41 @@ export interface RemoteJobObservationSource {
   watchRows(sessionId: string): () => void
   /** Reference-counted observation for one job (undefined = unowned job). */
   observe(sessionId: string | undefined, jobId: string): () => void
+  /** The official human kill RPC (the generated `job.kill` passthrough). */
+  kill(sessionId: string, jobId: string): Promise<RemoteJobKillResult>
+}
+
+/** Structural official `RemoteResult` of one human `job.kill`. */
+export type RemoteJobKillResult =
+  | { readonly ok: true; readonly value: { readonly outcome: 'requested' | 'already-finished' } }
+  | { readonly ok: false; readonly error: unknown }
+
+/**
+ * The Job-Stop operation-specific settlement table.
+ *
+ * It deliberately does NOT reuse the D2.2 write vocabulary's "any other domain
+ * code is a proven refusal" fallback (`../write-outcome.ts` SCOPE): Job Stop is
+ * a different operation family, and rc.2's PROVEN `job.kill` non-commit
+ * vocabulary is only `job/not-found` plus the pinned pre-invocation Gateway
+ * refusals. Any other code — an unknown or foreign domain code, an unproven
+ * `gateway/*`, or a code-less failure — leaves the commit state unproven and
+ * stays `indeterminate`; it is never reported as `rejected` and never replayed.
+ */
+export function classifyJobStopFailure(error: unknown): JobStopOutcome {
+  const code = remoteFailureCode(error)
+  // The Job-Stop-specific proven non-commit: this session's list no longer
+  // carries a killable row under that id.
+  if (code === 'job/not-found') return { kind: 'not-found' }
+  // Proven PRE-DISPATCH refusals: the gateway's own admission rejection and the
+  // pinned infrastructure codes raised before the addressed business method
+  // runs.
+  if (code === 'gateway/bad-request' || (code !== undefined && GATEWAY_PRE_INVOCATION_CODES.has(code))) {
+    return { kind: 'rejected', message: remoteFailureMessage(error) }
+  }
+  // `gateway/cancelled`, `gateway/internal`, `gateway/result-invalid`, any other
+  // `gateway/*`, an unknown/other domain code, and a code-less failure cannot
+  // prove the kill did not commit.
+  return { kind: 'indeterminate', message: remoteFailureMessage(error) }
 }
 
 /** The experimental Remote Job observation port over official `IJobs`. */
@@ -138,5 +178,20 @@ export class RemoteJobObservationPort implements JobObservationPort {
       closed = true
       for (const release of owned.splice(0)) release()
     }
+  }
+
+  /**
+   * Stop one Job through the official `IJobs.kill` passthrough. The generated
+   * method is a `RemoteResult` contract, so no defensive catch: a rejection is
+   * an assembly/programming defect. It shares no state with {@link open} and
+   * never mutates local observation/roster state; the official streams
+   * converge on their own. No automatic retry.
+   */
+  async stop(sessionId: string, jobId: string): Promise<JobStopOutcome> {
+    const result = await this.jobs.kill(sessionId, jobId)
+    if (result.ok) {
+      return result.value.outcome === 'requested' ? { kind: 'requested' } : { kind: 'already-finished' }
+    }
+    return classifyJobStopFailure(result.error)
   }
 }

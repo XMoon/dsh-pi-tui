@@ -2,14 +2,23 @@
  * The public extension SDK entry: `@xmoon76/dsh-pi-tui/extensions`.
  *
  * Exports the public contracts (types, capabilities, slot names) and the
- * Cordis plugin that PROVIDES the `piTuiExtensions` service (`pi-tui-extension-host`
- * Loader row). Third-party plugins import ONLY this entry — never
- * `@xmoon76/pi-tui`, `TuiApp`, or repository internals (the packed `.d.mts`
- * leak gate enforces that).
+ * Cordis plugin that PROVIDES the `piTuiExtensions` service (Direct: the
+ * `pi-tui-extension-host` Loader row in `cordis.patch.yml`; Remote: the
+ * Client UI subtree mounts this module as a Client plugin fiber on the
+ * official Client Context — same module, no backend branching inside).
+ * Third-party plugins import ONLY this entry — never `@xmoon76/pi-tui`,
+ * `TuiApp`, or repository internals (the packed `.d.mts` leak gate
+ * enforces that).
  *
  * M1 scope: registry primitives only. The service is available before any
  * TUI surface exists (`tuiStartup` gate), so a plugin can register during
  * boot; the SurfaceHost (M2) attaches later and renders the registrations.
+ *
+ * This module is a PERMANENT root package entry (`package.json` export
+ * `./extensions`, tsdown bundle entry), not a legacy feature root: it stays
+ * at `src/extensions.ts` and is classified `stable` in the source-root
+ * ledger. The concrete registry classes it installs live behind the
+ * extension boundary under `src/extension/internal/**`.
  * @module @xmoon76/dsh-pi-tui/extensions
  */
 
@@ -20,7 +29,7 @@ import { PI_TUI_EXTENSIONS_SERVICE, PiTuiExtensionServiceImpl } from './extensio
 // The host-owned command catalog lives in the command-policy module, never in
 // the package entry: the extension host and the entry must not import each
 // other (the catalog is a pure classification table).
-import { HOST_COMMAND_CATALOG } from './command-policy.ts'
+import { HOST_COMMAND_CATALOG } from './domain/command/policy.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
 
 /** Stable Cordis plugin name for the extension host row. */

@@ -20,14 +20,14 @@ import { PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { apply as applyExtensionHost } from '../src/extensions.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { EditorRegistry } from '../src/editor-registry.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -142,7 +142,7 @@ test('M10: the vim fixture validates the editor-extension seam over semantic eve
     // Re-vendor lifecycle follow-up P3: the first app must be FINAL-DISPOSED
     // before a second one starts — a stopped-but-alive surface still owns
     // the process slot (its keybinding manager keeps syncing into the
-    // process-global fork keybindings); see src/process-tui-slot.ts.
+    // process-global fork keybindings); see src/tui/process-slot.ts.
     app.dispose()
     const submitted: string[] = []
     const app2 = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, {

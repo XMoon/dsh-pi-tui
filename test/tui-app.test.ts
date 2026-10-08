@@ -15,7 +15,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { toolPresenterFrom } from '../src/present.ts'
+import { toolPresenterFrom } from '../src/tui/transcript/tool-presentation.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
@@ -24,14 +24,14 @@ import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import { APP_KEYBINDINGS } from '../src/keybindings/definitions.ts'
-import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../src/clipboard.ts'
+import { APP_KEYBINDINGS } from '../src/tui/keybindings/definitions.ts'
+import { buildOsc52Sequence, copyToClipboard, type CopyExecutor } from '../src/client/clipboard/copy.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
- * (see src/process-tui-slot.ts). */
+ * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -538,7 +538,7 @@ test('a client-local queued echo renders its content marked sending in the queue
   await vt.waitForRender()
   app.setPendingInputPresentation({
     queued: [{ id: 'req-1', rpcId: 'req-1', text: 'queued locally', mode: 'followup', local: true }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -553,7 +553,7 @@ test('the ephemeral pending-steering lane renders user content at the conversati
   const before = (vt.getViewport().join('\n').match(/❯/g) ?? []).length
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'req-2', rpcId: 'req-2', text: 'steer this now', local: true }],
+    tail: [{ kind: 'user', row: { id: 'req-2', rpcId: 'req-2', text: 'steer this now', local: true } }],
     running: true,
   })
   await vt.waitForRender()
@@ -571,7 +571,7 @@ test('an active steering row reads steering…; an interrupted (parked) one read
   const parked = (running: boolean): void => {
     app.setPendingInputPresentation({
       queued: [],
-      steering: [{ id: 'occ-1', rpcId: 'occ-1', text: 'steer this now', status: 'steering' }],
+      tail: [{ kind: 'user', row: { id: 'occ-1', rpcId: 'occ-1', text: 'steer this now', status: 'steering' } }],
       running,
     })
   }
@@ -600,7 +600,7 @@ test('a client-local steering echo never renders waiting: only an authoritative 
   // it into a parked row while its submission is still in flight.
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'echo-1', rpcId: 'echo-1', text: 'local steer echo', local: true, status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'echo-1', rpcId: 'echo-1', text: 'local steer echo', local: true, status: 'steering' } }],
     running: false,
   })
   await vt.waitForRender()
@@ -615,7 +615,7 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   await vt.waitForRender()
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'parent-occ', text: 'parent steer', status: 'steering' } }],
     running: true,
   })
   await vt.waitForRender()
@@ -629,7 +629,7 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   })
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'child-occ', text: 'child steer', status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'child-occ', text: 'child steer', status: 'steering' } }],
     running: false,
   })
   await vt.waitForRender()
@@ -641,7 +641,7 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   app.setViewerMode(undefined)
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'parent-occ', text: 'parent steer', status: 'steering' }],
+    tail: [{ kind: 'user', row: { id: 'parent-occ', text: 'parent steer', status: 'steering' } }],
     running: true,
   })
   await vt.waitForRender()
@@ -649,6 +649,56 @@ test('the parked waiting label follows the ACTIVE subject across a child viewer 
   assert.ok(!view.includes('child steer'), `the child parked row must not leak back into the parent:\n${view}`)
   assert.ok(view.includes('parent steer'), `the parent row must return:\n${view}`)
   assert.ok(view.includes('steering…'), `the parent active steer must read steering…:\n${view}`)
+})
+
+test('a pending Context tail row follows the active subject across a child viewer round trip', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [],
+    tail: [{ kind: 'context', row: { id: 'parent-ctx', text: 'PARENT-CONTEXT-ROW' } }],
+    running: true,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('PARENT-CONTEXT-ROW'),
+    'the parent pending Context row renders before the viewer opens')
+
+  // Entering the child viewer clears the parent tail (no parent leak), then
+  // the child subject's own Context occurrence renders.
+  app.setViewerMode({
+    parentSessionId: 'parent',
+    childSessionId: 'child',
+    label: 'child',
+    mode: 'continuable',
+    activity: 'inactive',
+    access: 'interactive-direct-child',
+  })
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('PARENT-CONTEXT-ROW'),
+    'entering the viewer must clear the parent Context tail')
+  app.setPendingInputPresentation({
+    queued: [],
+    tail: [{ kind: 'context', row: { id: 'child-ctx', text: 'CHILD-CONTEXT-ROW' } }],
+    running: true,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('CHILD-CONTEXT-ROW'), `the child Context row must render in the viewer:\n${view}`)
+  assert.ok(!view.includes('PARENT-CONTEXT-ROW'), `the parent Context row must not leak into the viewer:\n${view}`)
+
+  // Leaving the viewer: the tail is re-projected from the MAIN subject by the
+  // runner's next atomic presentation (the same contract as the user lane),
+  // so the parent's rows replace the child's with no residue.
+  app.setViewerMode(undefined)
+  app.setPendingInputPresentation({
+    queued: [],
+    tail: [{ kind: 'context', row: { id: 'parent-ctx', text: 'PARENT-CONTEXT-ROW' } }],
+    running: true,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('PARENT-CONTEXT-ROW'), `the parent Context row returns:\n${view}`)
+  assert.ok(!view.includes('CHILD-CONTEXT-ROW'), `the child Context row must not leak back:\n${view}`)
 })
 
 test('a narrow queue pane keeps a local sending suffix on the same row', async () => {
@@ -663,7 +713,7 @@ test('a narrow queue pane keeps a local sending suffix on the same row', async (
       mode: 'followup',
       local: true,
     }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -689,7 +739,7 @@ test('an ultra-narrow queue pane never wraps the local status onto a detached ro
       mode: 'followup',
       local: true,
     }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -705,7 +755,7 @@ test('a local-only queue pane does not advertise the bulk steer/recall actions',
   const { vt, app } = startApp()
   app.setPendingInputPresentation({
     queued: [{ id: 'req-l', rpcId: 'req-l', text: 'local only', mode: 'followup', local: true }],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -724,7 +774,7 @@ test('a local-only queue pane does not advertise the bulk steer/recall actions',
       { id: 'req-l', rpcId: 'req-l', text: 'local only', mode: 'followup', local: true },
       { id: 'auth-q', rpcId: 'auth-rpc', text: 'authoritative row', mode: 'followup' },
     ],
-    steering: [],
+    tail: [],
     running: true,
   })
   await vt.waitForRender()
@@ -756,7 +806,7 @@ test('the pending presentation never steals the fullscreen viewport (force-tail 
   // viewport (it also owns the virtual transcript window).
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true }],
+    tail: [{ kind: 'user', row: { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true } }],
     running: true,
   })
   await vt.waitForRender()
@@ -765,10 +815,7 @@ test('the pending presentation never steals the fullscreen viewport (force-tail 
 
   app.setPendingInputPresentation({
     queued: [],
-    steering: [
-      { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true },
-      { id: 'remote-occ', rpcId: 'remote-rpc', text: 'REMOTE-MARKER', status: 'steering' },
-    ],
+    tail: [{ kind: 'user', row: { id: 'req-local', rpcId: 'req-local', text: 'LOCAL-MARKER', local: true } }, { kind: 'user', row: { id: 'remote-occ', rpcId: 'remote-rpc', text: 'REMOTE-MARKER', status: 'steering' } }],
     running: true,
   })
   await vt.waitForRender()
@@ -780,11 +827,11 @@ test('clearing the pending-input presentation removes the lane and the queue pan
   const { vt, app } = startApp()
   app.setPendingInputPresentation({
     queued: [{ id: 'q', text: 'queued row', mode: 'followup', local: true }],
-    steering: [{ id: 's', text: 'steering row', local: true }],
+    tail: [{ kind: 'user', row: { id: 's', text: 'steering row', local: true } }],
     running: true,
   })
   await vt.waitForRender()
-  app.setPendingInputPresentation({ queued: [], steering: [], running: false })
+  app.setPendingInputPresentation({ queued: [], tail: [], running: false })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(!view.includes('steering row'), `stale steering row survived:\n${view}`)
@@ -796,7 +843,7 @@ test('the viewer clears the main pending-steering lane on entry', async () => {
   const { vt, app } = startApp()
   app.setPendingInputPresentation({
     queued: [],
-    steering: [{ id: 's', text: 'main steering must not leak', local: true }],
+    tail: [{ kind: 'user', row: { id: 's', text: 'main steering must not leak', local: true } }],
     running: true,
   })
   await vt.waitForRender()
@@ -885,7 +932,7 @@ test('history overlay preserves background cells outside its physical frame', as
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
@@ -930,7 +977,7 @@ test('history overlay reflows geometry without restarting its search state', asy
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(50, 10)
@@ -974,7 +1021,7 @@ test('history overlay preserves query and selection across fullscreen rebinds', 
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
@@ -1017,7 +1064,7 @@ test('a history-overlay click before the post-resize repaint is rejected at capp
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
   ]
-  const source: import('../src/history-search.ts').HistorySearchSource = {
+  const source: import('../src/client/history/search.ts').HistorySearchSource = {
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 40)
@@ -3498,7 +3545,10 @@ test('the one-shot subagent viewer covers the editor, consumes input, and restor
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('viewing subagent: research — one-shot · read-only · Esc returns'), `placeholder missing:\n${view}`)
-  assert.ok(view.includes('[viewing subagent · one-shot · read-only]'), `header badge missing:\n${view}`)
+  // DECISION B (viewer UX plan §1.2): the header no longer badges the
+  // viewer. The child identity lives in the subject bar, which follows the
+  // COMMITTED display subject — a bare setViewerMode does not commit one.
+  assert.ok(!view.includes('[viewing subagent'), `the retired header badge must never render:\n${view}`)
   // Typing goes nowhere, Enter does not submit, ↓ does not open anything.
   vt.sendInput('hello')
   vt.sendInput('\r')
@@ -3519,7 +3569,7 @@ test('the one-shot subagent viewer covers the editor, consumes input, and restor
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('my precious draft'), `draft not restored:\n${view}`)
-  assert.ok(!view.includes('[viewing subagent'), `badge survived leaving:\n${view}`)
+  assert.ok(!view.includes('[viewing subagent') && !view.includes('‹ back'), `the viewer identity survived leaving:\n${view}`)
   app.stop()
 })
 

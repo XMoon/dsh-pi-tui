@@ -26,15 +26,15 @@
 import xterm from '@xterm/headless'
 import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
-import { StatsFolder } from '../src/stats.ts'
-import { TranscriptWindowController } from '../src/transcript-window.ts'
-import { ContextMeasurementCoordinator } from '../src/status/context-measurement.ts'
-import { usageFromStats } from '../src/status/derive-usage.ts'
+import { StatsFolder } from '../src/domain/status/stats.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
+import { ContextMeasurementCoordinator } from '../src/domain/status/context-measurement.ts'
+import { usageFromStats } from '../src/domain/status/derive-usage.ts'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Terminal } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
-import type { SessionStats } from '../src/stats.ts'
+import type { SessionStats } from '../src/domain/status/stats.ts'
 
 const XtermTerminal = xterm.Terminal
 let benchmarkAppsCreated = 0

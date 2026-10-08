@@ -12,16 +12,16 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { ToolCallId, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, groupConsecutiveReads, isPostTurnReplayEvidence, type TranscriptMessage, type TurnActivity } from '../src/transcript.ts'
-import { projectCompact } from '../src/compact-projection.ts'
-import { isTranscriptWorkMember, projectTranscriptStructure } from '../src/transcript-projection.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
+import { isTranscriptWorkMember, projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import {
   FOCUS_MODE_PROMPT,
   FOCUS_SECTION_NAME,
   FOCUS_SECTION_ORDER,
-  installFocusPrompt,
-} from '../src/focus.ts'
-import { resolveDisplayPreset, type DisplayState } from '../src/display-preset.ts'
+} from '../src/domain/communication/focus.ts'
+import { installDirectTuiSystemPromptSections } from '../src/app/direct/system-prompt.ts'
+import { resolveDisplayPreset, type DisplayState } from '../src/domain/display/preset.ts'
 import {
   FocusActivityComponent,
   focusCollapsedBody,
@@ -32,19 +32,20 @@ import {
   focusStatusLabel,
   formatFocusDuration,
   formatFocusHeaderLine,
-  projectFocus,
-  type FocusProjectedBlock,
-} from '../src/focus-activity.ts'
-import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionPresentation, compactActionSourceOf, compactActionStatParts, type CompactActionPresentation, type CompactActionStats } from '../src/compact-process-preview.ts'
+} from '../src/tui/components/transcript/focus-activity.ts'
+import { projectFocus, type FocusProjectedBlock } from '../src/tui/transcript/focus-projection.ts'
+import { compactActionPresentation, type CompactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'
+import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionSourceOf, compactActionStatParts, type CompactActionStats } from '../src/tui/transcript/process-summary.ts'
 
 /** One action-stats literal for header fixtures. */
 function actionStatsOf(total: number, types: Record<string, number> = {}): CompactActionStats {
   return { total, types: new Map(Object.entries(types)) }
 }
-import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/present.ts'
-import { formatTokens, totalTokens } from '../src/token-usage.ts'
-import { FocusTimingStore } from '../src/focus-timing.ts'
-import type { RunPhase } from '../src/status/types.ts'
+import { focusToolDisplay, toolPresenterFrom, type ToolPresenter } from '../src/tui/transcript/tool-presentation.ts'
+import { totalTokens } from '../src/domain/transcript/usage.ts'
+import { formatTokens } from '../src/tui/token-format.ts'
+import { FocusTimingStore } from '../src/tui/transcript/focus-timing.ts'
+import type { RunPhase } from '../src/domain/status/types.ts'
 
 /** Build an event with an EXPLICIT time (Focus timing tests need control). */
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
@@ -1377,7 +1378,7 @@ test('FocusActivityComponent reads the live phase without a rebuild and freezes 
 test('a completed Focus turn renders Turn complete instead of Thought', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
-  const header = new FocusActivityComponent({ activity: folder.turnActivity(0)!, expanded: false, actionStats: actionStatsOf(2, { read: 2 }), now: () => 35_000 }).render(80).join('\n')
+  const header = new FocusActivityComponent({timing: new FocusTimingStore(),  activity: folder.turnActivity(0)!, expanded: false, actionStats: actionStatsOf(2, { read: 2 }), now: () => 35_000 }).render(80).join('\n')
   assert.ok(header.includes('Turn complete 6s'), header)
   assert.ok(!header.includes('Thought'), `the live label must not read Thought: ${header}`)
 })
@@ -1961,16 +1962,16 @@ test('the component renders a flat muted card and refreshes duration live', () =
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const component = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(1, { read: 1 }), now: () => 35000 })
+  const component = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: false, actionStats: actionStatsOf(1, { read: 1 }), now: () => 35000 })
   const lines = component.render(80)
   assert.ok(lines[0]!.includes('🐋 Turn complete 6s · 1 action · read ×1'), lines[0])
   assert.ok(!lines[0]!.startsWith('  '), 'the card chrome shares the transcript left edge (addendum v2 §28)')
   // Running turns re-read `now` per render: a later frame shows the new
   // duration (the WorkingIndicator heartbeat drives the repaint).
   const running = activityOf(0, [eventAt('turn/start', { turn: 0 }, 1000, 0)])!
-  const live = new FocusActivityComponent({ activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 12000 })
+  const live = new FocusActivityComponent({timing: new FocusTimingStore(),  activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 12000 })
   assert.ok(live.render(80)[0]!.includes('🐋 Working 11s'))
-  const later = new FocusActivityComponent({ activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 14000 })
+  const later = new FocusActivityComponent({timing: new FocusTimingStore(),  activity: running, expanded: false, actionStats: actionStatsOf(0), now: () => 14000 })
   assert.ok(later.render(80)[0]!.includes('🐋 Working 13s'))
 })
 
@@ -1981,7 +1982,7 @@ test('the symbols/minimal disclosure keeps every narrow width inside the termina
   for (const iconStyle of ['symbols', 'minimal'] as const) {
     for (const width of [1, 2, 3, 4, 8]) {
       for (const expanded of [false, true]) {
-        const component = new FocusActivityComponent({ activity, expanded, actionStats: actionStatsOf(0), now: () => 35000, iconStyle })
+        const component = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded, actionStats: actionStatsOf(0), now: () => 35000, iconStyle })
         for (const line of component.render(width)) {
           assert.ok(visibleWidth(line) <= width, `row wider than ${width} cols under ${iconStyle} (${expanded ? 'expanded' : 'collapsed'}): ${JSON.stringify(line)}`)
         }
@@ -2198,7 +2199,7 @@ test('FocusActivityComponent.render returns only physical rows for a multiline T
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c'), name: 'bash', arguments: '{}' }, 1001, 1),
   ])!
-  const component = new FocusActivityComponent({
+  const component = new FocusActivityComponent({timing: new FocusTimingStore(),
     activity,
     expanded: false,
     actionStats: actionStatsOf(1, { bash: 1 }),
@@ -2596,7 +2597,7 @@ test('the Thought component never exceeds the terminal at widths 1-3', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const component = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
+  const component = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
   for (const width of [1, 2, 3]) {
     for (const line of component.render(width)) {
       assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} (${visibleWidth(line)})`)
@@ -2608,8 +2609,8 @@ test('the Thought component never renders a line wider than the terminal', () =>
   const folder = new TranscriptFolder()
   applyMixed(folder, completedTurn(0, 0, 1000))
   const activity = folder.turnActivity(0)!
-  const running = new FocusActivityComponent({ activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
-  const open = new FocusActivityComponent({ activity, expanded: true, actionStats: actionStatsOf(0), now: () => 35000 })
+  const running = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: false, actionStats: actionStatsOf(0), now: () => 35000 })
+  const open = new FocusActivityComponent({timing: new FocusTimingStore(),  activity, expanded: true, actionStats: actionStatsOf(0), now: () => 35000 })
   for (const width of [12, 20, 40, 80]) {
     for (const line of [...running.render(width), ...open.render(width)]) {
       assert.ok(visibleWidth(line) <= width, `line ${JSON.stringify(line)} exceeds width ${width}`)
@@ -4103,11 +4104,12 @@ function fakeAgentCtx(sections: Array<{ name: string; order: number; text: strin
   }
 }
 
-test('installFocusPrompt registers ONE dynamic section with the TUI-private name', () => {
+test('the Direct system-prompt installer registers ONE dynamic Focus section with the TUI-private name', () => {
   const sections: Array<{ name: string; order: number; text: string | (() => string); complete?: boolean }> = []
   const agentCtx = fakeAgentCtx(sections)
   const displayState: DisplayState = { preset: 'full' }
-  const dispose = installFocusPrompt(agentCtx as never, displayState)
+  const disposers = installDirectTuiSystemPromptSections(agentCtx as never, { displayState })
+  const dispose = disposers[0]
   assert.ok(dispose !== undefined)
   assert.equal(sections.length, 1)
   assert.equal(sections[0]!.name, FOCUS_SECTION_NAME)
@@ -4139,20 +4141,19 @@ test('installFocusPrompt registers ONE dynamic section with the TUI-private name
   assert.equal(sections.length, 0, 'the disposer removes the section')
 })
 
-test('installFocusPrompt degrades gracefully when the service is missing', () => {
-  const agentCtx = { get: () => undefined }
-  const dispose = installFocusPrompt(agentCtx as never, { preset: 'focus' })
-  assert.equal(dispose, undefined, 'no service → no section, no throw')
+test('the Direct system-prompt installer degrades gracefully when the service is missing', () => {
+  const disposers = installDirectTuiSystemPromptSections({ get: () => undefined } as never, { displayState: { preset: 'focus' } })
+  assert.deepEqual(disposers, [], 'no service → no section, no throw')
 })
 
-test('installFocusPrompt tolerates a throwing registration', () => {
+test('the Direct system-prompt installer tolerates a throwing Focus registration', () => {
   const agentCtx = {
     get: (name: string) => name === 'systemPrompt'
       ? { section: () => { throw new Error('duplicate name') } }
       : undefined,
   }
-  const dispose = installFocusPrompt(agentCtx as never, { preset: 'focus' })
-  assert.equal(dispose, undefined)
+  const disposers = installDirectTuiSystemPromptSections(agentCtx as never, { displayState: { preset: 'focus' } })
+  assert.deepEqual(disposers, [])
 })
 
 // ── Collapsed Focus Action slot (post-F6 presentation-convergence addendum v2 §51) ────────
@@ -4161,9 +4162,8 @@ test('installFocusPrompt tolerates a throwing registration', () => {
  * projection path (`projectFocus` over the folded window). */
 function collapsedFocusActionOf(
   folder: TranscriptFolder,
-  forcedVisible?: ReadonlySet<TranscriptMessage>,
 ): FocusProjectedBlock & { kind: 'activity' } | undefined {
-  const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true, forcedVisible)
+  const block = projectFocus(folder.messages(), folder.turnActivities(), new Set(), true)
     .find(candidate => candidate.kind === 'activity')
   return block?.kind === 'activity' ? block : undefined
 }
@@ -4256,20 +4256,19 @@ test('collapsed Focus: a running question never duplicates itself as the Action'
   assert.equal(block?.action?.message.kind === 'tool' ? block.action.message.name : '', 'read')
 })
 
-test('collapsed Focus: a forced-visible row is never duplicated as the Action', () => {
+test('collapsed Focus: a visible persistent row never duplicates itself as the Action', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
     eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1002, 2),
   ])
-  const retryRow = folder.messages().find(message => message.kind === 'system' && message.origin === 'llm-retry')
-  assert.ok(retryRow !== undefined, 'fixture: the retry row exists')
-  // Without the reveal the retry owns the slot…
-  assert.equal(collapsedFocusActionOf(folder)?.action?.kind, 'retry')
-  // …and once the exact row is forced visible outside the Thought it stops
-  // being Action candidate scope (§16: no standalone row + Action duplicate).
-  assert.equal(collapsedFocusActionOf(folder, new Set([retryRow]))?.action?.kind, 'tool')
+  // The retry row is hidden process evidence, so it owns the collapsed Action
+  // slot; the Action winner is selected from the hidden rows only (§16: no
+  // standalone row + Action duplicate).
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.action?.kind, 'retry')
+  assert.equal(block?.action?.message.kind, 'system')
 })
 
 test('collapsed Focus: the committed-answer boundary keeps the Action on hidden root rows only', () => {
@@ -4324,23 +4323,17 @@ test('expanded Focus carries no Action preview and keeps canonical rows', () => 
 
 // ── Turn-level stats invariants (addendum v2 §18/§42) ────────────────────
 
-test('collapsed Focus: a forced-visible reveal never changes the turn-level action total', () => {
+test('collapsed Focus: the visible mid-turn notice never changes the turn-level action total', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
     eventAt('turn/start', { turn: 0 }, 1000, 0),
     eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, 1001, 1),
     eventAt('llm/retry', { turn: 0, step: 1, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, 1002, 2),
   ])
-  const retryRow = folder.messages().find(message => message.kind === 'system' && message.origin === 'llm-retry')
-  assert.ok(retryRow !== undefined, 'fixture: the retry row exists')
-  const base = collapsedFocusActionOf(folder)
-  const revealed = collapsedFocusActionOf(folder, new Set([retryRow]))
-  assert.equal(base?.actionStats.total, 2, 'read + retry')
-  assert.deepEqual(revealed?.actionStats, base?.actionStats,
-    'the temporary reveal is presentation-only and cannot change the header number')
-  // …while the collapsed WINNER does fall back to the still-hidden evidence.
-  assert.equal(base?.action?.kind, 'retry')
-  assert.equal(revealed?.action?.kind, 'tool')
+  const block = collapsedFocusActionOf(folder)
+  assert.equal(block?.actionStats.total, 2, 'read + retry')
+  // The collapsed WINNER comes from the hidden rows only: the retry owns it.
+  assert.equal(block?.action?.kind, 'retry')
 })
 
 test('Focus action stats stay turn-level when a turn-less entry splits the turn (v2 §18)', () => {

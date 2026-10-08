@@ -1,13 +1,20 @@
 /**
  * Detached read-only facts for the Task Center migration shadow.
  *
- * The port deliberately stops at one direct-child catalog and one session's job
- * status snapshots. The complete descendant tree remains an explicit upstream
- * gap until D5; this port never recreates that traversal in the TUI.
+ * The port represents the real Task Center dataset: the root session's full
+ * descendant catalog in stable DFS pre-order plus its status-only job roster.
+ * Descendant membership, order, `parentId`, and `depth` come from the parent
+ * `subagentCatalog` projections (the official `listDescendants` traversal);
+ * `activity` is the current runtime fact, never catalog presence.
  * @module @xmoon76/dsh-pi-tui/runtime/task-read-port
  */
 
-/** One direct-child subagent row from the official catalog. */
+/**
+ * One descendant row from the official recursive catalog traversal: a
+ * classified child or a branch diagnostic. `parentId`/`depth` are the
+ * traversal edge facts; direct children of the requested root carry
+ * `depth: 1`.
+ */
 export type TaskSubagentEntry =
   | {
     readonly kind: 'child'
@@ -16,11 +23,15 @@ export type TaskSubagentEntry =
     readonly mode: 'one-shot' | 'continuable'
     readonly activity: 'running' | 'inactive'
     readonly hasChildren: boolean
+    readonly parentId: string
+    readonly depth: number
   }
   | {
     readonly kind: 'diagnostic'
     readonly id: string
     readonly reason: 'corrupt' | 'unsupported' | 'unavailable'
+    readonly parentId: string
+    readonly depth: number
   }
 
 /** Status-only facts from one official JobRegistry snapshot (the roster
@@ -39,13 +50,15 @@ export interface TaskJobEntry {
 export interface TaskReadSnapshot {
   readonly parentSessionId: string
   readonly parentAvailable: boolean
-  readonly children: readonly TaskSubagentEntry[]
+  readonly descendants: readonly TaskSubagentEntry[]
   readonly jobs: readonly TaskJobEntry[]
 }
 
-/** Read one direct-child catalog and its status-only jobs. */
+/** Read the full descendant catalog and the root's status-only jobs. */
 export interface TaskReader {
-  readDirectChildren(
+  /** Full descendant catalog (stable DFS pre-order) + the root session's
+   * status-only job roster. */
+  readDescendants(
     parentSessionId: string,
     signal?: AbortSignal,
   ): Promise<TaskReadSnapshot | undefined>

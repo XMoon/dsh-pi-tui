@@ -15,9 +15,9 @@ import {
   summarizeAgentListResult,
   terminalSendCallPresentation,
   toolCardHeader,
-} from '../src/present.ts'
-import type { CompactToolPresentation } from '../src/present.ts'
-import { CompactTextPreview } from '../src/compact-text-preview.ts'
+} from '../src/tui/transcript/tool-presentation.ts'
+import type { CompactToolPresentation } from '../src/tui/transcript/tool-presentation.ts'
+import { CompactTextPreview } from '../src/tui/components/transcript/compact-text-preview.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -306,7 +306,7 @@ test('assistant delivery tails cap folded files and expand with transcript detai
 })
 
 test('an extension renderer keeps ownership of present body while host appends delivery tail', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerToolRenderer({
     id: 'custom-present', toolName: 'present',
@@ -509,7 +509,7 @@ test('folded CJK payloads stay width-safe on a tiny terminal', async () => {
 })
 
 test('an extension tool renderer still wins over the host action fallback', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerToolRenderer({
     id: 'custom-send', toolName: 'send_message',

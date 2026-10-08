@@ -8,11 +8,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PluginManagerController } from '../src/plugin-manager/controller.ts'
-import { PluginManagerHostRegistry } from '../src/plugin-manager/host-registry.ts'
-import { PluginManagerPanel } from '../src/plugin-manager/panel.ts'
+import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
+import { PluginManagerHostRegistry } from '../src/app/plugin-manager/host-registry.ts'
+import { PluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
 import type { PluginManagerPort } from '../src/runtime/plugin-manager-port.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 
 function port(): PluginManagerPort {
   return {
@@ -31,6 +31,7 @@ function port(): PluginManagerPort {
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
   }
 }
 

@@ -11,8 +11,8 @@ import { afterEach, test } from 'node:test'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { openerFor } from '../src/open-url.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { openerFor } from '../src/client/url/open.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -21,7 +21,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -121,7 +121,7 @@ test('openerFor passes the URL through on unix platforms', () => {
 const fakeRun = (output: string) => async () => ({ stdout: Buffer.from(output, 'utf8'), stderr: Buffer.alloc(0), code: 0 })
 
 test('readClipboardText preserves a REAL trailing newline on unix backends', async () => {
-  const { readClipboardText } = await import('../src/image/clipboard.ts')
+  const { readClipboardText } = await import('../src/client/clipboard/read.ts')
   const env = {
     platform: 'darwin',
     env: {} as Record<string, string | undefined>,
@@ -132,7 +132,7 @@ test('readClipboardText preserves a REAL trailing newline on unix backends', asy
 })
 
 test('readClipboardText preserves a REAL trailing newline on Wayland (no --no-newline)', async () => {
-  const { readClipboardText } = await import('../src/image/clipboard.ts')
+  const { readClipboardText } = await import('../src/client/clipboard/read.ts')
   const env = {
     platform: 'linux',
     env: { WAYLAND_DISPLAY: 'wayland-0' } as Record<string, string | undefined>,
@@ -143,7 +143,7 @@ test('readClipboardText preserves a REAL trailing newline on Wayland (no --no-ne
 })
 
 test('readClipboardText strips only the SYNTHETIC PowerShell trailing newline', async () => {
-  const { readClipboardText } = await import('../src/image/clipboard.ts')
+  const { readClipboardText } = await import('../src/client/clipboard/read.ts')
   const env = {
     platform: 'win32',
     env: {} as Record<string, string | undefined>,

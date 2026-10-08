@@ -11,8 +11,8 @@
  * @module @xmoon76/dsh-pi-tui/app/session/ownership-core
  */
 
-import { SessionOperationBarrier } from '../../session-operation-barrier.ts'
-import { SessionTransitionGate } from '../../transition-gate.ts'
+import { SessionOperationBarrier } from './operation-barrier.ts'
+import { SessionTransitionGate } from './transition-gate.ts'
 import { runGenerationBump } from './commit-order.ts'
 import {
   createSessionSubjectAuthority,

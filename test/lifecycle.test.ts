@@ -11,9 +11,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createExitController } from '../src/exit.ts'
-import { cancellationError, isCancellation, runDetached, runOwned } from '../src/detached.ts'
-import { createDiag, type Diag } from '../src/diag.ts'
+import { createExitController } from '../src/app/bootstrap/exit.ts'
+import { cancellationError, isCancellation, runDetached, runOwned } from '../src/runtime/process/tasks.ts'
+import { createDiag, type Diag } from '../src/runtime/process/diagnostics.ts'
 
 /** A promise the test resolves/rejects manually, to stage in-flight races. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {

@@ -4,9 +4,9 @@ import {
   RemotePresentationReadShadow,
   projectPresentationSnapshot,
   type PresentationReadShadowOutcome,
-} from '../src/runtime/remote/presentation-read-shadow.ts'
+} from '../scripts/support/presentation-read-shadow.ts'
 import { DirectPresentationReader } from '../src/runtime/direct/presentation-read-direct.ts'
-import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import {
   RemotePresentationReader,
   type RemotePresentationBinding,
@@ -60,6 +60,7 @@ function officialBinding(entries: readonly RemotePresentationEventEntry[], hasMo
     session: {
       getSnapshot: () => ({ openState: 'open', loadingOlder: false }),
       async loadOlder() {},
+      async loadThrough(_seq: number) {},
     },
     eventSource: { getSnapshot: () => ({ entries, hasMore, revision: entries.length }) },
   }
@@ -69,6 +70,7 @@ function reader(value: PresentationReadSnapshot | undefined): PresentationReader
   return {
     read: async (_sessionId, signal) => { signal?.throwIfAborted(); return value },
     loadOlder: async (_sessionId, signal) => { signal?.throwIfAborted(); return value },
+    loadThrough: async (_sessionId, _seq, signal) => { signal?.throwIfAborted(); return value },
   }
 }
 
@@ -440,6 +442,7 @@ test('discards stale presentation success and failure after generation reset', a
       return directSnapshot(settledEvents())
     },
     loadOlder: async () => directSnapshot(settledEvents()),
+    loadThrough: async () => directSnapshot(settledEvents()),
   }
   const successShadow = new RemotePresentationReadShadow(delayedSuccess, delayedSuccess, generations.source)
   const success = successShadow.compare({ sessionId: 'session' })
@@ -456,6 +459,7 @@ test('discards stale presentation success and failure after generation reset', a
       throw new Error('late old-generation failure')
     },
     loadOlder: async () => directSnapshot(settledEvents()),
+    loadThrough: async () => directSnapshot(settledEvents()),
   }
   const failureShadow = new RemotePresentationReadShadow(delayedFailure, delayedFailure, generations.source)
   const failure = failureShadow.compare({ sessionId: 'session' })
@@ -479,6 +483,7 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
       return directSnapshot(settledEvents())
     },
     loadOlder: async (_id, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
+    loadThrough: async (_id, _seq, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
   }
   const shadow = new RemotePresentationReadShadow(delayed, delayed, generations.source)
   const stale = shadow.compare({ sessionId: 'session' })
@@ -499,6 +504,7 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
       return directSnapshot(settledEvents())
     },
     loadOlder: async (_id, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
+    loadThrough: async (_id, _seq, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
   }
   const superseding = new RemotePresentationReadShadow(supersedable, supersedable, secondGenerations.source)
   const old = superseding.compare({ sessionId: 'session' })
@@ -514,6 +520,7 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
   const pendingReader: PresentationReader = {
     read: async (_id, signal) => { await thirdGate; signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
     loadOlder: async (_id, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
+    loadThrough: async (_id, _seq, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
   }
   const cancelledShadow = new RemotePresentationReadShadow(pendingReader, pendingReader, thirdGenerations.source)
   const controller = new AbortController()
@@ -529,6 +536,7 @@ test('generation reset, supersession, cancellation, and dispose discard stale pr
   const disposable: PresentationReader = {
     read: async (_id, signal) => { await disposeGate; signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
     loadOlder: async (_id, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
+    loadThrough: async (_id, _seq, signal) => { signal?.throwIfAborted(); return directSnapshot(settledEvents()) },
   }
   const disposedShadow = new RemotePresentationReadShadow(disposable, disposable, disposeGenerations.source)
   const disposed = disposedShadow.compare({ sessionId: 'session' })

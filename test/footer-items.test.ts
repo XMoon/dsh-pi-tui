@@ -8,11 +8,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { FooterComposer, renderSpans } from '../src/footer/composer.ts'
-import { isFooterLayout, parseFooterLayout } from '../src/footer/layout.ts'
-import type { FooterItemRef } from '../src/footer/types.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
+import { FooterComposer, renderSpans } from '../src/tui/footer/composer.ts'
+import { isFooterLayout, parseFooterLayout } from '../src/domain/footer/layout.ts'
+import type { FooterItemRef } from '../src/tui/footer/presentation-types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 const registry = createBuiltinFooterRegistry()
 const CONTEXT = { taskBrowserAvailable: true, extensionFooterText: '' }
@@ -189,16 +189,16 @@ test('stats-line renders the pi vocabulary from the structured usage', () => {
   assert.ok(!text.includes('LLM'))
 })
 
-test('view-scope renders the legacy viewer identity block', () => {
-  const oneShot = render('view-scope', snapshotWith(snap => {
-    snap.view.subject = { kind: 'subagent', id: 'c1', label: 'audit', mode: 'one-shot', activity: 'inactive' }
-  }))
-  assert.equal(oneShot, '[subagent · one-shot]  audit  inactive')
+test('view-scope is retired: it stays registered but renders nothing', () => {
+  // The child identity moved to the header-adjacent viewer subject bar. The
+  // id stays registered (and parseable) so a legacy custom layout that
+  // references it still loads/edits/saves, but it contributes no segment.
   const running = render('view-scope', snapshotWith(snap => {
     snap.view.subject = { kind: 'subagent', id: 'c1', label: 'research', mode: 'continuable', activity: 'running' }
   }))
-  assert.equal(running, '[subagent · continuable]  research  ● running')
+  assert.equal(running, '', 'the retired view-scope item renders nothing')
   assert.equal(render('view-scope', emptyStatusSnapshot()), '')
+  assert.ok(registry.ids().includes('view-scope'), 'the retired id stays registered for legacy layouts')
 })
 
 test('ext:* bridges the extension footer text; empty → nothing', () => {
@@ -475,14 +475,15 @@ test('token-usage:pi and cache-hit:pi render the pi vocabulary with compact pres
 
 test('the footer stats line and the /status detail line are SEPARATE contracts', async () => {
   // The footer's stats-line is chrome: recent metrics only, no lifetime
-  // LLM wall. formatStats is the /status DETAIL line: it keeps the labeled
-  // lifetime wall beside the recent metrics. They share the pi token
-  // vocabulary but must never be forced into string equality — the old
-  // source-consistency guard pinned them together and would have dragged
-  // the LLM wall back into every footer.
-  const { formatStatsLine } = await import('../src/footer/formatters.ts')
-  const { formatStats } = await import('../src/stats.ts')
-  const { usageFromStats } = await import('../src/status/derive-usage.ts')
+  // LLM wall. The /status Stats row (formatStatsFacts) is the DETAIL
+  // surface: it keeps the labeled lifetime wall beside the recent metrics.
+  // They share the pi token vocabulary but must never be forced into string
+  // equality — the old source-consistency guard pinned them together and
+  // would have dragged the LLM wall back into every footer.
+  const { formatStatsLine } = await import('../src/tui/footer/formatters.ts')
+  const { formatStatsFacts } = await import('../src/tui/commands/status.ts')
+  const { sessionStatsFactsOf } = await import('../src/domain/status/stats.ts')
+  const { usageFromStats } = await import('../src/domain/status/derive-usage.ts')
   const stats = {
     turns: 12,
     steps: 38,
@@ -497,11 +498,75 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
     cacheWriteTokens: 0,
   }
   const footerLine = formatStatsLine(usageFromStats(stats as never))
-  const detailLine = formatStats(stats as never)
+  const detailLine = formatStatsFacts(sessionStatsFactsOf(stats as never))
   assert.ok(!footerLine.includes('LLM'), `the footer line carries no lifetime wall:\n${footerLine}`)
   assert.ok(footerLine.includes('TTFB 2s') && footerLine.includes('40 tok/s'), `recent metrics on the footer line:\n${footerLine}`)
   assert.ok(detailLine.includes('LLM 2m00s'), `the detail line keeps the lifetime wall:\n${detailLine}`)
   assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('40 tok/s'), `recent metrics on the detail line:\n${detailLine}`)
   // The token/cache prefix stays IDENTICAL between the two surfaces.
-  assert.ok(footerLine.split(' | ')[0] === detailLine.split(' | ')[0], `shared pi vocabulary:\n${footerLine}\n${detailLine}`)
+  const tokenSegment = '↑2.6k ↓5.5k R20k CH91.9%'
+  assert.equal(footerLine.split(' | ')[0], tokenSegment, `shared pi vocabulary:\n${footerLine}`)
+  assert.ok(detailLine.includes(tokenSegment), `shared pi vocabulary:\n${detailLine}`)
+})
+
+test('an unavailable token projection renders the performance segment alone (no orphan separator)', async () => {
+  const { formatStatsLine, formatStatsLineCompact } = await import('../src/tui/footer/formatters.ts')
+  const { usageFromStats } = await import('../src/domain/status/derive-usage.ts')
+  const stats = {
+    turns: 12,
+    steps: 38,
+    llmMs: 120_000,
+    firstTokenMsAvg: 2_000,
+    tokensPerSec: 40,
+    cacheHitPct: 91.9,
+    inputTokens: 2_579,
+    outputTokens: 5_507,
+    contextWindow: 1_000_000,
+    cacheReadTokens: 20_000,
+    cacheWriteTokens: 0,
+  }
+  // The Remote branch with an unavailable `tokenUsage`/context: the official
+  // override is present but empty, so the token facts are UNKNOWN (omitted)
+  // while the recent-window performance metrics still come from the fold.
+  const usage = usageFromStats(stats as never, undefined, {})
+  assert.equal(usage.tokens, undefined, 'no owned token facts')
+  const line = formatStatsLine(usage)
+  const compact = formatStatsLineCompact(usage)
+  assert.equal(line.startsWith('| ') || line.startsWith(' | '), false, `no leading separator:\n${line}`)
+  assert.equal(line, 'TTFB 2s · 40 tok/s', `the performance segment alone:\n${line}`)
+  assert.equal(compact.startsWith('· ') || compact.startsWith(' · '), false, `no leading separator (compact):\n${compact}`)
+  assert.equal(compact, 'TTFB 2s · 40t/s', `the performance segment alone (compact):\n${compact}`)
+})
+
+test('PR5: unavailable recent metrics omit the performance segments (never a zero stand-in)', () => {
+  const unavailable = snapshotWith(snap => {
+    snap.usage.tokens = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 }
+    snap.usage.performance = { llmMs: 8100 }
+  })
+  // stats-line: the token segment survives; the recent tail is omitted.
+  assert.equal(render('stats-line', unavailable), '↑1.2k ↓3.4k')
+  // split formats that need the missing fact render nothing.
+  assert.equal(render('performance', unavailable, { id: 'performance', format: 'latency' }), '')
+  assert.equal(render('performance', unavailable, { id: 'performance', format: 'speed' }), '')
+  assert.equal(render('performance', unavailable, { id: 'performance', format: 'full' }), '')
+  // A proven zero stays a legitimate measured value.
+  const zero = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 }
+  })
+  assert.equal(render('performance', zero, { id: 'performance', format: 'full' }), 'TTFB 0s · 0 tok/s')
+  assert.equal(render('stats-line', zero), '↑0 ↓0 | TTFB 0s · 0 tok/s')
+})
+
+test('PR5: a partially available recent window renders the available half only', () => {
+  const latencyOnly = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8100, firstTokenMs: 2_600 }
+  })
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'latency' }), 'TTFB 2.6s')
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'speed' }), '')
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'full' }), 'TTFB 2.6s')
+  const speedOnly = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8100, tokensPerSec: 51 }
+  })
+  assert.equal(render('performance', speedOnly, { id: 'performance', format: 'full' }), '51 tok/s')
+  assert.equal(render('performance', speedOnly, { id: 'performance', format: 'latency' }), '')
 })

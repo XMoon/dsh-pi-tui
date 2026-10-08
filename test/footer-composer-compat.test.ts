@@ -13,12 +13,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { wrapTextWithAnsi, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import { color } from '../src/theme.ts'
-import { FooterComposer, mergeCommandSurface } from '../src/footer/composer.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from '../src/footer/types.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { color } from '../src/tui/theme/runtime.ts'
+import { FooterComposer, mergeCommandSurface } from '../src/tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
+import { DEFAULT_FOOTER_LAYOUT, COMPACT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
+import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW } from '../src/tui/footer/presentation-types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 const composer = new FooterComposer(createBuiltinFooterRegistry())
 
@@ -318,7 +318,9 @@ function defaultRow1Right(snap: StatusSnapshot): RefItem[] {
  * override (the drop order: cache-hit → latency → speed/turns-steps →
  * usage). */
 function defaultRow2Left(snap: StatusSnapshot): RefItem[] {
-  const t = snap.usage.tokens
+  // The token facts are optional (an unavailable projection omits them); this
+  // compat fixture always seeds them.
+  const t = snap.usage.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   const p = snap.usage.performance
   const items: RefItem[] = [{
     text: toneText(`↑${fmt(t.input)} ↓${fmt(t.output)}`
@@ -336,18 +338,24 @@ function defaultRow2Left(snap: StatusSnapshot): RefItem[] {
       order: items.length,
     })
   }
-  items.push({
-    text: toneText(`TTFB ${sec(p.firstTokenMs)}`, 'textMuted'),
-    compact: toneText(sec(p.firstTokenMs), 'textMuted'),
-    importance: 40,
-    order: items.length,
-  })
-  items.push({
-    text: toneText(`${p.tokensPerSec} tok/s`, 'textMuted'),
-    compact: toneText(`${p.tokensPerSec}t/s`, 'textMuted'),
-    importance: 45,
-    order: items.length,
-  })
+  // PR5: an absent recent metric (unproven bounded window) omits its item —
+  // the reference composer mirrors the builtin truthfulness rule.
+  if (p.firstTokenMs !== undefined) {
+    items.push({
+      text: toneText(`TTFB ${sec(p.firstTokenMs)}`, 'textMuted'),
+      compact: toneText(sec(p.firstTokenMs), 'textMuted'),
+      importance: 40,
+      order: items.length,
+    })
+  }
+  if (p.tokensPerSec !== undefined) {
+    items.push({
+      text: toneText(`${p.tokensPerSec} tok/s`, 'textMuted'),
+      compact: toneText(`${p.tokensPerSec}t/s`, 'textMuted'),
+      importance: 45,
+      order: items.length,
+    })
+  }
   items.push({
     text: `t${snap.usage.turns}/s${snap.usage.steps}`,
     compact: `t${snap.usage.turns}/s${snap.usage.steps}`,

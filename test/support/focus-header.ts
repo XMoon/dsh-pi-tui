@@ -24,7 +24,9 @@ const HEADER_LABEL = 'Work|Wait|Turn c|Compl|Fail|Interr|Block|Max'
  * so the label stem alone would misclassify it. Exclude the Activity header
  * SHAPE explicitly instead of relying on a brittle lookahead on the label
  * stem (post-F6 plan §6: the visible container is `Activity`; the internal
- * owner kind stays `work`). */
+ * owner kind stays `work`). Deliberately Activity-ONLY: `Thought` is a
+ * Compact-preset presentation identity and must never appear on a Focus
+ * surface, so matching it here would hide exactly that scope leak. */
 const WORK_CONTAINER_HEADER = /^\s*[▸▾] Activity(?:\s*(?:\S.*|…|\.\.\.)?)?\s*$/u
 
 function headerPattern(expanded: boolean | undefined): RegExp {

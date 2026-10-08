@@ -17,14 +17,14 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { InputRouter } from '../src/input-router.ts'
+import { InputRouter } from '../src/tui/interaction/input-router.ts'
 import type { NormalizedKey, TuiAction } from '../src/extension/public-types.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 interface DisposableApp { isDisposed(): boolean; dispose(): void }
 const startedApps = new Set<DisposableApp>()
 afterEach(() => {
@@ -473,7 +473,7 @@ test('TuiApp: a key with NO active host action falls through to a plugin binding
   // the key reaches the editor (the plugin binding is consulted only for
   // keys the editor declines; Ctrl+V is editor-owned copy). The key is
   // never SWALLOWED: it reaches the editor instead of being dropped.
-  const { parseUserKeybindings } = await import('../src/keybindings/config.ts')
+  const { parseUserKeybindings } = await import('../src/tui/keybindings/config.ts')
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.clipboard.pasteMedia': 'ctrl+p' }))
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
@@ -484,7 +484,7 @@ test('TuiApp: a key with NO active host action falls through to a plugin binding
 test('TuiApp: a plugin binding NEVER steals a key the focused editor owns (P1-06)', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
   const submitted: string[] = []

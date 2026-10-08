@@ -36,12 +36,14 @@ function state(
   return { ids, byId, phase }
 }
 
-function binding(values: RemoteProjectionValues): RemoteSessionBinding {
+function binding(values: RemoteProjectionValues & Readonly<Record<string, unknown>>): RemoteSessionBinding {
   return {
     session: {
       projections: {
         faceOf: (key: string) => ({
-          getSnapshot: () => key === 'title' ? values.title : values.agentPreset,
+          getSnapshot: () => key === 'title' ? values.title
+            : key === 'agentPreset' ? values.agentPreset
+            : values[key],
         }),
       },
     },
@@ -382,4 +384,206 @@ test('blank reads the official Client Session-summary blank bit (v2 §0.6)', () 
   assert.equal(reader.blank('session-a'), true)
   assert.equal(reader.blank('session-b'), false)
   assert.equal(reader.blank('session-missing'), undefined)
+})
+
+
+// ── M3-3A: official contextPressure / turnOutline / sessionStatus reads ────
+
+function pressureBinding(pressure: unknown, extra: Readonly<Record<string, unknown>> = {}): RemoteSessionBinding {
+  return binding({ contextPressure: pressure, ...extra })
+}
+
+test('R1/R2: measureContext reads projectedTokens first, then pressureTokens', () => {
+  const generation = createObservableGenerationHarness()
+  const projected = remoteSource({
+    state: state([], {}),
+    bindings: { s: pressureBinding({ pressureTokens: 100, projectedTokens: 125, contextWindow: 1000 }) },
+  })
+  assert.equal(new RemoteSessionReader(projected, generation.source).measureContext('s'), 125)
+  const fallback = remoteSource({
+    state: state([], {}),
+    bindings: { s: pressureBinding({ pressureTokens: 100 }) },
+  })
+  assert.equal(new RemoteSessionReader(fallback, generation.source).measureContext('s'), 100)
+})
+
+test('R3: a binding without a contextPressure value reads unmeasured', () => {
+  const generation = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state([], {}),
+    bindings: { s: pressureBinding(undefined) },
+  })
+  assert.equal(new RemoteSessionReader(source, generation.source).measureContext('s'), undefined)
+})
+
+test('R4: no binding or no connection reads unmeasured with zero retain/open', () => {
+  const generation = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state([], {}),
+    bindings: {},
+  })
+  const reader = new RemoteSessionReader(source, generation.source)
+  assert.equal(reader.measureContext('s'), undefined)
+  assert.equal(source.refreshCalls, 0, 'a measurement never refreshes the list')
+  generation.set(undefined)
+  const connected = remoteSource({
+    state: state([], {}),
+    bindings: { s: pressureBinding({ pressureTokens: 5 }) },
+  })
+  assert.equal(new RemoteSessionReader(connected, generation.source).measureContext('s'), undefined,
+    'a disconnected generation reads unmeasured')
+})
+
+test('R5: Direct and Remote map the SAME projection snapshot to the same occupancy', async () => {
+  const { contextPressureOccupancy } = await import('../src/runtime/session-reader-port.ts')
+  const pressure = { pressureTokens: 100, projectedTokens: 125, contextWindow: 1000 }
+  // The Direct mapping consumes the Host snapshot's value; the Remote
+  // mapping consumes the binding face's value — both feed the one shared
+  // semantic numerator.
+  assert.equal(contextPressureOccupancy(pressure), 125)
+  const generation = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state([], {}),
+    bindings: { s: pressureBinding(pressure) },
+  })
+  assert.equal(new RemoteSessionReader(source, generation.source).measureContext('s'),
+    contextPressureOccupancy(pressure))
+})
+
+test('turnOutline reads the official binding projection without any history fetch', () => {
+  const generation = createObservableGenerationHarness()
+  const outline = [{ turn: 2, seq: 40, prompt: 'second', response: 'r2' }, { turn: 1, seq: 10, prompt: 'first', response: 'r1' }]
+  const source = remoteSource({
+    state: state([], {}),
+    bindings: { s: binding({ turnOutline: outline }) },
+  })
+  assert.deepEqual(new RemoteSessionReader(source, generation.source).turnOutline('s'), outline)
+  const none = remoteSource({ state: state([], {}), bindings: {} })
+  assert.equal(new RemoteSessionReader(none, generation.source).turnOutline('s'), undefined)
+  generation.set(undefined)
+  assert.equal(new RemoteSessionReader(source, generation.source).turnOutline('s'), undefined)
+})
+
+test('sessionStatus reads the exact binding projections plus the list-row cwd fact', () => {
+  const generation = createObservableGenerationHarness()
+  const values = {
+    modelSelection: { lastUsed: { provider: 'p', model: 'm1' }, next: { provider: 'p', model: 'm2', reasoningEffort: 'high' } },
+    contextPressure: { projectedTokens: 900, contextWindow: 1000 },
+    contextBreakdown: { systemTokens: 10, toolsTokens: 20, messageTokens: 870 },
+    tokenUsage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
+    todos: [{ content: 't', status: 'in_progress' as const }],
+  }
+  const source = remoteSource({
+    state: state(['s'], { s: listRow('s', 1, { cwd: '/host/ws' }) }),
+    bindings: { s: binding(values) },
+  })
+  assert.deepEqual(new RemoteSessionReader(source, generation.source).sessionStatus('s'), {
+    sessionId: 's',
+    cwd: '/host/ws',
+    model: { provider: 'p', model: 'm2', reasoningEffort: 'high' },
+    context: {
+      projectedTokens: 900,
+      contextWindow: 1000,
+      breakdown: { systemTokens: 10, toolsTokens: 20, messageTokens: 870 },
+    },
+    todos: [{ content: 't', status: 'in_progress' }],
+    usage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
+  })
+})
+
+test('sessionStatus reads only the addressed session — no parent/main fallback, no invented facts', () => {
+  const generation = createObservableGenerationHarness()
+  const mainValues = { contextPressure: { projectedTokens: 500 } }
+  const source = remoteSource({
+    state: state(['main', 'child'], {
+      main: listRow('main', 2, { cwd: '/main' }),
+      child: listRow('child', 1, { cwd: '/child' }),
+    }),
+    bindings: { main: binding(mainValues) },
+  })
+  const reader = new RemoteSessionReader(source, generation.source)
+  // The child has no retained binding: no facts, never the main's values.
+  assert.deepEqual(reader.sessionStatus('child'), undefined)
+  // A cold/unretained child stays fact-free even after the main was read.
+  assert.equal(reader.sessionStatus('child')?.context?.projectedTokens, undefined)
+  assert.equal(reader.sessionStatus('main')?.context?.projectedTokens, 500)
+  // Absent projections stay absent (no zero-fill).
+  const bare = remoteSource({
+    state: state(['s'], { s: listRow('s', 1) }),
+    bindings: { s: binding({}) },
+  })
+  assert.deepEqual(new RemoteSessionReader(bare, generation.source).sessionStatus('s'), { sessionId: 's' })
+})
+
+test('T8: the Remote branch never grows the Direct compat read — an absent binding face stays unknown', () => {
+  // The Direct reader now falls back to the exact Session's own durable facts
+  // while the official `modelSelection` unit is unregistered. The Remote branch
+  // has an OFFICIAL binding face instead, so it must stay strictly
+  // binding-driven: an absent face is unknown, never a local/log-derived value.
+  const generation = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state(['child'], { child: listRow('child', 1, { cwd: '/child' }) }),
+    // The retained child binding owns OTHER facts but not `modelSelection`.
+    bindings: { child: binding({ title: 'child title', contextPressure: { projectedTokens: 12 } }) },
+  })
+  const reader = new RemoteSessionReader(source, generation.source)
+  const status = reader.sessionStatus('child')
+  assert.equal(status?.model, undefined,
+    'an absent Remote modelSelection face reads UNKNOWN — the Direct compat read must not reach this branch')
+  assert.equal(status?.title, 'child title', 'the other binding facts are unaffected')
+  assert.equal(status?.cwd, '/child')
+  generation.set(undefined)
+  assert.equal(new RemoteSessionReader(source, generation.source).sessionStatus('child'), undefined,
+    'a lost Connection generation stays unavailable')
+})
+
+test('sessionStatus keeps the official todos null distinct from capability-absent', () => {
+  const generation = createObservableGenerationHarness()
+  const withNull = remoteSource({
+    state: state(['s'], { s: listRow('s', 1) }),
+    bindings: { s: binding({ todos: null }) },
+  })
+  assert.equal(new RemoteSessionReader(withNull, generation.source).sessionStatus('s')?.todos, null)
+  const withoutValue = remoteSource({
+    state: state(['s'], { s: listRow('s', 1) }),
+    bindings: { s: binding({}) },
+  })
+  assert.equal(new RemoteSessionReader(withoutValue, generation.source).sessionStatus('s')?.todos, undefined)
+})
+
+test('a same-id binding replacement yields a NEW read — the stale projection never repaints', () => {
+  const generation = createObservableGenerationHarness()
+  const oldValues = { contextPressure: { projectedTokens: 111 } }
+  const newValues = { contextPressure: { projectedTokens: 222 } }
+  let current = binding(oldValues)
+  const source = remoteSource({
+    state: state(['s'], { s: listRow('s', 1) }),
+    bindings: {
+      get s() { return current },
+    },
+  })
+  const reader = new RemoteSessionReader(source, generation.source)
+  assert.equal(reader.sessionStatus('s')?.context?.projectedTokens, 111)
+  current = binding(newValues)
+  assert.equal(reader.sessionStatus('s')?.context?.projectedTokens, 222,
+    'the read always resolves the CURRENT binding generation')
+})
+
+test('the live status projection list is EXACTLY what the status reads (no static-read/stale-UI drift)', async () => {
+  const { CURRENT_STATUS_PROJECTION_KEYS } = await import('../src/runtime/remote/session-reader-remote.ts')
+  // The status DTO's keys + the plan source. A new status fact MUST update this
+  // list (and vice versa): the ingress subscribes to exactly these keys, so a
+  // key read here but missing there would render statically and never refresh.
+  assert.deepEqual(
+    [...CURRENT_STATUS_PROJECTION_KEYS].sort(),
+    // 'permissions' joined in M3-4 PR4 §6.1: the footer/status preset row is
+    // projection-authoritative, and a successful permission write is
+    // COMMITTED by the pushed projection — the live channel must carry it or
+    // the row would render statically after a cycle.
+    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
+  )
+  // Projections whose change the status does not consume stay OUT: their own
+  // consumer establishes the subscription it needs.
+  assert.equal(CURRENT_STATUS_PROJECTION_KEYS.includes('turnOutline'), false)
+  assert.equal(CURRENT_STATUS_PROJECTION_KEYS.includes('sessionStats'), false)
 })

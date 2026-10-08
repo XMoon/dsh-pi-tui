@@ -54,6 +54,55 @@ function shallowEqual<T extends object>(next: T, current: T): boolean {
   return true
 }
 
+/**
+ * Freeze one session slice at the PUBLICATION boundary (M3-5 PR1): the nested
+ * `displaySubject` snapshot added by M3-5 PR1 is part of the public "deeply
+ * frozen snapshots" contract, so it must be frozen too — a plugin must not be
+ * able to mutate the object the store (and every later subscriber, including
+ * the first-party builtins) keeps holding.
+ *
+ * The store also replaces a slice only when a field CHANGED, and `shallowEqual`
+ * compares the nested object by reference. A republished, content-equal
+ * `displaySubject` therefore reuses the CURRENT nested object (already frozen),
+ * so an identical publish neither breaks the slice identity nor notifies.
+ * @param next - the incoming session slice.
+ * @param current - the published session slice.
+ * @returns the frozen session slice to publish.
+ */
+function publishSession(
+  next: SurfaceStateValues['session'],
+  current: SurfaceStateValues['session'],
+): SurfaceStateValues['session'] {
+  const subject = next.displaySubject
+  if (subject === undefined) return Object.freeze({ ...next })
+  const frozen = current.displaySubject !== undefined && sameDisplaySubject(subject, current.displaySubject)
+    ? current.displaySubject
+    : Object.freeze({ ...subject })
+  return Object.freeze({ ...next, displaySubject: frozen })
+}
+
+/**
+ * Whether two display-subject snapshots carry the SAME facts.
+ *
+ * Both optional shapes are encoded by OMISSION — an unavailable model /
+ * permission / branch and a hidden todo summary all read as an ABSENT key — so
+ * the comparison must cover the UNION of the two key sets. A next-only key walk
+ * (`shallowEqual`) would treat that legal CLEAR as "unchanged", keep the stale
+ * facts and skip the notification.
+ */
+function sameDisplaySubject(
+  next: NonNullable<SurfaceStateValues['session']['displaySubject']>,
+  current: NonNullable<SurfaceStateValues['session']['displaySubject']>,
+): boolean {
+  const left = next as unknown as Record<string, unknown>
+  const right = current as unknown as Record<string, unknown>
+  const keys = new Set<string>([...Object.keys(left), ...Object.keys(right)])
+  for (const key of keys) {
+    if (left[key] !== right[key]) return false
+  }
+  return true
+}
+
 /** The immutable surface state store. */
 export class SurfaceStateStore {
   private values: SurfaceStateValues
@@ -116,9 +165,12 @@ export class SurfaceStateStore {
       merged.surface = Object.freeze({ ...next.surface })
       changed = true
     }
-    if (next.session !== undefined && !shallowEqual(next.session, this.values.session)) {
-      merged.session = Object.freeze({ ...next.session })
-      changed = true
+    if (next.session !== undefined) {
+      const session = publishSession(next.session, this.values.session)
+      if (!shallowEqual(session, this.values.session)) {
+        merged.session = session
+        changed = true
+      }
     }
     if (next.activity !== undefined && !shallowEqual(next.activity, this.values.activity)) {
       merged.activity = Object.freeze({ ...next.activity })

@@ -6,12 +6,14 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
-import { createDiag } from '../src/diag.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -19,15 +21,16 @@ import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
-import { parseNotificationMethod, parseNotificationMode } from '../src/notification/settings.ts'
-import { installProgressUpdatesPrompt, installResponseStylePrompt, parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../src/communication-policy.ts'
-import { installFocusPrompt, type SystemPromptLike } from '../src/focus.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import { parseNotificationMethod, parseNotificationMode } from '../src/domain/notification/settings.ts'
+import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, type ResponseStyleState } from '../src/domain/communication/policy.ts'
+import { installProgressUpdatesPrompt, installResponseStylePrompt, installFocusPrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -99,7 +102,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
   }
   installProgressUpdatesPrompt(systemPrompt, displayState, progressUpdatesState)
   installResponseStylePrompt(systemPrompt, responseStyleState)
-  installFocusPrompt({ get: () => systemPrompt } as never, displayState)
+  installFocusPrompt(systemPrompt, displayState)
   const prompt = (name = 'tui:progress-updates'): string => {
     const text = sections.get(name)!.text
     return typeof text === 'function' ? text({}) : text
@@ -126,13 +129,24 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
@@ -169,12 +183,13 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     applyFooterSettings: () => {},
     progressUpdatesState,
     responseStyleState,
+    gitAttributionState: { mode: 'off' },
     displayPreset: () => displayState.preset,
     setDisplayPreset: preset => { displayState.preset = preset; return { kind: 'applied', preset } },
     focusEnabled: () => displayState.preset === 'focus',
     setFocusMode: () => {},
     setNotificationMode: (mode) => { appliedModes.push(mode) },
-    setNotificationMethod: (method) => { appliedMethods.push(method) },
+    setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -188,7 +203,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (): Promise<void> => {

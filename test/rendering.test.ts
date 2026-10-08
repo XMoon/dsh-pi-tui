@@ -11,18 +11,20 @@ import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
-import { isDiffResult, renderDiffLine } from '../src/diff.ts'
+import { isDiffResult } from '../src/tui/transcript/diff-projection.ts'
+import { renderDiffLine } from '../src/tui/components/transcript/diff.ts'
 import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
-} from '../src/present.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { RendererRegistry } from '../src/renderer-registry.ts'
-import { color, currentPalette, darkColors, lightColors, setTheme } from '../src/theme.ts'
-import { iconFor } from '../src/icons.ts'
+} from '../src/tui/transcript/tool-presentation.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
+import { darkColors, lightColors } from '../src/domain/display/theme.ts'
+import { color, currentPalette, setTheme } from '../src/tui/theme/runtime.ts'
+import { iconFor } from '../src/tui/icons.ts'
 import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../src/tui-app.ts'
-import { WorkingIndicator, workingFramesFor } from '../src/working.ts'
+import { WorkingIndicator, workingFramesFor } from '../src/tui/components/working-indicator.ts'
 import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type WorkflowRunId } from '../src/transcript.ts'
-import { TranscriptWindowController } from '../src/transcript-window.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { hasFocusHeader } from './support/focus-header.ts'
@@ -31,7 +33,7 @@ import { hasFocusHeader } from './support/focus-header.ts'
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
- * (see src/process-tui-slot.ts). */
+ * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -1061,7 +1063,7 @@ test('askQuestions toggles multi-select options', async () => {
   await viewport(vt)
   vt.sendInput('2') // toggle B on
   await viewport(vt)
-  // Multi-select Enter toggles; → pages to the review page, Enter submits.
+  // Multi-select digits toggle; → pages to the review page, Enter submits.
   vt.sendInput('\x1b[C')
   await viewport(vt)
   vt.sendInput('\r')
@@ -1648,7 +1650,7 @@ test('regular mode: the root disclosure reveals the full child bodies and the ba
 test('footer preset hides the stats line in compact mode', async () => {
   const { vt, app } = startApp()
   app.setStatus({
-    model: 'm', cwd: 'c', statsLine: '5 步| LLM 8.1s',
+    model: 'm', cwd: 'c',
     // M1: the stats line composes from the structured usage facts.
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -1801,11 +1803,11 @@ test('transcript search: Ctrl+C closes the overlay and the hint advertises next/
   vt.sendInput('\x06') // ctrl+f opens search
   let view = await viewport(vt)
   assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
-  // The next/prev/close hint rides under the input (fixed non-configurable
-  // overlay keys — no effective binding to render).
-  assert.ok(view.includes('↵ next'), `search hint must advertise next:\n${view}`)
-  assert.ok(view.includes('prev'), `search hint must advertise previous:\n${view}`)
-  assert.ok(view.includes('esc/ctrl+c close'), `search hint must advertise esc/ctrl+c close:\n${view}`)
+  // The next/prev/close hint rides under the input. Its labels are rendered
+  // from the (non-configurable) keymap definitions and compacted to this exact
+  // overlay line, so the assertion pins the WHOLE hint rather than recomputing
+  // it in the test.
+  assert.ok(view.includes('↵ next · ⇧↵ prev · esc/ctrl+c close'), `search hint must render the full next/prev/close line:\n${view}`)
   // Ctrl+C closes search (the old behavior: the overlay's shared Input
   // swallowed Ctrl+C as its generic cancel and search stayed open).
   vt.sendInput('\x03') // ctrl+c
@@ -2081,6 +2083,25 @@ test('viewport anchors distinguish duplicate messages and cloned Focus activitie
 const WHALE_MARKERS = [".--'---._", '.------._', '.-------.', ".---'--.", '/ /~~~~~~']
 const hasWhale = (view: string): boolean => WHALE_MARKERS.some(marker => view.includes(marker))
 
+test('F2: an ABSENT welcome-card model fact is OMITTED, never rendered as an authoritative "unconfigured"', async () => {
+  // The official `SessionReader.sessionStatus()` contract: an absent field means
+  // the projection/capability is UNAVAILABLE and must not be guessed or replaced
+  // with a definitive business value. The Remote welcome branch therefore passes
+  // the absent fact THROUGH (no `model` key) instead of inventing
+  // "unconfigured", and the card renders no model line at all.
+  const { vt, app } = startApp()
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-absent-fact', version: '0.1.0' })
+  const view = await viewport(vt)
+  const plainFacts = view.split('\n').map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  assert.ok(view.includes('session-absent-fact'), `the card must still render its facts:\n${view}`)
+  assert.equal(view.includes('unconfigured'), false,
+    'an unavailable model projection must never become a definitive business value')
+  assert.equal(view.includes('no model'), false,
+    'nor the legacy no-model literal')
+  assert.equal(/model[ \t]*\S/.test(plainFacts), false,
+    `no model value may be rendered from an absent fact:\n${view}`)
+})
+
 test('welcome card shows the whale and full facts in the wide layout', async () => {
   const { vt, app } = startApp()
   // Values long enough to wrap inside the ~76-col side-by-side facts column.
@@ -2213,7 +2234,7 @@ test('live theme switch recolors every surface while the content stays identical
   app.start()
 
   startedApps.add(app)
-  app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3, statsLine: 'llm 1s' })
+  app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3 })
   app.setPlanMode(true)
   app.setTodoSummary([{ content: 'fix the theme', status: 'in_progress' }])
   app.setTasks([{ id: 'bash-1', label: 'review', status: 'running', kind: 'bash' }])
@@ -4074,7 +4095,7 @@ test('goal card headers carry the goal identity, not the generic Tool call row',
 })
 
 test('goalResultSummary and goalResultLines parse the shared goal shape', async () => {
-  const { goalResultSummary, goalResultLines } = await import('../src/present.ts')
+  const { goalResultSummary, goalResultLines } = await import('../src/tui/transcript/tool-presentation.ts')
   assert.equal(goalResultSummary(GOAL_RESULT), 'phase active · revision 3 · 2/6 rounds')
   assert.equal(goalResultSummary(JSON.stringify({ goal: null })), 'no goal set')
   assert.equal(goalResultSummary('oops'), undefined)
@@ -4101,7 +4122,7 @@ test('goalResultSummary and goalResultLines parse the shared goal shape', async 
 })
 
 test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async () => {
-  const { foldedResultSummaryFor } = await import('../src/present.ts')
+  const { foldedResultSummaryFor } = await import('../src/tui/transcript/tool-presentation.ts')
   // ralph: the render text's friendly first line is the summary.
   assert.equal(
     foldedResultSummaryFor('ralph', 'Ralph worker reported completion after 2 rounds.\nFinal report:\n{"status":"complete"}'),
@@ -4174,7 +4195,7 @@ test('cancelled ask_user_question cards show the structured error identity', asy
 })
 
 test('askAnswersSummary counts answered entries and skips skipped ones', async () => {
-  const { askAnswersSummary } = await import('../src/present.ts')
+  const { askAnswersSummary } = await import('../src/tui/transcript/tool-presentation.ts')
   assert.equal(askAnswersSummary(JSON.stringify({ answers: [
     { id: 'a', selected: ['x'] },
     { id: 'b', selected: [], custom: 'freeform' },
@@ -4198,7 +4219,7 @@ test('askAnswersSummary counts answered entries and skips skipped ones', async (
 })
 
 test('askAnswersLines renders one line per answer, skipped entries dimmed', async () => {
-  const { askAnswersLines } = await import('../src/present.ts')
+  const { askAnswersLines } = await import('../src/tui/transcript/tool-presentation.ts')
   assert.deepEqual(askAnswersLines(JSON.stringify({ answers: [
     { id: 'q1', selected: ['x', 'y'] },
     { id: 'q2', selected: [], custom: 'freeform' },

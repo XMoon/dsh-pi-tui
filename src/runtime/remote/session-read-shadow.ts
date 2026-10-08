@@ -35,6 +35,7 @@ export type SessionReadMismatchField =
   | 'search.order'
   | 'search.snippets'
   | 'search.hasMore'
+  | 'measureContext'
 
 /** One bounded, machine-readable parity mismatch. */
 export interface SessionReadMismatch {
@@ -109,7 +110,6 @@ interface CapturedOperation {
 const SKIPPED_FIELDS: readonly SessionReadSkippedField[] = [
   { field: 'createdAt', reason: 'the official Remote Session list has no creation timestamp' },
   { field: 'live', reason: 'the official running bit is not the Direct attached-session bit' },
-  { field: 'measureContext', reason: 'the official Client read face has no equivalent context-pressure contract' },
 ]
 const MAX_DIAGNOSTIC_ITEMS = 64
 const MAX_DIAGNOSTIC_TEXT = 512
@@ -321,6 +321,18 @@ export class RemoteSessionReadShadow {
       operation.signal.throwIfAborted()
 
       const mismatches = compareRows(directRows, remoteRows, directProjections, remoteProjections)
+      if (options.currentSessionId !== undefined) {
+        // M3-3A: both backends read the one official `contextPressure`
+        // semantic, so the D1 "no Client equivalent" skip is retired —
+        // the live session's occupancy now compares like every other field.
+        pushFieldMismatch(
+          mismatches,
+          'measureContext',
+          options.currentSessionId,
+          this.direct.measureContext(options.currentSessionId),
+          this.remote.measureContext(options.currentSessionId),
+        )
+      }
       if (options.searchQuery !== undefined) compareSearch(mismatches, directSearch, remoteSearch)
       if (!this.isCurrent(operation)) return this.discarded(operation)
       operation.signal.throwIfAborted()

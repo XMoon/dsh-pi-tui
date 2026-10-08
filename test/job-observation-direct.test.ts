@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { DirectJobObservationPort } from '../src/runtime/direct/job-observation-direct.ts'
 import type { JobObservedSnapshot } from '../src/runtime/job-observation-port.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 
 const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 
@@ -228,4 +228,73 @@ test('the pi-tui composition mounts the official job-controller row and injects 
   assert.match(yml, /inject: \[tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController\]/)
   // No second plugin-manager row: the base layer already mounts it.
   assert.equal((yml.match(/- id: plugin-manager\b/g) ?? []).length, 0)
+})
+
+/**
+ * A structural Host context carrying ONLY the local Job registry, so the
+ * Direct stop admission is driven without the follow stream.
+ */
+function registryHost(behavior: {
+  get?: (jobId: unknown, caller: unknown) => unknown
+  kill?: (jobId: unknown, caller: unknown, reason: string) => 'requested' | 'already-finished'
+} = {}): {
+  host: { get: (name: string) => unknown }
+  getCalls: Array<readonly [unknown, unknown]>
+  killCalls: Array<readonly [unknown, unknown, string]>
+} {
+  const getCalls: Array<readonly [unknown, unknown]> = []
+  const killCalls: Array<readonly [unknown, unknown, string]> = []
+  const registry = {
+    get: (jobId: unknown, caller: unknown) => {
+      getCalls.push([jobId, caller])
+      return behavior.get?.(jobId, caller)
+    },
+    kill: (jobId: unknown, caller: unknown, reason: string) => {
+      killCalls.push([jobId, caller, reason])
+      return behavior.kill?.(jobId, caller, reason)
+    },
+  }
+  return { host: { get: (name: string) => name === 'jobs' ? registry : undefined }, getCalls, killCalls }
+}
+
+test('stop proves the row through the registry then maps its kill admission', async () => {
+  const { host, getCalls, killCalls } = registryHost({ kill: () => 'requested' })
+  const port = new DirectJobObservationPort(host, diag)
+  assert.deepEqual(await port.stop('s1', 'job-1'), { kind: 'requested' })
+  assert.deepEqual(getCalls, [['job-1', 's1']])
+  assert.equal(killCalls.length, 1)
+  assert.deepEqual([killCalls[0]?.[0], killCalls[0]?.[1]], ['job-1', 's1'])
+  assert.equal(
+    killCalls[0]?.[2],
+    'cancelled by the user',
+    'the unified human-kill reason is the same wording the official Host JobController records over the wire',
+  )
+
+  const finished = new DirectJobObservationPort(registryHost({ kill: () => 'already-finished' }).host, diag)
+  assert.deepEqual(await finished.stop('s1', 'job-1'), { kind: 'already-finished' })
+})
+
+test('a registry get throw is a proven not-found and never reaches kill', async () => {
+  const { host, killCalls } = registryHost({
+    get: () => { throw new Error('job job-1 belongs to another session') },
+  })
+  const port = new DirectJobObservationPort(host, diag)
+  assert.deepEqual(await port.stop('s1', 'job-1'), { kind: 'not-found' })
+  assert.deepEqual(killCalls, [], 'a no-longer-visible row must not be killed')
+})
+
+test('a registry kill throw is a proven refusal', async () => {
+  const { host } = registryHost({
+    kill: () => { throw new Error('the producer refused cancellation') },
+  })
+  const port = new DirectJobObservationPort(host, diag)
+  assert.deepEqual(await port.stop('s1', 'job-1'), {
+    kind: 'rejected',
+    message: 'the producer refused cancellation',
+  })
+})
+
+test('stop fails loud when the local Job registry is absent', async () => {
+  const port = new DirectJobObservationPort({ get: () => undefined }, diag)
+  await assert.rejects(port.stop('s1', 'job-1'), /jobs service unavailable/)
 })

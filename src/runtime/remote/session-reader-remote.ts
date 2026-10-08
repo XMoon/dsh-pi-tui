@@ -10,13 +10,17 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/session-reader-remote
  */
 
-import { cancellationError } from '../../detached.ts'
-import type {
-  SessionContentSearchPage,
-  SessionProjectionSummary,
-  SessionReader,
-  SessionSummary,
+import { cancellationError } from '../process/tasks.ts'
+import {
+  contextPressureOccupancy,
+  type SessionContentSearchPage,
+  type SessionProjectionSummary,
+  type SessionReader,
+  type SessionSummary,
 } from '../session-reader-port.ts'
+import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
+import { detachedSessionStatus } from '../session-status-projection.ts'
+import type { SessionStatusProjection } from '../session-reader-port.ts'
 
 /** The public generation identity exposed by the official Connection client. */
 export interface RemoteConnectionGeneration {
@@ -140,6 +144,36 @@ function stringProjection(value: unknown): string | undefined {
  * existing TUI semantic read contract. A generation is required so a lost
  * Connection never becomes an authoritative empty list.
  */
+/** The projection keys whose values this adapter presents as a session's
+ *  CURRENT facts (the official feature contract exposes per-key faces only, so
+ *  a live subscription must name the keys it follows). ONE list: the ingress's
+ *  change channel and these reads stay in step. */
+const STATUS_PROJECTION_KEYS = [
+  'modelSelection',
+  'contextPressure',
+  'contextBreakdown',
+  'tokenUsage',
+  'todos',
+  'agentPreset',
+  'title',
+  'goal',
+  // M3-4 PR4 §6.1: the committed permission value rides the SAME live
+  // channel — a successful permission write is committed by the pushed
+  // projection (the footer's preset row repaints from it, never an
+  // optimistic local install).
+  'permissions',
+] as const
+
+/** The projection keys the Remote STATUS/WELCOME current facts are read from:
+ *  EXACTLY what `sessionStatus()` reads (`STATUS_PROJECTION_KEYS`, the tuple
+ *  that drives those reads) plus `plan` (read by the plan source). The
+ *  ingress's live refresh follows THIS list, so a key that is read is always
+ *  subscribed and a key that is subscribed is always read — no static-read /
+ *  stale-UI drift. A projection whose change the status does NOT consume
+ *  (e.g. `turnOutline`, `sessionStats`) is deliberately absent: its own
+ *  consumer establishes the subscription it needs. */
+export const CURRENT_STATUS_PROJECTION_KEYS: readonly string[] = [...STATUS_PROJECTION_KEYS, 'plan']
+
 export class RemoteSessionReader implements SessionReader {
   private readonly sessions: RemoteSessionsReadSource
   private readonly generation: RemoteConnectionGenerationSource
@@ -256,7 +290,53 @@ export class RemoteSessionReader implements SessionReader {
     }
   }
 
-  measureContext(_sessionId: string): undefined {
-    return undefined
+  measureContext(sessionId: string): number | undefined {
+    // The official `contextPressure` Session projection off the EXACT
+    // retained binding (M3-3A): no retain/open is performed for a
+    // measurement, and an unretained session simply has no value. The
+    // mapping is the one shared semantic (`projectedTokens ??
+    // pressureTokens`) — no Remote token-meter call exists or is invented.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    return contextPressureOccupancy(
+      binding.session.projections.faceOf('contextPressure').getSnapshot(),
+    )
+  }
+
+  turnOutline(sessionId: string): readonly TurnOutlineEntryDto[] | undefined {
+    // The official `turnOutline` projection off the EXACT retained binding
+    // (M3-4 /rewind foundation): a projection read only — no history fetch,
+    // no client-side fold, no retain for an outline.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    return detachedTurnOutline(
+      binding.session.projections.faceOf('turnOutline').getSnapshot(),
+    )
+  }
+
+  sessionStatus(sessionId: string): SessionStatusProjection | undefined {
+    // The official projection values off the EXACT retained binding of THIS
+    // session (main or viewed child alike): no retain, no parent fallback,
+    // no zero-filled guesses — an unretained session simply has no facts.
+    if (this.generation.getSnapshot() === undefined) return undefined
+    const binding = this.sessions.binding(sessionId)
+    if (binding === undefined) return undefined
+    const projections = binding.session.projections
+    // The reads are driven by the SAME tuple the live refresh subscribes to:
+    // adding a key here (and to the DTO) cannot leave the live channel behind.
+    const values: Record<string, unknown> = {}
+    for (const key of STATUS_PROJECTION_KEYS) values[key] = projections.faceOf(key).getSnapshot()
+    return detachedSessionStatus(sessionId, values, this.cwdOf(sessionId))
+  }
+
+  /** The official Client list-row cwd fact for one session (undefined when
+   *  the row carries none — never a main-session or client-side guess). */
+  private cwdOf(sessionId: string): string | undefined {
+    const snapshot = this.sessions.list.getSnapshot()
+    if (snapshot.phase !== 'ready') return undefined
+    const cwd = snapshot.byId[sessionId]?.cwd
+    return typeof cwd === 'string' ? cwd : undefined
   }
 }

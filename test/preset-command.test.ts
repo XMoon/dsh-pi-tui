@@ -7,6 +7,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -16,26 +18,35 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
-import { KeybindingEditorController } from '../src/keybinding-ui/controller.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/skill-catalog-refresh.ts'
-import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
+import {
+  executeHostCommandSubmission,
+  type HostCommandSubmissionDeps,
+} from '../src/app/submission/runtime.ts'
+import type { PresetCatalog } from '../src/runtime/catalog-port.ts'
+import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
+import { mergeDraft } from '../src/app/submission/steer.ts'
+import { KeybindingEditorController } from '../src/tui/keybindings/ui/controller.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshRequest } from '../src/app/command/catalog-refresh.ts'
+import type { SurfaceCommandSummary } from '../src/domain/catalog/surface.ts'
 import { SESSIONLESS_COMMANDS } from '../src/index.ts'
-import { createDiag } from '../src/diag.ts'
-import { customThemesDir, darkColors } from '../src/theme.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { customThemesDir } from '../src/client/theme/files.ts'
+import { darkColors } from '../src/domain/display/theme.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -212,9 +223,21 @@ function stubRunner(options: {
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   /** Defaults to a pass-through capture (the test themes use id === name). */
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
+  /** The runner's displayed/current Session preset read (`/preset status`, the
+   *  picker's "← current" mark). Absent = undefined (no live subject). */
+  currentPreset?: () => string | undefined
+  /** Replace the preset catalog sub-domain with a scripted port (the /preset
+   *  handler's only business authority). Used by the command-settlement
+   *  family to script exact `WriteOutcome`s without a Host. */
+  presetsPort?: PresetCatalog
 }): { runner: TuiCommandRunner; pending: { value: string | undefined }; refreshes: CatalogRefreshRequest[] } {
   const pending = { value: undefined as string | undefined }
   const refreshes: CatalogRefreshRequest[] = []
+  const catalog = new DirectCatalogPort(options.ctx as never, (sessionId) => {
+    const live = options.state !== undefined ? options.state.agent : options.agent
+    return live?.session.id === sessionId ? live : undefined
+  })
+  if (options.presetsPort !== undefined) Object.assign(catalog, { presets: options.presetsPort })
   const runner: TuiCommandRunner = {
     ctx: options.ctx,
     app: options.app,
@@ -250,17 +273,25 @@ function stubRunner(options: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
        ...options.sessionReader,
     },
-    catalog: new DirectCatalogPort(options.ctx as never, (sessionId) => {
-      const live = options.state !== undefined ? options.state.agent : options.agent
-      return live?.session.id === sessionId ? live : undefined
-    }),
+    catalog,
     config: new DirectConfigPort(options.ctx as never, undefined, () => undefined),
     commandRegistry: options.ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
@@ -284,7 +315,7 @@ function stubRunner(options: {
       await steps.prepare?.()
       return { ok: true, next: await steps.create() }
     },
-    currentPreset: () => undefined,
+    currentPreset: () => options.currentPreset?.(),
     get pendingPreset() { return pending.value },
     set pendingPreset(id: string | undefined) { pending.value = id },
     get effectivePresetId() { return pending.value ?? options.effectivePresetId },
@@ -304,11 +335,11 @@ function stubRunner(options: {
       return options.refreshCatalog?.(request) ?? { kind: 'failed', error: 'not wired in tests' }
     },
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -383,6 +414,10 @@ function setup(options: {
   commandsPresetOverride?: { name: string; definitionId?: string; description?: string }
   /** Omit the `agentPresets` service (a rosterless deployment). */
   noPresets?: boolean
+  /** Replace the preset catalog sub-domain with a scripted port. */
+  presetsPort?: PresetCatalog
+  /** The runner's displayed/current Session preset read. */
+  currentPreset?: () => string | undefined
   width?: number
   /** Viewport height; a taller screen keeps the whole `/help` list on one page. */
   height?: number
@@ -428,8 +463,10 @@ function setup(options: {
       }),
     recordExtensionError: options.recordExtensionError,
     clearExtensionError: options.clearExtensionError,
+    presetsPort: options.presetsPort,
+    currentPreset: options.currentPreset,
   })
-  const surface = registerTuiCommands(runner)
+  const surface = registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'preset')
   assert.ok(def?.handler !== undefined, 'preset handler missing')
   const run = async (rawInput: string): Promise<unknown> =>
@@ -439,11 +476,18 @@ function setup(options: {
     assert.ok(found?.handler !== undefined, `${name} handler missing`)
     return (found!.handler as (inv: CommandInvocation) => unknown)(invoke(rawInput))
   }
+  /** Invoke one registered handler as the outer command plane would: the
+   *  execution's command id is the disposition correlation key. */
+  const invokeCommand = async (name: string, commandId: string, rawInput: string): Promise<unknown> => {
+    const found = commands.defs.find(entry => entry.name === name)
+    assert.ok(found?.handler !== undefined, `${name} handler missing`)
+    return (found!.handler as (inv: CommandInvocation) => unknown)({ ...invoke(rawInput), commandId: CommandId(commandId) })
+  }
   const view = async (): Promise<string> => {
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, runCommand, view, pending, presets, ensureCalls, refreshes, surface }
+  return { vt, app, run, runCommand, invokeCommand, view, pending, presets, ensureCalls, refreshes, surface }
 }
 
 test('/preset is in the sessionless dispatch gate', () => {
@@ -465,7 +509,7 @@ test('/keybindings opens sessionless without creating a session', async () => {
     wheelScrollLines: '1',
       iconStyle: 'emoji',
       notificationMode: 'unfocused',
-      notificationMethod: 'auto',
+      terminalProgress: 'on', notificationMethod: 'auto',
       keybindings: undefined,
     }),
     replace: async () => {},
@@ -863,7 +907,7 @@ function reloadSettings(theme: string, onGet?: (count: number) => void): TuiSett
     get: () => {
       reads += 1
       onGet?.(reads)
-      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }
+      return { theme: currentTheme, iconStyle: 'emoji', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }
     },
     replace: doc => { currentTheme = doc.theme as string },
   }
@@ -1021,7 +1065,7 @@ test('/keybindings reload re-reads the settings document LAZILY (the explicit re
   let settingsDoc = {
     theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue',
     localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1',
-    iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto',
+    iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
     keybindings: { 'app.input.steer': 'ctrl+x' },
   }
   let reads = 0
@@ -1062,7 +1106,7 @@ test('/keybindings reload queues behind an editor write and applies the latest d
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
     keybindings: { 'app.input.steer': 'ctrl+x' },
   }
   let writes = 0
@@ -1127,7 +1171,7 @@ test('/keybindings reset queues behind an editor write and keeps the final reset
     wheelScrollLines: '1',
     iconStyle: 'emoji',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
     keybindings: undefined,
   }
   let writes = 0
@@ -1181,7 +1225,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
   // now-keybindings-less document.
   let replaced = 0
   const failing: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
+    get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }),
     replace: async () => { replaced += 1; throw new Error('write refused') },
   }
   let t = setup({ tuiSettings: failing })
@@ -1208,7 +1252,7 @@ test('/keybindings reset awaits the settings write, applies the cleared config, 
     get: () => {
       okReads += 1
       if (okReads > 1) throw new Error('no second read allowed')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => { okReplaced += 1 },
   }
@@ -1269,7 +1313,7 @@ test('/keybindings reload is fail-soft: a throwing settings read keeps the last-
   const tuiSettings: TuiSettingsLike = {
     get: () => {
       if (failing) throw new Error('settings read exploded')
-      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
+      return { theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', iconStyle: 'emoji', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', keybindings: { 'app.input.steer': 'ctrl+x' } }
     },
     replace: async () => {},
   }
@@ -1304,6 +1348,184 @@ test('/preset <id> surfaces an indeterminate switch without retrying', async () 
   assert.match(result.text, /do not retry/)
   assert.deepEqual(t.presets.selected, [], 'an ambiguous switch is never retried')
   t.app.stop()
+})
+
+/* ── PR5 Slice B: /preset <id> through the OUTER command-settlement owner ──
+ * The two cases below are ONE semantic family. The handler's draft disposition
+ * is what the outer owner reads; a future "always suppress preset failures"
+ * regression must break the known-rejection case, and a future "always
+ * restore" regression must break the indeterminate case. */
+
+/** Drive the REAL `/preset` handler through the REAL outer command-settlement
+ *  owner (`executeHostCommandSubmission`) with a scripted preset port. */
+async function settlePresetThroughOuterOwner(
+  outcome: Awaited<ReturnType<PresetCatalog['selectSessionPreset']>>['outcome'],
+): Promise<{
+  readonly restored: readonly string[]
+  readonly fallbacks: number
+  readonly draft: string
+  readonly handlerText: string
+  readonly selects: number
+  readonly statusText: string
+  readonly view: string
+  /** The runner's run-local pending preset AFTER the settlement. */
+  readonly pendingPreset: string | undefined
+}> {
+  const commandId = 'cmd-preset-exec'
+  const selects: unknown[] = []
+  // The authoritative displayed/current preset baseline the command reads
+  // (`/preset status`, the picker's "← current" mark). It must never become the
+  // requested alternate on a refused or indeterminate switch.
+  const displayed = { preset: 'standard' as string | undefined }
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    width: 200,
+    currentPreset: () => displayed.preset,
+    presetsPort: {
+      available: () => true,
+      roster: async () => ({ presets: [{ id: 'standard' }, { id: 'alternate' }], defaultId: 'standard' }),
+      resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+      defaultId: () => 'standard',
+      selectSessionPreset: async (sessionId, presetId) => {
+        selects.push({ sessionId, presetId })
+        return { ownership: 'current', outcome }
+      },
+    },
+  })
+  const restored: string[] = []
+  const acks: string[] = []
+  let fallbacks = 0
+  let handlerText = ''
+  let settled!: () => void
+  const done = new Promise<void>(resolve => { settled = resolve })
+  const deps = {
+    isDisposed: () => false,
+    notify: () => {},
+    loggerError: () => {},
+    readDraft: () => t.app.getDraft(),
+    mergeDraftIntoEditor: (value: string) => {
+      const merged = mergeDraft(t.app.getDraft(), value)
+      t.app.setEditorText(merged)
+      return merged === value
+    },
+    restoreSubmissionDraft: (value: string) => {
+      restored.push(value)
+      t.app.setEditorText(mergeDraft(t.app.getDraft(), value))
+    },
+    consumeDraftAttachments: () => {},
+    draftHasAttachments: () => false,
+    pinDraftAttachments: () => () => {},
+    settleLocalSubmission: () => {},
+    settleSubmitAck: (reason: string) => { acks.push(reason); settled() },
+    notifySubmissionFailure: () => {},
+    isScopeCurrent: () => true,
+    refuseByTransitionFence: () => {},
+    lateAttachmentRefusal: () => undefined,
+    commandSubmitAttachments: () => [],
+    isTuiOwnedCommand: () => false,
+    commandPlaneOwnsLine: () => false,
+    submittedHostClaim: () => undefined,
+    commandSignal: () => new AbortController().signal,
+    invokeCommandPlane: async () => {
+      const handlerResult = await t.invokeCommand('preset', commandId, 'alternate') as { kind: string; text?: string }
+      handlerText = handlerResult.text ?? ''
+      return {
+        kind: 'committed' as const,
+        matched: true,
+        execution: { commandId, result: { kind: handlerResult.kind, text: handlerResult.text } },
+      }
+    },
+    beginCommandSettlement: () => {},
+    abortCommandSettlement: () => {},
+    settleCommandSettlement: () => {},
+    trackSettlementWork: () => {},
+    captureCommandHealthRef: () => undefined,
+    clearCommandHealthError: () => {},
+    recordCommandHealthError: () => {},
+    readCommandDraftDisposition: (id?: string) => t.surface.takeCommandDraftDisposition(id),
+    shouldConsumeAdvertisedMiss: () => false,
+    isIndeterminateSkillWrite: () => false,
+    startArtifactSave: () => {},
+    submitPrompt: async () => { fallbacks += 1 },
+    commandSessionId: () => 's1',
+    markTurnTransferred: () => {},
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }
+  // The submit gesture cleared the editor before the command was dispatched.
+  t.app.setEditorText('')
+  executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+    text: '/preset alternate',
+    toggled: '/preset alternate',
+    scope: { sessionId: 's1' } as never,
+    submitRequestId: 'req-preset',
+    submitAckToken: 3,
+    generation: 0,
+    localEchoInstalled: true,
+    wasAdvertisedAtSubmit: false,
+    parsedName: 'preset',
+    submitTurn: { wait: Promise.resolve(), release: () => {} },
+  })
+  await done
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(acks.length, 1, 'the gesture settled exactly once')
+  // Read the displayed/current preset through the REAL `/preset status`
+  // handler (the production consumer of `runner.currentPreset()`), NOT by
+  // echoing the fixture's own baseline back: an optimistic local preset write
+  // would show up in this result text.
+  const status = await t.runCommand('preset', 'status') as { readonly kind: string; readonly text?: string }
+  assert.equal(status.kind, 'success', 'the /preset status read must succeed')
+  return {
+    restored,
+    fallbacks,
+    draft: t.app.getDraft(),
+    handlerText,
+    selects: selects.length,
+    statusText: status.text ?? '',
+    view: await t.view(),
+    pendingPreset: t.pending.value,
+  }
+}
+
+test('PR5: a TRUE indeterminate /preset <id> does not restore the typed command at the outer settlement owner', async () => {
+  const result = await settlePresetThroughOuterOwner({
+    kind: 'indeterminate',
+    error: { code: 'agent-preset/select-indeterminate', message: 'recompose ran but the durable append failed' },
+  })
+  assert.deepEqual(result.restored, [], 'an indeterminate switch must never restore a retry-ready command')
+  assert.equal(result.draft, '', 'the editor does not regain /preset <id>')
+  assert.equal(result.fallbacks, 0, 'no agent-facing fallback prompt is launched')
+  assert.equal(result.selects, 1, 'the switch dispatched exactly once (no implicit retry)')
+  assert.match(result.view, /do not retry/)
+  // AC4: the displayed/current preset the REAL `/preset status` handler reports
+  // (the production consumer of the runner's current-preset read) is still the
+  // authoritative Session value, and no run-local retry-ready preset intent is
+  // staged.
+  assert.match(result.statusText, /preset: standard/u,
+    'an indeterminate switch must leave the handler-reported current preset unchanged')
+  assert.ok(!result.statusText.includes('alternate'),
+    'the requested alternate preset must never become the reported current preset')
+  assert.equal(result.pendingPreset, undefined,
+    'an indeterminate switch must not stage a run-local pending preset')
+})
+
+test('PR5: a KNOWN writer-held /preset <id> rejection restores the typed command at the outer settlement owner', async () => {
+  const result = await settlePresetThroughOuterOwner({
+    kind: 'rejected',
+    error: { code: 'session/writer-held', message: SESSION_WRITER_HELD_GUIDANCE, details: { sessionId: 's1' } },
+  })
+  assert.deepEqual(result.restored, ['/preset alternate'], 'a known rejection restores the complete typed command')
+  assert.equal(result.draft, '/preset alternate', 'the editor regains the command for manual recovery')
+  assert.equal(result.fallbacks, 0, 'a restored command is never additionally submitted as a prompt')
+  assert.equal(result.selects, 1, 'the refused switch is not retried')
+  assert.match(result.view, /already in use/, 'the centralized writer-held guidance is rendered')
+  // AC4 negative control: the same family also proves a KNOWN rejection leaves
+  // the handler-reported current preset exactly where it was.
+  assert.match(result.statusText, /preset: standard/u,
+    'a refused switch must leave the handler-reported current preset unchanged')
+  assert.ok(!result.statusText.includes('alternate'),
+    'the requested alternate preset must never become the reported current preset')
+  assert.equal(result.pendingPreset, undefined,
+    'a refused switch must not stage a run-local pending preset')
 })
 
 test('/preset commits a Host-blank selection even when the transcript has a turn', async () => {

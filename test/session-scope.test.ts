@@ -196,7 +196,7 @@ test('captureLive() returns a subject + string sessionId while live, undefined w
   assert.equal(live.authority.captureLive(), undefined)
 })
 
-test('a scope-bound read facade throws SupersededReadError on a stale scope; a valid absent value returns undefined', () => {
+test('a scope-bound read facade throws SupersededReadError on a stale scope; a valid absent value returns undefined', async () => {
   // The A3-2 frozen contract (§3.2): `undefined` means "the domain value is
   // absent", NEVER "stale". The helpers mirror the production providers (the
   // REAL scope authority + the same sync admission check).
@@ -209,7 +209,7 @@ test('a scope-bound read facade throws SupersededReadError on a stale scope; a v
   assert.notEqual(scope, undefined)
   // A valid scope with an absent domain value returns undefined.
   assert.equal(facts.currentApprovalOverride(scope!), undefined, 'no override is an absent value')
-  assert.equal(facts.lastAssistantText(scope!), undefined, 'no assistant message is an absent value')
+  assert.equal(await facts.lastAssistantText(scope!), undefined, 'no assistant message is an absent value')
   assert.deepEqual(facts.currentSessionActivity(scope!), { running: false })
   // The SAME session id on a NEW owner object is a different owner: every
   // scope-bound read must refuse instead of retargeting to the new owner.
@@ -221,7 +221,12 @@ test('a scope-bound read facade throws SupersededReadError on a stale scope; a v
     () => facts.currentSessionStats(scope!),
     () => facts.lastAssistantText(scope!),
   ]) {
-    assert.throws(read, (error: unknown) => error instanceof SupersededReadError,
+    // The async facades still throw their admission SYNCHRONOUSLY (before
+    // dispatch); the rejection path below proves the same contract for the
+    // post-await re-checks.
+    let observed: unknown
+    try { await read() } catch (error) { observed = error }
+    assert.ok(observed instanceof SupersededReadError,
       'a stale scope must throw SupersededReadError, never return undefined')
   }
   // A generation bump on the same owner is stale too.

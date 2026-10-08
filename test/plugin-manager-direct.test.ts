@@ -161,6 +161,20 @@ test('subscribeInstall delivers detached phase/log events and unsubscribes', () 
   assert.equal([...listeners.get('plugin-manager/install-log')!].length, 0)
 })
 
+test('subscribeInvalidation maps the official plugin-manager/changed and unsubscribes', () => {
+  const { ctx, listeners } = host(fakeService())
+  const port = new DirectPluginManagerPort(ctx)
+  let invalidations = 0
+  const off = port.subscribeInvalidation(() => { invalidations += 1 })
+
+  const changed = [...listeners.get('plugin-manager/changed')!][0]!
+  changed({ reason: 'bundle' })
+  assert.equal(invalidations, 1, 'the Host change is one invalidation hint, not business truth')
+
+  off()
+  assert.equal([...listeners.get('plugin-manager/changed')!].length, 0, 'dispose releases the subscription')
+})
+
 test('a missing pluginManager service fails loud, never silently', async () => {
   const port = new DirectPluginManagerPort({ get: () => undefined, on: () => () => {} })
   await assert.rejects(() => port.snapshot(), /pluginManager service unavailable/)
@@ -170,8 +184,8 @@ test('the TUI plugin-manager source never touches profile/process internals', ()
   // rc.2 owns run/process recovery internally (plan §14.3): the TUI must never
   // read the run registry, a process group, or the profile lockfile.
   for (const file of [
-    '../src/plugin-manager/controller.ts',
-    '../src/plugin-manager/host-registry.ts',
+    '../src/app/plugin-manager/controller.ts',
+    '../src/app/plugin-manager/host-registry.ts',
     '../src/runtime/plugin-manager-port.ts',
     '../src/runtime/direct/plugin-manager-direct.ts',
   ]) {

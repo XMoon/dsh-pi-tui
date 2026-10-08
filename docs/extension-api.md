@@ -425,6 +425,28 @@ carry the actual contract (see "API tiers" above):
 - **Unstable** (`./extensions/unstable`) carries NO compatibility guarantee;
   implementation may change at any time.
 
+### M3-5 PR1 contract decision — the live session vs. the display subject
+
+The Stable `SessionSnapshot` means **"the live session's identity and mode"**
+and that meaning is UNCHANGED in `API_VERSION = 2`: `sessionId`,
+`workspaceRoot`, `title`, `model`, `cwd`, `branch`, `permission`, `turns` and
+`steps` keep describing the LIVE session owner, and the activity
+`todoCount`/`todoSummary` keep describing the LIVE session's todo state.
+Mounting a subagent viewer never re-points those fields.
+
+The session the user is currently LOOKING AT (the viewed child while a child
+viewer is mounted) is published ADDITIVELY as the optional
+`session.displaySubject`: its own `sessionId`, `title`, `workspaceRoot`,
+`cwd`, `branch`, `model`, `permission`, `turns`, `steps`, `todoCount` and
+`todoSummary`, resolved from that child Session's own Session status. It is
+present only while `viewerMode` is true. Plugins that render surface chrome
+should prefer `displaySubject` when it is present; plugins that correlate
+durable state with the live session keep reading the live-session fields.
+
+The first-party todo dock item follows this rule (it renders
+`displaySubject.todoSummary` when a viewer is mounted). No existing field
+changed meaning and no version bump is required.
+
 A full modal editor (Vim-class) is NOT a Stable-API proof target — it
 belongs to the Advanced/Unstable roadmap. The vim test fixture validates the
 editor-extension seam: the public package is consumable, the replacement

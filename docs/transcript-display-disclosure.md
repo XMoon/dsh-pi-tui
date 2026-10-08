@@ -39,8 +39,8 @@ preset.
 
 ## Semantic classes
 
-`transcript-semantics.ts` classifies source messages without inspecting display
-text:
+`src/domain/transcript/semantics.ts` classifies source messages without
+inspecting display text:
 
 - `conversation`: user and assistant messages, including intermediate and final replies;
 - `process`: thinking, ordinary tool activity, and retries;
@@ -57,7 +57,7 @@ control node, not a synthetic Tool.
 ## Canonical transcript structure
 
 The semantic segmentation is computed once, preset-neutrally, in
-`transcript-projection.ts`:
+`src/tui/transcript/structure.ts` (TS6):
 
 ```text
 raw TranscriptMessage[]
@@ -70,7 +70,7 @@ projectTranscriptStructure()
         └── Context cluster  (raw-adjacent same-turn ambient Context run)
 ```
 
-- `transcript-projection.ts` never reads the preset, the surface, Ctrl+O,
+- `src/tui/transcript/structure.ts` never reads the preset, the surface, Ctrl+O,
   mouse, search state, expanded owners, default depth, Focus root, viewport or
   render width. It answers only where the raw chronology forms a Work span, a
   Context cluster or a standalone row.
@@ -147,7 +147,8 @@ projectTranscriptStructure()
 
 Compact, Full and expanded Focus all materialize this structure:
 
-- **Compact** (`compact-projection.ts`) is the materialization adapter: a
+- **Compact** (`src/tui/transcript/compact-projection.ts`) is the materialization
+  adapter: a
   collapsed Work span emits its header, an expanded span its members; clusters
   obey the surface capability.
 - **Full** emits Work flat (no Work chrome) with the shared cluster
@@ -160,10 +161,43 @@ Compact, Full and expanded Focus all materialize this structure:
   Collapsed Focus keeps its own hoist policy and substitutes the canonical
   cluster identity at its Focus-projected position.
 
+### TS6 owner map
+
+TS6 split the renderer-neutral presentation core from the PiTui mechanics
+without changing any product semantics. The canonical direction is
+`PiTui mechanics -> tui/transcript/** -> semantic transcript facts`, enforced by
+the `tui-transcript-imports-renderer-mechanics` architecture rule:
+
+| Fact / algorithm | Owner |
+|---|---|
+| canonical Work/Context structure (`projectTranscriptStructure`, member indexes) | `src/tui/transcript/structure.ts` |
+| container-owner vocabulary and equality | `src/tui/transcript/container-owner.ts` |
+| Context presentation kind + ambient clustering | `src/tui/transcript/context-structure.ts` |
+| structured Context cluster summary | `src/tui/transcript/context-summary.ts` |
+| Action source classifier, chronology winner, action stats | `src/tui/transcript/process-summary.ts` |
+| renderer-neutral Activity/Work summary | `src/tui/transcript/work-summary.ts` |
+| Compact materialization | `src/tui/transcript/compact-projection.ts` |
+| Focus projection and holdback/ordering policy | `src/tui/transcript/focus-projection.ts` |
+| narrow Work/Context search-reveal resolution | `src/tui/transcript/reveal.ts` |
+| PiTui Focus card + header/body formatters | `src/tui/components/transcript/focus-activity.ts` |
+| PiTui Activity card | `src/tui/components/transcript/compact-work.ts` |
+| PiTui compact slot/Preparing/action presentation + cache signatures | `src/tui/components/transcript/compact-process-preview.ts` |
+| PiTui Context cluster header and standalone Context rows | `src/tui/components/transcript/{context-cluster,context-row}.ts` |
+| rendered-row search geometry/highlight | `src/tui/components/transcript/search-presentation.ts` |
+
+`tui/transcript/**` imports no PiTui, Tern, `TuiApp`, theme/icons, renderer
+registry or concrete TUI component, and since TS7 it reads the semantic owners
+from `src/domain/transcript/**` instead of the `src/transcript.ts` facade. The
+Context semantic authority (`contextFormOf` / `isAmbientContext`) now lives in
+`src/domain/transcript/context-semantics.ts`; TS8-F5 moved the overlay state to
+`src/app/surface/search-overlay.ts` and the interaction rendering to
+`src/tui/interaction/transcript-search.ts` (search semantics stay in
+`src/domain/transcript/search.ts`).
+
 ## Compact projection
 
 Compact materializes the canonical Work spans as presentation-only `Work` cards
-(`compact-projection.ts`):
+(`src/tui/transcript/compact-projection.ts`):
 
 ```text
 raw:      User · Thinking A · Tool A · Assistant A · Thinking B · Tool B · Notice · Tool C · Assistant final
@@ -181,9 +215,32 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   row (presenter-first semantic display, `focusToolDisplay` fallback). There is
   deliberately **no Message slot**: Assistant intermediate narration is already
   visible outside the span. Absent facts render no placeholder row.
-- Counts and previews describe the SPAN, never the whole turn. Span-local
-  duration is omitted: durable rows carry no per-row timestamps, and presenting
-  the whole-turn Focus duration as a span duration would be wrong.
+- **Historical compaction (2026-09-29):** only the LIVE / Preparing / TRUE
+  latest Work of the current window keeps those previews. A settled historical
+  span collapses to its header only, and a historical span whose only evidence
+  is Thinking renders the presentation-only identity `Thought <duration>`
+  instead of a semantically empty `Activity` (still the same
+  `TranscriptWorkSpan`; never a semantic class, stat or persisted state — and
+  the latest think-only span stays `Activity` so the identity never flips
+  while streaming). `Thought` means NO Action evidence at all: an orphan tool
+  result owns the collapsed `Action:` diagnostic while counting zero actions,
+  so such a span keeps the `Activity` identity (header-only, preview hidden).
+  This policy is COMPACT-ONLY: expanded Focus materializes the same canonical
+  spans through the same component path, and its nested Work keeps the
+  original header + Think/Action contract (`Thought` never appears outside
+  Compact). The "true latest" test is the window authority
+  (`transcriptWindow.hasNewer !== true` AND the span is the projected tail):
+  a history page's last Work is that page's tail, not the global latest. The
+  policy bit (`showPreview`) joins the Compact Work component-cache signature,
+  so the latest → historical transition repaints even when the span's own
+  summary is unchanged, in both window-paging directions.
+  Compact current work is observable; historical work is scannable; detail
+  remains available on demand.
+- Counts and previews describe the SPAN, never the whole turn. The header
+  duration is the span's OWN wall clock from its members' timing evidence;
+  it is omitted only when no member carries a `TranscriptTiming` sidecar
+  (unknown is omitted, never `0s`) — never faked or stretched from the
+  whole-turn Focus duration.
 - Expanding a `Work` span reveals its raw member rows through the existing
   message renderers; Thinking and tool-local detail keep their own orthogonal
   disclosure.
@@ -358,16 +415,19 @@ class:
 - Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK by
   the producer-declared `form` and raw position, never by source kind: a
   mid-turn `form:'notice'` (a background job or subagent settling while the
-  Agent already works) is hidden inside the collapsed Thought and restored at
-  its exact raw position when the Thought opens; a notice inside the turn's
-  opening foundation (the `thoughtLeadBoundary()` area) stays visible because it
-  explains why the turn started; a mid-turn relay stays visible because it is
-  external Agent-authored input. Compact keeps every notice standalone and Full
-  keeps full chronology.
-- A hidden mid-turn notice is reachable by search through a presentation-only
-  temporary reveal (`projectFocus` `forcedVisible`): it surfaces that row without
-  opening the Thought and without writing a manual owner, so an ordinary dismiss
-  restores the collapsed view with no residue.
+  Agent already works) renders AFTER the Thought as a visible post-Thought row
+  (2026-09-30 closure — it is visible process feedback, never hidden inside
+  the collapsed Thought and never a candidate for its Action slot); a notice
+  inside the turn's opening foundation (the `thoughtLeadBoundary()` area) stays
+  BEFORE the Thought because it explains why the turn started; a mid-turn relay
+  stays visible because it is external Agent-authored input. Expanded Focus
+  restores every notice at its exact raw position. Compact keeps every notice
+  standalone and Full keeps full chronology.
+- A search hit inside a mid-turn notice needs no Focus-root reveal and no
+  special forced-visible path: the row is already visible outside the Thought,
+  so ordinary search addresses it like any other surfaced Context card. A match
+  inside the folded Notice payload still opens through the row's own ordinary
+  message disclosure.
 - Full keeps the original transcript chronology, with ambient clusters
   substituted in place.
 - Context never enters the Focus Think/Tool/Message slots or the tool counts.
@@ -438,7 +498,8 @@ capability, ancestry and reveal routing are shared. F6 does NOT:
 
 ### Neutral container ownership (F6)
 
-`src/transcript-disclosure.ts` owns the ONE container-owner vocabulary
+`src/tui/transcript/container-owner.ts` (TS6; formerly
+`src/transcript-disclosure.ts`) owns the ONE container-owner vocabulary
 (`focus-root` by turn; `work` / `context-cluster` by canonical first-member
 object identity). Row ancestry is generated by the projection that produced the
 row — never reconstructed from screen geometry. The generic nearest-container
@@ -446,8 +507,9 @@ rule resolves a trailing blank spacer to the DEEPEST container the row and the
 next VISIBLE row share: an internal Work spacer collapses that Work, a spacer
 between nested Work and a Thought-only row collapses the Thought, a cluster
 spacer collapses the cluster, and a boundary/global blank is inert. Concrete
-row targets (long-user control, PTC sub-call, Workflow, attachment, secondary
-card) always win before the container fallback.
+local targets (the long-user bubble as a whole — collapsed or expanded — its
+tail control, PTC sub-call, Workflow, attachment,
+secondary card) always win before the container fallback.
 
 ### Regular-surface disclosure ownership (F6)
 
@@ -539,7 +601,8 @@ under bad input, long sessions and rapid live updates:
 - **Search / disclosure.** A flat/fail-open container never mints an inoperable
   owner; a surface switch during search re-checks the capability; a topology
   mutation re-resolves the current container path instead of a stale identity;
-  and a hidden mid-turn notice is reachable through the temporary reveal above.
+  and a mid-turn notice is already visible outside the collapsed Thought, so
+  search reaches it through the ordinary row/message disclosure paths.
 - **Width / grapheme.** Every F4 row family (Work, pending Preparing rows,
   Context cluster, notice, relay, recall) obeys the framebuffer width contract
   at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and

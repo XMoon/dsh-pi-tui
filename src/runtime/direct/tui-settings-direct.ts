@@ -44,9 +44,11 @@ export interface TuiConfigRefs {
   readonly homeEndKeys: Volatile<string>
   readonly displayPreset: Volatile<string | undefined>
   readonly progressUpdates: Volatile<string | undefined>
+  readonly gitAttribution: Volatile<string | undefined>
   readonly responseStyle: Volatile<string | undefined>
   readonly notificationMode: Volatile<string>
   readonly notificationMethod: Volatile<string>
+  readonly terminalProgress: Volatile<string>
   readonly wheelScrollLines: Volatile<string>
   readonly keybindings: Volatile<unknown>
   /** Internal one-shot legacy-migration marker; never a product row. */
@@ -118,9 +120,11 @@ const DIFF_FIELDS: readonly (keyof TuiConfigRefs)[] = [
   'homeEndKeys',
   'displayPreset',
   'progressUpdates',
+  'gitAttribution',
   'responseStyle',
   'notificationMode',
   'notificationMethod',
+  'terminalProgress',
   'wheelScrollLines',
   'keybindings',
 ]
@@ -155,9 +159,11 @@ export class DirectTuiSettings implements TuiSettingsConfig {
       homeEndKeys: this.refs.homeEndKeys.get(),
       displayPreset: this.refs.displayPreset.get(),
       progressUpdates: this.refs.progressUpdates.get(),
+      gitAttribution: this.refs.gitAttribution.get(),
       responseStyle: this.refs.responseStyle.get(),
       notificationMode: this.refs.notificationMode.get(),
       notificationMethod: this.refs.notificationMethod.get(),
+      terminalProgress: this.refs.terminalProgress.get(),
       wheelScrollLines: this.refs.wheelScrollLines.get(),
       keybindings: this.refs.keybindings.get(),
     }

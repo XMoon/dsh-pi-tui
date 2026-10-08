@@ -1,14 +1,16 @@
 /**
  * Read-only Task Center adapter over the published DSH 0.1.7-rc.2 Client model.
  *
- * Child membership comes from the official Client Session projections
- * (`projectionsBySession[parentId].values.subagentCatalog`), parent
- * availability from the official Session list facts, and the status-only
- * job roster from the official ClientJobs service through a retained
- * `watchRows(sessionId)` reference — the reader owns that watch for the
- * session it last read and releases it on switch/dispose. This module
- * never calls raw Remotes, opens a Session, or recreates a store; the
- * projection single-flight belongs to the official Client.
+ * Descendant membership and order come from a recursive walk of the official
+ * Client Session projections (`projectionsBySession[id].values.subagentCatalog`)
+ * mirroring the upstream `listDescendants` semantics: stable pre-order, exact
+ * `parentId`/`depth`, branch diagnostics, and `hasChildren` from the child's
+ * own catalog. Parent availability and per-child activity come from the
+ * official Session list facts; the status-only job roster comes from the
+ * official ClientJobs service through a retained `watchRows(sessionId)`
+ * reference — the reader owns that watch for the session it last read and
+ * releases it on switch/dispose. Listing never retains or opens a child
+ * Session; the projection single-flight belongs to the official Client.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/task-read-remote
  */
@@ -58,7 +60,7 @@ export interface RemoteTaskJobsSource {
   watchRows(sessionId: string): () => void
 }
 
-/** One official client-safe direct-child discovery row
+/** One official client-safe catalog row
  * (`SubagentCatalogEntry`): identity and durable mode, no activity. */
 export interface RemoteSubagentCatalogEntry {
   readonly id: string
@@ -85,31 +87,13 @@ function generationMatches(
   return Object.is(captured, generation.getSnapshot())
 }
 
-function detachChild(
-  entry: TaskSubagentEntry,
-  activity: 'running' | 'inactive',
+function detachDiagnostic(
+  id: string,
+  reason: 'corrupt' | 'unsupported' | 'unavailable',
+  parentId: string,
+  depth: number,
 ): TaskSubagentEntry {
-  return entry.kind === 'diagnostic'
-    ? Object.freeze({
-      kind: 'diagnostic',
-      id: entry.id,
-      reason: entry.reason,
-    })
-    : Object.freeze({
-      kind: 'child',
-      id: entry.id,
-      ...(entry.label === undefined ? {} : { label: entry.label }),
-      mode: entry.mode,
-      activity,
-      // Neither official read face exposes a descendant fact: the Direct
-      // listChildren entries (SubagentCatalogEntry) carry none, and a
-      // client-side "child's own projection is loaded and non-empty"
-      // derivation would be load-dependent — diverging from Direct and
-      // flipping under projection cache pressure. Both readers report
-      // `false` (no known children); expandability belongs to the Task
-      // Browser's own descendant navigation, not this read face.
-      hasChildren: false,
-    })
+  return Object.freeze({ kind: 'diagnostic', id, reason, parentId, depth })
 }
 
 function detachJob(job: RemoteJobView): TaskJobEntry {
@@ -124,11 +108,17 @@ function detachJob(job: RemoteJobView): TaskJobEntry {
   })
 }
 
+interface CatalogPosition {
+  readonly entry: RemoteSubagentCatalogEntry
+  readonly parentId: string
+  readonly depth: number
+}
+
 /**
- * Read one settled direct-child catalog, the parent availability fact, and
- * the status-only job roster of one session. The roster watch is retained
- * across reads for the SAME parent and switches atomically when the read
- * targets another session.
+ * Read the full descendant catalog, the parent availability fact, and the
+ * status-only job roster of one session. The roster watch is retained across
+ * reads for the SAME parent and switches atomically when the read targets
+ * another session.
  */
 export class RemoteTaskReader implements TaskReader {
   private readonly sessions: RemoteTaskSessionsSource
@@ -190,7 +180,75 @@ export class RemoteTaskReader implements TaskReader {
       && generationMatches(this.generation, capturedGeneration)
   }
 
-  async readDirectChildren(
+  /**
+   * Read one session's settled durable catalog. A missing, idle, or loading
+   * projection is NEVER an authoritative empty membership, so the read
+   * re-enters the official single-flight `refreshProjections` until the
+   * projection settles. Two settled failure shapes are handled explicitly:
+   *
+   * - `state === 'error'`: the official `refreshProjections` is the released
+   *   RETRY face (it short-circuits only on a settled `ready`), so this read
+   *   re-enters it ONCE before giving up — otherwise one transient failure would
+   *   turn every later read (including the Task Center's own retry) into a
+   *   permanent failure;
+   * - `state === 'ready'` WITHOUT `subagentCatalog`: the official Client clears
+   *   the projection store and still settles `ready` when `session.projections`
+   *   answers a null/missing Session, so this is a REAL read failure — exactly
+   *   the one upstream `listChildren` reports as
+   *   `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE`. It must never read as an
+   *   authoritative empty catalog (root) or as a normal inactive child (branch).
+   *
+   * Returns `undefined` when this read was superseded or the Connection
+   * generation changed.
+   */
+  private async readCatalog(
+    sessionId: string,
+    capturedGeneration: RemoteConnectionGeneration,
+    epoch: number,
+    signal: AbortSignal | undefined,
+  ): Promise<readonly RemoteSubagentCatalogEntry[] | undefined> {
+    let retriedOnError = false
+    for (;;) {
+      signal?.throwIfAborted()
+      if (!this.isCurrent(capturedGeneration, epoch)) return undefined
+      const snapshot = this.sessions.list.getSnapshot()
+      const projection = snapshot.projectionsBySession[sessionId]
+      const state = projection === undefined
+        ? 'loading'
+        : projection.state === 'idle'
+          ? projection.values.subagentCatalog === undefined ? 'loading' : 'ready'
+          : projection.state
+      if (state === 'error') {
+        if (retriedOnError) throw projection?.error
+        retriedOnError = true
+        try {
+          await this.sessions.refreshProjections(sessionId)
+        } catch (error) {
+          signal?.throwIfAborted()
+          if (!this.isCurrent(capturedGeneration, epoch)) return undefined
+          throw error
+        }
+        continue
+      }
+      if (state === 'loading') {
+        try {
+          await this.sessions.refreshProjections(sessionId)
+        } catch (error) {
+          signal?.throwIfAborted()
+          if (!this.isCurrent(capturedGeneration, epoch)) return undefined
+          throw error
+        }
+        continue
+      }
+      const entries = projection!.values.subagentCatalog
+      if (entries === undefined) {
+        throw new Error(`the subagentCatalog projection is unavailable for Session ${sessionId}`)
+      }
+      return entries
+    }
+  }
+
+  async readDescendants(
     parentSessionId: string,
     signal?: AbortSignal,
   ): Promise<TaskReadSnapshot | undefined> {
@@ -206,35 +264,92 @@ export class RemoteTaskReader implements TaskReader {
     // roster until the stream delivers.
     this.ensureWatch(parentSessionId)
 
-    let settled: {
-      readonly entries: readonly RemoteSubagentCatalogEntry[]
-    } | undefined
-    while (settled === undefined) {
+    // The ROOT catalog is read first and a root failure throws: a root
+    // projection error is never converted to an authoritative empty tree.
+    const rootEntries = await this.readCatalog(parentSessionId, capturedGeneration, epoch, signal)
+    if (rootEntries === undefined) return undefined
+
+    const stack: CatalogPosition[] = rootEntries
+      .map(entry => ({ entry, parentId: parentSessionId, depth: 1 }))
+      .reverse()
+    const visited = new Set<string>([parentSessionId])
+    const descendants: TaskSubagentEntry[] = []
+    for (let position = stack.pop(); position !== undefined; position = stack.pop()) {
       signal?.throwIfAborted()
       if (!this.isCurrent(capturedGeneration, epoch)) return undefined
-      const snapshot = this.sessions.list.getSnapshot()
-      const projection = snapshot.projectionsBySession[parentSessionId]
-      const state = projection === undefined
-        ? 'loading'
-        : projection.state === 'idle'
-          ? projection.values.subagentCatalog === undefined ? 'loading' : 'ready'
-          : projection.state
-      if (state === 'error') throw projection?.error
-      // The official Client owns the projection single-flight; re-enter
-      // its explicit read until the projection is settled. A missing,
-      // idle, or loading projection is NEVER an authoritative empty
-      // membership.
-      if (state === 'loading') {
-        try {
-          await this.sessions.refreshProjections(parentSessionId)
-        } catch (error) {
-          signal?.throwIfAborted()
-          if (!this.isCurrent(capturedGeneration, epoch)) return undefined
-          throw error
-        }
+      const { entry, parentId, depth } = position
+      if (visited.has(entry.id)) continue
+      visited.add(entry.id)
+      // The child's OWN catalog settles `hasChildren` and drives recursion. Its
+      // failure stops ONLY this branch and becomes a diagnostic (see the catch
+      // below): the branch-isolation policy is the owner-ruled Remote contract, and
+      // only a real caller cancellation propagates.
+      let children: readonly RemoteSubagentCatalogEntry[] | undefined
+      try {
+        children = await this.readCatalog(entry.id, capturedGeneration, epoch, signal)
+      } catch (error) {
+        // A caller cancellation propagates; it is never a branch diagnostic.
+        signal?.throwIfAborted()
+        if (!this.isCurrent(capturedGeneration, epoch)) return undefined
+        const code = error instanceof Error && 'code' in error ? error.code : undefined
+        // BRANCH-LOCAL DEGRADATION (M3-5 PR2 owner ruling): every shape of "this
+        // child's catalog cannot be read" — the missing-Session `ready` baseline
+        // (see `readCatalog`), a `session/projections-unavailable` projection
+        // failure, and any foreign wire failure — degrades to a branch-scoped
+        // diagnostic whose siblings stay visible. This is the OWNER-CHOSEN product
+        // contract for the Remote surface (one unreadable child catalog must not
+        // erase the whole descendant tree); it is NOT a claim of behaviour parity
+        // with the current upstream implementation, and the tension is recorded on
+        // BOTH sides: the current Host `listDescendants()` re-throws
+        // `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` (a whole-traversal abort), while
+        // the Web mapper keeps `ready` but falls back to
+        // `entries = (values.subagentCatalog ?? [])` and therefore renders the
+        // ready/key-absent shape as a KNOWN LEAF (`isKnownLeaf` = `ready &&
+        // entries.length === 0`). Only the error/loading shapes are expandable and
+        // retryable there. Caller cancellation is the ONE exception (handled above).
+        //
+        // CARRIER LIMIT (recorded, not papered over): the rc.2 Client collapses the
+        // Host `null` (missing Session) and a non-null baseline that omits
+        // `subagentCatalog` into the SAME `ready + key absent` state, so exact
+        // failure-scope parity with the Host rethrow is NOT representable, and its
+        // provenance MUST NOT be inferred from Session-list membership, catalog
+        // presence, messages, logs or any other authority. This failure SCOPE is
+        // user-visible: on the Direct special case the whole Task read fails, while
+        // the Remote surface degrades one branch and keeps its siblings. Corrupt /
+        // source-conflicting SessionQuery failures likewise collapse to
+        // `gateway/internal`, so `corrupt` is never inferred from shape: the
+        // representable answer is `unavailable`.
+        descendants.push(detachDiagnostic(
+          entry.id,
+          code === 'SESSION_QUERY_CORRUPT_SESSION' || code === 'SESSION_QUERY_SOURCE_CONFLICT'
+            ? 'corrupt' : 'unavailable',
+          parentId,
+          depth,
+        ))
         continue
       }
-      settled = { entries: projection!.values.subagentCatalog ?? [] }
+      if (children === undefined) return undefined
+      if (entry.mode === 'unknown') {
+        // An unclassified child stays non-interactive, but its readable
+        // catalog is still traversed.
+        descendants.push(detachDiagnostic(entry.id, 'unsupported', parentId, depth))
+      } else {
+        descendants.push(Object.freeze({
+          kind: 'child',
+          id: entry.id,
+          ...(entry.label === undefined ? {} : { label: entry.label }),
+          mode: entry.mode,
+          activity: this.sessions.list.getSnapshot().byId[entry.id]?.running === true
+            ? 'running' : 'inactive',
+          hasChildren: children.length > 0,
+          parentId,
+          depth,
+        }))
+      }
+      // Catalog event order defines siblings; the stack visits the first one next.
+      for (const child of [...children].reverse()) {
+        stack.push({ entry: child, parentId: entry.id, depth: depth + 1 })
+      }
     }
 
     if (!this.isCurrent(capturedGeneration, epoch)) return undefined
@@ -249,33 +364,12 @@ export class RemoteTaskReader implements TaskReader {
     // while still existing, so `ids`-only membership would understate. It
     // is knowledge that the session exists, not that it is running.
     const parentAvailable = snapshot.byId[parentSessionId] !== undefined
-    const children = Object.freeze(settled.entries.map(entry => detachChild(
-      {
-        kind: 'child',
-        id: entry.id,
-        ...(entry.label === undefined ? {} : { label: entry.label }),
-        // The port's mode vocabulary is the two known modes; an official
-        // 'unknown' catalog row maps to the READ-ONLY presentation (never
-        // offer follow-up interaction for an unclassified child).
-        mode: entry.mode === 'unknown' ? 'one-shot' : entry.mode,
-        activity: 'inactive',
-        // Neither official read face exposes a descendant fact: the Direct
-        // listChildren entries (SubagentCatalogEntry) carry none, and a
-        // client-side "child's own projection is loaded and non-empty"
-        // derivation would be load-dependent — diverging from Direct and
-        // flipping under projection cache pressure. Both readers report
-        // `false` (no known children); expandability belongs to the Task
-        // Browser's own descendant navigation, not this read face.
-        hasChildren: false,
-      },
-      snapshot.byId[entry.id]?.running === true ? 'running' : 'inactive',
-    )))
     const jobs = Object.freeze((this.jobs.state.getSnapshot().rows[parentSessionId] ?? []).map(detachJob))
     if (!this.isCurrent(capturedGeneration, epoch)) return undefined
     return Object.freeze({
       parentSessionId,
       parentAvailable,
-      children,
+      descendants: Object.freeze(descendants),
       jobs,
     })
   }

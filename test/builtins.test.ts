@@ -22,6 +22,7 @@ import { Text } from '@xmoon76/pi-tui'
 import { apply as applyExtensionHost } from '../src/extensions.ts'
 import type { PiTuiExtensionService } from '../src/extensions.ts'
 import { apply as applyBuiltins } from '../src/builtins.ts'
+import { enterChildDisplaySubject } from './support/display-subject.ts'
 import type { HeaderBadge } from '../src/extension/public-types.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -33,7 +34,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -237,7 +238,7 @@ test('the builtins render into a live TuiApp and the turn/step counter tracks st
 
     // State change: the host-native item re-composes from the projected
     // usage facts.
-    app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 3, steps: 7, statsLine: '' })
+    app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 3, steps: 7 })
     await settle()
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
@@ -548,5 +549,75 @@ test('the version badge shows the dsh version first, then the tui- bundle versio
     }
   } finally {
     process.argv[1] = previousArgv
+  }
+})
+
+test('M3-5 PR1: the builtin todo dock renders the DISPLAY SUBJECT summary while a child viewer is mounted', async () => {
+  // Contract decision (M3-5 PR1): `activity.todoSummary` keeps its v2 meaning
+  // (the LIVE session's list). The chrome follows the display subject through
+  // the ADDITIVE `session.displaySubject` projection, which the first-party
+  // builtin dock item prefers while a child viewer is mounted.
+  const ctx = new Context()
+  let fixture: LiveBuiltinApp | undefined
+  try {
+    fixture = await attachBuiltinApp(ctx)
+    fixture.app.setTodoSummary([{ content: 'live todo', status: 'in_progress' }])
+    await settleRender(fixture.app, fixture.vt)
+    let view = fixture.vt.getViewport().join('\n')
+    assert.ok(view.includes('live todo'), `the live summary renders first:\n${view}`)
+
+    enterChildDisplaySubject(fixture.app, {
+      id: 'child-1', label: 'child', mode: 'continuable', activity: 'running',
+      cwd: '/child-ws', turns: 1, steps: 1,
+      todos: [{ content: 'child todo', status: 'in_progress' }],
+    })
+    await settleRender(fixture.app, fixture.vt)
+    const state = fixture.host.state()
+    assert.ok(state.activity.todoSummary?.includes('live todo'),
+      `the live session keeps its own summary (v2): ${state.activity.todoSummary}`)
+    assert.ok(state.session.displaySubject?.todoSummary?.includes('child todo'),
+      `the display subject carries the child summary: ${state.session.displaySubject?.todoSummary}`)
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(view.includes('child todo'), `the dock must render the DISPLAY SUBJECT summary:\n${view}`)
+    assert.ok(!view.includes('live todo'), `the live summary must not stay on the child chrome:\n${view}`)
+
+    // Opening the child's todo panel hides the summary: the deletion-only
+    // republish (the summary key disappears) must reach the dock, not reuse the
+    // stale nested snapshot (M3-5 PR1 review R8).
+    fixture.app.toggleTodoPanel()
+    await settleRender(fixture.app, fixture.vt)
+    const panelState = fixture.host.state()
+    assert.equal(panelState.session.displaySubject?.todoSummary, undefined,
+      'the open panel clears the published display-subject summary')
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(!view.includes('☑'), `the dock summary must hide while the child panel is open:\n${view}`)
+    assert.ok(view.includes('child todo'), `the panel itself still renders the child list:\n${view}`)
+    fixture.app.toggleTodoPanel()
+    await settleRender(fixture.app, fixture.vt)
+    assert.ok(fixture.host.state().session.displaySubject?.todoSummary?.includes('child todo'),
+      'closing the panel restores the published summary')
+
+    // The choice is by SUBJECT, never by field presence: a mounted display
+    // subject with an EMPTY todo list has no summary, and the item must HIDE —
+    // never fall back to the live session's summary (which would print the
+    // parent's list on the child surface).
+    enterChildDisplaySubject(fixture.app, {
+      id: 'child-2', label: 'child two', mode: 'continuable', activity: 'running',
+      cwd: '/child-2-ws', turns: 1, steps: 1,
+      todos: [],
+    })
+    await settleRender(fixture.app, fixture.vt)
+    const emptyState = fixture.host.state()
+    assert.equal(emptyState.session.displaySubject?.todoCount, 0, 'an empty child list reads count 0')
+    assert.equal(emptyState.session.displaySubject?.todoSummary, undefined, 'and no summary')
+    assert.ok(emptyState.activity.todoSummary?.includes('live todo'),
+      `the LIVE summary is still the live session’s: ${emptyState.activity.todoSummary}`)
+    view = fixture.vt.getViewport().join('\n')
+    assert.ok(!view.includes('live todo'), `an empty child list must HIDE the dock, never show the parent’s summary:\n${view}`)
+    assert.ok(!view.includes('☑'), `the dock item must be hidden entirely:\n${view}`)
+  } finally {
+    for (const runtime of [...ctx.registry.values()]) {
+      for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
+    }
   }
 })

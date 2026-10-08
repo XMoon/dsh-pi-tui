@@ -7,6 +7,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -14,23 +16,25 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { TuiApp } from '../src/tui-app.ts'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import type { FooterLayoutV1 } from '../src/footer/types.ts'
-import type { FooterCustomItemSettings } from '../src/footer/custom-items.ts'
-import { FooterDynamicItemRuntime, activeFooterItemIds, executableCommandItemIds } from '../src/footer/dynamic-item-runtime.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
+import type { FooterLayoutV1 } from '../src/tui/footer/presentation-types.ts'
+import type { FooterCustomItemSettings } from '../src/domain/footer/custom-items.ts'
+import { FooterDynamicItemRuntime } from '../src/tui/footer/dynamic-item-runtime.ts'
+import { activeFooterItemIds, executableCommandItemIds } from '../src/domain/footer/custom-items.ts'
 import { serializeTuiSettingsMutation } from '../src/runtime/config-port.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -74,7 +78,7 @@ function syncRuntimeApply(
   savedCustomItems: readonly FooterCustomItemSettings[] | undefined,
   savedLayout: FooterLayoutV1 | undefined,
 ): void {
-  const trusted = (savedCustomItems ?? []).filter((item): item is import('../src/footer/custom-items.ts').FooterCustomCommandItemSettings => item.kind === 'command')
+  const trusted = (savedCustomItems ?? []).filter((item): item is import('../src/domain/footer/custom-items.ts').FooterCustomCommandItemSettings => item.kind === 'command')
   const authorized = savedLayout === undefined ? new Set<string>() : activeFooterItemIds(savedLayout)
   const executable = executableCommandItemIds(trusted, authorized, app.getEffectiveFooterLayout())
   runtime.sync(trusted, executable)
@@ -118,7 +122,7 @@ function fakeSettings(initial: { footer: string; footerLayout?: unknown; footerF
         localShellSandbox: 'bypass',
         homeEndKeys: 'viewport',
         wheelScrollLines: '1',
-        notificationMode: 'unfocused', notificationMethod: 'auto',
+        notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
       }),
       replace: (next: { footer: string; footerLayout?: unknown; footerFallbackMode?: string; footerCustomItems?: unknown }) => {
         doc.footer = next.footer
@@ -143,7 +147,7 @@ test('footer, focus, and fullscreen writes share one FIFO at the live commit poi
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
+    notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
   }
   const pending: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
   const settings: TuiSettingsLike = {
@@ -188,7 +192,7 @@ test('a failed whole-document settings write does not block later queued writes'
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
+    notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
   }
   let calls = 0
   let rejectFirst: (error: Error) => void = () => {}
@@ -238,6 +242,8 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -248,14 +254,17 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: {} as never,
@@ -279,11 +288,11 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -306,7 +315,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
       }
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   assert.ok(def?.handler !== undefined, 'footer handler missing')
   const result = await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
@@ -377,7 +386,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     localShellSandbox: 'bypass',
     homeEndKeys: 'viewport',
     wheelScrollLines: '1',
-    notificationMode: 'unfocused', notificationMethod: 'auto',
+    notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto',
     footerCustomItems: userRaw,
   }
   const pendingWrites: Array<{ next: ReturnType<TuiSettingsLike['get']>; resolve: () => void }> = []
@@ -416,6 +425,8 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -426,13 +437,16 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     settleIntent: () => {},
     tuiSettings: settings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: {} as never,
@@ -456,11 +470,11 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -477,7 +491,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
       if (doc !== undefined) applied.push({ footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems })
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const footer = commands.defs.find(entry => entry.name === 'footer')
   const settingsCommand = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(footer?.handler !== undefined)
@@ -580,6 +594,8 @@ test('/footer Esc cancels without writing', async () => {
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -590,14 +606,17 @@ test('/footer Esc cancels without writing', async () => {
     settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -616,7 +635,7 @@ test('/footer Esc cancels without writing', async () => {
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -625,7 +644,7 @@ test('/footer Esc cancels without writing', async () => {
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (doc) => { if (doc !== undefined) applied.push({ ...doc }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -659,6 +678,8 @@ test('/footer starts from the persisted custom layout when active', async () => 
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -669,14 +690,17 @@ test('/footer starts from the persisted custom layout when active', async () => 
     settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -695,7 +719,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -704,7 +728,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -739,6 +763,8 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -749,13 +775,16 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -774,7 +803,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -790,7 +819,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
       }
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -842,7 +871,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
   // A settings document whose replace REJECTS (the write fails).
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -850,6 +879,8 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -860,14 +891,17 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     settleIntent: () => {},
     tuiSettings: failingSettings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
 
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -886,7 +920,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -895,7 +929,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'footer')
   await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
@@ -932,7 +966,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
   const failingSettings: TuiSettingsLike = {
-    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
+    get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
     replace: () => { throw new Error('write failed') },
   }
   const applied: Array<{ footer: string }> = []
@@ -942,6 +976,8 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -952,13 +988,16 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     settleIntent: () => {},
     tuiSettings: failingSettings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -977,7 +1016,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -986,7 +1025,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   // Open the REAL /settings picker (the registered handler builds the
@@ -1021,6 +1060,8 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     ctx, app, diag: {} as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1031,13 +1072,16 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     settleIntent: () => {},
     tuiSettings: settings.value,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
     copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -1056,7 +1100,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     setModelSelectionPending: () => {},
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
-    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+    refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
     openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1065,7 +1109,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     enterView: async () => {}, requestExit: () => {}, extensions: undefined, exit: () => {},
     applyFooterSettings: (d) => { if (d !== undefined) applied.push({ ...d }) },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
@@ -1117,7 +1161,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     get: () => ({
       theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'on',
       busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport',
-      wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto', footerCustomItems: [known],
+      wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto', footerCustomItems: [known],
     }),
     replace: () => new Promise<void>((_resolve, reject) => { rejectReplace = reject }),
   }
@@ -1129,6 +1173,8 @@ test('/footer save failures notify exactly once (validation and write failures)'
     diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => undefined, () => 0),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     currentSessionId: undefined,
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1139,13 +1185,16 @@ test('/footer save failures notify exactly once (validation and write failures)'
     settleIntent: () => {},
     tuiSettings: settings,
     agents: {} as never,
-    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
     sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-    interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     hostFile: new DirectHostFilePort(() => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     cwd: '/ws',
     sessionCwd: () => '/ws',
     imageStore: {} as never,
@@ -1169,11 +1218,11 @@ test('/footer save failures notify exactly once (validation and write failures)'
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -1190,7 +1239,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
       if (doc !== undefined) applied.push({ footerLayout: doc.footerLayout })
     },
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const footer = commands.defs.find(entry => entry.name === 'footer')
   assert.ok(footer?.handler !== undefined)
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
@@ -1244,6 +1293,8 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
+      hostShellCompletion: true,
+      transcriptExportAvailable: true,
       currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1254,13 +1305,16 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
     settleIntent: () => {},
       tuiSettings: settings.value,
       agents: {} as never,
-      sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+      sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
       sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-      interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
       catalog: new DirectCatalogPort(ctx as never, () => undefined),
       config: new DirectConfigPort(ctx as never, undefined, () => undefined),
       hostFile: new DirectHostFilePort(() => undefined),
       commandRegistry: ctx.get('commands') as never,
+      clientCommands: createClientCommandRegistry(parseCommand),
       cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -1279,7 +1333,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       setModelSelectionPending: () => {},
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
-      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1296,7 +1350,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
         syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
-    registerTuiCommands(runner)
+    registerTuiCommandsWithDirectSeams(runner)
     const def = commands.defs.find(entry => entry.name === 'footer')
     await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
     await vt.waitForRender()
@@ -1359,7 +1413,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
     ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
     const doc = { footer: 'default' as string, footerLayout: undefined as unknown, footerCustomItems: undefined as unknown }
     const failingSettings: TuiSettingsLike = {
-      get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', notificationMethod: 'auto' }),
+      get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, footerCustomItems: doc.footerCustomItems as never, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
       replace: () => { throw new Error('write failed') },
     }
     const applied: Array<{ footer: string }> = []
@@ -1367,6 +1421,8 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       ctx, app, diag: {} as never,
       get defaultIntentOutcome() { return undefined },
       ...sessionScopeFacts(() => undefined, () => 0),
+      hostShellCompletion: true,
+      transcriptExportAvailable: true,
       currentSessionId: undefined,
       ensureSession: async () => {},
       get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -1377,13 +1433,16 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
     settleIntent: () => {},
       tuiSettings: failingSettings,
       agents: {} as never,
-      sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+      sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
       sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-      interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
       catalog: new DirectCatalogPort(ctx as never, () => undefined),
       config: new DirectConfigPort(ctx as never, undefined, () => undefined),
       hostFile: new DirectHostFilePort(() => undefined),
       commandRegistry: ctx.get('commands') as never,
+      clientCommands: createClientCommandRegistry(parseCommand),
       cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -1402,7 +1461,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       setModelSelectionPending: () => {},
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
-      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1419,7 +1478,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
         syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
-    registerTuiCommands(runner)
+    registerTuiCommandsWithDirectSeams(runner)
     const def = commands.defs.find(entry => entry.name === 'footer')
     await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
     await vt.waitForRender()
@@ -1486,13 +1545,18 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
     settleIntent: () => {},
       tuiSettings: settings.value,
       agents: {} as never,
-      sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined },
+      sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
       sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
-      interaction: { registerQuestionProvider: () => true, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+      interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
       catalog: new DirectCatalogPort(ctx as never, () => undefined),
       config: new DirectConfigPort(ctx as never, undefined, () => undefined),
       hostFile: new DirectHostFilePort(() => undefined),
+      hostShellCompletion: true,
+      transcriptExportAvailable: true,
       commandRegistry: ctx.get('commands') as never,
+      clientCommands: createClientCommandRegistry(parseCommand),
       cwd: '/ws', sessionCwd: () => '/ws', imageStore: {} as never,
       copyToClipboard: async () => true, imageLimits: () => undefined, insertIntoEditor: () => {},
       prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
@@ -1511,7 +1575,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       setModelSelectionPending: () => {},
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
-      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
+      refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
       openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1528,7 +1592,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
         syncRuntimeApply(runtime, app, savedCustomItems, d.footer === 'custom' ? d.footerLayout as FooterLayoutV1 : undefined)
       },
     }
-    registerTuiCommands(runner)
+    registerTuiCommandsWithDirectSeams(runner)
     const def = commands.defs.find(entry => entry.name === 'footer')
     await (def!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
     await vt.waitForRender()

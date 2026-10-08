@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { renderSpans } from '../src/footer/composer.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
-import type { FooterItemRef } from '../src/footer/types.ts'
+import { renderSpans } from '../src/tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
+import type { FooterItemRef } from '../src/tui/footer/presentation-types.ts'
 
 const registry = createBuiltinFooterRegistry()
 const ref: FooterItemRef = { id: 'tasks' }
@@ -66,4 +66,38 @@ test('Task Center footer renders only the ACTIVE kinds (PR review polish)', () =
   assert.equal(render(snap => {
     snap.activity.failedTaskCount = 1
   }, 'compact'), '[!1·↓]')
+})
+
+test('a Questions-only session still shows the Task Center badge and its ↓ hint', () => {
+  // Parked Questions are human attention, not work: they must be able to show
+  // the badge (and therefore the reopened path) with ZERO jobs and agents, and
+  // they must never inflate the work counts.
+  const item = registry.get('tasks')!
+  const snap = emptyStatusSnapshot() as Mutable<StatusSnapshot>
+  snap.activity.taskCount = 0
+  snap.activity.childAgentCount = 0
+  snap.activity.taskTotalCount = 0
+  snap.activity.childAgentTotalCount = 0
+  snap.activity.failedTaskCount = 0
+  snap.activity.questionAttentionCount = 1
+  const segment = item.render(snap as StatusSnapshot, ref, 'preferred', context)
+  assert.ok(segment, 'the badge must render for parked attention alone')
+  assert.equal(plain(renderSpans(segment.spans)), '[? 1 awaiting · ↓ view]')
+
+  const compact = item.render(snap as StatusSnapshot, ref, 'compact', context)
+  assert.ok(compact)
+  assert.equal(plain(renderSpans(compact.spans)), '[?1·↓]')
+
+  // A visible Question is not counted (it already owns the seat), so the badge
+  // disappears with nothing else to show.
+  snap.activity.questionAttentionCount = 0
+  assert.equal(item.render(snap as StatusSnapshot, ref, 'preferred', context), null)
+
+  // And with work present the attention figure stays SEPARATE from the counts.
+  snap.activity.taskCount = 1
+  snap.activity.taskTotalCount = 3
+  snap.activity.questionAttentionCount = 2
+  const mixed = item.render(snap as StatusSnapshot, ref, 'preferred', context)
+  assert.ok(mixed)
+  assert.equal(plain(renderSpans(mixed.spans)), '[● 1/3 tracked jobs · ? 2 awaiting · ↓ view]')
 })

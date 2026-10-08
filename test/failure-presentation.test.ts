@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { displayFailure, displayFailureText } from '../src/failure-presentation.ts'
+import { displayFailure, displayFailureText } from '../src/domain/transcript/failure.ts'
 
 /** The exact shape DSH rc.1 persists for an invariant violation thrown out of
  * prompt assembly: a durable `UNKNOWN` code beside the thrown message. */

@@ -21,10 +21,10 @@ import {
   createBuiltinFooterRegistry,
   INTENTIONALLY_STABLE_DENSITY_ITEMS,
   RESPONSIVE_COMPACT_ITEMS,
-} from '../src/footer/builtin-items.ts'
-import { FooterComposer, renderSpans } from '../src/footer/composer.ts'
-import type { FooterDensity, FooterItemRef } from '../src/footer/types.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+} from '../src/tui/footer/builtin-items.ts'
+import { FooterComposer, renderSpans } from '../src/tui/footer/composer.ts'
+import type { FooterDensity, FooterItemRef } from '../src/tui/footer/presentation-types.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 const registry = createBuiltinFooterRegistry()
 const composer = new FooterComposer(registry)

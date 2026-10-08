@@ -12,14 +12,14 @@ import { afterEach, test } from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FileHistorySearchSource } from '../src/history-search.ts'
-import { historyFilePath } from '../src/history.ts'
+import { FileHistorySearchSource } from '../src/client/history/search.ts'
+import { historyFilePath } from '../src/client/history/store.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 interface DisposableApp { isDisposed(): boolean; dispose(): void }
 const startedApps = new Set<DisposableApp>()
 afterEach(() => {
@@ -262,7 +262,7 @@ test('plugin keybindings can never claim Ctrl+R (host-reserved)', async (t) => {
   const home = tempHome(life)
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { KeybindingRegistry } = await import('../src/keybinding-registry.ts')
+  const { KeybindingRegistry } = await import('../src/extension/internal/keybinding-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const actions: string[] = []
   const app = new TuiApp(vt, {

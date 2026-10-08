@@ -27,8 +27,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/catalog-port
  */
 
-import type { HumanSkillCatalog } from '../skill-catalog.ts'
-import type { StandingSkillRead } from '../skill-catalog-refresh.ts'
+import type { HumanSkillCatalog } from '../domain/catalog/skill.ts'
 import type { OperationResult, WriteOutcome } from './write-outcome.ts'
 
 /** One model row of the Host-generation model directory (mirrors the official
@@ -63,8 +62,10 @@ export interface ModelDirectoryFailureDto {
 export interface ModelDirectoryDto {
   /** The selection an unconfigured Session observes. */
   readonly default: ModelSelectionDto
-  /** Provider routes currently able to serve a request, including empty
-   * catalogs (advisory: a route may serve a model it stopped advertising). */
+  /** Provider routes with at least one currently available catalog model
+   * (the official `buildModelCatalog` derivation: the non-empty successfully
+   * loaded groups' ids; advisory — a route may serve a model it stopped
+   * advertising). */
   readonly routableProviders: readonly string[]
   readonly groups: readonly ModelDirectoryGroupDto[]
   readonly failures: readonly ModelDirectoryFailureDto[]
@@ -98,12 +99,6 @@ export interface ModelDiscoveryRequest {
   readonly signal?: AbortSignal
 }
 
-/** One provider row for the provider-discovery capability. */
-export interface ModelProviderSummary {
-  readonly id: string
-  readonly name: string
-}
-
 /** The model/provider catalog sub-domain: the `/model` directory read, the
  *  Session-local selection write, the provider directory the `/login` merge
  *  reads, and the add-provider endpoint probe. */
@@ -113,14 +108,12 @@ export interface ModelCatalog {
   available(): boolean
   /** Load the Host-generation model directory (one semantic read matching
    *  the official `session.modelCatalog()`), including the deployment default
-   *  used by a Session with no local selection. */
+   *  used by a Session with no local selection. This is the ONLY selectable
+   *  provider/model directory: the subagent allowlist picker and every other
+   *  grouped-model consumer reads it, never a per-provider enumeration (the
+   *  historical Direct-only `listProviders()` + `listModels(provider)` pair
+   *  was retired in M3-3A — `llm.listModels` has no public Remote). */
   loadDirectory(signal?: AbortSignal): Promise<ModelDirectoryDto>
-  /** Provider-discovery capability (the subagent allowlist picker and the
-   *  `/login` merge), DISTINCT from the `/model` directory read: it
-   *  enumerates routable providers one call at a time. */
-  listProviders(): readonly ModelProviderSummary[]
-  /** One provider's models for provider-discovery consumers. */
-  listModels(providerId: string): Promise<readonly ModelInfoSummary[]>
   /** The global default used only when a Session has no local selection. */
   defaultSelection(): ModelSelectionDto | undefined
   /** Persist the global default (`agentDefaultModel.saveSelection`) as a
@@ -224,10 +217,20 @@ export type SkillDefinitionResult =
   /** The loaded definition is malformed (hostile/adapter data refused). */
   | { readonly kind: 'malformed' }
 
+/** One standing (sessionless) skill read result: the detached catalog plus the
+ * one-shot degradation notice (absent when nothing degraded). This is the
+ * port's own result type — the coordinator consumes it without owning it. */
+export interface StandingSkillRead {
+  readonly catalog: HumanSkillCatalog
+  /** One-shot user notice when the standing path degraded to the global
+   * layer (absent when nothing degraded). */
+  readonly notice?: string
+}
+
 /** The skill catalog sub-domain: sessionless standing reads, live agent
  *  reads, the loaded-definition path and the host-vs-fallback injection
- *  decision. The pure catalog logic stays in `src/skill-catalog.ts`; the
- *  Direct adapter owns the Host service discovery and the session-id →
+ *  decision. The pure catalog logic stays in `runtime/direct/skill-catalog.ts`;
+ *  the Direct adapter owns the Host service discovery and the session-id →
  *  live-agent resolution. */
 export interface SkillCatalogCapability {
   /** The sessionless STANDING skill catalog of one preset (the deferred

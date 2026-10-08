@@ -17,14 +17,16 @@ import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 //
 // The startup row is the loader's FIRST line and the ONLY place that runs
 // before the authorization row is imported. If this module shared any code
-// with the rest of the bundle (src/dsh-version.ts is used by builtins and
+// with the rest of the bundle (src/client/launcher/version.ts is used by builtins and
 // the runner), the bundler would fold it into the shared chunk that ALSO
-// carries src/authorization.ts — whose `@deepseek-ai/dsh-authorization`
+// carries src/app/command/authorization.ts — whose `@deepseek-ai/dsh-authorization`
 // import cannot resolve below the declared DSH compatibility floor, so the
 // startup row would fail at IMPORT time and the friendly gate below would
 // never run.
-// Keep the gate's own dsh-version parsing and semver comparison INLINE here
-// (same logic as src/dsh-version.ts; guarded by the same tests).
+// Keep the gate's own version parsing and semver comparison INLINE here: the
+// runner's shared `versionAtLeast` was retired (TS8-F2), so this startup-local
+// comparator is the only one and is exercised through the compatibility gate
+// (`harnessCompatEntryFor`) by the startup tests.
 
 /** The installed dsh version, resolved from the launcher's real path. */
 function installedDshVersion(): string | undefined {
@@ -49,7 +51,8 @@ function installedDshVersion(): string | undefined {
   return undefined
 }
 
-/** Prerelease-aware `a >= b` (semver ordering; mirrors src/dsh-version.ts). */
+/** Prerelease-aware `a >= b` (semver ordering). Startup-local by design: the
+ * zero-dependency island never shares a chunk with the runner. */
 function versionAtLeast(version: string, minimum: string): boolean {
   const parse = (value: string): { nums: number[]; pre: string[] } => {
     const [core, prerelease = ''] = value.split('-')
@@ -102,11 +105,12 @@ export const inject = ['cmdlineArgs']
  * bundle's own version cannot be read, so the message stays truthful.
  *
  * The current line has a minimum of the published npm release
- * dsh-v0.1.7-rc.2. The recovery guidance names the recommended published
+ * dsh-v0.2.0-rc.2 (M3-3B: the Question lifecycle consumes rc.2-only
+ * published contracts). The recovery guidance names the recommended published
  * upgrade target — which may be NEWER than the floor — and allows its native
- * install scripts. The already-published 0.4.7-alpha.2 line keeps its own
- * alpha.2 contract and remains the compatible fallback for a
- * dsh-v0.1.6-alpha.2 runtime.
+ * install scripts. The already-published 0.5.0 line keeps its own
+ * rc.1-era contract and remains the compatible fallback for a
+ * dsh-v0.2.0-rc.1 runtime.
  */
 export interface HarnessCompatEntry {
   /** Inclusive lower bound of the incompatible range; absent = unbounded below. */

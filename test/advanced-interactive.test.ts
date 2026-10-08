@@ -12,13 +12,13 @@ import { afterEach, test } from 'node:test'
 import { AdvancedInputRegistry } from '../src/extension/internal/advanced-input.ts'
 import { normalizeInputEvent } from '../src/extension/internal/input-events.ts'
 import type { AdvancedInputEvent, AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
-import type { SaveLocationDeps } from '../src/save-location.ts'
+import type { SaveLocationDeps } from '../src/tui/interaction/save-location.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 interface DisposableApp { isDisposed(): boolean; dispose(): void }
 const startedApps = new Set<DisposableApp>()
 afterEach(() => {
@@ -500,7 +500,7 @@ test('a blurred capturing overlay stays blurred through an approval round-trip',
 test('a blurred dependent restore focuses the CURRENT seat owner after a mid-overlay handoff', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -555,7 +555,7 @@ test('a blurred dependent restore focuses the CURRENT seat owner after a mid-ove
 test('a blurred dependent restore focuses the CURRENT host editor after a plugin unload', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })

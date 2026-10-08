@@ -10,8 +10,9 @@
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { TaskBrowserPanel, formatElapsed, type TaskPanelItem } from '../src/task-panel.ts'
-import { MARQUEE_STEP_MS } from '../src/marquee.ts'
+import { TaskBrowserPanel, formatElapsed } from '../src/tui/panels/task-panel.ts'
+import type { TaskPanelItem } from '../src/app/surface/task-presentation.ts'
+import { MARQUEE_STEP_MS } from '../src/tui/components/marquee.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 
@@ -1216,4 +1217,89 @@ test('a multiline refresh error stays ONE physical row', () => {
     assert.ok(visibleWidth(line) <= 20, `the banner must fit the narrow grant (${visibleWidth(line)} > 20): ${JSON.stringify(line)}`)
   }
   panel.dispose()
+})
+
+const questionRow = (overrides: Partial<TaskPanelItem> = {}): TaskPanelItem => ({
+  value: 'question:session-a:call-1',
+  label: 'Use staging or production?',
+  status: 'awaiting answer',
+  group: 'Needs attention',
+  source: 'question',
+  canOpen: true,
+  canStop: false,
+  ...overrides,
+})
+
+test('Quick shows a parked Question in Needs attention ABOVE active work', () => {
+  const panel = new TaskBrowserPanel(
+    [questionRow(), runningJob(), subagent()],
+    10,
+    { mode: 'quick', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const lines = panel.render(100).map(strip)
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('Needs attention'), `the attention group renders:\n${joined}`)
+  assert.ok(joined.includes('? Use staging or production?'), `the Question row renders with its glyph:\n${joined}`)
+  assert.ok(
+    joined.indexOf('Needs attention') < joined.indexOf('jobs') || !joined.includes('jobs'),
+    'attention precedes the work groups',
+  )
+})
+
+test('a pending Question stays visible in Quick even with running work', () => {
+  // The generic failure-attention rule only includes inactive rows when there
+  // is NO live work; a human-required Question must not depend on that.
+  const panel = new TaskBrowserPanel(
+    [questionRow(), runningJob()],
+    10,
+    { mode: 'quick', header: 'tasks' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const joined = panel.render(100).map(strip).join('\n')
+  assert.ok(joined.includes('Use staging or production?'), `the Question survives active work:\n${joined}`)
+  assert.ok(joined.includes('bash · pnpm build'), 'and the active work is still listed')
+})
+
+test('a visible Question is answering, and Question rows are searchable', () => {
+  const panel = new TaskBrowserPanel(
+    [questionRow({ status: 'answering' }), runningJob()],
+    10,
+    { mode: 'full', header: 'tasks', enableSearch: true, noMatchText: 'no matches' },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const joined = panel.render(100).map(strip).join('\n')
+  assert.ok(joined.includes('answering'), `Full renders the answering status:\n${joined}`)
+
+  panel.handleInput('/')
+  for (const char of 'staging') panel.handleInput(char)
+  const searched = panel.render(100).map(strip).join('\n')
+  assert.ok(searched.includes('Use staging or production?'), `search finds the Question row:\n${searched}`)
+  assert.ok(!searched.includes('bash · pnpm build'), 'and filters the non-matching work out')
+})
+
+test('Question rows never expose a stop affordance', () => {
+  const stopped: string[] = []
+  const panel = new TaskBrowserPanel(
+    [questionRow()],
+    10,
+    { mode: 'full', header: 'tasks' },
+    (value) => { stopped.push(value) },
+    () => {},
+    () => {},
+  )
+  // `s` is the (Job-only) stop key; a Question row must not raise a stop
+  // request for it (the row carries `canStop: false`, and the surface's stop
+  // path only addresses work rows in any case).
+  panel.handleInput('s')
+  assert.deepEqual(stopped, [], 'no stop request is issued for a Question row')
+  const row = questionRow()
+  assert.equal(row.canStop, false)
+  assert.equal(row.source, 'question')
 })

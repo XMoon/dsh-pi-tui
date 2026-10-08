@@ -7,16 +7,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { expandFileMentionsForSubmit } from '../src/mentions.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
-import { consumeDraftImages, draftHasImages, prepareUserMessage, type PrepareInputDeps } from '../src/image/submit.ts'
-import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/image/errors.ts'
-import type { AttachmentsLike, ImageAttachmentRefLike } from '../src/image/admission.ts'
-import type { LlmLike } from '../src/image/capability.ts'
-import type { DraftImage } from '../src/image/types.ts'
-import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
+import { consumeDraftAttachments, draftHasImages } from '../src/client/media/draft-attachments.ts'
+import { prepareUserMessage, type DirectPrepareInputDeps } from '../src/app/submission/direct-message-preparation.ts'
+import { ImageAdmissionError, ModelImageUnsupportedError } from '../src/domain/media/errors.ts'
+import type { AttachmentsLike } from '../src/app/submission/direct-image-admission.ts'
+import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
+import type { LlmLike } from '../src/app/submission/direct-image-capability.ts'
+import type { DraftImage } from '../src/client/media/image/types.ts'
 
 const LIMITS = {
   maxImageBytes: 20 * 1024 * 1024,
@@ -47,8 +45,7 @@ function fakeAttachments(): AttachmentsLike & { callCount: () => number } {
   }
 }
 
-function depsOf(overrides: Partial<PrepareInputDeps> = {}): PrepareInputDeps {
-  const sessionCwd = overrides.sessionCwd ?? (() => '/ws')
+function depsOf(overrides: Partial<DirectPrepareInputDeps> = {}): DirectPrepareInputDeps {
   return {
     attachments: fakeAttachments(),
     llm: {
@@ -57,19 +54,11 @@ function depsOf(overrides: Partial<PrepareInputDeps> = {}): PrepareInputDeps {
       },
     } as LlmLike,
     currentModel: () => ({ provider: 'provider', model: 'model' }),
-    sessionCwd,
-    // The Host-owned canonicalization seam (migration M1.10): the pure
-    // mentions rewrite with a stat-backed existence probe over the
-    // session cwd (the Direct adapter wires the same probe).
-    canonicalizeMentions: async (text) =>
-      expandFileMentionsForSubmit(text, sessionCwd(), (candidate) => {
-        try {
-          statSync(candidate)
-          return true
-        } catch {
-          return false
-        }
-      }),
+    // The send seam under the OFFICIAL mention semantics (M3-3A): the
+    // submitted text stays LITERAL — `serialize: ref => ref` plus the
+    // Host's FILE_REFERENCE_PROMPT — exactly what the Direct/Remote
+    // adapters return.
+    canonicalizeMentions: async (text) => text,
     ...overrides,
   }
 }
@@ -149,56 +138,43 @@ test('a draft referencing images without an attachment service rejects loudly', 
   await assert.rejects(() => prepareUserMessage(one.placeholder, store, deps), ImageAdmissionError)
 })
 
-test('consumeDraftImages removes ONLY the referenced drafts (round-5 finding 1)', () => {
+test('consumeDraftAttachments removes ONLY the referenced drafts (round-5 finding 1)', () => {
   const store = new DraftImageStore()
   const consumed = staged(store, 'consumed.png')
   const concurrent = staged(store, 'concurrent.png')
   // Submit text referencing only the first image: a concurrent intake's
   // draft must survive the consumption.
-  consumeDraftImages(consumed.placeholder, store)
+  consumeDraftAttachments(consumed.placeholder, store)
   assert.equal(store.get(consumed.id), undefined, 'the consumed draft is removed')
   assert.equal(store.get(concurrent.id)?.name, 'concurrent.png', 'the racing intake survives')
   // Nothing referenced → nothing removed.
-  consumeDraftImages('plain text', store)
+  consumeDraftAttachments('plain text', store)
   assert.equal(store.get(concurrent.id)?.name, 'concurrent.png')
 })
 
 // ── send-time @-mention canonicalization through the pipeline (plan item 7) ─
 
-function mentionWorkspace(life: TestLifecycle): string {
-  const root = life.tempDir('dsh-submit-mention-')
-  mkdirSync(join(root, 'src'))
-  writeFileSync(join(root, 'src', 'main.ts'), 'export {};')
-  writeFileSync(join(root, 'file.ts'), 'export {};')
-  return root
-}
-
-test('prepareUserMessage canonicalizes @-mentions in the text-only fast path', async (t) => {
-  const life = testLifecycle(t)
+test('prepareUserMessage keeps @-mentions LITERAL in the text-only fast path (official semantics)', async () => {
   const store = new DraftImageStore()
-  const root = mentionWorkspace(life)
-  const message = await prepareUserMessage('look at @src/main.ts', store, depsOf({ sessionCwd: () => root }))
+  const message = await prepareUserMessage('look at @src/main.ts', store, depsOf())
   const block = message.content[0]
   assert.equal(block!.type, 'text')
-  // The mention is rewritten to the absolute path; the text-only branch
-  // must NOT see the raw relative form.
-  assert.equal((block as { text: string }).text, `look at @${join(root, 'src', 'main.ts')}`)
+  // The official client contract: the mention is literal prompt text (the
+  // Host's FILE_REFERENCE_PROMPT resolves relative paths); no absolute
+  // rewrite on any backend.
+  assert.equal((block as { text: string }).text, 'look at @src/main.ts')
 })
 
-test('prepareUserMessage canonicalizes @-mentions alongside image placeholders', async (t) => {
-  const life = testLifecycle(t)
+test('prepareUserMessage keeps @-mentions literal alongside image placeholders', async () => {
   const store = new DraftImageStore()
-  const root = mentionWorkspace(life)
   const one = staged(store, 'a.png')
-  const message = await prepareUserMessage(`see @file.ts then ${one.placeholder}`, store, depsOf({ sessionCwd: () => root }))
+  const message = await prepareUserMessage(`see @file.ts then ${one.placeholder}`, store, depsOf())
   assert.deepEqual(message.content.map(block => block.type), ['text', 'image'])
-  assert.equal((message.content[0] as { text: string }).text, `see @${join(root, 'file.ts')} then `)
+  assert.equal((message.content[0] as { text: string }).text, 'see @file.ts then ')
 })
 
-test('prepareUserMessage keeps nonexistent mentions verbatim', async (t) => {
-  const life = testLifecycle(t)
+test('prepareUserMessage keeps nonexistent mentions verbatim', async () => {
   const store = new DraftImageStore()
-  const root = mentionWorkspace(life)
-  const message = await prepareUserMessage('see @missing.ts', store, depsOf({ sessionCwd: () => root }))
+  const message = await prepareUserMessage('see @missing.ts', store, depsOf())
   assert.equal((message.content[0] as { text: string }).text, 'see @missing.ts')
 })

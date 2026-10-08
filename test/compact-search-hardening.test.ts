@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -38,7 +38,9 @@ function clusterHeaderCount(view: string, expanded?: boolean): number {
 
 function workHeaderCount(view: string, expanded?: boolean): number {
   const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
-  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Activity(?: | ·|$)`).test(line)).length
+  // 2026-09-29 historical compaction: a settled think-only span's header
+  // identity is `Thought` — still one Work container either way.
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:Activity|Thought)(?: | ·|$)`).test(line)).length
 }
 
 const ambient = (label: string, form: 'instructions' | 'catalog' | 'snapshot', text: string): TranscriptMessage => ({

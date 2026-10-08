@@ -25,8 +25,9 @@ import { createToolResultMessage, MessageId, ToolCallId, type ContentBlock } fro
 import { SessionFormatEventCollector } from '@deepseek-ai/dsh-session-format'
 import { createSessionFormatV3ToV4, sessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import { SessionSeq, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { resultTextLines, type JsonValue } from '../src/present.ts'
-import { renderTranscriptMarkdown, TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { resultTextLines, type JsonValue } from '../src/tui/transcript/tool-presentation.ts'
+import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { renderTranscriptMarkdown } from '../src/client/artifact/transcript-markdown.ts'
 
 type ToolCard = Extract<TranscriptMessage, { kind: 'tool' }>
 

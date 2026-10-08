@@ -20,13 +20,14 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp, type StatusData } from '../src/tui-app.ts'
+import { enterChildDisplaySubject } from './support/display-subject.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -43,7 +44,6 @@ const RICH_STATUS: StatusData = {
   branch: 'feat/narrow-footer',
   turns: 3,
   steps: 7,
-  statsLine: '3 turns · 7 steps · 12.3s',
   permission: 'workspace-write',
   contextTokens: 1000,
   contextWindow: 10000,
@@ -424,6 +424,46 @@ test('the command footer consumes the surface budget: the hint is never clipped 
     }
   } finally {
     app.stop()
+  }
+})
+
+test('a fullscreen child subject keeps its one-row bar inside the footer budget on a short viewport', async () => {
+  // The bar is a NEW pinned chrome row (viewer UX plan §2.2/§4.3): on a
+  // chrome-heavy short viewport the footer budget shrinks FIRST — the bar
+  // must never be pushed into the transcript, and the editor frame must
+  // survive. The bar itself is exactly one physical row.
+  const { vt, app } = await startFullscreenApp(20, 10)
+  try {
+    enterChildDisplaySubject(app, {
+      id: 'child-1', label: 'research', mode: 'continuable', activity: 'running',
+      cwd: '/child', turns: 3, steps: 7, permission: 'workspace-write',
+      model: { provider: 'deepseek', model: 'flash' },
+    })
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const plain = lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+    // At 20 columns the bar degrades to the `‹` navigation marker + a
+    // trimmed label, but it is still exactly one physical row under the
+    // header.
+    const barRow = plain.findIndex(line => line.includes('‹'))
+    assert.equal(plain.filter(line => line.includes('‹')).length, 1,
+      `the child bar must be exactly one physical row:\n${lines.join('\n')}`)
+    assert.equal(barRow, 1, `the bar must sit under the header (never in the transcript):\n${lines.join('\n')}`)
+    assert.ok(plain[barRow]!.includes('resea'), `the bar must keep an identifiable child label:\n${lines.join('\n')}`)
+    // The editor frame survives in full.
+    const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+    assert.ok(editorTop !== -1, `editor top border missing:\n${lines.join('\n')}`)
+    assert.ok(lines.slice(editorTop + 1).some(line => line.includes('─'.repeat(10))),
+      `editor bottom border missing:\n${lines.join('\n')}`)
+    // Every footer row the surface granted is actually painted in the viewport.
+    const footerLines = [...app.footerRenderRowsForTest()]
+    for (const row of footerLines) {
+      const text = row.replace(/\x1b\[[0-9;]*m/g, '').trimEnd()
+      assert.ok(text !== '' && plain.some(line => line.includes(text)),
+        `a footer row was clipped out of the viewport: ${JSON.stringify(text)}\n${lines.join('\n')}`)
+    }
+  } finally {
+    app.dispose()
   }
 })
 

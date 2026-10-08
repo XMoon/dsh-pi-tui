@@ -1,0 +1,148 @@
+/**
+ * Direct Host attachment admission (plan M4, §10-§11; TS8-C): draft segments →
+ * `ctx.attachments.saveImages()` → `ContentBlock[]`.
+ *
+ * This is the DIRECT-path application preparation. It never resolves `ctx`:
+ * the composition root injects the structural Host attachment service
+ * (`ctx.attachments`) and this module only invokes the already-authoritative
+ * service and maps the result. The TUI NEVER re-implements normalization,
+ * transcoding or provider projection — it batches the referenced images
+ * through the attachment service and maps the returned refs back onto ordered
+ * content blocks. Structural types keep this module testable without the dsh
+ * runtime (AGENTS.md decision 7).
+ * @module @xmoon76/dsh-pi-tui/app/submission/direct-image-admission
+ */
+
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { DraftSegment } from '../../client/media/image/placeholder.ts'
+import { ImageAdmissionError } from '../../domain/media/errors.ts'
+import type { ImageAttachmentRefLike, ImageLimitsLike, ImageMediaType } from '../../domain/media/types.ts'
+
+/** Structural subset of `@deepseek-ai/dsh-attachment`'s `SaveImageAttachment`. */
+export interface SaveImageAttachmentLike {
+  readonly data: Uint8Array
+  readonly mediaType: ImageMediaType
+  readonly name?: string
+}
+
+/** Structural subset of the `ctx.attachments` service surface. */
+export interface AttachmentsLike {
+  readonly imageLimits: ImageLimitsLike
+  saveImages(inputs: readonly SaveImageAttachmentLike[]): Promise<readonly ImageAttachmentRefLike[]>
+}
+
+/** The admission outcome: ordered content blocks + the durable refs. */
+export interface AdmittedContent {
+  /** Blocks in exact draft order (text/image interleaving preserved, §11). */
+  readonly blocks: readonly ContentBlock[]
+  /** The durable refs in input order (parallel to the image segments). */
+  readonly refs: readonly ImageAttachmentRefLike[]
+}
+
+/** Total encoded bytes of the referenced images (preflight input). */
+export function imageSegmentsBytes(segments: readonly DraftSegment[]): number {
+  let total = 0
+  for (const segment of segments) {
+    if (segment.type === 'image') total += segment.image.byteLength
+  }
+  return total
+}
+
+/**
+ * Build the ordered `ContentBlock[]` for one draft (plan §11): every text
+ * segment becomes a text block, every image segment an image block backed by
+ * the durable refs (index-aligned with the image segments in order). Empty
+ * text segments were already dropped by the placeholder expansion.
+ * @param segments - the expanded draft segments.
+ * @param refs - durable refs in image-segment order.
+ */
+export function buildContentBlocks(
+  segments: readonly DraftSegment[],
+  refs: readonly ImageAttachmentRefLike[],
+): readonly ContentBlock[] {
+  const blocks: ContentBlock[] = []
+  let refIndex = 0
+  for (const segment of segments) {
+    if (segment.type === 'text') {
+      if (segment.text !== '') blocks.push({ type: 'text', text: segment.text })
+      continue
+    }
+    const ref = refs[refIndex]
+    if (ref === undefined) {
+      throw new ImageAdmissionError('An image draft could not be admitted (reference mismatch).')
+    }
+    refIndex += 1
+    blocks.push({ type: 'image', attachment: ref as never })
+  }
+  return blocks
+}
+
+/**
+ * Admit every staged image of a draft (plan §10.2): one batched
+ * `saveImages()` keeps input/ref ordering and avoids half-success semantics.
+ * Count/aggregate preflights come from the LIVE `imageLimits`; the harness
+ * re-validates bytes at admission — the TUI never duplicates normalization.
+ * RECALLED images (pulled back from the queue) are ALREADY durable: their
+ * ref is reused as-is and they are excluded from the save batch — the
+ * harness object is content-addressed, so re-submitting the same ref never
+ * duplicates storage (recall-all, review finding 3).
+ * @param segments - the expanded draft segments.
+ * @param attachments - the live `ctx.attachments` service.
+ * @returns the admitted blocks and refs.
+ */
+export async function admitDraftImages(
+  segments: readonly DraftSegment[],
+  attachments: AttachmentsLike,
+): Promise<AdmittedContent> {
+  const images = segments.filter((segment): segment is Extract<DraftSegment, { type: 'image' }> =>
+    segment.type === 'image')
+  if (images.length === 0) {
+    return { blocks: buildContentBlocks(segments, []), refs: [] }
+  }
+  const limits = attachments.imageLimits
+  if (images.length > limits.maxImagesPerMessage) {
+    throw new ImageAdmissionError(
+      `Too many images: ${images.length} attached, the current limit is ${limits.maxImagesPerMessage} per message.`,
+    )
+  }
+  const aggregate = imageSegmentsBytes(images)
+  if (aggregate > limits.maxMessageImageBytes) {
+    throw new ImageAdmissionError(
+      `Images total ${aggregate} bytes; the current aggregate limit is ${limits.maxMessageImageBytes} bytes.`,
+    )
+  }
+  // Split recalled (already-durable) from fresh images: only fresh bytes
+  // enter the save batch; recalled refs slot back into their positions.
+  const refs: ImageAttachmentRefLike[] = new Array(images.length)
+  const toSave: { input: SaveImageAttachmentLike; index: number }[] = []
+  images.forEach((segment, index) => {
+    const recalled = segment.image.recalledRef
+    if (recalled !== undefined) {
+      refs[index] = recalled
+    } else {
+      toSave.push({
+        input: {
+          data: segment.image.bytes,
+          mediaType: segment.image.mediaType,
+          ...(segment.image.name !== undefined ? { name: segment.image.name } : {}),
+        },
+        index,
+      })
+    }
+  })
+  if (toSave.length > 0) {
+    const saved = await attachments.saveImages(toSave.map(entry => entry.input))
+    if (saved.length !== toSave.length) {
+      // The service's contract is input-order-aligned refs; a mismatch
+      // means the blocks would silently diverge from the images
+      // (round-2 finding 6).
+      throw new ImageAdmissionError(
+        `The attachment service returned ${saved.length} references for ${toSave.length} images.`,
+      )
+    }
+    toSave.forEach((entry, savedIndex) => {
+      refs[entry.index] = saved[savedIndex]!
+    })
+  }
+  return { blocks: buildContentBlocks(segments, refs), refs }
+}

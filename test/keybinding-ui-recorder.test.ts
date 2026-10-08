@@ -5,7 +5,7 @@ import {
   KeyRecorder,
   type KeyRecorderTimer,
   validateRecordedKey,
-} from '../src/keybinding-ui/recorder.ts'
+} from '../src/tui/keybindings/ui/recorder.ts'
 
 function noop(): void {}
 

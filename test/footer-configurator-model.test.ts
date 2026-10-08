@@ -9,9 +9,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { FooterConfiguratorModel, flatPositionOf } from '../src/footer/configurator-model.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
+import { FooterConfiguratorModel, flatPositionOf } from '../src/tui/footer/configurator-model.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
 
 const registry = createBuiltinFooterRegistry()
 
@@ -139,6 +139,21 @@ test('Space removes the active item; it returns to the Add pool', () => {
   assert.ok(m.availableIds().includes('context'), 'removed items return to Available')
   // The cursor clamped onto the next item.
   assert.equal(idAtCursor(m), 'turns-steps')
+})
+
+test('the retired view-scope id is registered but never offered by the Add picker', () => {
+  const m = model()
+  assert.ok(registry.ids().includes('view-scope'), 'the id stays registered for legacy layouts')
+  assert.ok(!m.availableIds().includes('view-scope'), 'the Add picker must not offer the retired placement')
+  // A legacy draft that already references it still loads, previews and
+  // saves unchanged (the placement is inert, never a parse/round-trip error).
+  const legacy = new FooterConfiguratorModel({
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'view-scope' }, { id: 'model' }], right: [] }],
+  }, registry)
+  assert.deepEqual(legacy.state().layout.rows[0]!.left.map(ref => ref.id), ['view-scope', 'model'])
+  assert.deepEqual(legacy.preview().rows[0]!.left.map(ref => ref.id), ['view-scope', 'model'],
+    'the preview keeps the legacy placement (the renderer, not the editor, makes it inert)')
 })
 
 test('the Add picker: search, add, the definition remains addable, Esc clears then back', () => {
@@ -637,7 +652,7 @@ test('preset resets and the 1..2 row bound still work alongside the pages', () =
 
 /* ─── PR E: explicit save flow + unsaved-exit guard ──────────────────── */
 
-import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
+import { FooterCustomItemCatalog } from '../src/tui/footer/custom-item-catalog.ts'
 
 /** A model over a one-row layout that PLACES one custom definition, with
  * a fresh registry (the model wires the draft catalog into it). */

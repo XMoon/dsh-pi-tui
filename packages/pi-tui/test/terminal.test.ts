@@ -6,6 +6,7 @@ import {
 	normalizeNativeShiftEnterInput,
 	ProcessTerminal,
 	resolveEscapeTimeoutMs,
+	shouldKeepTerminalProgressAlive,
 } from "../src/terminal.ts";
 
 describe("resolveEscapeTimeoutMs", () => {
@@ -237,22 +238,344 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 	});
 });
 
+describe("shouldKeepTerminalProgressAlive", () => {
+	it("treats every Ghostty marker as heartbeat-required", () => {
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM_PROGRAM: "ghostty" }), true);
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM_PROGRAM: "Ghostty" }), true);
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM: "xterm-ghostty" }), true);
+		assert.equal(
+			shouldKeepTerminalProgressAlive({ GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty/1.0.0" }),
+			true,
+		);
+	});
+
+	it("treats every Monstar marker as heartbeat-required", () => {
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM_PROGRAM: "monstar" }), true);
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM: "monstar" }), true);
+	});
+
+	it("leaves persistent and unknown terminals without a heartbeat", () => {
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM_PROGRAM: "tern" }), false);
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM_PROGRAM: "kitty" }), false);
+		assert.equal(shouldKeepTerminalProgressAlive({ TERM_PROGRAM: "wezterm" }), false);
+		assert.equal(shouldKeepTerminalProgressAlive({ WT_SESSION: "a-session-id" }), false);
+		assert.equal(shouldKeepTerminalProgressAlive({}), false);
+	});
+});
+
 describe("ProcessTerminal progress", () => {
-	it("writes a valid OSC 9;4 clear sequence", () => {
-		const terminal = new ProcessTerminal();
+	/** Capture every RAW stdout write of a case, restoring the real stream. */
+	const captureStdout = () => {
 		const writes: string[] = [];
 		const previousWrite = process.stdout.write;
-
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			writes.push(String(chunk));
 			return true;
 		}) as typeof process.stdout.write;
+		return {
+			writes,
+			restore: () => {
+				process.stdout.write = previousWrite;
+			},
+		};
+	};
+
+	/**
+	 * Build a terminal with the heartbeat-relevant environment pinned. X059
+	 * snapshots the terminal identity ONCE, when `ProcessTerminal` is
+	 * constructed, so the env must be in place BEFORE `new ProcessTerminal()`.
+	 * Every key the policy reads is cleared first: an ambient Ghostty
+	 * (`TERM_PROGRAM` / `GHOSTTY_RESOURCES_DIR`) must not silently turn the
+	 * persistent-terminal negative controls green on a developer machine.
+	 */
+	const withTerminalEnv = <T>(env: NodeJS.ProcessEnv, run: () => T): T => {
+		const keys = ["TERM_PROGRAM", "TERM", "GHOSTTY_RESOURCES_DIR"] as const;
+		const previous = keys.map((key) => [key, process.env[key]] as const);
+		for (const key of keys) delete process.env[key];
+		for (const [key, value] of Object.entries(env)) process.env[key] = value;
+		try {
+			return run();
+		} finally {
+			for (const [key, value] of previous) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	};
+
+	it("writes a valid OSC 9;4 clear sequence", () => {
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
 
 		try {
 			terminal.setProgress(false);
-			assert.deepEqual(writes, ["\x1b]9;4;0\x07"]);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;0\x07"]);
 		} finally {
-			process.stdout.write = previousWrite;
+			capture.restore();
+		}
+	});
+
+	it("setProgress(true/false) writes its working/clear bytes once per explicit call (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgress(true);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
+			terminal.setProgress(true);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"],
+				"the boolean write stays unconditional (the host owns the dedupe)");
+			terminal.setProgress(false);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07", "\x1b]9;4;0\x07"]);
+			mock.timers.tick(5000);
+			assert.equal(capture.writes.length, 3, "a persistent terminal receives no periodic refresh");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("a persistent terminal's indeterminate writes ONE 9;4;1;0 and starts no heartbeat (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
+			mock.timers.tick(5000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"], "no periodic 9;4;1;0 refresh");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("snapshots the heartbeat policy at construction, so a later env change cannot flip it (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
+		const previousTermProgram = process.env.TERM_PROGRAM;
+		process.env.TERM_PROGRAM = "ghostty";
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			mock.timers.tick(5000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"],
+				"the construction-time persistent-terminal snapshot still owns the one-shot policy");
+		} finally {
+			capture.restore();
+			if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = previousTermProgram;
+			mock.timers.reset();
+		}
+	});
+
+	it("Ghostty keeps the 1 s indeterminate heartbeat and starts no second interval (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "ghostty" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
+			mock.timers.tick(1000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"],
+				"the heartbeat re-asserts the state every second");
+			mock.timers.tick(1000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"]);
+			terminal.setProgress(true);
+			assert.equal(capture.writes.length, 4, "a repeated explicit active writes its own bytes");
+			mock.timers.tick(1000);
+			assert.equal(capture.writes.length, 5, "a repeated explicit active starts no SECOND interval");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("writes OSC 9;4;4 for paused with no intermediate clear (X059)", () => {
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07"]);
+		} finally {
+			capture.restore();
+		}
+	});
+
+	it("indeterminate -> paused on Ghostty stops the heartbeat and writes paused directly (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "ghostty" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"]);
+			mock.timers.tick(1000);
+			assert.equal(capture.writes.length, 2, "the active heartbeat is running");
+
+			terminal.setProgressState("paused");
+			assert.deepEqual(capture.writes.slice(1), ["\x1b]9;4;1;0\x07", "\x1b]9;4;4\x07"],
+				"paused follows active directly, with NO \u001b]9;4;0 between them");
+			mock.timers.tick(5000);
+			assert.equal(capture.writes.length, 3, "paused owns no heartbeat of its own");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("a persistent terminal's indeterminate -> paused has no heartbeat and no intermediate clear (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			mock.timers.tick(5000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07"], "no heartbeat before the wait");
+
+			terminal.setProgressState("paused");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;4\x07"],
+				"paused follows active directly, with NO \u001b]9;4;0 between them");
+			mock.timers.tick(5000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;1;0\x07", "\x1b]9;4;4\x07"],
+				"paused owns no timer of its own");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("Ghostty's paused -> indeterminate resumes the 1 s heartbeat (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "ghostty" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			terminal.setProgressState("indeterminate");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07"]);
+			mock.timers.tick(1000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07", "\x1b]9;4;1;0\x07"],
+				"the resumed active state keeps re-asserting itself");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("a persistent terminal's paused -> indeterminate writes one 9;4;1;0 and starts no heartbeat (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			terminal.setProgressState("indeterminate");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07"]);
+			mock.timers.tick(5000);
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;1;0\x07"],
+				"the resumed active state is a one-shot projection");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("paused -> clear writes the clear sequence and stops every timer (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			terminal.setProgressState("clear");
+			assert.deepEqual(capture.writes, ["\x1b]9;4;4\x07", "\x1b]9;4;0\x07"]);
+			mock.timers.tick(2000);
+			assert.equal(capture.writes.length, 2);
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("stop() clears a PHYSICALLY paused state exactly once and leaves no keepalive (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("paused");
+			terminal.stop();
+			const clears = capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07");
+			assert.equal(clears.length, 1, "a paused state must not leak into the shell/editor");
+			mock.timers.tick(2000);
+			assert.deepEqual(capture.writes.filter((chunk) => chunk.startsWith("\x1b]9;4;")),
+				["\x1b]9;4;4\x07", "\x1b]9;4;0\x07"], "no progress bytes after the stop");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("stop() clears a one-shot indeterminate state and leaves no timer (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "tern" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			terminal.stop();
+			assert.equal(capture.writes.filter((chunk) => chunk === "\x1b]9;4;1;0\x07").length, 1);
+			assert.equal(capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07").length, 1);
+			const written = capture.writes.length;
+			mock.timers.tick(5000);
+			assert.equal(capture.writes.length, written, "no progress bytes after the stop");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("stop() clears an ACTIVE heartbeat state and leaves no interval (X059)", () => {
+		mock.timers.enable({ apis: ["setInterval"] });
+		const terminal = withTerminalEnv({ TERM_PROGRAM: "ghostty" }, () => new ProcessTerminal());
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgressState("indeterminate");
+			mock.timers.tick(1000);
+			assert.equal(
+				capture.writes.filter((chunk) => chunk === "\x1b]9;4;1;0\x07").length,
+				2,
+				"the active heartbeat is running before the stop",
+			);
+			terminal.stop();
+			assert.equal(capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07").length, 1);
+			const written = capture.writes.length;
+			mock.timers.tick(5000);
+			assert.equal(capture.writes.length, written, "stop() cleared the heartbeat interval");
+		} finally {
+			capture.restore();
+			mock.timers.reset();
+		}
+	});
+
+	it("stop() after an explicit clear writes no second clear (X059)", () => {
+		const terminal = new ProcessTerminal();
+		const capture = captureStdout();
+
+		try {
+			terminal.setProgress(false);
+			terminal.stop();
+			assert.deepEqual(capture.writes.filter((chunk) => chunk === "\x1b]9;4;0\x07"), ["\x1b]9;4;0\x07"]);
+		} finally {
+			capture.restore();
 		}
 	});
 });

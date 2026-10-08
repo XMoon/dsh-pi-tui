@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { sanitizeCommandOutput } from '../src/footer/ansi-sanitize.ts'
+import { sanitizeCommandOutput } from '../src/tui/footer/ansi-sanitize.ts'
 
 test('plain text and SGR styling survive', () => {
   const out = sanitizeCommandOutput('\x1b[31mred\x1b[0m plain \x1b[38;2;255;0;0mtruecolor\x1b[39m')

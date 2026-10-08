@@ -15,8 +15,9 @@ import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { TurnActivity, TranscriptMessage } from '../src/transcript.ts'
 import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import type { DisplayState } from '../src/display-preset.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { enterChildDisplaySubject } from './support/display-subject.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -120,6 +121,37 @@ test('an expanded Compact Work internal spacer collapses that Work (F6 blank-row
   view = vt.getViewport()
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the internal spacer collapses the owning Work')
   assert.ok(view.join('\n').includes('▸ Activity'), `the Work collapses to its header:\n${view.join('\n')}`)
+})
+
+test('an expanded Compact Work internal spacer still collapses that Work under a child subject bar', async () => {
+  // Same blank-row collapse as above, but with the pinned child subject bar
+  // above the transcript: the absolute row offset includes the bar, so the
+  // internal spacer must still resolve to its owning Work and collapse it.
+  const { vt, app } = startApp('compact')
+  const { messages, activities, owner } = fixture()
+  app.setTranscript(messages, activities)
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'research', mode: 'continuable', activity: 'running',
+    cwd: '/child', turns: 1, steps: 1,
+  })
+  app.setFullscreen(true)
+  await viewport(vt)
+  app.toggleWorkSpan(owner)
+  await viewport(vt)
+  const view = vt.getViewport()
+  const barY = view.findIndex(line => line.includes('‹ back'))
+  assert.equal(barY, 1, `the child bar must be the row under the header:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('▾ Activity'), `precondition: the Work is open:\n${view.join('\n')}`)
+  const toolY = view.findIndex(line => line.includes('Read'))
+  assert.ok(toolY > barY, `precondition: the Work member row is visible below the bar:\n${view.join('\n')}`)
+  assert.ok(isBlankRow(view[toolY - 1]!), `the clicked row must be an internal blank spacer:\n${view.join('\n')}`)
+  click(vt, 3, toolY)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
+    `the internal spacer must collapse the owning Work with the bar present:\n${after.join('\n')}`)
+  assert.ok(after.join('\n').includes('▸ Activity'), `the Work collapses to its header:\n${after.join('\n')}`)
+  app.setFullscreen(false)
 })
 
 test('a collapsed fullscreen Focus reveals root + nested Work temporarily for search', async () => {
@@ -361,7 +393,7 @@ test('a visible collapsed-Focus compaction override is collapsed by the first Ct
   assert.notEqual(overrides.get(compaction), true, 'the materialized override is cleared')
 })
 
-test('a hidden mid-turn notice override does not consume the first Ctrl+O', async () => {
+test('a materialized mid-turn notice payload override is collapsed by the first Ctrl+O', async () => {
   const { vt, app } = startApp('focus')
   const notice: TranscriptMessage = {
     kind: 'system', turn: 1, text: 'NOTICE_BODY_MARKER', label: 'Background job', context: true,
@@ -377,15 +409,21 @@ test('a hidden mid-turn notice override does not consume the first Ctrl+O', asyn
   const activities = new Map([[1, activity(1)]])
   app.setTranscript(messages, activities)
   await viewport(vt)
+  const view0 = await viewport(vt)
+  assert.ok(view0.includes('Background job'), 'the mid-turn notice row is visible (post-Thought)')
+  assert.ok(!view0.includes('NOTICE_BODY_MARKER'), 'precondition: its payload stays folded')
   const overrides = (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride
   overrides.set(notice, true)
   app.setTranscript(messages, activities)
-  assert.ok(!(await viewport(vt)).includes('NOTICE_BODY_MARKER'),
-    'precondition: collapsed Focus hides the mid-turn notice')
+  assert.ok((await viewport(vt)).includes('NOTICE_BODY_MARKER'),
+    'the materialized notice override opens its payload')
   vt.sendInput('\x0f')
   await viewport(vt)
-  assert.equal(app.isTranscriptDetailExpanded(), true, 'the hidden notice override must not consume the first press')
-  assert.equal(overrides.get(notice), true, 'the parked notice override is preserved')
+  // The notice renders outside the collapsed Thought, so its payload override
+  // is a MATERIALIZED regular-master disclosure: the first press collapses it
+  // (never a two-step no-op), exactly like any other visible card override.
+  assert.equal(app.isTranscriptDetailExpanded(), false, 'the visible notice override consumes the first press')
+  assert.notEqual(overrides.get(notice), true, 'the override is cleared by the collapse')
 })
 
 test('regular Focus Ctrl+O ignores a redundant Work owner covered by a manual root', async () => {

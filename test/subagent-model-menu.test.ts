@@ -1,9 +1,11 @@
 /**
  * Tests for the subagent model-selection allowlist picker
  * (subagent-model-menu.ts): the official-setting write-through, the
- * provider-grouped flat + searchable UX, partial provider failure, route
- * identity, the marker bookkeeping, and the official "enabled requires at
- * least one route" client-side guard.
+ * provider-grouped flat + searchable UX over the OFFICIAL model directory
+ * (`loadDirectory`), per-provider failure isolation inside the directory, a
+ * whole-directory failure, route identity, saved-but-absent routes, the
+ * marker bookkeeping, and the official "enabled requires at least one route"
+ * client-side guard.
  * @module @xmoon76/dsh-pi-tui/subagent-model-menu.test
  */
 
@@ -16,12 +18,12 @@ import {
   allowlistSummary,
   lastRouteWhileEnabled,
   projectSubagentAllowlist,
-  type AllowlistModel,
-  type AllowlistProvider,
+  type AllowlistCatalogState,
   type SubagentAllowlistPickerDeps,
-} from '../src/subagent-model-menu.ts'
+} from '../src/tui/pickers/subagent-model-menu.ts'
+import type { ModelDirectoryDto } from '../src/runtime/catalog-port.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from '../src/runtime/config-port.ts'
-import type { OwnedTaskOptions } from '../src/detached.ts'
+import type { OwnedTaskOptions } from '../src/runtime/process/tasks.ts'
 
 function selectionStore(initial: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }): {
   config: SubagentModelSelectionConfig
@@ -56,13 +58,38 @@ function selectionStore(initial: { enabled: boolean; allowedModels: readonly Sub
   }
 }
 
+/** One provider group spec for the rig's directory. */
+interface GroupSpec {
+  readonly id: string
+  readonly name?: string
+  readonly models: readonly { readonly id: string; readonly name?: string }[]
+}
+
+/** Build the official directory DTO shape the picker consumes. */
+function directoryOf(options: {
+  groups?: readonly GroupSpec[]
+  failures?: readonly { id: string; name: string; message: string }[]
+}): ModelDirectoryDto {
+  return {
+    default: { provider: 'dflt', model: 'dflt' },
+    routableProviders: (options.groups ?? []).map(group => group.id),
+    groups: (options.groups ?? []).map(group => ({
+      id: group.id,
+      name: group.name ?? group.id,
+      models: group.models.map(model => ({
+        id: model.id,
+        name: model.name ?? model.id,
+        ...model.name === undefined ? {} : { description: `${model.id} description` },
+      })),
+    })),
+    failures: options.failures ?? [],
+  }
+}
+
 interface RigOptions {
-  providers?: readonly AllowlistProvider[]
-  /** Models per provider id (default: `{ p: [m1, m2] }`). */
-  models?: Readonly<Record<string, readonly AllowlistModel[]>>
-  /** Providers whose discovery rejects. */
-  failing?: readonly string[]
-  /** Hold every provider load pending until `resolveProvider`/`rejectProvider`. */
+  /** The directory `loadDirectory` resolves with (default: one group `p` with m1/m2). */
+  directory?: ModelDirectoryDto
+  /** Hold the directory load pending until `resolveDirectory`/`rejectDirectory`. */
   defer?: boolean
 }
 
@@ -73,11 +100,13 @@ interface DepsRig {
   renders: () => number
   dones: Array<string | undefined>
   /** Post-close convergence values (the fork rejects `done` once the submenu
-   *  closed, so the committed summary arrives through this seam). */
+   * closed, so the committed summary arrives through this seam). */
   summaries: string[]
   settled: Promise<void>[]
-  resolveProvider: (providerId: string, models: readonly AllowlistModel[]) => void
-  rejectProvider: (providerId: string, error: Error) => void
+  /** How many times loadDirectory was called (the ONE official catalog read). */
+  directoryReads: () => number
+  resolveDirectory: (directory: ModelDirectoryDto) => void
+  rejectDirectory: (error: Error) => void
 }
 
 function rig(initial: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] }, options: RigOptions = {}): DepsRig {
@@ -86,29 +115,27 @@ function rig(initial: { enabled: boolean; allowedModels: readonly SubagentAllowe
   const dones: DepsRig['dones'] = []
   const summaries: string[] = []
   const settled: Promise<void>[] = []
-  const providers = options.providers ?? [{ id: 'p', name: 'Provider P' }]
-  const models = options.models ?? { p: [{ id: 'm1' }, { id: 'm2' }] }
-  const failing = new Set(options.failing ?? [])
-  const pendingLoads = new Map<string, { resolve: (value: readonly AllowlistModel[]) => void; reject: (error: Error) => void }>()
   let renders = 0
+  let directoryReads = 0
+  const directory = options.directory ?? directoryOf({ groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm1' }, { id: 'm2' }] }] })
+  let pending: { resolve: (value: ModelDirectoryDto) => void; reject: (error: Error) => void } | undefined
   const deps: SubagentAllowlistPickerDeps = {
     selection: store.config,
     catalog: {
-      listProviders: () => providers,
-      listModels: (providerId: string) => {
-        if (failing.has(providerId)) return Promise.reject(new Error(`${providerId} exploded`))
+      loadDirectory: () => {
+        directoryReads += 1
         if (options.defer === true) {
-          return new Promise<readonly AllowlistModel[]>((resolve, reject) => {
-            pendingLoads.set(providerId, { resolve, reject })
+          return new Promise<ModelDirectoryDto>((resolve, reject) => {
+            pending = { resolve, reject }
           })
         }
-        return Promise.resolve(models[providerId] ?? [])
+        return Promise.resolve(directory)
       },
     },
-    notify: (message: string, kind: 'info' | 'error') => { notices.push({ message, kind }) },
+    notify: (message, kind) => { notices.push({ message, kind }) },
     requestRender: () => { renders += 1 },
     done: (selected?: string) => { dones.push(selected) },
-    summarize: (value: string) => { summaries.push(value) },
+    summarize: (value) => { summaries.push(value) },
     runOwned: <T,>(_label: string, task: () => T | Promise<T>, taskOptions: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
       settled.push((async () => {
         try {
@@ -127,12 +154,13 @@ function rig(initial: { enabled: boolean; allowedModels: readonly SubagentAllowe
     dones,
     summaries,
     settled,
-    resolveProvider: (providerId, next) => { pendingLoads.get(providerId)?.resolve(next) },
-    rejectProvider: (providerId, error) => { pendingLoads.get(providerId)?.reject(error) },
+    directoryReads: () => directoryReads,
+    resolveDirectory: next => { pending?.resolve(next) },
+    rejectDirectory: error => { pending?.reject(error) },
   }
 }
 
-/** Flush the picker's provider loads and serialized write chain. */
+/** Flush the picker's directory load and serialized write chain. */
 async function settle(harness: DepsRig, expectedWrites: number): Promise<void> {
   for (let i = 0; i < 16 && harness.store.setPromises.length < expectedWrites; i += 1) {
     await Promise.resolve()
@@ -140,8 +168,8 @@ async function settle(harness: DepsRig, expectedWrites: number): Promise<void> {
   await Promise.allSettled([...harness.settled, ...harness.store.setPromises])
 }
 
-/** Bounded microtask flush WITHOUT awaiting still-pending deferred provider
- *  loads (used by the progressive-settlement tests). */
+/** Bounded microtask flush WITHOUT awaiting a still-pending deferred
+ * directory load (used by the late-settlement tests). */
 async function flush(turns = 16): Promise<void> {
   for (let i = 0; i < turns; i += 1) await Promise.resolve()
 }
@@ -165,11 +193,14 @@ test('allowlistSummary and lastRouteWhileEnabled are pure', () => {
   assert.equal(lastRouteWhileEnabled(true, [...only, { provider: 'q', model: 'n' }], { provider: 'p', model: 'm' }), false)
 })
 
-test('projection flattens providers in catalog order with full-identity allowed markers', () => {
+test('projection flattens directory groups in catalog order with full-identity allowed markers', () => {
   const projection = projectSubagentAllowlist({
-    providers: [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-    models: new Map([['p1', [{ id: 'shared' }]], ['p2', [{ id: 'shared' }]]]),
-    failures: new Map(),
+    catalog: { state: 'ready', directory: directoryOf({
+      groups: [
+        { id: 'p1', name: 'One', models: [{ id: 'shared' }] },
+        { id: 'p2', name: 'Two', models: [{ id: 'shared' }] },
+      ],
+    }) },
     allowed: [{ provider: 'p2', model: 'shared' }],
   })
   assert.deepEqual(projection.models.map(row => allowlistRouteKey(row.providerId, row.modelId)), [
@@ -179,21 +210,81 @@ test('projection flattens providers in catalog order with full-identity allowed 
   assert.equal(projection.models[1]!.allowed, true)
 })
 
-test('projection keeps a failed provider as an inert failure row and skips still-loading providers', () => {
+test('projection keeps a failed provider as an inert failure row beside the loaded groups', () => {
   const projection = projectSubagentAllowlist({
-    providers: [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
-    models: new Map([['a', [{ id: 'm' }]]]),
-    failures: new Map([['b', 'boom']]),
+    catalog: { state: 'ready', directory: directoryOf({
+      groups: [{ id: 'a', models: [{ id: 'm' }] }],
+      failures: [{ id: 'b', name: 'Bad', message: 'boom' }],
+    }) },
     allowed: [],
   })
   assert.deepEqual(projection.models.map(row => row.providerId), ['a'])
-  assert.deepEqual(projection.failures, [{ providerId: 'b', providerName: 'b', message: 'boom' }])
+  assert.deepEqual(projection.failures, [{ providerId: 'b', providerName: 'Bad', message: 'boom' }])
+})
+
+test('only a READY directory can claim a saved route absent', () => {
+  const ready: AllowlistCatalogState = {
+    state: 'ready',
+    directory: directoryOf({ groups: [{ id: 'p', name: 'P', models: [{ id: 'm1' }] }] }),
+  }
+  const allowed = [{ provider: 'p', model: 'm1' }, { provider: 'gone', model: 'old-model' }] as const
+  const projection = projectSubagentAllowlist({ catalog: ready, allowed })
+  assert.deepEqual(projection.models.map(row => allowlistRouteKey(row.providerId, row.modelId)), [
+    'p\u0000m1',
+    'gone\u0000old-model',
+  ])
+  assert.equal(projection.models[0]!.savedRoute, undefined, 'a listed route is a normal row')
+  assert.equal(projection.models[1]!.savedRoute, 'absent', 'the ready directory provably omits it')
+  assert.equal(projection.models[1]!.allowed, true)
+})
+
+test('a loading catalog never claims absence — saved routes stay saved, unverified', () => {
+  const projection = projectSubagentAllowlist({
+    catalog: { state: 'loading' },
+    allowed: [{ provider: 'gone', model: 'old-model' }],
+  })
+  assert.equal(projection.models.length, 1, 'the saved route stays representable and removable')
+  assert.equal(projection.models[0]!.savedRoute, 'catalog-loading', 'absence is never claimed while loading')
+  assert.deepEqual(projection.failures, [])
+})
+
+test('a failed whole-directory read never claims absence', () => {
+  const projection = projectSubagentAllowlist({
+    catalog: { state: 'failed', reason: 'remote connection is not connected' },
+    allowed: [{ provider: 'p', model: 'm1' }],
+  })
+  assert.equal(projection.models[0]!.savedRoute, 'catalog-unavailable')
+  assert.deepEqual(projection.failures, [{
+    providerId: 'model-directory',
+    providerName: 'Model directory',
+    message: 'remote connection is not connected',
+  }])
+})
+
+test('a provider-side failure never claims that provider\'s saved routes absent', () => {
+  const projection = projectSubagentAllowlist({
+    catalog: { state: 'ready', directory: directoryOf({
+      groups: [{ id: 'ok', name: 'Ok', models: [{ id: 'm' }] }],
+      failures: [{ id: 'anthropic', name: 'Anthropic', message: 'lookup failed' }],
+    }) },
+    allowed: [
+      { provider: 'anthropic', model: 'claude-x' },
+      { provider: 'ok', model: 'really-gone' },
+    ],
+  })
+  const anthropic = projection.models.find(row => row.providerId === 'anthropic')!
+  const okGone = projection.models.find(row => row.providerId === 'ok' && row.modelId === 'really-gone')!
+  assert.equal(anthropic.savedRoute, 'provider-unavailable',
+    'the failed provider\'s catalog could not answer — absence is not a fact')
+  assert.equal(okGone.savedRoute, 'absent',
+    'the loaded provider\'s omission IS provable')
 })
 
 test('toggling a model writes the WHOLE official section and Esc returns to /settings once', async () => {
   const harness = rig({ enabled: false, allowedModels: [] })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
+  assert.equal(harness.directoryReads(), 1, 'exactly ONE official directory read')
   // No provider navigation: the cursor already sits on the first model row.
   assert.ok(selectedLine(menu, 60)?.includes('m1'), `cursor must start on the first model:\n${menu.render(60).map(strip).join('\n')}`)
   menu.handleInput(ENTER) // toggle m1 on
@@ -283,8 +374,12 @@ test('a write settling AFTER the picker closed converges the outer row and stays
 
 test('the flat list is provider-grouped with no provider navigation step', async () => {
   const harness = rig({ enabled: false, allowedModels: [] }, {
-    providers: [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-    models: { p1: [{ id: 'm1', name: 'Model One' }], p2: [{ id: 'm2', name: 'Model Two' }] },
+    directory: directoryOf({
+      groups: [
+        { id: 'p1', name: 'One', models: [{ id: 'm1', name: 'Model One' }] },
+        { id: 'p2', name: 'Two', models: [{ id: 'm2', name: 'Model Two' }] },
+      ],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -299,7 +394,9 @@ test('the flat list is provider-grouped with no provider navigation step', async
 
 test('a model detail shows its id only while highlighted', async () => {
   const harness = rig({ enabled: false, allowedModels: [] }, {
-    models: { p: [{ id: 'gpt-5.6-sol', name: 'Sol' }, { id: 'pro', name: 'Pro' }] },
+    directory: directoryOf({
+      groups: [{ id: 'p', name: 'P', models: [{ id: 'gpt-5.6-sol', name: 'Sol' }, { id: 'pro', name: 'Pro' }] }],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -311,11 +408,12 @@ test('a model detail shows its id only while highlighted', async () => {
   assert.ok(view.includes('pro'), 'the new selected row shows its id')
 })
 
-test('partial provider failure isolates the failure and keeps other providers editable', async () => {
+test('a failed provider group isolates the failure and keeps the loaded groups editable', async () => {
   const harness = rig({ enabled: false, allowedModels: [] }, {
-    providers: [{ id: 'good', name: 'Good' }, { id: 'bad', name: 'Bad' }],
-    models: { good: [{ id: 'm1' }] },
-    failing: ['bad'],
+    directory: directoryOf({
+      groups: [{ id: 'good', name: 'Good', models: [{ id: 'm1' }] }],
+      failures: [{ id: 'bad', name: 'Bad', message: 'bad exploded' }],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -335,10 +433,96 @@ test('partial provider failure isolates the failure and keeps other providers ed
   assert.equal(harness.store.writes.length, 1, 'Enter on a failure row must not write')
 })
 
+test('a whole-directory failure renders one inert failure and keeps saved routes removable', async () => {
+  const harness = rig({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] }, { defer: true })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  menu.render(60) // Loading models…
+  harness.rejectDirectory(new Error('remote connection is not connected'))
+  await settle(harness, 0)
+  let view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('Model directory'), `the directory failure row must render:\n${view}`)
+  assert.ok(view.includes('m1'), `the saved route must stay visible:\n${view}`)
+  assert.ok(!view.includes('not in the current catalog'),
+    `a failed catalog read must never claim absence:\n${view}`)
+  // Filter to the saved route: its note says the catalog is unavailable —
+  // absence is NOT claimed from a failed read.
+  menu.handleInput('m1')
+  await flush()
+  view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('saved route (catalog unavailable)'),
+    `the saved route carries the truthful unverified note:\n${view}`)
+  for (let i = 0; i < 2; i += 1) menu.handleInput('\x7f')
+  // Filter to the failure row: its reason renders as the selected detail and
+  // Enter stays inert.
+  menu.handleInput('directory')
+  await flush()
+  view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('remote connection is not connected'), `the directory failure reason must render:\n${view}`)
+  menu.handleInput(ENTER)
+  await flush()
+  assert.deepEqual(harness.store.writes, [], 'Enter on the directory-failure row must not write')
+  // The saved route stays removable in principle: the enabled+last-route
+  // rule still guards the removal (disable first, then remove).
+  for (let i = 0; i < 9; i += 1) menu.handleInput('\x7f')
+  menu.handleInput('m1')
+  await flush()
+  menu.handleInput(ENTER) // cursor on the saved route -> refused while enabled
+  await settle(harness, 0)
+  assert.deepEqual(harness.store.writes, [], 'the last-route rule still applies on a failed directory')
+})
+
+test('a loading catalog shows saved routes WITHOUT the absence claim', async () => {
+  const harness = rig({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] }, { defer: true })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  const view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('m1'), `the saved route stays visible while loading:\n${view}`)
+  assert.ok(!view.includes('not in the current catalog'),
+    `a still-loading catalog must never claim absence:\n${view}`)
+  assert.ok(view.includes('catalog still loading'),
+    `the saved route carries the truthful loading note:\n${view}`)
+  harness.resolveDirectory(directoryOf({ groups: [{ id: 'p', name: 'P', models: [{ id: 'm1' }] }] }))
+  await flush()
+  // Once the directory arrives and lists the route, the saved-note disappears.
+  const settled = menu.render(60).map(strip).join('\n')
+  assert.ok(!settled.includes('Saved routes'), `a listed route is a normal row:\n${settled}`)
+})
+
+test('a provider-side failure keeps that provider\'s saved route unverified — never absent', async () => {
+  const harness = rig({ enabled: true, allowedModels: [{ provider: 'bad', model: 'b1' }, { provider: 'ok', model: 'gone' }] }, {
+    directory: directoryOf({
+      groups: [{ id: 'ok', name: 'Ok', models: [{ id: 'here' }] }],
+      failures: [{ id: 'bad', name: 'Bad', message: 'bad exploded' }],
+    }),
+  })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+  const view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('Unavailable'), `the provider failure row must render:\n${view}`)
+  // Both saved routes render under Saved routes with their own provable facts:
+  // 'gone' IS absent (ok loaded and omits it); 'b1' is NOT claimed absent.
+  menu.handleInput('b1')
+  await flush()
+  let filtered = menu.render(60).map(strip).join('\n')
+  assert.ok(filtered.includes('provider catalog unavailable'),
+    `the failed provider\'s saved route stays unverified:\n${filtered}`)
+  assert.ok(!filtered.includes('not in the current catalog'),
+    `the failed provider\'s saved route is never claimed absent:\n${filtered}`)
+  for (let i = 0; i < 2; i += 1) menu.handleInput('\x7f')
+  menu.handleInput('gone')
+  await flush()
+  filtered = menu.render(60).map(strip).join('\n')
+  assert.ok(filtered.includes('not in the current catalog'),
+    `the loaded provider\'s omission IS provable:\n${filtered}`)
+})
+
 test('search covers model name/id and provider name/id without changing allowed state', async () => {
   const harness = rig({ enabled: true, allowedModels: [{ provider: 'gw-42', model: 'm1' }] }, {
-    providers: [{ id: 'gw-42', name: 'Custom Gateway' }, { id: 'anthropic', name: 'Anthropic' }],
-    models: { 'gw-42': [{ id: 'm1', name: 'Sol' }], anthropic: [{ id: 'm2', name: 'Opus' }] },
+    directory: directoryOf({
+      groups: [
+        { id: 'gw-42', name: 'Custom Gateway', models: [{ id: 'm1', name: 'Sol' }] },
+        { id: 'anthropic', name: 'Anthropic', models: [{ id: 'm2', name: 'Opus' }] },
+      ],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -363,18 +547,54 @@ test('search covers model name/id and provider name/id without changing allowed 
 
 test('the initial cursor prefers the first allowed route in catalog order', async () => {
   const harness = rig({ enabled: true, allowedModels: [{ provider: 'p2', model: 'm' }] }, {
-    providers: [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-    models: { p1: [{ id: 'm', name: 'P1 Model' }], p2: [{ id: 'm', name: 'P2 Model' }] },
+    directory: directoryOf({
+      groups: [
+        { id: 'p1', name: 'One', models: [{ id: 'm', name: 'P1 Model' }] },
+        { id: 'p2', name: 'Two', models: [{ id: 'm', name: 'P2 Model' }] },
+      ],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
   assert.ok(selectedLine(menu, 60)?.includes('P2 Model'), `cursor must start on the allowed route:\n${menu.render(60).map(strip).join('\n')}`)
 })
 
+test('the initial cursor prefers an allowed catalog route over a saved-but-absent route', async () => {
+  const harness = rig({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'gone', model: 'old' }] }, {
+    directory: directoryOf({ groups: [{ id: 'p', name: 'P', models: [{ id: 'm1', name: 'Fresh' }] }] }),
+  })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+  assert.ok(selectedLine(menu, 60)?.includes('Fresh'), `a listed allowed route wins over the absent saved route:\n${menu.render(60).map(strip).join('\n')}`)
+})
+
+test('a saved-but-absent route renders as a removable trailing row', async () => {
+  const harness = rig({ enabled: false, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'gone', model: 'old' }] })
+  const menu = new SubagentModelAllowlistPicker(harness.deps)
+  await settle(harness, 0)
+  const view = menu.render(60).map(strip).join('\n')
+  assert.ok(view.includes('Saved routes'), `the absent-route section must render:\n${view}`)
+  assert.ok(view.includes('old'), `the absent saved route must render as a row:\n${view}`)
+  // Filter to the absent route: its hint renders as the selected detail and
+  // Enter removes it.
+  menu.handleInput('old')
+  await flush()
+  assert.ok(menu.render(60).map(strip).join('\n').includes('saved route not in the current catalog'),
+    `the absent-route hint must render for the selected row:\n${menu.render(60).map(strip).join('\n')}`)
+  menu.handleInput(ENTER)
+  await settle(harness, 1)
+  assert.deepEqual(harness.store.writes[0]?.allowedModels, [{ provider: 'p', model: 'm1' }],
+    'the absent saved route is removable')
+})
+
 test('duplicate model ids across providers keep distinct route identity', async () => {
   const harness = rig({ enabled: false, allowedModels: [{ provider: 'p2', model: 'm' }] }, {
-    providers: [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-    models: { p1: [{ id: 'm', name: 'P1 Model' }], p2: [{ id: 'm', name: 'P2 Model' }] },
+    directory: directoryOf({
+      groups: [
+        { id: 'p1', name: 'One', models: [{ id: 'm', name: 'P1 Model' }] },
+        { id: 'p2', name: 'Two', models: [{ id: 'm', name: 'P2 Model' }] },
+      ],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -396,7 +616,9 @@ test('duplicate model ids across providers keep distinct route identity', async 
 
 test('the picker honors the forwarded row budget', async () => {
   const harness = rig({ enabled: false, allowedModels: [] }, {
-    models: { p: Array.from({ length: 12 }, (_, index) => ({ id: `m${index}` })) },
+    directory: directoryOf({
+      groups: [{ id: 'p', name: 'P', models: Array.from({ length: 12 }, (_, index) => ({ id: `m${index}` })) }],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   menu.setMaxRows(6)
@@ -438,7 +660,9 @@ test('a mouse click toggles the exact model route (mouse parity)', async () => {
 
 test('a click on the selected-detail row is inert and cannot toggle a neighbour', async () => {
   const harness = rig({ enabled: false, allowedModels: [] }, {
-    models: { p: [{ id: 'id-a', name: 'Alpha' }, { id: 'id-b', name: 'Bravo' }] },
+    directory: directoryOf({
+      groups: [{ id: 'p', name: 'P', models: [{ id: 'id-a', name: 'Alpha' }, { id: 'id-b', name: 'Bravo' }] }],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -449,21 +673,22 @@ test('a click on the selected-detail row is inert and cannot toggle a neighbour'
   assert.deepEqual(harness.store.writes, [], 'an inert detail click must not write')
 })
 
-test('a click before the rows load is inert (no stale toggle)', async () => {
-  const harness = rig({ enabled: false, allowedModels: [] })
+test('a click before the directory settles is inert (no stale toggle)', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] }, { defer: true })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   menu.render(60) // Loading models… painted
   menu.handleMouse(mouse('press', 5, 0, 60, 10))
   menu.handleMouse(mouse('click', 5, 0, 60, 10))
-  await settle(harness, 0)
+  await flush()
   assert.deepEqual(harness.store.writes, [], 'a click on the unpainted loading state must not write')
 })
 
 test('a failed provider never becomes the initial selectable row', async () => {
   const harness = rig({ enabled: false, allowedModels: [] }, {
-    providers: [{ id: 'bad', name: 'Bad' }, { id: 'good', name: 'Good' }],
-    models: { good: [{ id: 'm1' }] },
-    failing: ['bad'],
+    directory: directoryOf({
+      groups: [{ id: 'good', name: 'Good', models: [{ id: 'm1' }] }],
+      failures: [{ id: 'bad', name: 'Bad', message: 'bad exploded' }],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -480,18 +705,14 @@ test('focus reaches the search Input (CURSOR_MARKER)', async () => {
   assert.ok(menu.render(60).join('\n').includes(CURSOR_MARKER), 'the focused picker must emit the cursor marker')
 })
 
-test('closing before provider loads settle never rebuilds, repaints, or notifies', async () => {
-  const harness = rig({ enabled: false, allowedModels: [] }, {
-    providers: [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-    defer: true,
-  })
+test('closing before the directory settles never rebuilds, repaints, or notifies', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] }, { defer: true })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   menu.render(60) // Loading models…
   const rendersBefore = harness.renders()
-  menu.handleInput(ESC) // close while BOTH provider loads are still pending
+  menu.handleInput(ESC) // close while the directory load is still pending
   assert.deepEqual(harness.dones, ['0 routes'], 'the close reports the current summary once')
-  harness.resolveProvider('p1', [{ id: 'm1' }]) // late success
-  harness.rejectProvider('p2', new Error('p2 exploded')) // late failure
+  harness.resolveDirectory(directoryOf({ groups: [{ id: 'p1', name: 'One', models: [{ id: 'm1' }] }] })) // late success
   await settle(harness, 0)
   assert.equal(harness.renders(), rendersBefore, 'a settle after close must not request a repaint')
   assert.deepEqual(harness.dones, ['0 routes'], 'no second close/summary via done')
@@ -499,63 +720,66 @@ test('closing before provider loads settle never rebuilds, repaints, or notifies
   assert.ok(!menu.render(60).map(strip).join('\n').includes('m1'), 'no rows may be built after close')
 })
 
-test('a late provider load cannot move the cursor after the user toggles', async () => {
-  // Controlled progressive settlement: p1 (with the allowed route) settles
-  // first, the user removes it, then p2 settles. The one-shot initial-cursor
-  // placement must NOT fire and move the cursor back to the first allowed row.
-  const harness = rig({ enabled: false, allowedModels: [
-    { provider: 'p1', model: 'm1' },
-    { provider: 'p1', model: 'm0' },
-  ] }, {
-    providers: [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-    defer: true,
+test('a late directory settle cannot move the cursor after the user interacted', async () => {
+  // While the directory loads, only the SAVED absent route (m0) renders and
+  // the picker auto-selects it. Without interaction, the post-settle
+  // placement would jump the cursor to the first allowed CATALOG row (m1).
+  // The user typing a filter mid-load is a real interaction, so the value-
+  // preserving refresh must keep the cursor on m0 instead.
+  const directory = directoryOf({
+    groups: [
+      { id: 'p1', name: 'One', models: [{ id: 'm1' }] },
+      { id: 'p2', name: 'Two', models: [{ id: 'm0' }] },
+    ],
   })
+  const harness = rig({
+    enabled: true,
+    allowedModels: [{ provider: 'p2', model: 'm0' }, { provider: 'p1', model: 'm1' }],
+  }, { directory, defer: true })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
-  harness.resolveProvider('p1', [{ id: 'm1' }, { id: 'm0' }])
-  await flush() // p1 settles; p2 is still pending
-  assert.ok(selectedLine(menu, 60)?.includes('m1'), `the cursor starts on the first allowed row:\n${menu.render(60).map(strip).join('\n')}`)
-  menu.handleInput(ENTER) // remove m1 (allowed -> [m0])
+  assert.ok(selectedLine(menu, 60)?.includes('m0'), 'the loading state auto-selects the saved absent route')
+  menu.handleInput('m') // a filter edit is a real interaction pre-settle
+  harness.resolveDirectory(directory)
   await flush()
-  await Promise.allSettled(harness.store.setPromises)
-  await flush()
-  assert.ok(selectedLine(menu, 60)?.includes('m1'), 'the toggled row keeps the cursor')
-  harness.resolveProvider('p2', [{ id: 'm2' }]) // late provider keeps settling
-  await flush()
-  assert.ok(selectedLine(menu, 60)?.includes('m1'),
-    `a late provider load must not override the user's cursor:\n${menu.render(60).map(strip).join('\n')}`)
+  assert.ok(selectedLine(menu, 60)?.includes('m0'),
+    `a late settle must not move the cursor to the allowed catalog route after the user interacted:\n${menu.render(60).map(strip).join('\n')}`)
 })
 
-test('a mouse press on the already-selected row latches against a late provider load', async () => {
-  // The press changes no selection (m1 is already the cursor), so nothing
-  // fires onSelectionChange; the pointer gesture itself must still cancel the
-  // one-shot placement so the late p2 load cannot move the cursor to m0.
-  const harness = rig({ enabled: false, allowedModels: [{ provider: 'p1', model: 'm0' }] }, {
-    providers: [{ id: 'p1', name: 'One' }, { id: 'p2', name: 'Two' }],
-    defer: true,
+test('a mouse press during loading latches against the late settle', async () => {
+  // The press targets the only row that exists mid-load (the saved absent
+  // route m0) and changes nothing, so onSelectionChange never fires; the
+  // pointer gesture itself must still cancel the one-shot placement so the
+  // late settle cannot jump the cursor to the allowed catalog route (m1).
+  const directory = directoryOf({
+    groups: [
+      { id: 'p1', name: 'One', models: [{ id: 'm1' }] },
+      { id: 'p2', name: 'Two', models: [{ id: 'm0' }] },
+    ],
   })
+  const harness = rig({
+    enabled: true,
+    allowedModels: [{ provider: 'p2', model: 'm0' }, { provider: 'p1', model: 'm1' }],
+  }, { directory, defer: true })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
-  harness.resolveProvider('p1', [{ id: 'm1' }, { id: 'm0' }])
+  const row = labelRow(menu, 60, 'm0')
+  assert.ok(row >= 0, 'the saved absent route renders mid-load')
+  menu.handleMouse(mouse('press', 5, row, 60, 10))
+  harness.resolveDirectory(directory)
   await flush()
-  assert.ok(selectedLine(menu, 60)?.includes('m1'), `the cursor starts on m1:\n${menu.render(60).map(strip).join('\n')}`)
-  const row = labelRow(menu, 60, 'm1')
-  assert.ok(row >= 0)
-  menu.handleMouse(mouse('press', 5, row, 60, 10)) // press the already-selected m1
-  harness.resolveProvider('p2', [{ id: 'm2' }])
-  await flush()
-  assert.ok(selectedLine(menu, 60)?.includes('m1'),
-    `the press must latch against the late load:\n${menu.render(60).map(strip).join('\n')}`)
+  assert.ok(selectedLine(menu, 60)?.includes('m0'),
+    `the press must latch against the late settle:\n${menu.render(60).map(strip).join('\n')}`)
 })
 
-test('the allowlist empty state separates loading, a settled empty catalog, and a zero-match search', async () => {
+test('the allowlist empty state separates loading, a settled empty directory, and a zero-match search', async () => {
   // Still loading.
-  const pending = rig({ enabled: false, allowedModels: [] }, { providers: [{ id: 'p', name: 'P' }], defer: true })
+  const pending = rig({ enabled: false, allowedModels: [] }, { defer: true })
   const pendingMenu = new SubagentModelAllowlistPicker(pending.deps)
   assert.ok(pendingMenu.render(60).map(strip).join('\n').includes('Loading models…'),
     `a pending load must say Loading:\n${pendingMenu.render(60).map(strip).join('\n')}`)
-  pending.resolveProvider('p', []) // settles with an EMPTY catalog
+  pending.resolveDirectory(directoryOf({ groups: [] })) // settles with an EMPTY directory
   await flush()
   assert.ok(pendingMenu.render(60).map(strip).join('\n').includes('no models available'),
-    `a settled empty catalog must not keep saying Loading:\n${pendingMenu.render(60).map(strip).join('\n')}`)
+    `a settled empty directory must not keep saying Loading:\n${pendingMenu.render(60).map(strip).join('\n')}`)
   // Settled with catalog, then a zero-match query.
   const full = rig({ enabled: false, allowedModels: [] })
   const fullMenu = new SubagentModelAllowlistPicker(full.deps)
@@ -568,8 +792,12 @@ test('the allowlist empty state separates loading, a settled empty catalog, and 
 
 test('multiple provider failures collapse into one Unavailable section', async () => {
   const harness = rig({ enabled: false, allowedModels: [] }, {
-    providers: [{ id: 'ga', name: 'Gateway A' }, { id: 'gb', name: 'Gateway B' }],
-    failing: ['ga', 'gb'],
+    directory: directoryOf({
+      failures: [
+        { id: 'ga', name: 'Gateway A', message: 'ga down' },
+        { id: 'gb', name: 'Gateway B', message: 'gb down' },
+      ],
+    }),
   })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
@@ -578,12 +806,12 @@ test('multiple provider failures collapse into one Unavailable section', async (
     `two failures must form ONE section:\n${lines.join('\n')}`)
 })
 
-test('an allowlist with no configured providers says so', async () => {
-  const harness = rig({ enabled: false, allowedModels: [] }, { providers: [] })
+test('an allowlist over an empty directory says no models', async () => {
+  const harness = rig({ enabled: false, allowedModels: [] }, { directory: directoryOf({ groups: [] }) })
   const menu = new SubagentModelAllowlistPicker(harness.deps)
   await settle(harness, 0)
-  assert.ok(menu.render(60).map(strip).join('\n').includes('no providers configured'),
-    `a zero-provider catalog must say so:\n${menu.render(60).map(strip).join('\n')}`)
+  assert.ok(menu.render(60).map(strip).join('\n').includes('no models available'),
+    `an empty directory must say no models available:\n${menu.render(60).map(strip).join('\n')}`)
 })
 
 test('the allowlist keeps the default TRAILING badge layout (not right-aligned)', async () => {

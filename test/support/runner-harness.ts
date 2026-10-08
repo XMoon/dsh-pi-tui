@@ -133,7 +133,7 @@ export interface RunnerHarness {
   readonly subagents?: unknown
   /** An optional jobs registry service (the Task Center's jobs half). */
   jobs?: unknown
-  /** An optional shell executor service (the sandbox-opt-in local-shell
+  /** An optional shell executor service (the sandbox-policy user-shell
    * path; absent models "sandbox unavailable in this composition"). */
   shell?: unknown
   /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
@@ -318,19 +318,28 @@ export function makeHarness(
     discoverModels: async () => [],
     listConfigurableProviders: () => [],
   }
-  const definitions = new Map<string, { name: string; description: string; handler: (...args: never[]) => unknown }>()
+  const definitions = new Map<string, { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }>()
   const commandSettlements: { sessionId: string; phase: 'run' | 'done'; ownerLive: boolean }[] = []
   const resumeSessionIds: string[] = []
   const disposeFailures = new Set<string>()
   let commandSeq = 0
   const commands = {
-    register: (definition: { name: string; description: string; handler: (...args: never[]) => unknown }) => {
+    register: (definition: { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }) => {
       definitions.set(definition.name, definition)
       return () => {
         if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
       }
     },
-    list: () => [...definitions.values()].map(({ name, description }) => ({ name, description })),
+    // The official descriptor carries the registration's own
+    // `definitionId` through (PR5 v2 §1C: the origin derivation compares the
+    // EFFECTIVE WINNER's definitionId against this surface's stamped mirror
+    // ids — dropping it here would make every mirror look like a genuine
+    // Host command).
+    list: () => [...definitions.values()].map(({ name, description, definitionId }) => ({
+      name,
+      description,
+      ...definitionId === undefined ? {} : { definitionId },
+    })),
     // The official CommandRuntime appends `command/run` BEFORE the handler and
     // `command/done` AFTER it settles, both to the SAME (source) Session. The
     // simulation records whether that Session still had a live owner handle at
@@ -387,14 +396,14 @@ export function installVirtualProcessTerminal(vt: VirtualTerminal): () => void {
   const prototype = ProcessTerminal.prototype as object
   const names = [
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
     'columns', 'rows', 'kittyProtocolActive', 'modifyOtherKeysActive',
   ]
   const originals = new Map<string, PropertyDescriptor | undefined>()
   const virtual = vt as unknown as Record<string, unknown>
   const methods = new Set([
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
   ])
   for (const name of names) {
     originals.set(name, Object.getOwnPropertyDescriptor(prototype, name))

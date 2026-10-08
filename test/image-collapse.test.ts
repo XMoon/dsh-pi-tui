@@ -14,7 +14,7 @@ import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepsee
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { ImageLoader } from '../src/image/loader.ts'
+import { ImageLoader } from '../src/client/media/image/loader.ts'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -22,7 +22,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

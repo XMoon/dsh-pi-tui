@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-08
+
+### Installation and version pairing
+
+This stable release moves the exact DSH family used for development and
+compatibility validation to the published `0.2.0-rc.2`, and the runtime peer
+floor rises to `>=0.2.0-rc.2`; installing DSH requires explicitly allowing its
+native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.1
+dsh --profile pi-tui
+```
+
+Users who must keep an older DSH: `@deepseek-ai/dsh@0.2.0-rc.1` and `0.1.7-rc.2`
+use the released `@xmoon76/dsh-pi-tui@0.5.0`; `@deepseek-ai/dsh@0.1.7-rc.1` uses
+`@xmoon76/dsh-pi-tui@0.4.8`.
+
+### Added
+
+- **Terminal-native progress and status reporting.** `/settings → Terminal
+  progress` turns from a switch into four modes: `9;4+7501` (default), `9;4`,
+  `7501` and `Off`. On top of the existing OSC 9;4 progress bar, the default
+  also reports the Agent's semantic state through OSC 7501 (working, waiting
+  for approval, waiting for an answer, done, error, idle): done/error is
+  reported once a real run's last turn result is proven, an interrupted or
+  cancelled run returns to idle, a proven final state is retained until exit,
+  and a temporary handover (`$EDITOR`, a fullscreen round-trip) clears the live
+  state first. Switching modes takes effect immediately, and a persisted `On`
+  reads as the dual-protocol default. Both protocols are generic terminal
+  protocols, not tied to one terminal: other terminals show whatever they
+  support.
+
+- **The pane's working directory follows the current Session (OSC 7).** It is
+  re-reported after startup, a session switch, a fullscreen round-trip and an
+  `$EDITOR` round-trip; a Direct session without an official cwd falls back to the
+  launch directory, and a DSH Remote backend publishes nothing — a Host cwd is
+  never leaked into the Client terminal (currently enabled only for terminals
+  identified as Tern).
+
+- **The subagent viewer now treats the child session as a real display subject
+  and adds a single-line subject bar.** While a viewed child session is on
+  screen, its model/preset/permission, context pressure and window, cumulative
+  token usage, todos and working directory all come from that child session's
+  own session state (`model ?` while the child has no model yet — never the
+  parent's model) and update the moment their event lands; the main session's
+  identity head card is hidden while viewing and returns on exit. The subject
+  bar sits under the header and shows `‹ back`, the child label, `● running` /
+  `○ inactive` and the child's own `provider/model @effort`; the old
+  `[viewing subagent · …]` marker and the footer `view-scope` identity block no
+  longer render (legacy custom layouts still load/edit/save). The extension API
+  gains the optional `session.displaySubject` projection for the viewed child;
+  the released session-snapshot semantics are unchanged — plugins still see only
+  the live/main session, so entering or leaving a viewer never looks like a
+  session switch.
+
+- **Optional official Git commit attribution guidance (off by default).** When
+  enabled, the Agent is instructed to add
+  `Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>` to commits it
+  creates; the `product-model` mode additionally adds
+  `Assisted-By: <provider>/<model>`. This is Agent guidance, not
+  repository-level enforcement: no Git hooks are installed, no commands are
+  rewritten, no repositories are probed, and manual commits stay untouched.
+
+- **Compact collapses settled historical process spans to their header.** Only
+  the live or Preparing newest span of the current window keeps its `Think:` /
+  `Action:` previews; a settled historical span collapses to its header (the
+  `N actions · …` statistics stay), and a historical think-only span shows
+  `Thought <duration>`.
+
+- **Context entries that have arrived but not yet entered the model history are
+  visible in the conversation tail.** A finished background job, a subagent
+  settlement or another non-user Context no longer waits silently: it shows one
+  bounded preview row in the original Context/User/Context order, leaves as soon
+  as the Host takes it over, and never pulls the viewport away from where you are
+  reading.
+
+### Changed
+
+- **The Question tool's input semantics converge to selection / editing /
+  progression.** Multi-select questions toggle checkboxes with `Space` (or
+  digits / clicks), while `Enter` only continues like `→` (skipping when
+  unanswered); free text saves live, so an un-Enter-ed draft survives `Esc` and
+  cross-question navigation; a saved custom answer shows its value on revisit
+  (masked questions show bullets). Hints now read
+  `space toggle · ↵ continue/review`.
+
+- **The top header is strictly ONE physical line.** The session title is
+  ANSI/CJK/emoji-safe truncated to the remaining cell width (ellipsized, then
+  dropped when no cell remains) and no longer wraps at any width or display
+  preset — a very long main title (especially while a child viewer is open) can
+  no longer push the editor and pinned chrome off screen.
+
+- **A mid-turn notice inside a collapsed Focus now renders outside the Thought.**
+  The opening notice that woke the turn stays before the Thought; notices that
+  arrive mid-turn (a background job finishing, a subagent settling) now render
+  after the collapsed Thought (in raw chronological order when expanded) and
+  stay reachable through full-text search.
+
+- **Scrolling and repainting are faster in large sessions.** Plain scrolling and
+  paging at a history boundary no longer remeasure the whole transcript
+  geometry; a measured session of ~1.6 MB of text showed ~80% lower per-frame
+  scroll CPU (an observation, not a CI threshold). Scroll, click and copy
+  semantics are unchanged.
+
+- **Command and settings discovery copy states conditional capabilities
+  truthfully.** `!`/`!!`, the `/settings` local-shell sandbox row, `/title`,
+  `/login`, `/logout`, `/transcript`, `/attach` and `/model` now spell out the
+  "requires backend / Host support" condition; registration and behavior are
+  unchanged.
+
+### Fixed
+
+- **A long user message can be expanded and collapsed symmetrically.** A single
+  click anywhere on a collapsed bubble expands it, and a single click anywhere on
+  an expanded bubble collapses it (the tail `▴ Collapse` control stays
+  available); drag selection remains intact. Regular long-user markers advertise
+  the effective key as `expand/collapse`.
+
+### Compatibility
+
+- **The DSH dependency baseline moves to the published `0.2.0-rc.2` family as a
+  whole.** Every `@deepseek-ai/dsh-*` peer floor rises to `>=0.2.0-rc.2`, and the
+  development/source qualification target pins exact `0.2.0-rc.2`. This line's
+  Question lifecycle depends on contracts published only in rc.2 (the
+  `userQuestions` Remotes and Session projection), so rc.1 and older families are
+  no longer inside this line's declared compatibility range; older runtimes
+  should pick their paired TUI line from the installation table above.
+
+> **Known limitations:** Direct is still the production default; Remote is this
+> project's own experimental composition that requires explicit configuration and
+> its Host extension, and this release does not promise general availability. The
+> OSC 7 pane working directory and the OSC 9;4 "waiting for input" refinement are
+> currently enabled only for terminals identified as Tern.
+
 ## [0.5.0] - 2026-09-28
 
 ### Installation and version pairing
@@ -1566,7 +1702,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.6...v0.4.8

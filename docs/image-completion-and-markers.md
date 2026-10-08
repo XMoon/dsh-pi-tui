@@ -29,10 +29,20 @@ nothing. Tab had two more gaps:
   is a first-class fork hook (autocomplete.ts). The `/attach` and `/image`
   completion entries (installed by `installCompletions` in commands.ts, gated
   by the `PATH_ARGUMENT_COMMANDS` set) carry it, backed by `suggestPathArgument`
-  (mentions.ts). The session cwd is read at CALL time, so a session switch
-  mid-edit stays correct.
-- **`suggestPathArgument(argumentText, cwd)`** is shell-style and
-  directory-local (the fd whole-tree fuzzy search stays `@`'s job). It
+  (`src/tui/file-completion/path-argument.ts`). This is CLIENT-local completion:
+  the Client cwd is read at CALL time and stays independent of the Session/Host
+  cwd, so a session switch cannot retarget local attachment completion onto the
+  Host filesystem, and a Host/remote workspace is never consulted.
+- **`suggestPathArgument(argumentText, cwd)`** resolves the Client-local
+  argument through the same discovery policy as the rest of the local
+  completion. An UNSCOPED (whole-tree) query is answered by finder-first fuzzy
+  discovery (`ClientLocalDiscoveryDriver`: fd/fdfind, or the bounded recursive
+  subtree fallback when the finder is unavailable). A scoped EMPTY term
+  (`src/`, `../pics/`) directly lists that directory's own children, while a
+  scoped NON-EMPTY term (`src/de`) uses the same finder/fallback search
+  constrained to that scoped base. A Windows-dialect token stays on the scan
+  path. The Session
+  `@` whole-tree search stays the Host authority's job. It
   resolves `~`, absolute and relative forms — including Windows drive
   (`C:\x`) and UNC (`\\server\share`) tokens, detected via
   `isAbsolute` + `win32.isAbsolute` and completed in the user's own path
@@ -196,7 +206,7 @@ placement" optimization is possible later.
 
 ## Guarding tests
 
-- `test/mentions.test.ts` — suggestPathArgument (bare prefix, directory
+- `test/autocomplete-provider.test.ts` — suggestPathArgument (bare prefix, directory
   continuation, `~`/absolute forms, quoting, single-token gate, provider
   integration through the fork command branch, the Tab gate override).
 - `test/tui-editor.test.ts` — headless: `/image sh` natural dropdown, Tab on

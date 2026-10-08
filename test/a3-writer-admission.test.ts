@@ -40,7 +40,7 @@ import {
   type SteerSubmissionDeps,
   type SubmissionRuntimeSurface,
 } from '../src/app/submission/runtime.ts'
-import { SessionOperationBarrier, TransitionInProgressError } from '../src/session-operation-barrier.ts'
+import { SessionOperationBarrier, TransitionInProgressError } from '../src/app/session/operation-barrier.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 import { compositionSource } from './support/composition-surface.ts'
 import { productionSources } from './support/owner-modules.ts'
@@ -180,6 +180,120 @@ test('a stale scope refused at admission takes the distinct stale path and runs 
   ], 'a stale capture takes the stale path — never the transition refusal')
 })
 
+test('PR5: a proven prompt rejection settles structurally inside the writer — restore, ack code, guidance, no throw', async () => {
+  // The ordinary prompt must consume `WriteOutcome.rejected` at the submission
+  // settlement owner instead of throwing its message: the reserved-submit
+  // wrapper then never performs its generic restore and `runOwned.onError`
+  // never emits a generic "submission failed" notice.
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({
+      kind: 'rejected' as const,
+      error: {
+        code: 'session/writer-held',
+        message: SESSION_WRITER_HELD_GUIDANCE,
+        details: { sessionId: 's1' },
+      },
+    }),
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION)
+  assert.deepEqual(calls, [
+    'dispatch',
+    'merge',
+    'settleLocal',
+    'ack:session write rejected: session/writer-held',
+    `notify:error:${SESSION_WRITER_HELD_GUIDANCE}`,
+  ], 'the rejection restores intent, settles echo + code-bearing ack, shows the guidance and returns')
+  assert.ok(calls.every(call => call !== 'consume'),
+    'a refused write never consumes the referenced drafts')
+  assert.ok(calls.every(call => !call.includes('try again') && !call.includes('submission failed')),
+    'a proven pre-commit refusal is never reported as a stale retry or a generic failure')
+})
+
+test('PR5: the admitted prompt writer owns the settlement interval — a transition waits through rejection settlement', async () => {
+  // DECISION D3: no post-dispatch currentness fence exists because the writer
+  // barrier IS the currentness authority for that interval. Prove it with the
+  // real `SessionRuntime.withWriter` + `SessionOperationBarrier`: EVERY
+  // caller-side settlement step must run while the admitted writer still holds
+  // the barrier (`activeWriters === 1`) and BEFORE the waiting transition runs.
+  // A broken implementation that released the writer as soon as the prompt
+  // outcome resolved and only then restored/acked/notified would fail here.
+  const { runtime: sessionRuntime, barrier } = bind(() => true)
+  let resolvePrompt!: (outcome: Awaited<ReturnType<SubmissionRuntimeSurface['prompt']>>) => void
+  const promptGate = new Promise<Awaited<ReturnType<SubmissionRuntimeSurface['prompt']>>>(resolve => {
+    resolvePrompt = resolve
+  })
+  let transitionDone = false
+  /** One settlement step's ordering facts: writer occupancy + transition state. */
+  const settlementFacts: string[] = []
+  const fact = (label: string): string => `${label}|writers=${barrier.activeWriters}|transitionDone=${transitionDone}`
+  const { surface, calls } = recordingSurface({
+    withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
+    prepareMessage: async () => undefined,
+    prompt: () => promptGate,
+    mergeDraftIntoEditor: () => { settlementFacts.push(fact('merge')); calls.push('merge'); return true },
+    settleLocalSubmission: () => { settlementFacts.push(fact('settleLocal')); calls.push('settleLocal') },
+    settleSubmitAck: (reason) => { settlementFacts.push(fact('ack')); calls.push(`ack:${reason}`) },
+    notify: (message, kind) => { settlementFacts.push(fact('notify')); calls.push(`notify:${kind}:${message}`) },
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  const pending = runtime.submitPrompt(SUBMISSION)
+  await flush()
+  assert.equal(barrier.activeWriters, 1, 'the prompt writer is admitted across the unresolved outcome')
+  const transition = barrier.runTransition(async () => { transitionDone = true })
+  await flush()
+  assert.equal(transitionDone, false, 'a transition cannot replace the Session while the writer is held')
+  resolvePrompt({
+    kind: 'rejected',
+    error: { code: 'session/writer-held', message: SESSION_WRITER_HELD_GUIDANCE, details: { sessionId: 's1' } },
+  })
+  await pending
+  assert.deepEqual(calls.slice(-4), [
+    'merge',
+    'settleLocal',
+    'ack:session write rejected: session/writer-held',
+    `notify:error:${SESSION_WRITER_HELD_GUIDANCE}`,
+  ], 'the caller-side settlement completed before the writer released')
+  assert.deepEqual(settlementFacts, [
+    'merge|writers=1|transitionDone=false',
+    'settleLocal|writers=1|transitionDone=false',
+    'ack|writers=1|transitionDone=false',
+    'notify|writers=1|transitionDone=false',
+  ], 'every settlement step ran inside the held writer, before the waiting transition could run')
+  await transition
+  assert.equal(transitionDone, true, 'the transition may complete only after the settlement finished')
+  assert.equal(barrier.activeWriters, 0)
+})
+
+test('PR5 negative control: an indeterminate prompt result never restores the draft', async () => {
+  const { surface, calls } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({
+      kind: 'indeterminate' as const,
+      error: { code: 'session/write-indeterminate', message: 'the transport failed after dispatch' },
+    }),
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await runtime.submitPrompt(SUBMISSION)
+  assert.deepEqual(calls, [
+    'dispatch',
+    'settleLocal',
+    'ack:session write result indeterminate',
+    'notify:error:session write result is indeterminate — do not retry automatically',
+  ], 'an unproven post-dispatch result is not restored and not reclassified as a rejection')
+})
+
+test('PR5 negative control: an unsupported prompt result keeps its generic failure path', async () => {
+  const { surface } = recordingSurface({
+    prepareMessage: async () => undefined,
+    prompt: async () => ({ kind: 'unsupported' as const, reason: 'prompt is not supported here' }),
+  })
+  const runtime = bindSubmissionRuntime({ surface })
+  await assert.rejects(runtime.submitPrompt(SUBMISSION), /prompt is not supported here/,
+    'only a proven rejection is settled locally; any other outcome still fails fast')
+})
+
 test('a committed transition settles the queue recall; a failed one restores it', () => {
   const { surface } = recordingSurface({})
   const runtime = bindSubmissionRuntime({ surface })
@@ -216,12 +330,20 @@ test('the queue-recall state and the plain-submit write body live in app/submiss
   assert.equal(index.includes('pendingQueueRecalls.push'), false,
     'the settle body must live in app/submission')
   // The plain-prompt write orchestration (prepare → semantic write → consume)
-  // is gone from the runner: the two write sites delegate to the submission
+  // is gone from the runner: the write sites delegate to the submission
   // runtime through `submitPrompt`. A5b-4 moved the sites into the submission
-  // controller owner, so the lock follows the authority there.
+  // controller owner, so the lock follows the authority there. M3-4 PR4 §1.3
+  // collapsed the former TWO sites into ONE: the command-dispatch window is
+  // now always open (Direct through the in-process executor, Remote through
+  // the Client registry + HostCommandPort), so the post-window "no commands
+  // service" fallthrough became unreachable and was deleted; the single
+  // remaining delegation is the command-submission fallback the runtime
+  // drives for an agent-facing line.
   const controller = readFileSync(new URL('../src/app/submission/controller.ts', import.meta.url), 'utf8')
-  assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 2,
-    'the command-fallback and direct prompt sites must delegate to the submission runtime')
+  assert.equal((controller.match(/deps\.submissionRuntime\.submitPrompt\(/g) ?? []).length, 1,
+    'the agent-facing write must delegate to the submission runtime through submitPrompt')
+  assert.ok(controller.includes('submitPrompt: (submission) => deps.submissionRuntime.submitPrompt(submission)'),
+    'the delegation is the command-submission fallback hook (never a second write path)')
 })
 
 // ── A3-4: the submission-domain writer sections (moved sites) ──────────────
@@ -374,6 +496,8 @@ test('A3-4 static exit: index.ts has ZERO direct writer admission; commands.ts h
 
 test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachment-intake UX fence', () => {
   const commands = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
+  // TS1 moved the attachment-intake fence into the artifacts command owner.
+  const artifacts = readFileSync(new URL('../src/tui/commands/artifacts.ts', import.meta.url), 'utf8')
   // The /skill semantic write enters through withWriter: no gate.busy re-check.
   const skill = span(commands, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
   assert.equal(skill.includes('sessionTransitionPending()'), false,
@@ -381,23 +505,23 @@ test('A3-4 static exit: sessionTransitionPending() is used ONLY by the attachmen
   // The only remaining uses are the attachment-intake UX fence (a draft-stage
   // gate, NOT a semantic session write).
   const intake = span(
-    commands,
+    artifacts,
     'const stageAttachmentCommand = (',
-    "\n  registerTuiCommand({\n    name: 'attach'",
+    '\n  const registerCopy = (): void => {',
   )
   const fenced = intake.match(/sessionTransitionPending\(\)/g) ?? []
   assert.equal(fenced.length, 3, 'the attachment intake keeps its three UX checks')
   // The lock scans EVERY production source, not just commands.ts (A5b review
   // finding): deriving `all` from the same file as `fenced` made a second
   // caller in any other module invisible. Every occurrence across src/** must
-  // be in commands.ts, and the only non-fence occurrence there is the
-  // interface declaration.
+  // be the three fence checks in the artifacts owner plus the ONE interface
+  // declaration in src/commands.ts.
   const sites = productionSources().flatMap(({ rel, source }) =>
     Array.from(source.matchAll(/sessionTransitionPending\(\)/g), () => rel),
   )
   assert.deepEqual(
     sites,
-    Array.from({ length: fenced.length + 1 }, () => 'src/commands.ts'),
+    ['src/commands.ts', ...Array.from({ length: fenced.length }, () => 'src/tui/commands/artifacts.ts')],
     'the only sessionTransitionPending() outside the intake fence is the interface declaration in src/commands.ts (whole-tree)',
   )
 })
@@ -631,4 +755,147 @@ test('P1 lock: a session/writer-held steer rejection is settled by the submissio
     'a proven refusal never tells the user to try again')
   assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
     'the helper never restores behind the owner (no double restore)')
+})
+
+/* ── PR5 (plan §3.8): stale Host-command settlement makes no visible commit ── */
+
+test('PR5: a command settlement whose subject was REPLACED performs cleanup only, never a visible mutation', async () => {
+  // The §3.8 invariant: the Host may finish the old command and the durable
+  // Host-side settlement completes, but once the captured SessionScope is no
+  // longer current the old operation cannot mutate the replacement TUI
+  // surface — no draft restore/consume, no ack rows, no notices, no health
+  // repaint, no artifact save. The release bookkeeping (pin + submit turn)
+  // MUST still run.
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  let released = false
+  let scopeCurrent = true
+  const deps = {
+    isDisposed: () => false,
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    loggerError: (message: string) => { calls.push(`log:${message}`) },
+    readDraft: () => '',
+    mergeDraftIntoEditor: () => true,
+    restoreSubmissionDraft: () => { calls.push('restore') },
+    consumeDraftAttachments: () => { calls.push('consume') },
+    draftHasAttachments: () => false,
+    pinDraftAttachments: () => () => { calls.push('fallbackPin') },
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    isScopeCurrent: () => scopeCurrent,
+    refuseByTransitionFence: () => { calls.push('fence') },
+    lateAttachmentRefusal: () => undefined,
+    commandSubmitAttachments: () => [],
+    isTuiOwnedCommand: () => false,
+    commandPlaneOwnsLine: () => false,
+    submittedHostClaim: () => undefined,
+    commandSignal: () => new AbortController().signal,
+    // A HOST command that SUCCEEDS while held, then the subject is replaced
+    // before the settlement runs (the /export artifact-save sink is the
+    // strongly observable mutation the plan demands).
+    invokeCommandPlane: async () => {
+      scopeCurrent = false
+      return { kind: 'committed' as const, matched: true, execution: { commandId: 'export', result: { kind: 'success' as const } } }
+    },
+    beginCommandSettlement: () => {},
+    abortCommandSettlement: () => {},
+    settleCommandSettlement: () => {},
+    trackSettlementWork: () => {},
+    captureCommandHealthRef: () => 'health-ref',
+    clearCommandHealthError: () => { calls.push('health-clear') },
+    recordCommandHealthError: () => { calls.push('health') },
+    readCommandDraftDisposition: () => undefined,
+    shouldConsumeAdvertisedMiss: () => false,
+    isIndeterminateSkillWrite: () => false,
+    startArtifactSave: () => { calls.push('artifactSave') },
+    submitPrompt: async () => {},
+    commandSessionId: () => 's1',
+    markTurnTransferred: () => {},
+    diag,
+    // The submit turn's release is the leak-prevention bookkeeping.
+    // (supplied via input.submitTurn below)
+  }
+  executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+    text: '/export',
+    toggled: '/export',
+    scope: SCOPE,
+    submitRequestId: 'request-stale',
+    submitAckToken: 9,
+    generation: 1,
+    localEchoInstalled: false,
+    wasAdvertisedAtSubmit: true,
+    parsedName: 'export',
+    submitTurn: { wait: Promise.resolve(), release: () => { released = true; calls.push('turnRelease') } },
+  })
+  await drainUntil(() => calls.includes('fallbackPin'))
+  assert.equal(released, true, 'the submit turn is ALWAYS released (leak prevention)')
+  assert.ok(calls.includes('fallbackPin'), 'the fallback pin is ALWAYS released')
+  // NO visible mutation of the replacement surface.
+  assert.deepEqual(calls.filter(call =>
+    call === 'restore' || call === 'consume' || call === 'settleLocal'
+    || call.startsWith('ack:') || call.startsWith('notify') || call === 'health-clear'
+    || call === 'health' || call === 'artifactSave' || call.startsWith('log:')), [],
+    'a stale settlement performs no visible mutation (no restore/consume/ack/notice/health/artifact-save)')
+})
+
+test('PR5 positive control: a current-scope settlement performs the normal visible behavior', async () => {
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const deps = {
+    isDisposed: () => false,
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    loggerError: (message: string) => { calls.push(`log:${message}`) },
+    readDraft: () => '',
+    mergeDraftIntoEditor: () => true,
+    restoreSubmissionDraft: () => { calls.push('restore') },
+    consumeDraftAttachments: () => { calls.push('consume') },
+    draftHasAttachments: () => false,
+    pinDraftAttachments: () => () => {},
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    isScopeCurrent: () => true,
+    refuseByTransitionFence: () => { calls.push('fence') },
+    lateAttachmentRefusal: () => undefined,
+    commandSubmitAttachments: () => [],
+    isTuiOwnedCommand: () => false,
+    commandPlaneOwnsLine: () => false,
+    submittedHostClaim: () => undefined,
+    commandSignal: () => new AbortController().signal,
+    invokeCommandPlane: async () =>
+      ({ kind: 'committed' as const, matched: true, execution: { commandId: 'export', result: { kind: 'success' as const } } }),
+    beginCommandSettlement: () => {},
+    abortCommandSettlement: () => {},
+    settleCommandSettlement: () => {},
+    trackSettlementWork: () => {},
+    captureCommandHealthRef: () => 'health-ref',
+    clearCommandHealthError: () => { calls.push('health-clear') },
+    recordCommandHealthError: () => { calls.push('health') },
+    readCommandDraftDisposition: () => undefined,
+    shouldConsumeAdvertisedMiss: () => false,
+    isIndeterminateSkillWrite: () => false,
+    startArtifactSave: () => { calls.push('artifactSave') },
+    submitPrompt: async () => {},
+    commandSessionId: () => 's1',
+    markTurnTransferred: () => {},
+    diag,
+  }
+  executeHostCommandSubmission(deps as unknown as HostCommandSubmissionDeps, {
+    text: '/export',
+    toggled: '/export',
+    scope: SCOPE,
+    submitRequestId: 'request-live',
+    submitAckToken: 10,
+    generation: 1,
+    localEchoInstalled: false,
+    wasAdvertisedAtSubmit: true,
+    parsedName: 'export',
+    submitTurn: { wait: Promise.resolve(), release: () => {} },
+  })
+  await drainUntil(() => calls.includes('artifactSave'))
+  assert.ok(calls.includes('artifactSave'), 'a current-scope /export success starts the artifact save')
+  assert.ok(calls.includes('settleLocal') && calls.some(call => call.startsWith('ack:')),
+    'a current-scope settlement settles its rows normally')
+  assert.ok(calls.includes('consume'), 'a current-scope success consumes the draft attachments')
 })

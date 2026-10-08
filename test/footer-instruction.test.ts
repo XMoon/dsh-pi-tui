@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { resolveFooterInstruction } from '../src/footer/instruction.ts'
+import { resolveFooterInstruction } from '../src/tui/footer/instruction.ts'
 
 test('exit confirmation instruction uses the effective key label', () => {
   for (const label of ['Ctrl+C', 'Ctrl+D', 'Ctrl+X', 'Leader X']) {

@@ -1,11 +1,13 @@
 /**
  * Experimental Remote-serving Host composition (M3-1).
  *
- * This module owns ONLY the additive official Host rows of the Remote
- * runtime: it receives the already-running ordinary pi-tui Host `Context`,
- * mounts the exact `docs/m3-entry-contract.md` §2.4.1 closure as tracked
- * Cordis fibers, and exposes the narrow in-process carrier that
- * `client-runtime.ts` installs as the Client Connection transport.
+ * This module owns ONLY the additive Host rows of the Remote runtime: the
+ * package's single private Typert contribution, the private
+ * `piTuiFileReferences` augmentation row, the private `piTuiTerminalProgress`
+ * status row plus the exact official Remote Host composition closure. It receives the already-running ordinary
+ * pi-tui Host `Context`, mounts everything as tracked Cordis fibers, and
+ * exposes the narrow in-process carrier that `client-runtime.ts` installs as
+ * the Client Connection transport.
  *
  * It does not boot a second Host Context, does not edit or emulate
  * `cordis.patch.yml`, and never touches the existing `jobController` row.
@@ -27,20 +29,36 @@ import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import * as sessionLogExport from '@deepseek-ai/dsh-session-log-export'
 import * as sessionStats from '@deepseek-ai/dsh-session-stats'
 import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
+import { PiTuiFileReferenceHostService, type FileReferencesServiceLike, type LiveAgentLike } from './pi-tui-file-reference-host.ts'
+import { PiTuiTerminalProgressHostService, type LiveAgentLike as TerminalProgressLiveAgentLike } from './terminal-progress-host.ts'
+import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 
 /**
  * Host services the ordinary Host Context must already expose before any M3
- * row mounts (`docs/m3-entry-contract.md` §2.4.1). The check fails fast with
+ * row mounts. The check fails fast with
  * the missing service named instead of parking the runtime.
  */
 const HOST_PREREQUISITE_SERVICES = [
   'credentials',
+  // The rc.2 user-questions service: `@deepseek-ai/dsh-base` already mounts
+  // `id: user-questions -> @deepseek-ai/dsh-user-questions`, and this bundle
+  // layers ON TOP of that base without disabling it, so the M3 composition
+  // must REUSE the existing service (its TypertRemoteService binding publishes
+  // the `userQuestions` namespace and registers the `userQuestions` Session
+  // projection every Client reads). Mounting a second one would double-register
+  // the namespace and duplicate the projection unit.
+  'userQuestions',
   'typert',
   'typertGateway',
   'agents',
   'agentDefaultModel',
   'attachments',
   'commands',
+  // The OFFICIAL `@`-file reference provider (the TUI composition mounts the
+  // `file-reference-local` row): the private `piTuiFileReferences` bare route
+  // delegates to it, so a Host without it could not serve a bare Session `@`
+  // query at all. Required rather than silently degraded.
+  'fileReferences',
   'fs',
   'llm',
   'sessions',
@@ -67,6 +85,16 @@ export interface InProcessHostCarrier {
     uplink?: AsyncIterable<unknown>,
   ): AsyncIterable<unknown>
   readonly ownsHost: true
+}
+
+/**
+ * The narrow Host diagnostics channel the additive rows report through. It is
+ * the runner's `Diag` shape declared structurally, so no application type
+ * crosses into the Host composition; absent, the rows report through the
+ * Host's own Cordis logger.
+ */
+export interface RemoteHostDiagnostics {
+  warn(message: string, fields?: Record<string, unknown>): void
 }
 
 /** The composed additive Host-side Remote runtime. */
@@ -142,9 +170,23 @@ function createInProcessCarrier(hostContext: Context): InProcessHostCarrier {
  * On a partial construction failure the already-mounted fibers unwind in
  * reverse order before the original error rethrows.
  */
-export async function createRemoteHostRuntime(hostContext: Context): Promise<RemoteHostRuntime> {
+export async function createRemoteHostRuntime(
+  hostContext: Context,
+  options: { readonly diag?: RemoteHostDiagnostics } = {},
+): Promise<RemoteHostRuntime> {
   assertHostPrerequisites(hostContext)
+  // An unknown upstream `turn/end.reason.kind` must never be dropped silently
+  // and must never crash the Host: absent an injected channel the row reports
+  // through this Host's own logger.
+  const diag: RemoteHostDiagnostics = options.diag ?? {
+    warn: (message, fields) => { hostContext.logger('remote-host').warn(message, fields) },
+  }
+  /** The live Agent of one session, read PER CALL through the authoritative
+   *  Host registry (never a composition-time snapshot). */
+  const liveAgentFor = (sessionId: string): unknown =>
+    (hostContext.reflect.get('agents') as { get(id: string): unknown } | undefined)?.get(sessionId)
   const jobControllerBefore = hostContext.reflect.get('jobController') as { typertRemote?: unknown }
+  const userQuestionsBefore = hostContext.reflect.get('userQuestions') as { typertRemote?: unknown }
 
   const fibers: Fiber[] = []
   let carrier: InProcessHostCarrier | undefined
@@ -170,6 +212,50 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
   }
 
   try {
+    // 0a. The package's ONE private Typert contribution: both descriptors
+    //     (`piTuiFileReferences/list`, `piTuiTerminalProgress/watch`) are
+    //     registered together because rc.2 admits exactly one contribution per
+    //     package identity. Registered FIRST and in its own fiber, so every
+    //     private endpoint is live before any Client can call it and is
+    //     withdrawn with this runtime.
+    const contributionFiber = hostContext.inject(['typert'], contributionCtx => {
+      contributionCtx.effect(
+        () => contributionCtx.typert.register(PI_TUI_HOST_CONTRIBUTION),
+        'pi-tui-private-remote-host',
+      )
+    })
+    fibers.push(contributionFiber)
+    await contributionFiber
+    // 0b. The private `piTuiFileReferences` Host service (TS8-HF1): the explicit
+    //    `@`-completion augmentation. Mounted ahead of the carrier so the
+    //    service binding is live before the first Client call. The composition
+    //    resolves the two narrow Host facts it needs (the same reflect reads
+    //    the prerequisite check above uses for base services).
+    const fileReferenceFiber = hostContext.inject(PiTuiFileReferenceHostService.inject, pluginCtx => {
+      new PiTuiFileReferenceHostService(pluginCtx, {
+        // Both facts are read PER CALL: a replaced `agents` registry or
+        // `fileReferences` provider must be observed, never a composition-time
+        // snapshot (the same reflect idiom the prerequisite check above uses).
+        agentFor: sessionId => liveAgentFor(sessionId) as LiveAgentLike | undefined,
+        official: () => hostContext.reflect.get('fileReferences') as FileReferencesServiceLike | undefined,
+      })
+    })
+    fibers.push(fileReferenceFiber)
+    await fileReferenceFiber
+    // 0c. The private `piTuiTerminalProgress` Host service (plan R2 §6): the
+    //     Remote branch's ONLY terminal-outcome authority. It observes the
+    //     durable turn boundaries and the live Agent status of this Host with
+    //     the SHARED interval fold and serves them over the private stream.
+    const terminalProgressFiber = hostContext.inject(PiTuiTerminalProgressHostService.inject, pluginCtx => {
+      new PiTuiTerminalProgressHostService(pluginCtx, {
+        agentFor: sessionId => liveAgentFor(sessionId) as TerminalProgressLiveAgentLike | undefined,
+        onUnknownReason: kind => {
+          diag.warn('terminal progress: unknown turn/end reason', { kind })
+        },
+      })
+    })
+    fibers.push(terminalProgressFiber)
+    await terminalProgressFiber
     // 1. Host connection — provides `connection` for the in-process carrier.
     //    No HTTP surface is composed, so the row's browser-authentication
     //    side is deliberately absent (the proven in-process fixture form);
@@ -221,6 +307,18 @@ export async function createRemoteHostRuntime(hostContext: Context): Promise<Rem
       || jobControllerAfter.typertRemote !== jobControllerBefore.typertRemote
     ) {
       throw new Error('remote host runtime: the existing jobController service was replaced by the M3 composition')
+    }
+    // The user-questions service is REUSED, never re-mounted: its stable Typert
+    // binding must be the very same one the caller had before this composition
+    // (a second mount would replace the namespace owner and duplicate the
+    // projection unit).
+    const userQuestionsAfter = hostContext.reflect.get('userQuestions') as { typertRemote?: unknown } | undefined
+    if (
+      userQuestionsAfter === undefined
+      || userQuestionsAfter.typertRemote === undefined
+      || userQuestionsAfter.typertRemote !== userQuestionsBefore?.typertRemote
+    ) {
+      throw new Error('remote host runtime: the existing userQuestions service was replaced by the M3 composition')
     }
 
     // The carrier is part of construction: a failure here must unwind the

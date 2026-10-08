@@ -10,14 +10,16 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
 import {
   finalizedBlockFallbackText,
-  fileAttachmentSummary,
   openOpaqueBlockFallbackText,
   textWithAttachmentMarkers,
   userBlocksVisibleNow,
-} from '../src/content-block-presentation.ts'
-import { resultTextLines } from '../src/present.ts'
-import { collectRewindCandidates, rewindPickerItem } from '../src/rewind.ts'
-import { renderTranscriptMarkdown, TranscriptFolder } from '../src/transcript.ts'
+} from '../src/domain/transcript/content-blocks.ts'
+import { fileAttachmentSummary } from '../src/domain/media/file-summary.ts'
+import { resultTextLines } from '../src/tui/transcript/tool-presentation.ts'
+import { collectRewindCandidates } from '../src/domain/session/rewind.ts'
+import { rewindPickerItem } from '../src/tui/pickers/rewind.ts'
+import { TranscriptFolder } from '../src/transcript.ts'
+import { renderTranscriptMarkdown } from '../src/client/artifact/transcript-markdown.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'

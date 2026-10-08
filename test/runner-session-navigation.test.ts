@@ -9,7 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldPendingModelSelection } from '../src/model-selection.ts'
+import { foldPendingModelSelection } from '../src/domain/session/model-selection.ts'
 import {
   disposeContext,
   event,
@@ -254,9 +254,12 @@ test('a rewind-picker fork awaits source retirement before its handoff completes
   life.defer(() => { if (context !== undefined) return disposeContext(context) })
   life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
 
-  let releaseDrain!: () => void
+  let releaseDrain: (() => void) | undefined
   let signalDrainReached!: () => void
   const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  // The held gate MUST have a fallback release: any failing assertion (or a
+  // timeout) would otherwise leave the drain parked and hang the teardown.
+  life.defer(() => { releaseDrain?.() })
   const source = fakeSession({
     id: 'rewind-retirement-source',
     header: { id: 'rewind-retirement-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
@@ -931,10 +934,18 @@ test('/rewind forwards the Host-owned fork anchor through the real picker callba
     ]
   }
   const firstTurn = withHumanPrompt('first answer')
+  // PR4 §4: the second span carries turn 1 — the REAL Host invariant the
+  // official turnOutline projection (and the Direct compat fold) relies on:
+  // turn numbers are host-assigned and monotone. The legacy fixture reused
+  // turn 0 for both spans, which the old full-log fold happened to tolerate
+  // but a whole-log outline correctly collapses.
   const secondTurn = withHumanPrompt('second answer').map(event => ({
     ...event,
     seq: event.seq + firstTurn.length,
     time: event.time + firstTurn.length * 1000,
+    ...('turn' in (event.data as Record<string, unknown>)
+      ? { data: { ...(event.data as Record<string, unknown>), turn: 1 } }
+      : {}),
   })) as unknown as SessionEvent[]
   const sourceEvents = resequence([
     modelEvent('model/selection', { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' }, 0),
@@ -1119,4 +1130,269 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
   const childSelections = harness.createdSessions[0]!.snapshotEvents().filter(event => (event as unknown as { type?: unknown }).type === 'model/selection')
   assert.deepEqual(childSelections.map(event => (event as unknown as { data: unknown }).data), [selection],
     'matching inherited state must not append a redundant child selection')
+})
+
+test('PR5 R7-4 positive control: a rewind LOAD failure whose picker identity is still current is shown', async (t) => {
+  // §3C-4: a throw from the PRE-ADMISSION region (here the `loadThrough` read)
+  // belongs to the picker identity, and while that identity is current the
+  // failure must be reported truthfully.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-load-ok-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const source = fakeSession({
+    id: 'rewind-load-ok',
+    header: { id: 'rewind-load-ok', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', { id: MessageId('load-ok-1'), role: 'user', content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      event('user/message', { id: MessageId('load-ok-2'), role: 'user', content: [{ type: 'text', text: 'second' }], source: { kind: 'user' } } as never, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback' })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TuiApp for the rewind picker')
+  // The picker is OPEN (its outline already read). Now the SELECTION's detail
+  // read fails: the §3C-4 pre-admission throw path.
+  const original = source.snapshotEvents
+  life.defer(() => { source.snapshotEvents = original })
+  source.snapshotEvents = () => { throw new Error('rewind load failed (fixture)') }
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\x1b[B')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  const until = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await new Promise<void>(resolve => setTimeout(resolve, 25))
+    }
+    return predicate()
+  }
+  assert.equal(await until(() => probe.notices.some(notice => notice.includes('rewind load failed (fixture)')), 8_000), true,
+    `a current pre-admission load failure must be shown: ${probe.notices.join(', ')}`)
+})
+
+test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies the replacement surface (mounted stale negative)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-rewind-stale-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  // TWO persisted sessions: the rewind SOURCE and an independent switch
+  // target B (a distinct full-id match for the /resume direct path).
+  const source = fakeSession({
+    id: 'rewind-stale-source',
+    header: { id: 'rewind-stale-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('rewind-stale-one'),
+        role: 'user',
+        content: [{ type: 'text', text: 'first' }],
+        source: { kind: 'user' },
+      } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+      event('turn/start', { turn: 1 }, 3),
+      event('user/message', {
+        id: MessageId('rewind-stale-two'),
+        role: 'user',
+        content: [{ type: 'text', text: 'second' }],
+        source: { kind: 'user' },
+      } as never, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+  const targetB = fakeSession({
+    id: 'rewind-stale-target-b',
+    header: { id: 'rewind-stale-target-b', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: [
+      event('turn/start', { turn: 0 }, 0),
+      event('user/message', {
+        id: MessageId('rewind-stale-b-one'),
+        role: 'user',
+        content: [{ type: 'text', text: 'session b content' }],
+        source: { kind: 'user' },
+      } as never, 1),
+      event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2),
+    ],
+  })
+
+  let releaseDrain: (() => void) | undefined
+  let signalDrainReached!: () => void
+  const drainReached = new Promise<void>(resolve => { signalDrainReached = resolve })
+  // The held drain MUST have a fallback release: any failing assertion above the
+  // in-body release would otherwise leave the gate parked and turn a plain
+  // failure into a teardown HANG (the harness's own cleanup, registered earlier,
+  // awaits the parked execution first — a later after-hook is too late).
+  life.defer(() => { releaseDrain?.() })
+  let drainCalls = 0
+  const harness = makeHarness(home, [source, targetB], { provider: 'global', model: 'fallback' }, undefined, undefined, () => ({
+    drainContinuableDescendants: async () => {
+      drainCalls += 1
+      if (drainCalls !== 1) return
+      signalDrainReached()
+      await new Promise<void>(resolve => { releaseDrain = resolve })
+    },
+    listDescendants: async () => [],
+  }))
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+
+  // Start the rewind: the real /rewind opens the picker; Enter selects the
+  // older turn. The fork adopts, and the source-retirement drain PARKS —
+  // the adoption commit has happened (the identity was minted) but the
+  // final settlement has NOT.
+  const rewindHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('rewind')
+  assert.ok(rewindHandler, 'the real runner must register /rewind')
+  await rewindHandler()
+  await settle()
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TuiApp for the rewind picker')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\x1b[B')
+  ;(app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput('\r')
+  const reachedDrain = await Promise.race([
+    drainReached.then(() => true),
+    new Promise<boolean>(resolve => { setTimeout(() => resolve(false), 5_000) }),
+  ])
+  assert.equal(reachedDrain, true, 'the rewind fork must reach (and park in) the source-retirement drain phase after the adoption commit')
+
+  // ── The EXTERNAL NAVIGATION inside the parked window ─────────────────────
+  // A REAL `/resume <B>` submit through the mounted editor. The navigation
+  // epoch advances SYNCHRONOUSLY at the entry (`switchSession` bumps BEFORE it
+  // enters the transition gate), while the switch itself queues behind the
+  // rewind's held gate. That is the production entry the stale fence exists for
+  // — and because the drain is still parked, the rewind's own settlement cannot
+  // have run yet.
+  const submit = app as unknown as { setDraft(text: string): void; submitDraft(): void }
+  submit.setDraft('/resume rewind-stale-target-b')
+  submit.submitDraft()
+  // Give the submitted /resume its bounded chance to reach `switchSession`
+  // INSIDE the parked window: the picker resolves the direct-match listing
+  // asynchronously, and only then does the synchronous pre-gate
+  // `bumpNavigationEpoch()` run. (The switch itself cannot commit yet — it
+  // queues behind the rewind's held gate.) This wait only PLACES the external
+  // navigation inside the window; it is never the evidence — the post-release
+  // facts below fail loudly if the navigation did not make it there.
+  const deadline = Date.now() + 700
+  while (Date.now() < deadline && !probe.notices.some(notice => notice.includes('rewound to turn'))) {
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+  }
+
+  // Release the drain: the old rewind's post-commit tail runs, and its
+  // settlement publishes (or is fenced) now.
+  releaseDrain?.()
+
+  // POSITIVE liveness facts BEFORE the negative assertion, so "no toast" can
+  // never be satisfied vacuously by an operation that never got there:
+  //  (a) the rewind's settlement really reached its end — its source owner was
+  //      retired exactly once (the post-commit tail's own effect);
+  //  (b) the external navigation really executed — B's authoritative switch
+  //      ran (it was queued behind the same gate, so this completes here too).
+  const until = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return true
+      await new Promise<void>(resolve => setTimeout(resolve, 25))
+    }
+    return predicate()
+  }
+  assert.equal(await until(() =>
+    harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length === 1, 10_000), true,
+    'the rewind settlement really ran: its source owner was retired EXACTLY once')
+  // `resumeSessionIds` only records that `agents.resume` was ENTERED (the fake
+  // pushes before the handle/setup/return, and even before a resumeError throw),
+  // so it cannot prove the switch. B's authoritative appearance is its
+  // transcript: the surface installs it only once the switch really committed.
+  assert.equal(await until(() =>
+    (probe.capturedMessages ?? []).some(row => JSON.stringify(row).includes('session b content')), 10_000), true,
+    'the external /resume really switched the surface to B (its transcript is installed)')
+  await settle()
+
+  // The paired positive control is the sibling test above ("a rewind-picker fork
+  // awaits source retirement before its handoff completes"): the SAME park with
+  // NO external navigation DOES publish "rewound to turn N". Together the two
+  // prove the toast is suppressed by the superseded operation-owned identity,
+  // not by the settlement never happening.
+    assert.ok(!probe.notices.some(notice => notice.includes('rewound to turn')),
+    `the stale rewind settlement must not notify the replacement surface: ${probe.notices.join(', ')}`)
+})
+
+
+test('PR5 R6-5: a cancellation detected at N+2 is suppressed once navigation advances to N+3 (consumer-level fence)', async (t) => {
+  // The structured-error contract: the error's OWN notificationNavigation
+  // (the live identity at detection) decides publishability. This locks the
+  // consumer gate directly — the mounted A→B→A positive (above) proves the
+  // N+2-still-current case; this sibling proves the N+3 advance suppresses.
+  const published: string[] = []
+  let live: { sessionId: string | undefined; navigationEpoch: number } = { sessionId: 'a', navigationEpoch: 2 }
+  const isCurrent = (identity: { sessionId: string | undefined; navigationEpoch: number }): boolean =>
+    identity.sessionId === live.sessionId && identity.navigationEpoch === live.navigationEpoch
+  // The presentation's error gate, verbatim semantics:
+  //   fence = outcome.notificationNavigation ?? pickerIdentity
+  //   if (!isNavigationCurrent(fence)) return
+  //   notify(...)
+  const settleError = (outcome: { notificationNavigation?: typeof live; text: string }): void => {
+    const fence = outcome.notificationNavigation ?? { sessionId: 'a', navigationEpoch: 0 }
+    if (!isCurrent(fence)) return
+    published.push(outcome.text)
+  }
+  // The cancellation detected at A/N+2 (what forkSession returns for the
+  // A→B→A stale picker), and the refusal detected inside the claim.
+  const cancellationAt2 = { text: 'session changed — rewind cancelled', notificationNavigation: { sessionId: 'a', navigationEpoch: 2 } }
+  settleError(cancellationAt2)
+  assert.deepEqual(published, ['session changed — rewind cancelled'],
+    'the cancellation is publishable while A/N+2 is still current')
+  // A later N+3 advance: the SAME cancellation outcome (had it settled
+  // later) is suppressed.
+  live = { sessionId: 'a', navigationEpoch: 3 }
+  settleError(cancellationAt2)
+  assert.deepEqual(published, ['session changed — rewind cancelled'],
+    'the N+2 cancellation is suppressed once navigation advanced to N+3')
+
+  // Case 2 of the four-case contract: an admitted Host REJECTION (fence =
+  // the ADMISSION identity N+1) publishes while N+1 is current, and is
+  // suppressed by a later N+2 advance.
+  const rejectAtClaim = { text: 'fork refused by Host (gateway/internal)', notificationNavigation: { sessionId: 'a', navigationEpoch: 1 } }
+  const publishedReject: string[] = []
+  const settle = (outcome: { text: string; notificationNavigation: { sessionId: string; navigationEpoch: number } }): void => {
+    if (!isCurrent(outcome.notificationNavigation)) return
+    publishedReject.push(outcome.text)
+  }
+  live = { sessionId: 'a', navigationEpoch: 1 }
+  settle(rejectAtClaim)
+  assert.deepEqual(publishedReject, ['fork refused by Host (gateway/internal)'],
+    'an admitted rejection publishes while its CLAIM identity is current')
+  live = { sessionId: 'a', navigationEpoch: 2 }
+  settle(rejectAtClaim)
+  assert.deepEqual(publishedReject, ['fork refused by Host (gateway/internal)'],
+    'the same rejection is suppressed after a later navigation advance (N+2)')
+  void t
 })

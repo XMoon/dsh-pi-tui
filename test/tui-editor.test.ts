@@ -11,7 +11,7 @@ import { afterEach, test } from 'node:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TuiApp } from '../src/tui-app.ts'
-import { suggestPathArgument } from '../src/mentions.ts'
+import { suggestPathArgument } from '../src/tui/file-completion/path-argument.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -20,7 +20,7 @@ import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -247,7 +247,10 @@ test('quoted @ directory acceptance keeps the quote open for child completion', 
   await waitForDropdownRow(vt, 'sub dir/', 'quoted mention directory')
   vt.sendInput('\t')
   await vt.waitForRender()
-  assert.equal(app.seatTextForTest(), '@"sub dir/"', 'the accepted value keeps balanced quote text')
+  // The OFFICIAL mention grammar (formatFileMention): a quoted DIRECTORY
+  // keeps the quote OPEN after its trailing slash so completion can
+  // descend another level — never a balanced closed quote.
+  assert.equal(app.seatTextForTest(), '@"sub dir/', 'the official grammar keeps the quote open')
   assert.equal(app.seatEditorForTest().getCursor(), '@"sub dir/'.length, 'the cursor remains inside the open quote')
   await waitForDropdownRow(vt, 'deep.png', 'quoted mention children after Tab')
 })

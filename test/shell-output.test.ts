@@ -10,17 +10,16 @@ import test from 'node:test'
 import { StringDecoder } from 'node:string_decoder'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseShellWords } from '../src/shell-words.ts'
+import { parseShellWords } from '../src/client/shell/words.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import {
   createBoundedOutput,
   createFileCapture,
-  formatBytes,
-  formatTruncation,
   utf8Tail,
   SHELL_OUTPUT_CAP_BYTES,
   SHELL_OUTPUT_CAP_LINES,
-} from '../src/bounded-output.ts'
+} from '../src/client/shell/output-capture.ts'
+import { formatBytes } from '../src/domain/media/format.ts'
 
 // --- shell-word parsing ($VISUAL / $EDITOR) ---
 
@@ -383,14 +382,16 @@ test('wire and display totals stay independent under invalid bytes (no contradic
   assert.notEqual(out.totalWireBytes, out.totalBytes, 'wire and display totals diverge under invalid bytes')
 })
 
-test('the truncation line reports ACTUAL retained values, never the caps', () => {
-  // Line cap 3 with 5000 lines: retained is 3 lines / ~37 bytes, NOT the
-  // configured 4000 lines / byte cap.
+test('a line-capped accumulator keeps the newest lines and reports the real totals', () => {
+  // Line cap 3 with 5000 lines: the retained tail is 3 lines, not the
+  // configured 4000. The truncation REPORT text is produced by the
+  // application-owned settle (`app/submission/user-shell.ts`, private
+  // helper) and is pinned by the shell settle behavior test.
   const out = createBoundedOutput(1024 * 1024, 3)
   for (let i = 0; i < 5000; i += 1) out.append(`line ${i}\n`)
-  const line = formatTruncation(out)
-  assert.ok(line.includes('/ 3 lines'), `actual retained lines:\n${line}`)
-  assert.ok(!line.includes('1.0 MiB'), 'the byte cap must never be reported as retained')
-  assert.ok(line.includes('5000 lines total'), `wire total:\n${line}`)
-  assert.ok(line.includes('retained'), line)
+  assert.equal(out.tail.split('\n').length, 3, 'the retained tail is 3 lines')
+  assert.equal(out.tail.split('\n')[0], 'line 4997', 'the newest lines are retained')
+  assert.ok(out.truncated, 'dropping content marks the accumulator truncated')
+  assert.equal(out.totalLines, 5000, 'every received line is still counted')
+  assert.ok(Buffer.byteLength(out.tail, 'utf8') < 1024 * 1024, 'retained display is far below the configured byte cap')
 })

@@ -16,11 +16,15 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // `presentation.leadingTurnCompleteness` closed with the rc.1 turn-aligned
 // opening windows: the presentation smoke now asserts the COMPLETE leading
 // turn instead of skipping its completeness.
+// `session.measureContext` closed with M3-3A: both backends read the one
+// official contextPressure semantic, so the D1 skip is retired and the field
+// compares like every other.
+// `subagent.descendantTree` closed with M3-5 PR2: the Task shadow now compares
+// the FULL recursive descendant tree (the official parent `subagentCatalog`
+// projections are the recursive membership authority), so the skip is retired.
 const KNOWN_SKIPS = Object.freeze([
   'session.createdAt',
   'session.live',
-  'session.measureContext',
-  'subagent.descendantTree',
 ])
 
 function runProof(name, script, parse) {
@@ -64,7 +68,6 @@ function main() {
     output => parseTextProof('session read parity', /same-Host remote session parity smoke passed/, output, [
       'session.createdAt',
       'session.live',
-      'session.measureContext',
     ]),
   )
   const surfaceAuthority = runProof(

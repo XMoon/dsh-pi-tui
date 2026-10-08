@@ -11,19 +11,19 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { FooterComposer } from '../src/footer/composer.ts'
-import { FooterConfiguratorModel, sameFooterCustomItem } from '../src/footer/configurator-model.ts'
-import { FooterCustomItemCatalog } from '../src/footer/custom-items.ts'
-import { FooterItemRegistry } from '../src/footer/item-registry.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import type { StatusSnapshot } from '../src/status/types.ts'
+import { FooterComposer } from '../src/tui/footer/composer.ts'
+import { FooterConfiguratorModel, sameFooterCustomItem } from '../src/tui/footer/configurator-model.ts'
+import { FooterCustomItemCatalog } from '../src/tui/footer/custom-item-catalog.ts'
+import { FooterItemRegistry } from '../src/tui/footer/item-registry.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
+import type { StatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -940,9 +940,9 @@ test('the whole-footer composer preview is sanitized too (SGR survives, OSC/CSI 
   // pass the command mode's sanitize boundary — legitimate SGR styling
   // survives, OSC/CSI/C0 never reaches the panel. The assertion inspects
   // the PANEL RENDER output directly (not the terminal viewport).
-  const { FooterConfiguratorPanel } = await import('../src/footer/configurator.ts')
-  const { FooterComposer } = await import('../src/footer/composer.ts')
-  const { createBuiltinFooterRegistry } = await import('../src/footer/builtin-items.ts')
+  const { FooterConfiguratorPanel } = await import('../src/tui/footer/configurator.ts')
+  const { FooterComposer } = await import('../src/tui/footer/composer.ts')
+  const { createBuiltinFooterRegistry } = await import('../src/tui/footer/builtin-items.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -984,9 +984,9 @@ test('the preview context is LIVE: an extension segment update while open shows 
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   // Avoid the real extension host: drive the panel directly with getters.
-  const { FooterConfiguratorPanel } = await import('../src/footer/configurator.ts')
-  const { FooterComposer } = await import('../src/footer/composer.ts')
-  const { createBuiltinFooterRegistry } = await import('../src/footer/builtin-items.ts')
+  const { FooterConfiguratorPanel } = await import('../src/tui/footer/configurator.ts')
+  const { FooterComposer } = await import('../src/tui/footer/composer.ts')
+  const { createBuiltinFooterRegistry } = await import('../src/tui/footer/builtin-items.ts')
   const model = new FooterConfiguratorModel({
     schemaVersion: 1,
     rows: [{ left: [{ id: 'ext:*' }], right: [] }],
@@ -1015,9 +1015,9 @@ test('the preview context is LIVE: an extension segment update while open shows 
 
 test('the preview task-browser getter is LIVE: a draft typed under the panel updates the hint', async () => {
   let taskBrowserAvailable = true
-  const { FooterConfiguratorPanel } = await import('../src/footer/configurator.ts')
-  const { FooterComposer } = await import('../src/footer/composer.ts')
-  const { createBuiltinFooterRegistry } = await import('../src/footer/builtin-items.ts')
+  const { FooterConfiguratorPanel } = await import('../src/tui/footer/configurator.ts')
+  const { FooterComposer } = await import('../src/tui/footer/composer.ts')
+  const { createBuiltinFooterRegistry } = await import('../src/tui/footer/builtin-items.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1455,8 +1455,8 @@ test('PR E: the Save row stays visible at 40x10 and Saving… survives a resize'
  * otherwise. */
 function openWithCommand(
   app: TuiApp,
-  committed: readonly import('../src/footer/custom-items.ts').FooterCustomItemSettings[],
-  draft?: import('../src/footer/custom-items.ts').FooterCustomItemCatalog,
+  committed: readonly import('../src/domain/footer/custom-items.ts').FooterCustomItemSettings[],
+  draft?: import('../src/tui/footer/custom-item-catalog.ts').FooterCustomItemCatalog,
 ): void {
   const registry = new FooterItemRegistry(app.getFooterItemRegistry())
   const customItems = draft ?? new FooterCustomItemCatalog(committed)

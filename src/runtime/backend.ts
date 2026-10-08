@@ -24,10 +24,13 @@ import type { SessionArchivePort } from './session-archive-port.ts'
 import type { HostCommandPort } from './host-command-port.ts'
 import type { PluginManagerPort } from './plugin-manager-port.ts'
 import type { JobObservationPort } from './job-observation-port.ts'
+import type { HostUserShellPort } from './host-user-shell-port.ts'
 
-/** The transport backends the TUI can run on. `direct` is the only one
- * today; the migration adds opt-in backends milestone by milestone. */
-export type BackendKind = 'direct'
+/** The transport backends the TUI can run on. `direct` remains the
+ * production/default; `remote` is the experimental M3-3B assembly that can be
+ * constructed and tested but is NOT selected by normal startup (M3-4 owns the
+ * main-application cutover). */
+export type BackendKind = 'direct' | 'remote'
 
 /** The semantic surface a backend serves: one narrow port per domain. */
 export interface Backend {
@@ -64,6 +67,10 @@ export interface Backend {
   /** The selected-Job observation domain port (P1-B): one non-consuming
    * observation stream for the Job the user opened. */
   readonly jobObservation: JobObservationPort
+  /** The Host user-shell execution port (M3-4 PR3 shell amendment): the
+   * backend's execution authority — Direct serves the in-process Host
+   * adapter; Remote serves the truthful-unavailable adapter (CARRIER_GAP). */
+  readonly hostUserShell: HostUserShellPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -83,6 +90,7 @@ export function createDirectBackend(
   hostCommand: HostCommandPort,
   pluginManager: PluginManagerPort,
   jobObservation: JobObservationPort,
+  hostUserShell: HostUserShellPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -100,5 +108,6 @@ export function createDirectBackend(
     hostCommand,
     pluginManager,
     jobObservation,
+    hostUserShell,
   }
 }

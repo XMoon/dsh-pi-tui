@@ -23,10 +23,10 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/input-history
  */
 
-import { dshHome, type Diag } from '../../diag.ts'
-import { runDetached } from '../../detached.ts'
-import { historyFilePath, loadHistoryFile, loadHistoryRecords, type ParsedHistoryRecord } from '../../history.ts'
-import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../../history-persist.ts'
+import { dshHome, type Diag } from '../../runtime/process/diagnostics.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import { historyFilePath, loadHistoryFile, loadHistoryRecords, type ParsedHistoryRecord } from '../../client/history/store.ts'
+import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../submission/history-persist.ts'
 import type { TuiApp } from '../../tui-app.ts'
 
 /** The narrow capabilities the history owner consumes. */

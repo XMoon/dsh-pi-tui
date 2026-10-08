@@ -32,42 +32,40 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/application-events
  */
 
-import type { DraftFileStore } from '../../attachment/file-draft.ts'
-import type { OwnedTaskOptions } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import type { DraftImageStore } from '../../image/draft-store.ts'
-import { checkImageLimits } from '../../image/intake.ts'
-import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../image/submit.ts'
+import type { DraftFileStore } from '../../client/media/attachment/file-draft.ts'
+import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
+import { checkImageLimits } from '../../client/media/image/intake.ts'
+import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
 import { resolveComposerDelivery } from '../../commands.ts'
-import { collectRewindCandidates, rewindPickerItem } from '../../rewind.ts'
+import { rewindCandidateOfLoadedWindow } from '../../domain/session/rewind.ts'
+import { rewindOutlineRows } from './rewind-presentation.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import type { SubagentPort } from '../../runtime/subagent-port.ts'
-import type { RewindNavigationIdentity } from '../../session-fork.ts'
-import { mergeDraft, steerAll, type SteerAgentLike } from '../../steer.ts'
+import type { RewindNavigationIdentity } from '../session/navigation-identity.ts'
+import { mergeDraft, steerAll, type SteerSubjectLike } from '../submission/steer.ts'
 import {
   isEmptyAcceleratedViewerSubmit,
   type TuiApp,
   type TuiAppEvents,
 } from '../../tui-app.ts'
-import { viewerActionCapability } from '../../subagent-viewer.ts'
-import {
-  viewerCanonicalizeScope,
-  type SubagentPromptOutcome,
-  type SubagentViewerSubmitRequest,
-} from '../../subagent-viewer-submit.ts'
+import { viewerActionCapability } from './viewer-policy.ts'
+import { viewerCanonicalizeScope } from './viewer-submission.ts'
+import type { SubagentPromptOutcome, SubagentViewerSubmitRequest } from '../../runtime/subagent-port.ts'
 import type { SessionForkOutcome } from '../session/runtime.ts'
 import type { SubmissionController } from '../submission/controller.ts'
 import type { ClientActions } from './client-actions.ts'
 import type { SettingsRuntime } from './settings-runtime.ts'
 import type { StatusRuntime } from './status-runtime.ts'
 
-/** The live-agent surface the event adapter reads (identity + rewind log). */
+/** The live-agent surface the event adapter reads (identity only; the
+ *  whole-log rewind authorities live in the injected rewind reads). */
 export interface ApplicationEventsAgent {
   readonly session: {
     readonly id: string
-    snapshotEvents(): Parameters<typeof collectRewindCandidates>[0]
   }
 }
 
@@ -110,8 +108,9 @@ export interface ApplicationEventsSurface {
  * narrower owner today. Injected as ONE domain group, never a flat bag.
  */
 export interface ApplicationEventsSubagentDelivery {
-  /** The exact live queue Agent of the viewed child (the steer-all target). */
-  queueAgentFor(childId: string): SteerAgentLike | undefined
+  /** The exact writer subject of the viewed child (the steer-all target): the
+   *  Direct child Agent object, or the viewer-owned token on Remote. */
+  queueSubjectFor(childId: string): SteerSubjectLike | undefined
   /** The semantic pending-input read (the queue placement/running state). */
   readonly pendingInputReader: PendingInputReader
   /** The session WRITE delivery seams (ordinary prompt + queue mutation). */
@@ -175,16 +174,43 @@ export interface ApplicationEventsDeps {
     readonly files: DraftFileStore
   }
   /** The deployment image policy (the Host attachments service `imageLimits`),
-   *  re-read per paste. */
+   *  re-read per paste. Direct only: on Remote this is `undefined`, so the
+   *  paste intake uses the Client's own caps and the exact Session's official
+   *  projection is re-applied later by the Remote serializer. */
   readonly imageLimits: () => Parameters<typeof checkImageLimits>[2] | undefined
-  /** The SessionRuntime rewind fork action (idle double-Esc / `/rewind`). */
+  /** The rewind whole-log reads + the fork action (idle double-Esc /
+   *  `/rewind`). M3-4 PR4 §4: the picker enumerates the official
+   *  `turnOutline` projection (whole-log — old turns outside the bounded
+   *  presentation window included); the selection jumps the window with
+   *  `loadThrough(seq)` and derives the EXACT material from the loaded
+   *  durable events. Both branches share this owner. */
   readonly rewind: {
+    /** The whole-log turn outline (the picker authority). */
+    turnOutline(sessionId: string): readonly import('../../runtime/presentation-read-port.ts').TurnOutlineEntryDto[] | undefined
+    /** Jump the window backwards through the OFFICIAL loadThrough loop and
+     *  return the loaded durable events (undefined = no materialized
+     *  binding / superseded settle — never a guessed boundary). */
+    loadThrough(sessionId: string, seq: number, signal?: AbortSignal): Promise<readonly import('../../runtime/presentation-read-port.ts').PresentationDurableEvent[] | undefined>
+    /** Capture the transport identity the selection was admitted under
+     *  (Remote: Connection generation + exact binding; Direct reads
+     *  `undefined`). Captured ONCE at picker open — the check below only
+     *  ever COMPARES this frozen identity. */
+    captureSelectionIdentity(sessionId: string): unknown
+    /** Whether the captured selection identity is still the live transport
+     *  for this session (the §6.5 re-check after every await; a
+     *  same-session-id binding rollover reads stale). `identity ===
+     *  undefined` (the Direct branch) is always current. */
+    isSelectionCurrent(sessionId: string, identity: unknown): boolean
     forkSession(
       sourceSessionId: string,
       atSeq: number,
       onAdopted: () => void,
       pickerIdentity: RewindNavigationIdentity,
     ): Promise<SessionForkOutcome>
+    /** PR5 v2 §3C: whether one navigation identity (the picker's, or the
+     *  runtime-minted post-adoption identity carried on a success outcome)
+     *  is still the live navigation subject. */
+    isNavigationCurrent(expected: RewindNavigationIdentity): boolean
   }
   /** The subagent viewer's Host delivery ports. */
   readonly subagentDelivery: ApplicationEventsSubagentDelivery
@@ -202,6 +228,31 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
    * navigation identity gates. Sessionless (deferred start) it notifies and
    * never creates a session.
    */
+  /**
+   * PR5 v2 §3C-4 (plan-owner ruling C): publish one PRE-ADMISSION
+   * cancellation/error under the navigation identity observed WHEN IT BECOMES
+   * AUTHORITATIVE.
+   *
+   * The picker identity is deliberately NOT reused here: it answers a different
+   * question ("is the original picker action still the same action"), and a
+   * cancellation detected after the surface moved is truthful against the state
+   * observed AT DETECTION (A→B→A lands on A/N+2) — the picker-open identity would
+   * already be stale and would swallow it.
+   *
+   * The three call sites below publish synchronously with detection, so the
+   * fence cannot fire today; it exists so the OWNER of the publication is
+   * explicit and so any future await before the notify can never leak a stale
+   * notice onto a replacement surface.
+   */
+  const publishDetectionNotice = (publish: () => void): void => {
+    const notificationNavigation: RewindNavigationIdentity = {
+      sessionId: deps.lifecycle.currentSessionId(),
+      navigationEpoch: deps.lifecycle.navigationEpoch(),
+    }
+    if (!deps.rewind.isNavigationCurrent(notificationNavigation)) return
+    publish()
+  }
+
   const openRewindPicker = (): void => {
     const app = deps.surface.app
     const source = deps.lifecycle.liveAgent()
@@ -217,36 +268,93 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
       app.notify('clear the current draft before rewinding', 'info')
       return
     }
-    const candidates = collectRewindCandidates(source.session.snapshotEvents())
-    if (candidates.length === 0) {
-      app.notify('no completed user turn to rewind', 'info')
-      return
-    }
     // Capture the picker-open identity, not only the Session id. A switch away
-    // and back to the same id must still supersede the old candidate.
+    // and back to the same id must still supersede the old candidate — and the
+    // REMOTE transport identity (Connection generation + exact binding) is
+    // captured here ONCE: a same-id binding rollover while the picker is open
+    // must invalidate the pending selection (§2.2/§16).
     const sourceId = source.session.id
+    const selectionIdentity = deps.rewind.captureSelectionIdentity(sourceId)
     const pickerIdentity: RewindNavigationIdentity = {
       sessionId: sourceId,
       navigationEpoch: deps.lifecycle.navigationEpoch(),
     }
+    // §4.1/§4.2: the picker authority is the whole-log turnOutline
+    // projection — never a full-log page scan, never the bounded window.
+    const outline = deps.rewind.turnOutline(sourceId)
+    const rows = outline === undefined ? [] : rewindOutlineRows(outline)
+    if (rows.length === 0) {
+      // Distinguish the two honest empties: an UNAVAILABLE outline (no
+      // whole-log authority reachable for this session — a projection
+      // capability gap on the Remote branch, or an unreadable one) never
+      // masquerades as "history has no turns" (§19.3 truthful-unavailable).
+      app.notify(outline === undefined
+        ? 'rewind history is unavailable right now'
+        : 'no completed user turn to rewind', 'info')
+      return
+    }
     app.openPicker(
-      candidates.map(rewindPickerItem),
+      rows,
       (value) => {
-        const candidate = candidates.find(item => String(item.turnStartSeq) === value)
-        if (candidate === undefined) return
+        const selectedSeq = Number(value)
         let adopted = false
-        deps.lifecycle.runOwned('conversation rewind', () => deps.rewind.forkSession(
-          sourceId,
-          candidate.forkAtSeq,
-          () => {
-            adopted = true
-            app.setDraft(candidate.editorText)
-          },
-          pickerIdentity,
-        ), {
+        deps.lifecycle.runOwned('conversation rewind', async () => {
+          // §4.3: capture the identities, jump the window through the
+          // OFFICIAL loadThrough loop, re-check, derive the EXACT material
+          // from the loaded durable events (the full editor text, never the
+          // outline's bounded preview), then dispatch the existing fork.
+          const loaded = await deps.rewind.loadThrough(sourceId, selectedSeq, deps.lifecycle.signal())
+          if (deps.lifecycle.isCleanedUp()) return
+          if (loaded === undefined) {
+            // The cancellation becomes authoritative HERE (the official Remote
+            // read settles `undefined` on supersession): its owner is the
+            // navigation state observed at this point.
+            publishDetectionNotice(() => {
+              app.notify('the session changed while rewinding — try again', 'info')
+            })
+            return
+          }
+          if (!deps.rewind.isSelectionCurrent(sourceId, selectionIdentity)) {
+            // The TRANSPORT/selection supersession becomes authoritative here
+            // (its own `selectionIdentity` stays the binding owner; the
+            // NAVIGATION owner of the publication is the detection state).
+            publishDetectionNotice(() => {
+              app.notify('the session changed while rewinding — try again', 'info')
+            })
+            return
+          }
+          const candidate = rewindCandidateOfLoadedWindow(loaded as never, selectedSeq)
+          if (candidate === undefined) {
+            // The resolution failure becomes authoritative here.
+            publishDetectionNotice(() => {
+              app.notify('the selected turn could not be resolved — try again', 'error')
+            })
+            return
+          }
+          return deps.rewind.forkSession(
+            sourceId,
+            candidate.forkAtSeq,
+            () => {
+              adopted = true
+              app.setDraft(candidate.editorText)
+            },
+            pickerIdentity,
+          ).then(outcome => ({ outcome, candidate }))
+        }, {
           sessionId: () => sourceId,
-          onResult: (outcome) => {
+          onResult: (result) => {
+            // A pre-fork settle (a loadThrough drop / an unresolved
+            // selection) already notified; nothing further here.
+            if (result === undefined) return
+            const { outcome, candidate } = result
             if (outcome.kind === 'success' && adopted) {
+              // §3C: the success toast belongs to the identity THIS
+              // operation's own adoption minted (the runtime's
+              // post-adoption navigation). A later external navigation
+              // (including A→B→A) must not receive the stale toast; the
+              // operation's own adoption is not supersession.
+              const owned = outcome.adoptedNavigation
+              if (owned !== undefined && !deps.rewind.isNavigationCurrent(owned)) return
               if (candidate.hasNonTextContent) {
                 app.notify(`rewound to turn ${candidate.turn}; original non-text content was not re-staged — review it before sending`, 'error')
               } else {
@@ -255,7 +363,16 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
               return
             }
             if (outcome.kind === 'error') {
-              if (outcome.text === 'the session changed before fork dispatch') {
+              // PR5 v2 §3C (plan-owner amendment): each error settles
+              // against ITS OWN notification fence. A runtime-DETECTED
+              // supersession carries the live identity observed at the
+              // detection moment (`notificationNavigation`) — A → B → A
+              // lands on A/N+2 and the cancellation is publishable while
+              // THAT identity is current; any later advance suppresses it.
+              // Every other pre-adoption failure belongs to the ORIGINAL
+              // picker identity. No error-text string matching.
+              if (!deps.rewind.isNavigationCurrent(outcome.notificationNavigation)) return
+              if (outcome.reason === 'navigation-changed-before-dispatch') {
                 app.notify('session changed — rewind cancelled', 'info')
               } else {
                 app.notify(outcome.text, 'error')
@@ -263,6 +380,21 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
             }
           },
           onError: (error) => {
+            // §3C-4 (review R7-4/R8): this is NOT a stage classifier — it is a
+            // conservative FAIL-CLOSED publication fence for an UNEXPECTED owned
+            // task failure. `runOwned` routes BOTH a task rejection and an async
+            // `onResult` failure here (src/runtime/process/tasks.ts `handlerFailure`), so a
+            // post-adoption consumer bug can reach this callback too; such a
+            // failure naturally fails the fence, because the rewind's own
+            // adoption advances the navigation epoch. That is exactly right:
+            // an old operation's error must never surface on a replacement
+            // surface. The ordinary pre-admission `loadThrough` read failure
+            // (the common case) is owned by the picker identity, which is still
+            // current at that point. `runOwned` has already reported the throw to
+            // diagnostics before this callback, so suppressing the VISIBLE
+            // notice once the surface moved neither hides nor loses it.
+            if (deps.lifecycle.isCleanedUp()) return
+            if (!deps.rewind.isNavigationCurrent(pickerIdentity)) return
             app.notify(safeErrorMessage(error), 'error')
           },
         })
@@ -541,7 +673,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           return false
         }
         deps.lifecycle.runOwned('subagent queue steer', () => steerAll({
-          currentAgent: () => deps.subagentDelivery.queueAgentFor(submit.childSessionId),
+          currentSubject: () => deps.subagentDelivery.queueSubjectFor(submit.childSessionId),
           currentGeneration: () => app.getViewerGeneration(),
           notify: (message, kind) => {
             if (deps.lifecycle.isCleanedUp() || app.getViewerGeneration() !== childViewerGeneration) return
@@ -559,7 +691,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           writer: deps.subagentDelivery.writer,
           writerSection: deps.subagentDelivery.writerSection,
         }, submit.text, { draftHasPayload: false }), {
-          sessionId: () => deps.subagentDelivery.queueAgentFor(submit.childSessionId)?.session.id,
+          sessionId: () => deps.subagentDelivery.queueSubjectFor(submit.childSessionId)?.session.id,
           onError: (error) => {
             restoreChildDraft(submit.text)
             if (deps.lifecycle.isCleanedUp() || app.getViewerGeneration() !== childViewerGeneration) return
@@ -585,12 +717,10 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
         makeSignal: () => promptViewerAbort === undefined
           ? deps.lifecycle.signal()
           : AbortSignal.any([deps.lifecycle.signal(), promptViewerAbort]),
-        // Same `@`-file mention canonicalization as the main session's
-        // submissions (the editor keeps `@src/foo.ts`, the child model receives
-        // the absolute path). The scope is the VIEWED CHILD's workspace when the
-        // viewer knows it (the child may have been born in another directory —
-        // canonicalizing against the parent cwd would rewrite the child's
-        // mentions to the wrong tree); an unknown cold-child cwd falls back to
+        // Same `@`-mention send seam as the main session's submissions
+        // (the official semantics keep the text literal; the seam remains
+        // the one routing point). The scope is the VIEWED CHILD's workspace
+        // when the viewer knows it; an unknown cold-child cwd falls back to
         // the live parent.
         canonicalizeText: (text) => deps.subagentDelivery.hostFile.canonicalizeMentions(
           viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),

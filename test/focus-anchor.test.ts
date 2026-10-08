@@ -23,7 +23,7 @@ import { findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -358,7 +358,7 @@ test('an attachment click inside an EXPANDED Thought toggles ONLY the attachment
   resetCapabilitiesCache()
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   const vt = new VirtualTerminal(100, 30)
-  const { ImageLoader } = await import('../src/image/loader.ts')
+  const { ImageLoader } = await import('../src/client/media/image/loader.ts')
   const loader = new ImageLoader(async () => ({ ref: {}, data: pngBytes() }))
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     imageLoader: loader,

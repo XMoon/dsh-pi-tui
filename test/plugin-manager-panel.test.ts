@@ -7,10 +7,10 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PluginManagerController } from '../src/plugin-manager/controller.ts'
-import { createDiag } from '../src/diag.ts'
-import { PluginManagerPanel } from '../src/plugin-manager/panel.ts'
-import { SELF_BUNDLE } from '../src/plugin-manager/classify.ts'
+import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { PluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
 import type { PluginManagerPort, PluginManagerSnapshot } from '../src/runtime/plugin-manager-port.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
@@ -39,6 +39,7 @@ function port(): PluginManagerPort {
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
   }
 }
 

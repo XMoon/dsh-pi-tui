@@ -5,11 +5,13 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { promisify } from 'node:util'
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { DraftFileStore } from '../src/attachment/file-draft.ts'
-import { admitDraftFiles, FILE_STREAM_CHUNK_BYTES } from '../src/attachment/file-admission.ts'
-import { FileInputError, probeAttachment } from '../src/attachment/intake.ts'
-import { expandAttachmentPlaceholders } from '../src/attachment/placeholder.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftFileStore } from '../src/client/media/attachment/file-draft.ts'
+import { admitDraftFiles } from '../src/app/submission/direct-file-admission.ts'
+import { FILE_STREAM_CHUNK_BYTES } from '../src/client/media/attachment/file-stream.ts'
+import { FileInputError } from '../src/domain/media/errors.ts'
+import { probeAttachment } from '../src/client/media/attachment/intake.ts'
+import { expandAttachmentPlaceholders } from '../src/client/media/attachment/placeholder.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 
 const execFileAsync = promisify(execFile)
 

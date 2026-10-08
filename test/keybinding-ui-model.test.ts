@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
 import {
   buildKeybindingEditorModel,
   searchKeybindingRows,
-} from '../src/keybinding-ui/model.ts'
+} from '../src/tui/keybindings/ui/model.ts'
 
 function modelFor(raw: unknown) {
   const manager = new HostKeybindingManager()
@@ -152,6 +152,23 @@ test('model marks disabled, fixed, leader, and conflicting states distinctly', (
     assert.match(model.summary, /customized/)
     assert.match(model.summary, /disabled/)
     assert.match(model.summary, /conflict/)
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('the model lists question.toggleSelection as a fixed row with its Space default', () => {
+  // Plan §15: the fixed action is visible in the editor with a readable
+  // label and its default key — never configurable.
+  const { manager, model } = modelFor({})
+  try {
+    const row = model.rows.find(candidate => candidate.id === 'question.toggleSelection')
+    assert.ok(row !== undefined, 'the row must exist')
+    assert.equal(row.status, 'fixed')
+    assert.equal(row.fixed, true)
+    assert.equal(row.label, 'Toggle multi-select option')
+    assert.deepEqual(row.effective, [{ kind: 'direct', key: 'space' }])
+    assert.equal(manager.keysFor('question.toggleSelection').length, 0, 'focused-component actions never enter the host keymap')
   } finally {
     manager.dispose()
   }

@@ -15,11 +15,25 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { compositionSource } from './support/composition-surface.ts'
 
 const commandsSource = readFileSync(new URL('../src/commands.ts', import.meta.url), 'utf8')
+// TS1 decomposes the built-in command definitions into `src/tui/commands/*.ts`;
+// the WHOLE command layer is the facade plus every domain module (deterministic
+// sorted directory scan). Assertions that pin a property of the command layer
+// as a whole — never the moved implementation's location — use this handle.
+const commandLayerSource = [
+  commandsSource,
+  ...readdirSync(new URL('../src/tui/commands/', import.meta.url))
+    .filter(name => name.endsWith('.ts'))
+    .sort()
+    .map(name => readFileSync(new URL(`../src/tui/commands/${name}`, import.meta.url), 'utf8')),
+].join('\n')
 const indexSource = compositionSource()
+// TS1 moved the static /skill and /yolo definitions out of the facade; their
+// source locks now point at the real owning module.
+const modelsSource = readFileSync(new URL('../src/tui/commands/models.ts', import.meta.url), 'utf8')
 // A3-5 relocated the semantic, scope-bound command facades (and their ONE
 // stale-throwing admission) out of the runner into the bound command runtime.
 const commandRuntimeSource = readFileSync(new URL('../src/app/command/runtime.ts', import.meta.url), 'utf8')
@@ -47,22 +61,23 @@ function code(source: string): string {
 test('the /skill paths resolve ONE atomic live scope and never pair two identity reads', () => {
   // The obsolete paired resolver is deleted from the interface AND the index
   // provider: the scope is the only identity the command layer handles.
-  assert.equal(count(commandsSource, 'requireLiveAgentScope'), 0,
+  assert.equal(count(commandLayerSource, 'requireLiveAgentScope'), 0,
     'the agent+scope pairing member must be gone from the command layer')
   assert.equal(count(indexSource, 'requireLiveAgentScope'), 0,
     'the agent+scope pairing provider must be gone from the index')
   // The rejected shape: an awaited agent resolution paired with a scope. A
   // destructured agent+scope tuple never appears, and no command reads a live
   // agent identity at all.
-  assert.equal(count(commandsSource, 'const { agent, scope }'), 0,
+  assert.equal(count(commandLayerSource, 'const { agent, scope }'), 0,
     'no path may destructure a paired agent+scope identity')
-  assert.equal(count(commandsSource, 'runner.liveAgent'), 0,
+  assert.equal(count(commandLayerSource, 'runner.liveAgent'), 0,
     'the command layer never reads a Direct Agent')
-  // Four /skill call sites (two wrappers, the handler, the picker): every one
-  // threads the SAME atomically captured scope.
-  assert.equal(count(commandsSource, 'loadSkill(scope,'), 4,
+  // Four /skill call sites across the whole command layer (two wrappers in the
+  // coordinator, the static /skill handler and its picker): every one threads
+  // the SAME atomically captured scope.
+  assert.equal(count(commandLayerSource, 'loadSkill(scope,'), 4,
     'every loadSkill call must receive the captured scope')
-  assert.ok(!commandsSource.includes('loadSkill(agent,'),
+  assert.ok(!commandLayerSource.includes('loadSkill(agent,'),
     'loadSkill must receive the captured scope, never a separately resolved agent')
 })
 
@@ -102,7 +117,7 @@ test('requireLiveSessionScope ensures the session then captures the scope atomic
 })
 
 test('sessionGeneration no longer exists in the command layer', () => {
-  assert.equal(commandsSource.includes('sessionGeneration'), false,
+  assert.equal(commandLayerSource.includes('sessionGeneration'), false,
     'A3-2 deletes the member: the scope-bound refresh facade carries the target key')
 })
 
@@ -180,8 +195,27 @@ test('scope-bound reads admit through ONE stale-throwing helper, never a raw cur
   assert.ok(seamsAt > 0, 'the injected Direct seams were not found')
   const seamsEnd = indexSource.indexOf('\n      surfaceCatalogContext:', seamsAt)
   const seamsBody = indexSource.slice(seamsAt, seamsEnd)
-  assert.equal(count(seamsBody, 'command.attachmentForSession('), 2,
-    'the Host-session seams must resolve the exact fenced attachment')
+  // PR4 §3.3/§12.4 relocated the Direct stats / last-assistant reads into the
+  // branch-shared helpers; TS2 §8 then moved those helpers (and their two
+  // session-log reads) into `src/app/bootstrap/presentation-bridge.ts`. The
+  // invariant is "every Direct session-log read resolves the EXACT fenced
+  // attachment": the composition zone provides the fenced session accessor
+  // exactly ONCE, and the helper performs both reads through that injected
+  // accessor and nothing else.
+  const bridgeSource = readFileSync(new URL('../src/app/bootstrap/presentation-bridge.ts', import.meta.url), 'utf8')
+  assert.equal(
+    count(indexSource, 'directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session,'),
+    1,
+    'the composition zone must provide the exact fenced attachment exactly once',
+  )
+  assert.equal(count(indexSource, 'command.attachmentForSession('), 1,
+    'the Direct session-log reads must resolve the exact fenced attachment')
+  assert.equal(count(bridgeSource, 'directSessionFor('), 2,
+    'both Direct session-log reads (the stats fold and the last-assistant read) go through the injected fenced accessor')
+  assert.equal(count(bridgeSource, 'deps.'), 0,
+    'the bridge reads only its injected dependencies, never a raw current attachment')
+  assert.equal(count(seamsBody, 'deps.liveAgent()'), 0,
+    'the seams never resolve the raw current attachment')
   assert.equal(count(seamsBody, 'commands.list(agentNow())'), 1,
     'only listScopedCommands may read the raw current attachment (a display read)')
 })
@@ -190,27 +224,42 @@ test('scope-bound WRITES refuse a stale scope BEFORE dispatching its sessionId',
   // The frozen §3.2 write contract: a stale scope takes an EXPLICIT refusal path
   // and its sessionId is never dispatched to a replacement-owner resolver.
   // A5b-3b-2: the facade (and its write guards) is owned by the command surface.
-  const writes = ['applyPermissionPreset', 'setSessionApprovalPolicy']
-  const end = commandSurfaceSource.indexOf('\n      switchSession:', commandSurfaceSource.indexOf('setSessionApprovalPolicy: '))
-  assert.ok(end > 0, 'the write provider span end was not found')
-  for (let index = 0; index < writes.length; index += 1) {
-    const at = commandSurfaceSource.indexOf(`${writes[index]}: `)
-    assert.ok(at > 0, `${writes[index]} provider not found`)
-    const next = index + 1 < writes.length
-      ? commandSurfaceSource.indexOf(`${writes[index + 1]}: `, at)
-      : end
-    const body = commandSurfaceSource.slice(at, next)
-    // The exact-owner admission and the explicit refusal...
-    assert.ok(body.includes('agentForLiveScope(scope)'),
-      `${writes[index]} must admit through agentForLiveScope`)
-    assert.ok(body.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
-      `${writes[index]} must REFUSE a stale scope explicitly (never retarget)`)
-    // ...BOTH of which precede the ONLY sessionId dispatch.
-    const guard = body.indexOf('agentForLiveScope(scope)')
-    const dispatch = body.indexOf('scope.sessionId')
-    assert.ok(dispatch > guard, `${writes[index]} must guard before dispatching scope.sessionId`)
-    assert.ok(!body.includes('agentNow()'), `${writes[index]} must not read the current attachment directly`)
+  const writeSpan = (name: string, nextName: string | undefined): string => {
+    const at = commandSurfaceSource.indexOf(`${name}: `)
+    assert.ok(at > 0, `${name} provider not found`)
+    const next = nextName === undefined
+      ? commandSurfaceSource.indexOf('\n      switchSession:', at)
+      : commandSurfaceSource.indexOf(`${nextName}: `, at)
+    assert.ok(next > at, `${name} provider span end was not found`)
+    return commandSurfaceSource.slice(at, next)
   }
+  // `setSessionApprovalPolicy` is a synchronous write: the exact-owner
+  // admission and the explicit stale-scope refusal BOTH precede the only
+  // `scope.sessionId` dispatch (never a re-resolved id).
+  const approval = writeSpan('setSessionApprovalPolicy', 'switchSession')
+  assert.ok(approval.includes('agentForLiveScope(scope)'),
+    'setSessionApprovalPolicy must admit through agentForLiveScope')
+  assert.ok(approval.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
+    'setSessionApprovalPolicy must REFUSE a stale scope explicitly (never retarget)')
+  assert.ok(approval.indexOf('scope.sessionId') > approval.indexOf('agentForLiveScope(scope)'),
+    'setSessionApprovalPolicy must guard before dispatching scope.sessionId')
+  assert.ok(!approval.includes('agentNow()'),
+    'setSessionApprovalPolicy must not read the current attachment directly')
+  // `applyPermissionPreset` is TRANSPORT-NEUTRAL (PR5 v2 §1D, owner ruling):
+  // the permission preset apply is an ASYNC ConfigPort dispatch, so the
+  // contract that survives is the explicit stale-scope refusal BEFORE the
+  // dispatch — and the §1D removal of the Direct-Agent prerequisite is
+  // itself part of the contract, asserted by ABSENCE (a re-introduced
+  // `agentForLiveScope(scope)` would re-break the Remote `/yolo` path).
+  const preset = writeSpan('applyPermissionPreset', 'setSessionApprovalPolicy')
+  assert.ok(preset.includes('if (!deps.sessionScope.isCurrent(scope)) return'),
+    'applyPermissionPreset must REFUSE a stale scope explicitly (never retarget)')
+  assert.ok(preset.indexOf('scope.sessionId') > preset.indexOf('if (!deps.sessionScope.isCurrent(scope)) return'),
+    'applyPermissionPreset must guard before dispatching scope.sessionId')
+  assert.ok(!preset.includes('agentForLiveScope(scope)'),
+    'applyPermissionPreset must NOT require a Direct agent (§1D: transport-neutral ConfigPort dispatch)')
+  assert.ok(!preset.includes('agentNow()'),
+    'applyPermissionPreset must not read the current attachment directly')
   // The ASYNC permission write re-checks the ORIGINAL scope after its await, so
   // a settlement is never presented for a superseded owner.
   const permissionWrite = commandSurfaceSource.slice(
@@ -228,18 +277,18 @@ test('a superseded skill/permission interaction is refused gracefully, never thr
   // read to the user-visible stale notice instead of propagating it.
   assert.ok(commandsSource.includes("text: 'the session changed while loading the skill — try again'"),
     'the skill definition read reports the stale refusal')
-  assert.ok(commandsSource.includes("text: 'the session changed while loading skills — try again'"),
+  assert.ok(commandLayerSource.includes("text: 'the session changed while loading skills — try again'"),
     'the skill catalog read reports the stale refusal')
   // The picker SELECTION must not let the error escape the overlay callback.
-  assert.ok(commandsSource.includes("app.notify('the session changed while loading skills — try again', 'error')"),
+  assert.ok(commandLayerSource.includes("app.notify('the session changed while loading skills — try again', 'error')"),
     'the picker selection notifies instead of throwing')
   // The stale /settings panel CLOSES and tells the user instead of dispatching
   // the retained scope to the replacement owner.
-  assert.ok(commandsSource.includes("app.notify('the session changed — the approval policy was not applied', 'error')"),
+  assert.ok(commandLayerSource.includes("app.notify('the session changed — the approval policy was not applied', 'error')"),
     'the settings panel reports the refused write')
-  assert.ok(commandsSource.includes('closeSettings()'), 'the stale panel closes itself')
+  assert.ok(commandLayerSource.includes('closeSettings()'), 'the stale panel closes itself')
   // /yolo maps the refused write to a command error.
-  assert.ok(commandsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
+  assert.ok(modelsSource.includes("text: 'the session changed before the permission preset could be applied — try again'"),
     'the permission preset refusal is user-visible')
 })
 
@@ -258,7 +307,7 @@ test('a dispatched permission write keeps its settlement; the refusal text never
   // `/yolo`: the pre-dispatch refusal may invite a retry, the post-dispatch one
   // must NOT (this preset disables approvals; a retry would target the new owner).
   const yolo = span(
-    commandsSource,
+    modelsSource,
     'const outcome = await runner.applyPermissionPreset(',
     "return { kind: 'success', text: 'danger-full-access",
   )

@@ -9,16 +9,13 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import {
 
-  MAX_PICKER_SESSIONS,
   buildSessionTree,
   findSessionMatch,
   formatSessionAge,
-  headerToPickerRow,
   sameWorkspace,
   sanitizeSessionSearchInput,
   sanitizeTerminalText,
@@ -26,12 +23,12 @@ import {
   shortSessionId,
   workspaceKey,
   type SessionPickerRow,
-} from '../src/sessions.ts'
+} from '../src/tui/pickers/sessions.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
- * (see src/process-tui-slot.ts). */
+ * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -134,26 +131,6 @@ test('sessionPickerItem marks the current session, subagents, forks, live', () =
   assert.equal(item.label, '● 01234567')
 })
 
-test('headerToPickerRow maps a header onto the row shape', () => {
-  const row = headerToPickerRow({
-    version: SESSION_FORMAT_VERSION, isSeeded: false,
-    id: SessionId('session-0123456789abcdef'),
-    createdAt: 42,
-    cwd: '/w',
-    agentPreset: 'minimal',
-    parentSession: SessionId('session-p'),
-    origin: 'subagent',
-  }, true)
-  assert.equal(row.id, 'session-0123456789abcdef')
-  assert.equal(row.updatedAt, 42)
-  assert.equal(row.createdAt, 42)
-  assert.equal(row.cwd, '/w')
-  assert.equal(row.preset, 'minimal')
-  assert.equal(row.parentSession, 'session-p')
-  assert.equal(row.origin, 'subagent')
-  assert.equal(row.live, true)
-})
-
 function treeRow(id: string, parentSession?: string): SessionPickerRow {
   return {
     id,
@@ -187,23 +164,6 @@ test('buildSessionTree emits cycle members without indentation or infinite trave
   assert.deepEqual(twoNode.map(entry => [entry.row.id, entry.depth]), [['a', 0], ['b', 1]])
   const self = buildSessionTree([treeRow('self', 'self')])
   assert.deepEqual(self.map(entry => [entry.row.id, entry.depth]), [['self', 0]])
-})
-
-test('headerToPickerRow preserves code until a roster-aware reader can disambiguate it', () => {
-  const row = headerToPickerRow({
-    version: SESSION_FORMAT_VERSION, isSeeded: false,
-    id: SessionId('session-legacy'),
-    createdAt: 42,
-    agentPreset: 'code',
-  }, false)
-  assert.equal(row.preset, 'code')
-})
-
-test('MAX_PICKER_SESSIONS keeps its legacy exported value', () => {
-  // The constant no longer caps the title reads (the picker loads titles
-  // for every main row it can display), but it stays exported and pinned
-  // as a documented legacy value.
-  assert.equal(MAX_PICKER_SESSIONS, 200)
 })
 
 // ── headless picker behavior through the virtual terminal ────────────────

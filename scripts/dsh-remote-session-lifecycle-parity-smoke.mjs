@@ -19,15 +19,47 @@
  * - C open / retain              (ClientSessions.retain, no invented resume RPC)
  * - D model select               (session.modelCatalog / session.selectModel)
  * - E preset select + locked     (agentPresets.select normal + refusal)
+ * - F real writer-held           (PR5 §12 Slice D: a real two-process kernel
+ *   write lease held by an external Node process -> Host cold-resume ->
+ *   SessionAlreadyOwnedError -> official `session/writer-held` -> the TUI
+ *   Remote SessionWriter/preset/model adapters settle a PROVEN rejection with
+ *   preserved details and the centralized guidance; SIGKILL the holder and an
+ *   explicit retry then commits)
+ *
+ * PRODUCTION PREREQUISITES REPRODUCED
+ * - exact DSH rc.2 JsonlSessionPersistence
+ * - real OS/kernel write lease (an independent Node holder process)
+ * - AgentLoop/session activation
+ * - SessionController / ApiSessionAgentController
+ * - Typert Gateway
+ * - real Host connection
+ * - independent official Client Context
+ * - generated Remote objects
+ * - TUI Remote SessionWriter/model/preset adapters
+ *
+ * TEST STAND-INS / SUBSTITUTIONS
+ * - temporary workRoot/persistence root
+ * - local stub LLM adapter/model registration
+ * - deterministic fixture preset(s)
+ * - process-local transport rather than external deployment
+ *
+ * DELIBERATELY ABSENT
+ * - external model provider/network/auth
+ * - public Remote backend selector
+ * - unrelated UI/plugins
+ * - reconnect/HMR scenarios
  *
  * @module dsh-remote-session-lifecycle-parity-smoke
  */
 
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -44,6 +76,7 @@ import presetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
 import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionTitle from '@deepseek-ai/dsh-session-title'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -54,6 +87,9 @@ import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import { RemoteSessionLifecycle } from '../src/runtime/remote/session-lifecycle-remote.ts'
 import { RemoteModelCatalog } from '../src/runtime/remote/model-remote.ts'
 import { RemotePresetCatalog } from '../src/runtime/remote/preset-remote.ts'
+import { RemoteSessionWriter } from '../src/runtime/remote/session-writer-remote.ts'
+import { RemotePromptSerializerProduction } from '../src/runtime/remote/prompt-serializer-remote.ts'
+import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 
 const PACKAGE_IDS = {
   connection: '@deepseek-ai/dsh-client-connection',
@@ -67,6 +103,10 @@ const ALT_MODEL = 'smoke-alt'
 const DEFAULT_SELECTION = Object.freeze({ provider: PROVIDER, model: MODEL })
 const PRESET = 'lifecycle-preset'
 const ALT_PRESET = 'lifecycle-preset-2'
+/** Flow F: the Session an EXTERNAL process holds the kernel write lease on. */
+const HELD_SESSION = 'lifecycle-held'
+/** The two-process holder fixture (plain Node, official rc.2 packages). */
+const HOLDER = fileURLToPath(new URL('../test/support/session-writer-holder.mjs', import.meta.url))
 
 const IMAGE_LIMITS = Object.freeze({
   maxImageBytes: 5 * 1024 * 1024,
@@ -172,6 +212,14 @@ async function createHost(workRoot) {
     persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
     const loop = await mountAgentLoopTestHarness(ctx)
     await ctx.plugin(CommandRuntime)
+    // The official session-title service: the SessionController's `rename`
+    // verb requires it (Flow F's explicit-retry positive control renames after
+    // the holder exits).
+    await ctx.plugin(SessionTitle, {
+      fallbackMaxWords: 5,
+      fallbackMaxBytes: 40,
+      maxTitleBytes: 80,
+    })
     provideHostPeripheralServices(ctx)
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
@@ -250,6 +298,8 @@ async function main() {
   const workRoot = mkdtempSync(join(tmpdir(), 'dsh-prem3-lifecycle-'))
   let client
   let host
+  let holder
+  let holderExited
   try {
     await import('@deepseek-ai/dsh-client-connection/client')
     await import('@deepseek-ai/dsh-api-gateway/client')
@@ -264,6 +314,15 @@ async function main() {
     host = await createHost(workRoot)
     const anchorDir = join(workRoot, 'anchor')
     mkdirSync(anchorDir, { recursive: true })
+
+    // ---- Flow F prerequisite: start the external writer holder BEFORE the
+    // Client's first catalog read, so the cold JSONL Session is discoverable
+    // (readable/openable) while its kernel write lease is held elsewhere.
+    holder = spawn(process.execPath, [HOLDER, host.persistenceRoot, HELD_SESSION, anchorDir], {
+      stdio: ['ignore', 'pipe', 'inherit'],
+    })
+    holderExited = new Promise(resolve => { holder.once('exit', () => { resolve() }) })
+    await once(holder.stdout, 'data') // 'holding'
 
     globalThis.__DSH_TRANSPORT__ = hostTransport(host)
 
@@ -442,8 +501,78 @@ async function main() {
       flows.presetSelectLocked = { status: 'covered', normalPreset: ALT_PRESET, lockedCode: 'agent-preset/locked' }
     }
 
+    // ---- Flow F: real two-process writer-held (PR5 §12 Slice D) ----------
+    {
+      // The cold Session is READABLE while the external process holds the
+      // write lease, and merely retaining it must not activate a Host Agent.
+      const opened = await lifecycle.open({ sessionId: HELD_SESSION })
+      assert.equal(opened.ownership, 'current', `Flow F ownership: ${opened.ownership}/${opened.outcome.kind}`)
+      assert.equal(opened.outcome.kind, 'opened', `Flow F cold open failed: ${opened.ownership}/${opened.outcome.kind}`)
+      assert.ok(sessions.binding(HELD_SESSION) !== undefined,
+        'Flow F must retain a Client generation for the cold held Session (a real read of the shared root)')
+      assert.equal(host.ctx.agents.get(SessionId(HELD_SESSION)), undefined,
+        'Flow F must not activate a Host Agent merely by opening the cold Session')
+      assert.equal(host.ctx.sessions.get(SessionId(HELD_SESSION)), undefined,
+        'Flow F cold open must not materialize a Host Session')
+
+      // The TUI Remote SessionWriter: the official rename resolves the Agent
+      // first, so the held lease refuses the write before any title mutation.
+      const writer = new RemoteSessionWriter(
+        sessions,
+        generation,
+        RemotePromptSerializerProduction.overSessions(sessions),
+      )
+      const refusedRename = await writer.rename(HELD_SESSION, 'held-title')
+      assert.equal(refusedRename.kind, 'rejected', `Flow F rename must be refused: ${refusedRename.kind}`)
+      if (refusedRename.kind === 'rejected') {
+        assert.equal(refusedRename.error.code, 'session/writer-held', 'Flow F rename must keep the exact code')
+        assert.deepEqual(refusedRename.error.details, { sessionId: HELD_SESSION }, 'Flow F rename must keep the official details')
+        assert.equal(refusedRename.error.message, SESSION_WRITER_HELD_GUIDANCE, 'Flow F rename must carry the shared guidance')
+      }
+
+      // The preset adapter: exact `session/writer-held` is a proven rejection
+      // with preserved details + centralized guidance (PR5 Slice B fix).
+      const refusedPreset = await presets.selectSessionPreset(HELD_SESSION, ALT_PRESET)
+      assert.equal(refusedPreset.outcome.kind, 'rejected', `Flow F preset must be refused: ${refusedPreset.outcome.kind}`)
+      if (refusedPreset.outcome.kind === 'rejected') {
+        assert.equal(refusedPreset.outcome.error.code, 'session/writer-held', 'Flow F preset must keep the exact code')
+        assert.deepEqual(refusedPreset.outcome.error.details, { sessionId: HELD_SESSION }, 'Flow F preset must keep the official details')
+        assert.equal(refusedPreset.outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'Flow F preset must carry the shared guidance')
+      }
+
+      // The model adapter: the existing exact writer-held mapping.
+      const refusedModel = await models.selectSessionModel(HELD_SESSION, { provider: PROVIDER, model: ALT_MODEL })
+      assert.equal(refusedModel.outcome.kind, 'rejected', `Flow F model must be refused: ${refusedModel.outcome.kind}`)
+      if (refusedModel.outcome.kind === 'rejected') {
+        assert.equal(refusedModel.outcome.error.code, 'session/writer-held', 'Flow F model must keep the exact code')
+        assert.deepEqual(refusedModel.outcome.error.details, { sessionId: HELD_SESSION }, 'Flow F model must keep the official details')
+        assert.equal(refusedModel.outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'Flow F model must carry the shared guidance')
+      }
+
+      // EXPLICIT recovery positive control: only after the holder process is
+      // killed (the kernel releases the lease with it) does a second,
+      // user-initiated write commit. No automatic retry happened above.
+      holder.kill('SIGKILL')
+      await holderExited
+      holder = undefined
+      const takenOver = await writer.rename(HELD_SESSION, 'held-title')
+      assert.equal(takenOver.kind, 'committed', `Flow F explicit retry must commit after the holder exits: ${takenOver.kind}`)
+      if (takenOver.kind === 'committed') {
+        assert.equal(takenOver.value.title, 'held-title')
+      }
+      opened.outcome.handle.client?.release()
+      flows.writerHeld = {
+        status: 'covered',
+        sessionId: HELD_SESSION,
+        refusedCodes: ['session/writer-held'],
+        recovery: 'explicit retry committed after SIGKILL of the holder',
+      }
+    }
+
     console.log(JSON.stringify({ ok: true, flows }))
   } finally {
+    if (holder !== undefined && holder.exitCode === null) holder.kill('SIGKILL')
+    if (holderExited !== undefined) await holderExited
     if (client !== undefined) await client.fiber.dispose()
     if (host !== undefined) {
       if (host.persistenceFiber !== undefined) await host.persistenceFiber.dispose()

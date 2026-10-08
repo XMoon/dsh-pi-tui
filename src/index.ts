@@ -14,7 +14,7 @@
  *
  * KEYS ARE NOT HARD-CODED IN THE RUNNER: host shortcuts are semantic actions (app.*)
  * resolved through the user-orchestrable keymap; the single source of truth
- * for default keys is src/keybindings/definitions.ts and the effective map
+ * for default keys is src/tui/keybindings/definitions.ts and the effective map
  * is inspectable at runtime with `/keybindings`. User-FACING strings derive
  * key labels through the keymap's keyHint(); key
  * names in comments are shorthand for the default binding and must never be
@@ -25,15 +25,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
-import { type ProgressUpdatesState, type ResponseStyleState } from './communication-policy.ts'
-import { type DisplayState } from './display-preset.ts'
+import { type ProgressUpdatesState, type ResponseStyleState } from './domain/communication/policy.ts'
 
-import { type Diag } from './diag.ts'
+import { type Diag } from './runtime/process/diagnostics.ts'
 import {
   resolveInitialCatalog as resolveInitialCatalogImpl,
-  type InitialCatalogResolution,
-  type SurfaceCatalogContext,
-} from './surface-catalog.ts'
+} from './app/direct/initial-catalog.ts'
+import type { InitialCatalogResolution } from './domain/catalog/surface.ts'
+import type { SurfaceCatalogContext } from './runtime/direct/surface-catalog.ts'
 import { applyRunner } from './app/bootstrap.ts'
 import { composeDirectAgent, recordedDirectPreset } from './app/direct/composition.ts'
 
@@ -43,16 +42,18 @@ export const name = 'tui-runner'
 /** Core services required before the TUI can mount. */
 export const inject = ['agentDefaultModel', 'agents', 'sessions', TUI_STARTUP_SERVICE]
 
-import type { Config } from './tui-config.ts'
-export { Config } from './tui-config.ts'
+import type { Config } from './app/config/schema.ts'
+export { Config } from './app/config/schema.ts'
 
 // Relocated root helpers (A5-1/A5-1b, plan §27): every helper implementation
 // lives in its natural top-level module; the package-root exports are preserved
 // here unchanged.
-export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, commandRejectsImages, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, resolveSubmitDelivery, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt, dangerCommand } from './command-policy.ts'
-export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './interrupt.ts'
-export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './subagent-viewer.ts'
-export type { InitialCatalogResolution } from './surface-catalog.ts'
+export { SESSIONLESS_COMMANDS, LOCAL_COMMANDS, HOST_COMMAND_CATALOG, isLocalCommandLine, isBareCommandLine, commandIsLocalForAttachments, normalizeSkillInvocation, shouldConsumeAdvertisedMiss, isPlainExitPrompt } from './domain/command/policy.ts'
+export { dangerCommand } from './domain/shell/danger.ts'
+export { commandRejectsImages, resolveSubmitDelivery } from './app/submission/command-policy.ts'
+export { interruptAgent, type InterruptWriteOutcome, type InterruptAgentLike, type InterruptWriterLike } from './app/session/interrupt.ts'
+export { createViewerOpenToken, teardownViewerForSessionSwap, viewerActionCapability, matchPendingSubagentCall, type PendingSubagentCall, type ViewerOpenToken } from './app/surface/viewer-policy.ts'
+export type { InitialCatalogResolution } from './domain/catalog/surface.ts'
 
 /**
  * Options for {@link resolveInitialCatalog}.
@@ -60,7 +61,7 @@ export type { InitialCatalogResolution } from './surface-catalog.ts'
  * The public declaration stays here (A5a review P1): `liveAgent` keeps the Host
  * `Agent` type it has always had, so consumers that READ the property keep
  * compiling. The implementation consumes the structural
- * `SurfaceCatalogResolutionOptions` in `surface-catalog.ts`.
+ * `SurfaceCatalogResolutionOptions` in `app/direct/initial-catalog.ts`.
  */
 export interface ResolveInitialCatalogOptions {
   /** The resumed live agent, if any (prefetch path). */
@@ -85,8 +86,8 @@ export interface ResolveInitialCatalogOptions {
  * prefetches the resumed agent's effective catalog; the deferred start reads the
  * cold HUMAN SKILL catalog through the preset's STANDING SCOPE — no Agent, no
  * session, no turn — so the first input sees human-invocable skills without any
- * durable side effect. The implementation and its failure taxonomy live in
- * `surface-catalog.ts`.
+ * durable side effect. The implementation and its pre-mount failure taxonomy
+ * live in `app/direct/initial-catalog.ts`.
  * @param options - injected dependencies (see {@link ResolveInitialCatalogOptions}).
  * @returns the snapshot / skill catalog to install and an optional notice.
  */
@@ -94,23 +95,35 @@ export async function resolveInitialCatalog(options: ResolveInitialCatalogOption
   return resolveInitialCatalogImpl(options)
 }
 
-export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './task-presentation.ts'
-export { foldQueueRows, type QueueFoldResult, type QueueInboxMessage } from './pending-presentation.ts'
-export { compactingFromLog } from './compaction-presentation.ts'
+export { subagentJobTranscriptId, taskRowSelectionDisposition, subagentJobViewHint } from './app/surface/task-presentation.ts'
+export { foldQueueRows, type QueueFoldResult } from './app/surface/pending-presentation.ts'
+export type { QueueInboxMessage } from './app/submission/pending-input.ts'
+export { compactingFromLog } from './app/surface/compaction-presentation.ts'
 
-export { runningProfile, hostRunningProfile, resumeCommand, type ProfileContextReadLike } from './dsh-profile.ts'
+export { runningProfile, resumeCommand } from './client/launcher/profile.ts'
+export { hostRunningProfile, type ProfileContextReadLike } from './app/bootstrap.ts'
 
-// A4-7: the compaction/context presentation folds live in the top-level
-// compaction-presentation module (plan §16/§27) and are consumed by the
-// surface routing; the root entry point re-exports them unchanged so the
-// published package surface stays byte-compatible.
+// A4-7: the compaction/context presentation folds live in the application-owned
+// `app/surface` compaction-presentation module (plan §16/§27; TS8-F5 moved them
+// out of the top-level root) and are consumed by the surface routing; the root
+// entry point re-exports them unchanged so the published package surface stays
+// byte-compatible.
 export {
   foldCompactionEvent,
   settleCompactionSurface,
   busyAfterTurnBoundary,
   contextRefreshKind,
-} from './compaction-presentation.ts'
-export type { CompactionFold, CompactionSettleSurface } from './compaction-presentation.ts'
+} from './app/surface/compaction-presentation.ts'
+export type { CompactionFold, CompactionSettleSurface } from './app/surface/compaction-presentation.ts'
+
+
+/**
+ * The PUBLIC structural shape of the shared mutable display authority. The
+ * canonical owner is `src/domain/display/preset.ts` (`DisplayState`); the
+ * published `composeAgent` signature stays STRUCTURAL so the internal source
+ * path never leaks into the declaration bundle (TS8-D).
+ */
+type DisplayState = { preset: 'focus' | 'compact' | 'full' }
 
 
 /** One agent's preset composition: the id to record and the setup that installs it. */

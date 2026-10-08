@@ -6,15 +6,17 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { truncateSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
-import { createDiag } from '../src/diag.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
-import { DraftFileStore } from '../src/attachment/file-draft.ts'
-import { consumeDraftImages, pruneUnreferencedDrafts } from '../src/image/submit.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
+import { DraftFileStore } from '../src/client/media/attachment/file-draft.ts'
+import { consumeDraftAttachments, pruneUnreferencedDraftAttachments } from '../src/client/media/draft-attachments.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -22,11 +24,12 @@ import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces
- * (see src/process-tui-slot.ts). */
+ * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -99,13 +102,24 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
@@ -140,11 +154,11 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -158,7 +172,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const image = services.defs.find(def => def.name === 'image')
   const attach = services.defs.find(def => def.name === 'attach')
   assert.ok(image !== undefined, '/image registered')
@@ -326,7 +340,7 @@ test('orchestration: a real submit flow restores BEFORE unpin and survives a con
   const file2 = join(dir, 'second.png')
   writeFileSync(file2, pngBytes())
   const { app, imageStore, imageHandler } = setup()
-  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const { runReservedSubmit } = await import('../src/app/submission/submit-flow.ts')
   // Stage #1; the user submits a multimodal draft (the editor carries
   // the text).
   const draft1 = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
@@ -372,7 +386,7 @@ test('orchestration: a real submit flow restores BEFORE unpin and survives a con
 
 test('command fallback SUCCESS: the handoff pin transfers and releases exactly once', async () => {
   const { app, imageStore } = setup()
-  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const { runReservedSubmit } = await import('../src/app/submission/submit-flow.ts')
   const draft = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
   const text = `look at ${draft.placeholder}`
   // The handoff pin is acquired synchronously BEFORE commands.execute()
@@ -382,7 +396,7 @@ test('command fallback SUCCESS: the handoff pin transfers and releases exactly o
   // leak the handoff forever (review finding).
   await runReservedSubmit({
     reserve: () => handoff,
-    run: async () => { consumeDraftImages(text, imageStore) },
+    run: async () => { consumeDraftAttachments(text, imageStore) },
     restore: () => {},
   }, text)
   assert.equal(imageStore.isPinned(draft.id), false, 'the handoff pin is released after the nested submit')
@@ -391,7 +405,7 @@ test('command fallback SUCCESS: the handoff pin transfers and releases exactly o
 
 test('command fallback FAILURE: restore keeps the draft; the pin releases; prune can collect it after the placeholder leaves', async () => {
   const { app, imageStore } = setup()
-  const { runReservedSubmit } = await import('../src/image/submit-flow.ts')
+  const { runReservedSubmit } = await import('../src/app/submission/submit-flow.ts')
   const draft = imageStore.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
   const text = `look at ${draft.placeholder}`
   const handoff = imageStore.pinReferenced(text)
@@ -406,6 +420,6 @@ test('command fallback FAILURE: restore keeps the draft; the pin releases; prune
   // The user deletes the placeholder: prune can now collect it (no stale
   // pin holds it forever).
   app.setEditorText('')
-  pruneUnreferencedDrafts('', imageStore)
+  pruneUnreferencedDraftAttachments('', imageStore)
   assert.equal(imageStore.get(draft.id), undefined, 'the released draft is prunable after the placeholder leaves')
 })

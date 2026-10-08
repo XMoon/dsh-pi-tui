@@ -8,9 +8,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { PluginManagerController } from '../src/plugin-manager/controller.ts'
-import { PluginManagerPanel } from '../src/plugin-manager/panel.ts'
-import { createDiag } from '../src/diag.ts'
+import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
+import { PluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type {
   PluginChangeFact,
   PluginInstallEvent,
@@ -56,6 +56,7 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
     waitForInstall: async () => null,
     cancelInstall: async () => ({ status: 'not-running' }),
     subscribeInstall: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
@@ -163,6 +164,7 @@ function recoveryHarness(options: {
     },
     cancelInstall: async (requestId) => { cancelCalls.push(String(requestId)); return { status: 'cancelled' } },
     subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
   }
   const controller = new PluginManagerController(port, {
     requestRender: () => {},

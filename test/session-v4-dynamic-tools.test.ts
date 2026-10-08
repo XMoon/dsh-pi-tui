@@ -34,17 +34,17 @@ import SessionStore, { SessionId, SessionSeq, type SessionEvent } from '@deepsee
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { projectCompact } from '../src/compact-projection.ts'
-import { projectFocus } from '../src/focus-activity.ts'
-import { resultTextLines, writeFoldedPreview } from '../src/present.ts'
-import { collectRewindCandidates } from '../src/rewind.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
+import { projectFocus } from '../src/tui/transcript/focus-projection.ts'
+import { resultTextLines, writeFoldedPreview } from '../src/tui/transcript/tool-presentation.ts'
+import { collectRewindCandidates } from '../src/domain/session/rewind.ts'
 import {
-  renderTranscriptMarkdown,
   transcriptSearchText,
   TranscriptFolder,
   type TranscriptMessage,
 } from '../src/transcript.ts'
-import { projectTranscriptStructure } from '../src/transcript-projection.ts'
+import { renderTranscriptMarkdown } from '../src/client/artifact/transcript-markdown.ts'
+import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import { TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 

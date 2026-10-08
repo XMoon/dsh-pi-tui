@@ -13,6 +13,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { Context } from '@deepseek-ai/cordis'
@@ -21,25 +23,26 @@ import {
   ContextMeasurementCoordinator,
   deferInitialContextMeasure,
   type ContextMeasureReason,
-} from '../src/status/context-measurement.ts'
+} from '../src/domain/status/context-measurement.ts'
 import { compositionFile } from './support/composition-surface.ts'
 import { ownerFile, ownerSource } from './support/owner-modules.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
-import { StatusStore } from '../src/status/store.ts'
-import { usageFromStats } from '../src/status/derive-usage.ts'
-import { plainSectionEqual } from '../src/status/equal.ts'
-import type { SessionStats } from '../src/stats.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
+import { StatusStore } from '../src/domain/status/store.ts'
+import { usageFromStats } from '../src/domain/status/derive-usage.ts'
+import { plainSectionEqual } from '../src/domain/status/equal.ts'
+import type { SessionStats } from '../src/domain/status/stats.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { contextRefreshKind } from '../src/index.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -409,6 +412,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
         signal: new AbortController().signal,
         diag: { warn: () => {}, error: () => {}, info: () => {} },
         commandRegistry: ctx.get('commands'),
+    clientCommands: createClientCommandRegistry(parseCommand),
         recordExtensionError: () => {},
         clearExtensionError: () => {},
         captureExtensionHealthRef: () => {},
@@ -422,7 +426,7 @@ test('P2: /status forces ONE measurement through the coordinator, never a duplic
           list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map() ,
         },
       } as unknown as TuiCommandRunner
-      registerTuiCommands(runner)
+      registerTuiCommandsWithDirectSeams(runner)
       const statusDef = defs.find(entry => entry.name === 'status')
       assert.ok(statusDef?.handler, 'the /status command is registered')
       await (statusDef.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })

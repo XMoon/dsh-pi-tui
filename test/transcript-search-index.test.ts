@@ -16,7 +16,7 @@ import test from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptSearchText, transcriptSearchMatchKey, transcriptSearchSourceKey, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../src/transcript.ts'
-import { refreshedSearchState, steppedSearchOverlayState } from '../src/search-overlay.ts'
+import { refreshedSearchState, steppedSearchOverlayState } from '../src/app/surface/search-overlay.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 
 /** Build a minimal event envelope for tests. The type parameter is widened

@@ -16,11 +16,11 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { projectCompact } from '../src/compact-projection.ts'
-import { summarizeWorkSpan } from '../src/compact-work.ts'
-import { projectFocus } from '../src/focus-activity.ts'
-import { askAnswersLines, askAnswersSummary } from '../src/present.ts'
-import { SURFACED_INTERACTION_TOOL_NAMES, isSurfacedInteractionTool, isSurfacedInteractionToolName } from '../src/transcript-semantics.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
+import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
+import { projectFocus } from '../src/tui/transcript/focus-projection.ts'
+import { askAnswersLines, askAnswersSummary } from '../src/tui/transcript/tool-presentation.ts'
+import { SURFACED_INTERACTION_TOOL_NAMES, isSurfacedInteractionTool, isSurfacedInteractionToolName } from '../src/domain/transcript/semantics.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -496,7 +496,7 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
       return toolName === 'ask_user_question' ? view.includes('● q0 → B') : view.includes('Plan approved')
     }
     assert.ok(cardFull(), `regular Focus fails open (card full, no coupled fold):\n${vt.getViewport().join('\n')}`)
-    assert.ok(!vt.getViewport().join('\n').includes('ctrl+o to expand'),
+    assert.ok(!vt.getViewport().join('\n').includes('ctrl+o expand/collapse'),
       `no Ctrl+O affordance is advertised for the fail-open card:\n${vt.getViewport().join('\n')}`)
 
     // Expanding/collapsing the root must never change the card's own state.
@@ -599,3 +599,59 @@ for (const toolName of ['ask_user_question', 'exit_plan_mode'] as const) {
     assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no Thought-root promotion for an already-visible card')
   })
 }
+
+test('M3-3B a timed-out question card renders the authoritative late answer from the projection', async () => {
+  // The call's own result recorded the timeout; the answer arrived later and
+  // lives in the `userQuestions.settled` projection. The card must show what
+  // the user finally answered — the durable transcript event is unchanged.
+  const card: TranscriptMessage = {
+    kind: 'tool', turn: TURN, callId: 'call-late', name: 'ask_user_question',
+    args: JSON.stringify({ questions: [{ id: 'q0', question: 'Use A or B?' }] }),
+    result: JSON.stringify({ pending: true, callId: 'call-late' }), status: 'ok',
+  }
+  const enriched = startApp('full')
+  enriched.app.setSettledQuestionAnswersLookup(
+    callId => callId === 'call-late' ? [{ id: 'q0', selected: ['B'] }] : undefined,
+  )
+  enriched.app.setTranscript([card], new Map())
+  await enriched.vt.waitForRender()
+  const view = enriched.vt.getViewport().join('\n')
+  assert.ok(view.includes('1/1 answered'), `the late answer replaces the timeout preview:\n${view}`)
+  assert.ok(!view.includes('pending'), `the timeout payload is not shown once the answer is known:\n${view}`)
+
+  // Without the projection (capability absence) the card never presents the
+  // timed-out payload as if it were an answer. A fresh card object forces the
+  // presentation cache to re-derive from the now-cleared lookup.
+  enriched.app.setSettledQuestionAnswersLookup(undefined)
+  enriched.app.setTranscript([{ ...card }], new Map())
+  await enriched.vt.waitForRender()
+  assert.ok(!enriched.vt.getViewport().join('\n').includes('1/1 answered'),
+    'without the projection the timed-out payload is not presented as an answer')
+})
+
+test('M3-3B an EMPTY settled batch is authoritative and replaces the recorded timeout', async () => {
+  // rc.2 allows a settled entry whose answers batch is empty (a late reply
+  // settled the question without a readable batch). The settled entry is the
+  // authority: falling back to the call's own result would keep presenting the
+  // timeout/pending payload as the outcome.
+  const card: TranscriptMessage = {
+    kind: 'tool', turn: TURN, callId: 'call-empty', name: 'ask_user_question',
+    args: JSON.stringify({ questions: [{ id: 'q0', question: 'Use A or B?' }] }),
+    result: JSON.stringify({ pending: true, callId: 'call-empty' }), status: 'ok',
+  }
+  const { vt, app } = startApp('full')
+  app.setSettledQuestionAnswersLookup(callId => callId === 'call-empty' ? [] : undefined)
+  app.setTranscript([card], new Map())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('pending'), `the recorded timeout is not the outcome any more:\n${view}`)
+  assert.ok(view.includes('0/0 answered'), `the settled entry renders its (empty) authoritative batch:\n${view}`)
+
+  // With NO settled entry the card still shows its own recorded result — the
+  // enrichment never invents a settled state.
+  app.setSettledQuestionAnswersLookup(undefined)
+  app.setTranscript([{ ...card }], new Map())
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('0/0 answered'),
+    'no settled entry means no settled rendering')
+})

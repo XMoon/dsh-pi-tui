@@ -10,26 +10,29 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { registerTuiCommands, type TuiCommandRunner, type TuiSettingsLike } from '../src/commands.ts'
 import { LOCAL_COMMANDS, resolveSubmitDelivery } from '../src/index.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { createDiag } from '../src/diag.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -126,11 +129,11 @@ function fakeTuiSettings(busyEnter: string, localShellSandbox = 'bypass'): { val
 
 /** A fake commands service recording the registered definitions. */
 function fakeCommands() {
-  const defs: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }[] = []
+  const defs: { name: string; handler?: unknown; definitionId?: string; input?: { hint: string; attachments?: boolean } }[] = []
   return {
     defs,
     service: {
-      register: (def: { name: string; handler?: unknown; input?: { hint: string; attachments?: boolean } }): (() => void) => {
+      register: (def: { name: string; handler?: unknown; definitionId?: string; input?: { hint: string; attachments?: boolean } }): (() => void) => {
         defs.push(def)
         return () => {}
       },
@@ -143,6 +146,10 @@ function fakeCommands() {
       list: () => defs.map(def => ({
         name: def.name,
         description: 'a command',
+        // The official descriptor carries the registration's own
+        // `definitionId` through (PR5 v2 §1C: the origin derivation compares
+        // the effective winner's id against this surface's stamped mirrors).
+        ...(def.definitionId === undefined ? {} : { definitionId: def.definitionId }),
         ...(def.input === undefined ? {} : { input: def.input }),
       })),
       find: () => undefined,
@@ -182,13 +189,24 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
@@ -223,11 +241,11 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -241,7 +259,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     extensions: options.extensions as never,
     exit: () => {},
   }
-  const installed = registerTuiCommands(runner)
+  const installed = registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   const run = async (rawInput: string): Promise<unknown> =>
@@ -267,8 +285,63 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     await vt.waitForRender()
     return vt.getViewport().join('\n')
   }
-  return { vt, app, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
+  return { vt, app, ctx, run, runCommand, view, settings, installed, commands, registered: commands.defs.map(def => def.name) }
 }
+
+test('PR5 §1C-3 (R6-1): only the winner stamped with THIS surface\'s mirror id is subtracted', () => {
+  const t = setup()
+  try {
+    // The Direct compatibility mirror for /status carries the stamped
+    // provenance id and is therefore NOT Host origin.
+    const mirror = t.commands.defs.find(def => def.name === 'status')
+    assert.ok(mirror?.definitionId !== undefined,
+      'the Direct Host mirror carries the stamped provenance id')
+    assert.equal(t.installed.hostCatalogResolves('status'), false,
+      'a mirrored name is not Host origin')
+    assert.equal(t.installed.hostOriginClaimOf({ name: 'status' }), undefined,
+      'no Host-origin line claim for a mirrored name')
+    // A GENUINE Host command now takes the same name (its own identity — no
+    // stamped id). The effective winner is genuine Host authority: a
+    // name-based subtraction would have wrongly removed it (the R6-1 bug).
+    t.commands.defs.push({
+      name: 'status',
+      handler: () => ({ kind: 'success' }),
+      input: { hint: '<x>', attachments: true },
+    })
+    t.ctx.emit('commands/change')
+    assert.equal(t.installed.hostCatalogResolves('status'), true,
+      'the genuine Host winner IS Host origin — a name alone never subtracts it')
+    assert.deepEqual(t.installed.hostOriginClaimOf({ name: 'status' }), { claimed: true, attachments: true },
+      'the origin claim reads the WINNING Host descriptor, never the mirror underneath')
+  } finally {
+    t.app.stop()
+  }
+})
+
+test('PR5 §1C-3 (R6-2/R6-3): the sessionless origin derives from the PURE Host view; the advertised union may differ', () => {
+  const t = setup()
+  try {
+    // A genuine Host /export declares attachments; the TUI's own Client
+    // definition of the same name declares none. In the OLD sessionless
+    // merge the Client definition overwrote the Host descriptor.
+    t.commands.defs.push({
+      name: 'export',
+      handler: () => ({ kind: 'success' }),
+      input: { hint: '<path>', attachments: true },
+    })
+    t.ctx.emit('commands/change')
+    // The ADVERTISED union (completion/advertised-miss semantics) still lets
+    // the Client definition overwrite the Host one — this is exactly why the
+    // sibling gates had to move off it.
+    assert.deepEqual(t.installed.hostClaimOf({ name: 'export' }), { claimed: true, attachments: false },
+      'the advertised union is contaminated by the same-name Client descriptor')
+    // The origin view keeps the genuine Host declaration.
+    assert.deepEqual(t.installed.hostOriginClaimOf({ name: 'export' }), { claimed: true, attachments: true },
+      'the origin view keeps the WINNING Host attachment declaration (never Client synthesis)')
+  } finally {
+    t.app.stop()
+  }
+})
 
 test('every command registerTuiCommands registers is in LOCAL_COMMANDS', () => {
   // A future TUI command added to commands.ts but forgotten in the local
@@ -328,7 +401,7 @@ test('/settings shows the local-shell-sandbox row with the persisted value', asy
   // thinking, footer, busy-enter, then sandbox).
   for (let i = 0; i < 6; i += 1) t.vt.sendInput('\x1b[B')
   const view = await t.view()
-  assert.ok(view.includes('Local shell sandbox'), `local-shell-sandbox row missing:\n${view}`)
+  assert.ok(view.includes('User shell sandbox policy'), `local-shell-sandbox row missing:\n${view}`)
   assert.ok(view.includes('sandbox'), `persisted value missing:\n${view}`)
   t.app.stop()
 })
@@ -538,4 +611,19 @@ test('the deprecated app.input.queue action keeps its own (fixed-queue) identity
   assert.equal(both.bindings['app.input.queue'], 'ctrl+y')
   assert.equal(both.bindings['app.input.submitAccelerated'], 'ctrl+k')
   assert.deepEqual(both.diagnostics, [], 'two distinct actions never collide')
+})
+
+test('/settings describes the user-shell sandbox policy as conditional on Host execution', async () => {
+  // The row keeps its persisted value and write path, but its discovery copy
+  // must not over-promise execution: a backend that provides no Host
+  // user-shell (Remote rc.2 fails closed) still shows the policy row.
+  const t = setup()
+  let captured: Parameters<TuiApp['openSettings']>[0] | undefined
+  t.app.openSettings = ((items: Parameters<TuiApp['openSettings']>[0]) => { captured = items }) as unknown as TuiApp['openSettings']
+  await t.runCommand('settings', '')
+  const row = captured?.find(candidate => candidate.id === 'local-shell-sandbox')
+  assert.ok(row !== undefined, 'the local-shell-sandbox row must exist')
+  assert.match(row.description ?? '', /when Host user-shell execution is available/i,
+    'the sandbox policy description must scope execution to an available Host user-shell')
+  t.app.stop()
 })

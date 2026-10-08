@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { FocusTimingStore, focusTimerPaused } from '../src/focus-timing.ts'
+import { FocusTimingStore, focusTimerPaused } from '../src/tui/transcript/focus-timing.ts'
 import type { TurnActivity } from '../src/transcript.ts'
 
 /** A minimal mutable activity; the timer only reads start/end/completed. The
@@ -287,4 +287,35 @@ test('observing a pause twice does not double-count', () => {
   store.observe(asActivity(activity), 'waiting-approval', 9_000)
   store.observe(asActivity(activity), 'waiting-approval', 30_000)
   assert.equal(store.activeMillis(asActivity(activity), 'waiting-approval', 50_000), 5_000)
+})
+
+test('two FocusTimingStore instances isolate their phase timeline and live registry', () => {
+  // Two independent surfaces (the process slot still allows only one live
+  // TuiApp). Each store owns its own phase, pause windows and live registry,
+  // so one surface's wait and session reset must never move the other's timer.
+  const a = new FocusTimingStore()
+  const b = new FocusTimingStore()
+  const activityA = asActivity(make(0))
+  const activityB = asActivity(make(0))
+  // Seed both stores from the same working phase at the same instant.
+  assert.equal(a.activeMillis(activityA, 'working', 1_000), 1_000)
+  assert.equal(b.activeMillis(activityB, 'working', 1_000), 1_000)
+  // A waits on the user while B keeps running: only A freezes.
+  a.notePhase('waiting-question', 2_000)
+  assert.equal(a.activeMillis(activityA, 'waiting-question', 5_000), 2_000, 'A freezes at the question boundary')
+  assert.equal(b.activeMillis(activityB, 'working', 5_000), 5_000, 'B keeps accumulating its own active span')
+  // B now holds its OWN live wait history — an open pause window and a
+  // registered live activity — before A switches sessions. B is never
+  // re-observed in between, so a reset that leaked into B cannot re-seed it.
+  b.notePhase('waiting-approval', 6_500)
+  a.resetSessionScope()
+  // B resumes from ITS OWN 6_500 boundary and closes ITS retained window.
+  b.notePhase('working', 10_000)
+  // The registered activity proves B's live registry survived A's reset ...
+  assert.equal(b.activeMillis(activityB, 'working', 11_000), 7_500, 'B resumed from its own boundary after the reset on A')
+  // ... and a late-published B activity proves B's phase/windows survived:
+  // it still subtracts B's own 6_500 → 10_000 wait (11s wall − 3.5s wait).
+  assert.equal(b.activeMillis(asActivity(make(0)), 'working', 11_000), 7_500, 'the late B activity inherits B own retained wait')
+  // Non-vacuity: A's reset really dropped A's own retained pause window.
+  assert.equal(a.activeMillis(asActivity(make(0)), 'working', 11_000), 11_000)
 })

@@ -14,10 +14,11 @@
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
-import { installProgressUpdatesPrompt, installResponseStylePrompt, type ProgressUpdatesState, type ResponseStyleState } from '../../communication-policy.ts'
-import { installFocusPrompt, type SystemPromptLike } from '../../focus.ts'
-import type { DisplayState } from '../../display-preset.ts'
-import type { Diag } from '../../diag.ts'
+import type { ProgressUpdatesState, ResponseStyleState } from '../../domain/communication/policy.ts'
+import type { GitAttributionState } from '../../domain/communication/git-attribution.ts'
+import { installDirectTuiSystemPromptSections } from './system-prompt.ts'
+import type { DisplayState } from '../../domain/display/preset.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { recordedSessionPreset } from '../../runtime/direct/session-preset-direct.ts'
 
 /** One agent's preset composition: the id to record and the setup that installs it. */
@@ -46,24 +47,16 @@ export async function composeDirectAgent(
   diag?: Diag,
   progressUpdatesState?: ProgressUpdatesState,
   responseStyleState?: ResponseStyleState,
+  gitAttributionState?: GitAttributionState,
 ): Promise<DirectLegacyAgentComposition | DirectAgentComposition> {
   const installTuiPrompts = (agentCtx: Context): void => {
-    if (progressUpdatesState !== undefined || responseStyleState !== undefined) {
-      const systemPrompt = agentCtx.get('systemPrompt') as SystemPromptLike | undefined
-      if (systemPrompt !== undefined) {
-        // The progress section's effective text reads the live display state
-        // (Focus suppresses it), so it needs both live states.
-        if (progressUpdatesState !== undefined && displayState !== undefined) {
-          installProgressUpdatesPrompt(systemPrompt, displayState, progressUpdatesState)
-        } else if (progressUpdatesState !== undefined) {
-          diag?.warn('progress updates prompt unavailable', { reason: 'display state missing' })
-        }
-        if (responseStyleState !== undefined) installResponseStylePrompt(systemPrompt, responseStyleState)
-      } else {
-        diag?.warn('communication policy prompt unavailable', { reason: 'systemPrompt service missing' })
-      }
-    }
-    if (displayState !== undefined) installFocusPrompt(agentCtx, displayState, diag)
+    installDirectTuiSystemPromptSections(agentCtx, {
+      displayState,
+      diag,
+      progressUpdatesState,
+      responseStyleState,
+      gitAttributionState,
+    })
   }
   const presets = ctx.get('agentPresets')
   if (presets === undefined) {

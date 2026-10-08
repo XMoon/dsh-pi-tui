@@ -18,11 +18,11 @@ import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { RemotePendingInputReader } from '../src/runtime/remote/pending-input-reader-remote.ts'
-import { RemoteSubmissionPresentation } from '../src/submission-presentation.ts'
-import type { RemotePendingSubmission } from '../src/submission-presentation.ts'
+import { RemoteSubmissionPresentation } from '../src/app/remote/submission-presentation.ts'
+import type { RemotePendingSubmission } from '../src/app/remote/submission-presentation.ts'
 import type { RemoteConnectionGenerationSource } from '../src/runtime/remote/session-reader-remote.ts'
 import { createObservableGenerationHarness } from './support/remote-generation.ts'
-import { buildPendingPresentation } from '../src/pending-presentation.ts'
+import { buildPendingPresentation } from '../src/app/surface/pending-presentation.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -330,4 +330,226 @@ test('the same authoritative occurrence is presented once even for two same-text
   // req-1's echo is suppressed by the authoritative occurrence; req-2 stays a
   // distinct local row. Two rendered rows total, never deduped by text.
   assert.equal((view.match(/SAME-TEXT/g) ?? []).length, 2, `identity, not text, decides the duplicate:\n${view}`)
+})
+
+// ── Remote pending Context closure (plan §9.4) ──────────────────────────────
+
+/** One non-user authoritative next-step occurrence inbox. */
+function contextInbox(entries: readonly { id: string; text: string }[]): OfficialInbox {
+  return {
+    'next-turn': [],
+    'next-step': entries.map(entry => ({
+      id: entry.id,
+      content: [{ type: 'text', text: entry.text }],
+      source: { kind: 'tool-jobs' },
+    })),
+  }
+}
+
+test('a Remote next-step non-user occurrence renders as the generic pending Context tail', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: contextInbox([{ id: 'ctx-1', text: 'REMOTE-BACKGROUND-CONTEXT' }]),
+    running: true,
+    pendingSubmissions: [],
+  })
+  presentOnce(app, host.sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('REMOTE-BACKGROUND-CONTEXT'), `the Remote pending Context preview must render:\n${view}`)
+  assert.ok(view.includes('waiting for next step…'), `the running subject reads waiting for next step:\n${view}`)
+  // Non-user identity: no user bubble marker, no steering row, no queue row.
+  assert.ok(!view.includes('❯ REMOTE-BACKGROUND-CONTEXT'), `context must not render as a user bubble:\n${view}`)
+  assert.ok(!view.includes('steering…'), `context must not read as steering:\n${view}`)
+  assert.ok(!view.includes('to steer all') && !view.includes('to recall all'),
+    `context must never appear as a queue row:\n${view}`)
+})
+
+test('a Remote next-step USER occurrence remains pending steering', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: {
+      'next-turn': [],
+      'next-step': [{ id: 'occ-user', content: [{ type: 'text', text: 'REMOTE-USER-STEER' }], source: { kind: 'user' } }],
+    },
+    running: true,
+    pendingSubmissions: [],
+  })
+  presentOnce(app, host.sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ REMOTE-USER-STEER'), `the user occurrence stays a pending steering bubble:\n${view}`)
+  assert.ok(view.includes('steering…'), `the user occurrence reads steering:\n${view}`)
+  assert.ok(!view.includes('waiting for next step…'), `a user row never reads as Context:\n${view}`)
+})
+
+test('a Remote Context/User/Context tail preserves the join order', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: {
+      'next-turn': [],
+      'next-step': [
+        { id: 'ctx-a', content: [{ type: 'text', text: 'CTX-A' }], source: { kind: 'tool-jobs' } },
+        { id: 'user-b', content: [{ type: 'text', text: 'USER-B' }], source: { kind: 'user' } },
+        { id: 'ctx-c', content: [{ type: 'text', text: 'CTX-C' }], source: { kind: 'subagent-settled' } },
+      ],
+    },
+    running: true,
+    pendingSubmissions: [],
+  })
+  const reader = new RemotePendingInputReader(host.sessions, generation.source)
+  const rows = buildPendingPresentation({ pending: reader.snapshot('session-a'), submissions: [], textOf })
+  assert.deepEqual(
+    rows.tail.map(item => item.kind),
+    ['context', 'user', 'context'],
+    `the ordered tail preserves Context/User/Context:\n${JSON.stringify(rows.tail)}`,
+  )
+  app.setPendingInputPresentation(rows)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  const contextA = view.indexOf('CTX-A')
+  const userB = view.indexOf('USER-B')
+  const contextC = view.indexOf('CTX-C')
+  assert.ok(contextA >= 0 && userB > contextA && contextC > userB,
+    `the rendered order is Context A, User B, Context C:\n${view}`)
+})
+
+test('a replaced Remote Connection generation clears a stale pending Context row', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: contextInbox([{ id: 'ctx-stale', text: 'REMOTE-STALE-CONTEXT' }]),
+    running: true,
+    pendingSubmissions: [],
+  })
+  // The replacement generation has not re-bound the addressed Session yet
+  // (the real reconnect window): the old binding is gone, so the reader must
+  // report the session unavailable, never replay the previous generation's
+  // rows.
+  let rebindable = true
+  const sessions: BothSessionsSource = {
+    binding: id => rebindable && id === 'session-a' ? { session: host.sessions.binding(id)!.session } : undefined,
+  }
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('REMOTE-STALE-CONTEXT'))
+
+  generation.set({ id: 2 })
+  rebindable = false
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('REMOTE-STALE-CONTEXT'), `stale Context presentation survived:\n${view}`)
+})
+
+test('a same-generation durable re-bind keeps the Context row (reconnect is not data loss)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: contextInbox([{ id: 'ctx-durable', text: 'REMOTE-DURABLE-CONTEXT' }]),
+    running: true,
+    pendingSubmissions: [],
+  })
+  const sessions: BothSessionsSource = {
+    binding: id => id === 'session-a' ? { session: host.sessions.binding(id)!.session } : undefined,
+  }
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('REMOTE-DURABLE-CONTEXT'))
+
+  // The durable inbox projection SURVIVES a reconnect: a replaced generation
+  // whose new binding carries the same durable rows keeps them on screen —
+  // the clear in the generation test comes from the un-rebound window, not
+  // from dropping durable data.
+  generation.set({ id: 2 })
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('REMOTE-DURABLE-CONTEXT'),
+    `a re-bound durable Context must survive the generation replacement:\n${view}`)
+})
+
+test('a SAME-generation unavailable binding retains no stale pending Context (case 6)', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: contextInbox([{ id: 'ctx-unbound', text: 'REMOTE-UNBOUND-CONTEXT' }]),
+    running: true,
+    pendingSubmissions: [],
+  })
+  let bindable = true
+  const sessions: BothSessionsSource = {
+    binding: id => bindable && id === 'session-a' ? { session: host.sessions.binding(id)!.session } : undefined,
+  }
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('REMOTE-UNBOUND-CONTEXT'))
+
+  // ONLY the binding becomes unavailable; the generation is UNCHANGED. The
+  // reader must report the session as unavailable (never replay the previous
+  // binding's rows), so the Context row leaves the rendered surface.
+  bindable = false
+  presentOnce(app, sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('REMOTE-UNBOUND-CONTEXT'),
+    `an unavailable same-generation binding must not retain stale Context:\n${view}`)
+})
+
+test('a Remote session switch clears the previous session pending Context row', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const a = officialSession({
+    inbox: contextInbox([{ id: 'ctx-a', text: 'SESSION-A-CONTEXT' }]),
+    running: true,
+    pendingSubmissions: [],
+  })
+  const b = officialSession({ inbox: EMPTY_INBOX, running: false, pendingSubmissions: [] })
+  const faces: Record<string, OfficialSessionFace> = {
+    'session-a': a.sessions.binding('session-a')!.session,
+    'session-b': b.sessions.binding('session-a')!.session,
+  }
+  const sessions: BothSessionsSource = {
+    binding: id => faces[id] === undefined ? undefined : { session: faces[id] },
+  }
+  presentOnce(app, sessions, generation.source, 'session-a')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('SESSION-A-CONTEXT'))
+
+  presentOnce(app, sessions, generation.source, 'session-b')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('SESSION-A-CONTEXT'), `previous session's Context row survived:\n${view}`)
+})
+
+test('a same-text Remote Context occurrence and human local echo never correlate', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const generation = createObservableGenerationHarness()
+  const host = officialSession({
+    inbox: contextInbox([{ id: 'ctx-same', text: 'SAME-WORDS' }]),
+    running: true,
+    pendingSubmissions: [
+      { requestId: 'req-human', placement: 'steering', time: 1, text: 'SAME-WORDS', attachments: [] },
+    ],
+  })
+  presentOnce(app, host.sessions, generation.source)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // The non-user Context occurrence has no rpc identity, so the same-TEXT
+  // human echo is NOT suppressed: both rows render as distinct lanes.
+  assert.equal((view.match(/SAME-WORDS/g) ?? []).length, 2,
+    `text is never a correlation key — context occurrence plus human echo both render:\n${view}`)
+  assert.ok(view.includes('❯ SAME-WORDS'), `the human echo keeps its user bubble:\n${view}`)
+  assert.ok(!view.includes('❯ Context'), `the context row is not a user bubble:\n${view}`)
 })

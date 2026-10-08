@@ -12,17 +12,42 @@
 
 import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
-import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from '../../client-artifact-save.ts'
-import { completeDirectory } from '../../file-completion/directory-completion.ts'
-import { LocalFileSource } from '../../file-completion/local-file-source.ts'
-import { isCancellation, runOwned } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import type { Diag } from '../../diag.ts'
+import { isDirectoryPath, resolveClientDirectory, streamToFile, writeTextAtomically } from '../../client/artifact/save.ts'
+import { ClientLocalDiscoveryDriver, clientPathQueryEnvironment } from '../../client/file-completion/local-discovery.ts'
+import { completeDirectory } from '../../client/file-completion/directory-completion.ts'
+import { isCancellation, runOwned } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionArchivePort } from '../../runtime/session-archive-port.ts'
-import type { SaveLocationResult } from '../../save-location.ts'
-import { sessionArtifactFilename } from '../../session-artifact-filename.ts'
-import { renderTranscriptMarkdown } from '../../transcript.ts'
-import type { TuiApp } from '../../tui-app.ts'
+import type { SaveLocationResult, TuiApp } from '../../tui-app.ts'
+import { renderTranscriptMarkdown } from '../../client/artifact/transcript-markdown.ts'
+
+/**
+ * The fixed artifact filenames (Pre-Stage-D export convergence, inlined by
+ * TS8-F4): the archive filename mirrors the upstream `sessionLogZipFilename`
+ * convention exactly (the upstream safe-segment helper is private; the mirror
+ * is test-pinned against the upstream archive filename parity), and the
+ * transcript filename uses the SAME safe full Session id convention. The
+ * filename is owned by this command/artifact owner and is never user input.
+ * Exported for the filename-parity regression only.
+ */
+
+/** One filesystem-safe path segment from a Session id (the upstream archive
+ * convention: every non `[A-Za-z0-9_-]` character becomes `_`). */
+export function safeSessionIdSegment(id: string): string {
+  return id.replace(/[^A-Za-z0-9_-]/g, '_')
+}
+
+/** The fixed artifact filename for one Session: the full safe Session id
+ * plus the artifact extension. The archive name mirrors the official DSH
+ * convention (`dsh-session-<safe-id>.zip` — test-pinned against the
+ * upstream `sessionLogZipFilename`); the transcript name shares the same
+ * safe-id normalization. */
+export function sessionArtifactFilename(sessionId: string, kind: 'archive' | 'transcript'): string {
+  if (kind === 'archive') return `dsh-session-${safeSessionIdSegment(sessionId)}.zip`
+  return `dsh-session-${safeSessionIdSegment(sessionId)}.md`
+}
+
 
 /** One artifact save workflow outcome. */
 export type ArtifactSaveOutcome =
@@ -79,9 +104,9 @@ export function createArtifactSaveOwner<
     }
   }
 
-  /** The Client-local directory completion source (the shared engine). */
+  /** The Client-local directory completion driver (the Client's own fs). */
   
-  const localFileSource = new LocalFileSource()
+  const clientDiscovery = new ClientLocalDiscoveryDriver()
 
   const saveArtifact = async (
     name: 'export' | 'transcript',
@@ -112,7 +137,13 @@ export function createArtifactSaveOwner<
             return false
           }
         },
-        complete: (raw, completionSignal) => completeDirectory(raw, deps.clientCwd, localFileSource, completionSignal),
+        complete: (raw, completionSignal) => completeDirectory(
+          raw,
+          deps.clientCwd,
+          clientDiscovery,
+          clientPathQueryEnvironment(),
+          completionSignal,
+        ),
       }, deps.signal)
     } catch (error) {
       // A REFUSAL (a duplicate prompt, or an active Host question/approval)

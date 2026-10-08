@@ -36,10 +36,10 @@ import {
 import { SupersededReadError } from '../src/runtime/read-error.ts'
 import type { SkillDefinitionResult } from '../src/runtime/catalog-port.ts'
 import type { PermissionPresetOutcome, PermissionPresetResult } from '../src/commands.ts'
-import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
-import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/skill-catalog-refresh.ts'
-import { computeStats, type SessionStats } from '../src/stats.ts'
-import type { SurfaceCommandSummary } from '../src/surface-catalog.ts'
+import type { HumanSkillCatalog } from '../src/domain/catalog/skill.ts'
+import type { CatalogRefreshOutcome, CatalogRefreshSource } from '../src/app/command/catalog-refresh.ts'
+import { computeStats, type SessionStats } from '../src/domain/status/stats.ts'
+import type { SurfaceCommandSummary } from '../src/domain/catalog/surface.ts'
 
 /** The subset of `TuiCommandRunner` the scope helper supplies: the CAPTURE
  * members plus the A3-2 scope-bound facades. A stub must also expose
@@ -61,8 +61,8 @@ export interface SessionScopeFacts {
     readonly cwd: string
   }
   currentApprovalOverride(scope: LiveSessionScope): 'ask' | 'never' | undefined
-  currentSessionStats(scope: LiveSessionScope): SessionStats | undefined
-  lastAssistantText(scope: LiveSessionScope): string | undefined
+  currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStats | undefined>
+  lastAssistantText(scope: LiveSessionScope, signal?: AbortSignal): Promise<string | undefined>
   refreshSessionCatalog(scope: SessionScope, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
   refreshStandingCatalog(presetId: string | undefined, source: CatalogRefreshSource): Promise<CatalogRefreshOutcome>
   applyPermissionPreset(
@@ -181,8 +181,8 @@ export function sessionScopeFacts(
       agentForLiveScope(scope)
       return undefined
     },
-    currentSessionStats: (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
-    lastAssistantText: (scope) => {
+    currentSessionStats: async (scope) => computeStats(agentForLiveScope(scope).session.snapshotEvents()),
+    lastAssistantText: async (scope) => {
       const session = agentForLiveScope(scope).session
       for (let seq = Number(session.seq) - 1; seq >= 0; seq -= 1) {
         const event = session.eventAt(SessionSeq(seq))

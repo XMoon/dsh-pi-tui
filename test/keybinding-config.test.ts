@@ -7,7 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isValidKeyId, isPlainPrintableKey, LEADER_PREFIX, parseUserKeybindings } from '../src/keybindings/config.ts'
+import { APP_KEYBINDINGS } from '../src/tui/keybindings/definitions.ts'
+import { isValidKeyId, isPlainPrintableKey, LEADER_PREFIX, parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 
 test('KeyId validation accepts the fork grammar', () => {
   assert.ok(isValidKeyId('ctrl+s'))
@@ -285,4 +286,20 @@ test('a configurable action bound to a fixed overlay key warns (the overlay wins
   // A non-colliding remap warns nothing.
   const clean = parseUserKeybindings({ 'app.transcript.search': 'ctrl+x' })
   assert.ok(!clean.diagnostics.some(message => message.includes('overlay owns')), `unexpected warning: ${clean.diagnostics.join(' | ')}`)
+})
+
+test('question.toggleSelection is a fixed, non-configurable action with default key space', () => {
+  // The Question UX convergence plan §15: the multi-select checkbox
+  // verb is a REAL component action (Physical Key → Semantic Action ID →
+  // Component), fixed like the other question.* overlay contracts.
+  const action = APP_KEYBINDINGS['question.toggleSelection']
+  assert.ok(action !== undefined, 'the action must exist in the inventory')
+  assert.deepEqual(action.defaultKeys, ['space'])
+  assert.equal(action.configurable, false)
+  assert.equal(action.scope, 'question')
+  assert.equal(action.category, 'Question')
+  // A user binding is rejected like every other non-configurable action.
+  const parsed = parseUserKeybindings({ 'question.toggleSelection': 'ctrl+t' })
+  assert.deepEqual(parsed.bindings, {})
+  assert.ok(parsed.diagnostics.some(message => message.includes('not user-configurable')))
 })

@@ -12,7 +12,7 @@ import { afterEach, test } from 'node:test'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 interface DisposableApp { isDisposed(): boolean; dispose(): void }
 const startedApps = new Set<DisposableApp>()
 afterEach(() => {
@@ -58,7 +58,7 @@ test('advanced editor controls: get/set/cursor/insert/paste through the seat', a
 test('advanced editor controls: state is preserved across a plugin-editor seat handoff', async () => {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
-  const { EditorRegistry } = await import('../src/editor-registry.ts')
+  const { EditorRegistry } = await import('../src/extension/internal/editor-registry.ts')
   const vt = new VirtualTerminal(80, 24)
   const registry = new EditorRegistry()
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })

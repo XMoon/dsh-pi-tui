@@ -13,7 +13,7 @@ import test from 'node:test'
 import { createDirectRuntimeBackend } from '../src/runtime/direct/backend-direct.ts'
 import { DIRECT_IMPLEMENTED_CAPABILITIES } from '../src/runtime/capability.ts'
 import type { DirectBackendDeps } from '../src/runtime/direct/backend-direct.ts'
-import type { Diag } from '../src/diag.ts'
+import type { Diag } from '../src/runtime/process/diagnostics.ts'
 import { compositionSource } from './support/composition-surface.ts'
 
 function makeDeps(): DirectBackendDeps {
@@ -34,6 +34,7 @@ function makeDeps(): DirectBackendDeps {
       setCurrent: () => {},
       selectForNextRequest: () => {},
       serializeImageAdmission: async (_agent, operation) => operation(),
+      durableProjectionForSession: () => ({ lastUsed: null, next: null }),
     },
     ownerPool: { claim: () => undefined, park: () => {} },
     compose: async () => ({ setup: () => {} }),

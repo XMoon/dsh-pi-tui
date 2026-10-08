@@ -8,12 +8,12 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
-import { DEFAULT_FOOTER_LAYOUT } from '../src/footer/presets.ts'
-import { StatusStore } from '../src/status/store.ts'
-import { initialStatusSnapshot } from '../src/status/snapshot.ts'
-import { FooterComposer } from '../src/footer/composer.ts'
-import { createBuiltinFooterRegistry } from '../src/footer/builtin-items.ts'
-import { emptyStatusSnapshot, type StatusSnapshot } from '../src/status/types.ts'
+import { DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
+import { StatusStore } from '../src/domain/status/store.ts'
+import { initialStatusSnapshot } from '../src/domain/status/snapshot.ts'
+import { FooterComposer } from '../src/tui/footer/composer.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
+import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
@@ -23,7 +23,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

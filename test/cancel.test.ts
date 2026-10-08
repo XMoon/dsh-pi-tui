@@ -15,8 +15,8 @@ import { afterEach, test } from 'node:test'
 import type { SettingItem } from '@xmoon76/pi-tui'
 import { interruptAgent } from '../src/index.ts'
 import type { SessionWriter } from '../src/runtime/session-writer-port.ts'
-import { rewindPickerItem } from '../src/rewind.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { rewindPickerItem } from '../src/tui/pickers/rewind.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -24,7 +24,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
- * (see src/process-tui-slot.ts). */
+ * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

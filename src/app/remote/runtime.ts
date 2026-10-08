@@ -19,8 +19,16 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Backend } from '../../runtime/backend.ts'
+import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
+import { RemoteConfigPort, type RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
+import { RemoteSessionArchive } from '../../runtime/remote/session-archive-remote.ts'
+import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
-import { createRemoteHostRuntime, mergeCause, type RemoteHostRuntime } from './host-runtime.ts'
+import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
+import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
+import { createRemoteHostRuntime, mergeCause, type InProcessHostCarrier, type RemoteHostRuntime } from './host-runtime.ts'
+import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ASemantics } from './m3a-semantics.ts'
 
 /**
  * Run one disposal step with per-step error isolation: the step's failures
@@ -111,3 +119,148 @@ export async function createExperimentalRemoteRuntime(
     },
   }
 }
+
+/** Compile-time proof that the ONE M3-1 Client runtime satisfies the Remote
+ *  ConfigPort's narrow source face (never called; referenced by the
+ *  official-contract gate). */
+export function remoteConfigRuntimeSourceOf(runtime: RemoteClientRuntime): RemoteConfigRuntimeSource {
+  return runtime
+}
+
+/** Inputs for the complete experimental Remote `Backend` assembly. */
+export interface RemoteBackendRuntimeOptions {
+  /** The ONE M3-1 Client runtime every adapter shares. */
+  readonly runtime: RemoteClientRuntime
+  /** The application-owned prompt serializer (the D2.2 writer dependency).
+   * Absent selects the PRODUCTION serializer (M3-4 PR3): the PreparedPrompt
+   * → official PromptContentPart mapping over the same Client sessions face.
+   * Composition tests may still inject an explicit stub. */
+  readonly promptSerializer?: RemotePromptSerializer
+  /** The composition-owned fetch the archive adapter addresses. */
+  readonly fetch: InProcessHostCarrier['fetch']
+}
+
+/** The complete experimental Remote `Backend` plus its disposal owner. */
+export interface RemoteBackendRuntime {
+  readonly backend: Backend
+  readonly semantics: RemoteM3ASemantics
+  /** Drop adapter-owned caches/subscriptions. Runs BEFORE the Client
+   *  Context disposal (`RemoteClientRuntime.dispose()`). Idempotent. */
+  dispose(): void
+}
+
+/**
+ * Assemble the complete experimental Remote `Backend` (M3-3B) from ONE M3-1
+ * Client runtime: the M3-3A semantic bundle (session/runtime/catalog/host-file
+ * + the M3-3B interaction and Plugin Manager/Job-observation adapters), the
+ * Remote ConfigPort mirror, and the Remote session archive. It is NOT a
+ * production cutover: normal startup still selects Direct.
+ *
+ * Construction is TRANSACTIONAL in the caller's ownership sense: every part
+ * that installs its own subscriptions/caches (the semantics bundle, the
+ * ConfigPort mirror) is unwound — adapters before anything the caller owns —
+ * when a LATER assembly step throws before this function returns. The caller
+ * therefore never receives or leaks backend partial state (plan §12).
+ */
+export async function createRemoteBackendRuntime(
+  options: RemoteBackendRuntimeOptions,
+): Promise<RemoteBackendRuntime> {
+  // Reverse-unwind ledger of the constructed parts, in construction order.
+  // Each entry runs that part's disposal exactly once, error-isolated from
+  // the others; the first collected error surfaces with the rest attached.
+  const unwind: Array<() => void> = []
+  const runReverse = (): void => {
+    const errors: unknown[] = []
+    for (let index = unwind.length - 1; index >= 0; index -= 1) {
+      try {
+        unwind[index]()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    if (errors.length > 0) {
+      const failure = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+      if (errors.length > 1) {
+        mergeCause(failure, new AggregateError(errors.slice(1), 'remote backend runtime: remaining disposal failures'))
+      }
+      throw failure
+    }
+  }
+  try {
+    const semantics = createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(options.runtime), {
+      // The production serializer is the DEFAULT (M3-4 PR3): it consumes the
+      // application PreparedPrompt and reads recalled durable images through
+      // the official binding-scoped attachment read. An explicit injection
+      // (composition tests) still wins.
+      promptSerializer: options.promptSerializer
+        ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions),
+    })
+    unwind.push(() => semantics.dispose())
+    const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))
+    unwind.push(() => config.dispose())
+    const sessionArchive = new RemoteSessionArchive({ fetch: options.fetch })
+    // §2.3/§4.1 config readiness barrier: the mirror's invalidation listeners
+    // are already installed (the port's constructor), the M3-1 Client runtime
+    // already awaited its own initial readiness (so a Connection generation
+    // exists), and THIS is the first read. Awaiting it here is what makes a
+    // freshly assembled Remote backend's settings/providers/permissions
+    // readable instead of permanently 'stale'.
+    //
+    // A transient failure must not prevent the backend from existing: the mirror
+    // RECORDS it (`lastRefreshFailure()`), `readiness()` stays 'stale', and the
+    // next invalidation / write pre-flight / explicit read retries. The
+    // consumer then shows a truthful unavailable state instead of fabricated
+    // values.
+    try {
+      await config.describe()
+    } catch {
+      // Recorded by `RemoteConfigPort.describe()`; construction continues.
+    }
+    let disposed = false
+    const dispose = (): void => {
+      if (disposed) return
+      disposed = true
+      runReverse()
+    }
+    return {
+      backend: createRemoteBackend({
+        ...semantics,
+        config,
+        sessionArchive,
+        // M3-4 PR3: the Remote Host user-shell adapter (truthful
+        // unavailable; CARRIER_GAP) — served by the backend, so the
+        // composition root holds no static Remote edge.
+        hostUserShell: new RemoteHostUserShellPort(),
+      }),
+      semantics,
+      dispose,
+    }
+  } catch (error) {
+    // A failure at ANY point after the first constructed part (including the
+    // final `createRemoteBackend` assembly) unwinds every constructed part
+    // before the caller sees the rejection: backend partial state does not
+    // survive. An unwind failure rides the original error's cause chain
+    // without masking it.
+    let unwindFailure: unknown
+    try {
+      runReverse()
+    } catch (secondary) {
+      unwindFailure = secondary
+    }
+    if (unwindFailure !== undefined) {
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), unwindFailure)
+    }
+    throw error
+  }
+}
+
+// M3-4 PR1 single-entry re-export: the ONE dynamic boundary
+// (`runtime/backend-loader.ts`) imports THIS module; the application-runtime
+// aggregate joins through this intra-`app/remote` STATIC edge instead of a
+// second dynamic target, keeping the frozen "ONE dynamic edge into
+// app/remote/**" contract intact.
+export {
+  createRemoteApplicationRuntime,
+  type RemoteApplicationRuntime,
+  type RemoteApplicationRuntimeOptions,
+} from './application-runtime.ts'

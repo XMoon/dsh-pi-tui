@@ -67,26 +67,49 @@ export const DEPRECATED_READER_PATTERNS = [
 // `src/app/bootstrap.ts`; the debt moved WITH them, never doubled and never
 // absorbed by the surface.
 export const DEPRECATED_READER_ALLOWLIST = [
-  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly Event[] = initialChild?.snapshotEvents() ?? []', why: 'child-viewer observed history seed (A5b-1 viewer owner)' },
-  { file: 'src/app/surface/viewer-runtime.ts', call: 'snapshotEvents', site: 'const durableEvents = mergeSessionEventCut(currentChild?.snapshotEvents() ?? observedEvents, opening.events)', why: 'child-viewer durable history merge (A5b-1 viewer owner)' },
+  // M3-5 PR2 moved the Direct child-viewer read OUT of the A5b-1 viewer owner
+  // into the Direct child-view source (`src/app/direct/child-view.ts`): the debt
+  // moved WITH the call sites, never doubled and never absorbed by the surface.
+  { file: 'src/app/direct/child-view.ts', call: 'snapshotEvents', site: 'let observedEvents: readonly Event[] = initial?.snapshotEvents() ?? []', why: 'child-viewer observed history seed (M3-5 PR2 Direct child-view source)' },
+  { file: 'src/app/direct/child-view.ts', call: 'snapshotEvents', site: 'const durableEvents = current?.snapshotEvents() ?? observedEvents', why: 'child-viewer durable history merge (M3-5 PR2 Direct child-view source)' },
   { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: '? agent.session.snapshotEvents()', why: 'live-session resume history branch (A5b-1 presentation owner)' },
   { file: 'src/app/surface/session-presentation.ts', call: 'snapshotEvents', site: ': mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)', why: 'live-session resume history merge branch (A5b-1 presentation owner)' },
-  { file: 'src/app/surface/application-events.ts', call: 'snapshotEvents', site: 'const candidates = collectRewindCandidates(source.session.snapshotEvents())', why: 'Direct rewind candidate fold (A5b-5 application-event owner; relocated from the composition root)' },
+  // M3-4 PR4 relocated the rewind picker authority OUT of the application
+  // event owner (it reads SessionReader.turnOutline + loadThrough): the old
+  // application-events.ts allowance was removed, not transferred.
   // A3-2 relocated the two command-fact reads from commands.ts into the
   // scope-bound facade providers (the Direct implementation is now localized
   // in the runner); the debt moved WITH the call site, never doubled. A3-5
   // relocated the provider bodies into the runner's command-runtime surface
   // hooks, so the same two call sites now read through `attachmentForSession`.
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'sessionStats: (sessionId) => computeStats(command.attachmentForSession(sessionId).session.snapshotEvents()),', why: '/status Direct stats fold over the in-process session log (A3-5 command-runtime surface hook)' },
-  { file: 'src/app/bootstrap.ts', call: 'eventAt', site: 'const event = session.eventAt(SessionSeq(seq))', why: '/copy last assistant-message read over the Direct in-process session log (A3-2 facade provider)' },
+  // TS2 §8 then moved the branch-selection glue (and these two call sites WITH
+  // it) into `src/app/bootstrap/presentation-bridge.ts`; the composition root
+  // supplies only the ONE fenced session accessor
+  // (`directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session`),
+  // so the frozen debt count is unchanged, not doubled.
+  { file: 'src/app/bootstrap/presentation-bridge.ts', call: 'snapshotEvents', site: 'computeStats(directSessionFor(sessionId).snapshotEvents())', why: '/status Direct stats fold over the in-process session log (TS2: relocated with the presentation bridge; the fenced attachment is injected by the composition root)' },
+  { file: 'src/app/bootstrap/presentation-bridge.ts', call: 'eventAt', site: 'const event = session.eventAt(seq)', why: '/copy last assistant-message read over the Direct in-process session log (TS2: relocated with the presentation bridge; the fenced attachment is injected by the composition root)' },
   // A4-7 relocated the compaction-settle working read into the injected
   // `currentWorkingFromLog` capability (the surface owns only the WHEN); the
   // debt moved WITH the call site, never doubled. The surface never reads the
   // live session log itself.
-  { file: 'src/app/bootstrap.ts', call: 'snapshotEvents', site: 'return agent === undefined ? false : workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability)' },
+  { file: 'src/app/bootstrap/session-startup.ts', call: 'snapshotEvents', site: 'if (agent !== undefined) return workingFromLog(agent.session.snapshotEvents())', why: 'Direct compaction-end context re-measure from the in-process log (A4-7 injected capability; M3-4 PR2: the Remote branch folds the official reader window instead)' },
   { file: 'src/runtime/direct/model-selection-direct.ts', call: 'snapshotEvents', site: 'const folded = foldPendingModelSelection(agent.session.snapshotEvents())', why: 'Direct model-selection replay over the in-process session log' },
+  // M3-4 PR4 §18.4: the DIRECT-only compatibility fold for the whole-log
+  // rewind outline. The shared picker owner reads the official `turnOutline`
+  // projection on both branches; a minimal Direct composition that mounts no
+  // `session-turn-outline` row keeps the SAME semantic through the exact
+  // attached Session's in-process snapshot. The Remote adapter has NO
+  // fallback (projection-only, fail-closed), and an authoritative `[]` never
+  // reaches this fold. Two identical call sites: the capability-absent branch
+  // and the value-absent branch.
+  { file: 'src/runtime/direct/session-direct.ts', call: 'snapshotEvents', site: 'return directTurnOutlineCompat(agent.session.snapshotEvents())', why: 'Direct-only rewind-outline compatibility fold, capability absent (M3-4 PR4 §18.4; projection present always wins)' },
+  { file: 'src/runtime/direct/session-direct.ts', call: 'snapshotEvents', site: 'return directTurnOutlineCompat(agent.session.snapshotEvents())', why: 'Direct-only rewind-outline compatibility fold, projection value absent (M3-4 PR4 §18.4; an authoritative [] never reaches this fold)' },
   { file: 'src/runtime/direct/presentation-read-direct.ts', call: 'snapshotEvents', site: 'const durableEvents = agent.session.snapshotEvents().map(event => detachedClone(event as PresentationDurableEvent))', why: 'Direct presentation read fold over the in-process session log' },
-  { file: 'src/transcript.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },
+  // TS8-D moved the `/transcript` full-log Markdown reconstruction (and this
+  // call site WITH it) out of the `src/transcript.ts` facade into the Client
+  // artifact formatter; the debt moved, never doubled.
+  { file: 'src/client/artifact/transcript-markdown.ts', call: 'snapshotEvents', site: 'for (const event of session.snapshotEvents()) {', why: 'Direct full transcript reconstruction from the in-process log' },
 ]
 
 /** Collect the .ts files of one directory tree (src only; no fixtures). */

@@ -11,7 +11,8 @@ import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../src/index.ts'
-import { TuiApp, type StreamingToolPreview } from '../src/tui-app.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import type { StreamingToolPreview } from '../src/app/surface/streaming-tool-preparing.ts'
 import {
   disposeContext,
   event,

@@ -21,13 +21,13 @@ import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import { FOOTER_MAX_PHYSICAL_LINES } from '../src/footer/types.ts'
+import { FOOTER_MAX_PHYSICAL_LINES } from '../src/tui/footer/presentation-types.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -56,7 +56,6 @@ const SHORT_STATUS: StatusData = {
   branch: 'feat/narrow-footer',
   turns: 3,
   steps: 7,
-  statsLine: '3 turns · 7 steps · 12.3s',
   permission: 'workspace-write',
   contextTokens: 1000,
   contextWindow: 10000,
@@ -79,7 +78,6 @@ const EXTREME_STATUS: StatusData = {
   branch: 'feat/pluginization-phase2-5-with-a-very-long-name',
   turns: 3,
   steps: 7,
-  statsLine: 'stats ' + 'y'.repeat(300),
   permission: 'workspace-write',
   contextTokens: 1000,
   contextWindow: 10000,

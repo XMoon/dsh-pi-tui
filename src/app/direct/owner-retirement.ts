@@ -13,8 +13,8 @@
  */
 
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import type { Diag } from '../../diag.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import {
   retireDirectOwnedSession,
   type RetirementFailure,

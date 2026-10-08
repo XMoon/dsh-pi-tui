@@ -3,7 +3,7 @@
  *
  * Owns the official Client bundle capture, the Client `Context`, the exact
  * plugin mount order, the explicit `/remote` contributions, initial
- * readiness, and reverse disposal (`docs/m3-entry-contract.md` §2.4.2/§2.4.3).
+ * readiness, and reverse disposal.
  * It does not assemble the TUI semantic `Backend`.
  *
  * rc.2 publishes the six required Client plugin entries as Web
@@ -39,7 +39,9 @@ import llmRemote from '@deepseek-ai/dsh-llm/remote'
 import sessionRemote from '@deepseek-ai/dsh-api-session-controller/remote'
 import jobRemote from '@deepseek-ai/dsh-api-job-controller/remote'
 import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
+import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
+import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause, type InProcessHostCarrier } from './host-runtime.ts'
 
 type TypertClientModule = typeof typertRegistryClient
@@ -261,6 +263,7 @@ const REMOTE_CONTRIBUTIONS = [
   permissionPresetsRemote,
   llmRemote,
   fileUploadsRemote,
+  userQuestionsRemote,
 ] as const
 
 /** The composed official Client runtime. Not exported from the package root. */
@@ -305,10 +308,11 @@ export async function disposeRemoteContributions(
 
 /**
  * Compose one fresh official Client `Context` over the Host carrier:
- * typert -> Connection (explicit transport) -> Gateway -> the ten explicit
- * `/remote` contributions -> fileUpload -> Sessions -> Jobs, then wait for
- * initial readiness. On construction failure the partial composition unwinds
- * immediately; the loader shim is never active during plugin execution.
+ * typert -> Connection (explicit transport) -> Gateway -> the eleven explicit
+ * `/remote` contributions -> the private pi-tui contribution (TS8-HF1) ->
+ * fileUpload -> Sessions -> Jobs, then wait for initial readiness. On
+ * construction failure the partial composition unwinds immediately; the
+ * loader shim is never active during plugin execution.
  */
 export async function createRemoteClientRuntime(options: RemoteClientRuntimeOptions): Promise<RemoteClientRuntime> {
   const modules = await loadOfficialClientModulesOnce()
@@ -387,6 +391,14 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     for (const contribution of REMOTE_CONTRIBUTIONS) {
       contributionDisposers.push(await context.remote.$mount(contribution))
     }
+    // 4b. The private pi-tui contribution: mounted explicitly, AFTER the
+    //     official generated contributions and deliberately kept separate from
+    //     that list. It is the package's ONE contribution (rc.2 admits exactly
+    //     one per package), carrying BOTH private descriptors — the
+    //     `piTuiFileReferences` augmentation (the official `fileReferences`
+    //     namespace stays mounted and authoritative for bare queries) and the
+    //     `piTuiTerminalProgress` status stream.
+    contributionDisposers.push(await context.remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
     // 5./6./7. Domain Clients - fileUpload before Sessions is contractual
     // (the Session Client injects `fileUpload`).
     fileUploadFiber = context.plugin(modules.fileUpload)
@@ -453,7 +465,7 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
 }
 
 /**
- * Initial readiness (`docs/m3-entry-contract.md` §4.1): a defined Connection
+ * Initial readiness: a defined Connection
  * generation AND a `ready` Session list. Subscription-driven with no
  * production timeout; the lifecycle signal aborts the wait and every listener
  * is removed on settle or abort.

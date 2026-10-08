@@ -93,16 +93,16 @@ test('A4: the runner owns no surface construction or mount', () => {
     'the runner must not construct the Task Browser coordinator')
   assert.match(indexSource, /surface\.attachTasks\(\{/u,
     'the runner must attach the Task Center through the surface owner')
-  assert.match(read('src/app/surface/runtime.ts'), /jobsEventsDispose = jobs\.subscribe\(/u,
-    'the surface owner must own the jobs-event subscription')
+  assert.match(read('src/app/surface/task-runtime.ts'), /jobsEventsDispose = jobs\.subscribe\(/u,
+    'the Task Center owner must own the jobs-event subscription')
   assert.doesNotMatch(indexSource, /backend\.interaction\.onApprovalRequest\(/u,
     'the runner must not register the approval provider directly')
-  assert.doesNotMatch(indexSource, /backend\.interaction\.registerQuestionProvider\(/u,
+  assert.doesNotMatch(indexSource, /backend\.interaction\.questions\.onRequest\(/u,
     'the runner must not register the question provider directly')
   assert.match(indexSource, /surface\.attachInteraction\(backend\.interaction,/u,
     'the runner must attach the interaction providers through the surface owner')
-  assert.match(read('src/app/surface/runtime.ts'), /new TaskBrowserRuntime\(/u,
-    'the surface owner must construct the Task Browser coordinator')
+  assert.match(read('src/app/surface/task-runtime.ts'), /new TaskBrowserRuntime\(/u,
+    'the Task Center owner must construct the Task Browser coordinator')
 })
 
 test('A4: the mounted TuiApp has exactly one lifetime owner', () => {
@@ -163,7 +163,12 @@ test('A4-7: the four presentation routing bodies live in app/surface, not the ru
   // THIN delegations; the routing decisions/fences and the apply/paint calls
   // are surface-owned. Each routing body is pinned to BOTH sides: the runner
   // must not re-grow the body, and the surface must actually own it.
-  const surface = read('src/app/surface/runtime.ts')
+  //
+  // TS3 §36: the routing BODIES moved from the aggregate into the dedicated
+  // `app/surface/event-routing.ts` owner, so the positive locks read that module
+  // (the aggregate only forwards the entries). The runner-side negative locks
+  // stay on the composition zone.
+  const surface = read('src/app/surface/event-routing.ts')
 
   // 1. session/event routing.
   assert.match(indexSource, /ctx\.on\('session\/event', \(session, event\) => surface\.routeSessionEvent\(session, event\)\)/u,
@@ -241,7 +246,7 @@ test('A4-7: the four presentation routing bodies live in app/surface, not the ru
   // the presentation intent; the surface routing performs the refresh.
   assert.match(surface, /SurfaceMainEventObservation/u,
     'the surface must define the observation-intent record')
-  assert.match(surface, /if \(observed\.refreshAgents\) refreshAgents\(\)/u,
+  assert.match(surface, /if \(observed\.refreshAgents\) options\.refreshAgents\(\)/u,
     'the surface must decide/perform the subagent tool/call refresh')
   assert.match(indexSource, /return \{ settledViewChildId, refreshAgents \}/u,
     'the runner must report the refresh intent instead of calling it')
@@ -253,13 +258,13 @@ test('A4-4: the status commit and the pending-input presentation are surface-own
   const surface = read('src/app/surface/runtime.ts')
 
   // Status COMMIT coordination: the runner keeps the semantic derivation and
-  // delegates the two-call commit (`status.update` then `mounted().setStatus`).
-  assert.match(surface, /commitStatus\(patch, legacyFacts\)/u,
+  // delegates the ONE atomic display-subject commit (store patch incl. `view`
+  // + legacy footer facts + the presentation projection) through the mounted
+  // app (M3-5 PR1 §9.7).
+  assert.match(surface, /commitStatus\(\n?\s*patch: StatusPatch,/u,
     'the surface must own the status commit')
-  assert.match(surface, /status\.update\(patch\)/u,
-    'the surface must commit the status patch')
-  assert.match(surface, /mounted\(\)\.setStatus\(legacyFacts\)/u,
-    'the surface must commit the legacy footer facts')
+  assert.match(surface, /mounted\(\)\.commitDisplaySubject\(patch, legacyFacts, presentation\)/u,
+    'the surface must commit the display-subject payload through the app')
   assert.match(statusSource, /deps\.surface\.commitStatus\(patch,/u,
     'the status owner must delegate the status commit to the surface')
   assert.doesNotMatch(statusSource, /deps\.surface\.status\.update\(/u,
@@ -374,7 +379,8 @@ test('A4-8: the active-target, repaint and search/transcript wiring are surface-
   // The Host registrations, the Direct install and the credential
   // subscription/disposal stay in the runner.
   assert.match(indexSource, /ctx\.on\('session\/event'/u, 'the runner keeps the session/event registration')
-  assert.match(indexSource, /directRuntime\.installAssistantStream\(/u, 'the runner keeps the Direct assistant-stream install')
+  assert.match(indexSource, /directAssistantRuntime\.installAssistantStream\(/u,
+    'the runner keeps the Direct assistant-stream install (M3-4 PR2: branch-guarded on the Remote selection)')
   assert.match(indexSource, /credentials\.onChanged\(/u, 'the runner keeps the credential subscription')
   assert.match(indexSource, /disposeCredentialSubscription/u, 'the runner keeps the credential disposal')
 })

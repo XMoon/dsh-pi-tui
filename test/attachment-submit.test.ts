@@ -3,13 +3,16 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { DraftFileStore } from '../src/attachment/file-draft.ts'
-import type { FileAttachmentStoreLike } from '../src/attachment/file-admission.ts'
-import { FileInputError, probeAttachment } from '../src/attachment/intake.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
-import { draftHasAttachments, prepareUserMessage, type PrepareInputDeps } from '../src/image/submit.ts'
-import type { AttachmentsLike, ImageAttachmentRefLike } from '../src/image/admission.ts'
-import type { LlmLike } from '../src/image/capability.ts'
+import { DraftFileStore } from '../src/client/media/attachment/file-draft.ts'
+import type { FileAttachmentStoreLike } from '../src/app/submission/direct-file-admission.ts'
+import { FileInputError } from '../src/domain/media/errors.ts'
+import { probeAttachment } from '../src/client/media/attachment/intake.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
+import { draftHasAttachments } from '../src/client/media/draft-attachments.ts'
+import { prepareUserMessage, type DirectPrepareInputDeps } from '../src/app/submission/direct-message-preparation.ts'
+import type { AttachmentsLike } from '../src/app/submission/direct-image-admission.ts'
+import type { ImageAttachmentRefLike } from '../src/domain/media/types.ts'
+import type { LlmLike } from '../src/app/submission/direct-image-capability.ts'
 
 const imageLimits = {
   maxImageBytes: 20 * 1024 * 1024,
@@ -20,12 +23,11 @@ const imageLimits = {
   mediaTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const,
 }
 
-function deps(attachments: AttachmentsLike | undefined): PrepareInputDeps {
+function deps(attachments: AttachmentsLike | undefined): DirectPrepareInputDeps {
   return {
     attachments,
     llm: { async resolveModelInfo() { return { inputModalities: ['text', 'image'] } } } as LlmLike,
     currentModel: () => ({ provider: 'provider', model: 'model' }),
-    sessionCwd: () => '/ws',
     canonicalizeMentions: async text => text,
   }
 }

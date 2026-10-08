@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
-import { compositionFile, compositionSources } from './support/composition-surface.ts'
-import { aliasAwareConstructionSites, ownerFile, ownerSource, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { compositionFile, compositionSources, compositionSourcesUnder } from './support/composition-surface.ts'
+import { aliasAwareConstructionSites, ownerFile, ownerSource, productionScriptKind, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
+
+/** This repository root. */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * A5b bootstrap-closure locks (plan A5b §2.2, §7.6.2, §8.2).
@@ -15,22 +22,16 @@ import { aliasAwareConstructionSites, ownerFile, ownerSource, productionSource, 
  * connect → start → dispose/fatal cleanup (plan §2.1).
  *
  * The final A5 state forbids the handler groups and implementation literals
- * below from being DEFINED in bootstrap (plan §7.6.2). Until the corresponding
- * slice lands they are legitimately still there, so this test keeps a frozen,
- * per-slice ledger:
- *
- * - a forbidden name is either absent from bootstrap, or listed in
- *   `PENDING_BOOTSTRAP_HANDLERS` with the slice that removes it;
- * - every ledger entry must still be a real declaration in bootstrap, so a
- *   slice cannot delete the implementation while leaving a stale exemption
- *   behind, and the ledger cannot quietly outlive the debt;
- * - the package entry never defines any of them.
- *
- * A5b-6 flips the ledger to empty; from then on the lock is final.
+ * below from being DEFINED in the composition layer (plan §7.6.2). Every A5b
+ * slice has landed and the per-slice ledger was retired together with the A5b
+ * root matrix, so the lock is permanent and ZONE-wide (TS2): a forbidden name
+ * must be absent from `src/app/bootstrap.ts` AND from every
+ * `src/app/bootstrap/**` helper at any depth, and the package entry never
+ * defines any of them.
  *
  * Plan §8.2's minimum closure list and where each clause is locked:
- *   1. bootstrap exists and is the sole composition root —
- *      "src/app/bootstrap.ts is the sole application composition root" below;
+ *   1. the composition zone exists — one facade plus its helpers —
+ *      "the composition zone is one facade plus its bootstrap helpers" below;
  *   2. `src/index.ts` remains a facade —
  *      "the package entry is a facade and defines no application handler";
  *   3. forbidden handler definitions absent — the two ledger tests below;
@@ -50,18 +51,11 @@ import { aliasAwareConstructionSites, ownerFile, ownerSource, productionSource, 
  * (plan §7.6.5).
  */
 
-interface PendingHandler {
-  /** root-scope declaration name in `src/app/bootstrap.ts` */
-  readonly name: string
-  /** the A5b slice that extracts it into its real owner */
-  readonly slice: 'A5b-1' | 'A5b-2' | 'A5b-3' | 'A5b-4' | 'A5b-5' | 'A5b-6'
-  /** where it lands (the owner module) */
-  readonly owner: string
-}
-
 /**
- * Plan §7.6.2: definitions `src/app/bootstrap.ts` must not contain at the final
- * A5 state. This list is durable — it does not shrink as slices land.
+ * Plan §7.6.2: definitions that must not exist anywhere in the composition
+ * layer. This list is durable — it does not shrink as slices land, and TS2 made
+ * it ZONE-wide: `src/app/bootstrap/**` is now a legal home for composition code,
+ * so "absent from bootstrap" can no longer mean "absent from `bootstrap.ts`".
  */
 const FINAL_FORBIDDEN_HANDLERS: readonly string[] = [
   'runLocalShell',
@@ -81,50 +75,144 @@ const FINAL_FORBIDDEN_HANDLERS: readonly string[] = [
   'runner', // the TuiCommandRunner literal
 ]
 
-/** The transitional ledger: forbidden handlers still implemented in bootstrap. */
-const PENDING_BOOTSTRAP_HANDLERS: readonly PendingHandler[] = []
+/**
+ * The whole bootstrap composition ZONE under one repository root: the facade
+ * plus every `src/app/bootstrap/**` helper, at any depth.
+ *
+ * The "this must not exist in the composition layer" locks read the ZONE, not
+ * just the facade (TS2 §17/§20): the retired A5b root matrix used to re-see every
+ * bootstrap declaration, and with it gone a new helper could otherwise
+ * reintroduce an application handler, an extracted owner's state or an
+ * application-owner mutable-state category with every lock still green. The
+ * locks that genuinely belong to the FACADE alone (`applyRunner`, the owner
+ * constructions, the exact connectors) keep reading `compositionFile`/
+ * `compositionSource` directly.
+ */
+function bootstrapZoneUnder(root: string): string {
+  return compositionSourcesUnder(root)
+    .filter(({ rel }) => rel === 'src/app/bootstrap.ts' || rel.startsWith('src/app/bootstrap/'))
+    .map(({ rel, source }) => `// >>> ${rel}\n${source}`)
+    .join('\n')
+}
 
-/** Does `source` declare `name` at any scope? */
+/** {@link bootstrapZoneUnder} bound to this repository root. */
+function bootstrapZone(): string {
+  return bootstrapZoneUnder(ROOT)
+}
+
+/** True when the two sources declare the same set of `let`/`const`/`function`/`class` names. */
 function declares(source: string, name: string): boolean {
   return new RegExp(`\\b(?:const|let|var|function|class)\\s+${name}\\b`).test(source)
 }
 
-test('A5b: src/app/bootstrap.ts is the sole application composition root', () => {
-  // Plan §8.2(1). `compositionSources()` throws when either file is missing, so
-  // this also locks the EXISTENCE of the composition root; the pair is the
-  // whole composition surface, so no second application composition root may
-  // appear (the owners consume narrow injected callbacks instead).
-  assert.deepEqual(
-    compositionSources().map(({ rel }) => rel),
-    ['src/index.ts', 'src/app/bootstrap.ts'],
-    'the composition surface must be exactly the package entry plus src/app/bootstrap.ts',
-  )
-})
-
-test('A5b: a forbidden handler is absent from bootstrap or explicitly on the slice ledger', () => {
-  const root = compositionFile('src/app/bootstrap.ts')
-  const ledger = new Set(PENDING_BOOTSTRAP_HANDLERS.map((e) => e.name))
+/**
+ * Every forbidden handler must be absent from the WHOLE composition zone. The
+ * transitional per-slice ledger is retired with the A5b root matrix: the A5b
+ * slices have all landed (`MUST_MOVE` residual was 0), so this is now a
+ * permanent, non-shrinking contract.
+ */
+function assertForbiddenHandlersAbsent(zone: string): void {
   for (const name of FINAL_FORBIDDEN_HANDLERS) {
-    if (!declares(root, name)) continue
-    assert.ok(
-      ledger.has(name),
-      `${name} is implemented in bootstrap without a slice ledger entry — record the A5b slice that extracts it`,
+    assert.equal(
+      declares(zone, name),
+      false,
+      `${name} is implemented in the bootstrap composition zone — that handler belongs to its owner layer`,
     )
+  }
+}
+
+/** No application-owner mutable-state CATEGORY may be declared in the zone. */
+function assertOwnerStateCategoriesAbsent(
+  zone: string,
+  categories: ReadonlyArray<readonly [string, readonly string[]]>,
+): void {
+  for (const [category, names] of categories) {
+    for (const name of names) {
+      assert.equal(declares(zone, name), false,
+        `the bootstrap composition zone must not declare ${name} (${category}, plan §7.6.2)`)
+    }
+  }
+}
+
+/**
+ * The A5b-6 composition-side forbidden owner-state/retention slots (plan
+ * §7.6.2/§17). These are NOT facade identity or legal-connector facts: the whole
+ * composition layer must be free of them, so the assertion reads the ZONE —
+ * a nested helper may not reintroduce them either. The corresponding POSITIVE
+ * late-bound connector locks stay facade-scoped.
+ */
+function assertCompositionFreeOfOwnerState(
+  zone: string,
+  names: readonly string[],
+  patterns: readonly RegExp[] = [],
+): void {
+  for (const name of names) {
+    assert.equal(
+      declares(zone, name),
+      false,
+      `the bootstrap composition zone must not declare ${name} (owner state, plan §17)`,
+    )
+  }
+  for (const pattern of patterns) {
+    assert.doesNotMatch(
+      zone,
+      pattern,
+      `the bootstrap composition zone must not name ${String(pattern)} (owner state/policy, plan §17)`,
+    )
+  }
+}
+
+test('A5b: the composition zone is one facade plus its bootstrap helpers, and nothing else', () => {
+  // Plan §8.2(1), restated durably by TS2. `compositionSources()` throws when a
+  // listed file is missing, so this locks the EXISTENCE of the entry and the
+  // facade; the zone is the ONLY place application composition may live, so no
+  // second application composition root may appear anywhere else (the owners
+  // consume narrow injected callbacks instead).
+  const files = compositionSources().map(({ rel }) => rel)
+  assert.equal(files[0], 'src/index.ts', 'the package entry is the first composition-surface file')
+  assert.equal(files[1], 'src/app/bootstrap.ts', 'src/app/bootstrap.ts is the sole composition facade')
+  for (const rel of files.slice(2)) {
+    assert.ok(rel.startsWith('src/app/bootstrap/'),
+      `src/app/bootstrap/** is the only composition-helper zone (${rel} is outside it)`)
+  }
+  // The zone is closed: the Cordis composition entries may be exported from the
+  // facade ONLY, so a "bootstrap-like" root appearing elsewhere fails here even
+  // before the architecture gate's dependency rules are consulted.
+  for (const { rel, source } of productionSources()) {
+    if (rel === 'src/app/bootstrap.ts') continue
+    assert.doesNotMatch(source, /export\s+(?:async\s+)?function\s+(?:applyRunner|applyRunnerWithRuntime)\b/u,
+      `${rel} exports an application composition entry — the composition zone is src/app/bootstrap.ts + src/app/bootstrap/**`)
   }
 })
 
-test('A5b: every ledger entry is a live declaration scheduled for a known slice', () => {
-  const root = compositionFile('src/app/bootstrap.ts')
-  const seen = new Set<string>()
-  for (const entry of PENDING_BOOTSTRAP_HANDLERS) {
-    assert.equal(seen.has(entry.name), false, `${entry.name} is listed twice in the ledger`)
-    seen.add(entry.name)
-    assert.ok(FINAL_FORBIDDEN_HANDLERS.includes(entry.name), `${entry.name} is not on the final forbidden list`)
-    assert.ok(
-      declares(root, entry.name),
-      `the ledger still exempts ${entry.name} for ${entry.slice}, but bootstrap no longer declares it — delete the ledger entry`,
-    )
-  }
+test('A5b: no forbidden handler exists anywhere in the bootstrap composition zone', () => {
+  // Permanent replacement for the retired per-slice ledger: every A5b slice has
+  // landed, so the forbidden-handler contract no longer shrinks and no longer
+  // needs a migration exemption list.
+  const zone = bootstrapZone()
+  assert.ok(zone.includes('src/app/bootstrap.ts'), 'the zone must contain the facade')
+  assert.ok(zone.includes('src/app/bootstrap/lifecycle.ts'), 'the zone must contain the helpers')
+  assertForbiddenHandlersAbsent(zone)
+})
+
+test('A5b/TS2: a forbidden handler reintroduced in a NESTED helper fails the zone lock (mutation)', (t) => {
+  // The real consumer, on a fixture tree: a new helper at ANY depth that
+  // redeclares a forbidden handler must fail, and the same fixture without it
+  // must pass — otherwise "absent from the composition zone" would only be
+  // covering the facade.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-zone-forbidden-')
+  mkdirSync(join(root, 'src', 'app', 'bootstrap', 'nested'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.ts'), 'export const entry = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap.ts'), 'export const bootstrap = 1\n')
+  const nested = join(root, 'src', 'app', 'bootstrap', 'nested', 'legacy.ts')
+  writeFileSync(nested, 'export const harmless = 1\n')
+  assertForbiddenHandlersAbsent(bootstrapZoneUnder(root))
+  writeFileSync(nested, 'const registerCommands = (): void => {}\nconst pendingSubmissions = []\n')
+  const zone = bootstrapZoneUnder(root)
+  assert.ok(declares(zone, 'registerCommands'), 'the fixture must actually reintroduce the name in the zone')
+  assert.throws(() => assertForbiddenHandlersAbsent(zone),
+    'a handler reintroduced in a NESTED bootstrap helper must fail the zone lock')
 })
 
 test('A5b: the package entry is a facade and defines no application handler', () => {
@@ -211,7 +299,11 @@ interface TypedObjectLiteral {
  * declared variable name).
  */
 function typedObjectLiterals(rel: string, source: string, typeName: string): TypedObjectLiteral[] {
-  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  // The parser kind follows the FILE (`.tsx` => TSX): every caller feeds this
+  // from `productionSources()`, which scans all four production extensions, and
+  // a legal JSX attribute/child holding a typed implementation literal is
+  // invisible to a TS parse (TS2 §19).
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel))
   // Local type aliases (`type Events = TuiAppEvents`, incl. chains, resolved to
   // convergence in source order) are followed; a CONTEXTUALLY typed literal (an
   // argument whose parameter is declared elsewhere as this type) has no syntactic
@@ -343,6 +435,30 @@ test('A5b: tuiAppEventsLiterals detects every TuiAppEvents literal form', () => 
   }
 })
 
+test('A5b/TS2: a typed implementation literal in a JSX attribute is caught (hard case, not a parser-kind copy)', () => {
+  // Every caller of `typedObjectLiterals` feeds it from `productionSources()`,
+  // which scans `.tsx` too. A legal JSX ATTRIBUTE position is invisible to a TS
+  // parse, so a rogue `TuiAppEvents`/`TuiCommandRunner` literal could hide in a
+  // `.tsx` production module and still satisfy "exactly one implementation".
+  // Both halves are asserted, so the extension — not incidental recovery — is
+  // what makes this pass.
+  const eventsInAttribute = 'export const view = <Box value={{ onSubmit: () => {} } satisfies TuiAppEvents} />\n'
+  assert.deepEqual(
+    tuiAppEventsLiterals('probe.tsx', eventsInAttribute).map(literal => literal.name),
+    ['<expression>'],
+  )
+  assert.deepEqual(tuiAppEventsLiterals('probe.ts', eventsInAttribute), [],
+    'the same bytes parsed as TS must yield NO literal')
+
+  const runnerInChild = 'export const view = <Box>{{ onSubmit: () => {} } satisfies TuiCommandRunner}</Box>\n'
+  assert.equal(tuiCommandRunnerLiterals('probe.tsx', runnerInChild).length, 1)
+  assert.deepEqual(tuiCommandRunnerLiterals('probe.ts', runnerInChild), [],
+    'the same bytes parsed as TS must yield NO literal')
+
+  // The `.ts` grammar is unchanged: angle-bracket assertions still work.
+  assert.equal(tuiCommandRunnerLiterals('synthetic.ts', 'const rogue = <TuiCommandRunner>{ onSubmit: () => {} }\n').length, 1)
+})
+
 test('A5b: tuiCommandRunnerLiterals detects every TuiCommandRunner literal form', () => {
   const positive: ReadonlyArray<string> = [
     'const rogue: TuiCommandRunner = { onSubmit: () => {} }\n',
@@ -452,13 +568,16 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     [
       'viewing', 'setViewedQueueAgent', 'activePendingSessionId',
       'pendingSubagentCalls', 'viewCallToChild', 'viewerOpen', 'openingViewer',
-      'viewerSessionAbort', 'refreshViewerFooter', 'enterView', 'exitView',
+      'viewerSessionAbort', 'enterView', 'exitView',
       'viewedChildPresentation', 'settleSubagentSubmit', 'subagentPromptNotice',
     ],
   ],
   [
     'src/app/command/artifacts.ts',
-    ['artifactInFlight', 'ArtifactSaveFailure', 'localFileSource', 'saveArtifact', 'startArtifactSave'],
+    // TS8-A renamed the Client-local discovery slot (`localFileSource` ->
+    // `clientDiscovery`) when the artifact save owner moved onto the canonical
+    // Client completion capability; the declaration still lives in THIS owner.
+    ['artifactInFlight', 'ArtifactSaveFailure', 'clientDiscovery', 'saveArtifact', 'startArtifactSave'],
   ],
   [
     'src/app/command/surface.ts',
@@ -481,8 +600,11 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
   [
     'src/app/surface/settings-runtime.ts',
     [
-      'userFooterCustomItemsForSave', 'footerCommandRunner', 'footerCommandUnsubscribe',
-      'footerDynamicItemRuntime', 'keybindings', 'applyUserKeybindings',
+      // TS5 §12/§13.4: the memoized keybinding-manager slot and the footer
+      // command slots left this owner — the mounted surface owns the keymap and
+      // the TUI footer runtime (`tui/footer/runtime.ts`) owns the runner's
+      // resources, so the application owner declares neither.
+      'userFooterCustomItemsForSave', 'applyUserKeybindings',
       'footerWarningShown', 'customFooterWarningShown', 'footerCommandItemWarningShown',
       'disableFooterCommand', 'applyFooterSettings', 'setDisplayPreset',
     ],
@@ -528,8 +650,8 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
     ],
   ],
   [
-    'src/app/submission/local-shell.ts',
-    ['localShellController', 'interruptLiveAgent', 'shellTempFiles', 'runLocalShell'],
+    'src/app/submission/user-shell.ts',
+    ['shellController', 'interrupt', 'shellTempFiles', 'runUserShell'],
   ],
   [
     'src/app/surface/application-events.ts',
@@ -541,16 +663,19 @@ const EXTRACTED_DECLARATIONS: ReadonlyArray<readonly [string, readonly string[]]
   ],
 ]
 
-test('A5b: every extracted declaration lives in its named owner, never in the composition root', () => {
-  const root = compositionFile('src/app/bootstrap.ts')
+test('A5b: every extracted declaration lives in its named owner, never in the composition ZONE', () => {
+  // TS2 §17/§20: the "must not return" half reads the WHOLE zone, so a helper —
+  // at any depth — cannot take an extracted declaration back into the
+  // composition layer. The owner-side half is unchanged.
+  const zone = bootstrapZone()
   for (const [rel, names] of EXTRACTED_DECLARATIONS) {
     const owner = ownerFile(rel)
     for (const name of names) {
       assert.ok(declares(owner, name), `${name} must be declared in the owner ${rel}`)
       assert.equal(
-        declares(root, name),
+        declares(zone, name),
         false,
-        `src/app/bootstrap.ts must not declare ${name} — it belongs to ${rel}`,
+        `the bootstrap composition zone must not declare ${name} — it belongs to ${rel}`,
       )
     }
   }
@@ -565,9 +690,9 @@ const OWNER_CONSTRUCTIONS: ReadonlyArray<readonly [string, string, string]> = [
   ['src/app/command/surface.ts', 'createCommandSurface', 'createCommandSurface<ModelSelection, SessionId, Agent>('],
   ['src/app/command/artifacts.ts', 'createArtifactSaveOwner', 'createArtifactSaveOwner<Agent>('],
   ['src/app/surface/session-presentation.ts', 'createSessionPresentation', 'createSessionPresentation<SessionEvent>('],
-  ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent, Agent>('],
+  ['src/app/surface/viewer-runtime.ts', 'createViewerRuntime', 'createViewerRuntime<SessionEvent>('],
   ['src/app/submission/controller.ts', 'createSubmissionController', 'createSubmissionController<Agent>('],
-  ['src/app/submission/local-shell.ts', 'createLocalShell', 'createLocalShell<Agent>('],
+  ['src/app/submission/user-shell.ts', 'createUserShell', 'createUserShell<Agent>('],
   ['src/app/surface/application-events.ts', 'createApplicationEvents', 'createApplicationEvents('],
   ['src/app/surface/client-actions.ts', 'createClientActions', 'createClientActions('],
 ]
@@ -602,7 +727,7 @@ const OWNER_FACTORY_NAMES: readonly string[] = [
   'createSessionPresentation',
   'createViewerRuntime',
   'createSubmissionController',
-  'createLocalShell',
+  'createUserShell',
   'createApplicationEvents',
   'createClientActions',
 ]
@@ -729,18 +854,23 @@ test('A5b-3: the command runtime application binding is command-owned', () => {
   const owner = ownerFile('src/app/command/surface.ts')
   assert.match(owner, /bindCommandRuntime\(/u,
     'the command surface owner must own the runtime binding')
-  // A5b-3 review P2: disposal must clear BOTH the coordinator and the refresh
-  // request, so a late `skills/change` (the Direct capability cannot unsubscribe)
-  // cannot reach a disposed coordinator.
+  // A5b-3 review P2 + M3-6 PR3: disposal must retire BOTH the coordinator and
+  // the refresh request through the non-truncating primitive, so a throwing
+  // generation unsubscribe or a late `skills/change` (the Direct capability
+  // cannot unsubscribe) cannot reach a disposed coordinator.
   const disposeAt = owner.indexOf('const disposeCatalog = (): void => {')
   assert.ok(disposeAt > 0, 'the command owner must expose disposeCatalog')
   const disposeBody = owner.slice(disposeAt, owner.indexOf('\n  }', disposeAt))
-  assert.ok(disposeBody.includes('catalogCoordinator?.dispose()'),
-    'disposal must dispose the catalog coordinator')
+  assert.ok(disposeBody.includes('runSyncDisposalSteps('),
+    'disposal attempts every owned step through the non-truncating primitive')
+  assert.ok(disposeBody.includes('const coordinator = catalogCoordinator'),
+    'disposal snapshots the coordinator before retiring the slot')
+  assert.ok(disposeBody.includes('coordinator?.dispose()'),
+    'disposal disposes the catalog coordinator')
   assert.ok(disposeBody.includes('catalogCoordinator = undefined'),
-    'disposal must clear the coordinator reference')
+    'disposal clears the coordinator reference')
   assert.ok(disposeBody.includes('catalogRefreshRequest = undefined'),
-    'disposal must clear the refresh request so a late skills/change is a no-op')
+    'disposal clears the refresh request so a late skills/change is a no-op')
 })
 
 test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read late-bound', () => {
@@ -750,42 +880,45 @@ test('A5b-6: the Direct-facing viewed-queue authority is viewer-owned and read l
   // queue resolver — the invariant (ONE published authority, published by the
   // viewer, read by the Direct runtime) is unchanged.
   const root = compositionFile('src/app/bootstrap.ts')
+  const zone = bootstrapZone()
   const viewer = ownerFile('src/app/surface/viewer-runtime.ts')
-  assert.equal(declares(root, 'viewedQueueAgent'), false,
-    'the composition root must not hold the viewed-queue viewer state (plan §7.6.2)')
+  // Composition-side negative: the slot must not exist anywhere in the zone.
+  assertCompositionFreeOfOwnerState(zone, ['viewedQueueAgent'], [/publishQueueAuthority/u])
   assert.ok(declares(viewer, 'queueAuthority'),
     'the viewer owner must hold the published queue authority slot')
   assert.match(viewer, /viewedQueueAuthority: \(\) => queueAuthority/u,
     'the viewer owner must expose a getter for the published authority')
+  // Facade-side POSITIVE: the narrow late-bound connector stays in the facade.
   assert.match(root, /getViewedQueueAgent: \(\) => viewerRef\?\.viewedQueueAuthority\(\)/u,
     'the composition connector must read the viewer-owned authority late-bound (never capture by value)')
-  assert.doesNotMatch(root, /publishQueueAuthority/u,
-    'the composition root must no longer receive the viewer publication callback')
 })
 
-test('A5b-6: the composition root implements no TuiAppEvents/TuiCommandRunner literal', () => {
+test('A5b-6: the composition ZONE implements no TuiAppEvents/TuiCommandRunner literal', () => {
   // Plan §7.6.2, second list. A literal is detected by its type annotation
   // (`: TuiAppEvents = {` / `: TuiCommandRunner = {`); the type-only references
   // the composition still needs (e.g. `TuiCommandRunner['agents']`) are fine.
-  const root = compositionFile('src/app/bootstrap.ts')
+  // TS2: the scan is ZONE-wide — a helper implementing either literal would be a
+  // second application implementation living in the composition layer.
+  const zone = bootstrapZone()
   for (const type of ['TuiAppEvents', 'TuiCommandRunner']) {
     assert.equal(
-      new RegExp(`:\\s*${type}\\s*=\\s*\\{`).test(root),
+      new RegExp(`:\\s*${type}\\s*=\\s*\\{`).test(zone),
       false,
-      `src/app/bootstrap.ts must not implement ${type} as an object literal`,
+      `the bootstrap composition zone must not implement ${type} as an object literal`,
     )
   }
-  assert.equal(declares(root, 'surfaceEvents'), false,
-    'the TuiAppEvents implementation must live in its owner, not the composition root')
+  assert.equal(declares(zone, 'surfaceEvents'), false,
+    'the TuiAppEvents implementation must live in its owner, not the composition layer')
 })
 
-test('A5b-6: no application-owner mutable state category remains in the composition root', () => {
+test('A5b-6: no application-owner mutable state category remains in the composition ZONE', (t) => {
   // Plan §7.6.2 categories: client-local history state, command claim/catalog
   // mutable slots, submission FIFO/ack/local-echo state, viewer mutable state
   // and the footer/display state machine. Each name below is a real declaration
   // of its named owner (pinned in EXTRACTED_DECLARATIONS above); this lock keeps
-  // the CATEGORY explicit and mutation-sensitive.
-  const root = compositionFile('src/app/bootstrap.ts')
+  // the CATEGORY explicit and mutation-sensitive, and since TS2 it scans the
+  // whole bootstrap zone (a helper must not reintroduce a category either).
+  const zone = bootstrapZone()
   const categories: ReadonlyArray<readonly [string, readonly string[]]> = [
     ['client-local history state', ['knownHistoryCwdSet', 'lastHistoryContent', 'bootHistoryEntries']],
     ['command claim/catalog mutable slots', [
@@ -799,16 +932,27 @@ test('A5b-6: no application-owner mutable state category remains in the composit
     ]],
     ['viewer mutable state', ['viewerOpen', 'openingViewer', 'pendingSubagentCalls', 'viewerSessionAbort']],
     ['footer/display mutable state machine', [
-      'footerCommandRunner', 'footerCommandUnsubscribe', 'footerDynamicItemRuntime',
+      // TS5 §13.4: the whole-footer runner, its status subscription and the
+      // per-item runner now live behind the TUI footer runtime; the composition
+      // zone must not declare them (or their former slot names) either.
+      'commandRunner', 'commandUnsubscribe', 'dynamicItemRuntime',
       'userFooterCustomItemsForSave', 'applyFooterSettings', 'footerWarningShown',
     ]],
   ]
-  for (const [category, names] of categories) {
-    for (const name of names) {
-      assert.equal(declares(root, name), false,
-        `src/app/bootstrap.ts must not declare ${name} (${category}, plan §7.6.2)`)
-    }
-  }
+  assertOwnerStateCategoriesAbsent(zone, categories)
+  // The real consumer on a fixture tree: a category reintroduced in a NESTED
+  // helper must fail, and the same fixture without it must pass.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-zone-state-')
+  mkdirSync(join(root, 'src', 'app', 'bootstrap', 'nested'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.ts'), 'export const entry = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap.ts'), 'export const bootstrap = 1\n')
+  const nested = join(root, 'src', 'app', 'bootstrap', 'nested', 'legacy.ts')
+  writeFileSync(nested, 'export const harmless = 1\n')
+  assertOwnerStateCategoriesAbsent(bootstrapZoneUnder(root), categories)
+  writeFileSync(nested, 'const pendingSubmissions = new Map()\nconst knownHistoryCwdSet = new Set()\n')
+  assert.throws(() => assertOwnerStateCategoriesAbsent(bootstrapZoneUnder(root), categories),
+    'an application-owner state category reintroduced in a NESTED bootstrap helper must fail the zone lock')
 })
 
 test('A5b-6: the composition root holds exactly one ownership and scope authority', () => {
@@ -863,7 +1007,7 @@ test('A5b-4: the input-history owner owns the submission persistence policy', ()
   const root = compositionFile('src/app/bootstrap.ts')
   const controller = ownerFile('src/app/submission/controller.ts')
   const history = ownerFile('src/app/surface/input-history.ts')
-  assert.match(history, /from '\.\.\/\.\.\/history-persist\.ts'/u,
+  assert.match(history, /from '\.\.\/submission\/history-persist\.ts'/u,
     'the history owner must own the persist decision + ordering gate')
   assert.match(history, /runDetached\('input history write'/u,
     'the history owner must own the detached write')
@@ -871,10 +1015,21 @@ test('A5b-4: the input-history owner owns the submission persistence policy', ()
     'the composition root must not write input history')
   assert.doesNotMatch(controller, /runDetached\('input history write'/u,
     'the submission controller must not write input history')
-  assert.doesNotMatch(controller, /from '\.\.\/\.\.\/history-persist\.ts'/u,
+  // The controller lives in `src/app/submission/`, so its canonical forbidden
+  // specifiers are `./history-persist.ts` (same dir) and
+  // `../../client/history/store.ts`.
+  const forbiddenHistoryPersist = /from '\.\/history-persist\.ts'/u
+  const forbiddenHistoryStore = /from '\.\.\/\.\.\/client\/history\/store\.ts'/u
+  assert.doesNotMatch(controller, forbiddenHistoryPersist,
     'the submission controller must consume the owner, not history-persist directly')
-  assert.doesNotMatch(controller, /from '\.\.\/\.\.\/history\.ts'/u,
+  assert.doesNotMatch(controller, forbiddenHistoryStore,
     'the submission controller must not resolve history file paths directly')
+  // Discriminating-power control: the SAME patterns must reject the real
+  // forbidden imports a controller in this directory would write.
+  assert.match("import { persistAfterSession } from './history-persist.ts'\n", forbiddenHistoryPersist,
+    'the negative guard must reject a direct history-persist import')
+  assert.match("import { historyFilePath } from '../../client/history/store.ts'\n", forbiddenHistoryStore,
+    'the negative guard must reject a direct history-store import')
   // Exactly ONE last-content state: the submission deps no longer expose it.
   assert.doesNotMatch(controller, /deps\.history\.(?:lastContent|setLastContent)\b/u,
     'the controller must not keep a second last-content state')
@@ -887,8 +1042,8 @@ test('A5b-6: the submission writer section is controller-owned and read late-bou
   // before the controller, the event adapter after it).
   const root = compositionFile('src/app/bootstrap.ts')
   const controller = ownerFile('src/app/submission/controller.ts')
-  assert.equal(declares(root, 'submissionWriterSection'), false,
-    'the composition root must not declare the submission writer section')
+  // Composition-side negative: the writer section must not exist anywhere in the zone.
+  assertCompositionFreeOfOwnerState(bootstrapZone(), ['submissionWriterSection'])
   assert.ok(declares(controller, 'withWriterSection'),
     'the submission owner must own withWriterSection')
   // The exact semantics: captureLive → reject with SessionScopeSupersededError
@@ -907,26 +1062,23 @@ test('A5b-6: the submission writer section is controller-owned and read late-bou
 test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a root cache', () => {
   // Finding (P2): the composition root held the retained jobs snapshot and the
   // session/generation fence — a small state machine, not composition wiring.
-  // It belongs to the Task-Center owner (`SurfaceRuntime.attachTasks`, which
+  // It belongs to the Task-Center owner (`TaskRuntime.attachTasks`, which
   // already owns the task model); the root now supplies only the fence FACTS.
-  const root = compositionFile('src/app/bootstrap.ts')
-  const owner = ownerFile('src/app/surface/runtime.ts')
-  // The composition root must not name a jobs-snapshot/retained-rows slot.
-  assert.equal(declares(root, 'jobSnapshot'), false,
-    'the composition root must not declare the retained jobs snapshot')
-  assert.doesNotMatch(root, /\bjobSnapshot\b|\bretainedJobsSnapshot\b/u,
-    'the composition root must not name a jobs-snapshot/retained-rows slot')
-  // The injected subagent source group no longer receives `readJobs`; it supplies
-  // the fence facts instead, so the owner can derive the session id without
-  // importing the ownership core.
-  assert.doesNotMatch(root, /readJobs/u,
-    'the composition root must not provide the jobs-read retention policy')
+  // TS3 §34 moved that owner into `app/surface/task-runtime.ts`.
+  const owner = ownerFile('src/app/surface/task-runtime.ts')
+  // Composition-side negative: neither the retained-snapshot slot nor the
+  // jobs-read retention policy may exist anywhere in the zone.
+  assertCompositionFreeOfOwnerState(
+    bootstrapZone(),
+    ['jobSnapshot', 'retainedJobsSnapshot'],
+    [/\bjobSnapshot\b/u, /\bretainedJobsSnapshot\b/u, /readJobs/u],
+  )
   const sourceGroup = owner.slice(
-    owner.indexOf('export interface TaskSurfaceAgents'),
+    owner.indexOf('export interface TaskSurfaceRead'),
     owner.indexOf('export interface TaskSurfaceSource'),
   )
   assert.doesNotMatch(sourceGroup, /readJobs/u,
-    'the injected subagent source group must no longer carry readJobs')
+    'the injected Task read source group must no longer carry readJobs')
   assert.match(sourceGroup, /currentSessionId\(\): string \| undefined/u,
     'the source group must supply the jobs-read session id for the owner')
   // The owner owns the retained snapshot AND the same-session fence.
@@ -937,18 +1089,52 @@ test('A5b-6: the jobs-read retention policy is Task-Center owner state, never a 
   assert.match(owner, /retainedJobsSnapshot\?\.key === key \? retainedJobsSnapshot\.rows : \[\]/u,
     'the owner must keep the same-session retention fence on a transient read failure')
   const readJobsAt = owner.indexOf('readJobs: () => {')
-  const readJobsEnd = owner.indexOf('agentStatusOf: agents.agentStatusOf', readJobsAt)
+  const readJobsEnd = owner.indexOf('activityOf: taskRead.activityOf', readJobsAt)
   assert.ok(readJobsAt > 0 && readJobsEnd > readJobsAt,
-    'the owner must implement readJobs and wire agentStatusOf after it')
+    'the owner must implement readJobs and wire the activity read after it')
   const readJobsBody = owner.slice(readJobsAt, readJobsEnd)
-  assert.match(readJobsBody, /const key = agents\.currentKey\(\)/u,
+  assert.match(readJobsBody, /const key = taskRead\.currentKey\(\)/u,
     'the owner must resolve the fence key from the injected facts at call time')
-  assert.match(readJobsBody, /const sessionId = agents\.currentSessionId\(\)/u,
+  assert.match(readJobsBody, /const sessionId = taskRead\.currentSessionId\(\)/u,
     'the owner must resolve the session id from the injected facts at call time')
   assert.match(readJobsBody, /jobs\.list\(sessionId\)/u,
     'the owner must read the jobs through its own injected adapter')
   assert.doesNotMatch(readJobsBody, /agentNow\(/u,
     'the owner-side jobs read must not read the Direct attachment')
-  assert.doesNotMatch(owner, /readJobs: agents\.readJobs/u,
+  assert.doesNotMatch(owner, /readJobs: taskRead\.readJobs/u,
     'the TaskBrowserRuntime must receive the owner-side readJobs, not a root-provided one')
+})
+
+test('A5b/TS2: legacy owner-state slots reintroduced in a NESTED helper fail the zone locks (mutation)', (t) => {
+  // Rejection proof for the A5b-6 composition-side negatives. These four slots
+  // are NOT in FINAL_FORBIDDEN_HANDLERS, EXTRACTED_DECLARATIONS or the five
+  // category rows, so their own zone assertions are the only thing that can
+  // reject a helper redeclaring them. The facade placement is the positive
+  // control that the same assertion fires for the ORIGINAL location too.
+  const names = ['viewedQueueAgent', 'submissionWriterSection', 'jobSnapshot', 'retainedJobsSnapshot'] as const
+  const patterns = [/publishQueueAuthority/u, /\bjobSnapshot\b/u, /\bretainedJobsSnapshot\b/u, /readJobs/u] as const
+  const slotSource = `${names.map(name => `let ${name}: unknown\n`).join('')}const readJobs = 1\nconst publishQueueAuthority = 1\n`
+
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-zone-legacy-state-')
+  mkdirSync(join(root, 'src', 'app', 'bootstrap', 'nested'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.ts'), 'export const entry = 1\n')
+  const facade = join(root, 'src', 'app', 'bootstrap.ts')
+  const nested = join(root, 'src', 'app', 'bootstrap', 'nested', 'legacy.ts')
+  writeFileSync(facade, 'export const bootstrap = 1\n')
+  writeFileSync(nested, 'export const harmless = 1\n')
+
+  // Clean positive: the same fixture without the slots passes.
+  assertCompositionFreeOfOwnerState(bootstrapZoneUnder(root), names, patterns)
+
+  // Nested negative: a helper at ANY depth may not reintroduce them.
+  writeFileSync(nested, slotSource)
+  assert.throws(() => assertCompositionFreeOfOwnerState(bootstrapZoneUnder(root), names, patterns),
+    'the four legacy owner-state slots must be rejected anywhere in the composition zone')
+
+  // Same-bytes facade control: the original location fires the same assertion.
+  writeFileSync(nested, 'export const harmless = 1\n')
+  writeFileSync(facade, slotSource)
+  assert.throws(() => assertCompositionFreeOfOwnerState(bootstrapZoneUnder(root), names, patterns),
+    'the same bytes in the facade must fire the same assertion')
 })

@@ -6,7 +6,7 @@ bare `void somePromise()` in this codebase means the failure either crashes
 nothing (silent), escapes to nowhere (unhandled rejection), or gets
 misreported as a cancellation when it was a real failure.
 
-## Diagnostics sink (`src/diag.ts`)
+## Diagnostics sink (`src/runtime/process/diagnostics.ts`)
 
 `ctx.logger` is invisible in this process (no exporter), so the TUI's own
 diagnostics go to **stderr + `$DSH_HOME/logs/pi-tui-<pid>.log`** (env
@@ -14,7 +14,7 @@ diagnostics go to **stderr + `$DSH_HOME/logs/pi-tui-<pid>.log`** (env
 lifecycle logging in diag, not just ctx.logger — a log line that only goes to
 ctx.logger is a log line that never exists here.
 
-## Detached tasks (`src/detached.ts`)
+## Detached tasks (`src/runtime/process/tasks.ts`)
 
 Rule: **never a bare `void somePromise()`**. Two entries, both taking a TASK
 FACTORY that is invoked SYNCHRONOUSLY before the helper returns:
@@ -23,7 +23,7 @@ FACTORY that is invoked SYNCHRONOUSLY before the helper returns:
   consumer: settings writes, theme autodetect, skill refresh.
 - `runOwned(label, () => task, { isCancellation?, onResult, onCancel, onError })`
   — result-consuming main flows: submit/steer dispatch, command execution,
-  local commands, local-shell card settle, the `!` shell-context submit
+  local commands, user-shell card settle, the `!` shell-context submit
   (re-validate → followup; a refused write keeps the card, an unexpected
   error notifies), session switch, question flows, model-picker selection
   writes, external editor.
@@ -50,7 +50,7 @@ classified like any other failure — nothing escapes classification.
    and produce zero unhandled rejections. Thrown values are never mutated:
    primitives, null and frozen errors are carried by an internal wrapper.
 
-## Error observation (`src/error-boundary.ts`)
+## Error observation (`src/runtime/process/errors.ts`)
 
 Error observation is SYNC-TOTAL: describing any legal thrown value (hostile
 Proxy/getter/coercion) can never make a chain reject. Honest limit: an
@@ -61,7 +61,7 @@ guarantee.
 
 ## Lifecycle roots are equally total
 
-Startup and exit (`src/index.ts` root catch, `src/exit.ts`) protect every
+Startup and exit (`src/index.ts` root catch, `src/app/bootstrap/exit.ts`) protect every
 step individually (diag, cleanup, hint, exit), so no throw can skip
 teardown or leak a rejection. The Direct owned-session retirement
 (`src/runtime/direct/owned-session-retirement.ts`) is equally total: every
@@ -101,9 +101,9 @@ published identity rather than issuing a second attempt.
 ## The bare-`void` allowlist (and its static guard)
 
 The ONLY bare-`void` exceptions are the terminal sinks inside
-`src/detached.ts` (exempt **by filename** in `rules.test.ts` — the helpers'
+`src/runtime/process/tasks.ts` (exempt **by filename** in `rules.test.ts` — the helpers'
 own sinks need no marker) and the two lifecycle roots (startup in
-`index.ts`, exit in `exit.ts`), which carry an `allowlist` comment on the
+`index.ts`, exit in `app/bootstrap/exit.ts`), which carry an `allowlist` comment on the
 same line. `test/rules.test.ts` statically detects COMMON SINGLE-LINE
 `void call()` discards (recursive over `src/`, with matcher self-tests). It
 is deliberately NOT a substitute for review or a type-aware lint

@@ -173,13 +173,14 @@ test('a parent settlement notice never alters the child viewer surface', () => {
 // ── viewer content isolation (TuiApp level) ──────────────────────────────
 
 import { TuiApp } from '../src/tui-app.ts'
+import { enterChildDisplaySubject, exitChildDisplaySubject } from './support/display-subject.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -238,22 +239,67 @@ test('B04: a child log with a descriptor keeps its viewer identity without a fak
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
-  app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'session-child', label: 'scout-child', mode: 'continuable', activity: 'running' })
-  // The runner's viewer-open footer commit: the identity block renders the
-  // badge (mode), the label and the activity from the AUTHORITATIVE viewer
-  // state — the exact identity the descriptor card used to duplicate.
-  app.setViewerFooter({
-    label: 'scout-child', childSessionId: 'session-child', mode: 'continuable', activity: 'running',
-    cwd: '', turns: 1, steps: 1, statsLine: '',
+  // The runner's viewer-open commit: the subject bar renders the child
+  // identity — navigation, label, activity — from the AUTHORITATIVE viewer
+  // state, the exact identity the descriptor card used to duplicate.
+  enterChildDisplaySubject(app, {
+    id: 'session-child', label: 'scout-child', mode: 'continuable', activity: 'running',
+    parentSessionId: 'session-main', cwd: '', turns: 1, steps: 1,
   })
   app.setTranscript(messages, folder.turnActivities())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('child prompt'), `the child transcript body renders:\n${view}`)
   assert.ok(view.includes('scout-child'), `the viewer chrome keeps the authoritative child label:\n${view}`)
-  assert.ok(view.includes('[subagent · continuable]'), `the mode identity stays in the viewer footer:\n${view}`)
-  assert.ok(view.includes('running'), `the child activity stays in the viewer footer:\n${view}`)
+  assert.ok(view.includes('‹ back'), `the mode identity lives in the viewer subject bar:\n${view}`)
+  assert.ok(view.includes('● running'), `the child activity stays in the viewer subject bar:\n${view}`)
+  assert.ok(!view.includes('[subagent · continuable]'), `the retired footer badge must not render:\n${view}`)
   assert.ok(!view.includes('mode: continuable'), `no fake Subagent identity card renders:\n${view}`)
   assert.ok(!view.toLowerCase().includes('deepseek-chat'), `the descriptor metadata never renders:\n${view}`)
+  app.stop()
+})
+
+test('the main session welcome card never renders on the child viewer surface (M3-5 PR1 review R3)', async () => {
+  // The welcome card names the MAIN session's model/workspace/session id. While
+  // the display subject is a viewed child it must not remain visible anywhere
+  // on the child surface; the facts are kept, so exit restores the LATEST main
+  // identity (no parked enter-time copy).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  app.setWelcomeCard({ cwd: '/parent-ws', sessionId: 'session-main', model: 'p/parent-model', version: '0.0.0' })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('p/parent-model'), `the main welcome card must render first:\n${view}`)
+  assert.ok(view.includes('session-main'), `the main session identity must render first:\n${view}`)
+
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'child', mode: 'continuable', activity: 'running',
+    cwd: '/child-ws', turns: 1, steps: 1,
+    model: { provider: 'deepseek', model: 'child-model' },
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('deepseek/child-model'), `the child's own model must render instead:\n${view}`)
+  assert.ok(!view.includes('p/parent-model'), `the parent model must leave the child surface:\n${view}`)
+  assert.ok(!view.includes('session-main'), `the parent session identity must leave the child surface:\n${view}`)
+  assert.ok(!view.includes('/parent-ws'), `the parent workspace must leave the child surface:\n${view}`)
+
+  // A main identity commit while the child is displayed stores the main facts
+  // but must not surface them on the child.
+  app.setWelcomeCard({ cwd: '/parent-ws-v2', sessionId: 'session-main', model: 'p/parent-model-v2', version: '0.0.0' })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('parent-model-v2'), `a main identity commit must not surface on the child:\n${view}`)
+  assert.ok(!view.includes('/parent-ws-v2'), `a main workspace commit must not surface on the child:\n${view}`)
+
+  exitChildDisplaySubject(app, { model: 'p/parent-model-v2', cwd: '/parent-ws-v2', turns: 1, steps: 1 })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('parent-model-v2'), `the LATEST main model must return on exit:\n${view}`)
+  assert.ok(view.includes('/parent-ws-v2'), `the LATEST main workspace must return on exit:\n${view}`)
+  assert.ok(view.includes('session-main'), `the main session identity must return on exit:\n${view}`)
   app.stop()
 })

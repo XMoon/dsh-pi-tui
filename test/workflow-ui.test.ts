@@ -14,7 +14,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp, type WorkflowAction } from '../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type WorkflowMemberView, type WorkflowRunId, type WorkflowRunStatus } from '../src/transcript.ts'
-import { workflowMemberViewerTarget, type TaskBrowserRow } from '../src/tasks-browser.ts'
+import { workflowMemberViewerTarget, type TaskBrowserRow } from '../src/domain/task/browser.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -580,7 +580,7 @@ test('the running run pill uses the primary semantic color (review P2, plan §8.
 })
 
 test('workflow cards stay host-owned under a message renderer registry (review P2)', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerMessageRenderer({
     id: 'workflow-plugin',

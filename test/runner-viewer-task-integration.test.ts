@@ -30,6 +30,7 @@ import {
   liveChunkFrame,
   liveCommittedEnd,
   liveStart,
+  modelEvent,
 } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -550,7 +551,14 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
     tokens?: { input: number; output: number }
     performance?: { firstTokenMs: number }
   } | undefined
-  assert.deepEqual(viewerUsage?.tokens, { input: 21, output: 5, cacheRead: 0, cacheWrite: 0 })
+  // M3-5 PR1 §9.5: the child's CUMULATIVE tokens are a SessionStatus fact.
+  // This fixture has no `sessionProjections` service, so the child's official
+  // usage is UNAVAILABLE — the bounded child transcript fold's 21/5 sum must
+  // never be presented as a session total.
+  assert.equal(viewerUsage?.tokens, undefined,
+    'the bounded child fold token sum must not masquerade as the child cumulative usage')
+  // The recent-performance figures stay presentation-local and still reach the
+  // child stats footer.
   assert.ok((viewerUsage?.performance?.firstTokenMs ?? 0) > 0, 'B first-token timing must reach the child stats footer')
 
   // Parent events continue through the runner while the child owns the
@@ -688,7 +696,9 @@ test('the interactive child viewer projects its own authoritative steering and n
   context.emit('session/event', parent as never, event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [] }, 40))
   await settle()
   await vt.waitForRender()
-  assert.ok(app.pendingInputForTest().steering.some(row => row.text === 'PARENT-STEER'),
+  const userRowsOf = (pending: ReturnType<TuiApp['pendingInputForTest']>) =>
+    pending.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(userRowsOf(app.pendingInputForTest()).some(row => row.text === 'PARENT-STEER'),
     'the main subject shows its authoritative steering before the viewer opens')
 
   // Enter the interactive continuable child viewer.
@@ -706,9 +716,10 @@ test('the interactive child viewer projects its own authoritative steering and n
   await settle()
   await vt.waitForRender()
   const viewed = app.pendingInputForTest()
-  assert.ok(viewed.steering.some(row => row.text === 'CHILD-STEER' && row.rpcId === 'child-rpc'),
-    `the child authoritative steering must be visible: ${JSON.stringify(viewed.steering)}`)
-  assert.ok(!viewed.steering.some(row => row.text === 'PARENT-STEER'),
+  const viewedUsers = userRowsOf(viewed)
+  assert.ok(viewedUsers.some(row => row.text === 'CHILD-STEER' && row.rpcId === 'child-rpc'),
+    `the child authoritative steering must be visible: ${JSON.stringify(viewedUsers)}`)
+  assert.ok(!viewedUsers.some(row => row.text === 'PARENT-STEER'),
     'the parent pending row must not leak into the child viewer')
 
   // Leaving the viewer re-projects the MAIN subject: the child row must not leak.
@@ -718,9 +729,10 @@ test('the interactive child viewer projects its own authoritative steering and n
   await vt.waitForRender()
   assert.ok(app.getViewerGeneration() > mountedGeneration, 'Esc must close the viewer')
   const restored = app.pendingInputForTest()
-  assert.ok(!restored.steering.some(row => row.text === 'CHILD-STEER'),
+  const restoredUsers = userRowsOf(restored)
+  assert.ok(!restoredUsers.some(row => row.text === 'CHILD-STEER'),
     'the closed child pending row must not leak to the parent surface')
-  assert.ok(restored.steering.some(row => row.text === 'PARENT-STEER'),
+  assert.ok(restoredUsers.some(row => row.text === 'PARENT-STEER'),
     'the parent subject is re-projected after the viewer closes')
 })
 
@@ -789,14 +801,19 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   assert.ok(view().includes('completed'),
     `the restored parent must show the live-refreshed job status:\n${view()}`)
 
-  // A vanished job must leave the parent usable: the registry lookup throws,
-  // so openJobView opens nothing and reports keep-open.
+  // A row that left the CURRENT Task projection must leave the parent usable:
+  // the selection resolves against the current rows (the Task row identity
+  // authority, not a registry lookup), so a vanished row opens nothing and
+  // reports keep-open.
   jobs.setEntries([])
+  jobs.emit()
+  await settle()
+  await vt.waitForRender()
   input('\r')
   await settle()
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 1,
-    'a vanished job must not dismiss the parent browser')
+    'a row that left the current projection must not dismiss the parent browser')
 })
 
 test('the runner-level Job event subscription is exactly-once and disposed with the surface (C1)', async (t) => {
@@ -1619,4 +1636,1252 @@ test('a failed coalesced catalog read still runs exactly one trailing refresh', 
   await settle()
   await vt.waitForRender()
   assert.equal(listings.length, 2, 'the trailing read must settle without starting another read')
+})
+
+test('a parked continued Question is reachable and reopenable from the Task Center', async (t) => {
+  // Addendum §16.4 (surface integration, not a source-string assertion): the
+  // literal user path is park -> Task Center -> Enter -> the SAME Question
+  // returns to the editor seat. The Question controller owns the authority
+  // interpretation; the surface composes its attention rows into the browser.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-question-park-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const session: FakeSession = fakeSession({
+    id: 'question-park-session',
+    header: { id: 'question-park-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('answer me later'),
+  })
+  const harness = makeHarness(home, [session], { provider: 'p', model: 'm' })
+
+  context = new Context()
+  // The production base contract this fixture must model: the Host provides the
+  // `userQuestions` capability (`dsh-base` mounts it), and the Direct Question
+  // adapter's `onRequest()` returns false without it — which would leave
+  // `attach()` with nothing to cold-reconcile and silently hide the whole
+  // parked-Question path. The fake is the minimal SEMANTIC shape the adapter
+  // declares (`attachWait` + `answer`); this test never answers a late reply.
+  context.provide('userQuestions', {
+    attachWait: () => (async function* () {
+      // No live timed wait for any call: the durable projection is the only
+      // authority this fixture exercises.
+      await new Promise(() => {})
+    })(),
+    answer: () => false,
+  } as never)
+  // The durable Question authority: one CONTINUED call with no queued reply.
+  // A parked Question is discovered from this projection alone.
+  let queuedReply = false
+  let projectionListener: (() => void) | undefined
+  const questionsProjection = context.provide('sessionProjections', {
+    stateOf: (_session: unknown, key: string): unknown => key === 'userQuestions'
+      ? {
+          questions: {
+            active: [{
+              callId: 'call-parked',
+              questions: [{ id: 'q1', question: 'Use staging or production?' }],
+              state: 'continued',
+            }],
+            settled: [],
+          },
+        }
+      : {
+          'next-step': queuedReply ? [{ source: { kind: 'user-question-reply', callId: 'call-parked' } }] : [],
+          'next-turn': [],
+        },
+    onChanged: (listener: (session: unknown, key: string) => void) => {
+      // The adapter filters by owning session + projected unit, so the
+      // notification carries the real arguments (an argument-less call would be
+      // filtered out and prove nothing).
+      projectionListener = () => listener({ id: 'question-park-session' }, 'inbox')
+      return () => { projectionListener = undefined }
+    },
+  } as never)
+  assert.ok(questionsProjection === undefined || questionsProjection !== undefined)
+  fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  await settle()
+  await vt.waitForRender()
+
+  // COLD discovery parks it: the Question must NOT have stolen the editor seat,
+  // yet the footer's Task Center trigger is armed by the parked attention alone
+  // (no Job/Subagent is running in this fixture).
+  assert.equal(app.overlayGraphState().handles, 0, 'cold discovery owns no overlay')
+  const idle = vt.getViewport().join('\n')
+  assert.ok(!idle.includes('Type your answer…'), `no Question panel was mounted:\n${idle}`)
+  // COLD DISCOVERY closes the whole chain, with zero work of any kind: the
+  // controller found the continued call at attach (the fixture now models the
+  // production `userQuestions` capability), parked it, published the count, and
+  // the footer therefore advertises the Task Center.
+  assert.equal(app.isTasksActive(), true, 'a parked Question alone arms the affordance')
+  assert.ok(idle.includes('? 1 awaiting'), `the footer counts it as human attention:\n${idle}`)
+  assert.ok(idle.includes('↓ view'), `and advertises the reopen trigger:\n${idle}`)
+
+  // The MANDATORY keyboard path: the literal ↓ opens Quick for a Questions-only
+  // session.
+  vt.sendInput('\x1b[B')
+  await settle()
+  await vt.waitForRender()
+  const quickByKey = vt.getViewport().join('\n')
+  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick Tasks:\n${quickByKey}`)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'Quick owns keyboard focus while open')
+  assert.ok(quickByKey.includes('Needs attention'), `with the attention group:\n${quickByKey}`)
+  assert.ok(quickByKey.includes('Use staging or production?'), `and the parked Question row:\n${quickByKey}`)
+  assert.ok(quickByKey.includes('awaiting answer'), `marked as awaiting an answer:\n${quickByKey}`)
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'Enter reopens the Question from Quick')
+  const fromQuick = vt.getViewport().join('\n')
+  assert.ok(fromQuick.includes('Type your answer…'), `the QuestionFlow is reopened:\n${fromQuick}`)
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the reopened Question owns keyboard focus')
+  // Esc is LAYERED inside the flow (the reopened form restores the review page,
+  // where the first Esc steps back and the next one cancels the flow); only the
+  // flow's own cancel parks the continued Question.
+  const editableFlows = (): number => (vt.getViewport().join('\n').match(/Type your answer…/gu) ?? []).length
+  const parkQuestion = async (): Promise<void> => {
+    for (let attempt = 0; attempt < 3 && editableFlows() > 0; attempt += 1) {
+      vt.sendInput('\x1b')
+      await settle()
+      await vt.waitForRender()
+    }
+    assert.equal(editableFlows(), 0, 'the Question is parked')
+  }
+
+  // VISIBLE -> Esc -> literal ↓ -> Quick: the affordance comes back with the
+  // park. (`visible -> answering` is NOT driven here: while a Question owns
+  // input the Task Center is unreachable by design — only the modal-safe
+  // inspection actions pass — so a concurrent state would be a fabricated
+  // navigation contract. The mapping is covered by the pure projection test.)
+  await parkQuestion()
+  const parkedAgain = vt.getViewport().join('\n')
+  assert.ok(parkedAgain.includes('? 1 awaiting'), `parking restores the attention figure:\n${parkedAgain}`)
+  assert.ok(parkedAgain.includes('↓ view'), `and the trigger:\n${parkedAgain}`)
+  // Ownership round-trip: Quick -> Question capture -> park -> the CURRENT
+  // editor-seat occupant gets physical focus back.
+  assert.equal(app.focusSeatForTest(), 'editor', 'parking restores the editor keyboard seat')
+  assert.equal(
+    app.focusedComponentForTest(),
+    app.seatEditorForTest().component,
+    'parking restores physical focus to the current editor-seat occupant',
+  )
+  vt.sendInput('\x1b[B')
+  await settle()
+  await vt.waitForRender()
+  const quickAfterPark = vt.getViewport().join('\n')
+  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick after the park:\n${quickAfterPark}`)
+  assert.ok(quickAfterPark.includes('Use staging or production?'), `with the Question row:\n${quickAfterPark}`)
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(editableFlows(), 1, 'and Enter reopens the QuestionFlow')
+
+  // Park it once more so the row/live-removal leg below starts parked. This is
+  // the reachable path to Full: park FIRST (the Question owns input while it is
+  // visible), then open the Task Center.
+  await parkQuestion()
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  const quick = vt.getViewport().join('\n')
+  assert.equal(app.overlayGraphState().handles, 1, `the Task Center is open:\n${quick}`)
+  assert.ok(quick.includes('Needs attention'), `it lists the parked Question:\n${quick}`)
+  assert.ok(quick.includes('Use staging or production?'), `with its label:\n${quick}`)
+  assert.ok(quick.includes('awaiting answer'), `as awaiting an answer:\n${quick}`)
+
+  // Authority changes while the browser is open: the row disappears live, with
+  // no catalog re-list and no stale row left behind.
+  queuedReply = true
+  projectionListener?.()
+  await settle()
+  await vt.waitForRender()
+  const removed = vt.getViewport().join('\n')
+  assert.ok(!removed.includes('Use staging or production?'), `a queued reply removes the row live:\n${removed}`)
+
+  // The reply is discarded: the same call becomes answerable again, parked, and
+  // the row returns.
+  queuedReply = false
+  projectionListener?.()
+  await settle()
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(restored.includes('Use staging or production?'), `the row returns when the call is answerable again:\n${restored}`)
+
+  // Enter reopens the SAME entry: the browser closes and the editable panel
+  // returns (no transcript reconstruction, no second flow).
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'a reopened Question replaces the browser')
+  const reopened = vt.getViewport().join('\n')
+  assert.ok(reopened.includes('Use staging or production?'), `the Question panel returns:\n${reopened}`)
+  assert.ok(reopened.includes('Type your answer…'), `the editable form owns the seat again:\n${reopened}`)
+  const flowFrames = (reopened.match(/Type your answer…/gu) ?? []).length
+  assert.equal(flowFrames, 1, 'exactly one editable flow exists')
+
+  // Park it again and confirm the row is rebuilt from presentation state. The
+  // flow's Esc is LAYERED, so a single press would only leave the edit layer:
+  // the parked state must be proven (no editable frame, the attention figure
+  // back) BEFORE the Task Center is opened, otherwise this leg would walk the
+  // unreachable handler path it is meant to rule out.
+  await parkQuestion()
+  const parkedIdle = vt.getViewport().join('\n')
+  assert.ok(!parkedIdle.includes('Type your answer…'), `the Question is parked, not visible:\n${parkedIdle}`)
+  assert.ok(parkedIdle.includes('? 1 awaiting'), `the parked figure is back:\n${parkedIdle}`)
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  const reparked = vt.getViewport().join('\n')
+  assert.ok(reparked.includes('Use staging or production?'), `the parked Question is reachable again:\n${reparked}`)
+  assert.ok(reparked.includes('awaiting answer'), `and renders as awaiting an answer:\n${reparked}`)
+
+  // Authority ends the interaction: with no other work or failure attention,
+  // BOTH the attention figure and the trigger disappear — the affordance never
+  // outlives the truth that produced it.
+  await parkQuestion()
+  queuedReply = true
+  projectionListener?.()
+  await settle()
+  await vt.waitForRender()
+  const ended = vt.getViewport().join('\n')
+  assert.ok(!ended.includes('? 1 awaiting'), `a queued reply removes the attention figure:\n${ended}`)
+  assert.ok(!ended.includes('↓ view'), `and the trigger with it:\n${ended}`)
+  assert.equal(app.isTasksActive(), false, 'nothing is reachable any more')
+
+
+})
+
+test('M3-5 PR1 L6: the Direct child viewer derives its display subject from SessionStatus(childId) and never leaks the parent', async (t) => {
+  // The decisive Direct application proof: the REAL Task Center/viewer entry
+  // mounts the child, and the status/footer sink shows the child's OWN
+  // SessionStatus facts (model/preset/permission/cwd/context/usage/todos)
+  // resolved through backend.sessionReader.sessionStatus(childId).
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-display-subject-l6-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  // Wide enough that the default footer preset keeps the model/context/token
+  // items (the narrow 80-column budget legitimately drops them).
+  const vt = new VirtualTerminal(140, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const childACwd = join(home, 'child-a-ws')
+  const childBCwd = join(home, 'child-b-ws')
+  const parent = fakeSession({
+    id: 'display-subject-parent',
+    header: { id: 'display-subject-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('parent answer'),
+      event('todo/write', { todos: [{ content: 'PARENT-TODO-V1', status: 'in_progress' }] }, 6),
+    ],
+  })
+  const childA = fakeSession({
+    id: 'display-subject-child-a',
+    header: { id: 'display-subject-child-a', cwd: childACwd, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child a answer'),
+  })
+  const childB = fakeSession({
+    id: 'display-subject-child-b',
+    header: { id: 'display-subject-child-b', cwd: childBCwd, createdAt: 1_700_000_000_002, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child b answer'),
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: childA.id, label: 'child display subject A', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: childB.id, label: 'child display subject B', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  const harness = makeHarness(home, [parent, childA, childB], { provider: 'p', model: 'parent-model' }, undefined, undefined, subagents)
+  for (const id of [childA.id, childB.id]) {
+    const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: id })
+    life.defer(() => handle.dispose())
+  }
+  context = new Context()
+  // The official Session-scoped projections the DirectSessionReader reads. Each
+  // child carries DIFFERENT facts so a leak is immediately visible; the child's
+  // `tokenUsage` (11/5) deliberately differs from its own bounded log fold
+  // (10/2) so the sink proves the projection path, not the fold.
+  // Child A's title/todos are MUTABLE: the invalidation regressions below move
+  // the official projection and commit the corresponding durable event (the
+  // real Host order), then require the display subject to follow WITHOUT a
+  // turn/step boundary.
+  let childATitle = 'child a title'
+  let childATodos: readonly { readonly content: string; readonly status: 'pending' | 'in_progress' | 'completed' }[] = [
+    { content: 'CHILD-A-TODO', status: 'in_progress' },
+    { content: 'CHILD-A-TODO-2', status: 'pending' },
+  ]
+  let childAModel: { readonly provider: string; readonly model: string } = { provider: 'deepseek', model: 'child-a-model' }
+  let childAPreset = 'child-a-preset'
+  const statusValuesBySession: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+    get [childA.id]() {
+      return {
+        get modelSelection() { return { lastUsed: childAModel } },
+        get agentPreset() { return childAPreset },
+        permissions: { currentValue: 'read-only' },
+        get title() { return childATitle },
+        goal: { goal: { objective: 'child a objective', phase: 'active' } },
+        contextPressure: { projectedTokens: 100, contextWindow: 2000 },
+        tokenUsage: { uncachedInputTokens: 11, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        get todos() { return childATodos },
+      }
+    },
+    [childB.id]: {
+      modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-b-model' } },
+      permissions: { currentValue: 'workspace-write' },
+      title: 'child b title',
+      contextPressure: { pressureTokens: 300, contextWindow: 4000 },
+      tokenUsage: { uncachedInputTokens: 21, outputTokens: 9, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      todos: [{ content: 'CHILD-B-TODO', status: 'pending' }],
+    },
+  }
+  // Flipped by the negative control below: with the child's official
+  // projection REMOVED, its bounded fold sum must never be presented as the
+  // cumulative usage.
+  let childAProjectionAvailable = true
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values = session.header.id === childA.id && !childAProjectionAvailable
+        ? {}
+        : statusValuesBySession[session.header.id]
+      if (values === undefined) return { values: {} }
+      if (keys === undefined) return { values }
+      return {
+        values: Object.fromEntries(keys
+          .filter(key => key in values)
+          .map(key => [key, (values as Record<string, unknown>)[key]])),
+      }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await vt.waitForRender()
+  const mainSnapshot = probe.capturedChildStatus
+  assert.equal(mainSnapshot, undefined, 'the main subject commits no child snapshot')
+
+  // Both children are RUNNING live agents (their catalog row and the exact
+  // Agent status agree).
+  for (const session of [childA, childB]) {
+    ;(liveAgentOf(harness, session.id) as { status: 'idle' | 'running' }).status = 'running'
+  }
+  // The REAL Task Center entry mounts child A.
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'child A must mount through the real Task Center entry')
+
+  const aStatus = probe.capturedChildStatus
+  assert.ok(aStatus, 'the child display subject must commit a StatusStore snapshot')
+  assert.deepEqual(aStatus.view.subject, {
+    kind: 'subagent',
+    id: childA.id,
+    label: 'child display subject A',
+    mode: 'continuable',
+    activity: 'running',
+  })
+  // Every Session-owned section is the CHILD's own SessionStatus.
+  assert.deepEqual(aStatus.composition, {
+    model: { provider: 'deepseek', id: 'child-a-model', displayName: 'child-a-model' },
+    agentPreset: { id: 'child-a-preset', label: 'child-a-preset' },
+  })
+  assert.deepEqual(aStatus.access.permissionPreset, { id: 'read-only', label: 'read-only', matched: true })
+  assert.equal(aStatus.workspace.cwd, childACwd, 'the child workspace must be the child session cwd')
+  assert.deepEqual(aStatus.usage.tokens, { input: 11, output: 5, cacheRead: 0, cacheWrite: 0 },
+    'the CHILD cumulative tokens are the official tokenUsage projection (11/5), not the bounded log fold (10/2)')
+  assert.deepEqual(aStatus.usage.context, { usedTokens: 100, windowTokens: 2000, percent: 5 })
+  assert.equal(aStatus.usage.turns, 1, 'turns stay the child fold’s own presentation fact')
+  assert.equal(aStatus.usage.steps, 1)
+  const aPresentation = probe.capturedDisplaySubject?.presentation
+  assert.ok(aPresentation, 'the child display-subject presentation must travel in the same commit')
+  assert.equal(aPresentation.sessionId, childA.id)
+  assert.equal(aPresentation.workspaceRoot, childACwd)
+  assert.equal(aPresentation.title, 'child a title')
+  assert.deepEqual(aPresentation.todos, [
+    { content: 'CHILD-A-TODO', status: 'in_progress' },
+    { content: 'CHILD-A-TODO-2', status: 'pending' },
+  ])
+  // The legacy display fields describe the LIVE session (M3-5 PR1 contract
+  // decision) and never re-point to the child; the child's own goal is a
+  // presentation fact.
+  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home,
+    'a child subject must not re-point the live-session legacy fields')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.model, 'p/parent-model',
+    'the live-session legacy model stays the LIVE model')
+  assert.match(aPresentation.goal ?? '', /^goal ● child a objective$/u)
+  // The PARENT's facts are nowhere on the child subject.
+  assert.notEqual(aStatus.workspace.cwd, home)
+  assert.notEqual(aStatus.composition.model?.id, 'parent-model')
+  // …and the child's OWN facts are ACTUALLY RENDERED (not merely captured):
+  // model/provider, permission, the official cumulative tokens (11/5, never
+  // the bounded fold's 10/2), the official context window, the child todo
+  // count and the child workspace.
+  const viewA = vt.getViewport().join('\n')
+  assert.ok(viewA.includes('‹ back'), `the viewer subject bar must render:\n${viewA}`)
+  assert.ok(viewA.includes('child display subject A'), `the child label must render:\n${viewA}`)
+  assert.ok(viewA.includes('child-a-ws'), `the child workspace must render:\n${viewA}`)
+  assert.ok(viewA.includes('deepseek/child-a-model'), `the child model must render:\n${viewA}`)
+  assert.ok(!viewA.includes('[subagent · continuable]'), `the retired viewer badge must not render:\n${viewA}`)
+  assert.ok(viewA.includes('[read-only]'), `the child permission must render:\n${viewA}`)
+  assert.ok(viewA.includes('↑11'), `the official child input tokens must render:\n${viewA}`)
+  assert.ok(viewA.includes('↓5'), `the official child output tokens must render:\n${viewA}`)
+  assert.ok(viewA.includes('100/2.0k'), `the official child context must render:\n${viewA}`)
+  assert.ok(viewA.includes('2 active · CHILD-A-TODO'),
+    `the child todo summary/count must render (the parent has 1):\n${viewA}`)
+  assert.ok(viewA.includes('goal ● child a objective'), `the child goal must render:\n${viewA}`)
+  assert.ok(!viewA.includes('PARENT-TODO-V1'), `the parent todo summary must not render:\n${viewA}`)
+  // WHOLE-VIEWPORT negative control (M3-5 PR1 §5/§9.6): the parent session's
+  // model and session identity must not remain visible ANYWHERE on the child
+  // surface — not in the footer and not in the main session's welcome card
+  // (which is hidden while the display subject is the child).
+  assert.ok(!viewA.includes('p/parent-model'), `the parent model must not render anywhere on the child surface:\n${viewA}`)
+  assert.ok(!viewA.includes('display-subject-parent'), `the parent session identity must not render anywhere on the child surface:\n${viewA}`)
+
+  // INVALIDATION (M3-5 PR1 review R4): a child `session/title` alone — with NO
+  // step/end / turn/end boundary around it — must re-derive the display subject
+  // immediately. The Host commits the event AND its projection moves.
+  childATitle = 'child a retitled'
+  // The Host commits the durable event through its own Session append (the
+  // production shape: the fake session's `append` is the same primitive the
+  // other runner suites use).
+  context.emit('session/event', childA as never, childA.append!('session/title', { title: 'child a retitled' }) as SessionEvent)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'child a retitled',
+    'a lone child session/title must reach the display-subject presentation without a boundary')
+  const subjectAfterTitle = probe.displaySubject() as { readonly title?: string; readonly sessionId?: string } | undefined
+  assert.equal(subjectAfterTitle?.sessionId, childA.id)
+  assert.equal(subjectAfterTitle?.title, 'child a retitled',
+    'the EXTENSION-visible display-subject title must follow a lone child session/title immediately')
+  // The BAR follows the same title-only change even though no StatusStore
+  // SECTION changed (the store therefore does not notify); the presentation
+  // projection is re-read at the atomic commit point.
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('child a retitled'),
+    'a lone child session/title must refresh the subject bar without any store section change')
+
+  // The same for a child `todo/write`: the display-subject todo list (and the
+  // rendered summary line) must follow immediately.
+  childATodos = [
+    { content: 'CHILD-A-TODO-3', status: 'in_progress' },
+    { content: 'CHILD-A-TODO-4', status: 'pending' },
+    { content: 'CHILD-A-TODO-5', status: 'pending' },
+  ]
+  context.emit('session/event', childA as never, event('todo/write', { todos: [...childATodos] }, 41))
+  await settle()
+  await vt.waitForRender()
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos,
+    'a lone child todo/write must reach the display-subject presentation without a boundary')
+  assert.equal(probe.capturedChildStatus?.activity.todoCount, 3)
+  const viewTodoWrite = vt.getViewport().join('\n')
+  assert.ok(viewTodoWrite.includes('3 active · CHILD-A-TODO-3'),
+    `the rendered child todo summary must follow the lone todo/write:\n${viewTodoWrite}`)
+  assert.ok(viewTodoWrite.includes('child a retitled'),
+    `the committed child title must render in the subject bar:\n${viewTodoWrite}`)
+
+  // INVALIDATION (M3-5 PR1 review R4): a lone child `model/selection` — the
+  // durable model-selection commit, which can land outside a turn — and a lone
+  // `agent-preset/selected` must re-derive the display subject immediately. Both
+  // officially move `modelSelection` / `agentPreset`, which
+  // `DirectSessionReader.sessionStatus` reads.
+  childAModel = { provider: 'deepseek', model: 'child-a-model-v2' }
+  context.emit('session/event', childA as never, event('model/selection', { provider: 'deepseek', model: 'child-a-model-v2' }, 42))
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-model-v2',
+    'a lone child model/selection must reach the committed display subject')
+  assert.ok(vt.getViewport().join('\n').includes('deepseek/child-a-model-v2'),
+    `the subject bar must follow a lone child model/selection:\n${vt.getViewport().join('\n')}`)
+
+  childAPreset = 'child-a-preset-v2'
+  context.emit('session/event', childA as never, event('agent-preset/selected', { agentPreset: 'child-a-preset-v2' }, 43))
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.agentPreset?.id, 'child-a-preset-v2',
+    'a lone child agent-preset/selected must reach the committed display subject')
+
+  // A LATE parent refresh (a main todo/write + a main turn boundary) while the
+  // child is displayed must never repaint the child subject with parent facts.
+  context.emit('session/event', parent as never, event('todo/write', { todos: [{ content: 'PARENT-TODO-V2', status: 'pending' }] }, 7))
+  // The LIVE parent's fold advances while the child owns the screen (an
+  // ordinary second turn: the main stats fold counts at step/end) and the
+  // status refresh keeps selecting the CHILD — the live legacy slot must still
+  // follow the parent's current facts.
+  context.emit('session/event', parent as never, event('turn/start', { turn: 1 }, 8))
+  context.emit('session/event', parent as never, event('step/start', { turn: 1, step: 0 }, 81))
+  context.emit('session/event', parent as never, event('step/end', { turn: 1, step: 0 }, 82))
+  // NO child event is emitted here: the parent's OWN `step/end` (a cheap event
+  // that advances the live fold but triggers no other refresh path) must refresh
+  // the status and carry the LIVE sibling facts forward (M3-5 PR1 review R9).
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.view.subject.kind, 'subagent',
+    'the committed display subject must stay the child after a late parent refresh')
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos,
+    'the parent todo write must not replace the child’s presentation projection')
+  // The legacy slot is the LIVE session's and must stay CURRENT: the parent fold
+  // advanced while the child was displayed and the LAST parent event was a cheap
+  // `step/end` with no child event after it, so only the LIVE-event trigger can
+  // have refreshed these (M3-5 PR1 reviews R5/R9).
+  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home,
+    'the live-session legacy fields describe the LIVE session (its own cwd)')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.turns, 2,
+    'the LIVE turn counter must keep advancing while the child is displayed')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.steps, 2,
+    'the LIVE step counter must keep advancing on a lone parent step/end')
+  // …while the child's OWN sections and presentation are untouched by the parent.
+  assert.equal(probe.capturedChildStatus?.workspace.cwd, childACwd)
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-model-v2')
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos)
+
+  // Child A → child B through the SAME real Task Center entry: no A residue.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\x1b[B')
+  await settle()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  const bStatus = probe.capturedChildStatus
+  assert.ok(bStatus, 'child B must commit its own display-subject snapshot')
+  assert.equal(bStatus.view.subject.kind === 'subagent' ? bStatus.view.subject.id : undefined, childB.id,
+    'child B must be the committed display subject')
+  assert.equal(bStatus.composition.model?.id, 'child-b-model')
+  assert.deepEqual(bStatus.access.permissionPreset, { id: 'workspace-write', label: 'workspace-write', matched: true },
+    'B’s own permission, never A’s read-only')
+  assert.equal(bStatus.workspace.cwd, childBCwd)
+  assert.deepEqual(bStatus.usage.tokens, { input: 21, output: 9, cacheRead: 0, cacheWrite: 0 })
+  assert.deepEqual(bStatus.usage.context, { usedTokens: 300, windowTokens: 4000, percent: 8 },
+    'pressureTokens is B’s numerator when projectedTokens is absent')
+  assert.equal(bStatus.composition.agentPreset, undefined, 'B records no preset — A’s must not survive')
+  assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, [{ content: 'CHILD-B-TODO', status: 'pending' }])
+  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'child b title')
+  assert.equal(probe.capturedDisplaySubject?.presentation?.goal, undefined, 'A’s goal must not survive into B')
+  assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home, 'B’s commit keeps the LIVE legacy facts')
+  const viewB = vt.getViewport().join('\n')
+  assert.ok(viewB.includes('child display subject B'), `the rendered subject bar must show B’s identity:\n${viewB}`)
+  assert.ok(viewB.includes('child-b-ws'), `the rendered footer must show B’s workspace:\n${viewB}`)
+  assert.ok(!viewB.includes('child-a-ws'), `A’s workspace must not survive into B:\n${viewB}`)
+  assert.ok(!viewB.includes('child-a-model'), `A’s model must not survive into the subject bar:\n${viewB}`)
+  assert.ok(!viewB.includes('child a retitled'), `A’s title must not survive into B’s subject bar:\n${viewB}`)
+
+  // Child → main restores the parent subject.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(restored.includes('p/parent-model'), `the parent footer must return:\n${restored}`)
+  assert.ok(restored.includes('display-subject-parent'), `the parent welcome card must return:\n${restored}`)
+  assert.ok(!restored.includes('[subagent · continuable]'), `the viewer badge must clear:\n${restored}`)
+  assert.ok(!restored.includes('‹ back'), `the subject bar must clear on exit:\n${restored}`)
+  assert.ok(!restored.includes('child-b-ws'), `the child workspace must clear:\n${restored}`)
+
+  // NEGATIVE CONTROL: with child A's official SessionStatus projection REMOVED,
+  // its bounded transcript fold sum (10/2) must NOT be presented as the
+  // cumulative usage — an unavailable official fact OMITS the section instead
+  // of folding the window or copying the parent.
+  childAProjectionAvailable = false
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(
+    probe.capturedChildStatus?.view.subject.kind === 'subagent' ? probe.capturedChildStatus.view.subject.id : undefined,
+    childA.id,
+    'child A must be the display subject again',
+  )
+  assert.equal(probe.capturedChildStatus?.usage.tokens, undefined,
+    'the child cumulative tokens are ABSENT when the official projection cannot answer')
+  assert.equal(probe.capturedChildStatus?.usage.context, undefined)
+  const viewNoOfficial = vt.getViewport().join('\n')
+  assert.ok(!viewNoOfficial.includes('↑10'),
+    `the bounded fold's input sum must not stand in for the cumulative usage:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('↑11'), `the removed official value must not linger:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('↓'), `no token figures may render when the official usage is unavailable:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('100/2.0k'), `no context window may render when the official child context is unavailable:\n${viewNoOfficial}`)
+  assert.ok(viewNoOfficial.includes('child display subject A'), `the child identity must still render:\n${viewNoOfficial}`)
+  assert.ok(viewNoOfficial.includes('model ?'),
+    `an absent official child model must render the unknown token, never a parent value:\n${viewNoOfficial}`)
+  assert.ok(!viewNoOfficial.includes('child-a-model'),
+    `the removed official model must not linger in the subject bar:\n${viewNoOfficial}`)
+})
+
+test('F4-R1: a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {
+  // The connected production chain under test:
+  //   TuiApp viewer follow-up (Enter in an interactive continuable viewer)
+  //     -> TuiAppEvents.onSubagentSubmit (application-events.ts)
+  //     -> deps.subagentDelivery.subagent.prompt(...) inside runOwned
+  //     -> the REAL DirectSubagentPort reading the injected `subagents` service
+  //     -> onResult/onError -> viewer.settleSubmit (viewer-runtime.ts)
+  //     -> the current/stale draft sink.
+  // Nothing here stubs onSubagentSubmit or calls setEditorText/
+  // restoreSubagentDraft to manufacture the sink; the injected official prompt
+  // surface is the only fake.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-viewer-settle-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(80, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'viewer-settle-parent',
+    header: { id: 'viewer-settle-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'viewer-settle-child',
+    header: {
+      id: 'viewer-settle-child',
+      cwd: home,
+      createdAt: 1_700_000_000_001,
+      version: SESSION_FORMAT_VERSION,
+      isSeeded: true,
+      parentSession: parent.id,
+    },
+    events: [
+      event('turn/start', { turn: 1 }, 0),
+      event('step/start', { turn: 1, step: 1 }, 1),
+      event('user/message', {
+        id: MessageId('viewer-settle-first-prompt'),
+        role: 'user',
+        content: [{ type: 'text', text: 'child first prompt' }],
+        source: { kind: 'user' },
+      }, 2, 'append'),
+      event('assistant/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          id: MessageId('viewer-settle-first-reply'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'child first reply' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+        usage: { inputTokens: 3, outputTokens: 2 },
+        stream: [],
+      }, 3, 'append'),
+      event('step/end', { turn: 1, step: 1 }, 4),
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 5),
+    ],
+  })
+
+  // The official prompt surface the REAL DirectSubagentPort reads lazily. A
+  // held refusal lets the test move the viewer BETWEEN the send and the
+  // settlement; an accepting arm is the positive control.
+  const promptCalls: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }[] = []
+  const held: (() => void)[] = []
+  let accepted = false
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child',
+      id: child.id,
+      label: 'settle child',
+      mode: 'continuable',
+      activity: 'inactive',
+      hasChildren: false,
+      parentId: parent.id,
+      depth: 1,
+    }],
+    prompt: async (request: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }) => {
+      promptCalls.push(request)
+      if (accepted) return { messageId: 'viewer-settle-accepted' }
+      await new Promise<void>(resolve => { held.push(resolve) })
+      // A refused continuation: the Direct adapter classifies this as
+      // `stale-child`, a PROVEN rejection (never indeterminate).
+      throw { code: 'subagent/not-resumable' }
+    },
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  const openViewer = async (): Promise<void> => {
+    await tasksHandler()
+    await settle()
+    await vt.waitForRender()
+    input('\r')
+    await settle()
+    await vt.waitForRender()
+    assert.notEqual(app.getViewerGeneration(), 0, 'the continuable child viewer must mount')
+  }
+  const typeText = (text: string): void => { for (const char of text) input(char) }
+  const clearVisibleDraft = (): void => {
+    const current = app.getDraft()
+    for (let index = 0; index < current.length; index += 1) input('\x7f')
+  }
+  const noTranscriptRow = (text: string): boolean =>
+    !(probe.capturedMessages ?? []).some(message => (message.text ?? '').includes(text))
+
+  // ── 0. ACCEPTED positive control: the official prompt resolves ok, so the
+  // production settlement restores NOTHING to either draft sink.
+  await openViewer()
+  accepted = true
+  typeText('accepted follow-up')
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(promptCalls.length, 1, 'the production viewer submit must reach the official prompt exactly once')
+  assert.equal(promptCalls[0]!.childSessionId, child.id)
+  assert.deepEqual(promptCalls[0]!.content, [{ type: 'text', text: 'accepted follow-up' }])
+  assert.equal(app.getDraft(), '', 'an accepted send must not restore the visible draft')
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  await openViewer()
+  assert.equal(app.getDraft(), '', 'an accepted send must not restore into the child slot either')
+
+  // ── 1. CURRENT-viewer refusal: the production settlement merges the failed
+  // text beneath whatever the user typed while the send was in flight.
+  accepted = false
+  const generationAtCurrentSend = app.getViewerGeneration()
+  typeText('first refusal text')
+  input('\r')
+  await settle()
+  assert.equal(promptCalls.length, 2, 'the refusal submit must reach the official prompt')
+  assert.equal(app.getDraft(), '', 'the submit clears the visible draft before the async delivery')
+  typeText('newer text')
+  held.at(-1)!()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'newer text\n\nfirst refusal text',
+    'a refusal for the still-current viewer must merge the failed text under the newer visible draft')
+  assert.equal(app.getViewerGeneration(), generationAtCurrentSend, 'the current arm must not have moved the viewer')
+  assert.ok(noTranscriptRow('first refusal text'), 'a refusal must never insert a fake transcript row')
+
+  // ── 2. DELAYED refusal after the SAME child viewer closed before settle:
+  // the current (parent) editor is untouched and the text goes to the
+  // addressed child's map-only slot, surfacing only on re-entry.
+  clearVisibleDraft()
+  await settle()
+  assert.equal(app.getDraft(), '', 'the editor must be empty before the delayed send')
+  const generationAtDelayedSend = app.getViewerGeneration()
+  typeText('delayed refusal text')
+  input('\r')
+  await settle()
+  assert.equal(promptCalls.length, 3, 'the delayed submit must reach the official prompt')
+  assert.equal(app.getDraft(), '', 'the delayed submit clears the visible draft before delivery')
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  assert.ok(app.getViewerGeneration() > generationAtDelayedSend, 'Esc must close the viewer before the refusal settles')
+  assert.equal(app.getDraft(), '', 'the parent editor is untouched while the delayed send is pending')
+  held.at(-1)!()
+  await settle()
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'a stale refusal must never touch the current visible editor')
+  assert.ok(noTranscriptRow('delayed refusal text'), 'a stale refusal must never insert a fake transcript row')
+  await openViewer()
+  assert.equal(app.getDraft(), 'delayed refusal text',
+    'the stale refusal must restore into the ADDRESSED child slot (surfaced when that child is viewed again)')
+})
+
+test('T6/T7: Direct viewer shows the child’s used model and follows later request headers without a registered projection', async (t) => {
+  // The shipped `dsh-base` + TUI composition mounts `ctx.sessionProjections`
+  // but registers no `modelSelection` unit (its only registrant is the API
+  // SessionController row of the web bundle). Before this fix the child subject
+  // bar therefore rendered `model ?` although the child Session had already
+  // recorded the route it really used. This test drives the REAL runner entry
+  // (`/tasks` → viewer) against a registry that owns no `modelSelection` key and
+  // a child Session that really logged its `request/header`.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-direct-subagent-model-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(140, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const childACwd = join(home, 'model-child-a-ws')
+  const childBCwd = join(home, 'model-child-b-ws')
+  const parent = fakeSession({
+    id: 'direct-model-parent',
+    header: { id: 'direct-model-parent', cwd: home, createdAt: 1_700_000_000_100, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const childA = fakeSession({
+    id: 'direct-model-child-a',
+    header: { id: 'direct-model-child-a', cwd: childACwd, createdAt: 1_700_000_000_101, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('child a answer'),
+      modelEvent('request/header', { header: { config: { provider: 'deepseek', model: 'child-a-used-model', reasoningEffort: 'high' } }, reason: 'initial' }, 6),
+    ],
+  })
+  const childB = fakeSession({
+    id: 'direct-model-child-b',
+    header: { id: 'direct-model-child-b', cwd: childBCwd, createdAt: 1_700_000_000_102, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('child b answer'),
+      modelEvent('request/header', { header: { config: { provider: 'deepseek', model: 'child-b-used-model' } }, reason: 'initial' }, 6),
+    ],
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: childA.id, label: 'model child A', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: childB.id, label: 'model child B', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  // The process default is deliberately labelled: a leak is unmistakable.
+  const harness = makeHarness(home, [parent, childA, childB], { provider: 'global', model: 'global-default-model' }, undefined, undefined, subagents)
+  for (const id of [childA.id, childB.id]) {
+    const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: id })
+    life.defer(() => handle.dispose())
+  }
+  context = new Context()
+  // The official projection face: other keys ARE owned, `modelSelection` is
+  // ABSENT (not null) for every Session — exactly the shipped registry.
+  const ownedValues: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+    [childA.id]: { permissions: { currentValue: 'workspace-write' } },
+    [childB.id]: { permissions: { currentValue: 'read-only' } },
+  }
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values = ownedValues[String(session.header.id)] ?? {}
+      if (keys === undefined) return { values: { ...values } }
+      return {
+        values: Object.fromEntries(keys
+          .filter(key => key in values)
+          .map(key => [key, (values as Record<string, unknown>)[key]])),
+      }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await vt.waitForRender()
+
+  for (const session of [childA, childB]) {
+    ;(liveAgentOf(harness, session.id) as { status: 'idle' | 'running' }).status = 'running'
+  }
+
+  // ── T6: the REAL Task Center entry mounts child A ─────────────────────────
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'child A must mount through the real Task Center entry')
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-used-model',
+    'the committed display subject must carry the child Session’s own used route')
+  assert.equal(probe.capturedChildStatus?.composition.model?.reasoningEffort, 'high',
+    'the raw request-header effort must survive into the shared composition fact')
+  const barA = app.viewerSubjectBarRenderRowsForTest().join('\n')
+  assert.ok(barA.includes('deepseek/child-a-used-model'), `the SUBJECT BAR must show the child model:\n${barA}`)
+  assert.ok(barA.includes('@high'), `the SUBJECT BAR must keep the used effort:\n${barA}`)
+  assert.ok(barA.includes('model child A'), `the identity must still render:\n${barA}`)
+  const viewA = vt.getViewport().join('\n')
+  assert.ok(viewA.includes('[deepseek/child-a-used-model @high]'),
+    `the child FOOTER model badge must read the SAME child fact:\n${viewA}`)
+  assert.ok(!viewA.includes('model ?'), `the unknown stand-in must be gone for a child that requested:\n${viewA}`)
+  assert.ok(!viewA.includes('global-default-model'), `the global default must never stand in for the child:\n${viewA}`)
+  assert.ok(!viewA.includes('child-b-used-model'), `child B must not leak into A’s surface:\n${viewA}`)
+
+  // ── T7: while mounted, the child makes a NEW request on a DIFFERENT model ──
+  const appendToChildA = (type: string, data: unknown): SessionEvent =>
+    childA.append!(type, data) as SessionEvent
+  const explicitEvent = appendToChildA('request/header', {
+    header: { config: { provider: 'anthropic', model: 'child-a-explicit-model', reasoningEffort: 'max' } },
+    reason: 'change',
+  })
+  context.emit('session/event', childA as never, explicitEvent)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-explicit-model',
+    'EXPLICIT child route: the child’s own new request header owns the surface')
+  assert.equal(probe.capturedChildStatus?.composition.model?.provider, 'anthropic')
+  assert.equal(probe.capturedChildStatus?.composition.model?.reasoningEffort, 'max')
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('anthropic/child-a-explicit-model'),
+    'the subject bar must follow the child’s own latest request')
+
+  // DOCUMENTED REDUCTION (owner-approved scope): an unconsumed pending intent is
+  // NOT reproduced by the compat source, so a lone `model/selection` must NOT
+  // move the child surface — the latest USED route stays.
+  const pendingEvent = appendToChildA('model/selection', {
+    provider: 'google', model: 'child-a-pending-only-model', reasoningEffort: 'low',
+  })
+  context.emit('session/event', childA as never, pendingEvent)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-explicit-model',
+    'a lone child model/selection is OUT OF SCOPE for the compat read and must not move the surface')
+  assert.ok(!app.viewerSubjectBarRenderRowsForTest().join('\n').includes('child-a-pending-only-model'),
+    'the pending-only model must never reach the subject bar through this compat path')
+
+  // The PARENT switching its own route while the child is displayed must not
+  // touch the child surface.
+  const parentSwitch = parent.append!('request/header', {
+    header: { config: { provider: 'parent-provider', model: 'parent-after-switch', reasoningEffort: 'high' } },
+    reason: 'change',
+  }) as SessionEvent
+  context.emit('session/event', parent as never, parentSwitch)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-explicit-model',
+    'a parent route switch must never repaint the displayed child')
+  const viewAfterParentSwitch = vt.getViewport().join('\n')
+  assert.ok(!viewAfterParentSwitch.includes('parent-after-switch'),
+    `the parent’s new model must not leak into the child surface:\n${viewAfterParentSwitch}`)
+
+  // ── T7 continued: child A → child B through the SAME real entry ───────────
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\x1b[B')
+  await settle()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-b-used-model',
+    'child B must read ITS OWN request header')
+  const viewB = vt.getViewport().join('\n')
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('deepseek/child-b-used-model'))
+  assert.ok(!viewB.includes('child-a-explicit-model'), `A’s model must not survive into B:\n${viewB}`)
+  assert.ok(!viewB.includes('child-a-pending-only-model'), `A’s pending-only intent must not survive into B:\n${viewB}`)
+
+  // Leaving the viewer restores the MAIN subject's own facts.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(!restored.includes('‹ back'), `the subject bar must clear on exit:\n${restored}`)
+  assert.ok(!restored.includes('child-b-used-model'), `the child model must not linger on the main subject:\n${restored}`)
+})
+
+test('T6b (owner item 1): a child that USED the same route as the process default reads it through the absence branch, never as a default fill', async (t) => {
+  // The inherited-route case: the child's own `request/header` carries exactly
+  // the process default's provider/model, so a default-fill bug would render the
+  // SAME string and a broken compat read would render `model ?`. The test
+  // therefore also moves the process default afterwards and requires the child
+  // surface to stay on the route recorded in the child's OWN log.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-direct-model-inherited-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(140, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent = fakeSession({
+    id: 'inherited-parent',
+    header: { id: 'inherited-parent', cwd: home, createdAt: 1_700_000_000_300, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child = fakeSession({
+    id: 'inherited-child',
+    header: { id: 'inherited-child', cwd: join(home, 'inherited-child-ws'), createdAt: 1_700_000_000_301, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('inherited child answer'),
+      modelEvent('request/header', {
+        header: { config: { provider: 'shared', model: 'shared-inherited-model' } },
+        reason: 'initial',
+      }, 6),
+    ],
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: child.id, label: 'inherited child', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'shared', model: 'shared-inherited-model' }, undefined, undefined, subagents)
+  const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => handle.dispose())
+  context = new Context()
+  // The shipped registry: no `modelSelection` unit is registered for any Session.
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values: Record<string, unknown> = String(session.header.id) === child.id
+        ? { permissions: { currentValue: 'workspace-write' } }
+        : {}
+      if (keys === undefined) return { values: { ...values } }
+      return { values: Object.fromEntries(keys.filter(key => key in values).map(key => [key, values[key]])) }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await vt.waitForRender()
+  ;(liveAgentOf(harness, child.id) as { status: 'idle' | 'running' }).status = 'running'
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the inherited child must mount through the real Task Center entry')
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'shared-inherited-model',
+    'the child’s OWN used route must reach the display subject through the absence branch')
+  assert.equal(probe.capturedChildStatus?.composition.model?.provider, 'shared')
+  const bar = app.viewerSubjectBarRenderRowsForTest().join('\n')
+  assert.ok(bar.includes('shared/shared-inherited-model'), `the subject bar must show the inherited-and-used route:\n${bar}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model ?'), `the unknown stand-in must be gone for a child that requested:\n${view}`)
+  assert.ok(view.includes('[shared/shared-inherited-model]'), `the child footer badge must read the same fact:\n${view}`)
+
+  // DISCRIMINATOR: a process-default FILL would move here; the child's own
+  // recorded route must not.
+  const defaultModel = harness.defaultModel as { saveSelection: (next: { provider: string; model: string }) => Promise<unknown> }
+  await defaultModel.saveSelection({ provider: 'switched', model: 'switched-default-model' })
+  const refresh = child.append!('todo/write', { todos: [{ content: 'INHERITED-REFRESH', status: 'pending' }] }) as SessionEvent
+  context.emit('session/event', child as never, refresh)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'shared-inherited-model',
+    'the child surface must never follow the process default')
+  const after = vt.getViewport().join('\n')
+  assert.ok(!after.includes('switched-default-model'), `the changed process default must not leak into the child surface:\n${after}`)
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('shared/shared-inherited-model'),
+    'the subject bar still renders the child’s own used route')
+})
+
+test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost on a ≥2,000-event child Session', async (t) => {
+  // Every durable child event makes the viewer re-derive the display subject,
+  // which invokes the Direct compat read. The compat source answers from the
+  // Session's own incrementally maintained `requestHeader()` (no log scan), so
+  // this test drives the REAL routing on a 2,000+ event child Session and records
+  // a per-event DISTRIBUTION (mean/p50/p95/max) for the same 100 appends with the
+  // official `modelSelection` key absent (compat active) and present (compat
+  // skipped). Numbers are printed; the assertion is a frame-budget ceiling.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-direct-model-perf-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(120, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  // 501 legal turns = 2,004 durable events, plus the child's own request header
+  // (so the compat fold has a real value to find).
+  const bulk: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 501; turn++) {
+    bulk.push(event('turn/start', { turn }, seq++))
+    bulk.push(event('step/start', { turn, step: 0 }, seq++))
+    bulk.push(event('step/end', { turn, step: 0 }, seq++))
+    bulk.push(event('turn/end', { turn, reason: { kind: 'completed' } }, seq++))
+  }
+  bulk.push(modelEvent('request/header', {
+    header: { config: { provider: 'deepseek', model: 'perf-child-model', reasoningEffort: 'high' } },
+    reason: 'initial',
+  }, bulk.length))
+  assert.equal(bulk.length, 2005, 'the perf fixture must exceed 2,000 legal durable events')
+  const parent = fakeSession({
+    id: 'perf-parent',
+    header: { id: 'perf-parent', cwd: home, createdAt: 1_700_000_000_200, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child = fakeSession({
+    id: 'perf-child',
+    header: { id: 'perf-child', cwd: join(home, 'perf-child-ws'), createdAt: 1_700_000_000_201, version: SESSION_FORMAT_VERSION },
+    events: bulk,
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: child.id, label: 'perf child', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'global', model: 'global-default-model' }, undefined, undefined, subagents)
+  const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => handle.dispose())
+  context = new Context()
+  /** Flipped between the two measurement phases: the registry OWNS the
+   *  official key only in the control phase. */
+  let ownsOfficialKey = false
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values: Record<string, unknown> = String(session.header.id) === child.id && ownsOfficialKey
+        ? { modelSelection: { lastUsed: { provider: 'official', model: 'official-model' }, next: null } }
+        : {}
+      if (keys === undefined) return { values: { ...values } }
+      return { values: Object.fromEntries(keys.filter(key => key in values).map(key => [key, values[key]])) }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler)
+  await settle()
+  await vt.waitForRender()
+  ;(liveAgentOf(harness, child.id) as { status: 'idle' | 'running' }).status = 'running'
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the perf child must be mounted in the viewer')
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'perf-child-model',
+    'the compat read must already be live on this 2,005-event Session')
+
+  const appendAndRefresh = (label: string): void => {
+    const appended = child.append!('todo/write', { todos: [{ content: label, status: 'pending' }] }) as SessionEvent
+    context!.emit('session/event', child as never, appended)
+  }
+  // Deterministic work counter (load-independent): every full-log read the status
+  // path performs shows up here. The compat read must add ZERO log scans.
+  const originalSnapshotEvents = child.snapshotEvents
+  let logScans = 0
+  child.snapshotEvents = () => { logScans += 1; return originalSnapshotEvents() }
+  const measure = (phase: string, offset: number) => {
+    logScans = 0
+    const samples: number[] = []
+    for (let index = 0; index < 100; index++) {
+      const started = performance.now()
+      appendAndRefresh(`PERF-${phase}-${offset + index}`)
+      samples.push(performance.now() - started)
+    }
+    const sorted = [...samples].sort((left, right) => left - right)
+    const at = (quantile: number): number => sorted[Math.min(sorted.length - 1, Math.floor(quantile * sorted.length))]!
+    const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length
+    console.log(
+      `[perf] ${phase}: n=${samples.length} logScans=${logScans} mean=${mean.toFixed(3)} `
+      + `p50=${at(0.5).toFixed(3)} p95=${at(0.95).toFixed(3)} max=${sorted[sorted.length - 1]!.toFixed(3)} ms/event`,
+    )
+    return { mean, p95: at(0.95), max: sorted[sorted.length - 1]!, logScans }
+  }
+  for (let index = 0; index < 10; index++) appendAndRefresh('PERF-warmup')
+  await settle()
+  await vt.waitForRender()
+  const compat = measure('compat (modelSelection unit ABSENT)', 1000)
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'perf-child-model',
+    'PHASE PROOF: with the key absent the surface reads the 2,005-event Session’s own request header')
+  ownsOfficialKey = true
+  const official = measure('official (modelSelection unit PRESENT)', 2000)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'official-model',
+    'PHASE PROOF: once the key is owned the official value takes over (the compat read is skipped)')
+  // The load-independent assertion: enabling the compat read must not add a single
+  // Session-log scan to the refresh path (the only super-constant cost this lane
+  // exists to rule out). The wall-clock figures are printed as a distribution and
+  // guarded only by a generous stall ceiling, because the fixture's
+  // `requestHeader()` is a naive re-derivation while production's is an
+  // incrementally maintained cache — so the measured delta is an upper bound.
+  assert.equal(compat.logScans, official.logScans,
+    `the compat read must add no Session-log scan (compat ${compat.logScans}, official ${official.logScans})`)
+  console.log(`[perf] compat overhead over the official path: mean ${(compat.mean - official.mean).toFixed(3)}`
+    + ` p95 ${(compat.p95 - official.p95).toFixed(3)} max ${(compat.max - official.max).toFixed(3)} ms/event`)
+  assert.ok(compat.p95 < 50,
+    `no refresh lane may stall pathologically; measured p95 ${compat.p95.toFixed(3)} ms/event`)
 })

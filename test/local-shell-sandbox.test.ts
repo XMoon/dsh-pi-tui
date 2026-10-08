@@ -11,6 +11,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../src/tui-app.ts'
+import { SHELL_OUTPUT_CAP_LINES } from '../src/client/shell/output-capture.ts'
 import {
   disposeContext,
   fakeSession,
@@ -203,6 +204,24 @@ test('sandbox `!` success resolves through execute/result with the command and e
     'execute must receive the spec object returned by resolve')
 })
 
+test('a truncated sandbox run settles with the production retention report (canonical byte units)', async (t) => {
+  // More lines than the retained-tail cap: the settle must report the ACTUAL
+  // retained values (the cap), the real received total, and byte totals
+  // through the canonical `domain/media/format` formatter.
+  const stdout = `${Array.from({ length: SHELL_OUTPUT_CAP_LINES + 1000 }, (_, index) => `line ${index}`).join('\n')}\n`
+  const shell = makeShellFake({ result: async () => runResult({ exitCode: 0, stdout }) })
+  const mounted = await mountSandboxRunner(t, shell)
+  mounted.submit('!make loud')
+  const view = await waitForView(mounted, 'output truncated: retained', 'the truncated settle')
+  assert.match(
+    view,
+    new RegExp(`output truncated: retained \\d+\\.\\d (KiB|MiB) display / ${SHELL_OUTPUT_CAP_LINES} lines`),
+    `the ACTUAL retained values in canonical display units:\n${view}`,
+  )
+  assert.ok(view.includes(`(${SHELL_OUTPUT_CAP_LINES + 1000} lines total)`), `the real received total:\n${view}`)
+  assert.ok(view.includes('exit 0'), `the exit marker still settles the card:\n${view}`)
+})
+
 test('a nonzero sandbox exit resolves (never rejects) into an error card', async (t) => {
   const shell = makeShellFake({
     result: async () => runResult({ exitCode: 3, stdout: '', stderr: 'boom' }),
@@ -314,12 +333,16 @@ test('a synchronous resolve() throw settles the card like a failed run', async (
   assert.equal(shell.executeCount(), 0, 'a refused resolve must never reach execute')
 })
 
-test('the sandbox preference without a composition shell capability notifies and falls back to the local spawn', async (t) => {
+test('the sandbox preference without a composition shell capability fails closed and executes nothing (shell amendment)', async (t) => {
   const mounted = await mountSandboxRunner(t, undefined)
   mounted.submit('!echo fallback-ok')
-  await waitForView(mounted, 'fallback-ok', 'the local spawn fallback card')
-  assert.ok(mounted.notices.some(notice => notice.includes('sandbox unavailable')),
-    `the downgrade must be surfaced, not silent:\n${mounted.notices.join('\n')}`)
+  const view = await waitForView(mounted, 'sandbox policy is unavailable', 'the fail-closed card')
+  // CARRIER/POLICY fail-closed (M3-4 PR3): the run must NOT degrade to the
+  // bypass spawn — the card carries the unavailable message and NEVER the
+  // command's own output or an exit marker. (The command name itself appears
+  // in the echoed `$ command` header; that is the card's args, not output.)
+  assert.ok(!view.includes('exit 0'), `an unavailable sandbox policy must not execute the command:\n${view}`)
+  assert.ok(!view.includes('exit 1'), `an unavailable sandbox policy must not execute the command:\n${view}`)
 })
 
 test('the default bypass preference never touches the composition shell capability', async (t) => {

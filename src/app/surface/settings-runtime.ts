@@ -21,22 +21,20 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/settings-runtime
  */
 
-import { runDetached } from '../../detached.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { serializeTuiSettingsMutation } from '../../runtime/config-port.ts'
-import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult } from '../../display-preset.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import { FooterCommandRunner } from '../../footer/command-runner.ts'
-import { activeFooterItemIds, executableCommandItemIds, FooterDynamicItemRuntime } from '../../footer/dynamic-item-runtime.ts'
-import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../footer/layout.ts'
-import { parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../footer/custom-items.ts'
-import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../../home-end-keys.ts'
-import { parseUserKeybindings } from '../../keybindings/config.ts'
-import { normalizePersistedTheme, resolveThemeSelection } from '../../theme-source.ts'
-import { wheelScrollLinesOf } from '../../wheel-scroll.ts'
-import type { Diag } from '../../diag.ts'
+import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, type DisplayPresetApplyResult } from '../../domain/display/preset.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
+import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
+import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
+import { resolveThemeSelection } from './theme-selection.ts'
+import { wheelScrollLinesOf } from '../../domain/display/wheel-scroll.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { Backend } from '../../runtime/backend.ts'
-import type { StatusSnapshot } from '../../status/types.ts'
+import type { StatusSnapshot } from '../../domain/status/types.ts'
 
 /** The Direct settings document read (the adapter stays in the composition
  *  root); the type is DERIVED from the real persistence helper so this owner
@@ -47,9 +45,15 @@ export type SettingsDocLike = Parameters<typeof serializeTuiSettingsMutation>[0]
 export type FooterSettingsDoc = { readonly footer: string; readonly footerLayout?: unknown; readonly footerCustomItems?: unknown }
 
 /** The extension theme registry the boot display reads (official registry,
- *  injected so this owner never reaches the extension service itself). */
+ *  injected so this owner never reaches the extension service itself). The
+ *  NAME-addressed lookup stays a narrow structural read — never the concrete
+ *  registry class. */
 export interface BootThemeExtensions {
-  readonly themes: Parameters<typeof resolveThemeSelection>[1]
+  readonly themes: NonNullable<Parameters<typeof resolveThemeSelection>[1]> & {
+    /** The source-qualified selectable value behind one plugin display NAME
+     *  (the Phase-4 advanced host-state `setTheme(name)` contract). */
+    selectableValueForName(name: string): string | undefined
+  }
   _recordRegistryHealthRef(kind: string, id: string): unknown
   _clearRegistryError(ref: unknown): void
   _recordRegistryError(ref: unknown, error: unknown): void
@@ -144,50 +148,35 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   // subscription are A4-6 surface-owned (`surface.attachTasks` +
   // `surface.disposeJobEvents` / `disposeJobObservation` / `disposeTaskBrowser`);
   // the runner no longer holds their slots.
-  // M5: the footer command lifecycle slots. Hoisted here for TWO TDZ
-  // guards: cleanup releases them, and — unlike the slots above —
-  // `onTerminalResize` (handed to the surface mount below) READS
-  // footerCommandRunner during startup itself: the first surface-geometry
-  // sync fires it (lastCommandWidth starts at 0), and a keybinding
-  // rebuild's invalidate → requestRender is reachable before the footer
-  // settings block runs. Declaring at the footer block left the read in
-  // the temporal dead zone — a ReferenceError swallowed by the keybinding
-  // apply's fail-soft catch and misreported as a keybindings failure
-  // (guarded by the startup-eager-callback audit in test/rules.test.ts).
-  
-  let footerCommandRunner: FooterCommandRunner | undefined
-
-  let footerCommandUnsubscribe: (() => void) | undefined
-
-  // PR D: the custom command item runtime (one runner per ACTIVE layout
-  // command item). Hoisted with the whole-footer slots for the same TDZ
-  // guards; cleanup disposes it so no child/timer survives a remount.
-  
-  let footerDynamicItemRuntime: FooterDynamicItemRuntime | undefined
+  // M5/TS5: the footer command RESOURCES (the whole-footer runner, its status
+  // subscription and the per-item runners) are owned by the TUI footer runtime
+  // (`tui/footer/runtime.ts`); this owner drives them through the narrow
+  // mounted-surface capabilities. The TuiApp field exists from construction, so
+  // the startup-eager `onTerminalResize` read can never hit a temporal dead
+  // zone (the former reason these slots were hoisted here).
 
   // M3: the user-orchestrable keybinding manager (the app built it with
   // the builtin defaults). Apply safe mode, the persisted user
   // overrides, and the plugin contributions — all fail-soft (a bad entry
   // is a diagnostic, never a startup failure; plan §16/§17).
   
-  let keybindings: ReturnType<TuiApp['keybindingsManager']> | undefined
-  const keybindingsManager = (): ReturnType<TuiApp['keybindingsManager']> =>
-    (keybindings ??= deps.surface.app.keybindingsManager())
-
   const applyUserKeybindings = (): void => {
     // Fail-soft reload (review finding): a transient settings read
     // error must never abort the startup application — the failure is
     // a diagnostic. The catch is also the net for errors thrown AFTER
     // the rebuild succeeded: HostKeybindingManager.rebuild() is ordered
     // keymap-first, invalidate-last, so a throwing UI invalidation (a
-    // startup-eager callback — the footerCommandRunner TDZ was exactly
+    // startup-eager callback — the footer-command slot TDZ was exactly
     // this) leaves the NEW keymap active. The diagnostic must not claim
     // a last-known-good rollback that did not happen; /keybindings
-    // reload re-applies from the document either way.
+    // reload re-applies from the document either way. The TUI owns the
+    // parse/apply semantics (TS5 §12); the diagnostics ride the same sink
+    // order as before the move.
     try {
-      const parsed = parseUserKeybindings(deps.tuiSettings?.get().keybindings)
-      for (const message of parsed.diagnostics) deps.diag.warn('keybindings', { message })
-      keybindingsManager().setUserConfiguration(parsed)
+      deps.surface.app.applyUserKeybindings(
+        deps.tuiSettings?.get().keybindings,
+        (message) => deps.diag.warn('keybindings', { message }),
+      )
     } catch (error: unknown) {
       deps.diag.warn('keybindings', { error: String(error), message: 'keybindings startup apply failed — the error may come from the post-rebuild UI invalidation, so the keymap may already be rebuilt; /keybindings reload re-applies it' })
     }
@@ -211,17 +200,8 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   
   let footerCommandItemWarningShown = false
 
-  // footerCommandRunner / footerCommandUnsubscribe are hoisted ABOVE
-  // cleanup (TDZ guard — the startup-eager onTerminalResize callback
-  // reads the runner before this block can run); only the warning
-  // latch lives here.
-  
   const disableFooterCommand = (): void => {
-    footerCommandUnsubscribe?.()
-    footerCommandUnsubscribe = undefined
-    footerCommandRunner?.dispose()
-    footerCommandRunner = undefined
-    deps.surface.app.setFooterCommandRows(undefined)
+    deps.surface.app.disableFooterCommand()
   }
 
   const busyEnter = (): string | undefined => deps.tuiSettings?.get().busyEnter
@@ -262,22 +242,9 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     const syncDynamicCommandItems = (authorizedIds: ReadonlySet<string>): void => {
       const trustedCommands = customResult.items
         .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
-      if (footerDynamicItemRuntime === undefined) {
-        footerDynamicItemRuntime = new FooterDynamicItemRuntime({
-          snapshot: () => deps.surface.status.snapshot(),
-          width: () => deps.surface.app.getTerminalWidth(),
-          height: () => deps.surface.app.getTerminalHeight(),
-          signal: deps.signal,
-          onValue: (id, value) => deps.surface.app.setFooterCommandItemValue(id, value),
-          onNotifyOnce: (message) => deps.surface.app.notify(message, 'error'),
-        })
-      }
-      const executableIds = executableCommandItemIds(
-        trustedCommands,
-        authorizedIds,
-        deps.surface.app.getEffectiveFooterLayout(),
-      )
-      footerDynamicItemRuntime.sync(trustedCommands, executableIds)
+      // The TUI runtime reconciles the per-item runners against the trusted
+      // definitions, the USER-authorized ids and the CURRENT effective layout.
+      deps.surface.app.syncFooterCommandItems(trustedCommands, authorizedIds, deps.signal)
       if (!footerCommandItemWarningShown) {
         const mergedCommands = parseFooterCustomItems(doc.footerCustomItems).items
           .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
@@ -348,29 +315,12 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
         syncDynamicCommandItems(authorizedIds)
         return
       }
-      if (footerCommandRunner === undefined) {
-        footerCommandRunner = new FooterCommandRunner({
-          config,
-          snapshot: () => deps.surface.status.snapshot(),
-          width: () => deps.surface.app.getTerminalWidth(),
-          height: () => deps.surface.app.getTerminalHeight(),
-          onOutput: (rows) => deps.surface.app.setFooterCommandRows(rows),
-          onNotifyOnce: (message) => deps.surface.app.notify(message, 'error'),
-          signal: deps.signal,
-        })
-        // Status changes refresh the command (coalesced to its interval).
-        footerCommandUnsubscribe = deps.surface.status.subscribe(() => footerCommandRunner?.requestRefresh())
-      } else {
-        footerCommandRunner.setConfig(config)
-      }
-      // The native layout stays untouched while command mode is armed:
-      // a failed command (undefined rows) falls back to the user's OWN
+      // The TUI runtime arms (or re-arms) the whole-footer runner, wires its
+      // status subscription and suspends the per-item runners it covers. The
+      // native layout stays untouched while command mode is armed: a failed
+      // command (undefined rows) falls back to the user's OWN
       // default/compact/custom layout, never the builtin default.
-      footerCommandRunner.requestRefresh()
-      // The whole-footer command surface covers the native items:
-      // per-item command runners must not keep spawning in the
-      // background (plan §7.2 — suspend/dispose).
-      footerDynamicItemRuntime?.sync([], new Set<string>())
+      deps.surface.app.applyFooterCommandConfig(config, deps.signal)
       return
     }
     disableFooterCommand()
@@ -515,7 +465,9 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * step must precede the first fullscreen entry.
    */
   const applyBootDisplay = (): void => {
-  applyHomeEndKeyMode(homeEndKeysModeOf(deps.tuiSettings?.get().homeEndKeys))
+  // The Home/End preset is TUI-owned (TS5 §12): the application owner hands
+  // the persisted raw value to the mounted surface.
+  deps.surface.app.setHomeEndMode(deps.tuiSettings?.get().homeEndKeys)
   // The wheel step is a constructor-time alt-screen option: hand the
   // preference to the app BEFORE the first fullscreen entry, or the
   // first alt screen would still scroll 1 line per wheel event (the
@@ -588,25 +540,25 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   /** The env-driven safe-keybindings mode (the policy lives with the settings). */
   const applySafeKeybindingsMode = (): void => {
     if (process.env.DSH_PI_TUI_SAFE_KEYBINDINGS !== '1') return
-    keybindingsManager().setSafeMode(true)
+    deps.surface.app.setSafeKeybindingsMode(true)
     deps.diag.info('keybindings', { safeMode: true })
   }
-  const requestFooterCommandRefresh = (): void => { footerCommandRunner?.requestRefresh() }
+  const requestFooterCommandRefresh = (): void => { deps.surface.app.requestFooterCommandRefresh() }
   /**
    * Release the footer command runner + per-item runtime. The lifecycle abort
    * already disposes an armed runner through its own abort listener; the
    * explicit unsubscribe + dispose keeps the release symmetric with the arm
    * path and also covers the teardown-before-arm window (both idempotent).
+   * Every owner slot is retired before its callback runs, so a throwing
+   * unsubscribe/runner disposal cannot strand its siblings (M3-6 PR3).
    */
   const disposeFooterCommand = (): void => {
-    footerCommandUnsubscribe?.()
-    footerCommandUnsubscribe = undefined
-    footerCommandRunner?.dispose()
-    footerCommandRunner = undefined
-    // PR D: release every per-item command runner (children, timers,
-    // abort listeners) before the app dies.
-    footerDynamicItemRuntime?.dispose()
-    footerDynamicItemRuntime = undefined
+    // The TUI footer runtime retires its own slots before their callbacks run
+    // (the whole-footer runner, its status subscription and every per-item
+    // runner), so no child/timer/abort listener survives.
+    runSyncDisposalSteps('footer command disposal', [
+      () => deps.surface.app.disposeFooterCommand(),
+    ])
   }
 
   return {

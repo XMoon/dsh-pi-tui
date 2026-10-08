@@ -12,16 +12,22 @@ import test from 'node:test'
 import {
   classifySubagentPromptError,
   classifySubagentPromptSettlement,
+} from '../src/runtime/subagent-outcome.ts'
+import {
   resolveSubagentSettleTarget,
   subagentPromptDisposition,
-  submitSubagentPrompt,
   viewerCanonicalizeScope,
-  type SubagentPromptContentPart,
-  type SubagentPromptService,
   type SubagentSettleViewerState,
+} from '../src/app/surface/viewer-submission.ts'
+import {
+  submitSubagentPrompt,
+  type SubagentPromptService,
   type SubagentViewerSubmitDeps,
-  type SubagentViewerSubmitRequest,
-} from '../src/subagent-viewer-submit.ts'
+} from '../src/runtime/direct/subagent-direct.ts'
+import type {
+  SubagentPromptContentPart,
+  SubagentViewerSubmitRequest,
+} from '../src/runtime/subagent-port.ts'
 
 const request: SubagentViewerSubmitRequest = {
   parentSessionId: 'session-parent',
@@ -109,11 +115,14 @@ test('every submit mints a FRESH requestId (a retry is a new human prompt)', asy
   assert.notEqual(calls[0]!.requestId, calls[1]!.requestId, 'two submits never share one identity')
 })
 
-test('the prompt text runs through the SAME canonicalization as the main session (@-mention expansion)', async () => {
-  // The viewer editor keeps the concise `@src/foo.ts` form; the child
-  // model must receive the absolute path exactly like a main-session
-  // submission (expandFileMentionsForSubmit is the runner's wiring).
+test('the prompt text runs through the SAME send seam as the main session (official literal semantics)', async () => {
+  // The OFFICIAL mention semantics (M3-3A): the child model receives the
+  // mention LITERALLY — exactly the bytes a main-session submission
+  // sends — and the Host's FILE_REFERENCE_PROMPT resolves relative paths
+  // from the workspace root. The seam still routes (a future official
+  // carrier would land behind it), but no backend rewrites the text.
   const calls: RecordedCall[] = []
+  let seamCalls = 0
   const outcome = await submitSubagentPrompt(
     {
       parentSessionId: request.parentSessionId,
@@ -123,15 +132,19 @@ test('the prompt text runs through the SAME canonicalization as the main session
     },
     deps({
       subagents: () => service(calls),
-      canonicalizeText: (text) => text.replace('@src/foo.ts', '@/home/xmoon/project/src/foo.ts'),
+      canonicalizeText: (text) => {
+        seamCalls += 1
+        return text
+      },
     }),
   )
   assert.equal(outcome.kind, 'ok')
+  assert.equal(seamCalls, 1, 'the send seam ran exactly once for the text part')
   const first = calls[0]!.content[0]!
   assert.equal(first.type, 'text')
   if (first.type === 'text') {
-    assert.equal(first.text, 'review @/home/xmoon/project/src/foo.ts',
-      'the prompt content must carry the canonicalized absolute path')
+    assert.equal(first.text, 'review @src/foo.ts',
+      'the prompt content stays literal — the same bytes the main session sends')
   }
 })
 

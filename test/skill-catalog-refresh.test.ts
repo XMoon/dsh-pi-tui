@@ -10,10 +10,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshHooks } from '../src/skill-catalog-refresh.ts'
-import { createDiag } from '../src/diag.ts'
-import type { HumanSkillCatalog } from '../src/skill-catalog.ts'
-import type { SurfaceCatalogSnapshot } from '../src/surface-catalog.ts'
+import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshHooks } from '../src/app/command/catalog-refresh.ts'
+import { SupersededReadError } from '../src/runtime/read-error.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import type { HumanSkillCatalog } from '../src/domain/catalog/skill.ts'
+import type { SurfaceCatalogSnapshot } from '../src/domain/catalog/surface.ts'
 
 /** A promise the test resolves manually, to stage late completions. */
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
@@ -76,7 +77,7 @@ function scriptedHooks(script: {
   const hooks: CatalogRefreshHooks = {
     readAgent: async (agent, signal) => {
       if (script.read !== undefined) {
-        const result = script.read(agent, signal)
+        const result = script.read(agent as never, signal)
         return result instanceof Promise ? abortAware(result, signal) : result
       }
       throw new Error('unexpected read')
@@ -227,6 +228,27 @@ test('a read failure reports failed, installs nothing and keeps the transition s
   assert.deepEqual(installed, [], 'a failed read never installs (the transition commands stay)')
   assert.ok(calls.some(call => call.kind === 'transition'), 'the transition was still entered')
   assert.ok(lines.some(line => /WARN catalog unavailable/.test(line) && /registry exploded/.test(line)))
+})
+
+test('PR4 F2: a SupersededReadError from the read settles superseded (never a user-facing failure)', async () => {
+  // The provider detected a transport/ownership rollover itself (§2.2/§16 —
+  // e.g. the combined catalog read's admission-token re-check after both
+  // providers settled). That is a SUPERSESSION: no install, no WARN, and a
+  // later refresh for the replacement transport owns the next commit.
+  const { hooks, installed } = scriptedHooks({
+    read: async () => { throw new SupersededReadError('the connection changed during the catalog refresh') },
+  })
+  const { diag, lines } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const outcome = await coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: 1 },
+    agent: fakeAgent(),
+  })
+  assert.equal(outcome.kind, 'superseded')
+  assert.deepEqual(installed, [], 'a superseded transport never installs')
+  assert.equal(lines.some(line => /WARN catalog unavailable/.test(line)), false,
+    'a transport supersession is not reported as a catalog failure')
 })
 
 test('a lifecycle abort supersedes the refresh: no install, no failure report', async () => {
@@ -556,4 +578,61 @@ test('a double settled() is idempotent and cannot clear a follow-up refresh', as
   assert.deepEqual(starts, [1, 2], 'a fresh notification still starts a refresh')
   gate.settled()
   assert.deepEqual(starts, [1, 2], 'the follow-up was not cleared by the stale settle')
+})
+
+test('PR4 F2b: a FAILED commands provider degrades to an issue — the successful skills provider still updates its own field', async () => {
+  // Provider isolation (§2.2): the coordinator's mergePartial keeps the
+  // last-good HOST commands when the commands provider failed (an empty
+  // replace would erase the claim set) while a successful skills read
+  // updates the skills field. The Remote read surface expresses a commands
+  // failure as {commands: [], issues: [{provider: 'commands'}]}.
+  const first = snapshotOf({ commands: [Object.freeze({ name: 'last-good-host', description: 'h' })], skills: [Object.freeze({ name: 'old-skill', description: 'o' })] })
+  const second = Object.freeze({
+    commands: Object.freeze([]),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze([Object.freeze({ name: 'fresh-skill', description: 'f' })]),
+    issues: Object.freeze([Object.freeze({ provider: 'commands' as const, message: 'commands/list failed' })]),
+  })
+  let call = 0
+  const { hooks, installed } = scriptedHooks({
+    read: async () => { call += 1; return call === 1 ? first : second },
+  })
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  await coordinator.refresh({ source: 'live-session', target: { kind: 'agent', key: 1 }, agent: fakeAgent() })
+  const outcome = await coordinator.refresh({ source: 'reload', target: { kind: 'agent', key: 1 }, agent: fakeAgent() })
+  assert.equal(outcome.kind, 'applied', 'a commands-provider failure is not a whole-refresh failure')
+  if (outcome.kind === 'applied') {
+    assert.deepEqual(outcome.snapshot.commands.map(command => command.name), ['last-good-host'],
+      'the failed commands field keeps the LAST-GOOD host commands (mergePartial)')
+    assert.deepEqual(outcome.snapshot.skills.map(skill => skill.name), ['fresh-skill'],
+      'the successful skills provider DID update its own field')
+  }
+})
+
+test('PR4 F2a: the admission target identity is re-checked right before install (a settle→install rollover settles superseded)', async () => {
+  // The §2.2/§16 FINAL-install fence: the transport identity captured at
+  // admission must still be live immediately before installSnapshot — a
+  // same-id binding rollover in the gap between the read's settle and the
+  // synchronous install must not commit the retired snapshot.
+  const gate = deferred<SurfaceCatalogSnapshot>()
+  let identity: { marker: string } | undefined = { marker: 'binding-X' }
+  const { hooks, installed } = scriptedHooks({ read: async () => gate.promise })
+  hooks.captureTargetIdentity = () => identity
+  hooks.isTargetCurrent = captured => captured === identity
+  const { diag } = capturingDiag()
+  const coordinator = new CatalogRefreshCoordinator(hooks, new AbortController().signal, diag)
+  const refresh = coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: 1 },
+    agent: fakeAgent(),
+  })
+  // The read settles; BEFORE the install runs, the binding rolls over.
+  gate.resolve(snapshotA)
+  await Promise.resolve()
+  identity = { marker: 'binding-Y' }
+  const outcome = await refresh
+  assert.equal(outcome.kind, 'superseded',
+    'the rollover between settle and install invalidates the commit')
+  assert.deepEqual(installed, [], 'the retired snapshot never installed')
 })

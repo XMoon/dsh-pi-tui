@@ -16,25 +16,28 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -55,7 +58,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 3000, stepMs = 10
 }
 
 /** A session id with a deterministic createdAt so sort order is stable. */
-function row(id: string, createdAt: number): import('../src/sessions.ts').SessionPickerRow {
+function row(id: string, createdAt: number): import('../src/tui/pickers/sessions.ts').SessionPickerRow {
   return { id, updatedAt: createdAt, createdAt, cwd: '/ws/project-a', live: false }
 }
 
@@ -142,14 +145,23 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',
@@ -172,11 +184,11 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -189,7 +201,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
 
   const def = defs.find(entry => entry.name === 'sessions')
   assert.ok(def?.handler !== undefined, 'sessions handler missing')

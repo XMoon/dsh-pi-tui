@@ -15,10 +15,10 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { StreamingToolPreview } from '../src/tui-app.ts'
+import type { StreamingToolPreview } from '../src/app/surface/streaming-tool-preparing.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import type { DisplayState } from '../src/display-preset.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -68,7 +68,9 @@ const preparingRows = (view: string): number[] =>
   view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
 
 const workHeaders = (view: string): string[] =>
-  view.split('\n').filter(line => /^\s*(?:▸|▾) Activity(?: | ·|$)/.test(line))
+  // A Work header is `Activity`, or `Thought` for a historical think-only
+  // span (the 2026-09-29 compact historical compaction).
+  view.split('\n').filter(line => /^\s*(?:▸|▾) (?:Activity|Thought)(?: | ·|$)/.test(line))
 
 // --- S5: Preparing becomes durable ----------------------------------------
 

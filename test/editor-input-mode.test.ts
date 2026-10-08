@@ -1,5 +1,5 @@
 /**
- * Pure tests for the editor input-mode codec (src/editor-input-mode.ts):
+ * Pure tests for the editor input-mode codec (src/tui/interaction/editor-input-mode.ts):
  * the `!` / `!!` prefixes are editor STATE, never document text — the
  * codec serializes a mode + body back into the wire form at host
  * boundaries and decodes serialized lines (history entries, pastes,
@@ -14,7 +14,7 @@ import {
   serializeEditorInput,
   serializedDraftHasPayload,
   shellPrefixForMode,
-} from '../src/editor-input-mode.ts'
+} from '../src/tui/interaction/editor-input-mode.ts'
 
 test('shellPrefixForMode maps the three modes to their prefixes', () => {
   assert.equal(shellPrefixForMode('prompt'), '')

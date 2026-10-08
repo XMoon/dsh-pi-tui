@@ -24,7 +24,7 @@ its architecture interface (`matchesKey(data, 'ctrl+o')` scattered across
 so a future user override only touches the keymap, never a business
 handler.
 
-## The modules (`src/keybindings/`)
+## The modules (`src/tui/keybindings/`)
 
 | Module | Role |
 |---|---|
@@ -42,7 +42,7 @@ handler.
 
 ## The input ladder (what must not be broken)
 
-The `InputRouter` (input-router.ts) keeps its protocol/capture/focus
+The `InputRouter` (`src/tui/interaction/input-router.ts`) keeps its protocol/capture/focus
 precedence — the keymap is consulted ONLY when the ladder allows
 keybinding resolution. The plan is explicit: **do not delete the
 InputRouter**. The host ladder in `handleInputCore` is:
@@ -176,7 +176,7 @@ configurable action first (plan §3.3).
 The `tui-app` plugin's profile-owned Config, field `keybindings` — a
 whole-value volatile raw field since DSH 0.1.7 (the retired `dsh-pi-tui`
 settings namespace is only a legacy-migration input). The parser in
-`src/keybindings/config.ts` remains the only validation authority:
+`src/tui/keybindings/config.ts` remains the only validation authority:
 
 ```yaml
 keybindings:
@@ -290,7 +290,7 @@ Host code must not hard-code physical keys in a way that can drift from
 the user's live bindings:
 
 - **The single source of truth for DEFAULT keys is `definitions.ts`**
-  (plus the `RESERVED_HOST_KEYS` inventory in keybinding-registry.ts).
+  (plus the `RESERVED_HOST_KEYS` inventory in `extension/internal/keybinding-registry.ts`).
   `src/tui-app.ts` and `src/index.ts` carry a header note pointing here.
 - **Keyboard exit requests use same-key confirmation.** Every effective exit
   request that reaches the Host — including full `<leader>X` sequences — arms
@@ -308,9 +308,20 @@ the user's live bindings:
   keys). Every other mention is shorthand for the default binding and
   must not be relied on as the live binding.
 - **The static gate** also rejects hard-coded chord labels in
-  user-facing string literals (`src/index.ts`, `src/commands.ts`,
-  `src/tui-app.ts`), with a documented allowlist for fork editor-level
-  keys (Ctrl+Home/End).
+  user-facing string literals. The scan enumerates EVERY production module
+  under `src/tui/**` recursively (`src/tui/keybindings/**` included, TS5
+  §18.1), plus `src/index.ts`, `src/commands.ts` and `src/tui-app.ts`, and
+  exempts only individual POSITIONS with a documented rationale: fork
+  editor-level keys (Ctrl+Home/End), the keybinding authority's
+  machine-readable vocabulary (the canonical KeyId grammar tables, the
+  KeyId→label map, the pi-tui binding presets, the shared terminal-ambiguous
+  key inventory) and the diagnostics that NAME a fixed key. Each authority
+  exemption is scoped to its OWNING FILE and its EXACT trimmed line, so it
+  fails closed — editing that line, appending a label to it, or reusing the
+  fragment in another module drops the exemption and the gate re-flags it.
+  Its host-interaction chord scan follows the owner: the TuiApp facade
+  remainder plus `src/tui/interaction/approval-runtime.ts`, while focused
+  components keep their own fixed keys.
 
 ## Revision history and convergence
 
@@ -331,7 +342,7 @@ current code implements:
 
 **Canonical physical identity.** `esc`/`escape`, `return`/`enter` and
 modifier order collapse to ONE key identity at every rule entry point
-(`src/keybindings/key-identity.ts`) — aliases can never bypass conflict,
+(`src/tui/keybindings/key-identity.ts`) — aliases can never bypass conflict,
 leader collision or dedup.
 
 **Single effective rule model.** The keymap compiles `declared` rules,

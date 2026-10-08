@@ -2,14 +2,16 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { TuiApp, type QueueItem, type StreamingToolPreview } from '../src/tui-app.ts'
+import { TuiApp, type QueueItem } from '../src/tui-app.ts'
+import type { StreamingToolPreview } from '../src/app/surface/streaming-tool-preparing.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import {
   removeStreamingToolPreview,
   streamingToolPreviewSnapshot,
   upsertStreamingToolPreview,
-} from '../src/streaming-tool-preparing.ts'
-import { RendererRegistry } from '../src/renderer-registry.ts'
+} from '../src/app/surface/streaming-tool-preparing.ts'
+import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
+import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -285,7 +287,7 @@ test('formal Preparing handoff does not add a second blank row', async () => {
       }
       upsertStreamingToolPreview(previews, {
         callId: '', turn: 1, step: 1, index: 0, name: 'edit', argumentsDelta: 'x'.repeat(900),
-      })
+      }, toolSummaryKeys)
       folder.applyLiveInput(delta)
       show(app, folder, streamingToolPreviewSnapshot(previews))
       await vt.waitForRender()
@@ -301,7 +303,7 @@ test('formal Preparing handoff does not add a second blank row', async () => {
       }
       upsertStreamingToolPreview(previews, {
         callId: 'formal-edit', turn: 1, step: 1, index: 0, name: 'edit',
-      })
+      }, toolSummaryKeys)
       folder.applyLiveInput(blockEnd)
       show(app, folder, streamingToolPreviewSnapshot(previews))
       await vt.waitForRender()

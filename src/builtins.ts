@@ -15,9 +15,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { dshVersion } from './dsh-version.ts'
+import { bundleVersion, dshVersion } from './client/launcher/version.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from './extensions.ts'
 import type { DockItem, HeaderBadge, StyledSpan } from './extension/public-types.ts'
 import { TUI_STARTUP_SERVICE } from './startup.ts'
@@ -27,16 +25,6 @@ export const name = 'pi-tui-builtins'
 
 /** The builtins mount only when the TUI startup flags were parsed. */
 export const inject = [TUI_STARTUP_SERVICE, PI_TUI_EXTENSIONS_SERVICE]
-
-/** The `@xmoon76/dsh-pi-tui` package version (dist/extensions.mjs → ../package.json). */
-function packageVersion(): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: string }
-    return pkg.version ?? '0.0.0'
-  } catch {
-    return '0.0.0'
-  }
-}
 
 /**
  * Register the first-party chrome contributions. The turn/step footer
@@ -63,8 +51,8 @@ export function apply(ctx: Context): void {
     description: 'The dsh and bundle versions (first-party builtin).',
   }, {
     text: installedDsh === undefined
-      ? `tui-v${packageVersion()}`
-      : `dsh-${installedDsh} · tui-v${packageVersion()}`,
+      ? `tui-v${bundleVersion()}`
+      : `dsh-${installedDsh} · tui-v${bundleVersion()}`,
     tone: 'info',
   })
 
@@ -79,8 +67,20 @@ export function apply(ctx: Context): void {
     description: 'The todo summary line (first-party builtin).',
   }, { label: [] })
 
-  const renderTodoDock = (state: { activity: { todoSummary?: string } }): void => {
-    const summary = state.activity.todoSummary
+  const renderTodoDock = (state: {
+    readonly activity: { readonly todoSummary?: string }
+    readonly session: { readonly displaySubject?: { readonly todoSummary?: string } }
+  }): void => {
+    // The chrome follows the DISPLAY SUBJECT (M3-5 PR1): while a child viewer is
+    // mounted the host publishes the child's own state additively on
+    // `session.displaySubject`, and the live-session `activity.todoSummary` keeps
+    // its v2 meaning (the live session's list). The choice is by SUBJECT, never
+    // by field absence: a mounted display subject with no summary (an empty or
+    // unavailable child todo list) hides the item instead of falling back to the
+    // live session's — which would print the parent's list on the child surface.
+    const summary = state.session.displaySubject === undefined
+      ? state.activity.todoSummary
+      : state.session.displaySubject.todoSummary
     if (summary === undefined || summary === '') {
       todoDock.replace({ label: [] })
       return

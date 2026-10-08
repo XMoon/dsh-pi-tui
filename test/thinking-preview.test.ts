@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { thinkingPreviewTail } from '../src/thinking-preview.ts'
+import { thinkingPreviewTail } from '../src/tui/components/transcript/thinking-preview.ts'
 
 test('thinkingPreviewTail leaves a line that fits untouched', () => {
   assert.equal(thinkingPreviewTail('hello', 5), 'hello')

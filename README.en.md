@@ -54,17 +54,20 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.0` (stable / `@latest`) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Current stable line; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
+| `0.5.1` (stable / `@latest`) | `dsh-v0.2.0-rc.2` | Current stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
+| `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. The `0.5.0` line unifies its
-whole DSH peer floor at `>=0.1.7-rc.2` (the rc.2 preset registry peers
-`dsh-agent` exactly, so a wider legacy floor no longer satisfies a standalone
-tarball install), while its exact validation and recommended upgrade target is
-the published `0.2.0-rc.1` family; older runtimes fail at the normal
+Do not mix the stable and `@next` prerelease lines. `0.5.1` lifts the whole DSH
+peer floor to `>=0.2.0-rc.2`: the Question lifecycle
+consumes contracts published only in rc.2 (the `userQuestions.attachWait`/
+`answer` Remotes and the `userQuestions` Session projection), so mixing in the
+rc.1 family would be a false compatibility statement. The previous stable `0.5.0`
+line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
+older runtimes fail at the normal
 incompatible-runtime boundary, so install the paired TUI line from the table
 above. The startup notice
 is best-effort rather than a Loader startup-order guarantee. See the [full
@@ -253,17 +256,49 @@ The editor supports two Shell modes:
 ! git status
 ```
 
-Runs a local command and submits its output into the current Session.
+Runs the command in the Host environment and submits its output into the current Session.
 
 ```text
 !! git status
 ```
 
-Runs the command locally only. Its output is not added to model context.
+Runs the command in the Host environment as well; its output stays out of model context (card display only).
 
 `!` / `!!` are editor modes rather than plain text prefixes. The prompt and completion behavior switch together with the active mode.
 
 Shell cards show a bounded output preview by default. `Ctrl+O` expands the retained output — except in fullscreen Focus, where Ctrl+O owns the Thought roots and the shell cards keep their folded state.
+
+### Git commit attribution (optional)
+
+When enabled, dsh-pi-tui instructs the Agent to add the official attribution trailers when it creates Git commits:
+
+```text
+Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>
+```
+
+It is **off by default**. Three modes are supported:
+
+```text
+off            no attribution guidance (default)
+product        the official Co-Authored-By trailer
+product-model  official trailer + Assisted-By: <provider>/<model>
+```
+
+This is **Agent guidance (a prompt policy), not repository-level enforcement**:
+dsh-pi-tui installs no Git hooks, rewrites no `git commit` command, and probes
+no repository. The `provider`/`model` in `product-model` come straight from
+DSH's official model selection (a model switch takes effect on the next
+request).
+
+Boundaries:
+
+- `!` / `!!` user shell commands and commits from your own terminal are completely untouched;
+- no `prepare-commit-msg` hook is installed and existing hooks are never modified;
+- **not effective under the `minimal` preset**: its persona is a complete system prompt
+  (`complete: true`) that replaces every other section — the same existing behavior for the
+  other TUI guidance (progress updates, response style, focus);
+- no GitHub credentials or API are required; the Author/Committer identity is never modified;
+- a model may in theory ignore or mis-transcribe the instruction — this is the accepted tradeoff: low-intrusion guidance instead of a full Git lifecycle subsystem.
 
 ### File references and images
 
@@ -304,6 +339,29 @@ The `Icon style` option in `/settings` switches the TUI's structural icons:
 `Emoji` (default, colorful), `Symbols` (compact single-cell terminal
 symbols), or `Minimal` (decorative icons hidden; only status/interaction
 markers remain). Switching applies immediately and persists.
+
+The `Terminal progress` row in `/settings` selects the native terminal status
+reporting in four modes: `9;4+7501` (default — both the OSC 9;4 progress bar and
+the OSC 7501 semantic state), `9;4` (progress-bar compatibility only), `7501`
+(semantic state only: working, waiting for approval/answer, done, error) and
+`Off` (clear and stop reporting). Switching applies immediately; done and error
+are reported only once a real run's last turn result is proven, while a
+cancelled or interrupted run returns to idle. A persisted `On` reads as the
+dual-protocol default.
+
+Terminal compatibility: a terminal that does not know OSC 7501 simply ignores
+it — Ghostty's GUI currently shows the OSC 9;4 progress bar and not the 7501
+semantic state, which is expected and not a reporting failure. Inside tmux and
+other terminal multiplexers an unknown OSC may not be forwarded to the outer
+terminal (this feature deliberately implements no tmux DCS passthrough and does
+not change multiplexer settings); use an outer terminal that supports it when
+the state must survive a multiplexer. The OSC 7501 semantic state describes the
+current Main Agent only.
+
+This project's own Remote composition (experimental, our Host) reports the same
+state: the Host side is served by this extension's private Host status stream and
+shares ONE interval classifier with Direct. **A third-party DSH Host without this
+extension's Host plugin is not supported** (it has no equivalent event source).
 
 Slash Commands registered by other plugins through `ctx.commands` are discovered automatically.
 
@@ -352,7 +410,7 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | `Tab`         | Autocomplete slash commands and file paths          |
 | `@`           | File completion                                     |
 | `!`           | Enter Shell mode                                    |
-| `!!`          | Enter local-only Shell mode                         |
+| `!!`          | Enter Session-excluded Shell mode                   |
 
 Use `/help` inside the TUI for the current command and keybinding list. The table above shows the defaults; after customization, `/help` and `/keybindings` show the effective keys.
 
@@ -598,8 +656,8 @@ This section contains DSH compatibility and CI validation details only; ordinary
 ### npm mode (current `next`)
 
 The current compatibility-train line is npm mode: it targets the published
-`dsh-v0.2.0-rc.1` family declared by this checkout's `package.json` and
-resolved by its lockfile (the runtime peer floor stays `>=0.1.7-rc.2`). The
+`dsh-v0.2.0-rc.2` family declared by this checkout's `package.json` and
+resolved by its lockfile (the runtime peer floor is also `>=0.2.0-rc.2`). The
 isolated npm driver installs that exact
 family from the public registry and exercises the TUI build/test/package path:
 

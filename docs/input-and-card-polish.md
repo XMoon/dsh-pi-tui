@@ -1,4 +1,4 @@
-# Input and card polish: bash completion, local-shell sandbox, question answers, goal cards, todo dock click, JSON folded previews, shell editor mode
+# Input and card polish: bash completion, user-shell sandbox policy, question answers, goal cards, todo dock click, JSON folded previews, shell editor mode
 
 Seven small, independent surface improvements, designed together because they
 land in the same release cycle. Each section records the decision, the
@@ -9,7 +9,7 @@ kept as-is.
 | # | Topic | Chosen approach |
 |---|---|---|
 | 1 | `!` / `!!` bash completion | Real-shell `compgen` bridge (command names + paths + a small subcommand table) |
-| 2 | `!` / `!!` sandbox | New `/settings` row, default **bypass** (pi/kimi parity), opt-in sandbox |
+| 2 | `!` / `!!` sandbox | New `/settings` row (Host user-shell policy), default **bypass** (pi/kimi parity), opt-in sandbox |
 | 3 | `ask_user_question` answers card | Folded: `N/M answered` summary; expanded: per-question answer lines |
 | 4 | Goal cards (`get_goal`/`create_goal`/`update_goal`) | Folded: goal summary; expanded: field lines; named headers |
 | 5 | Todo dock click (fullscreen) | Map the dock summary row to `toggleTodoPanel()` |
@@ -33,8 +33,8 @@ maintaining a parallel command database.
 
 ### Design
 
-New module `src/shell-completion.ts`, consumed by `MentionProvider`
-(`src/mentions.ts`). The provider detects a `!`-prefixed line and delegates to
+New module `src/client/shell/compgen.ts`, consumed by `MentionProvider`
+(`src/tui/interaction/autocomplete/provider.ts`). The provider detects a `!`-prefixed line and delegates to
 the shell bridge; every other line keeps the current behavior.
 
 **Trigger rules** (inside a `!`/`!!` line only):
@@ -96,10 +96,10 @@ Decisions that matter:
 
 **Touch points**
 
-- `src/shell-completion.ts` — new module (bridge + cache + subcommand table).
-- `src/mentions.ts` — `MentionProvider.getSuggestions` branches on a
+- `src/client/shell/compgen.ts` — new module (bridge + cache + subcommand table).
+- `src/tui/interaction/autocomplete/provider.ts` — `MentionProvider.getSuggestions` branches on a
   `!`-line; `applyCompletion` routes command-name items.
-- `src/tui-editor.ts` — no change needed (the fork's autocomplete machinery
+- `src/tui/interaction/tui-editor.ts` — no change needed (the fork's autocomplete machinery
   already re-triggers after input; the provider swap is transparent).
 
 **Tests**
@@ -115,7 +115,17 @@ Decisions that matter:
 
 ---
 
-## 2. Local-shell sandbox: `/settings` row, default bypass
+## 2. User-shell sandbox policy: `/settings` row, default bypass
+
+> Terminology note (shell amendment, M3-4 PR3): the `!`/`!!` shell is the
+> **user shell**, executed in the **Host execution environment**. `bypass` and
+> `sandbox` are Host-side execution policies — `bypass` never means "runs on
+> the Client machine" and `sandbox` never means "runs on the Host machine".
+> `!` is the context shell (result enters Session/model); `!!` is the
+> session-excluded / presentation-only shell (result never enters
+> Session/model, but execution still uses the Session's Host workspace).
+> Where older text below says "local", read it as the Direct in-process
+> deployment of the SAME Host-owned execution, never as machine locality.
 
 ### Why
 
@@ -133,27 +143,33 @@ inconsistent with both references.
 New TUI settings field `localShellSandbox: 'bypass' | 'sandbox'`, **default
 `bypass`** (pi/kimi parity). Persisted in the existing TUI settings document
 (`settingsNamespace('tui')`, `src/index.ts` `tuiSettings` registration —
-same document as `busyEnter`).
+same document as `busyEnter`). The persisted key keeps its historical name
+(`localShellSandbox`); its meaning is the **Host user-shell execution
+policy**, never an execution locality.
 
-- `/settings` row (in `src/commands.ts`'s settings panel, next to
+- `/settings` row (in `src/tui/commands/settings.ts`'s settings panel, next to
   `busy-enter`):
 
   ```text
   id:          'local-shell-sandbox'
-  label:       'Local shell sandbox'
-  description: '! / !! commands run outside the dsh sandbox (bypass, default) or under the sandbox policy'
+  label:       'User shell sandbox policy'
+  description: '! / !! execute in the Host environment outside the dsh sandbox (bypass, default) or under the sandbox policy'
   values:      ['bypass', 'sandbox']
   ```
 
   `onChange` persists through `tuiSettings.replace({ ...doc, localShellSandbox: value })`
   (same pattern as the `busy-enter` row).
 
-- `runLocalShell` (`src/index.ts`): read the preference once per run.
-  - `bypass` (default): execute through the **existing spawn path** — the
-    current `ctx.shell === undefined` fallback, promoted to the primary
-    path. It already has everything: bounded tail capture, 0600 full-output
-    temp file, abort via `localShellController`, per-stream `StringDecoder`.
-  - `sandbox`: keep the current `ctx.shell` resolve/run path unchanged.
+- The user-shell execution path (`src/app/submission/user-shell.ts` reads the
+  preference once per run and hands it to the `HostUserShellPort` /
+  `Backend.hostUserShell`, M3-4 PR3):
+  - `bypass` (default): execute through the Direct Host adapter's plain
+    spawn path — bounded tail capture, 0600 full-output temp file, abort via
+    `localShellController`, per-stream `StringDecoder`.
+  - `sandbox`: execute through the Direct Host adapter's `ctx.shell`
+    resolve/run path (Host sandbox policy).
+  - A policy the composition cannot serve fails closed with a visible error;
+    it never downgrades sandbox to bypass.
   - The `!` context submission (re-validate → followup) is
     **untouched** — only the execution backend changes.
 
@@ -164,15 +180,21 @@ default matches every reference implementation.
 
 **Touch points**
 
-- `src/index.ts` — settings schema + base (`localShellSandbox: 'bypass'`),
-  `runLocalShell` backend selection.
-- `src/commands.ts` — the settings row + onChange persistence.
+- `src/app/config/schema.ts` — settings schema + base (`localShellSandbox: 'bypass'`).
+- `src/app/submission/user-shell.ts` — reads the preference per run and passes
+  it to `HostUserShellPort.execute`.
+- `src/runtime/direct/host-user-shell-direct.ts` — the Direct Host adapter:
+  policy selection (`bypass` spawn / `sandbox` via the dsh shell executor),
+  fail-closed when the sandbox policy is unavailable.
+- `src/tui/commands/settings.ts` — the settings row + onChange persistence.
 - `src/commands.ts` `TuiSettingsLike` — extend the document shape.
 
 **Tests**
 
-- Headless: with the preference `bypass`, `runLocalShell` does NOT call an
-  injected fake `ctx.shell` (spawn path used); with `sandbox` it does.
+- Headless: with the preference `bypass`, the run does NOT call an injected
+  fake `ctx.shell` (the Direct Host adapter's spawn path is used); with
+  `sandbox` it does (`test/local-shell-sandbox.test.ts`, pinned at
+  `HostUserShellPort` level after the M3-4 PR3 rename).
 - Settings row renders with `bypass` default; flipping persists through the
   injected settings document.
 - Existing shell tests (bounded output, abort, truncation) stay green — they
@@ -427,20 +449,22 @@ result text verbatim — **no JSON beautification on the web either**.
 The editor used to keep the literal shell prefix in the draft (`!git status`).
 The prefix is presentation + state, not text: it must never be part of the
 document (no cursor-offset/render hacks, no debounce to distinguish `!` from
-`!!`), and the shell business layer (`src/shell-context.ts`) must keep
+`!!`), and the shell business layer (`src/app/submission/shell-context.ts`) must keep
 receiving the exact same wire text as before. kimi's `CustomEditor` stores
 `inputMode: 'prompt' | 'bash'` and never puts the `!` in the buffer; this
 extends that two-state model to dsh-pi-tui's two-shell-semantics (`!` =
-context, `!!` = local).
+context, `!!` = session-excluded — see the terminology note in §2).
 
 ### Design
 
 Three explicit modes — `prompt`, `shell-context`, `shell-local` — owned by
-`TuiEditor` (`src/tui-editor.ts`), with a pure codec in
-`src/editor-input-mode.ts` (`shellPrefixForMode` / `serializeEditorInput` /
+`TuiEditor` (`src/tui/interaction/tui-editor.ts`), with a pure codec in
+`src/tui/interaction/editor-input-mode.ts` (`shellPrefixForMode` / `serializeEditorInput` /
 `editorModeFromHistoryEntry`). The buffer holds the bare command body; the
 mode is serialized back into the textual `!`/`!!` protocol ONLY at host
-boundaries.
+boundaries. The internal enum name `shell-local` is a COMPATIBILITY name:
+"local" means Session/model-excluded presentation mode, NEVER
+Client-machine execution.
 
 **Transitions** (empty body only): `!` → shell-context, `!` → shell-local,
 Backspace steps back (`!!` → `!` → prompt), Esc cancels the whole shell mode
@@ -469,7 +493,7 @@ pre-mode behavior).
   (`!!` before `!`); `onHistoryDraftSave`/`onHistoryDraftRestore` keep the
   mode across ↑/↓ browsing.
 - **Completion** — `MentionProvider` synthesizes a VIRTUAL `!`/`!!` line for
-  the shell grammar (`src/shell-completion.ts` untouched); the applied
+  the shell grammar (`src/tui/interaction/autocomplete/shell.ts` untouched); the applied
   completion never writes the synthetic prefix into the buffer. In a shell
   mode a leading `/` is a PATH, never a slash command: natural triggers stay
   quiet and Tab forces path completion (the fork's `handleTabCompletion`
@@ -497,13 +521,13 @@ the body/cursor never jump on a mode switch. The editor border uses
 
 **Touch points**
 
-- `src/editor-input-mode.ts` (new) — the pure codec.
-- `src/tui-editor.ts` — mode state, transitions, render, paste
+- `src/tui/interaction/editor-input-mode.ts` (new) — the pure codec.
+- `src/tui/interaction/tui-editor.ts` — mode state, transitions, render, paste
   normalization, history hooks, Tab routing.
 - `src/tui-app.ts` — boundary serialization/decoding, Esc ladder, seat-mode
   routing, footer hint.
-- `src/mentions.ts` — the virtual completion prefix.
-- `src/editor-seat-holder.ts` — `getInputMode`/`setSerializedInput` on the
+- `src/tui/interaction/autocomplete/provider.ts` — the virtual completion prefix.
+- `src/tui/interaction/editor-seat-holder.ts` — `getInputMode`/`setSerializedInput` on the
   seat surface, wire-form handoff.
 
 **Tests**
@@ -718,7 +742,7 @@ rounds (codex / gpt-5.6-luna):
   The host editor's `onSubmit` serialized through `serializeSeatDraft`,
   which reads the VISIBLE seat (`'prompt'` for a mode-less plugin), so a
   declined-Enter submit of a `!!pwd` plugin document degraded into a
-  plain `pwd` — a LOCAL-ONLY command leaking into the model path. The
+  plain `pwd` — a session-excluded command leaking into the model path. The
   completion mode source read the same visible seat, so a declined
   `!gi` Tab lost the shell completion grammar and the extension query
   lost the `!` wire prefix. FIXED: the split is now explicit — HOST

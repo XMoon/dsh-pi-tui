@@ -27,16 +27,16 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { cancellationError, isCancellation, runOwned } from '../../detached.ts'
-import type { Diag } from '../../diag.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import { runReservedSubmit } from '../../image/submit-flow.ts'
-import { TransitionInProgressError } from '../../session-operation-barrier.ts'
+import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import { runReservedSubmit } from './submit-flow.ts'
+import { TransitionInProgressError } from '../session/operation-barrier.ts'
 import {
   formatShellSubmitText,
   submitShellResult,
   type ShellSubmitAgentLike,
-} from '../../shell-context.ts'
+} from './shell-context.ts'
 import type { PreparedMessage, SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import type { PendingInputReader, PendingInputSnapshot } from '../../runtime/pending-input-reader-port.ts'
 import type { HostCommandOutcome } from '../../runtime/host-command-port.ts'
@@ -46,8 +46,8 @@ import {
   PARKED_STEERING_NOTICE,
   steerAll,
   steerHasPayload,
-  type SteerAgentLike,
-} from '../../steer.ts'
+  type SteerSubjectLike,
+} from './steer.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 
 /** One accepted queue pull-back whose local representation waits on a transition. */
@@ -206,7 +206,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         // T1 BEFORE the write call: a synchronously-emitted inbox/turn event
         // (Direct in-process) must never log ahead of dispatch.
         surface.markDispatch(sessionId)
-        const outcome = await surface.prompt(sessionId, message)
+      const outcome = await surface.prompt(sessionId, message)
         if (surface.isDisposed()) return
         if (outcome.kind !== 'committed') {
           if (outcome.kind === 'indeterminate') {
@@ -217,8 +217,20 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
             return
           }
           if (outcome.kind === 'cancelled') throw cancellationError('session write cancelled')
-          const failure = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
-          throw new Error(failure)
+          if (outcome.kind === 'rejected') {
+            // A PROVEN pre-commit refusal (e.g. `session/writer-held`): the
+            // submission owner settles it HERE as a normal terminal return, so
+            // the reserved-submit wrapper never performs its generic exception
+            // restore and the structural code/details survive to the ack. The
+            // refused outcome's own message is the user copy (the writer-held
+            // guidance), never a generic "submission failed" wrapper.
+            surface.mergeDraftIntoEditor(text)
+            surface.settleLocalSubmission(requestId)
+            surface.settleSubmitAck(`session write rejected: ${outcome.error.code}`, { token: ackToken, terminal: true })
+            surface.notify(outcome.error.message, 'error')
+            return
+          }
+          throw new Error(outcome.reason)
         }
         // Consume ONLY the referenced drafts — a concurrent intake's newer
         // image survives.
@@ -258,7 +270,7 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
 // TUI operations as narrow hooks (editor/card/notify/ack/session-writer); this
 // module decides the ORDER and the terminal settlement, and is therefore the
 // single place a future `session/writer-held` recovery is added. The helpers
-// (`src/steer.ts`, `src/shell-context.ts`) keep their own write bodies.
+// (`app/submission/steer.ts`, `src/shell-context.ts`) keep their own write bodies.
 
 /**
  * One completed `!` context run's submission (kimi parity). The runner owns the
@@ -662,7 +674,7 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
 // ── Ctrl+S steer / busy-Enter draft steer ──────────────────────────────────
 
 /** The live steer agent identity (structural: session + activity). */
-export interface SteerSubmissionAgent extends SteerAgentLike {
+export interface SteerSubmissionAgent extends SteerSubjectLike {
   readonly status: string
 }
 
@@ -755,7 +767,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
   // not a record (completed `!`/`!!` runs).
   deps.clearSettledLocalMessages()
   // The payload verdict is computed ONCE here on the SERIALIZED wire form and
-  // passed to steerAll (steer.ts never guesses shell/image semantics): `!` /
+  // passed to steerAll (app/submission/steer.ts never guesses shell/image semantics): `!` /
   // `!!` shell modes make a bare prefix a payload, attachment placeholders
   // make an empty-text draft a payload, whitespace alone is not.
   const draftHasPayload = text.trim() !== '' || deps.draftHasAttachments(text)
@@ -921,7 +933,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
           // T1 BEFORE the dispatch.
           deps.markDispatch(agentForSteer.session.id)
           const outcome = await steerAll({
-            currentAgent: () => deps.isDisposed() ? undefined : agentForSteer,
+            currentSubject: () => deps.isDisposed() ? undefined : agentForSteer,
             currentGeneration: () => generationForSteer,
             notify: (message, kind) => {
               if (deps.isDisposed()) return
@@ -1131,14 +1143,23 @@ export function executeHostCommandSubmission(
       deps.abortCommandSettlement()
       throw error
     }
-    settled = settled.finally(deps.settleCommandSettlement)
+    settled = settled.then(outcome => {
+      return outcome
+    }).finally(deps.settleCommandSettlement)
     deps.trackSettlementWork(settled)
     return settled
   }, {
     diag: deps.diag,
     sessionId: () => deps.commandSessionId(),
     onResult: (outcome) => {
-      if (deps.isDisposed()) {
+      // PR5 (plan §3.8): the release/cleanup bookkeeping ALWAYS runs (leak
+      // prevention), but a settlement whose ORIGINAL subject was replaced
+      // makes no VISIBLE mutation — the Host may finish the old command and
+      // the durable Host-side settlement completes, yet the replacement
+      // surface must not receive the old draft restore/consume, ack rows,
+      // notices, health repaints or artifact saves.
+      const scopeCurrent = deps.isScopeCurrent(scope)
+      if (deps.isDisposed() || !scopeCurrent) {
         fallbackPin()
         submitTurn.release()
         return
@@ -1262,7 +1283,9 @@ export function executeHostCommandSubmission(
     onError: (error) => {
       fallbackPin()
       submitTurn.release()
-      if (deps.isDisposed()) return
+      // PR5 (plan §3.8): cleanup above ALWAYS runs; a replaced subject's
+      // failure notice/health repaint must not reach the replacement surface.
+      if (deps.isDisposed() || !deps.isScopeCurrent(scope)) return
       // A frozen transition refused the writer admission BEFORE any command
       // dispatch: a PROVEN pre-dispatch refusal (nothing ran), never the generic
       // command-failure / command-health-error path. Restore the draft, settle
@@ -1299,7 +1322,9 @@ export function executeHostCommandSubmission(
     onCancel: () => {
       fallbackPin()
       submitTurn.release()
-      if (deps.isDisposed()) return
+      // PR5 (plan §3.8): same rule as onError — no visible mutation on a
+      // replaced subject.
+      if (deps.isDisposed() || !deps.isScopeCurrent(scope)) return
       const draftDisposition = deps.readCommandDraftDisposition()
       if (draftDisposition !== 'restored' && draftDisposition !== 'suppressed') {
         deps.restoreSubmissionDraft(text)

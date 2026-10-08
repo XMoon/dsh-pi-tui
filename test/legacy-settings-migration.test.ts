@@ -13,7 +13,7 @@ import test from 'node:test'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { migrateLegacySettings, type LegacySettingsMigrationInput, type MigrationDiagLike } from '../src/legacy-settings-migration.ts'
+import { migrateLegacySettings, type LegacySettingsMigrationInput, type MigrationDiagLike } from '../src/app/bootstrap/legacy-settings-migration.ts'
 import type { SettingsFormsLike, TuiSettingsDescriptorLike, TuiSettingsPathOp } from '../src/runtime/direct/tui-settings-direct.ts'
 
 type MutateCall = { ns: string; ops: readonly TuiSettingsPathOp[]; revision?: number }

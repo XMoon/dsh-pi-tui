@@ -1,0 +1,174 @@
+/**
+ * `!` shell context submission (kimi parity): a completed Host user-shell
+ * run is submitted to the session as an ordinary user message, so the
+ * model sees the command AND its output on the next turn. `!!` results
+ * stay Session/model-excluded — presentation-only, no session write, no
+ * model visibility (pi's excluded-from-context semantics); execution is
+ * still Host-side on both gestures (M3-4 PR3). Extracted from the runner
+ * so the TOCTOU races are testable headless, exactly like app/submission/steer.ts:
+ *
+ * - The agent/generation identity is captured BEFORE the awaited write
+ *   window.
+ * - Before the followup, the identity is re-validated: same agent
+ *   object, same session generation. A switch mid-send aborts
+ *   (`stale`) — the output is never written to a session the identity
+ *   did not verify.
+ * @module @xmoon76/dsh-pi-tui/app/submission/shell-context
+ */
+
+import { cancellationError } from '../../runtime/process/tasks.ts'
+import { sessionUnchanged } from './steer.ts'
+import type { SessionWriter } from '../../runtime/session-writer-port.ts'
+import { TransitionInProgressError } from '../session/operation-barrier.ts'
+import { SessionScopeSupersededError } from '../session/scope.ts'
+
+/** The minimal agent surface the shell submit needs (the runner's live agent). */
+export interface ShellSubmitAgentLike {
+  session: { id: string }
+}
+
+export type ShellSubmitOutcome = 'ok' | 'stale' | 'indeterminate'
+
+/** Injectable dependencies of {@link submitShellResult}. */
+export interface ShellSubmitDeps {
+  /** Current live agent, re-read on every access (TOCTOU detection). */
+  currentAgent(): ShellSubmitAgentLike | undefined
+  /** Current session generation, re-read (session switch detection). */
+  currentGeneration(): number
+  notify(message: string, kind: 'info' | 'error'): void
+  /** Notice for a session switch detected mid-send. */
+  staleNotice(): string
+  /**
+   * A post-admission LOCAL VALIDITY fence (surface lifetime / disposed). It runs
+   * only after the writer section was entered, so it MUST NOT read the session
+   * transition gate: an admitted writer is never truncated by a waiting
+   * transition — that admission belongs to `SessionRuntime.withWriter` alone.
+   * Optional; absent keeps the historical behavior.
+   */
+  fence?: () => boolean
+  /** The fence refusal notice (defaults to {@link staleNotice}). */
+  fenceNotice?: () => string
+  /**
+   * The submission writer admission (convergence plan phase 3): the shell
+   * write runs inside this section, so a transition started while the
+   * shell result awaits drains it first. The runner binds it to the captured
+   * live scope through `SubmissionRuntime.withWriter`, so the operation
+   * barrier has exactly ONE admission owner. Optional; absent keeps the
+   * direct/unit-call behavior.
+   */
+  writerSection?: <T>(task: () => Promise<T>) => Promise<T>
+  /** Deliver the shell result through the semantic session writer. */
+  writer: Pick<SessionWriter, 'prompt'>
+  /** Build the user message (runner-side creation, keeps this module dsh-free). */
+  createMessage(text: string): unknown
+  /** Called once the message was accepted by the agent (followup sent). */
+  onSubmitted(): void
+}
+
+/**
+ * Submit a completed `!` shell run's command+output to the session:
+ * barrier → capture identity → re-validate → followup. No-op without an
+ * agent. `stale` aborts for a retry against the new session (the
+ * caller's card keeps the output visible either way).
+ */
+export async function submitShellResult(deps: ShellSubmitDeps, text: string): Promise<ShellSubmitOutcome> {
+  // Capture before entering the barrier: a delayed shell result belongs to
+  // the session that was current when this submit began, never whichever
+  // Agent happens to be live after a transition drains.
+  const agent = deps.currentAgent()
+  if (agent === undefined) return 'ok'
+  const generation = deps.currentGeneration()
+  const writerSection = deps.writerSection
+  if (writerSection !== undefined) {
+    try {
+      return await writerSection(async () => submitShellResultCore(deps, text, agent, generation))
+    } catch (error) {
+      // A frozen transition and a superseded capture are DIFFERENT refusals
+      // (both wrote NOTHING): report the refusal that actually happened and keep
+      // the card's output visible for a retry — never the transition notice for a
+      // stale capture.
+      if (error instanceof TransitionInProgressError) {
+        deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      if (error instanceof SessionScopeSupersededError) {
+        deps.notify(deps.staleNotice(), 'info')
+        return 'stale'
+      }
+      throw error
+    }
+  }
+  return submitShellResultCore(deps, text, agent, generation)
+}
+
+async function submitShellResultCore(
+  deps: ShellSubmitDeps,
+  text: string,
+  agent: ShellSubmitAgentLike,
+  generation: number,
+): Promise<ShellSubmitOutcome> {
+  // TOCTOU re-validation: the session must still be the exact one the
+  // identity was captured from, or the submission is aborted for a retry
+  // against the new session.
+  if (!sessionUnchanged({ subject: agent, generation }, deps.currentAgent(), deps.currentGeneration())) {
+    deps.notify(deps.staleNotice(), 'error')
+    return 'stale'
+  }
+  // The post-admission local validity fence (surface lifetime): the writer
+  // section was already entered, so this must never consult the session
+  // transition gate. The caller's card keeps the output visible; the `!` line
+  // can be re-run after the transition settles.
+  if (deps.fence?.() === true) {
+    deps.notify(deps.fenceNotice !== undefined ? deps.fenceNotice() : deps.staleNotice(), 'info')
+    return 'stale'
+  }
+  const outcome = await deps.writer.prompt(agent.session.id, deps.createMessage(text), 'queue')
+  if (outcome.kind === 'committed') {
+    deps.onSubmitted()
+    return 'ok'
+  }
+  if (outcome.kind === 'cancelled') throw cancellationError('shell session write cancelled')
+  if (outcome.kind === 'indeterminate') {
+    deps.notify('shell session write result is indeterminate — do not retry automatically', 'error')
+    return 'indeterminate'
+  }
+  deps.notify(outcome.kind === 'rejected' ? outcome.error.message : outcome.reason, 'error')
+  return 'stale'
+}
+
+/**
+ * Classify one `!` line: 'context' submits the command+output to the
+ * session (kimi parity), 'local' runs purely off-session (pi's `!!`
+ * escape hatch). Returns undefined for a non-`!` line.
+ */
+export function shellModeOf(text: string): 'context' | 'local' | undefined {
+  if (!text.startsWith('!')) return undefined
+  return text.startsWith('!!') ? 'local' : 'context'
+}
+
+/** Extract the command after the `!` prefix ('' when nothing follows). */
+export function shellCommandOf(text: string): string {
+  return text.replace(/^!+/, '').trim()
+}
+
+/**
+ * The user-shell sandbox policy preference for user-typed `!`/`!!`
+ * commands: 'sandbox' routes them through the dsh shell capability's
+ * policy, anything else (including an absent settings document) is
+ * 'bypass' — the pi/kimi default that runs the user's own commands
+ * outside the sandbox (the sandbox guards the model's autonomous
+ * commands, not the user's).
+ * @param settings - the TUI settings document's fields, when present.
+ */
+export function localShellSandboxPreferenceOf(settings: { localShellSandbox?: string } | undefined): 'bypass' | 'sandbox' {
+  return settings?.localShellSandbox === 'sandbox' ? 'sandbox' : 'bypass'
+}
+
+/**
+ * The model-facing submission text: the command echoed `$`-style (kimi
+ * ShellExecution parity) followed by the settled card result (output +
+ * `[exit N]` / truncation lines).
+ */
+export function formatShellSubmitText(command: string, result: string): string {
+  return `$ ${command}\n${result}`
+}

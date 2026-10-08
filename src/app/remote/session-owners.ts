@@ -2,7 +2,7 @@
  * M3-2 Remote Session owner services: the exact-`SessionBinding` provider of
  * the consumer-owned `SessionOwnerAccess` / `SessionOwnerRetirement` seams.
  *
- * Identity authority (frozen in `docs/m3-entry-contract.md` §5.1): the exact
+ * Identity authority (frozen by M3-2; see `docs/client-server-migration.md` M3-2): the exact
  * `SessionReference.binding` OBJECT a retained `ClientSessionOwner` carries is
  * the generation token —
  *
@@ -30,7 +30,7 @@
  * @module @xmoon76/dsh-pi-tui/app/remote/session-owners
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { clientOwnerOf, type ClientSessionOwner, type SessionHandle } from '../../runtime/session-lifecycle-port.ts'
 import type {
   SessionOwnerAccess,

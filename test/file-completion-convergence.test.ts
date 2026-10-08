@@ -15,18 +15,18 @@ import { afterEach, test } from 'node:test'
 import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join, win32, sep } from 'node:path'
-import { classifyFileCompletionContext, extractAtPrefix } from '../src/file-completion/context.ts'
-import { resolvePathQuery } from '../src/file-completion/query.ts'
-import { scorePathCandidate } from '../src/file-completion/ranking.ts'
-import { presentPathCandidate } from '../src/file-completion/presentation.ts'
-import { MentionProvider } from '../src/mentions.ts'
+import { classifyFileCompletionContext, extractAtPrefix } from '../src/tui/file-completion/context.ts'
+import { resolvePathQuery, type PathQueryEnvironment } from '../src/domain/file-completion/query.ts'
+import { scorePathCandidate } from '../src/domain/file-completion/ranking.ts'
+import { presentPathCandidate } from '../src/tui/file-completion/presentation.ts'
+import { MentionProvider } from '../src/tui/interaction/autocomplete/provider.ts'
 import { DirectHostFilePort, resolveFdPath } from '../src/runtime/direct/host-file-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 interface DisposableApp { isDisposed(): boolean; dispose(): void }
 const startedApps = new Set<DisposableApp>()
 afterEach(() => {
@@ -456,32 +456,46 @@ printf '%s\\0' './visible.txt'
 })
 
 test('§23 matrix: Windows drive and UNC tokens keep their dialect (pure)', () => {
-  const query = resolvePathQuery('C:\\Users\\sh', '/ws')
+  // The domain resolver is environment-neutral: these pure pins supply the
+  // facts explicitly instead of reading the process environment.
+  const environment: PathQueryEnvironment = { homeDir: '/home/fixture', windowsHost: false }
+  const query = resolvePathQuery('C:\\Users\\sh', '/ws', environment)
   assert.equal(query.searchBase, win32.dirname('C:\\Users\\sh'))
   assert.equal(query.displayBase, 'C:\\Users\\')
   assert.equal(query.winAbsolute, true)
-  const unc = resolvePathQuery('\\\\server\\share\\fo', '/ws')
+  const unc = resolvePathQuery('\\\\server\\share\\fo', '/ws', environment)
   assert.equal(unc.searchBase, '\\\\server\\share\\')
   assert.equal(unc.displayBase, '\\\\server\\share\\')
   assert.equal(unc.winAbsolute, true)
+  // The SAME raw/cwd resolves differently under the two explicit host facts —
+  // proven without touching process.platform.
+  const windowsHost = resolvePathQuery('sub\\fi', '/ws', { homeDir: '/home/fixture', windowsHost: true })
+  const posixHost = resolvePathQuery('sub\\fi', '/ws', environment)
+  assert.equal(windowsHost.searchBase, win32.join('/ws', 'sub'))
+  assert.equal(posixHost.searchBase, '/ws/sub')
+  // `~` expansion uses the injected homeDir, never the real homedir().
+  assert.equal(resolvePathQuery('~/pics/a', '/ws', environment).searchBase, '/home/fixture/pics')
 })
 
 test('candidates present one full display path independently of host path dialect', () => {
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   assert.equal(scorePathCandidate({ path: 'C:\\Users\\deep\\Foo.txt', kind: 'file' }, 'foo.txt'), 100)
   const rootFile = presentPathCandidate({ path: 'package.json', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(rootFile !== undefined)
   assert.equal(rootFile.label, 'package.json')
   assert.equal(rootFile.description, undefined)
   const nestedFile = presentPathCandidate(
-    { path: 'src/file-completion/presentation.ts', kind: 'file' },
+    { path: 'src/tui/file-completion/presentation.ts', kind: 'file' },
     { at: false, quoted: false },
   )
-  assert.equal(nestedFile.label, 'src/file-completion/presentation.ts')
+  assert.ok(nestedFile !== undefined)
+  assert.equal(nestedFile.label, 'src/tui/file-completion/presentation.ts')
   assert.equal(nestedFile.description, undefined)
   const directory = presentPathCandidate(
     { path: 'C:\\Users\\Pictures', kind: 'directory' },
     { at: false, quoted: false, sep: '\\' },
   )
+  assert.ok(directory !== undefined)
   assert.equal(directory.value, 'C:\\Users\\Pictures\\')
   assert.equal(directory.label, 'C:\\Users\\Pictures/')
   assert.ok(directory.label.endsWith('/'))
@@ -490,17 +504,63 @@ test('candidates present one full display path independently of host path dialec
     { path: 'C:/Users\\Pictures', kind: 'directory' },
     { at: true, quoted: false, sep: '\\' },
   )
-  assert.equal(mixed.value, '@C:/Users\\Pictures\\')
+  assert.ok(mixed !== undefined)
+  // The OFFICIAL mention grammar (formatFileMention): the value uses the
+  // grammar's own separator and quoting, not the local dialect note.
+  assert.equal(mixed.value, '@C:/Users\\Pictures/')
   assert.equal(mixed.label, 'C:/Users\\Pictures/')
   assert.equal(mixed.description, undefined)
 })
 
-test('the presentation layer quotes spaced values for /image and keeps @ quoting', () => {
+test('the @ mention value is the OFFICIAL grammar: non-space whitespace quotes, unsafe paths refuse', () => {
+  // The official `formatFileMention` quoting rule is /\s/ (any regex
+  // whitespace) — e.g. a NON-BREAKING space quotes, wider than the old
+  // local `includes(' ')` check.
+  const nbsp = presentPathCandidate({ path: 'a\u00a0b.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.ok(nbsp !== undefined)
+  assert.equal(nbsp.value, '@"a\u00a0b.ts"', 'the official grammar quotes non-space whitespace')
+  // A path the grammar cannot represent safely returns `undefined` — the
+  // candidate is refused, never presented with a broken token. TAB is a
+  // control character to the official grammar (refused), and `"` and C0
+  // controls are refused outright.
+  const tabbed = presentPathCandidate({ path: 'foo\tbar.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.equal(tabbed, undefined, 'the official grammar refuses a tab (control character)')
+  const quotedPath = presentPathCandidate({ path: 'foo"bar.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.equal(quotedPath, undefined, 'a `"` in the path is refused by the official grammar')
+  const control = presentPathCandidate({ path: 'foo\u0001bar.ts', kind: 'file' }, { at: true, quoted: false })
+  assert.equal(control, undefined, 'a control character is refused by the official grammar')
+  // A quoted DIRECTORY keeps the quote open for continuation (official).
+  const dir = presentPathCandidate({ path: 'my dir', kind: 'directory' }, { at: true, quoted: true })
+  assert.ok(dir !== undefined)
+  assert.equal(dir.value, '@"my dir/', 'the official grammar keeps a quoted directory open')
+})
+
+test('the NON-@ forms preserve an explicitly opened quote (and quote spaces) — local policy', () => {
+  // An explicitly opened quote stays quoted even without spaces.
+  const quotedNoSpace = presentPathCandidate({ path: 'file.ts', kind: 'file' }, { at: false, quoted: true })
+  assert.ok(quotedNoSpace !== undefined)
+  assert.equal(quotedNoSpace.value, '"file.ts"', 'an explicitly opened quote is preserved')
+  // A space-bearing path quotes (the local rule is a literal space —
+  // narrower than the official grammar's /\s/; the official @ form owns
+  // the wider whitespace rule).
+  const spaced = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(spaced !== undefined)
+  assert.equal(spaced.value, '"my file.txt"')
+  // Unquoted, space-free stays bare.
+  const bare = presentPathCandidate({ path: 'file.ts', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(bare !== undefined)
+  assert.equal(bare.value, 'file.ts')
+})
+
+test('the presentation layer quotes spaced values for /image; @ quoting is the official grammar', () => {
   const item = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: false, quoted: false })
+  assert.ok(item !== undefined)
   assert.equal(item.value, '"my file.txt"')
   const atItem = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: true, quoted: false })
-  assert.equal(atItem.value, '@"my file.txt"')
+  assert.ok(atItem !== undefined)
+  assert.equal(atItem.value, '@"my file.txt"', 'the official grammar quotes whitespace')
   const atQuoted = presentPathCandidate({ path: 'my file.txt', kind: 'file' }, { at: true, quoted: true })
+  assert.ok(atQuoted !== undefined)
   assert.equal(atQuoted.value, '@"my file.txt"')
 })
 
@@ -786,9 +846,24 @@ test('review finding (round 6): a scope switch mid-flight fences the old session
 
 test('review finding 2: a Windows-dialect directory keeps the backslash separator', () => {
   const item = presentPathCandidate({ path: 'C:\\Users\\foo', kind: 'directory' }, { at: false, quoted: false, sep: '\\' })
+  assert.ok(item !== undefined)
   assert.equal(item.value, 'C:\\Users\\foo\\', 'a Windows directory completes with \\ — never a mixed /')
   const posix = presentPathCandidate({ path: 'src/foo', kind: 'directory' }, { at: false, quoted: false, sep: '/' })
+  assert.ok(posix !== undefined)
   assert.equal(posix.value, 'src/foo/')
+})
+
+test('trigger grammar: quote and = boundaries are TUI extensions over the official baseline', () => {
+  const set = new Set(['attach', 'image'])
+  // The OFFICIAL activeAtToken accepts @ only at start-of-line/whitespace;
+  // a mention after an UNCLOSED quote (the editor keeps the quote open
+  // while typing) and after `=` are INTENTIONAL TUI trigger extensions.
+  assert.equal(classifyFileCompletionContext('x"@foo', set).kind, 'mention',
+    'a mention after an opening double quote triggers (TUI extension)')
+  assert.equal(classifyFileCompletionContext("x'@foo", set).kind, 'mention',
+    'a mention after an opening single quote triggers (TUI extension)')
+  assert.equal(classifyFileCompletionContext('key=@foo', set).kind, 'mention',
+    'a mention after = triggers (TUI extension)')
 })
 
 test('extractAtPrefix keeps the CJK-glue rule and rejects emails', () => {

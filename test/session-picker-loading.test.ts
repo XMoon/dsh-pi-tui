@@ -10,26 +10,29 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import type { SessionReader } from '../src/runtime/session-reader-port.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -105,14 +108,23 @@ function harness(sessionReader: SessionReader): Harness {
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
     config: new DirectConfigPort(ctx as never, undefined, () => undefined),
     commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
     hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',
@@ -137,11 +149,11 @@ function harness(sessionReader: SessionReader): Harness {
     sessionBlank: () => undefined,
     refreshStatus: () => {},
     applyFooterSettings: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -154,7 +166,7 @@ function harness(sessionReader: SessionReader): Harness {
     extensions: undefined,
     exit: () => {},
   }
-  registerTuiCommands(runner)
+  registerTuiCommandsWithDirectSeams(runner)
   const def = defs.find(entry => entry.name === 'sessions')
   assert.ok(def?.handler !== undefined, 'sessions handler missing')
   // /resume registers as its own command carrying the alias handler.
@@ -185,6 +197,8 @@ test('the picker opens and Esc cancels while list() pends forever', async (t) =>
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -206,6 +220,8 @@ test('Enter on the loading placeholder never triggers a resume', async (t) => {
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -228,6 +244,8 @@ test('arrows, search, and Esc stay responsive while a projection batch pends', a
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: () => new Promise<ProjectionMap>(() => {}),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -265,6 +283,8 @@ test('closing the picker aborts the pending projection batch', async (t) => {
       return new Promise<ProjectionMap>(resolve => { settleBatch = () => resolve(new Map()) })
     },
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -299,6 +319,8 @@ test('a superseding open fences the previous load out of the UI', async (t) => {
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -317,6 +339,8 @@ test('a listing failure swaps the loading row for the refusal row', async (t) =>
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -344,6 +368,8 @@ test('progressive title enrichment preserves the live search query', async (t) =
       return new Map()
     },
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -367,6 +393,8 @@ test('/resume <arg> is input-first: the overlay opens while list() pends forever
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -403,6 +431,8 @@ test('/resume <arg> with NO match lists exactly once and keeps the argument as t
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 
@@ -433,6 +463,8 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
     search: async () => ({ items: [], hasMore: false }),
     projectionBatch: async () => new Map(),
     blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
   })
   t.after(() => h.app.stop())
 

@@ -1,20 +1,20 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import { ActionEditorPanel } from '../src/keybinding-ui/action-editor.ts'
-import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../src/keybinding-ui/list.ts'
-import type { KeybindingMutationResult } from '../src/keybinding-ui/controller.ts'
-import { buildKeybindingEditorModel } from '../src/keybinding-ui/model.ts'
+import { ActionEditorPanel } from '../src/tui/keybindings/ui/action-editor.ts'
+import { KeybindingEditorPanel, KeybindingEditorUnavailablePanel } from '../src/tui/keybindings/ui/list.ts'
+import type { KeybindingMutationResult } from '../src/tui/keybindings/ui/controller.ts'
+import { buildKeybindingEditorModel } from '../src/tui/keybindings/ui/model.ts'
 import { CURSOR_MARKER, visibleWidth } from '@xmoon76/pi-tui'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

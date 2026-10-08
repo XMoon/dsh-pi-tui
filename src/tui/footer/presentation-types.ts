@@ -1,0 +1,107 @@
+/**
+ * Footer presentation types (TS5 §13.2): the render contracts the terminal
+ * composer consumes. The persisted/neutral layout shape lives in
+ * `domain/footer/layout.ts` and stays re-exported here for the existing
+ * consumers. The composer consumes
+ * ONLY the StatusSnapshot plus a small host-owned surface context (editor
+ * emptiness, extension chrome text) — never business state.
+ * @module @xmoon76/dsh-pi-tui/tui/footer/presentation-types
+ */
+
+import type { StatusSnapshot } from '../../domain/status/types.ts'
+import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../../domain/footer/layout.ts'
+
+export type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from '../../domain/footer/layout.ts'
+
+/** One styled run of footer text. */
+export interface FooterSpan {
+  readonly text: string
+  readonly tone?: FooterTone
+  readonly emphasis?: 'normal' | 'strong' | 'dim' | 'italic'
+}
+
+/** One rendered footer item: styled spans with layout hints. */
+export interface FooterSegment {
+  readonly spans: readonly FooterSpan[]
+  readonly minWidth?: number
+  readonly importance?: number
+}
+
+/** The density an item renders at (plan §9.2: preferred vs compact). */
+export type FooterDensity = 'preferred' | 'compact'
+
+
+/** The host-owned surface context the composer receives (NOT business
+ * state — the plan's §2.2 prohibition targets permission/plan/focus/stats/
+ * git/model derivation). */
+export interface FooterRenderContext {
+  /** Whether ↓ would open the task browser RIGHT NOW — the exact routing
+   * gate: active tasks, no overlay entries, an EMPTY VISIBLE seat editor
+   * in prompt mode (a shell-mode body is composing a command, and a
+   * plugin replacement editor decides by its own text/mode — the host
+   * editor's draft is not the gate). Drives the task badge's `↓ view`
+   * hint. */
+  readonly taskBrowserAvailable: boolean
+  /** The extension footer segments' baked text (the ext:* synthetic item). */
+  readonly extensionFooterText: string
+}
+
+/** A builtin footer item definition (plan §7). Render callbacks are pure,
+ * synchronous, I/O-free and read only the snapshot + context. */
+export interface FooterItemDefinition {
+  readonly id: string
+  readonly label: string
+  readonly description?: string
+  readonly defaultZone: 'left' | 'right'
+  readonly defaultImportance: number
+  readonly minWidth?: number
+  /** The finite formatter ids this item supports. */
+  readonly formats: readonly string[]
+  readonly defaultFormat: string
+  render(
+    snapshot: StatusSnapshot,
+    ref: FooterItemRef,
+    density: FooterDensity,
+    context: FooterRenderContext,
+  ): FooterSegment | null
+}
+
+/** The footer's physical-line budget (plan 2026-08-31 §6.1): the host
+ * surface owns how many TERMINAL physical lines the footer may occupy;
+ * the persisted 1..2 LAYOUT-ROW schema (FooterLayoutV1) is independent of
+ * it — a future Add-Row surface raises `total`, never the row renderer.
+ * Both values normalize defensively: non-finite values fall back to the
+ * composer defaults, finite junk floors at 1, absurd values clamp to the
+ * hard capability (perRow ≤ 2, total ≤ 4). A surface granting ZERO lines
+ * (its pinned chrome alone fills the viewport) signals exactly
+ * `total: 0` and the footer renders nothing at all — not even the Host
+ * instruction; negative totals are invalid input and normalize like
+ * every other finite junk value. */
+export interface FooterPhysicalLineBudget {
+  /** The max physical lines ONE logical row may occupy (1..2). */
+  readonly perRow: number
+  /** The max physical lines the whole footer surface may occupy
+   * (0..4; exactly 0 = render nothing). */
+  readonly total: number
+}
+
+/** The max physical lines one logical row wraps into at narrow widths
+ * (plan 2026-08-31 §6.1/§6.2): past the cap the row resolves overflow
+ * through the semantic compact → importance-drop → ANSI-safe truncate
+ * discipline — never by slicing the wrapped lines. Composer HARD
+ * capability: callers may never raise this past 2. */
+export const FOOTER_MAX_PHYSICAL_LINES_PER_ROW = 2
+
+/** The Composer's HARD capacity ceiling for the footer status surface
+ * (plan 2026-08-31 §6.1, revised 2026-08-31 PR #57 review): with the
+ * default two-logical-row layout the CAPACITY is status ≤ 2 + stats ≤ 2.
+ * This is a ceiling, NOT the everyday render height — the actual render
+ * budget is decided by the SURFACE (TuiApp passes
+ * `physicalLineBudget.total = min(4, currently-available footer rows)`,
+ * so short viewports render fewer lines and the Host instruction is
+ * never viewport-clipped). */
+export const FOOTER_MAX_PHYSICAL_LINES = 4
+
+/** The legacy physical-line cap name — physical lines, never logical
+ * rows. Kept as an alias for external ABI; prefer the explicit names. */
+export const FOOTER_MAX_LINES = FOOTER_MAX_PHYSICAL_LINES

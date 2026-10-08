@@ -1,7 +1,9 @@
 /**
  * The PiTuiExtensionService: the Cordis service third-party plugins inject
- * to register contributions. Provided by the `pi-tui-extension-host` row
- * (src/extensions.ts); owned by that provider's fiber, so provider unload
+ * to register contributions. Direct: provided by the `pi-tui-extension-host`
+ * Loader row (src/extensions.ts); Remote: provided by the Client UI
+ * subtree's extension-host plugin fiber on the official Client Context
+ * (M3-6 PR1). Owned by that provider's fiber, so provider unload
  * disposes every registration made through it.
  *
  * Owner binding (M1, plan §16): every registration is created inside the
@@ -46,14 +48,14 @@ import type {
 import { AdvancedInputRegistry } from './internal/advanced-input.ts'
 import { UnstableInputRegistry } from './internal/unstable-input.ts'
 import { normalizeInputEvent } from './internal/input-events.ts'
-import { CommandBridge } from '../command-bridge.ts'
-import { ThemeRegistry } from '../theme-registry.ts'
-import { stripControlChars } from '../footer/layout.ts'
-import { AutocompleteRegistry } from '../autocomplete-registry.ts'
-import { SettingsRegistry } from '../settings-registry.ts'
-import { KeybindingRegistry } from '../keybinding-registry.ts'
-import { RendererRegistry } from '../renderer-registry.ts'
-import { EditorRegistry } from '../editor-registry.ts'
+import { CommandBridge } from './internal/command-bridge.ts'
+import { ThemeRegistry } from './internal/theme-registry.ts'
+import { stripControlChars } from '../domain/footer/layout.ts'
+import { AutocompleteRegistry } from './internal/autocomplete-registry.ts'
+import { SettingsRegistry } from './internal/settings-registry.ts'
+import { KeybindingRegistry } from './internal/keybinding-registry.ts'
+import { RendererRegistry } from './internal/renderer-registry.ts'
+import { EditorRegistry } from './internal/editor-registry.ts'
 import type {
   AutocompleteHandle,
   EditorContribution,

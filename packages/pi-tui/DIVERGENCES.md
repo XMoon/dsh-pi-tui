@@ -55,7 +55,7 @@
 
 - `DROPPED`: `X013` — No known in-repo vendor, host, public, or behavioral consumer remains; external use of this private package behavior is unverified. The host busy indicator is WorkingIndicator.
 - `DELIBERATELY_KEPT`: `X030` — A host copy of decodePrintableKey would duplicate the implementation; the package exports map exposes only the root entry.
-- `MOVED_TO_HOST`: `X001`, `X002`, `X041` — The DSH searchable picker behavior moved to the Host-owned src/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline.
+- `MOVED_TO_HOST`: `X001`, `X002`, `X041` — The DSH searchable picker behavior moved to the Host-owned src/tui/pickers/searchable-picker.ts SearchablePicker (guarded by test/searchable-picker.test.ts); the vendored SelectList is restored to the pinned upstream baseline.
 - `NOT_MOVABLE`: `X042` — The remaining X042 seam is SettingsList focus/row-budget propagation inside the vendored fork; the SelectList-side Input focus ownership moved to the Host SearchablePicker.
 - `NOT_MOVABLE`: `X004A`, `X004B`, `X005`, `X006`, `X007`, `X008`, `X009`, `X010`, `X014`, `X016`, `X018`, `X020`, `X021`, `X022`, `X023`, `X024`, `X025`, `X027`, `X028`, `X029`, `X031`, `X032`, `X033`, `X034`, `X035`, `X036`, `X037`, `X038`, `X039`, `X040`, `X043`, `X044`, `X045`, `X046`, `X047` — The behavior is vendor-internal, terminal-owned, protocol-owned, performance-owned, or requires metadata unavailable at a host wrapper boundary.
 - `UPSTREAM_LEVER`: `X005`, `X006`, `X007`, `X008`, `X014`, `X016`, `X021`, `X033`, `X035`, `X048`, `X049`, `X050`, `X051` — Generic improvements may be proposed upstream; an upstream issue or similar implementation is not absorption evidence.
@@ -80,8 +80,8 @@
 
 ## Summary
 
-- Records: 59
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 48, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 60
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 49, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -144,6 +144,7 @@
 | X056 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
 | X057 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X058 | ACTIVE | MEDIUM | LOCAL_UX | NO |
+| X059 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -178,11 +179,11 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 
 **Host**
 - src/tui-app.ts openPicker and categorized picker rebuild (now Host SearchablePicker)
-- src/commands.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)
-- src/model-picker.ts /model ModelPicker (provider-grouped inline-effort model list via the Host SearchablePicker)
-- src/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)
+- src/tui/commands/sessions.ts session picker via the TuiApp picker surface (PickerItem/PickerCategory; no direct SelectList import)
+- src/tui/pickers/model-picker.ts /model ModelPicker (provider-grouped inline-effort model list via the Host SearchablePicker)
+- src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker (/settings allowlist flat list via the Host SearchablePicker)
 - advanced ui.select picker adapter
-- Audit note: The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/model-picker.ts (which constructs SearchablePicker directly for the /model provider-grouped model list (with an inline per-model effort)); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
+- Audit note: The Host consumers exercise query, grouping, dynamic rows, and row budgets through TuiApp.openPicker/openCategorizedPicker, which now construct the Host SearchablePicker, and through src/tui/pickers/model-picker.ts (which constructs SearchablePicker directly for the /model provider-grouped model list (with an inline per-model effort)); the footer configurator remains a host-owned SettingsList/Input flow, not an X001 consumer. The vendor Editor's autocomplete construction is upstream-compatible and is not counted as a consumer of the extended semantics.
 
 **Public / extension**
 - Advanced ui.select and picker adapter contracts expose the searchable picker behavior to host-owned integrations.
@@ -223,7 +224,7 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 
 #### Replacement mapping
 
-- SelectList search/group/page/row-budget behavior -> Host owner src/searchable-picker.ts SearchablePicker -> guarded by test/searchable-picker.test.ts
+- SelectList search/group/page/row-budget behavior -> Host owner src/tui/pickers/searchable-picker.ts SearchablePicker -> guarded by test/searchable-picker.test.ts
 - TuiApp openPicker/categorized picker -> Host SearchablePicker API -> existing PickerHandle remains the Host-facing adapter
 - advanced ui.select -> TuiApp.openPicker -> SearchablePicker -> advanced broker/lifecycle tests
 
@@ -237,7 +238,7 @@ The host needs searchable, grouped, pageable, and responsively bounded pickers w
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Relocated to the Host-owned SearchablePicker (src/searchable-picker.ts) with the vendored SelectList restored to the pinned upstream baseline; the fork no longer carries this divergence.
+- Notes: Relocated to the Host-owned SearchablePicker (src/tui/pickers/searchable-picker.ts) with the vendored SelectList restored to the pinned upstream baseline; the fork no longer carries this divergence.
 
 ### X002 — SelectList setItems selection/search preservation
 
@@ -269,7 +270,7 @@ Open host pickers receive asynchronously enriched rows and must refresh without 
 
 **Host**
 - src/tui-app.ts session and categorized SearchablePicker refreshes
-- src/commands.ts asynchronous session-title enrichment
+- src/tui/commands/sessions.ts asynchronous session-title enrichment
 - Audit note: Host updates session/category rows while overlays remain mounted; the model picker is SettingsList-owned and is not counted as an X002 SelectList consumer.
 
 **Public / extension**
@@ -730,8 +731,8 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - src/tui-app.ts OverlayBroker.disposeAll and overlay leases
 - editor seat, panels, timers, and fullscreen surface teardown
 - test/pi-component-compat.test.ts public component compatibility
-- src/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)
-- src/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)
+- src/tui/pickers/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)
+- src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)
 - Audit note: Host final teardown relies on exactly-once release. Post-v0.85.1 audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts).
 
 **Public / extension**
@@ -1554,12 +1555,12 @@ Mouse handling belongs to the alternate fullscreen screen; regular mode remains 
 - Category: `HARD_HOST_API`
 - Risk: `HIGH`
 - Files: `src/tui-alt-screen.ts`, `src/tui.ts`, `src/components/box.ts`, `src/components/mouse-region.ts`
-- Last audited: `2026-09-09`
+- Last audited: `2026-09-29`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
 
-The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback. Pointer events must also never reach a stale target: an overlay hidden or removed since the last paint, a layout root replaced via setLayoutRoot, or a component removed from a Container mid-gesture must stop receiving press/drag/release events immediately (the cached layout frame only refreshes on the next paint).
+The host needs single-cell fullscreen clicks for click-to-expand. Double-click selection must remain native word selection, and single-click handling must not duplicate clipboard feedback. Pointer events must also never reach a stale target: an overlay hidden or removed since the last paint, a layout root replaced via setLayoutRoot, or a component removed from a Container mid-gesture must stop receiving press/drag/release events immediately (the cached layout frame only refreshes on the next paint). Host-owned interactive disclosure targets may consume the first plain single click through onCellClick; double-click word selection remains the selection behavior on rows that stay selection-owned. PR #197 deliberately changes the ownership of long-user bubble text rows: the bubble itself, in both collapsed and expanded states, is now a Host disclosure target — ordinary rows that display canonical user text and were previously selection-owned. Those specific user-text rows therefore no longer promise double-click word selection: the first complete plain click runs the local expand/collapse action. This is a Host ownership decision (which painted rows are click-owned controls versus selection-owned text), not a change to the fork's click-granularity classifier.
 
 #### Changed surface
 
@@ -1590,8 +1591,9 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - Audit note: No subclass replaces click classification.
 
 **Host**
-- src/tui-app.ts handleFullscreenClick expands the question/transcript surface.
-- Audit note: The callback is a direct host seam.
+- src/tui-app.ts handleFullscreenClick expands the question/transcript surface, and resolves the long-user disclosure bubble (issue #192 / PR #197) as a whole-bubble local disclosure surface in both states — its text rows are click-owned, so the first plain single click on them runs the Host expand/collapse action instead of selection.
+- test/long-user-disclosure.test.ts pins the ownership change: the first complete click on a long-user bubble (collapsed or expanded) acts immediately, so no deferred double-click window exists on that surface.
+- Audit note: The callback is a direct host seam. The long-user bubble is intentionally different from ordinary selection-owned transcript text: its text rows themselves are now Host disclosure targets, so their first plain click is consumed by local expand/collapse. Recorded here so a revendor audit separates the two contracts: the fork owns single/double/drag gesture classification; the Host owns which painted rows are click-owned controls and which stay selection-owned text.
 
 **Public / extension**
 - TuiAltScreen options expose the click callback through the public component constructor.
@@ -1656,7 +1658,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed the host callback is a structural and behavioral seam, not a convenience import.
+- Notes: Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 declared the long-user bubble's ordinary user-text rows (collapsed and expanded alike) Host disclosure targets — a selection-owned → disclosure-owned ownership change recorded in why/host above; the fork's click-granularity classifier itself is unchanged.
 
 ### X019 — Text no-op dispose inheritance shim
 
@@ -2079,7 +2081,7 @@ Fullscreen transcript lines reserve leading columns for a bullet/emoji. Copying 
 - Audit note: No host subclass can recover startColumn from final text.
 
 **Host**
-- src/clipboard.ts callback and fullscreen drag-copy UX
+- src/client/clipboard/copy.ts callback and fullscreen drag-copy UX
 - Audit note: The host callback shape receives only final text.
 
 **Public / extension**
@@ -2233,7 +2235,7 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 - Audit note: No local replacement branch remains.
 
 **Host**
-- src/clipboard.ts callback supplies host clipboard policy and Copied!/Copy failed feedback.
+- src/client/clipboard/copy.ts callback supplies host clipboard policy and Copied!/Copy failed feedback.
 - Audit note: The host remains a consumer of the upstream seam, not of a local divergence.
 
 **Public / extension**
@@ -2268,7 +2270,7 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 
 #### Replacement mapping
 
-- Former local clipboard patch -> upstream copySelection/copyOnSelect/active-selection API; host policy remains src/clipboard.ts.
+- Former local clipboard patch -> upstream copySelection/copyOnSelect/active-selection API; host policy remains src/client/clipboard/copy.ts.
 
 #### Retirement evidence
 
@@ -2310,9 +2312,9 @@ fd output can identify a directory without a trailing slash, including through s
 - Audit note: The current host passes fdPath=null to this inner provider for deterministic fallback, so no claim is made that the host's @-mention HostFilePort path exercises fd output.
 
 **Host**
-- src/mentions.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider
+- src/tui/interaction/autocomplete/provider.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider
 - public AutocompleteProvider consumers may provide an fd-backed provider
-- Audit note: The current @ flow uses HostFilePort/discoverMention and the /image path uses completeImageArgument/LocalFileSource; neither is counted as a direct fd consumer of X027.
+- Audit note: The current @ flow uses HostFilePort/discoverMention and the /image path uses completePathArgument over ClientLocalDiscoveryDriver (its own Client finder); neither is counted as a direct fd consumer of X027.
 
 **Public / extension**
 - AutocompleteProvider output is public through editor completion integration
@@ -3334,8 +3336,8 @@ Prefilled query and draft inputs should place the cursor at the end by default, 
 
 **Host**
 - SearchablePicker initialQuery/setFilter
-- src/history-panel.ts history query
-- src/task-panel.ts task query
+- src/tui/panels/history-panel.ts history query
+- src/tui/panels/task-panel.ts task query
 - src/question.ts question draft/prefill paths
 - Audit note: These callers append or continue typing after prefill; the cited host paths are concrete setValue consumers rather than a generic editor-adjacent bucket.
 
@@ -3415,8 +3417,8 @@ filterQuery is the single source of truth for the rendered search box, getFilter
 
 **Host**
 - src/tui-app.ts categorized picker query handoff and category cycle
-- src/commands.ts session prefill and row enrichment
-- src/tui-app.ts PickerHandle getFilter/setFilter closures and MarqueeFilterAdapter getFilter read
+- src/tui/commands/sessions.ts session prefill and row enrichment
+- src/tui-app.ts PickerHandle getFilter/setFilter closures and src/tui/pickers/picker-adapters.ts MarqueeFilterAdapter getFilter read
 - Audit note: Host calls both programmatic and typed filter paths through distinct adapters; the categorized lifecycle consumes initialQuery once and category navigation preserves the live query (an empty query stays empty).
 
 **Public / extension**
@@ -3504,9 +3506,9 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 **Host**
 - src/tui-app.ts FocusForwardingFrame and settings overlays
-- src/theme-menu.ts SettingsList submenu wrapper
-- src/subagent-model-menu.ts SubagentModelAllowlistPicker forwards focus to its SearchablePicker
-- src/model-picker.ts ModelPicker forwards focus to its active SearchablePicker
+- src/tui/pickers/theme-menu.ts SettingsList submenu wrapper
+- src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker forwards focus to its SearchablePicker
+- src/tui/pickers/model-picker.ts ModelPicker forwards focus to its active SearchablePicker
 - test/theme-picker.test.ts and test/model-picker.test.ts CURSOR_MARKER regressions
 - Audit note: Host frames rely on the child accepting focus; editor-seat-holder.ts is an editor seat/draft handoff rather than a list-focus wrapper. Post-v0.85.1 audit: ThemeSubmenu forwards Focusable state to its inner SettingsList, and the /settings SubagentModelAllowlistPicker and the /model ModelPicker forward the active view's focused flag through to their SearchablePicker search Input so the IME cursor marker survives submenu/view transitions.
 
@@ -3551,7 +3553,7 @@ List wrappers own the Input or submenu the user actually types into. Focus state
 
 #### Replacement mapping
 
-- SelectList-side Input focus ownership -> moved to Host SearchablePicker (src/searchable-picker.ts) -> test/searchable-picker.test.ts focus tests
+- SelectList-side Input focus ownership -> moved to Host SearchablePicker (src/tui/pickers/searchable-picker.ts) -> test/searchable-picker.test.ts focus tests
 - remaining vendor-owned seam -> SettingsList focus/row-budget propagation -> packages/pi-tui/test/settings-list.test.ts
 
 #### Retirement evidence
@@ -4749,7 +4751,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - Category: `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `LOW`
 - Files: `src/tui-alt-screen.ts`
-- Last audited: `2026-09-18`
+- Last audited: `2026-09-29`
 - Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
 
 #### Why it exists
@@ -4771,7 +4773,7 @@ The host paints presentation-only chrome inside the transcript scroll content (t
 - Audit note: None.
 
 **Host**
-- src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows/userDisclosureHit geometry; every other row returns undefined.
+- src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows userDisclosureHits range geometry (the collapse+tail-slot hit rows); every other row — the whole-bubble body range included — returns undefined.
 - src/tui-app.ts selectionLineText returns undefined unless the context scrollView is the transcript ScrollView, so overlay/editor selections are never filtered.
 - Audit note: The host owns the semantic meaning of its chrome; the fork never learns what the row is.
 
@@ -4818,7 +4820,7 @@ The host paints presentation-only chrome inside the transcript scroll content (t
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only.
+- Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only. 2026-09-29: host dependency re-verified after PR #197 moved the host hit geometry to plural userDisclosureHits ranges — the override still targets only the tail-slot collapse rows.
 
 ### X058 — Viewport passthrough for a focused capturing overlay
 
@@ -4910,3 +4912,115 @@ The host transcript-search box is a capturing overlay: it must keep KEYBOARD foc
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream blocks wheel, PageUp/PageDown, the scrollbar and the selection anchor under ANY visible overlay; the fork adds one optional passthrough keyed on the focused opted-in overlay with no other blocking overlay.
+
+### X059 — Stateful OSC 9;4 projection and terminal-specific heartbeat
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/index.ts`, `src/terminal.ts`
+- Last audited: `2026-10-07`
+- Baseline compared: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+
+#### Why it exists
+
+Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which the boolean Terminal.setProgress(active) cannot express: false means idle, so a host that wants to show a user-blocked wait would have to write a clear first (a visible working -> idle -> waiting_input blink), and ProcessTerminal.stop() would not know that a physical state is still on the pane. The fork therefore keeps the boolean contract as-is and adds one optional stateful projection whose physical state is tracked independently of the keepalive timer. The same physical state machine also owns the active heartbeat: the logical unknown-progress working state is always projected as OSC 9;4 state 1 value 0, which keeps the pane working without forcing the strong indeterminate animation of state 3, while 'paused' remains 9;4;4. The periodic refresh is only required by terminals known to expire that state; repeating it on a persistent terminal is unnecessary and may restart their native progress animation.
+
+#### Changed surface
+
+- TerminalProgressState = 'clear' | 'indeterminate' | 'paused' (exported): the LOGICAL progress states this terminal can own. 'indeterminate' stays the compatibility name of the logical unknown-progress working state; its current PHYSICAL presentation is OSC 9;4 state 1 value 0.
+- Terminal.setProgressState?(state) — optional and additive; an implementation that does not provide it keeps the boolean contract unchanged.
+- ProcessTerminal.setProgressState: 'indeterminate' ALWAYS writes OSC 9;4;1;0 once per explicit projection and starts the 1 s heartbeat only on a terminal known to expire OSC 9;4 state (currently Ghostty / Monstar); 'paused' stops the heartbeat and writes OSC 9;4;4 with NO intermediate 9;4;0; 'clear' stops the heartbeat and writes OSC 9;4;0.
+- shouldKeepTerminalProgressAlive(env) is the positive allowlist for that heartbeat, snapshotted once at ProcessTerminal construction; persistent terminals (Tern, Kitty, WezTerm, Windows Terminal, unknown) receive no periodic 9;4;1;0 refresh.
+- A repeated explicit projection still writes its own bytes and starts no second interval.
+- ProcessTerminal.setProgress(active) delegates to the stateful primitive (true -> indeterminate, false -> clear) and keeps its one-write-per-explicit-call behavior, timer ownership and dedupe semantics; the WORKING payload it writes is now OSC 9;4;1;0 (the clear payload is unchanged). paused -> indeterminate resumes the heartbeat only where the terminal requires it.
+- ProcessTerminal.stop() clears EVERY non-clear physical progress state, not only a heartbeat-backed one, so a paused state cannot leak into the shell or an $EDITOR that takes the terminal next.
+- Host: src/tui-app.ts reconciles the effective pane state from THREE inputs — the authoritative main-Agent running truth, the canonical RunPhase, and the lifecycle-owned agentInputWait fact (whether the Agent is BLOCKED on the presented wait); only a Tern terminal consumes setProgressState (every other terminal keeps the plain boolean projection).
+- Host: the persisted terminalProgress preference (default 'on') gates the PHYSICAL projection only. While it is 'off' the desired logical state keeps folding from the same three authoritative inputs but no active/paused bytes are written, disabling asserts one clear through the existing low-level clear path, and every reacquisition while off asserts clear. The preference never changes the running/RunPhase/agentInputWait fold.
+
+#### Dependency map
+
+**Vendor internal**
+- The physical progress state is tracked next to (never derived from) the keepalive interval, because 'paused' is a real state with no interval; stop()'s clear predicate reads that field.
+- clearProgressInterval() remains the single timer-ownership point; setProgressState('indeterminate') reuses it and never starts a second interval.
+- shouldKeepTerminalProgressAlive(env) decides whether indeterminate owns a 1 s refresh interval; the policy is snapshotted once at construction, so a later env mutation cannot flip a live terminal's timer policy.
+- An explicit indeterminate projection always writes one OSC 9;4;1;0 regardless of the heartbeat policy.
+- Repeated explicit setProgress(true) / setProgressState('indeterminate') must not create a second interval.
+- Audit note: The behavior changes for an existing caller are: stop() also clears a physically paused state (which the boolean API could never leave behind); the 1 s active refresh narrows to terminals that expire OSC 9;4 state; and the logical unknown-progress working state is now written as OSC 9;4;1;0 instead of 9;4;3. Every explicit projection still writes exactly once per call and keeps the timer/dedupe semantics; only the working payload changed.
+
+**Inheritance / structural**
+- ProcessTerminal implements the Terminal interface; the new member is optional, so structural/test implementations that only provide setProgress stay assignable.
+- No subclass edge: the method is a plain public method on ProcessTerminal, and TerminalProgressState is a closed string union.
+- Audit note: An implementation without setProgressState is untouched and keeps the upstream boolean behavior.
+
+**Host**
+- src/tui-app.ts owns the effective state: reconcileTerminalProgress() runs from setTerminalProgress() and from every activity projection (projectActivity), so a wait opening or settling while the main Agent runs moves the pane immediately — including the question FIFO handover, where the phase is unchanged but the new flow's agentInputWait is not.
+- Only a wait the main Agent is BLOCKED on pauses the pane: agentInputWait is supplied by the interaction lifecycle that owns the wait (the LIVE foreground Agent question wait and the Agent approval port pass true; a CONTINUED late-answer form whose Agent already continued, the /login authorization prompt and every other Client-local flow stay false), so neither the canonical phase nor the interaction SOURCE alone can claim waiting_input.
+- The Tern-only guard keeps the richer method off every non-Tern path (plan §9.2), and a Tern terminal that lacks setProgressState fails soft to the boolean working/clear projection (plan §9.3).
+- The PR #230 ownership lifecycle is preserved: while the TuiApp does not own the terminal the desired state is only folded, and every screen (re)start re-asserts the CURRENT effective state.
+- The terminalProgress preference gates only the physical write: setTerminalProgressEnabled(false) asserts one clear and then suppresses active/paused writes while the desired logical state keeps folding; (re)enabling reprojects the current effective state immediately, and an acquisition while disabled asserts clear. It is a presentation gate, never a second Agent-state authority.
+- Audit note: Guarded by test/terminal-progress-lifecycle.test.ts (the Tern waiting_input section: the real Agent-port positives, the /login local negative, the CONTINUED live->continued handover negative, the FIFO handover flips and the lifecycle restores; plus the terminalProgress on/off gate) and test/tern-terminal.test.ts (the pure mapping).
+
+**Public / extension**
+- Terminal and the new TerminalProgressState are public package types; the method is optional and additive, so existing consumers compile and behave unchanged.
+- The extension-facing public API is deliberately not widened: no plugin-facing capability or option is added.
+- Audit note: Absent method = upstream behavior.
+
+**Behavioral coupling**
+- indeterminate always emits one OSC 9;4;1;0, and Ghostty / Monstar keep refreshing it every 1 s.
+- Tern and other persistent terminals receive no periodic 9;4;1;0 refresh, and a repeated explicit active starts no second interval.
+- indeterminate -> paused stops any heartbeat and writes 9;4;4 directly, with no 9;4;0 between them.
+- paused -> indeterminate writes 9;4;1;0 and resumes the heartbeat only where the terminal requires it; paused -> clear writes 9;4;0.
+- paused / indeterminate -> stop() writes 9;4;0 exactly once and leaves no timer; a stop() after an explicit clear writes no second clear.
+- boolean setProgress(true/false) preserves its true->indeterminate / false->clear LOGICAL mapping and exactly one write per explicit call; the working physical payload is now 9;4;1;0 (the clear payload is unchanged).
+- A host screen restart while paused re-asserts paused on the new screen; heartbeat policy does not change host ownership semantics.
+- Audit note: Guarded by packages/pi-tui/test/terminal.test.ts (X059) plus the host terminal-progress lifecycle regressions (the real-OSC disposal case pins Ghostty for the heartbeat + teardown evidence).
+
+#### Guarding tests
+
+- packages/pi-tui/test/terminal.test.ts: shouldKeepTerminalProgressAlive is a Ghostty/Monstar allowlist and denies persistent/unknown terminals (X059)
+- packages/pi-tui/test/terminal.test.ts: a persistent terminal's indeterminate writes ONE 9;4;1;0 and starts no heartbeat (X059)
+- packages/pi-tui/test/terminal.test.ts: the heartbeat policy is snapshotted at construction and a later env change cannot flip it (X059)
+- packages/pi-tui/test/terminal.test.ts: Ghostty keeps the 1 s indeterminate heartbeat and starts no second interval (X059)
+- packages/pi-tui/test/terminal.test.ts: indeterminate -> paused on Ghostty stops the heartbeat and writes paused directly (X059)
+- packages/pi-tui/test/terminal.test.ts: a persistent terminal's indeterminate -> paused has no heartbeat and no intermediate clear (X059)
+- packages/pi-tui/test/terminal.test.ts: Ghostty's paused -> indeterminate resumes the 1 s heartbeat (X059)
+- packages/pi-tui/test/terminal.test.ts: a persistent terminal's paused -> indeterminate writes one 9;4;1;0 and starts no heartbeat (X059)
+- packages/pi-tui/test/terminal.test.ts: setProgress(true/false) writes its working/clear bytes once per explicit call (X059)
+- packages/pi-tui/test/terminal.test.ts: writes OSC 9;4;4 for paused with no intermediate clear (X059)
+- packages/pi-tui/test/terminal.test.ts: paused -> clear writes the clear sequence and stops every timer (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() clears a PHYSICALLY paused state exactly once and leaves no keepalive (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() clears a one-shot indeterminate state and leaves no timer (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() clears an ACTIVE heartbeat state and leaves no interval (X059)
+- packages/pi-tui/test/terminal.test.ts: stop() after an explicit clear writes no second clear (X059)
+- test/tern-terminal.test.ts: the Tern progress state needs a wait phase AND a proven Agent-blocking wait
+- test/terminal-progress-lifecycle.test.ts: the Tern waiting_input section (real Agent approval/question positives, plan review, parked attention, the /login local negative, the CONTINUED live->continued handover negative, the FIFO handover flips, owner fence, stop/$EDITOR/fullscreen restores), the terminalProgress on/off presentation gate (disable asserts one clear and suppresses active/paused writes, re-enable reprojects the current truth, acquisition while off asserts clear, the desired state keeps folding while suppressed) and the real-OSC disposal case pinned to Ghostty (heartbeat interval + teardown)
+- test/terminal-progress-settings.test.ts: the terminalProgress parser default/invalid fallbacks and the /settings row (default render, invalid fallback, immediate runtime setter, whole-document persistence, reopen)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@d981de1229ef899957bbe968bc8dcda02a21f477`
+- Relevant upstream files:
+- packages/tui/src/terminal.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream's Terminal exposes only setProgress(active) over OSC 9;4 clear/indeterminate and refreshes indeterminate periodically; its stop() clears progress only when the keepalive interval was running. The fork adds one optional stateful projection ('paused' = OSC 9;4;4 without a transient clear), tracks the physical state separately from the keepalive, makes stop() clear any non-clear state, restricts the 1 s active heartbeat to terminals known to expire OSC 9;4 state, and presents the logical unknown-progress working state as OSC 9;4;1;0 instead of state 3. Explicit true/false LOGICAL state mapping and the one-write-per-explicit-call behavior remain compatible; the working physical payload intentionally changed from OSC 9;4;3 to OSC 9;4;1;0.
+
+#### Retirement conditions
+
+- Retire or replace when upstream gains an equivalent stateful/paused OSC 9;4 progress API (or the host stops needing a waiting_input pane state), then run the X059 fork terminal regressions and the host terminal-progress lifecycle regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Re-audited the whole OSC 9;4 physical state machine after the heartbeat convergence and the working-encoding change. The three-state LOGICAL projection is unchanged (clear / unknown-progress working / paused); its WORKING physical payload is now OSC 9;4;1;0 instead of 9;4;3, so the boolean contract no longer keeps its exact working bytes (it keeps one write per explicit call, its true->indeterminate / false->clear mapping and the clear payload). The paused state is optional and consumed by the Tern ANSI path only, and the widened lifecycle rule (stop() clearing a physically paused state) is unchanged. The previous universal 1 s active refresh was narrowed to terminals known to expire OSC 9;4 state (Ghostty / Monstar); persistent terminals including Tern are one-shot. The host-side consumer contract is THREE inputs (main-Agent running + canonical RunPhase + the lifecycle-owned agentInputWait) plus the terminalProgress presentation gate: a re-vendor or retirement audit must keep the third input, never collapse it back to the phase alone, and must not let the gate become a second Agent-state authority.

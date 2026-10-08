@@ -14,7 +14,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
- * (see src/process-tui-slot.ts). */
+ * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -46,11 +46,10 @@ test('footer shows model, cwd, branch, counters, context pressure, and stats', a
     branch: 'main',
     turns: 2,
     steps: 5,
-    statsLine: '2 轮 · 5 步| LLM 8.1s',
     contextTokens: 25_000,
     contextWindow: 100_000,
     // M1: the footer composes the stats line from the STRUCTURED usage
-    // facts (the legacy statsLine string is no longer a footer input).
+    // facts (never a preformatted compatibility string).
     usage: {
       tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
       performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0 },

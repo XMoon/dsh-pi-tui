@@ -9,7 +9,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-command-direct
  */
 
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import type {
   HostCommandExecution,
   HostCommandOutcome,

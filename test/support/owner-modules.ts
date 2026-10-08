@@ -5,6 +5,28 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 /**
+ * Mirror of `scripts/application-architecture-gate.mjs`'s `SOURCE_EXTENSIONS`.
+ *
+ * The production support modules are TypeScript, so they cannot import the
+ * unchecked `.mjs` gate script without an implicit-`any` error. The two copies
+ * are kept in lockstep by a drift guard in
+ * `test/application-architecture-gate.test.mjs` (it can import both).
+ */
+export const PRODUCTION_SOURCE_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.mts', '.cts']
+
+/**
+ * Mirror of the gate's `scriptKindOf`: `.tsx` must be parsed as TSX, or a legal
+ * JSX tree hides the declarations an AST scan is looking for. Also drift-
+ * guarded by `test/application-architecture-gate.test.mjs`.
+ */
+export function productionScriptKind(rel: string): ts.ScriptKind {
+  return rel.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+}
+
+/** This repository root. */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+/**
  * The A5b owner surface: the composition surface (plan A5 §22) PLUS the
  * application modules the A5b slices extract bootstrap responsibilities into
  * (`app/surface`, `app/command`, `app/submission`).
@@ -43,14 +65,73 @@ export interface OwnerModule {
   readonly role: OwnerRole
 }
 
+/** The bootstrap composition-helper directory (the TS2 zone). */
+const BOOTSTRAP_ZONE = 'src/app/bootstrap'
+
+/**
+ * Every production source file under `root`/`dir`, RECURSIVELY, as
+ * `root`-relative POSIX paths, deterministically sorted; `node_modules`/`dist`
+ * are skipped.
+ *
+ * The zone scans must walk the WHOLE subtree: a one-level `readdir` would let a
+ * NESTED `src/app/bootstrap/**` helper escape the composition/owner surface
+ * locks while the architecture gate (which treats the directory as the zone)
+ * still accepts it (TS2 §7/§18/§20).
+ */
+export function productionFilesUnder(root: string, dir: string): string[] {
+  const out: string[] = []
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === 'dist') continue
+        walk(path)
+      } else if (PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.name.endsWith(extension))) {
+        out.push(relative(root, path).split('\\').join('/'))
+      }
+    }
+  }
+  walk(join(root, dir))
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+}
+
+/**
+ * Every `src/app/bootstrap/**` composition helper, sorted deterministically. The
+ * zone is directory-defined (plan §7), so a new helper — at ANY depth — joins the
+ * aggregate owner surface automatically instead of escaping its bag/single-owner
+ * locks.
+ */
+function bootstrapHelperModules(): OwnerModule[] {
+  return productionFilesUnder(ROOT, BOOTSTRAP_ZONE)
+    .map(rel => ({ rel, role: 'composition' as const }))
+}
+
 /** The explicit A5b owner-module set, in composition order. */
 export const OWNER_MODULES: readonly OwnerModule[] = [
   { rel: 'src/index.ts', role: 'composition' },
   { rel: 'src/app/bootstrap.ts', role: 'composition' },
+  // TS2: the composition zone is `src/app/bootstrap.ts` + every
+  // `src/app/bootstrap/**` wiring helper. The helper list is read from disk (the
+  // zone is defined by DIRECTORY, plan §7), so a newly extracted helper is
+  // covered by the aggregate `ownerSource()`/`ownerOccurrences()` locks — the
+  // "no universal dependency bag in the composition zone" invariant (plan §20)
+  // fails for a bag declared in ANY bootstrap module.
+  ...bootstrapHelperModules(),
   // A4-6 / A5b-6: the mounted-surface owner; the A5b-6 closure moved the
   // Task-Center jobs-read retention policy into it (plan §7.6.2), so its
   // ownership location is now locked from the A5b owner surface.
   { rel: 'src/app/surface/runtime.ts', role: 'owner' },
+  // TS3: the surface's independent application-level owners. The aggregate
+  // remains the ONE `createSurfaceRuntime()` entry; each sub-owner owns its own
+  // state and disposal hook, and the aggregate
+  // `ownerSource()`/`ownerOccurrences()` locks (bag detection, exact
+  // single-owner counts) now cover them too.
+  { rel: 'src/app/surface/notification-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/extension-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/plugin-manager-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/task-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/interaction-runtime.ts', role: 'owner' },
+  { rel: 'src/app/surface/event-routing.ts', role: 'owner' },
   // A5b-1: viewer + live-session presentation.
   { rel: 'src/app/surface/session-presentation.ts', role: 'owner' },
   { rel: 'src/app/surface/viewer-runtime.ts', role: 'owner' },
@@ -65,13 +146,11 @@ export const OWNER_MODULES: readonly OwnerModule[] = [
   // A5b-3: command authority/registration/catalog.
   // A5b-4: submission/input + local shell.
   { rel: 'src/app/submission/controller.ts', role: 'owner' },
-  { rel: 'src/app/submission/local-shell.ts', role: 'owner' },
+  { rel: 'src/app/submission/user-shell.ts', role: 'owner' },
   // A5b-5: TuiApp application events + client-local platform actions.
   { rel: 'src/app/surface/application-events.ts', role: 'owner' },
   { rel: 'src/app/surface/client-actions.ts', role: 'owner' },
 ] as const
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 function read(rel: string): string {
   const path = join(ROOT, rel)
@@ -106,7 +185,7 @@ export function ownerFile(rel: string): string {
  * an object-literal initializer behind — `(...)`, `x as T`, `<T>x`, `x!`,
  * `x satisfies T` — looping until the expression stops changing.
  *
- * This mirrors the unwrap in `scripts/pre-m3-architecture-gate.mjs`
+ * This mirrors the unwrap in `scripts/application-architecture-gate.mjs`
  * (`findDirectAdapterConstructions`). It lives here, next to the production
  * walkers it guards, because BOTH A5b AST guards
  * (`test/a5-composition-inventory.test.ts` and
@@ -146,26 +225,20 @@ export function unwrapExpression(
  * `packages/` and `dist/` are never reached because the walk starts at `src/`;
  * `node_modules`/`dist` are skipped defensively.
  *
- * The extension filter mirrors `scripts/pre-m3-architecture-gate.mjs`'s
- * `collectSourceEntries()` — `.ts`, `.mts` and `.cts` (which also cover the
- * `.d.ts` / `.d.mts` / `.d.cts` declaration spellings) — so no production
- * TypeScript source is skipped silently.
+ * The extension filter is the SAME set as
+ * `scripts/application-architecture-gate.mjs`'s `collectSourceEntries()` —
+ * `.ts`, `.tsx`, `.mts`, `.cts` (which also cover the `.d.ts` / `.d.mts` /
+ * `.d.cts` declaration spellings) — so no production TypeScript source is
+ * skipped silently and a `.tsx` duplicate cannot escape the single-owner scans
+ * (TS1/TS2: the production gate already scanned `.tsx`).
  */
+export function productionSourcesUnder(root: string): Array<{ rel: string; source: string }> {
+  return productionFilesUnder(root, 'src').map(rel => ({ rel, source: readFileSync(join(root, rel), 'utf8') }))
+}
+
+/** {@link productionSourcesUnder} bound to this repository root. */
 export function productionSources(): Array<{ rel: string; source: string }> {
-  const out: Array<{ rel: string; source: string }> = []
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === 'dist') continue
-        walk(path)
-      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.mts') || entry.name.endsWith('.cts')) {
-        out.push({ rel: relative(ROOT, path).split('\\').join('/'), source: readFileSync(path, 'utf8') })
-      }
-    }
-  }
-  walk(join(ROOT, 'src'))
-  return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+  return productionSourcesUnder(ROOT)
 }
 
 /**
@@ -185,10 +258,13 @@ export function productionSources(): Array<{ rel: string; source: string }> {
  * outside the helper entirely. The architecture gate locks the dependency
  * direction only — it performs no type analysis.
  */
-export function aliasAwareConstructionSites(name: string): string[] {
-  const files = productionSources().map(({ rel, source }) => ({
+export function aliasAwareConstructionSites(
+  name: string,
+  sources: Array<{ rel: string; source: string }> = productionSources(),
+): string[] {
+  const files = sources.map(({ rel, source }) => ({
     rel,
-    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS),
+    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel)),
   }))
   const aliases = new Set<string>()
   let changed = true

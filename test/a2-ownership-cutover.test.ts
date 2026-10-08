@@ -19,13 +19,14 @@ const retirementSource = readFileSync(new URL('../src/app/direct/owner-retiremen
 const sessionRuntimeSource = readFileSync(new URL('../src/app/session/runtime.ts', import.meta.url), 'utf8')
 // A4-7: the presentation event routing moved into the surface owner, so the
 // currentness locks below are anchored to the surface routing bodies and the
-// runner's injected core read.
-const surfaceSource = readFileSync(new URL('../src/app/surface/runtime.ts', import.meta.url), 'utf8')
+// runner's injected core read. TS3 §36 moved those routing bodies on again, from
+// the aggregate into `app/surface/event-routing.ts`.
+const routingSource = readFileSync(new URL('../src/app/surface/event-routing.ts', import.meta.url), 'utf8')
 // A5b-4: the submission admission fences + the param-agent interrupt fences
 // moved into the submission owners, so the currentness locks below read the
 // OWNER modules explicitly (never a glob).
 const submissionControllerSource = readFileSync(new URL('../src/app/submission/controller.ts', import.meta.url), 'utf8')
-const localShellSource = readFileSync(new URL('../src/app/submission/local-shell.ts', import.meta.url), 'utf8')
+const localShellSource = readFileSync(new URL('../src/app/submission/user-shell.ts', import.meta.url), 'utf8')
 
 test('the runner keeps NO local ownership authority (A2-2 cutover)', () => {
   assert.ok(!/\blet liveAgent\b/.test(indexSource), 'no local liveAgent declaration')
@@ -66,15 +67,31 @@ test('the current owner is published only through the injected SessionOwnerAcces
     'first-session publication goes through the injected owner provider (runtime)')
   const publishes = sessionRuntimeSource.match(/core\.setCurrentOwner\(/g) ?? []
   assert.equal(publishes.length, 4, `expected the 4 runtime publish sites, saw ${publishes.length}`)
-  // The production bootstrap is still the Direct composition: it injects the
-  // Direct owner provider into the runtime (the Remote provider is composed by
-  // the future Remote runtime selection seam, never by this bootstrap).
-  assert.ok(indexSource.includes('owners: directRuntime.owners,'),
-    'the production bootstrap injects the Direct owner provider')
-  assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime.owners.currentDirectAttachment()'),
+  // The production bootstrap is still the Direct composition: it selects the
+  // Direct application runtime through the M3-4 selection seam and injects
+  // its owner provider into the runtime (the Remote provider is composed by
+  // the Remote branch of the same seam, never a second bootstrap truth).
+  assert.ok(indexSource.includes('owners: selectedRuntime.owners,'),
+    'the production bootstrap injects the selected (Direct) owner provider')
+  assert.ok(indexSource.includes('retirement: selectedRuntime.retirement,'),
+    'the production bootstrap injects the selected (Direct) retirement provider')
+  assert.ok(indexSource.includes('const selectedRuntime = await selectApplicationRuntime({'),
+    'the M3-4 selection seam constructs the selected runtime core')
+  assert.ok(indexSource.includes('      kind: \'direct\','),
+    'normal package apply() selects Direct')
+  // M3-4 PR2: the read is branch-safe (optional chain — a Remote selection
+  // has no Direct runtime); it is still a DERIVED registry projection of the
+  // SAME accessor, never a stored second truth.
+  assert.ok(indexSource.includes('const agentNow = (): Agent | undefined => directRuntime()?.owners.currentDirectAttachment()'),
     'the current attachment is a DERIVED registry projection')
-  assert.ok(indexSource.includes('const handleNow = (): AgentHandle | undefined =>'),
-    'the retirement handle is read through the core slot')
+  // M3-4 PR1 removed the runner's last Direct owner-handle read
+  // (`handleNow`): the fatal catch now runs the ONE memoized retirement
+  // coordinator unconditionally (it covers parked owners and pending forks
+  // too), so no Direct-handle-based owner-presence gate remains.
+  assert.ok(!indexSource.includes('handleNow'),
+    'the runner keeps no Direct-handle-based owner-presence gate (the coordinator owns retirement)')
+  assert.ok(!indexSource.includes('currentOwnerPresentRef'),
+    'no Direct-handle owner-presence ref remains in the composition root')
 })
 
 /**
@@ -94,6 +111,27 @@ function spanOf(source: string, from: string, to: string): string {
   return source.slice(start, end)
 }
 
+/** The ONE `createTaskSource({...})` call site's argument object (TS2 §9). */
+function taskSourceInjection(source: string): string {
+  return spanOf(source, 'const taskSource = createTaskSource({', 'surface.attachTasks({')
+}
+
+/**
+ * Assert the Task fence's ownership-core injection at its EXACT site: the
+ * composition root must hand `createTaskSource` the ownership-core session id
+ * and generation as LAZY reads. A whole-composition-surface `includes` cannot
+ * stand in for this (seven other legitimate core reads in the facade satisfy
+ * it), which is why the mutation test below must fail for a wrong-source or
+ * constant injection.
+ */
+function assertTaskFenceInjection(source: string): void {
+  const call = taskSourceInjection(source)
+  assert.ok(call.includes('currentSessionId: () => ownership.currentSessionId(),'),
+    'the Task fence key must take its session id from the ownership core')
+  assert.ok(call.includes('generation: () => ownership.generation(),'),
+    'the Task fence key must take its generation from the ownership core')
+}
+
 test('currentness identity comes from the ownership core, never from the Direct attachment', () => {
   // fork navigation fence (bound runtime) + admission identity (runner)
   const forkFence = spanOf(sessionRuntimeSource, 'const isNavigationCurrent = ', 'const parkForkOwner = ')
@@ -111,24 +149,39 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the switch no-op compares the CORE session id')
   assert.ok(!switchLocked.includes('agentNow('), 'the switch no-op must not read the Direct attachment')
 
-  // Task Browser jobs fence: the composition root derives the key + injects the
-  // session id from the ownership core; the A5b-6 retention policy (the
-  // retained snapshot + the same-session fence) is Task-Center-owned and reads
-  // both at CALL time (locked in test/a5b-bootstrap-closure.test.ts).
-  const jobFence = spanOf(indexSource, 'currentKey: () => {', 'listDescendants:')
-  assert.ok(jobFence.includes('const sessionId = ownership.currentSessionId()'),
-    'the Job snapshot key takes its session id from the core')
-  assert.ok(jobFence.includes('`${ownership.generation()}:${sessionId}`'),
+  // Task Browser jobs fence: the branch composition moved to the bootstrap
+  // composition zone (`src/app/bootstrap/task-source.ts`, TS2 §9), so the key
+  // lock reads the owner that now builds it AND the exact injection site that
+  // feeds it. The A5b-6 retention policy (the retained snapshot + the
+  // same-session fence) is Task-Center-owned and reads both at CALL time
+  // (locked in test/a5b-bootstrap-closure.test.ts).
+  //
+  // The injection lock is scoped to the ONE `createTaskSource({...})` argument
+  // object on purpose: a whole-composition-surface `includes` is satisfied by
+  // ANY of the other legitimate core reads in the facade (there are seven), so a
+  // wrong-source (`agentNow()?.session.id`) or constant (`() => 0`) injection at
+  // THIS site would keep the locks green — the exact weakening this test guards
+  // against (mutation-verified below).
+  const taskSourceSource = readFileSync(new URL('../src/app/bootstrap/task-source.ts', import.meta.url), 'utf8')
+  const jobFence = spanOf(taskSourceSource, 'const taskReadKey = (): string | undefined => {', 'return { taskRead }')
+  assert.ok(jobFence.includes('const sessionId = currentSessionId()'),
+    'the Job snapshot key takes its session id from the injected ownership read')
+  assert.ok(jobFence.includes('`${generation()}:${sessionId}`'),
     'the Job snapshot identity key is built from the core generation + session id')
-  assert.ok(jobFence.includes('currentSessionId: () => ownership.currentSessionId()'),
-    'the runner injects the SAME core session id for the owner-side jobs read')
+  assert.ok(jobFence.includes('currentSessionId,'),
+    'the SAME injected ownership read is forwarded to the owner-side jobs read')
+  assert.ok(!jobFence.includes('agentNow('),
+    'the Task read composition must not resolve the session id from the Direct attachment')
+  assertTaskFenceInjection(indexSource)
+  assert.ok(indexSource.includes('taskRead: taskSource.taskRead,'),
+    'the surface must receive the branch-composed Task read itself, never a second composition')
   assert.ok(!indexSource.includes('readJobs'),
     'the root must not provide the jobs-read retention policy (moved to the surface owner)')
 
   // session/event main routing (A4-7): the gate moved into the surface owner;
   // the runner injects the core session id. Gate + injection in ONE assertion
   // each, so neither side can drift.
-  const eventRouting = spanOf(surfaceSource, 'const ownerSessionId = source.currentSessionId()',
+  const eventRouting = spanOf(routingSource, 'const ownerSessionId = source.currentSessionId()',
     'main.applyToolPreview(event)')
   assert.ok(eventRouting.includes('if (session.id !== ownerSessionId) return'),
     'the main routing gate uses the injected session id')
@@ -139,7 +192,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
 
   // assistant-stream input gate (A4-7): the surface owns the routing; source +
   // gate in ONE span.
-  const onInput = spanOf(surfaceSource, 'const applyAssistantInput = ', 'const applyResumedCompaction = ')
+  const onInput = spanOf(routingSource, 'const applyAssistantInput = ', 'const applyResumedCompaction = ')
   assert.ok(onInput.includes('const sessionId = source.currentSessionId()'),
     'the assistant-stream input takes its session id from the injected core read')
   assert.ok(onInput.includes('if (sessionId === undefined || input.sessionId !== sessionId) return'),
@@ -147,7 +200,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
   assert.ok(!onInput.includes('agentNow('), 'the assistant-stream input gate must not read the Direct attachment')
 
   // exact-Agent identity helper + assistant-stream current check
-  assert.ok(surfaceSource.includes('if (source.isCurrentOwnerAgent(subject)) return true'),
+  assert.ok(routingSource.includes('if (source.isCurrentOwnerAgent(subject)) return true'),
     'the exact-Agent main-surface check resolves the identity through the injected helper')
   const helper = span('const isCurrentOwnerAgent = ', '// The semantic backend')
   assert.ok(helper.includes('const owner = ownership.owner()') && helper.includes('attachmentOf(owner)?.agent === candidate'),
@@ -157,14 +210,14 @@ test('currentness identity comes from the ownership core, never from the Direct 
 
   // agent/status ownership (A4-7): owner + completion identity in ONE span in
   // the surface; the runner injects the core-derived completion identity.
-  const agentStatus = spanOf(surfaceSource, 'const routeAgentStatus = ', 'const routeProviderRefresh = ')
+  const agentStatus = spanOf(routingSource, 'const routeAgentStatus = ', 'const routeProviderRefresh = ')
   assert.ok(agentStatus.includes('const currentAgentId = source.completionOwnerId()'),
     'the agent/status ownership check resolves the injected completion identity')
   assert.ok(agentStatus.includes('agentId === currentAgentId'),
     'the agent/status main branch compares against the core-derived completion identity')
   assert.ok(!agentStatus.includes('agentNow('), 'agent/status must not read the Direct attachment')
   assert.ok(indexSource.includes('completionOwnerId: () => {')
-    && indexSource.includes('directRuntime.owners.completionIdentity(owner)'),
+    && indexSource.includes('directRuntime()?.owners.completionIdentity(owner)'),
     'the runner must inject the completion identity from the core owner')
 
   // No identity/currentness judgement may use the Direct attachment as the
@@ -177,6 +230,38 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'the switch no-op must not compare against a Direct-attachment snapshot')
   assert.ok(indexSource.includes('ownership.currentSessionId()'),
     'the runner resolves the current session id through the core')
+})
+
+test('the Task fence injection lock rejects a wrong-source or constant injection (mutation)', () => {
+  // The lock above is only worth its invariant if a WRONG injection at the exact
+  // `createTaskSource({...})` site fails it. Both mutations change only that
+  // argument object: the session id falls back to the Direct attachment (which
+  // the Remote branch does not have) and the generation becomes a constant
+  // (which voids the same-session ownership-rollover key). Everything else —
+  // including the seven other legitimate `ownership.currentSessionId()` reads
+  // and the whole-key builder in `task-source.ts` — stays byte-identical, so an
+  // unscoped lock would keep passing.
+  assertTaskFenceInjection(indexSource)
+  const call = taskSourceInjection(indexSource)
+
+  const wrongSource = indexSource.replace(
+    call,
+    call.replace(
+      'currentSessionId: () => ownership.currentSessionId(),',
+      'currentSessionId: () => agentNow()?.session.id,',
+    ),
+  )
+  assert.notEqual(wrongSource, indexSource, 'the mutation fixture must actually rewrite the injection site')
+  assert.throws(() => assertTaskFenceInjection(wrongSource),
+    'a Direct-attachment session id injection must fail the Task fence injection lock')
+
+  const constantGeneration = indexSource.replace(
+    call,
+    call.replace('generation: () => ownership.generation(),', 'generation: () => 0,'),
+  )
+  assert.notEqual(constantGeneration, indexSource, 'the mutation fixture must actually rewrite the injection site')
+  assert.throws(() => assertTaskFenceInjection(constantGeneration),
+    'a constant generation injection must fail the Task fence injection lock')
 })
 
 test('no sessionId→Agent lookup reconstructs currentness in the runner', () => {
@@ -227,10 +312,14 @@ test('the admission fences use the ownership subject; only the param-agent fence
     2,
     'the two owner-token callbacks must resolve the captured token through the subject compare',
   )
+  // M3-4 PR3: the user-shell interrupt dropped the exact-Agent compare for
+  // the semantic SessionWriter.cancel under a live-scope admission (§27), so
+  // NO legacy sessionUnchanged fence may remain anywhere (the interrupt
+  // fences are generation-fenced now).
   const legacyFences = (indexSource.match(/sessionUnchanged\(/g) ?? []).length
     + (localShellSource.match(/sessionUnchanged\(/g) ?? []).length
-  assert.equal(legacyFences, 2,
-    'only the two param-agent interrupt fences may keep the exact-Agent sessionUnchanged compare')
+  assert.equal(legacyFences, 0,
+    'no exact-Agent sessionUnchanged fence remains: the user-shell interrupt is generation-fenced (M3-4 PR3)')
 })
 
 test('a coordinator-level retirement failure never masquerades as a backend phase', () => {

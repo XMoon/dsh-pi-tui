@@ -11,16 +11,17 @@ import { readFileSync } from 'node:fs'
 import { getEventListeners } from 'node:events'
 import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { FooterCommandRunner, KILL_GRACE_MS, type FooterCommandConfig } from '../src/footer/command-runner.ts'
+import { FooterCommandRunner, KILL_GRACE_MS } from '../src/tui/footer/command-runner.ts'
+import type { FooterCommandConfig } from '../src/domain/footer/command-config.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { emptyStatusSnapshot } from '../src/status/types.ts'
+import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

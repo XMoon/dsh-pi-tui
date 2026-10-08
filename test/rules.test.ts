@@ -5,7 +5,7 @@
  * type-aware lint (`@typescript-eslint/no-floating-promises` catches forms
  * this matcher cannot see: variable promises, `new Promise`, line-broken
  * void, and floating promises without `void`). Every detected use must be
- * either a terminal sink inside `src/detached.ts` (the helpers themselves)
+ * either a terminal sink inside `src/runtime/process/tasks.ts` (the helpers themselves)
  * or a documented lifecycle-root allowlist entry — a line carrying the
  * `allowlist` marker (the startup and exit orchestrations). New hand-
  * written `void` promise chains fail this test instead of waiting for the
@@ -20,6 +20,8 @@ import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
+import { PRODUCTION_SOURCE_EXTENSIONS, productionScriptKind } from './support/owner-modules.ts'
+
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
 /** The runner composition source (A5-2 moved the runner body from the
@@ -30,33 +32,41 @@ const runnerSource = (): string => [
   readFileSync(join(srcDir, 'app', 'bootstrap.ts'), 'utf8'),
 ].join('\n')
 
-/** The runner's lifecycle-root BLOCK: the arrow whose block declares
- * `disposeSurface`. A5-4 named that arrow (`startRunner`) and hoisted the
- * terminal catch out of the chained call, so the root is no longer a
- * `void (async () => …)()` expression statement. */
+/** The runner's lifecycle-root BLOCK: the body of the `startRunner` arrow
+ * (A5-4 named that arrow and hoisted the terminal catch out of the chained
+ * call, so the root is no longer a `void (async () => …)()` expression
+ * statement). TS2 §11 moved the `disposeSurface` declaration into the bootstrap
+ * composition zone, so the root is anchored on its own name — the one thing the
+ * facade keeps (§14) — instead of on a declaration that may move. */
 function lifecycleRootBlock(sourceFile: ts.SourceFile): ts.Block {
-  const candidates: ts.ArrowFunction[] = []
-  const findArrows = (node: ts.Node): void => {
-    if (ts.isArrowFunction(node)) candidates.push(node)
-    ts.forEachChild(node, findArrows)
+  let root: ts.ArrowFunction | undefined
+  const findRoot = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === 'startRunner'
+      && node.initializer !== undefined
+      && ts.isArrowFunction(node.initializer)
+      && ts.isBlock(node.initializer.body)) {
+      root = node.initializer
+    }
+    ts.forEachChild(node, findRoot)
   }
-  findArrows(sourceFile)
-  const root = candidates.find(arrow => ts.isBlock(arrow.body) && arrow.body.statements.some(statement =>
-    ts.isVariableStatement(statement)
-    && statement.declarationList.declarations.some(declaration =>
-      ts.isIdentifier(declaration.name) && declaration.name.text === 'disposeSurface')))
-  assert.ok(root !== undefined, 'the startup lifecycle root (the arrow whose block declares disposeSurface) must exist')
+  findRoot(sourceFile)
+  assert.ok(root !== undefined, 'the startup lifecycle root (`const startRunner = async (): Promise<void> => {…}`) must exist')
   return root.body as ts.Block
 }
 
-/** Recursively list every `.ts` file under a directory. */
+/** Recursively list every production source file under a directory. The
+ * extension set is the SAME four the architecture gate and the whole-tree
+ * owner scans use (`.ts`/`.tsx`/`.mts`/`.cts`), so a `.tsx` production module
+ * cannot escape these AST audits (TS2 §19). */
 function listSourceFiles(dir: string): string[] {
   const files: string[] = []
   for (const entry of readdirSync(dir)) {
     const path = join(dir, entry)
     if (statSync(path).isDirectory()) {
       files.push(...listSourceFiles(path))
-    } else if (entry.endsWith('.ts')) {
+    } else if (PRODUCTION_SOURCE_EXTENSIONS.some(extension => entry.endsWith(extension))) {
       files.push(path)
     }
   }
@@ -120,7 +130,7 @@ test('the matcher self-tests: allowed fixtures stay allowed, denied fixtures are
   assert.deepEqual(findVoidDiscards('/* doc: void somePromise() */'), [])
 })
 
-test('every production `void <promise>` discard is in detached.ts or an explicit allowlist', () => {
+test('every production `void <promise>` discard is in runtime/process/tasks.ts or an explicit allowlist', () => {
   const violations: string[] = []
   for (const path of listSourceFiles(srcDir)) {
     const file = relative(srcDir, path)
@@ -129,10 +139,10 @@ test('every production `void <promise>` discard is in detached.ts or an explicit
     const clean = stripComments(source).split('\n')
     for (let index = 0; index < clean.length; index += 1) {
       if (!VOID_PROMISE.test(clean[index]!)) continue
-      // detached.ts is the helpers' own terminal sink; everything else
+      // runtime/process/tasks.ts is the helpers' own terminal sink; everything else
       // needs the explicit `allowlist` marker on the SAME line (checked
       // on the ORIGINAL line: comment stripping removes the marker).
-      if (file !== 'detached.ts' && !originalLines[index]!.includes('allowlist')) {
+      if (file !== 'runtime/process/tasks.ts' && !originalLines[index]!.includes('allowlist')) {
         violations.push(`${file}:${index + 1}: ${clean[index]!.trim()}`)
       }
     }
@@ -140,7 +150,7 @@ test('every production `void <promise>` discard is in detached.ts or an explicit
   assert.deepEqual(
     violations,
     [],
-    'hand-written `void` promise chains are only legal inside detached.ts or with an explicit `allowlist` marker (AGENTS.md hard rule)',
+    'hand-written `void` promise chains are only legal inside runtime/process/tasks.ts or with an explicit `allowlist` marker (AGENTS.md hard rule)',
   )
 })
 
@@ -189,7 +199,7 @@ test('no keybinding settings watch callback crosses the config port (migration b
   for (const path of listSourceFiles(srcDir)) {
     const file = relative(srcDir, path)
     const source = readFileSync(path, 'utf8')
-    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, productionScriptKind(file))
     // Simple alias bindings of the settings object: name → declaration.
     // Parenthesized initializers (`const s = (settings)`) are unwrapped.
     // Round 33: alias collection is a FIXED POINT — a chain
@@ -268,31 +278,31 @@ test('no keybinding settings watch callback crosses the config port (migration b
   )
 })
 
-test('the runner cleanup closure never references a later-declared binding (TDZ guard)', () => {
-  // Lifecycle regression (review round 28): `cleanup()` is registered into
+test('the runner cleanup authority never references a later-declared binding (TDZ guard)', () => {
+  // Lifecycle regression (review round 28): the teardown is registered into
   // the Cordis effect BEFORE the app is constructed, so it can run while
   // later declarations are still in the temporal dead zone — a throwing
   // subscription registration at startup then turns the teardown into a
   // SECOND ReferenceError that masks the original failure and skips the
   // extension detach / diag dispose. Every runner-scope `let`/`const`
-  // identifier the cleanup body touches must be declared BEFORE the
-  // cleanup block. `stopKeybindingWatch` (removed — the settings watch is
-  // gone), `stopPluginKeybindingSync` and `catalogCoordinator` were the
+  // identifier the teardown touches must be declared BEFORE the teardown
+  // authority is created. `stopKeybindingWatch` (removed — the settings watch
+  // is gone), `stopPluginKeybindingSync` and `catalogCoordinator` were the
   // offenders; this audit keeps the whole class out.
   //
   // Round 30: the audit is AST-based (typescript's compiler API), so it
   // handles destructuring (`const { x } = y`, `const [x] = y`), same-line
   // nested blocks and nested closures precisely — no regex/brace-depth
   // approximation.
+  //
+  // TS2 §11: the teardown body now lives in `app/bootstrap/lifecycle.ts`; the
+  // runner-scope reads it depends on are the PROVIDER CLOSURES in the
+  // `createSurfaceLifecycle({...})` object literal audited below.
   const source = runnerSource()
   const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
-  // Find the startup lifecycle root's async IIFE:
-  // `void (async () => { ... })().catch(...)` — a void expression nested
-  // inside the apply function. Round 31: NOT simply the first void
-  // statement — the lifecycle root is uniquely identified as the arrow whose
-  // block declares `disposeSurface` (A5-4 named it `startRunner`; an earlier
-  // unrelated arrow must not hijack the anchor).
+  // The startup lifecycle root: `const startRunner = async (): Promise<void> => {…}`
+  // (A5-4 named it; TS2 anchors it on the name the facade keeps — plan §14).
   const runnerBlock = lifecycleRootBlock(sourceFile)
 
   // Collect runner-scope `let`/`const` declarations (the arrow body's direct
@@ -325,18 +335,24 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
     }
   }
 
-  // The disposeSurface function declaration (runner-scope).
-  const cleanupDecl = runnerBlock.statements.find(statement =>
+  // TS2 §11 moved the idempotent client-surface teardown into
+  // `app/bootstrap/lifecycle.ts`. Its ONLY runner-scope reads are the provider
+  // closures handed to the lifecycle factory, so THAT statement is the "cleanup
+  // closure" this audit speaks about: it is created in the runner's startup
+  // window, its callbacks can run at ANY later teardown (effect unload, startup
+  // failure, exit), and every runner-scope binding they touch must therefore
+  // already be declared — otherwise the early teardown reads the temporal dead
+  // zone and masks the original failure.
+  const authorityDecl = runnerBlock.statements.find(statement =>
     ts.isVariableStatement(statement)
     && ts.isIdentifier(statement.declarationList.declarations[0]!.name)
-    && statement.declarationList.declarations[0]!.name.text === 'disposeSurface'
+    && statement.declarationList.declarations[0]!.name.text === 'surfaceLifecycle'
   ) as ts.VariableStatement | undefined
-  assert.ok(cleanupDecl !== undefined, 'disposeSurface must exist in the runner scope')
-  const cleanupInitializer = cleanupDecl.declarationList.declarations[0]!.initializer
-  assert.ok(cleanupInitializer !== undefined && ts.isArrowFunction(cleanupInitializer), 'disposeSurface must be an arrow function')
-  const cleanupBody = cleanupInitializer.body
-  assert.ok(ts.isBlock(cleanupBody), 'disposeSurface body must be a block')
-  const cleanupLine = sourceFile.getLineAndCharacterOfPosition(cleanupDecl.getStart()).line + 1
+  assert.ok(authorityDecl !== undefined, 'the surface lifecycle authority must exist in the runner scope')
+  const authorityInitializer = authorityDecl.declarationList.declarations[0]!.initializer
+  assert.ok(authorityInitializer !== undefined && ts.isCallExpression(authorityInitializer),
+    'the surface lifecycle authority must be created by its factory call')
+  const cleanupLine = sourceFile.getLineAndCharacterOfPosition(authorityDecl.getStart()).line + 1
 
   // Collect the identifiers referenced in the cleanup body (excluding its
   // own local declarations — e.g. the `for (const file of ...)` loop var).
@@ -349,12 +365,13 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
       for (const name of names) skip.add(name)
     }
     if (ts.isIdentifier(node)) {
-      // Only bare identifiers (not property names / member names) count.
+      // Only bare identifiers (not property names / member names) count. A
+      // SHORTHAND property (`{ diag }`) is a VALUE READ, not a key, so it counts
+      // — the authority's object literal evaluates it eagerly at that line.
       const parent = node.parent
       const isPropertyName = parent !== undefined && (
         (ts.isPropertyAccessExpression(parent) && parent.name === node)
         || (ts.isPropertyAssignment(parent) && parent.name === node)
-        || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)
         || (ts.isBindingElement(parent) && parent.name === node)
         || (ts.isMethodDeclaration(parent) && parent.name === node)
         || (ts.isParameter(parent) && parent.name === node)
@@ -364,7 +381,7 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
     }
     ts.forEachChild(node, visit)
   }
-  visit(cleanupBody)
+  visit(authorityInitializer)
   for (const name of [...referenced]) if (skip.has(name)) referenced.delete(name)
 
   const violations: string[] = []
@@ -372,13 +389,13 @@ test('the runner cleanup closure never references a later-declared binding (TDZ 
     const declLine = runnerDecls.get(name)
     if (declLine === undefined) continue
     if (declLine > cleanupLine) {
-      violations.push(`${name} (runner-scope declaration at line ${declLine}) referenced by cleanup (line ${cleanupLine}) — TDZ ReferenceError on early teardown`)
+      violations.push(`${name} (runner-scope declaration at line ${declLine}) referenced by the teardown authority (line ${cleanupLine}) — TDZ ReferenceError on early teardown`)
     }
   }
   assert.deepEqual(
     violations,
     [],
-    'cleanup must only reference runner-scope bindings declared BEFORE it — a binding declared later is a TDZ ReferenceError when cleanup runs early (effect teardown / startup failure / exit)',
+    'the teardown authority must only reference runner-scope bindings declared BEFORE it — a binding declared later is a TDZ ReferenceError when the teardown runs early (effect teardown / startup failure / exit)',
   )
 })
 
@@ -417,7 +434,7 @@ test('legacy history moves to JSONL files and never re-enters Config', () => {
   const source = runnerSource()
   assert.doesNotMatch(source, /settings history cleanup/u,
     'the retired whole-document history cleanup write must stay deleted')
-  const migration = readFileSync(join(srcDir, 'legacy-settings-migration.ts'), 'utf8')
+  const migration = readFileSync(join(srcDir, 'app/bootstrap/legacy-settings-migration.ts'), 'utf8')
   // The field lists that DO cross into Config never mention history, and no
   // history migration exists at all in PR A (plan §8.5: the legacy data
   // stays in the read-only file; a durable history move is not this PR's
@@ -448,9 +465,9 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
   const source = runnerSource()
   const sourceFile = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
-  // The lifecycle root (same anchor as the cleanup audit above): the arrow
-  // whose block declares `disposeSurface`. Only bindings in THAT scope are the
-  // runner-scope slots this audit speaks about.
+  // The lifecycle root (same anchor as the cleanup audit above): the
+  // `startRunner` arrow body. Only bindings in THAT scope are the runner-scope
+  // slots this audit speaks about.
   const runnerBlock = lifecycleRootBlock(sourceFile)
 
   /** Collect every bound name of a binding pattern. */
@@ -622,7 +639,7 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
         if (declLine !== undefined && declLine > callLine) {
           violations.push(
             `${ref} → ${ref} (declared at line ${declLine}) captured by the startProcessTui arguments (call at line ${callLine})`
-              + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+              + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footer-command slots)',
           )
         }
         continue
@@ -640,7 +657,7 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
           if (declLine !== undefined && declLine > callLine) {
             violations.push(
               `…${ref} (declared at line ${declLine}) spread into the startProcessTui arguments (call at line ${callLine})`
-                + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+                + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footer-command slots)',
             )
           }
         }
@@ -659,7 +676,7 @@ test('startup-eager callbacks of startProcessTui never reference a later-declare
         if (declLine === undefined || declLine <= callLine) continue
         violations.push(
           `${name} → ${ref} (declared at line ${declLine}) captured by the startProcessTui arguments (call at line ${callLine})`
-            + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footerCommandRunner slots)',
+            + ' — TDZ ReferenceError when the callback/value fires before the declaration runs; hoist the declaration (see the footer-command slots)',
         )
       }
     }
@@ -720,12 +737,12 @@ test('the host editor consumes the X044 protected autocomplete seam directly (no
   // `as unknown as AutocompleteInternals` casts would silently survive
   // upstream signature changes and explode at runtime — the exact class
   // of breakage the re-vendor gates exist to prevent.
-  const path = join(srcDir, 'tui-editor.ts')
+  const path = join(srcDir, 'tui/interaction/tui-editor.ts')
   const source = readFileSync(path, 'utf8')
   assert.ok(!source.includes('AutocompleteInternals'),
     'the AutocompleteInternals cast interface must not exist — the host calls the protected seam directly')
   // Narrow on the CAST IDIOM only: an unrelated, legitimate `as unknown
   // as` in this file (a future compat seam) must not trip the X044 gate.
   assert.ok(!source.includes('as unknown as AutocompleteInternals'),
-    'tui-editor.ts must not cast to reach editor internals (X044)')
+    'tui/interaction/tui-editor.ts must not cast to reach editor internals (X044)')
 })

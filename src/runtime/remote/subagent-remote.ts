@@ -16,15 +16,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import {
-  classifySubagentPromptSettlement,
-  type SubagentPromptContentPart,
-} from '../../subagent-viewer-submit.ts'
-import type { SubagentPromptOutcome } from '../../subagent-viewer-submit.ts'
+import { classifySubagentPromptSettlement } from '../subagent-outcome.ts'
 import type {
   SubagentInterruptOutcome,
   SubagentInterruptRequest,
+  SubagentPromptContentPart,
   SubagentPromptContext,
+  SubagentPromptOutcome,
   SubagentPort,
 } from '../subagent-port.ts'
 import { isRemoteBusinessRefusalCode } from '../write-outcome.ts'

@@ -199,6 +199,13 @@ ext:*
 `full`, `focus`, or a future available preset. `focus-mode` remains a legacy
 layout-compatibility item: it shows `focus` only when Focus is active.
 
+`view-scope` is **retired**: the child viewer identity now renders in the
+header-adjacent viewer subject bar (see below). The id remains registered and
+parseable, so a saved custom layout that references it still loads, edits and
+saves; the placement is inert (it renders nothing) and the Add picker no longer
+offers it. It never has to be removed from a custom layout, but removing it has
+no visual effect.
+
 `ext:*` is the compatibility bridge for the legacy aggregate extension Footer
 segment. First-class extension items use their own `ext:<owner>/<id>` identity.
 
@@ -220,14 +227,37 @@ Common builtin Style sets include:
 | Turns / steps | `both`, `turns`, `steps` |
 | Version | `tui`, `dsh`, `both` |
 
-The `default` preset composes two rows with a left and a right zone each:
+The `default` preset composes two rows with a left and a right zone each.
+While a subagent viewer is open the builtin `default`/`compact` presets switch
+to their **viewer counterparts** (same composer, same snapshot — only the
+presentation layout differs): the retired viewer identity block and the
+main-only facts are gone, but the **model placement is kept**, exactly like
+the main preset. The **main** preset itself is unchanged:
 
 ```text
-row 1 left   view-scope · permission-preset · model · tasks · cwd · git-branch · ext:*
+MAIN default
+row 1 left   view-scope(inert) · permission-preset · model · tasks · cwd · git-branch · ext:*
 row 1 right  plan-state · display-preset
 row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed · turns-steps
 row 2 right  context:full
+
+MAIN compact
+row 1 left   view-scope(inert) · permission-preset · plan-state · model · tasks · cwd · git-branch · context · turns-steps · ext:*
+
+CHILD viewer default
+row 1 left   permission-preset · model · agent-preset · cwd · git-branch
+row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed · turns-steps
+row 2 right  context:full
+
+CHILD viewer compact
+row 1 left   permission-preset · model · agent-preset · cwd · git-branch · context · turns-steps
 ```
+
+A **custom** layout (and a command surface) is never swapped: it renders
+exactly as configured on both subjects. The child model therefore shows in the
+footer AND in the subject bar — that duplication is intended: the bar is the
+always-visible core identity, while the footer keeps its full existing model
+capability (format, responsive compact/drop and `/footer` configuration).
 
 Items of one zone are joined with two spaces; the right zone renders flush
 right. The second row decomposes the pi-vocabulary stats line into real
@@ -244,6 +274,38 @@ Omitting `format` keeps that item's default Style.
 The selected Style is a persisted preference. On a narrow terminal the runtime
 may render a shorter density form to preserve more useful information; that
 does not rewrite the saved Style.
+
+## Viewer subject bar
+
+The child viewer identity is NOT a Footer item and is NOT configurable through
+`/footer`. When the mounted viewer displays a child session, the TUI renders
+one pinned row directly under the global header:
+
+```text
+‹ back  reviewer · Audit ownership     ● running   deepseek/v4 @high
+```
+
+- `‹ back` is a navigation affordance (Esc exits the viewer); it is not a
+  clickable control.
+- The child label, its `● running` / `○ inactive` activity and its real
+  `provider/model @effort` come from the child's own committed SessionStatus
+  (the same atomic `StatusSnapshot` the Footer composes from). An unavailable
+  child model renders `model ?` — the parent model is never substituted.
+- The child's own session title is shown only when it exists and names the
+  displayed child.
+- On the main subject the bar is absent (zero rows). In fullscreen it is
+  pinned (`shrink: 0`) and never scrolls with the transcript; in regular mode
+  it flows with the terminal scrollback like the rest of the document.
+- Narrow terminals drop information in a fixed order: the optional title
+  first, then the label is trimmed (keeping at least 6 cells), then the
+  activity words collapse to a marker, then `back` collapses to `‹`, then
+  `@effort`, then `provider/`, and the model id is ellipsized last.
+
+Because the bar is an independent, always-visible core identity, the builtin
+child Footer layouts KEEP their `model` placement: the same model may appear
+in both places, and that is intended. The bar and the footer read the same
+`StatusSnapshot.composition.model` (never a second model state, never the
+parent's model), while each applies its own degradation strategy.
 
 ## Custom Text items
 

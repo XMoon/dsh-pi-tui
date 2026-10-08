@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
-import { HostKeybindingManager } from '../src/keybindings/manager.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
 import {
   KeybindingEditorController,
   type KeybindingMutation,
-} from '../src/keybinding-ui/controller.ts'
+} from '../src/tui/keybindings/ui/controller.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../src/runtime/config-port.ts'
 
 function settingsFixture(initialKeybindings: unknown, footerCustomItems?: unknown): {
@@ -326,7 +326,7 @@ test('shared settings mutations serialize and preserve both concurrent edits', a
     homeEndKeys: 'off',
     wheelScrollLines: '1',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
   }
   let gets = 0
   let replaces = 0
@@ -389,7 +389,7 @@ test('the shared queue also preserves an unrelated whole-document settings write
     homeEndKeys: 'off',
     wheelScrollLines: '1',
     notificationMode: 'unfocused',
-    notificationMethod: 'auto',
+    terminalProgress: 'on', notificationMethod: 'auto',
   }
   let replaces = 0
   const firstReplaceStarted = deferred<void>()

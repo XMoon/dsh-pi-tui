@@ -18,10 +18,11 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { TranscriptFolder, windowMessages, type TranscriptToolMessage } from '../src/transcript.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
-import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth, type StreamingToolPreview } from '../src/tui-app.ts'
-import type { DisplayState } from '../src/display-preset.ts'
-import type { ToolPresenter } from '../src/present.ts'
-import { parseUserKeybindings } from '../src/keybindings/config.ts'
+import { EXPAND_RECENT_TURNS, TuiApp, transcriptContentWidth } from '../src/tui-app.ts'
+import type { StreamingToolPreview } from '../src/app/surface/streaming-tool-preparing.ts'
+import type { DisplayState } from '../src/domain/display/preset.ts'
+import type { ToolPresenter } from '../src/tui/transcript/tool-presentation.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader } from './support/focus-header.ts'
 
@@ -29,7 +30,7 @@ import { countFocusHeaders, findFocusHeaderRow, hasFocusHeader } from './support
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -978,7 +979,7 @@ test('revealSearchMatch opens the owner Thought and full-reveals the matched sec
 })
 
 test('a plugin tool renderer sees the EFFECTIVE expansion inside an expanded Thought (review finding)', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerToolRenderer({
     id: 'probe', toolName: 'read',
@@ -2339,8 +2340,9 @@ test('Question modal inspection allowlist separates presentation from mutation',
   startedApps.add(app)
   const internals = app as unknown as { isModalInspectionSafeHit(hitId: string): boolean }
   const allowed = [
-    'user:expand:1',
-    'pending-user:collapse:key',
+    'user:expand:bubble:1',
+    'pending-user:collapse:tail:key',
+    'user:collapse:bubble:2',
     'focus:toggle:1',
     'focus:collapse:1',
     'ptc:1:call-1',
@@ -3798,7 +3800,7 @@ function notStartedTurn(): SessionEvent[] {
 }
 
 test('Focus keeps a TOOL_NOT_STARTED diagnostic standalone: no Action slot, no action count, no plugin renderer', async () => {
-  const { RendererRegistry } = await import('../src/renderer-registry.ts')
+  const { RendererRegistry } = await import('../src/extension/internal/renderer-registry.ts')
   const registry = new RendererRegistry()
   registry.registerToolRenderer({
     id: 'probe', toolName: 'bash',

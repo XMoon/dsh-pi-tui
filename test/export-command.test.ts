@@ -11,6 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -20,18 +22,19 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../src/index.ts'
-import { createDiag } from '../src/diag.ts'
-import { sessionArtifactFilename, safeSessionIdSegment } from '../src/session-artifact-filename.ts'
-import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../src/client-artifact-save.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { sessionArtifactFilename, safeSessionIdSegment } from '../src/app/command/artifacts.ts'
+import { resolveClientDirectory, streamToFile, writeTextAtomically } from '../src/client/artifact/save.ts'
 import { sessionLogZipFilename } from '@deepseek-ai/dsh-session-log-export'
 import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/image/draft-store.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { DirectSessionArchive } from '../src/runtime/direct/session-archive-direct.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -71,6 +74,8 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
       projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
     },
     sessionWriter: {
       prompt: async () => ({ kind: 'committed' as const, value: undefined }),
@@ -80,7 +85,13 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
     },
     interaction: {
-      registerQuestionProvider: () => true,
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
       onApprovalRequest: () => {},
       setApprovalPolicy: () => true,
     },
@@ -88,8 +99,6 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       models: {
         available: () => true,
         loadDirectory: async () => ({ default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] }),
-        listProviders: () => [],
-        listModels: async () => [],
         defaultSelection: () => undefined,
         saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
         sessionSelection: () => undefined,
@@ -113,6 +122,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
     },
     config: {
+      configReadiness: () => 'ready' as const,
       tuiSettings: undefined,
       footerCommandTrust: {
         userFooterMode: undefined,
@@ -131,6 +141,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         writeKeylessProfile: async () => ({ kind: 'written' as const }),
       },
       credentials: {
+        recordsSupported: () => true,
         available: () => true,
         setReference: async () => {},
         unsetReference: async () => {},
@@ -148,6 +159,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         cancel: async () => {},
       },
       permissions: {
+        approvalOverrideAvailable: () => true,
         presetNames: () => [],
         defaultPreset: () => undefined,
         setDefaultPreset: async () => {},
@@ -166,7 +178,10 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
     commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
     requestExit: () => {},
     cwd: '/ws',
     sessionCwd: () => '/ws',
@@ -191,11 +206,11 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' },
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     focusEnabled: () => false,
     setFocusMode: () => {},
     setNotificationMode: () => {},
-    setNotificationMethod: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
@@ -250,7 +265,7 @@ test('/export accepts no arguments: bare and whitespace-only succeed, any argume
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   startedApps.add(app)
-  registerTuiCommands(stubRunner(ctx, app))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app))
   const defs = commands.defs
 
   const bare = awaitHandler(defs, 'export', '')
@@ -274,9 +289,12 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   startedApps.add(app)
-  registerTuiCommands(stubRunner(ctx, app))
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app))
   const defs = commands.defs
 
+  // The stub declares the REQUIRED capability explicitly as `true` (Direct
+  // semantics); the refused branch is locked separately below and by the
+  // mounted Remote /transcript L6.
   const bare = awaitHandler(defs, 'transcript', '')
   assert.equal(bare.kind, 'success')
   assert.equal(bare.text, 'Transcript export requested.')
@@ -286,6 +304,23 @@ test('/transcript accepts no arguments: bare and whitespace-only succeed, any ar
 
   const path = awaitHandler(defs, 'transcript', 'foo.md')
   assert.equal(path.kind, 'error')
+})
+
+test('/transcript refuses truthfully when the composition declares the capability false (PR4 round 5; required since PR5)', () => {
+  const ctx = new Context()
+  const commands = fakeCommands()
+  ctx.provide('commands', commands.service as never)
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
+  startedApps.add(app)
+  const runner: import('../src/commands.ts').TuiCommandRunner = {
+    ...stubRunner(ctx, app),
+    transcriptExportAvailable: false,
+  }
+  registerTuiCommandsWithDirectSeams(runner)
+  const refused = awaitHandler(commands.defs, 'transcript', '')
+  assert.equal(refused.kind, 'error')
+  assert.equal(refused.text, 'transcript export is unavailable on this backend')
 })
 
 // The grammar handlers are synchronous acknowledgements; the helper keeps
@@ -723,15 +758,24 @@ function makeHarness(home: string, options: {
     discoverModels: async () => [],
     listConfigurableProviders: () => [],
   }
-  const definitions = new Map<string, { name: string; description: string; handler: (...args: never[]) => unknown }>()
+  const definitions = new Map<string, { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }>()
   const commands = {
-    register: (definition: { name: string; description: string; handler: (...args: never[]) => unknown }) => {
+    register: (definition: { name: string; description: string; definitionId?: string; handler: (...args: never[]) => unknown }) => {
       definitions.set(definition.name, definition)
       return () => {
         if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
       }
     },
-    list: () => [...definitions.values()].map(({ name, description }) => ({ name, description })),
+    // The official descriptor carries the registration's own `definitionId`
+    // (PR5 v2 §1C: the Host-origin derivation compares the EFFECTIVE WINNER's
+    // id against this surface's stamped Direct compatibility mirrors —
+    // dropping it here would make every mirror look like a genuine Host
+    // command).
+    list: () => [...definitions.values()].map(({ name, description, definitionId }) => ({
+      name,
+      description,
+      ...definitionId === undefined ? {} : { definitionId },
+    })),
     execute: options.execute ?? (async () => ({ result: { kind: 'success' } })),
     handler: (name: string) => definitions.get(name)?.handler,
   }
@@ -754,14 +798,14 @@ function installVirtualProcessTerminal(vt: VirtualTerminal): () => void {
   const prototype = ProcessTerminal.prototype as object
   const names = [
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
     'columns', 'rows', 'kittyProtocolActive', 'modifyOtherKeysActive',
   ]
   const originals = new Map<string, PropertyDescriptor | undefined>()
   const virtual = vt as unknown as Record<string, unknown>
   const methods = new Set([
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
   ])
   for (const name of names) {
     originals.set(name, Object.getOwnPropertyDescriptor(prototype, name))

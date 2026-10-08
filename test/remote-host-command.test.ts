@@ -14,6 +14,7 @@ import {
   type RemoteCommandsSource,
 } from '../src/runtime/remote/host-command-remote.ts'
 import type { HostCommandRequest } from '../src/runtime/host-command-port.ts'
+import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 
 interface CommandCall {
   readonly agentId: string
@@ -153,4 +154,25 @@ test('an unsupported attachment payload is rejected before a text-only execution
   assert.equal(outcome.kind, 'rejected')
   assert.equal(h.calls.length, 1)
   assert.deepEqual(h.calls[0]?.attachments, attachments)
+})
+
+test('PR5: an exact commands.execute session/writer-held refusal is rejected with code, details and guidance', async () => {
+  // L3 contract proof for AC6: the adapter classifies an EXPLICIT
+  // `session/writer-held` command result correctly. PR5 does NOT claim this is
+  // normally UI-reachable on a cold held Session (`commands.list(agent)` needs
+  // the same Agent lookup and fails first) — see
+  // docs/client-server-migration.md + docs/client-server-coupling.md.
+  const h = harness()
+  h.setResult({
+    ok: false,
+    error: new RemoteError('session/writer-held', 'SessionAlreadyOwnedError: lease held', { sessionId: 'session-a' as never }),
+  })
+  const outcome = await h.port.execute(request())
+  assert.equal(h.calls.length, 1, 'the command is dispatched exactly once — never re-executed')
+  assert.equal(outcome.kind, 'rejected')
+  if (outcome.kind === 'rejected') {
+    assert.equal(outcome.error.code, 'session/writer-held', 'the exact official code is preserved')
+    assert.deepEqual(outcome.error.details, { sessionId: 'session-a' }, 'the official failure details are preserved')
+    assert.equal(outcome.error.message, SESSION_WRITER_HELD_GUIDANCE, 'the shared actionable guidance is the user copy')
+  }
 })

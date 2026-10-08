@@ -13,15 +13,20 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { submitSubagentPrompt, type SubagentPromptService } from '../../subagent-viewer-submit.ts'
-import type { SubagentPromptOutcome } from '../../subagent-viewer-submit.ts'
+import {
+  classifySubagentPromptSettlement,
+  safeSubagentErrorMessage,
+} from '../subagent-outcome.ts'
 import type {
   SubagentInterruptOutcome,
   SubagentInterruptRequest,
+  SubagentPromptContentPart,
   SubagentPromptContext,
+  SubagentPromptOutcome,
   SubagentPort,
+  SubagentViewerSubmitRequest,
 } from '../subagent-port.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the service resolves from the dsh installation). */
@@ -122,5 +127,133 @@ export class DirectSubagentPort implements SubagentPort {
       return classifyInterruptFailure(error)
     }
     return { kind: 'committed' }
+  }
+}
+
+/** The official `ctx.subagents.prompt` control surface (structural — never
+ * a package dependency; the service resolves from the dsh installation).
+ * The request shape is the official `SubagentPromptRequest` vocabulary:
+ * caller-minted `requestId`, durable parent/child address, the required
+ * `continuable` discriminator, explicit `queue` or `steer` delivery, prompt
+ * parts, and the optional browser zone. */
+export interface SubagentPromptService {
+  prompt(
+    request: {
+      readonly requestId: string
+      readonly parentSessionId: string
+      readonly childSessionId: string
+      readonly mode: 'continuable'
+      readonly delivery: 'queue' | 'steer'
+      readonly content: readonly SubagentPromptContentPart[]
+      readonly clientTimeZone?: string
+    },
+    signal: AbortSignal,
+  ): Promise<{ readonly messageId: unknown }>
+}
+
+/** The dependency surface the Direct submit helper needs. */
+export interface SubagentViewerSubmitDeps {
+  /** The `ctx.subagents` runtime (undefined = continuation unavailable). */
+  subagents(): SubagentPromptService | undefined
+  /** A fresh per-call cancellation source (the caller owns aborting it). */
+  makeSignal(): AbortSignal
+  /** Mint the caller-owned identity for THIS prompt, before the call —
+   * every retry that represents a NEW human submit mints a fresh id (the
+   * Host persists it on the accepted message). */
+  mintRequestId(): string
+  /** The send seam for the final user text BEFORE delivery (the official
+   * `@`-mention semantics keep it LITERAL — the Host's
+   * FILE_REFERENCE_PROMPT resolves relative paths from the workspace
+   * root, on the main surface and in viewer prompts alike). MAY be async;
+   * the default passes the text through untouched. */
+  canonicalizeText?(text: string): string | Promise<string>
+}
+
+/**
+ * Deliver one viewer prompt to a continuable child through the official
+ * subagent control API, or settle why it could not be delivered. Never throws:
+ * a pre-dispatch preparation failure is `{ kind: 'rejected' }` (a restorable
+ * draft), a proven dispatch-phase refusal is `{ kind: 'rejected' }`, and only
+ * an unidentified failure OF the `prompt()` dispatch itself settles
+ * `{ kind: 'indeterminate' }` (see {@link classifySubagentPromptSettlement}).
+ *
+ * INTERNAL to the Direct adapter: application code consumes the semantic
+ * `SubagentPort.prompt` on `DirectSubagentPort`, never this helper.
+ */
+export async function submitSubagentPrompt(
+  request: SubagentViewerSubmitRequest,
+  deps: SubagentViewerSubmitDeps,
+): Promise<SubagentPromptOutcome> {
+  // ── Pre-dispatch preparation. Every failure here happens BEFORE
+  //    `prompt()` is called, so it is a KNOWN non-dispatch: the caller may
+  //    restore its draft and it is never indeterminate.
+  let subagents: SubagentPromptService
+  let signal: AbortSignal
+  let canonical: SubagentPromptContentPart[]
+  let requestId: string
+  try {
+    // 1. The official control surface, read lazily: the continuation
+    //    runtime may appear/disappear between calls (draining / activation
+    //    disposal).
+    const resolved = deps.subagents()
+    if (resolved === undefined) {
+      return { kind: 'rejected', reason: { kind: 'unavailable' } }
+    }
+    subagents = resolved
+    signal = deps.makeSignal()
+    // 2. The send seam passes the text BEFORE delivery (the official
+    //    mention semantics keep it literal). The seam MAY be async, so the
+    //    caller signal is re-checked after the await: an implementation
+    //    that does not synchronously reject an already-aborted signal must
+    //    never accept the message while the UI already treats the send as
+    //    stale (the draft is restored by the caller). Parent/child
+    //    authority itself is the Host's job — the official prompt()
+    //    rejects it authoritatively.
+    canonical = []
+    for (const part of request.content) {
+      if (part.type === 'text') {
+        canonical.push({ type: 'text', text: await deps.canonicalizeText?.(part.text) ?? part.text })
+      } else {
+        // Image parts are forwarded VERBATIM: the Host admits and persists
+        // them through the attachment store before delivery (the official
+        // prompt contract) — the TUI never rewrites them, and the
+        // @-mention canonicalization applies to text only.
+        canonical.push(part)
+      }
+    }
+    if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
+    // 3. Mint the caller-owned identity in the PRE-DISPATCH phase: it is an
+    //    argument evaluated before `prompt()`, so a mint failure is a known
+    //    non-dispatch, not an ambiguous delivery.
+    requestId = deps.mintRequestId()
+  } catch (error) {
+    return { kind: 'rejected', reason: { kind: 'error', message: safeSubagentErrorMessage(error) } }
+  }
+  // ── Dispatch. Only a failure of the `prompt()` call itself can leave the
+  //    child's ownership unproven.
+  try {
+    // The ONE correct write path: the official browser prompt contract.
+    // A HUMAN-authored message to a continuable direct child — the
+    // resolved queue/steer delivery is passed unchanged to the child;
+    // the child owns the selected placement;
+    // the requestId (minted fresh for THIS submit, before the call) is
+    // persisted on the accepted message.
+    const receipt = await subagents.prompt(
+      {
+        requestId,
+        parentSessionId: request.parentSessionId,
+        childSessionId: request.childSessionId,
+        mode: 'continuable',
+        delivery: request.delivery,
+        content: canonical,
+      },
+      signal,
+    )
+    return { kind: 'ok', messageId: receipt.messageId }
+  } catch (error) {
+    const settlement = classifySubagentPromptSettlement(error)
+    return settlement.kind === 'rejected'
+      ? { kind: 'rejected', reason: settlement.reason }
+      : settlement
   }
 }

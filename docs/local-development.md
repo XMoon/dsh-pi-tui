@@ -150,6 +150,11 @@ worktree's DSH mode.
 
 ## Main / next branch roles and promotion
 
+Branch roles define the repository's development and promotion workflow.
+They do not determine npm dist-tags; the release workflow derives `latest`
+vs `next` from the pushed release tag prefix (see
+[docs/releasing.md](releasing.md)).
+
 `main` and `next` are both long-lived branches, but they have different
 responsibilities:
 
@@ -211,7 +216,7 @@ F. finalize the release metadata
                                          |
                                          +-- verify the merged candidate
                                          |
-                                         +-- stable tag / publication
+                                         +-- release tag / publication
                                          |
                                          +------ merge released main ------> next
 ```
@@ -232,8 +237,8 @@ promotion MAY reserve the package version — together with every
 version-coupled field, atomically — very early, so the eventual gates
 validate the exact artifact intended for publication. An untagged version
 on the branch is a RESERVED candidate identity, not evidence the release
-exists; the identity is consumed only when the stable tag is created (see
-[docs/releasing.md](releasing.md)).
+exists; the identity is consumed when the corresponding release tag is
+published (see [docs/releasing.md](releasing.md)).
 
 **Release identity reservation is not the feature-freeze boundary.** The
 promotion branch may continue release-scoped product development after
@@ -304,7 +309,7 @@ that release checklist; no second version bump is required merely because
 the candidate moved from the promotion branch to `main`. If `next` must
 resume forward development before the candidate is ready to tag, an earlier
 back-merge is allowed, but `main` must be merged forward again after the
-stable tag/publication. Do not reset `next` to `main`: `next` remains the
+release tag/publication. Do not reset `next` to `main`: `next` remains the
 forward-integration branch.
 
 The final promotion invariant is that the `main` state containing the

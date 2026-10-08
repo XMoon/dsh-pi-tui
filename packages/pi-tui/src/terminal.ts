@@ -9,8 +9,13 @@ import { StdinBuffer } from "./stdin-buffer.ts";
 const cjsRequire = createRequire(import.meta.url);
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
-const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
+/** OSC 9;4 state 1 value 0 — a WORKING progress state whose completion
+ * percentage is unknown. Deliberately NOT state 3: a determinate state 1
+ * with value 0 keeps the pane "working" without forcing the strong
+ * indeterminate animation (X059). */
+const TERMINAL_PROGRESS_WORKING_SEQUENCE = "\x1b]9;4;1;0\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0\x07";
+const TERMINAL_PROGRESS_PAUSED_SEQUENCE = "\x1b]9;4;4\x07";
 const NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
@@ -113,7 +118,26 @@ export interface Terminal {
 
 	// Progress indicator (OSC 9;4)
 	setProgress(active: boolean): void;
+
+	/**
+	 * Optional richer OSC 9;4 state projection (X059). Consumers that only
+	 * know the boolean `setProgress` keep working unchanged; `ProcessTerminal`
+	 * implements it so a host can express `paused` (OSC 9;4;4, e.g. Tern's
+	 * `waiting_input`) without a transient clear.
+	 */
+	setProgressState?(state: TerminalProgressState): void;
 }
+
+/**
+ * The logical terminal progress states owned by the fork (X059):
+ * `clear` (idle), `indeterminate` (active working whose completion
+ * percentage is unknown) and `paused` (waiting for user input — a state the
+ * boolean API cannot represent). The physical OSC 9;4 encoding is an
+ * implementation detail of `ProcessTerminal`: the fork currently presents
+ * `indeterminate` as OSC 9;4 state 1 value 0 and `paused` as state 4;
+ * terminals that expire the active state receive a 1 s keepalive.
+ */
+export type TerminalProgressState = "clear" | "indeterminate" | "paused";
 
 const DEFAULT_ESCAPE_TIMEOUT_MS = 10;
 const DEFAULT_SSH_ESCAPE_TIMEOUT_MS = 100;
@@ -135,6 +159,24 @@ export function resolveEscapeTimeoutMs(env: NodeJS.ProcessEnv = process.env): nu
 }
 
 /**
+ * Whether the attached terminal expires the OSC 9;4 indeterminate state and
+ * therefore needs the 1 s heartbeat (X059). Ghostty and Monstar drop the
+ * progress state unless it is re-asserted; persistent terminals (Tern, Kitty,
+ * WezTerm, ...) keep it, and re-writing `9;4;1;0` there is unnecessary — it can
+ * even restart their native progress animation (e.g. Windows Terminal).
+ * A positive allowlist: an unknown terminal is NOT refreshed.
+ */
+export function shouldKeepTerminalProgressAlive(env: NodeJS.ProcessEnv = process.env): boolean {
+	const termProgram = (env.TERM_PROGRAM ?? "").toLowerCase();
+	const term = (env.TERM ?? "").toLowerCase();
+
+	const ghostty = termProgram === "ghostty" || term.includes("ghostty") || Boolean(env.GHOSTTY_RESOURCES_DIR);
+	const monstar = termProgram === "monstar" || term === "monstar";
+
+	return ghostty || monstar;
+}
+
+/**
  * Real terminal using process.stdin/stdout
  */
 export class ProcessTerminal implements Terminal {
@@ -153,6 +195,15 @@ export class ProcessTerminal implements Terminal {
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
+	/** The PHYSICAL OSC 9;4 state (X059). Tracked separately from the
+	 * keepalive timer because `paused` is a real state with no interval: only
+	 * this field can tell `stop()` that there is something to clear. */
+	private progressState: TerminalProgressState = "clear";
+	/** Whether the attached terminal expires OSC 9;4 state and needs the
+	 * indeterminate heartbeat (X059). Snapshotted ONCE at construction: the
+	 * terminal identity cannot change within this process, so a later env
+	 * mutation must not flip the timer policy of a live terminal. */
+	private readonly keepProgressAlive = shouldKeepTerminalProgressAlive();
 	private writeLogPath = (() => {
 		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
@@ -473,8 +524,14 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
-		if (this.clearProgressInterval()) {
+		// Clear EVERY physically active progress state, not only the
+		// keepalive-backed indeterminate one: `paused` has no interval, so the
+		// old interval-only predicate would leak OSC 9;4;4 into the shell or
+		// the $EDITOR that takes the terminal next (X059).
+		if (this.progressState !== "clear") {
+			this.clearProgressInterval();
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			this.progressState = "clear";
 		}
 
 		// Disable bracketed paste mode
@@ -579,19 +636,43 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	setProgress(active: boolean): void {
-		if (active) {
-			// OSC 9;4;3 - indeterminate progress
-			process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
-			if (!this.progressInterval) {
+		// The boolean LOGICAL contract is unchanged: true = indeterminate,
+		// false = clear, and each explicit call writes its own state once. The
+		// WORKING physical payload is now OSC 9;4;1;0 (X059), so only the clear
+		// byte pair is identical to the upstream/baseline sequence. It delegates
+		// to the stateful primitive so the physical state stays truthful for
+		// `stop()` (X059); the active heartbeat stays terminal-specific.
+		this.setProgressState(active ? "indeterminate" : "clear");
+	}
+
+	/**
+	 * OSC 9;4 state projection (X059). Each call writes its own state
+	 * UNCONDITIONALLY — the caller owns the dedupe, exactly like the boolean
+	 * contract, so `setProgress(true/false)` still writes exactly once per
+	 * call (`indeterminate` is presented as OSC 9;4;1;0, not the upstream
+	 * 9;4;3).
+	 * `indeterminate` starts the 1 s heartbeat only on terminals known to
+	 * expire OSC 9;4 state; a persistent terminal (Tern) gets the single
+	 * explicit write only. `paused` stops the heartbeat and writes OSC 9;4;4
+	 * directly with NO intermediate clear: a transient indeterminate/idle
+	 * frame would make Tern blink `working` between `working` and
+	 * `waiting_input`.
+	 */
+	setProgressState(state: TerminalProgressState): void {
+		if (state === "indeterminate") {
+			// OSC 9;4;1;0 - working, completion percentage unknown (X059)
+			process.stdout.write(TERMINAL_PROGRESS_WORKING_SEQUENCE);
+			if (this.keepProgressAlive && !this.progressInterval) {
 				this.progressInterval = setInterval(() => {
-					process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+					process.stdout.write(TERMINAL_PROGRESS_WORKING_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
 			}
 		} else {
 			this.clearProgressInterval();
-			// OSC 9;4;0 - clear progress
-			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+			// OSC 9;4;4 - paused (waiting for user input) / OSC 9;4;0 - clear
+			process.stdout.write(state === "paused" ? TERMINAL_PROGRESS_PAUSED_SEQUENCE : TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
+		this.progressState = state;
 	}
 
 	private clearProgressInterval(): boolean {

@@ -21,15 +21,15 @@ vendored build dependency and must never be published separately.
 ## Version reservation and consumption
 
 A version present in Git is a **reserved candidate identity**, not proof of a
-published release. The stable tag is the boundary that commits the identity
+published release. The release tag is the boundary that commits the identity
 to the publication workflow:
 
 ```text
 package.version present in Git     ≠ published release
-stable tag vX.Y.Z                  = identity committed to publication
+release tag (v... or next-v...)     = identity committed to publication
 ```
 
-When a stable release is produced through a promotion branch, the intended
+When a release is produced through a promotion branch, the intended
 package version MAY be reserved very early whenever that identity is
 consumed by compatibility metadata (`src/dsh-compat-matrix.json`
 `current.since` and the current row's `tui`), candidate packaging, startup
@@ -104,9 +104,9 @@ were a promised capability.
 
 ## 2. Update release metadata and documentation
 
-Stable release metadata may be finalized in one of two places:
+Release metadata may be finalized in one of two places:
 
-- **Promotion path (preferred):** when a stable release is promoted from a
+- **Promotion path (preferred):** when a release is promoted from a
   mature `next` snapshot, the promotion branch reserves the version early
   and finalizes the release metadata (changelogs, guidance, release-specific
   docs) at the end of the branch, AFTER RC freeze and the final
@@ -118,23 +118,40 @@ Stable release metadata may be finalized in one of two places:
 - **Direct path:** a release not using a promotion branch finalizes its
   metadata directly on `main`.
 
-In both cases the tag is created only on the verified `main` commit; an
-untagged version is a reserved candidate identity (see "Version reservation
-and consumption" above).
+In both cases the release tag is created only on the verified commit
+intended for publication; an untagged version is a reserved candidate
+identity (see "Version reservation and consumption" above).
 
-Choose exactly one release channel before editing metadata:
+Choose exactly one publication channel before editing metadata. The channel
+is determined by the release tag prefix alone:
 
-- **Stable:** publication target `main`; stable tag `vX.Y.Z`; npm dist-tag
-  `latest`; a stable SemVer package version. Stable release metadata may be
-  prepared and finalized on the promotion branch — the stable tag itself
-  must land on the verified `main` commit.
-- **Prerelease:** publication target `next`; tag `next-vX.Y.Z-alpha.N` (or
-  another prerelease identifier); npm dist-tag `next`; and the same
-  prerelease version in `package.json`.
+- **Latest channel:** tag `v<semver>`; npm dist-tag `latest`.
+- **Next channel:** tag `next-v<semver>`; npm dist-tag `next`.
 
-The tag's commit must already be an ancestor of its required branch. A
-`next-v...` tag on `main`, or a stable `v...` tag on `next`, is a release error;
-the CI `release-context` and ancestry gates enforce these rules again.
+SemVer maturity is independent of the publication channel. Either channel
+accepts a stable or a prerelease SemVer:
+
+```text
+vX.Y.Z              -> npm latest, GitHub prerelease=false
+vX.Y.Z-rc.N         -> npm latest, GitHub prerelease=true
+next-vX.Y.Z         -> npm next,   GitHub prerelease=false
+next-vX.Y.Z-alpha.N -> npm next,   GitHub prerelease=true
+```
+
+The formerly forbidden combinations (`vX.Y.Z-rc.N` on latest, `next-vX.Y.Z`
+on next) are valid: `v0.6.0-rc.1` publishes to `latest` as a GitHub
+prerelease, and `next-v0.6.0` publishes a stable SemVer to `next`.
+
+The release workflow derives the publication channel from the tag prefix
+only. Branch roles remain development/maintenance conventions, not
+npm-channel inputs or CI publication gates. Release metadata may be
+prepared and finalized on the promotion branch; the release tag itself must
+land on the verified commit intended for publication.
+
+A package version must be published only once: npm versions are immutable.
+If release work changes the publication channel, use a new package version
+before publishing, unless maintainers deliberately perform an out-of-band
+npm dist-tag reassignment.
 
 For the selected package version `X.Y.Z` (including any prerelease suffix) on
 release date `YYYY-MM-DD`:
@@ -156,15 +173,15 @@ release date `YYYY-MM-DD`:
 3. In both changelogs, add `## [X.Y.Z] - YYYY-MM-DD` immediately below the
    empty `## [Unreleased]` heading, then move the accumulated entries under
    that version. Leave a fresh empty `[Unreleased]` section at the top.
-4. Update both changelog reference blocks. Use the matching channel prefix for
-   both links:
+4. Update both changelog reference blocks. Use the tag prefix of the selected
+   publication channel for both links:
 
    ```text
-   # stable
+   # latest channel (v tags)
    [Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/vX.Y.Z...HEAD
    [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/v<previous>...vX.Y.Z
 
-   # prerelease
+   # next channel (next-v tags)
    [Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-vX.Y.Z...HEAD
    [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/next-v<previous>...next-vX.Y.Z
    ```
@@ -190,20 +207,25 @@ finalized and before the candidate is tagged. It
 checks the tag format, package version, both changelog sections, matching
 version/date headings, and non-empty release content:
 
-Stable:
+Latest channel:
 
 ```sh
 node scripts/release-notes.mjs vX.Y.Z /tmp/dsh-pi-tui-release-notes-X.Y.Z.md
+node scripts/release-notes.mjs vX.Y.Z-rc.N /tmp/dsh-pi-tui-release-notes-X.Y.Z-rc.N.md
 ```
 
-Prerelease:
+Next channel:
 
 ```sh
 node scripts/release-notes.mjs next-vX.Y.Z-alpha.N /tmp/dsh-pi-tui-release-notes-X.Y.Z-alpha.N.md
+node scripts/release-notes.mjs next-vX.Y.Z /tmp/dsh-pi-tui-release-notes-X.Y.Z.md
 ```
 
-The script compares the parsed tag version (without the `next-` channel
-marker) with `package.json` and verifies both dated bilingual sections. Review
+The script requires an explicit release tag: a bare version such as `X.Y.Z`
+or `X.Y.Z-rc.N` is intentionally rejected, because a version string does not
+encode a publication channel. The script compares the parsed tag version
+(without the `next-` channel marker) with `package.json` and verifies both
+dated bilingual sections. Review
 the generated file if the release body matters. For the 0.4 migration line,
 the dated sections must also include the DSH/TUI pairing and copy-paste
 installation commands: the TUI command is pinned to the parsed release version
@@ -260,13 +282,14 @@ git diff --cached --check
 git commit -m "chore: release <channel>-<version>"
 ```
 
-Create the tag that matches the selected channel, without pushing it:
+Create the release tag that matches the selected publication channel,
+without pushing it:
 
 ```sh
-# stable channel
+# latest channel
 git tag vX.Y.Z
 
-# prerelease channel
+# next channel
 git tag next-vX.Y.Z-alpha.N
 ```
 
@@ -279,22 +302,23 @@ git tag -d vX.Y.Z                 # or next-vX.Y.Z-alpha.N
 
 ## 6. Push only after explicit confirmation
 
-Do not push automatically. Once the user confirms the commit and tag, push the
-matching branch and tag:
+Do not push automatically. Once the user confirms the commit and tag, push
+the tag (branch pushes are a separate normal-development step, not a
+publication requirement):
 
 ```sh
-# stable channel
-git push origin main vX.Y.Z
+# latest channel
+git push origin vX.Y.Z
 
-# prerelease channel
-git push origin next next-vX.Y.Z-alpha.N
+# next channel
+git push origin next-vX.Y.Z-alpha.N
 ```
 
 The push skips the Husky gate for the branch and runs the full gate for the
 release tag. The tag starts `.github/workflows/ci.yml`:
 
-1. the parser selects `latest`/`main` for `v...`, or `next`/`next` for
-   `next-v...`, and the ancestry gate checks the tag's required branch;
+1. the parser selects the npm dist-tag from the tag prefix and independently
+   derives the GitHub prerelease state from the SemVer;
 2. source checks, build/pack, compatibility and ecosystem smoke jobs, the old
    runtime boundary, and the production dependency audit run in parallel;
 3. release metadata extracts the bilingual changelog body and checks parsed
@@ -317,12 +341,12 @@ Release, and artifact. If a release is not meant to be published yet, stop after
 the local commit and tag and leave the tag unpushed.
 
 ```sh
-# stable channel
-git ls-remote --tags origin vX.Y.Z
+# latest channel (an RC release published to latest)
+git ls-remote --tags origin vX.Y.Z-rc.N
 npm view @xmoon76/dsh-pi-tui@latest version
-gh release view vX.Y.Z --repo XMoon/dsh-pi-tui
+gh release view vX.Y.Z-rc.N --repo XMoon/dsh-pi-tui
 
-# prerelease channel
+# next channel
 git ls-remote --tags origin next-vX.Y.Z-alpha.N
 npm view @xmoon76/dsh-pi-tui@next version
 gh release view next-vX.Y.Z-alpha.N --repo XMoon/dsh-pi-tui

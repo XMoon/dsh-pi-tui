@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import { CompletionNotificationController } from '../src/notification/controller.ts'
+import { CompletionNotificationController } from '../src/domain/notification/controller.ts'
 import {
 
   DISABLE_FOCUS_REPORTING,
@@ -24,11 +24,11 @@ import {
   FOCUS_OUT_SEQUENCE,
   TerminalFocusTracker,
   isFocusReport,
-} from '../src/notification/terminal-focus.ts'
+} from '../src/tui/notification/terminal-focus.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

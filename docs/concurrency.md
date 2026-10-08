@@ -107,7 +107,7 @@ overlap across their awaits:
 
 ### SessionTransitionGate — one transition at a time
 
-`src/transition-gate.ts` is a **process-local single-writer queue**: ordinary
+`src/app/session/transition-gate.ts` is a **process-local single-writer queue**: ordinary
 session transitions run inside `SessionTransitionGate.run`, held from BEFORE
 the child create or Direct `resume` until the transaction settles. Host fork
 dispatch is intentionally outside this destructive transition queue; only a
@@ -118,7 +118,7 @@ is refused loudly (AsyncLocalStorage detects it — re-entry would deadlock
 the queue). The runner exposes the gate as `runner.withSessionTransition(task)`.
 
 On top of the gate, ordinary session transitions share ONE transaction shape
-(`runner.transitionTo`), whose phase order — fixed in `src/transition.ts`
+(`runner.transitionTo`), whose phase order — fixed in `src/app/session/transition.ts`
 (`runTransitionTo`, unit-tested) — is the whole point:
 
 1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. (A `/new`
@@ -214,7 +214,7 @@ admit through the bound runtime and, once admitted, carry only the
 surface-lifetime fence — an admitted writer is never truncated by a waiting
 transition. Reading `transitionGate.busy` is therefore NOT a writer-admission
 mechanism at all: it has exactly ONE production reader, the attachment-intake
-UX fence (`sessionTransitionPending()`, `src/commands.ts`). Every semantic
+UX fence (`sessionTransitionPending()`, `src/tui/commands/artifacts.ts`). Every semantic
 writer — including the `HostCommandPort` submission — admits only through the
 bound runtime, and a `TransitionInProgressError` raised there is settled as a
 PROVEN pre-dispatch refusal (draft restored + the transition notice), never as
@@ -240,12 +240,53 @@ a generic command failure.
   `submitShell`) and, for each, the `WriteOutcome` classification plus the
   draft/queue/card settlement. Since A5b the caller-side WORKFLOW (the submit
   FIFO/ack/local-echo state, the dispatch and the shell card lifecycle) lives in
-  `src/app/submission/controller.ts` + `src/app/submission/local-shell.ts`, and
+  `src/app/submission/controller.ts` + `src/app/submission/user-shell.ts`, and
   the one scope-fenced section helper is
   `SubmissionController.withWriterSection` — ownership moved, the contract did
   not. Every write they perform enters through `SessionRuntime.withWriter`, so
   the future Remote writer-held recovery hangs off this ONE caller-side module
   rather than every writer site.
+
+### Known-rejection settlement inside the held writer (M3-5 PR5)
+
+The ordinary prompt's `WriteOutcome` settlement happens INSIDE the admitted
+writer section: `SessionRuntime.withWriter` wraps
+`withPromptAdmission → prepareMessage → isScopeCurrent → markDispatch → prompt
+→ settlement`. A proven rejection (`kind: 'rejected'`, e.g. the official
+`session/writer-held`) is a NORMAL terminal return from that body, not a throw:
+
+```text
+merge the submitted human text into the editor exactly once
+settle the local submission echo
+terminate this gesture's submit ack with the structural code
+notify the refusal's own message (the centralized writer-held guidance)
+return
+```
+
+Consequences that are part of the contract:
+
+- A Session transition that arrives after the writer is admitted WAITS for the
+  result AND the caller-side terminal settlement — the barrier is the
+  currentness/lifecycle authority for that interval. There is therefore
+  **intentionally no post-dispatch prompt currentness fence**; adding one would
+  duplicate authority over a state the barrier contract excludes. The existing
+  post-`prepareMessage()`/pre-dispatch fence is unchanged.
+- Because the body returns normally, the reserved-submit wrapper performs no
+  generic exception restore and `runOwned.onError` emits no generic
+  "submission failed" wrapper. A `cancelled` outcome still throws the
+  cancellation error, and an `unsupported` outcome still fails fast.
+- A writer-held refusal is restored/never-auto-retried according to the proven
+  pre-commit semantics: no lease takeover, no force-resume, no Direct fallback
+  and no optimistic success. An indeterminate post-dispatch result keeps its
+  existing settlement — the draft is NOT restored and nothing is retried.
+- Remote surfaces obey the same rule at their own owner. The Remote preset
+  adapter classifies only the EXACT `session/writer-held` (alongside its
+  operation-specific preset refusals) as a proven rejection, keeps the official
+  `details`, and uses the centralized guidance; a TRUE indeterminate typed
+  `/preset <id>` records `suppressed` so the command is not restored as
+  retry-ready intent. `/title` (whose official `rename` resolves the Agent
+  before the title mutation) restores the typed command with the guidance and
+  mutates no title.
 
 ### D2.1 write settlement
 
@@ -519,6 +560,46 @@ TUI's Client writers; they do not take over Host ownership. The retirement
 serializes against an in-flight transition through the same gate + barrier
 (a FIFO no-op task waits for a running transition to settle — the lifecycle
 abort already cancelled its create/open), then retires the CURRENT owner.
+
+### Runner lifecycle contract: surface → retirement → transport
+
+Every runner teardown path shares ONE frozen top-level order (M3-6 PR3):
+
+```text
+normal unload / HMR:
+  surface total cleanup attempt
+  → Session retirement settlement
+  → selected transport disposal
+
+mounted fatal:
+  same surface cleanup authority
+  → bounded Session retirement
+  → transport only if retirement settled
+  → exit(1)
+```
+
+Surface cleanup is **non-truncating**: every independent surface-owned
+resource is attempted in its original order even when a sibling throws
+(`src/runtime/process/disposal.ts::runSyncDisposalSteps` runs every step, then rethrows the
+single failure by identity or an `AggregateError`). The same primitive
+hardens each owner's own `dispose()` chain (viewer, command catalog, footer
+settings, Plugin Manager, Question, OverlayBroker, `TuiApp.stop/dispose`,
+`SurfaceRuntime.dispose`, and the bootstrap `disposeSurface`). A cleanup
+error is recorded (or surfaced) but never reorders or replaces the Session
+retirement / selected-transport disposal: the surface failure is secondary,
+the retirement outcome stays the returned HMR result.
+
+`TuiApp.dispose()` remains **fail-closed** on the process live-TUI slot: the
+non-truncating batch runs to the end, but the process slot is released only
+when the WHOLE batch returned successfully — a final-dispose error keeps the
+slot claimed (a half-torn-down surface is never publicly replaceable).
+
+The mounted-fatal catch (`handleStartupFailure`) reaches the SAME
+`disposeSurface` authority through a runner-scope ref, so a fatal after the
+TUI mount runs the identical surface cleanup before the bounded retirement;
+only a fatal before the surface owner exists keeps its own minimal
+focus/abort safety. Cleanup errors never replace the original fatal message
+and never prevent `exit(1)`.
 
 ## The submit path is guard-free (the decision)
 

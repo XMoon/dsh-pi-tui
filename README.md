@@ -52,16 +52,19 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.0`（stable / `@latest`） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 当前稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
+| `0.5.1`（stable / `@latest`） | `dsh-v0.2.0-rc.2` | 当前稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
+| `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.0` 的整个 DSH peer floor 统一为
-`>=0.1.7-rc.2`（rc.2 的 preset registry 精确 peer `dsh-agent`，更宽的旧
-floor 已无法满足独立 tarball 安装），精确验证与推荐升级目标是已发布的
-`0.2.0-rc.1` family；旧 runtime 会在正常的不兼容边界以非零状态失败，
+不要把稳定线与 `@next` 预发布线混装。`0.5.1` 把整个 DSH peer
+floor 提升到 `>=0.2.0-rc.2`：Question 生命周期消费 rc.2 才发布的公开契约
+（`userQuestions.attachWait`/`answer` Remote 与 `userQuestions` Session
+projection），rc.1 family 不提供这些契约，混装属于虚假的兼容声明。上一稳定版
+`0.5.0` 保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧
+runtime 会在正常的不兼容边界以非零状态失败，
 请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
 [兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
@@ -218,17 +221,48 @@ Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导
 ! git status
 ```
 
-执行本地命令，并把输出提交到当前 Session。
+在宿主（Host）环境执行命令，并把输出提交到当前 Session。
 
 ```text
 !! git status
 ```
 
-只在本地执行，输出不会进入模型上下文。
+同样在宿主环境执行，但输出不进入模型上下文（仅卡片展示）。
 
 `!` / `!!` 是独立的编辑器模式，而不是普通文本前缀。进入 Shell 模式后 Prompt 和补全行为会同步切换。
 
 Shell 卡片默认只显示有限的输出预览，`Ctrl+O` 可以展开完整保留内容——全屏 Focus 除外:那里 `Ctrl+O` 负责 Thought root 的整体开关,Shell 卡片保持折叠。
+
+### Git 提交署名（可选）
+
+开启后，dsh-pi-tui 会指示 Agent 在创建 Git 提交时加上官方项目署名：
+
+```text
+Co-Authored-By: @xmoon76/dsh-pi-tui <dsh-pi-tui@xmoon.org>
+```
+
+默认 **关闭**。支持三种模式：
+
+```text
+off            不添加署名指引（默认）
+product        官方 Co-Authored-By 署名
+product-model  官方署名 + Assisted-By: <provider>/<model>
+```
+
+这是 **Agent 指引（prompt policy），不是仓库级强制**：dsh-pi-tui 不会安装 Git
+钩子、不改写任何 `git commit` 命令、也不探测仓库。`product-model` 的
+`provider`/`model` 由 DSH 官方模型选择直接注入（切换模型后下一次请求生效）。
+
+边界说明：
+
+- `!` / `!!` 用户 Shell 和你自己终端里的手动提交完全不受影响；
+- 不安装任何 `prepare-commit-msg` 钩子，不修改已有钩子；
+- **使用 `minimal` preset 时不生效**：该 preset 的 persona 是完整 system prompt
+  （`complete: true`），会替换掉其它全部 section；既有的 TUI 指引（Progress updates、
+  Response style、Focus）在该 preset 下同样是这种既有行为；
+- 不需要 GitHub 凭证/API；不修改 Author/Committer 身份；
+- 模型理论上可能忽略或写错指引——这是有意的取舍：用低侵入的指引替代一整套
+  Git 生命周期子系统。
 
 ### 文件引用与图片
 
@@ -268,6 +302,23 @@ TUI 使用 DSH 提供的模型和设置服务。
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
 保留状态/交互标记);切换立即生效并持久化。
+
+`/settings` 中的 `Terminal progress` 控制原生终端状态上报,共四档:
+`9;4+7501`(默认,同时上报 OSC 9;4 进度条与 OSC 7501 语义状态)、
+`9;4`(只保留进度条兼容协议)、`7501`(只上报语义状态:运行中 / 等待审批 /
+等待回答 / 完成 / 出错)、`Off`(清除并停止上报)。切换立即生效;完成与出错
+只在一次真实运行的最后一个 turn 结果被证实后上报,中断或取消会回到空闲。
+旧的 `On` 配置读作默认双协议。
+
+终端兼容性说明:不认识 OSC 7501 的终端会直接忽略它——目前 Ghostty 的 GUI
+只显示 OSC 9;4 进度条、不显示 7501 语义状态,这是预期行为,不代表上报失败。
+在 tmux 等终端复用器里,未知 OSC 可能不会被转发到外层终端(本功能有意不实现
+tmux 的 DCS passthrough,也不修改复用器设置);需要跨复用器保留状态时请直接
+使用支持它的外层终端。此外,OSC 7501 的语义状态只作用于当前 Main Agent。
+
+本项目的 Remote(实验性、自有 Host 组合)同样上报这套状态:Host 侧由本扩展自带的
+私有状态流提供,并与 Direct 共用同一份区间判定。**未安装本项目 Host 扩展的第三方
+DSH Host 不支持**这套上报(它没有对应的事件源)。
 
 其他插件注册到 `ctx.commands` 的 Slash Command 也会被自动发现。
 
@@ -315,8 +366,8 @@ TUI 使用 DSH 提供的模型和设置服务。
 | `Ctrl+V`      | 粘贴图片                   |
 | `Tab`         | 补全斜杠命令与文件路径           |
 | `@`           | 文件补全                   |
-| `!`           | 进入 Shell 模式            |
-| `!!`          | 进入 Local-only Shell 模式 |
+| `!`           | 进入 Shell 模式（结果进 Session） |
+| `!!`          | 进入 Session 排除的 Shell 模式     |
 
 完整按键和命令以 TUI 中的 `/help` 为准。表中的快捷键是默认值;用户自定义后,以 `/help` 和 `/keybindings` 显示的生效键位为准。
 
@@ -551,8 +602,8 @@ dsh --profile pi-tui-dev
 ### npm 模式（当前 `next`）
 
 当前兼容列车线是 npm 模式：以本 checkout 的 `package.json` 声明、
-lockfile 解析的已发布 `dsh-v0.2.0-rc.1` family 为精确验证目标（运行时
-peer floor 保持 `>=0.1.7-rc.2`）。隔离的 npm
+lockfile 解析的已发布 `dsh-v0.2.0-rc.2` family 为精确验证目标（运行时
+peer floor 同为 `>=0.2.0-rc.2`）。隔离的 npm
 驱动从公共 registry 安装该精确 family，并跑完整 build/test/package 路径：
 
 ```sh

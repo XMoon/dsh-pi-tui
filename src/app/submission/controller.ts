@@ -18,32 +18,36 @@
 
 import { randomUUID } from 'node:crypto'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { draftHasFiles, expandAttachmentPlaceholders } from '../../attachment/placeholder.ts'
-import type { DraftFileStore } from '../../attachment/file-draft.ts'
-import { formatBytes } from '../../bounded-output.ts'
-import type { Diag } from '../../diag.ts'
-import { runOwned } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import { ImageInputError } from '../../image/errors.ts'
-import { runReservedSubmit } from '../../image/submit-flow.ts'
-import type { DraftImageStore } from '../../image/draft-store.ts'
-import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments, prepareUserMessage, type PrepareInputDeps } from '../../image/submit.ts'
-import { expandImagePlaceholders } from '../../image/placeholder.ts'
-import { commandIsLocalForAttachments, isBareCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, resolveSubmitDelivery, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../command-policy.ts'
+import { draftHasFiles, expandAttachmentPlaceholders } from '../../client/media/attachment/placeholder.ts'
+import type { DraftFileStore } from '../../client/media/attachment/file-draft.ts'
+import { formatBytes } from '../../domain/media/format.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { runOwned } from '../../runtime/process/tasks.ts'
+import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import { ImageInputError } from '../../domain/media/errors.ts'
+import type { FileAttachmentRefLike, ImageAttachmentRefLike } from '../../domain/media/types.ts'
+import { runReservedSubmit } from './submit-flow.ts'
+import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
+import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments } from '../../client/media/draft-attachments.ts'
+import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
+import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
+import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
+import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
+import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
-import { PendingSubmissions, type PendingSubmissionPlacement } from '../../pending-submission.ts'
-import { queueInboxMessageOf } from '../../pending-presentation.ts'
+import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
+import { queueInboxMessageOf } from './pending-input.ts'
 import type { HostCommandExecution, HostCommandOutcome, HostCommandPort } from '../../runtime/host-command-port.ts'
 import type { HostFilePort } from '../../runtime/host-file-port.ts'
 import type { PendingInputReader } from '../../runtime/pending-input-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
-import { shellCommandOf } from '../../shell-context.ts'
+import { shellCommandOf } from './shell-context.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
-import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from '../../submit-ack.ts'
-import { SubmitLatencyTracker, type SubmitLatencyPhase } from '../../submit-latency.ts'
-import { DirectSubmissionPresentation, type SubmissionPresentationSource } from '../../submission-presentation.ts'
-import { mergeDraft, refuseByTransitionFence } from '../../steer.ts'
+import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckState, type SubmitPendingDetail } from './ack.ts'
+import { SubmitLatencyTracker, type SubmitLatencyPhase } from './latency.ts'
+import { DirectSubmissionPresentation, type SubmissionPresentationSource } from './presentation.ts'
+import { mergeDraft, refuseByTransitionFence } from './steer.ts'
 import type { ComposerSubmitRequest, TuiApp } from '../../tui-app.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
@@ -62,11 +66,15 @@ export type LocalCommandInvocation = Parameters<TuiLocalCommandHandler>[0]
 export type LocalCommandHandler = (invocation: LocalCommandInvocation) => ReturnType<TuiLocalCommandHandler>
 
 /** The raw Host command-registry plane (the composition root maps the
- *  official service; this owner never imports it). */
+ *  official service; this owner never imports it). Direct-only after PR4
+ *  §1.3: a TUI-owned command line NEVER routes through the Host executor on
+ *  the Remote branch — the Client registry owns that execution — so the
+ *  plane is supplied ONLY where a real Direct Agent exists. */
 export interface SubmissionCommandPlane<ExactAgent> {
   /** Whether the composition provides a command service at all. */
   available(): boolean
-  /** Execute one TUI-owned command line in-process. */
+  /** Execute one TUI-owned command line in-process (Direct compatibility:
+   *  the exact Direct Agent the line was captured against). */
   execute(agent: ExactAgent, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<HostCommandExecution | undefined>
   /** The command-service fallback handler for one local command name. */
   findHandler(name: string): LocalCommandHandler | undefined
@@ -75,11 +83,29 @@ export interface SubmissionCommandPlane<ExactAgent> {
 /** The A5b-3 command authority seams the submission path consumes. */
 export interface SubmissionCommandAuthority {
   wasAdvertisedClaim(name: string): boolean
+  /** The ADVERTISED union claim view (completion/advertised-miss semantics).
+   *  NOT a routing authority — routing uses {@link hostOriginClaimOf}. */
   hostClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** PR5 v2 §1C-4: the GENUINE Host-origin line authority (this TUI's own
+   *  Direct compatibility mirrors excluded; Client synthesis never
+   *  overwrites it). Every routing decision consumes THIS. */
+  hostOriginClaimOf(parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined
+  /** §D3 precedence: whether a GENUINE HOST-ORIGIN command resolves the
+   *  name (the claim-set union also carries this surface's own Client
+   *  registrations, so it cannot discriminate Host authority). */
+  hostCatalogResolves(name: string): boolean
+  /** §1C-6: the LIVE Client registry's exact-line claim — the ONLY TUI
+   *  ownership source the classification may read (bare token, or an argued
+   *  line when the definition declares an `input` descriptor). */
+  clientClaimsLine(parsed: { name: string; rawInput?: string } | undefined): boolean
   isSkillWrapperName(name: string): boolean
   isSkillInvocation(parsed: { name: string } | undefined, text: string): boolean
   withCommandDelivery<T>(delivery: SubmitDelivery, run: () => T): T
   takeCommandDraftDisposition(commandId?: string): 'restored' | 'suppressed' | undefined
+  /** The Client-owned command registry (PR4 §1.3): the TUI_BUILTIN route's
+   *  execution owner on the Remote branch (Direct keeps the in-process
+   *  command service for its unchanged dispatch surface). */
+  clientCommands: ClientCommandRegistry
 }
 
 /** The narrow client command-bridge read surface. */
@@ -87,7 +113,6 @@ export interface SubmissionExtensionsDeps {
   findContribution(name: string): { readonly sessionless: boolean } | undefined
   handlerFor(name: string): TuiLocalCommandHandler | undefined
   commandIdFor(name: string): string | undefined
-  isLocal(name: string, staticLocal: ReadonlySet<string>): boolean
   recordHealthRef(slot: string, id: string): unknown
   recordError(ref: unknown, error: unknown): void
   clearError(ref: unknown): void
@@ -136,6 +161,10 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly command: SubmissionCommandAuthority
   /** The raw command-registry plane. */
   readonly commandPlane: SubmissionCommandPlane<ExactAgent>
+  /** The selected backend kind (PR4 §1.3): 'direct' keeps the in-process
+   *  command-service dispatch surface for TUI-owned lines; any other value
+   *  routes them through the Client registry. */
+  readonly backendKind: 'direct' | 'remote'
   /** The semantic backend port slices the submission path reads. */
   readonly backend: {
     readonly hostFile: HostFilePort
@@ -143,6 +172,13 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     readonly sessionWriter: SessionWriter
     readonly hostCommand: HostCommandPort
   }
+  /**
+   * The INJECTED submission-presentation source (M3-4 PR2): the official
+   * `SessionSnapshot.pendingSubmissions` read on the Remote branch. Absent
+   * on Direct — the controller then wires its own ledger (the unchanged
+   * Direct optimistic identity).
+   */
+  readonly submissionPresentation?: SubmissionPresentationSource
   /** The per-TUI draft stores. */
   readonly drafts: {
     readonly images: DraftImageStore
@@ -164,7 +200,7 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly extensions: SubmissionExtensionsDeps
   /** The client artifact-save owner. */
   readonly artifacts: { start(name: 'export' | 'transcript', agent: ExactAgent): void }
-  /** The local-shell owner (the run/inspect seam). */
+  /** The user-shell owner (the run/inspect seam). */
   readonly shell: {
     run(text: string, ackToken: number | undefined): void
     interrupt(): void
@@ -173,15 +209,21 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly model: {
     readonly selected: { readonly current: { readonly provider: string; readonly model: string } | undefined }
   }
-  /** The image submission services (read at construction, like the old site). */
+  /** The Direct submission services (read at construction, like the old site). */
   readonly image: {
-    attachments(): PrepareInputDeps['attachments']
-    llm(): PrepareInputDeps['llm']
+    attachments(): DirectPrepareInputDeps['attachments']
+    llm(): DirectPrepareInputDeps['llm']
   }
   /** The Direct TUI-settings facade (read live). */
   readonly tuiSettings: { get(): TuiSettingsDoc } | undefined
   /** The exact owner-subject currentness fence. */
   readonly captureMatches: (subject: SessionSubject | undefined) => boolean
+  /** The transport-forked prepare seam (M3-4 PR3 §10/§12): absent keeps the
+   * Direct prepareUserMessage pipeline; a Remote selection injects the SAME
+   * PreparedPrompt path the plain-prompt flow uses, so steer and prompt share
+   * one preparation authority per transport (never a Direct UserMessage into
+   * the Remote serializer). */
+  readonly prepareTransport?: (text: string, requestId: string) => Promise<unknown>
   /** The owner-resolved per-Agent prompt admission window. */
   readonly direct: {
     withPromptAdmission<T>(agent: ExactAgent, hasImages: boolean, task: () => Promise<T>): Promise<T>
@@ -225,9 +267,9 @@ export interface SubmissionController {
   /** Correlate one authoritative durable occurrence by request id. */
   observeDurable(rpcId: string): void
   /** The client-local presentation echoes for one session. */
-  snapshotEchoes(sessionId: string | undefined): readonly import('../../submission-presentation.ts').SubmissionPresentationItem[] | undefined
+  snapshotEchoes(sessionId: string | undefined): readonly import('./presentation.ts').SubmissionPresentationItem[] | undefined
   /** The image submission deps the command runner consumes. */
-  prepareDeps(): PrepareInputDeps
+  prepareDeps(): DirectPrepareInputDeps
   /** Publish one local submission echo. The composition root resolves the
    *  exact Agent and reports the facts; the OWNER derives the placement. */
   beginLocalSubmission(input: {
@@ -309,34 +351,35 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const attachmentRefusal = (
     parsed: { name: string; rawInput?: string },
     draft: string,
-    // Whether THIS LINE is a local command line — the dispatch's ONE
-    // classification (`commandIsLocalForAttachments`), computed by the
-    // caller because it must be re-readable against the FINAL catalog for a
-    // deferred start.
-    isLocal: boolean,
-    // The ONE skill-invocation predicate (`isSkillInvocation`: an explicit
-    // `/skill <name> ...` or a live skill wrapper) — TUI-owned agent-facing
-    // input that loadSkill owns. It is supplied rather than re-derived: the
-    // predicate applies the argued-`/skill` short-circuit, and WITHOUT it
-    // the line would fall into the HOST branch below (`/skill` is itself a
-    // registered TUI command) and be refused as a non-declaring command.
-    skillInvocation: boolean,
+    // The caller's classification of THIS LINE (PR5 v2 §1C-7): a Client
+    // command (TUI or extension) refuses staged attachments; a genuine
+    // Host command follows the HOST descriptor's own `attachments`
+    // declaration carried by the classification; skills and ordinary
+    // submissions are multimodal. Never re-derived from the advertised
+    // union here (review R6-3: the union lets a same-name Client
+    // descriptor overwrite the winning Host declaration).
+    classification: CommandLineClassification,
   ): string | undefined => {
     if (!draftHasAttachments(draft, deps.drafts.images, deps.drafts.files)) return undefined
-    if (skillInvocation) return undefined
-    if (!isLocal) {
-      const claim = deps.command.hostClaimOf(parsed)
-      if (claim?.claimed === true) {
-        if (claim.attachments !== true) {
-          return `/${parsed.name} does not accept attachments; remove them first`
-        }
-        if (draftHasFiles(draft, deps.drafts.images, deps.drafts.files)) {
-          return `/${parsed.name} cannot receive file attachments in this client; remove them first`
-        }
-      }
-      return undefined
+    // §1C-4/§3 (review R7-2): the classification is the ONLY input. A parallel
+    // `isSkillInvocation` predicate must not outrank the Host precedence — an
+    // argued `/skill <name>` whose name a GENUINE Host command owns (or a live
+    // wrapper whose name a later scoped Host command owns) is a `host-command`
+    // and follows the HOST descriptor's declaration. A real skill invocation
+    // classifies as `skill-invocation` and falls through to the multimodal
+    // return at the end, exactly as before.
+    if (classification.kind === 'client-command') {
+      return 'Attachments cannot be included in a user-shell command.'
     }
-    return 'Attachments cannot be included in a local command.'
+    if (classification.kind === 'host-command') {
+      if (classification.attachments !== true) {
+        return `/${parsed.name} does not accept attachments; remove them first`
+      }
+      if (draftHasFiles(draft, deps.drafts.images, deps.drafts.files)) {
+        return `/${parsed.name} cannot receive file attachments in this client; remove them first`
+      }
+    }
+    return undefined
   }
 
   /** The encoded images ONE command invocation carries (DSH
@@ -396,8 +439,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     deps.app().setEditorText(mergeDraft(deps.app().getDraft(), draft))
   }
 
-  // ── Local submit acknowledgement + latency timeline (submit-ack.ts /
-  // submit-latency.ts) ── the immediate "Submitting…" / "Queued…" row
+  // ── Local submit acknowledgement + latency timeline (app/submission/ack.ts /
+  // app/submission/latency.ts) ── the immediate "Submitting…" / "Queued…" row
   // between the editor clearing and the FIRST authoritative DSH event,
   // and the T0-T5 phase timings for the diag channel. The window is real
   // even without any per-submit persistence check: session create, image
@@ -419,16 +462,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const pendingSubmissions = new PendingSubmissions()
 
   /**
-   * The client-local presentation source the queue/transcript handoff reads.
-   * Production Direct wires the ledger above. D2.2 has NO production Remote
-   * backend, so this runner intentionally has no substitution point; the
-   * experimental Remote assembly (tests/smoke) composes
-   * `RemoteSubmissionPresentation` directly. A complete Remote backend (M3)
-   * is what would inject the official `SessionSnapshot.pendingSubmissions`
-   * source here instead of running two optimistic identities (D2.2 §21/§22).
+   * The client-local presentation source the queue/transcript handoff reads
+   * (D2.2 → M3-4 PR2): Direct wires the ledger above; a Remote selection
+   * injects the official `SessionSnapshot.pendingSubmissions` source
+   * (`RemoteSubmissionPresentation`) so the two optimistic identities never
+   * run together. The pending-presentation join stays the ONE UI join.
    */
-  
-  const submissionPresentation: SubmissionPresentationSource = new DirectSubmissionPresentation(pendingSubmissions)
+  const submissionPresentation: SubmissionPresentationSource = deps.submissionPresentation
+    ?? new DirectSubmissionPresentation(pendingSubmissions)
 
   /**
    * Accept one submission: show the pending row NOW (Submit/Queued by
@@ -554,19 +595,20 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     deps.app().notify(`${prefix}: ${message}`, 'error')
   }
 
-  /** The image submission surface (plan §13): the live attachment/llm
+  /** The Direct submission surface (plan §13): the live attachment/llm
    * services + the CURRENT provider/model, re-read at submit time (the
    * TUI supports runtime model switching — never a startup snapshot). */
   
-  const submitDeps: PrepareInputDeps = {
+  const submitDeps: DirectPrepareInputDeps = {
     attachments: deps.image.attachments(),
     get fileStore() { return deps.drafts.files },
     signal: deps.signal,
     llm: deps.image.llm(),
-    // Send-time `@`-file canonicalization through the Host-file port
-    // (migration M1.10): the live session's workspace is the scope.
+    // The `@`-mention send seam (M1.10 → M3-3A official semantics): the
+    // submitted text stays LITERAL — the Host's FILE_REFERENCE_PROMPT owns
+    // relative-path resolution — and the seam routes through the port so a
+    // future official carrier (if one ever exists) lands in one place.
     canonicalizeMentions: (text) => deps.backend.hostFile.canonicalizeMentions({ kind: 'session', sessionId: deps.liveAgent()?.session.id ?? '' }, text),
-    sessionCwd: () => deps.status.sessionCwd(),
     currentModel: () => {
       // The AUTHORITATIVE model for the next step is the mutable
       // selection's `current` (/model writes it; prompt assembly reads
@@ -646,7 +688,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // argued line of an execute-kind command) stays one — no later catalog
     // change may turn it into an invocation except the final catalog
     // actually CLAIMING it.
-    const submitView = parsedAtSubmit === undefined ? undefined : deps.command.hostClaimOf(parsedAtSubmit)
+    const submitOriginClaim = parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit)
     // Whether this line is an ordinary agent-facing prompt (never a Host
     // command, a TUI-local control, or a skill invocation) at submit time.
     // Such a line installs its local echo SYNCHRONOUSLY, before the FIFO
@@ -663,9 +705,28 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // would neither dedupe against nor retire on their authoritative
     // occurrence. They keep their existing command feedback.
     const ordinaryPromptAtSubmit = parsedAtSubmit === undefined
-      || (submitView?.claimed !== true
-        && !LOCAL_COMMANDS.has(parsedAtSubmit.name)
-        && deps.command.isSkillWrapperName(parsedAtSubmit.name) !== true)
+      || (submitOriginClaim?.claimed !== true
+        // §D3 line authority (round 4) + §1C-4 (review R7-1): the submit-time
+        // echo gate reads the GENUINE Host-origin claim above and the SAME
+        // NAME-authority primitive as the delivery gate below
+        // (`isLocalCommandLine` with `hostCatalogResolves`, which answers the
+        // origin map's NAME ownership): a genuine Host name is never a
+        // TUI-local line, while a TUI built-in's own Client registration is
+        // never Host territory.
+        // `/export foo` is an ordinary submission and gets its immediate
+        // echo like every prompt, instead of silently vanishing behind a
+        // blocked FIFO turn. Skill invocations keep their own exclusion.
+        // §1C-6 (whole-PR F4): the TUI term is the LIVE Client registry's
+        // exact-line claim — the static name list never answers ownership.
+        // §1C-4 keeps a genuine Host NAME out of the TUI family.
+        && !(deps.command.hostCatalogResolves(parsedAtSubmit.name) === false
+          && deps.command.clientClaimsLine(parsedAtSubmit))
+        // §1C-5 (whole-PR F2): the skill exclusion applies only where the line
+        // is NOT a genuine Host-origin name. A Host name that does not claim
+        // this argued line is an ORDINARY submission, so a live wrapper
+        // sharing its name must not deny it the immediate echo.
+        && !(deps.command.isSkillInvocation(parsedAtSubmit, text)
+          && deps.command.hostCatalogResolves(parsedAtSubmit.name) === false))
     // Install the echo NOW for a known ordinary prompt on an existing
     // session — before the FIFO turn and the asynchronous admission. A
     // deferred start installs after the session materializes, below.
@@ -702,19 +763,46 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // NOT own an argued line of an execute-kind host command: upstream
     // `matchEnter` makes it an ordinary submission, and the host registry
     // resolves by NAME, so asking it would run the command anyway.
+    // §D3 ORDER: the AUTHORITATIVE HOST CATALOG is consulted FIRST — a
+    // resolved Host name owns the line even when a TUI built-in or a skill
+    // wrapper shares it (e.g. the frozen rc.2 Web-only Host `/export`
+    // colliding with the TUI's Client `/export`). §1C-4 (review R7-1): the
+    // discriminator is the GENUINE Host-origin LINE claim — the effective
+    // winner with this surface's mirrors excluded — never the advertised
+    // union, which a same-name Client descriptor can overwrite (a genuine
+    // Host leading-input `/export` next to the TUI's execute-kind Client
+    // `/export` reads `claimed:false` from the union and would be wrongly
+    // handed to the ordinary-submission route).
+    // §1C-5 (whole-PR F1): the SUBMIT-TIME non-invocation is STICKY. A name the
+    // genuine Host origin resolved but did NOT claim on this line was an
+    // ordinary submission when it was submitted; a later catalog disappearance
+    // (a deferred, session-scoped re-resolution, or a definition that went
+    // away) must not hand it to a same-name static TUI route or a live skill
+    // wrapper. Only a FINAL genuine claim may turn it back into a command.
+    const effectiveOriginClaim = (parsed: { name: string; rawInput?: string } | undefined) => {
+      if (parsed === undefined) return undefined
+      const finalClaim = deps.command.hostOriginClaimOf(parsed)
+      if (finalClaim?.claimed === true) return finalClaim
+      return submitOriginClaim?.claimed === false ? submitOriginClaim : finalClaim
+    }
     const commandPlaneOwnsLine = (): boolean => {
       if (parsedAtSubmit === undefined) return true
-      if (LOCAL_COMMANDS.has(parsedAtSubmit.name)) return true
+      const originClaim = effectiveOriginClaim(parsedAtSubmit)
+      if (originClaim !== undefined) return originClaim.claimed !== false
+      // §1C-5 NAMESPACE ORDER: a LIVE skill wrapper owns its own slash line
+      // BEFORE the Client-registration terms — the wrapper's handler turns
+      // `/name args` into loadSkill, and the wrapper's own Client registration
+      // (an `execute`-shaped definition without `input`) must not disqualify it.
       if (deps.command.isSkillWrapperName(parsedAtSubmit.name) === true) return true
-      const finalView = deps.command.hostClaimOf(parsedAtSubmit)
-      // A resolved final catalog answers for itself (claimed = the plane
-      // runs the command; unclaimed = an ordinary submission).
-      if (finalView !== undefined) return finalView.claimed
-      // The final catalog does not resolve the name at all: the plane decides
-      // (a session-scoped command the standing view cannot see) — UNLESS the
-      // line was ALREADY a known non-invocation when it was submitted, which
-      // no disappearance can turn into an invocation.
-      return submitView?.claimed !== false
+      // §1C-6 (whole-PR F4): a LIVE Client definition that does not claim THIS
+      // line (an argued line of a definition without an `input` descriptor)
+      // owns nothing — the line is an ordinary submission, exactly like the
+      // argued line of an execute-kind Host command.
+      if (deps.command.clientClaimsLine(parsedAtSubmit)) return true
+      if (deps.command.clientCommands.get(parsedAtSubmit.name) !== undefined) return false
+      // The final catalog resolves nothing at all: the plane decides (a
+      // session-scoped command the standing view cannot see).
+      return submitOriginClaim?.claimed !== false
     }
     // Assigned inside the runOwned factory (invocation-time capture).
     let commandHealthRef: { slot: string; id: string; owner: string } | undefined
@@ -745,6 +833,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // throw before this point must not strand the tail (no turn was taken),
     // and no other submission can interleave during the synchronous setup
     // above, so the ordering contract is unchanged.
+    const tag = `${text.slice(0, 14)}:${submitRequestId.slice(0, 8)}`
     const submitTurn = takeSubmitTurn()
     runOwned('submit', () => runReservedSubmit({
       reserve: (t) => {
@@ -797,6 +886,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           settleLocalSubmitAck('submit resolved without an agent', { token: submitAckToken, terminal: true })
           return
         }
+        // PR4 §1.3: the REAL-Direct-Agent discriminator for the TUI_BUILTIN
+        // route. On Remote `liveAgent()` is the transport-neutral structural
+        // projection `{status, session:{id}}`; on Direct it is the in-process
+        // Agent. A cheap structural marker separates them: the Direct Agent
+        // always carries its mutable `status` string AND an `inbox`-bearing
+        // object graph — the projection never does. The Client registry
+        // executes the Remote branch (never `ctx.commands.execute` on the
+        // projection).
+        const directAgent = 'inbox' in (agent as object) ? (agent as ExactAgent) : undefined
         if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) {
           const merged = mergeDraft(deps.app().getDraft(), text)
           deps.app().setEditorText(merged)
@@ -831,7 +929,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // agentNow(): writing through a re-read closure variable could
       // target a session the identity check did not see (a switch
       // between the check and the write).
-      if (deps.commandPlane.available()) {
+      // PR4 §1.3: the command-dispatch window exists on BOTH branches —
+      // Direct through the in-process service, Remote through the Client
+      // registry + HostCommandPort. `commandPlane.available()` therefore no
+      // longer gates the window: the Remote branch supplies its own
+      // always-available execution owners.
+      {
         // Bare `/plan` toggles: when plan mode is already active it exits
         // instead of re-entering (the official command needs `/plan off`).
         const parsed = parseCommand(text)
@@ -875,32 +978,67 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             (t) => deps.app().setEditorText(t),
             (m, k) => deps.app().notify(m, k),
           ),
-          // DEFERRED AUTHORITY: re-apply the attachment policy against the
-          // FINAL catalog BEFORE the command plane runs.
+          // DEFERRED AUTHORITY (§1C-8): re-run the SAME classifier against
+          // the FINAL catalog BEFORE the command plane runs, and re-apply
+          // the attachment policy from that final classification (the
+          // dynamic contribution term stays STICKY to the submit-time
+          // route, exactly as the sticky-rules note in §1C-8 records).
+          //
+          // §1C-5 (review R6-4): the facts come from ONE helper so the
+          // deferred sites can never drift from the submit-time decision —
+          // in particular the skill-invocation FIRST rule (an argued
+          // `/skill <name>` is never absorbed into a Client command by the
+          // BARE picker's LOCAL_COMMANDS membership) and the wrapper-outranks-
+          // contribution precedence.
           lateAttachmentRefusal: () => {
             if (parsed === undefined) return undefined
-            return attachmentRefusal(
-              parsed,
-              text,
-              commandIsLocalForAttachments(
-                parsed,
-                deps.command.isSkillWrapperName,
-                // The dynamic (client contribution) term is STICKY to the
-                // submit-time route.
-                n => clientLocalAtSubmit && (deps.extensions.isLocal(n, LOCAL_COMMANDS) ?? false),
-                // STICKY SUBMIT-TIME AUTHORITY: once the host catalog RESOLVED
-                // this name, the name is host territory for the lifetime of the
-                // submission.
-                line => deps.command.hostClaimOf(line) ?? submitView,
-              ),
-              deps.command.isSkillInvocation(parsed, text),
-            )
+            const finalSkillInvocation = deps.command.isSkillInvocation(parsed, text)
+            const finalClassification = classifyCommandLine({
+              // §1C-5 (whole-PR F1): the sticky submit-time non-invocation
+              // survives a final-catalog disappearance.
+              hostOriginClaim: effectiveOriginClaim(parsed),
+              // §1C-5 (review R6-4): the skill-invocation rule comes FIRST —
+              // a Client registration must never absorb an argued
+              // `/skill <name>` into a Client command. §1C-6 (whole-PR F4):
+              // the TUI term is the LIVE Client registry claim plus the
+              // BARE-line contribution, never a static name list.
+              // §1C-6 (whole-PR R15-1): the TUI term is the LIVE Client
+              // claim ONLY. It must never consult `extensions.isLocal(...,
+              // LOCAL_COMMANDS)`: that path ends in `CommandBridge.isLocal`'s
+              // `staticLocal.has(name)` first statement, so a BARE name with no
+              // live Client definition (`/kill`) re-entered the TUI family from
+              // the static list. A live bare-line CONTRIBUTION is the
+              // `extensionCommand` term below, not this one.
+              tuiCommand: !finalSkillInvocation && deps.command.clientClaimsLine(parsed),
+              // The wrapper-outranks-contribution precedence (§1C-5).
+              extensionCommand: clientLocalAtSubmit && !finalSkillInvocation
+                && isBareCommandLine(parsed)
+                && deps.command.isSkillWrapperName(parsed.name) !== true
+                && deps.extensions.findContribution(parsed.name) !== undefined,
+              skillInvocation: finalSkillInvocation,
+            })
+            return attachmentRefusal(parsed, text, finalClassification)
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: () => parsedAtSubmit !== undefined
-            && (LOCAL_COMMANDS.has(parsedAtSubmit.name) || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true),
+            // §1C-7: the TUI-owned route is the classifier's client-command
+            // (tui) family evaluated against the FINAL catalog — a genuine
+            // Host-origin name (mirrors excluded) disqualifies it first.
+            // (Distinct question from the line classification: a skill
+            // invocation is agent-facing INPUT yet its handler still lives in
+            // the TUI's own registry, so the skill/wrapper terms stay OUT of
+            // this predicate.)
+            && classifyCommandLine({
+              // §1C-5 (whole-PR F1): the sticky submit-time non-invocation.
+              hostOriginClaim: effectiveOriginClaim(parsedAtSubmit),
+              // §1C-6 (whole-PR F4): the LIVE Client registry claim.
+              tuiCommand: deps.command.clientClaimsLine(parsedAtSubmit)
+                || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true,
+              extensionCommand: false,
+              skillInvocation: false,
+            }).kind === 'client-command',
           commandPlaneOwnsLine,
-          submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostClaimOf(parsedAtSubmit),
+          submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,
           invokeCommandPlane: ({ toggled: commandLine, commandPlaneLine, tuiOwnedCommand, submittedAttachments, signal: commandSignal }) =>
             deps.command.withCommandDelivery(delivery, () => {
@@ -908,17 +1046,28 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 return Promise.resolve({ kind: 'committed', matched: false } as HostCommandOutcome)
               }
               if (tuiOwnedCommand) {
-                // TUI-local commands and skill wrappers retain their existing
-                // in-process command service path; HostCommandPort is only
-                // for a line already selected as Host-owned.
-                return deps.commandPlane.execute(agent, commandLine, submittedAttachments, commandSignal).then((execution: HostCommandExecution | undefined) => {
+                // PR4 §1.3 — the explicit TUI_BUILTIN/SKILL_WRAPPER route.
+                // A REAL Direct Agent (the branch where the in-process
+                // command service owns the dispatch surface) keeps the
+                // existing executor path unchanged; the Remote structural
+                // projection executes through the CLIENT registry — the
+                // projected agent must never reach `ctx.commands.execute`.
+                if (directAgent !== undefined) {
+                  return deps.commandPlane.execute(directAgent, commandLine, submittedAttachments, commandSignal).then((execution: HostCommandExecution | undefined) => {
+                    return execution === undefined
+                      ? { kind: 'committed', matched: false } as const
+                      : { kind: 'committed', matched: true, execution } as const
+                  })
+                }
+                return deps.command.clientCommands.execute({ line: commandLine, signal: commandSignal }).then((execution) => {
                   return execution === undefined
                     ? { kind: 'committed', matched: false } as const
                     : { kind: 'committed', matched: true, execution } as const
                 })
               }
-              // The HostCommandPort submission enters the barrier through
-              // the submission runtime (the M3 insertion point).
+              // The HOST route: the HostCommandPort submission enters the
+              // barrier through the submission runtime (the M3 insertion
+              // point).
               return deps.submissionRuntime.withWriter(scope, () => deps.backend.hostCommand.execute({
                 sessionId: agent.session.id,
                 line: commandLine,
@@ -966,19 +1115,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         })
         return
       }
-      // No commands service: direct follow-up on the CAPTURED agent (see
-      // the note above — never a re-read closure variable). Images ride
-      // the same prepared message as every other path (§13). The submission
-      // runtime owns the ordered writer admission (transition drain +
-      // per-Agent image window) and its terminal ack/echo settlement.
-      await deps.submissionRuntime.submitPrompt({
-        text,
-        scope,
-        requestId: submitRequestId,
-        ackToken: submitAckToken,
-        generation,
-        echoInstalled: localEchoInstalled,
-      })
       },
       restore: (t) => restoreSubmissionDraft(t),
     }, text), {
@@ -1031,7 +1167,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // M5: a plugin-declared local command with a bridge handler routes
     // to the bridge FIRST (its rawInput is passed verbatim — never
     // re-parsed or rewritten, the skill rawInput regression gate); the
-    // commands service is the fallback for core commands.
+    // CLIENT command registry is the core-commands fallback (PR4 §1.5);
+    // the Direct commands service is the LAST fallback and exists only on
+    // the Direct branch (a Remote sessionless command must never reach a
+    // Host `findHandler` for a TUI callback).
     const bridgeHandler = deps.extensions.handlerFor(parsed.name)
     const bridgeCommandId = deps.extensions.commandIdFor(parsed.name)
     // Captured at INVOCATION START (same generation fence as the
@@ -1039,8 +1178,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const bridgeCommandRef = bridgeCommandId === undefined
       ? undefined
       : deps.extensions.recordHealthRef('command', bridgeCommandId)
-    const planeHandler = deps.commandPlane.findHandler(parsed.name)
-    if (bridgeHandler === undefined && planeHandler === undefined) {
+    // §1C-6 SINK INVARIANT: the same exact-line admission the registry's
+    // `execute` enforces — an argued line of a definition WITHOUT an `input`
+    // descriptor is not an invocation, so it falls through instead of running
+    // a handler that never claimed the line.
+    const clientHandler = deps.command.clientClaimsLine(parsed)
+      ? deps.command.clientCommands.get(parsed.name)
+      : undefined
+    const planeHandler = clientHandler === undefined && deps.backendKind === 'direct'
+      ? deps.commandPlane.findHandler(parsed.name)
+      : undefined
+    if (bridgeHandler === undefined && clientHandler === undefined && planeHandler === undefined) {
       // The "sessionless" command is actually unknown: it falls back to
       // a session dispatch — the history row goes through the
       // deferred-start gate (persist AFTER the session exists, with the
@@ -1054,7 +1202,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       rawInput: parsed.rawInput,
       signal: deps.signal,
     } as LocalCommandInvocation
-    const handler = bridgeHandler ?? planeHandler
+    const handler = (bridgeHandler ?? (clientHandler !== undefined
+      ? (invocation: LocalCommandInvocation) => clientHandler.handler(invocation as never)
+      : planeHandler!)) as LocalCommandHandler
     if (handler === undefined) {
       dispatchViaSession(text, persistHistory, delivery)
       return
@@ -1157,7 +1307,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       ensureSession: () => deps.session.ensureSession(),
       withPromptAdmission: (agent, hasImages, task) =>
         deps.direct.withPromptAdmission(agent as unknown as ExactAgent, hasImages, task),
-      prepareMessage: (value, requestId) => prepareUserMessage(value, deps.drafts.images, submitDeps, { requestId }),
+      prepareMessage: (value, requestId) => prepareMessage(value, requestId),
       markDispatch: (sessionId) => submitLatencyTracker.mark(sessionId, 'dispatch'),
       restoreSubmissionDraft: (value) => restoreSubmissionDraft(value),
       notifySubmissionFailure: (error) => notifySubmissionFailure(error),
@@ -1269,69 +1419,64 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     const persistHistory = (sessionId: string | undefined): void => {
       deps.history.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
     }
-    // `!` runs the command and submits the completed command+output to
-    // the session (kimi parity); `!!` runs purely locally with no session
-    // write (pi's excluded-from-context escape hatch). A local `!!` needs
-    // no session at all; the contextual `!` creates the session first
-    // (the FIRST user message is the deferred trigger).
+    // `!` runs the command on the Host and submits the completed
+    // command+output to the session (kimi parity); `!!` runs on the Host
+    // with the SAME execution locality but zero Session/model write (pi's
+    // excluded-from-context escape hatch). `!!` is Session-EXCLUDED, never
+    // sessionless (shell amendment M3-4 PR3): with no current Session the
+    // gesture ensures one first and executes in that Session's Host
+    // workspace, persisting the history row under that Session identity.
     if (text.startsWith('!')) {
-      // A local shell line is a UI control with NO attachment delivery path
-      // (`runLocalShell` neither admits nor consumes drafts): a staged
+      // A user-shell line is a UI control with NO attachment delivery path
+      // (the shell owner neither admits nor consumes drafts): a staged
       // attachment must never become shell arguments, and the success path
       // must never consume it. Refuse and hand the draft (placeholder
       // intact) back, exactly like a local command.
       if (draftHasAttachments(text, deps.drafts.images, deps.drafts.files)) {
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
-        deps.app().notify('Attachments cannot be included in a local command.', 'error')
+        deps.app().notify('Attachments cannot be included in a user-shell command.', 'error')
         return
       }
-      if (text.startsWith('!!')) {
-        // `!!` runs purely locally with NO session write (pi's
-        // excluded-from-context escape hatch) — the row is sessionless
-        // (Current directory / All directories, never Current session).
+      if (shellCommandOf(text) === '') {
+        // A bare `!`/`!!` (no command) is a no-op — sessionless.
         persistHistory(undefined)
-        deps.shell.run(text, undefined)
-      } else if (shellCommandOf(text) !== '') {
-        // Local submit acknowledgement (plan D), armed AT THE GESTURE —
-        // BEFORE ensureSession: a deferred/slow session create is part
-        // of the no-feedback window this row exists to cover. The
-        // runLocalShell-side accept was moved here so the T0 baseline
-        // is never rebased by the shell wiring. The TOKEN rides into
-        // the shell flow: its terminal exits settle only while THIS
-        // gesture is still the newest one.
-        const shellAckToken = acceptLocalSubmitAck()
-        // An owned workflow: the session creation failure restores the
-        // draft (failSubmission) — runOwned (AGENTS.md), never a bare
-        // void. The history row is written AFTER the session exists
-        // (the deferred-start gate), so a `!` line that creates the
-        // session carries its id.
-        runOwned('contextual shell', () => deps.session.ensureSession().then(() => {
-          persistHistory(deps.liveAgent()?.session.id)
-          deps.shell.run(text, shellAckToken)
-        }), {
-          diag: deps.diag,
-          sessionId: () => deps.liveAgent()?.session.id,
-          onError: (error) => {
-            // The session create failed: nothing will be written — the
-            // ack row armed at the gesture is TERMINAL here (plan D).
-            settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
-            failSubmission(text)(error)
-          },
-          onCancel: () => {
-            if (deps.isCleanedUp()) return
-            // NOT wrapped in runReservedSubmit: nothing restores the
-            // draft here, so a cancelled ensureSession would silently
-            // lose the submitted text — merge it back first (no error
-            // notice: a cancellation is not a failure), then end the
-            // ack row terminally.
-            deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
-            settleLocalSubmitAck('contextual shell cancelled', { token: shellAckToken, terminal: true })
-          },
-        })
-      } else {
-        // A bare `!` (no command) is a no-op — sessionless.
-        persistHistory(undefined)
+        return
       }
+      // Local submit acknowledgement (plan D), armed AT THE GESTURE —
+      // BEFORE ensureSession: a deferred/slow session create is part
+      // of the no-feedback window this row exists to cover. The TOKEN
+      // rides into the shell flow: its terminal exits settle only while
+      // THIS gesture is still the newest one. Both modes arm it: a
+      // sessionless `!!` also creates its execution Session now.
+      const shellAckToken = acceptLocalSubmitAck()
+      // An owned workflow: the session creation failure restores the draft
+      // (failSubmission) — runOwned (AGENTS.md), never a bare void. The
+      // history row is written AFTER the session exists (the
+      // deferred-start gate), so a `!`/`!!` line that creates the session
+      // carries its id.
+      runOwned('user shell', () => deps.session.ensureSession().then(() => {
+        persistHistory(deps.liveAgent()?.session.id)
+        deps.shell.run(text, shellAckToken)
+      }), {
+        diag: deps.diag,
+        sessionId: () => deps.liveAgent()?.session.id,
+        onError: (error) => {
+          // The session create failed: nothing will be written — the
+          // ack row armed at the gesture is TERMINAL here (plan D).
+          settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
+          failSubmission(text)(error)
+        },
+        onCancel: () => {
+          if (deps.isCleanedUp()) return
+          // NOT wrapped in runReservedSubmit: nothing restores the draft
+          // here, so a cancelled ensureSession would silently lose the
+          // submitted text — merge it back first (no error notice: a
+          // cancellation is not a failure), then end the ack row
+          // terminally.
+          deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+          settleLocalSubmitAck('user shell cancelled', { token: shellAckToken, terminal: true })
+        },
+      })
       return
     }
     // A sessionless slash command runs locally BEFORE any session exists:
@@ -1340,13 +1485,41 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // like /plan, and plain prompts — creates the session lazily. M5: a
     // plugin-declared sessionless command (CommandBridge) joins the set.
     const parsed = parseCommand(text)
-    // The CURRENT host catalog's view of THIS LINE, asked ONCE for the
-    // synchronous routing decisions below (the deferred resolution asks
-    // again, against the catalog the session committed). A name the
-    // catalog RESOLVES is host territory even when it does not claim this
-    // line: `/compact extra` is an ordinary submission, never a same-named
-    // client contribution's.
-    const hostView = parsed === undefined ? undefined : deps.command.hostClaimOf(parsed)
+    // PR5 v2 §1C-5/§1C-7: ONE semantic classification drives every sibling
+    // gate below (attachment policy, busy delivery, early echo, the
+    // namespace order, the deferred re-checks). Its Host term is the
+    // GENUINE Host-origin claim (§1C-4 `hostOriginClaimOf`: this TUI's own
+    // Direct compatibility mirrors are excluded, so a successfully mirrored
+    // /status still classifies CLIENT_COMMAND — the PR4 regression class),
+    // its Client terms come from the LIVE sources (the Client registry
+    // seam, the extension contribution of a bare line, the skill-wrapper
+    // state), never from a reconstructed name list.
+    // §1C-5 line semantics FIRST (review R6-4): an argued `/skill <name>
+    // ...` and a live dynamic wrapper are SKILL invocations — the static
+    // LOCAL_COMMANDS membership of `skill` (the BARE picker) must never
+    // absorb the argued form into a Client command.
+    const skillInvocation = deps.command.isSkillInvocation(parsed, text)
+    const classification = classifyCommandLine({
+      hostOriginClaim: parsed === undefined ? undefined : deps.command.hostOriginClaimOf(parsed),
+      // §1C-6 source fidelity (whole-PR F4): the TUI term is the LIVE Client
+      // registry's EXACT-LINE claim — a registered definition owns the bare
+      // token, and an argued line only when it declares an `input` descriptor
+      // (the official `matchEnter` semantics). The static name list is not an
+      // ownership source, and only a line that is NOT a skill invocation is a
+      // Client command.
+      tuiCommand: parsed !== undefined
+        && !skillInvocation
+        && deps.command.clientClaimsLine(parsed),
+      // A live skill wrapper outranks a same-name extension contribution
+      // (the wrapper route wins everywhere) — the extension term excludes
+      // wrapper names.
+      extensionCommand: parsed !== undefined
+        && !skillInvocation
+        && isBareCommandLine(parsed)
+        && deps.command.isSkillWrapperName(parsed.name) !== true
+        && deps.extensions.findContribution(parsed.name) !== undefined,
+      skillInvocation,
+    })
     // Command semantics matrix (plan §19.3): slash commands are not LLM
     // prompts — an image-bearing command line is REJECTED explicitly
     // (never a silent drop, never a stray placeholder sent to the model).
@@ -1362,24 +1535,34 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // an argued line of a contribution name is an ordinary submission, with
     // its attachments.
     if (parsed !== undefined) {
-      const refusal = attachmentRefusal(
-        parsed,
-        text,
-        commandIsLocalForAttachments(
-          parsed,
-          deps.command.isSkillWrapperName,
-          n => deps.extensions.isLocal(n, LOCAL_COMMANDS) ?? false,
-          deps.command.hostClaimOf,
-        ),
-        deps.command.isSkillInvocation(parsed, text),
-      )
+      // §1C-7: the attachment gate consumes the SAME classification — a
+      // Client command (TUI or extension) refuses staged attachments, a
+      // Host command follows the HOST descriptor's own declaration, skill
+      // invocations and ordinary submissions stay multimodal.
+      const refusal = attachmentRefusal(parsed, text, classification)
       if (refusal !== undefined) {
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
         deps.app().notify(refusal, 'error')
         return
       }
     }
-    const isSessionless = parsed !== undefined && SESSIONLESS_COMMANDS.has(parsed.name)
+    // §1C-7 (whole-PR F4/F5): the sessionless LOCAL route consumes the ONE
+    // classification — the TUI client-command family — instead of re-judging a
+    // name against `SESSIONLESS_COMMANDS` alone. A genuine Host name whose
+    // execute-kind descriptor does not claim the ARGUED form classifies as
+    // ordinary-submission and must never be pulled back into the local surface.
+    const isSessionless = parsed !== undefined
+      && classification.kind === 'client-command'
+      && classification.source === 'tui'
+      && SESSIONLESS_COMMANDS.has(parsed.name)
+    // §1C-7: the delivery gate consumes the SAME classification — every
+    // Client command (TUI or extension) takes the local-command placeholder
+    // (never steer), skill invocations and ordinary submissions follow the
+    // busy queue/steer policy, Host commands ride the command path. A Host
+    // -origin name that does not claim this line is an ORDINARY submission
+    // (hostNameReserved), so an argued `/export foo` keeps the ordinary
+    // prompt policy everywhere.
+    const tuiLocalLine = classification.kind === 'client-command'
     // The submission's effective delivery mode — resolved ONCE, here at
     // the boundary (web ComposerSubmissionPolicy parity, DSH
     // 0.1.6): an idle agent queues, plain Enter takes the
@@ -1391,7 +1574,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // their own busy semantics (Host commands, client commands) ignore it.
     const delivery: SubmitDelivery = request === 'explicit-queue'
       ? 'queue'
-      : resolveSubmitDelivery(parsed, deps.liveAgent()?.status === 'running', request, deps.tuiSettings?.get().busyEnter)
+      : resolveSubmitDelivery(parsed, deps.liveAgent()?.status === 'running', request, deps.tuiSettings?.get().busyEnter, tuiLocalLine)
     // NAMESPACE ORDER (DSH client command contribution parity):
     //   1. host command claim (the closed host catalog always wins);
     //   2. client command contribution (client-owned behavior);
@@ -1410,9 +1593,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // (also excluded from the claim). A claimed command the real session
     // then lacks is consumed by the advertised-miss gate inside
     // dispatchViaSession — never a plain model message.
-    if (parsed !== undefined
-      && !LOCAL_COMMANDS.has(parsed.name)
-      && hostView?.claimed === true) {
+    if (classification.kind === 'host-command') {
       dispatchViaSession(text, persistHistory, delivery)
       return
     }
@@ -1431,14 +1612,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // TUI-owned agent-facing input and outranks a contribution of the same
     // name (the contribution may have been registered before the skill
     // catalog loaded).
+    // §1C-7: the contribution gate consumes the SAME classification — only
+    // the classifier's client-command(extension) family routes here (a
+    // genuine Host-origin name, claimed or merely reserved, and a live
+    // skill wrapper already outranked it inside the classifier; a TUI-owned
+    // registration is the TUI branch below, never this one).
     const contribution = parsed === undefined
-      || !isBareCommandLine(parsed)
-      || deps.command.isSkillWrapperName(parsed.name) === true
-      // A name the host catalog RESOLVES is host territory even when it does
-      // not claim THIS line: the line is an ordinary submission, so a
-      // same-named contribution — reachable only in the failed-source
-      // collision state — never runs for it.
-      || hostView !== undefined
+      || !(classification.kind === 'client-command' && classification.source === 'extension')
       ? undefined
       : deps.extensions.findContribution(parsed.name)
     if (parsed !== undefined && contribution !== undefined) {
@@ -1464,17 +1644,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         run: async () => {
           await deps.session.ensureSession()
           if (deps.isCleanedUp() || deps.liveAgent() === undefined) return
-          // AUTHORITY RE-CHECK after the session exists: the deferred start
-          // commits a session whose scoped catalog the standing view could
-          // not see, and the skill catalog may load with it. A live HOST
-          // claim FOR THIS LINE or a TUI skill wrapper outranks the
-          // contribution that was decided before the session existed. (A host
-          // name can only CLAIM this bare line: the argued lines a catalog
-          // resolves without claiming are ordinary submissions and never
-          // reach this branch.) The delivery resolved before the session
+          // AUTHORITY RE-CHECK after the session exists (§1C-8): the
+          // deferred start commits a session whose scoped catalog the
+          // standing view could not see, and the skill catalog may load with
+          // it. The SAME origin-aware classifier is re-run against the FINAL
+          // catalog: a genuine Host-origin NAME (mirrors excluded) or a TUI
+          // skill wrapper outranks the contribution decided before the
+          // session existed. The delivery resolved before the session
           // existed, so it is a queue-mode submission: `dispatchViaSession`
           // delivers the line itself.
-          if (deps.command.hostClaimOf(parsed) !== undefined || deps.command.isSkillWrapperName(parsed.name) === true) {
+          if (deps.command.hostCatalogResolves(parsed.name) || deps.command.isSkillWrapperName(parsed.name) === true) {
             dispatchViaSession(text, persistHistory, delivery)
             return
           }
@@ -1509,6 +1688,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // a session exists. Without a live agent it runs locally (and creates
     // none); with a live agent it dispatches through the session's command
     // service, but the persist closure still supplies undefined.
+    // §1C-7: the sessionless LOCAL route (see `isSessionless`: the TUI
+    // client-command family, LIVE-registry-derived, intersected with the
+    // sessionless name set). Its delivery stays `queue`, so falling through can
+    // never steer it.
     if (parsed !== undefined && isSessionless) {
       if (deps.liveAgent() === undefined) {
         runLocalCommand(parsed, text, persistHistory, delivery, undefined)
@@ -1535,7 +1718,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // Image placeholders ride the line untouched; the history row is
       // written by the dispatch AFTER the session exists (the
       // deferred-start gate), with the FINAL session id.
-      if (deps.command.isSkillInvocation(parsed, text)) {
+      // §1C-5 (whole-PR F2): the skill-delivery route consumes the semantic
+      // family, never the raw predicate alone. A genuine Host name that does
+      // NOT claim this argued line is an ORDINARY submission, so it takes the
+      // ordinary steer path even while a live skill wrapper shares its name.
+      const skillLine = deps.command.isSkillInvocation(parsed, text)
+        && (parsed === undefined || deps.command.hostCatalogResolves(parsed.name) === false)
+      if (skillLine) {
         dispatchViaSession(text, persistHistory, delivery)
         return
       }
@@ -1572,7 +1761,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           deps.backend.sessionWriter.updateQueue(sessionId, messageId, operation),
         deferQueueRecall: (recall) => deps.submissionRuntime.deferQueueRecall(recall),
         stageRecalledImage: (attachment) => {
-          const ref = attachment as import('../../image/admission.ts').ImageAttachmentRefLike
+          const ref = attachment as ImageAttachmentRefLike
           const draft = deps.drafts.images.add({
             mediaType: ref.mediaType,
             width: ref.width,
@@ -1584,7 +1773,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           return { id: draft.id, placeholder: draft.placeholder }
         },
         stageRecalledFile: (attachment) => {
-          const ref = attachment as import('../../attachment/file-admission.ts').FileAttachmentRefLike
+          const ref = attachment as FileAttachmentRefLike
           const draft = deps.drafts.files.add({
             name: ref.name,
             byteLength: ref.bytes,
@@ -1626,7 +1815,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   const abortLocalShell = (): void => deps.shell.interrupt()
   /** Prepare one outgoing message through the shared image/draft pipeline. */
   const prepareMessage = (text: string, requestId: string): Promise<unknown> =>
-    prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId })
+    deps.prepareTransport !== undefined
+      ? deps.prepareTransport(text, requestId)
+      : prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId })
 
   return {
     submit,

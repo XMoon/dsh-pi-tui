@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { setKittyProtocolActive, visibleWidth } from '@xmoon76/pi-tui'
 import type { TranscriptMessage } from '../src/transcript.ts'
-import { renderTranscriptMarkdown } from '../src/transcript.ts'
+import { renderTranscriptMarkdown } from '../src/client/artifact/transcript-markdown.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -16,7 +16,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
  * stopped after each test — the process's single-live-TUI slot (the
  * vendored keybindings are process-global) is held only by LIVE surfaces,
  * so a test that starts an app must not leak the slot into the next test
- * (see src/process-tui-slot.ts). */
+ * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

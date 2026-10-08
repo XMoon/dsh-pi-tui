@@ -28,8 +28,12 @@ import {
   searchSessionContentPage,
   type SessionSearchProviderLike,
 } from './session-search-direct.ts'
-import { cancellationError } from '../../detached.ts'
-import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../session-reader-port.ts'
+import { cancellationError } from '../process/tasks.ts'
+import { contextPressureOccupancy, type SessionContentSearchPage, type SessionProjectionSummary, type SessionReader, type SessionStatusProjection, type SessionSummary } from '../session-reader-port.ts'
+import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
+import { directTurnOutlineCompat } from './turn-outline-compat.ts'
+import { detachedSessionStatus } from '../session-status-projection.ts'
+import type { DurableModelSelectionReader } from './model-selection-direct.ts'
 
 /**
  * The narrow session-query surface the reader's listing and semantic search
@@ -70,11 +74,6 @@ export interface SessionQueryLike {
  * a package dependency; the services resolve from the dsh installation). */
 export interface HostContextLike {
   get(name: string): unknown
-}
-
-/** The structural `tokenMeter` surface the reader needs. */
-export interface TokenMeterLike {
-  measure(session: unknown): { totalTokens: number }
 }
 
 /** A live agent as the reader resolves it (structural projection). */
@@ -118,11 +117,18 @@ function activityTimestamp(
   return Math.max(header.createdAt, lastPromptAt ?? 0)
 }
 
+/**
+ * Re-exported for the adapter tests that inject this REQUIRED dependency; the
+ * capability itself is declared by its owner (`model-selection-direct.ts`).
+ */
+export type { DurableModelSelectionReader }
+
 /** The Direct backend's session reader: Host query/persistence services plus
  * injected live-registry capabilities behind the semantic `SessionReader` interface. */
 export class DirectSessionReader implements SessionReader {
   private readonly ctx: HostContextLike
   private readonly liveResolvers: DirectSessionLiveResolvers | undefined
+  private readonly modelSelections: DurableModelSelectionReader
   /**
    * The most recent listing's complete `SessionHeader` values, keyed by
    * session id. `projectionBatch` reads the projection-cache hint from these
@@ -133,9 +139,22 @@ export class DirectSessionReader implements SessionReader {
    */
   private headerSnapshot = new Map<string, SessionHeader>()
 
-  constructor(ctx: HostContextLike, liveResolvers?: DirectSessionLiveResolvers) {
+  constructor(
+    ctx: HostContextLike,
+    /** The Direct-only live-registry resolvers; `undefined` for a reader whose
+     *  composition mounts no live registry. */
+    liveResolvers: DirectSessionLiveResolvers | undefined,
+    /**
+     * The Direct-only durable model-selection read (see
+     * {@link DurableModelSelectionReader}). REQUIRED: a composition that omits
+     * it must fail to compile rather than silently lose the viewed child's
+     * model with no error anywhere.
+     */
+    modelSelections: DurableModelSelectionReader,
+  ) {
     this.ctx = ctx
     this.liveResolvers = liveResolvers
+    this.modelSelections = modelSelections
   }
 
   private liveAgent(sessionId: string): LiveAgentLike | undefined {
@@ -312,13 +331,109 @@ export class DirectSessionReader implements SessionReader {
   measureContext(sessionId: string): number | undefined {
     const agent = this.liveAgent(sessionId)
     if (agent === undefined) return undefined
-    const meter = this.ctx.get('tokenMeter') as TokenMeterLike | undefined
-    if (meter === undefined) return undefined
+    // The official `contextPressure` Session projection is the one context
+    // authority (M3-3A): the occupancy numerator `projectedTokens ??
+    // pressureTokens`, exactly what the Remote adapter reads off the wire.
+    // The historical `tokenMeter.measure()` total is NOT a second authority.
+    const projections = this.ctx.get('sessionProjections') as {
+      snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
+    } | undefined
+    if (projections === undefined) return undefined
     try {
-      return meter.measure(agent.session).totalTokens
+      const snapshot = projections.snapshot(agent.session, ['contextPressure'])
+      return contextPressureOccupancy(snapshot?.values?.contextPressure)
     } catch {
-      // Measurement is best-effort; the /status row falls back to unmeasured.
+      // The projection capability is best-effort here; the /status row falls
+      // back to unmeasured.
       return undefined
     }
+  }
+
+  turnOutline(sessionId: string): readonly TurnOutlineEntryDto[] | undefined {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return undefined
+    // The official whole-log `turnOutline` projection (M3-4 /rewind
+    // foundation): a detached read of the Host fold. The DIRECT-only
+    // compatibility fallback below (§18.4) exists so minimal compositions
+    // without the `session-turn-outline` Host row keep the SAME semantic
+    // through the exact attached Session's full snapshot — the Remote
+    // adapter has no fallback (projection-only, fail-closed).
+    const projections = this.sessionProjections()
+    if (projections === undefined) {
+      // CAPABILITY unavailable (no projection service at all): the Direct
+      // compatibility fold. NEVER taken for an authoritative empty `[]`.
+      return directTurnOutlineCompat(agent.session.snapshotEvents())
+    }
+    try {
+      const outline = detachedTurnOutline(projections.snapshot(agent.session, ['turnOutline'])?.values?.turnOutline)
+      if (outline !== undefined) return outline
+      // VALUE unavailable: the projection service exists but this key has
+      // no unit mounted (undefined value, never `[]`) — the compatibility
+      // fold over the EXACT same attachment.
+      return directTurnOutlineCompat(agent.session.snapshotEvents())
+    } catch {
+      // A THROWING projection read is a projection FAILURE, not an
+      // unavailable capability: surface it as unknown (`undefined`), never
+      // masked by the compatibility fold.
+      return undefined
+    }
+  }
+
+  sessionStatus(sessionId: string): SessionStatusProjection | undefined {
+    // The projection SUBJECT is the attached/retained Session identity, NOT
+    // the live Agent: a retained Session whose Agent is inactive (or was
+    // never mounted in this process) still owns its official projection
+    // facts. Requiring a live Agent here would read a valid retained Session
+    // as status-unavailable — and would force a cold-resume merely to answer
+    // a status question (M3-5 PR1 §9.1).
+    const session = this.liveSession(sessionId)
+    if (session === undefined) return undefined
+    // ONE consistent cut over the official projection units of THIS exact
+    // session (M3-4/M3-5 foundation). No StatsFolder, no raw-log fold, no
+    // other session's values ever ride along.
+    const projections = this.sessionProjections()
+    if (projections === undefined) return undefined
+    try {
+      const values = projections.snapshot(session, [
+        'modelSelection',
+        'contextPressure',
+        'contextBreakdown',
+        'tokenUsage',
+        'todos',
+        'agentPreset',
+        'title',
+        'goal',
+        // PR4 §6.1: the committed permission value on the SAME shared
+        // semantic (Direct reads the identical projection the Remote
+        // binding carries).
+        'permissions',
+      ])?.values
+      if (values === undefined) return undefined
+      // The official `modelSelection` unit is registered by the API
+      // SessionController row, which this profile does not compose, so the
+      // registry omits the key entirely. ABSENCE of the key — never a
+      // present-but-empty value, since the registered unit's legal
+      // `{ next: null, lastUsed: null }` must stay authoritative — is the one
+      // signal to read THIS Session's own durable selection facts as the
+      // compatible source. The shared DTO mapping is untouched: the compat value
+      // carries the official wire shape and loses to the official key whenever
+      // that key exists. Its approved scope is the latest USED route only (see
+      // `DurableModelSelectionReader`); the pending-intent slot is explicitly not
+      // part of this compat path.
+      const forDisplay = Object.prototype.hasOwnProperty.call(values, 'modelSelection')
+        ? values
+        : { ...values, modelSelection: this.modelSelections.durableProjectionForSession(session) }
+      return detachedSessionStatus(sessionId, forDisplay, session.header.cwd)
+    } catch {
+      // A projection authority failure is `undefined` (unknown), never a
+      // crash and never partially invented facts.
+      return undefined
+    }
+  }
+
+  private sessionProjections(): {
+    snapshot(session: unknown, keys?: readonly string[]): { readonly values?: Record<string, unknown> } | undefined
+  } | undefined {
+    return this.ctx.get('sessionProjections') as ReturnType<DirectSessionReader['sessionProjections']> | undefined
   }
 }

@@ -17,35 +17,38 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { CredentialKey, CredentialRef } from '@deepseek-ai/dsh-credentials'
+import {
+  credentialKeyId,
+  credentialKeyScope,
+  type CredentialKey,
+  type CredentialRef,
+} from '@deepseek-ai/dsh-credentials'
 import {
   AuthorizationDeclinedError,
+  type AuthorizationEntry,
   type AuthorizationInteraction,
+  type AuthorizationNotice,
   type AuthorizationPrompt,
 } from '@deepseek-ai/dsh-authorization'
-import {
-  authorizationTargets,
-  type AuthorizationServiceLike,
-  type AuthorizationTarget,
-} from '../../authorization.ts'
 import {
   credentialOptionsFor,
   providerOptionsFor,
   type ProviderCatalogEntry,
   type ProviderOption,
-} from '../../provider-catalog.ts'
-import { cancellationError } from '../../detached.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
+} from '../../domain/catalog/provider.ts'
+import { cancellationError } from '../process/tasks.ts'
+import { safeErrorMessage } from '../process/errors.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
   resolveUserCommandItemFallbackActivationIds,
   resolveUserLayerFooterMode,
-} from '../../footer/command-trust.ts'
-import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../footer/custom-items.ts'
+} from '../../domain/footer/command-trust.ts'
+import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
+  AuthorizationFlowTarget,
   AuthorizationPromptEvent,
   ConfigPort,
   CredentialConfig,
@@ -59,6 +62,7 @@ import type {
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
+  ConfigReadiness,
 } from '../config-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
@@ -117,6 +121,12 @@ export interface AgentPresetsServiceLike {
 /** The Direct backend's config: the `ctx` services behind the semantic
  * `ConfigPort` interfaces. */
 export class DirectConfigPort implements ConfigPort {
+  /** Direct reads hit the in-process Host authority, so its config facts are
+   *  always the current ones (§9.1). */
+  configReadiness(): ConfigReadiness {
+    return 'ready'
+  }
+
   readonly tuiSettings: TuiSettingsConfig | undefined
   readonly footerCommandTrust: FooterCommandTrust
   readonly footerCustomItems: FooterCustomItemsConfig
@@ -371,7 +381,7 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
   /** The merged /login option list as the port's CLIENT DTOs: the llm
    * configurable-provider directory over its PER-ENTRY sections when the
    * llm service is present, the settings-only fallback otherwise. The
-   * pure merge stays in provider-catalog.ts; this adapter only wires the
+   * pure merge stays in domain/catalog/provider.ts; this adapter only wires the
    * section reads and maps the schema facts onto the semantic
    * `canProvisionProfile` flag (never a namespace or path across the
    * port). */
@@ -538,6 +548,10 @@ export class DirectCredentialConfig implements CredentialConfig {
     return { configured: info.configured, ...typeof info.source === 'string' ? { source: info.source } : {} }
   }
 
+  recordsSupported(): boolean {
+    return true
+  }
+
   async listRecords(): Promise<readonly { key: string; kind?: string }[]> {
     const credentials = this.credentials()
     if (credentials === undefined) return []
@@ -564,8 +578,50 @@ export class DirectCredentialConfig implements CredentialConfig {
   }
 }
 
-/** The Direct authorization config (`ctx.authorization` behind the
- * authorization.ts seam). The upstream interaction model (notify/prompt
+/** The record scope every llm-pi-ai provider flow writes under (matches
+ * `@deepseek-ai/dsh-llm-pi-ai`'s RECORD_SCOPE — the TUI addresses flows by
+ * route through it). Direct Host knowledge, kept beside the adapter that
+ * interprets the Host authorization entries. */
+export const LLM_PI_AI_SCOPE = 'llm-pi-ai'
+
+/** The structural authorization service surface this Direct adapter reads. */
+export interface AuthorizationServiceLike {
+  list(): readonly AuthorizationEntry[]
+  describe(key: CredentialKey): AuthorizationEntry | undefined
+  begin(request: {
+    key: CredentialKey
+    method?: string
+    interaction: {
+      notify(notice: AuthorizationNotice): void
+      prompt(prompt: {
+        kind: 'text' | 'secret' | 'select'
+        message: string
+        placeholder?: string
+        options?: readonly { id: string; label: string; description?: string }[]
+        signal?: AbortSignal
+      }): Promise<string>
+    }
+    signal?: AbortSignal
+  }): Promise<{ status: 'authorized' | 'cancelled' }>
+  cancel(key: CredentialKey): void
+}
+
+/** Map the Host authorization entries to detached /login flow targets,
+ * deriving the route from the key's scope (llm-pi-ai flows address the provider
+ * route). This is the ONLY place that knows the Host entry shape. */
+export function authorizationTargets(entries: readonly AuthorizationEntry[]): AuthorizationFlowTarget[] {
+  return entries.map(entry => ({
+    kind: 'authorization',
+    route: credentialKeyScope(entry.key) === LLM_PI_AI_SCOPE ? credentialKeyId(entry.key) : undefined,
+    key: entry.key,
+    label: entry.label,
+    methods: entry.methods,
+    inFlight: entry.inFlight,
+  }))
+}
+
+/** The Direct authorization config (`ctx.authorization` behind the config
+ * port's AuthorizationConfig). The upstream interaction model (notify/prompt
  * callbacks) is bridged into the port's EVENT model: the adapter owns the
  * bridge interaction, consumers see only detached events and answer with
  * `respond`/`cancel` — no callback ever crosses the contract. */
@@ -603,7 +659,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     return this.authorization() !== undefined
   }
 
-  listTargets(): readonly AuthorizationTarget[] {
+  listTargets(): readonly AuthorizationFlowTarget[] {
     const authorization = this.authorization()
     // Detached copies — the method OBJECTS are cloned too (a shallow
     // array copy would still alias the Host's method rows).
@@ -873,6 +929,11 @@ export class DirectPermissionConfig implements PermissionConfig {
     await mutateSettings(settings, 'permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
+  }
+
+  approvalOverrideAvailable(): boolean {
+    // Direct reads and writes the official session approval policy in-process.
+    return true
   }
 
   approvalOverrideOf(sessionId: string): 'ask' | 'never' | undefined {

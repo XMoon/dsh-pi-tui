@@ -19,7 +19,7 @@ import { afterEach, test } from 'node:test'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { ImageLoader } from '../src/image/loader.ts'
+import { ImageLoader } from '../src/client/media/image/loader.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()

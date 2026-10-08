@@ -8,7 +8,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DIFF_CONTEXT_LINES, MAX_DIFF_EDIT_LENGTH, renderDiffView, summarizeDiffs, type AnchoredFileDiff } from '../src/diff.ts'
+import { DIFF_CONTEXT_LINES, MAX_DIFF_EDIT_LENGTH, summarizeDiffs, type AnchoredFileDiff } from '../src/tui/transcript/diff-projection.ts'
+import { renderDiffView } from '../src/tui/components/transcript/diff.ts'
 
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 

@@ -13,6 +13,13 @@ before editing. Read subsystem docs only when the task touches that subsystem.
 - **Do not hide contradictions.** Prefer fast failure over silent defaults, broad catches, speculative fallbacks, or validation for states guaranteed by internal contracts. Validate at real system boundaries.
 - **Never push or force-push without explicit user approval.** Local commits are allowed when appropriate; remote changes are not.
 
+## Code review
+
+Before reviewing code changes, read `docs/code-review.md` and pass it plus the
+applicable requirements/contracts to the reviewer. It supplements the generic
+review loop; subsystem contracts remain authoritative. PR acceptance is not
+stage closure or permission to merge.
+
 ## Naming and writing
 
 - Repository/profile/package names are `dsh-pi-tui`, `pi-tui`, `@xmoon76/pi-tui`
@@ -27,6 +34,42 @@ before editing. Read subsystem docs only when the task touches that subsystem.
 - Before adding a command, check this repository and official dsh for confusing or near-synonym names. This applies to new independent commands; preserve explicit existing aliases such as `/statusline` for `/footer`.
 
 ## Repository boundaries
+
+### Source module placement
+
+Before adding a production module, identify the layer that owns its state/lifetime/IO.
+
+- `src/app/**` — application lifecycle, orchestration, currentness and owner composition.
+- `src/runtime/**` — semantic ports/contracts plus Direct/Remote backend adapters.
+- `src/domain/**` — transport/UI-neutral semantic models, policies, folds and derived state.
+- `src/client/**` — Client-local non-TUI platform capabilities such as local media,
+  clipboard, artifact IO and Client-local path completion.
+- `src/tui/**` — terminal rendering, pickers, panels, commands and interaction.
+- `src/extension/**` — public extension compatibility boundary.
+
+A feature may span several layers when the responsibilities differ: file completion
+owns neutral query/ranking/discovery policy in `domain/file-completion/**`, the
+Client-local filesystem capability in `client/file-completion/**`, the terminal
+trigger/presentation in `tui/file-completion/**` and the Direct Host WORKSPACE
+compatibility IO in `runtime/direct/file-completion/**`. Do not recreate the retired
+mixed `src/file-completion/**` directory.
+
+Do not add an ordinary new root feature/helper (`src/*.ts`, `*.tsx`, `*.mts`,
+`*.cts`). Root modules are limited to documented entries/facades/compatibility
+islands guarded by the architecture gate; the gate scans all four extensions.
+
+Choose placement by the owning layer, not by the feature noun. A domain may appear in
+multiple layers when the responsibilities differ (for example `app/command/**` owns
+application command execution while `tui/commands/**` owns terminal slash-command
+presentation).
+
+Do not create a parallel root feature tree when a canonical owner layer exists, do not
+move code only for visual symmetry, and do not hide cross-layer dependencies behind a
+generic Context/Services bag.
+
+When placement is ambiguous, stop before creating the file and identify the state owner,
+lifecycle owner, IO authority, primary callers and forbidden dependencies. Read
+`docs/architecture.md` for the complete taxonomy and dependency direction.
 
 ### Vendored pi-tui
 
@@ -62,8 +105,12 @@ The current production backend is Direct. The long-term migration is tracked in
   relocations only, with migration and coupling docs updated in the same PR.
 - Every Host-touching feature declares locality (Client-local, Host-owned, or
   split), its narrow semantic-port owner, and its wire story. Never assume
-  Client cwd/filesystem equals Host cwd/filesystem: remote shell, `@file`,
-  external-editor, and export must fail closed until a Host seam exists.
+  Client cwd/filesystem equals Host cwd/filesystem. Host workspace semantics —
+  `@file`, Host user-shell execution, and any future Host-owned filesystem
+  editing/open — require an authoritative Host seam and fail closed until one
+  exists. Client-local semantics — terminal/editor UI, the current draft
+  external editor, Client-local draft file/image intake, and Client-local
+  artifact output — stay Client-local by contract.
 - Keep Client-local and Host-owned state explicit; callbacks/renderers/editor
   objects never cross the process boundary. Do not replace Context with a
   universal god object; keep ports narrow and domain-owned.
@@ -171,6 +218,19 @@ published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
 staged), plus whatever stage-specific validation the authority plan for the
 current stage requires (e.g. the Pre-M3 plan's §35.5/§35.6 matrix).
 
+**Never re-run a lane that is already green on the same state.** Before a
+stage-final pass, take stock of what has already run against the CURRENT tree
+and run only the remainder — re-running a green lane after an edit that does
+not touch its inputs buys no evidence and costs the whole suite. A delta
+invalidates a lane only when it touches that lane's inputs: `packages/pi-tui/**`
+for the fork lanes, `src/**` + `test/**` + `scripts/**` for the bundle suites,
+`docs/**` and the doc-gate inputs for `test:docs`/the documentation gates.
+A docs-only or comment-only delta does not invalidate a suite already green on
+the same code. State which lanes were already green (and against which state)
+and which were run for the delta, so the evidence stays auditable. CI runs the
+full pipeline on the PR; the local stage-final pass exists to catch failures
+before pushing, not to reproduce CI.
+
 Validation mechanics for this toolchain:
 
 * `packages/pi-tui/dist` is a build INPUT to the root bundle and to the tests:
@@ -193,11 +253,15 @@ Validation mechanics for this toolchain:
   `node scripts/tarball-smoke.mjs` before pushing — the ordinary product suite
   does NOT cover this (it is a `postpack`/CI check), and a stale `dist` makes it
   pass locally.
-* A publicly-exported helper therefore lives in the public entry (`src/index.ts`)
-  or in an allowlisted TOP-LEVEL module that matches its natural ownership
-  (`src/compaction-presentation.ts`, `src/pending-presentation.ts`, ...), never
-  under `src/app/**` or `src/runtime/**`; the internal owner imports it (§27 of
-  the Pre-M3 convergence plan, and §5's `app/* -> presentation modules`).
+* A publicly-exported helper therefore follows the canonical owner-layer placement
+  (`## Repository boundaries` → `### Source module placement`) and is exposed through
+  the public entry (`src/index.ts`) or an existing documented facade. Do not create a
+  new root `src/*.ts` module merely to satisfy declaration bundling. The root
+  ledger `scripts/source-root-baseline.json` is CLOSED at the seven stable
+  entries/facades with no legacy root left (the architecture gate also forbids
+  every retired root path); those entries are not a template for new modules. If the declaration/tarball boundary
+  cannot expose the canonical nested owner, STOP and report the packaging constraint
+  instead of growing the root baseline.
 
 When entering a development worktree:
 

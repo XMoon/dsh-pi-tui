@@ -10,7 +10,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { QuestionFlow, type QuestionFlowQuestion } from '../src/question.ts'
+import { setKittyProtocolActive } from '@xmoon76/pi-tui'
+import { QuestionFlow, type QuestionFlowQuestion } from '../src/tui/interaction/question.ts'
 
 const BUDGETS = [8, 12, 22, 24]
 const WIDTHS = [50, 100]
@@ -248,7 +249,7 @@ test('Enter on empty custom text never wipes an existing selection', () => {
   ], (answers) => { done2 = answers }, () => {})
   g.setMaxRows(24)
   render(g, 100)
-  g.handleInput('\r') // toggle X (multi-select stays on the question)
+  g.handleInput(' ') // toggle X (Space is the multi-select checkbox verb; stays on the question)
   render(g, 100)
   // Cursor onto "Type something." (last row), enter text mode, Enter empty.
   g.handleInput('\x1b[B')
@@ -1066,12 +1067,12 @@ test('edit mode hint is mode-specific: esc back everywhere in the edit, esc canc
   enterOtherEdit(f, 2)
   const choicesEdit = render(f, 100).join('\n')
   assert.ok(choicesEdit.includes('←→ edit'), `edit hint must advertise ←→ edit:\n${choicesEdit}`)
-  assert.ok(choicesEdit.includes('↵ confirm'), `edit hint must advertise ↵ confirm:\n${choicesEdit}`)
+  assert.ok(choicesEdit.includes('↵ review'), `edit hint must advertise ↵ review on the last question:\n${choicesEdit}`)
   assert.ok(choicesEdit.includes('esc back'), `choices edit hint must say esc back:\n${choicesEdit}`)
   assert.ok(!choicesEdit.includes('esc cancel'), `choices edit hint must not say esc cancel:\n${choicesEdit}`)
   assert.ok(!choicesEdit.includes('↑↓ select'), `edit hint must not advertise ↑↓ select:\n${choicesEdit}`)
   assert.ok(!choicesEdit.includes('1-2 choose'), `edit hint must not advertise digit choose:\n${choicesEdit}`)
-  assert.ok(!choicesEdit.includes('↵ toggle'), `edit hint must not advertise ↵ toggle (Enter confirms custom text):\n${choicesEdit}`)
+  assert.ok(!choicesEdit.includes('↵ confirm'), `edit hint must not advertise the old ↵ confirm:\n${choicesEdit}`)
   assert.ok(!choicesEdit.includes('→ next'), `edit hint must not advertise → next:\n${choicesEdit}`)
   // Optionless EDIT layer: same esc back (leave the edit for the
   // navigation layer) — NOT esc cancel (that lives in navigation).
@@ -1088,10 +1089,11 @@ test('edit mode hint is mode-specific: esc back everywhere in the edit, esc canc
   assert.ok(nav.includes('← back · → skip'), `navigation hint must advertise the arrow verbs:\n${nav}`)
   assert.ok(nav.includes('esc cancel'), `navigation hint must advertise esc cancel:\n${nav}`)
   assert.ok(!nav.includes('←→ edit'), `navigation hint must not advertise ←→ edit:\n${nav}`)
-  // List mode keeps its own hint (regression guard).
+  // List mode keeps its own hint (regression guard). Single-question
+  // flow: Enter on the last question advertises ↵ review.
   const list = render(makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], 24), 100).join('\n')
   assert.ok(list.includes('↑↓ select'), `list mode must keep ↑↓ select:\n${list}`)
-  assert.ok(list.includes('↵ confirm'), `list mode must keep ↵ confirm:\n${list}`)
+  assert.ok(list.includes('↵ review'), `list mode must advertise ↵ review on the last question:\n${list}`)
   assert.ok(list.includes('esc cancel'), `list mode must keep esc cancel:\n${list}`)
 })
 
@@ -1230,43 +1232,75 @@ test('optionless navigation: physical ↑/↓ stay no-ops, j/k are text', () => 
   assert.ok(view.includes('←→ edit'), `j must re-enter the edit layer:\n${view}`)
 })
 
-test('skip invalidates the free-text Input owner (no stale text beside (skipped))', () => {
-  // Q1 (optionless) has uncommitted 'abc' in the Input; → skip advances.
-  // Returning to Q1 must re-seed from the CLEARED draft — the (skipped)
-  // row must never show stale 'abc' next to it (the Input instance and
-  // ownership survive the skip otherwise, because Q2 never touches it).
+test('an explicit skip clears the live draft (no stale text beside (skipped))', () => {
+  // The NEW draft contract: every mutation syncs Draft.custom, so a
+  // typed 'abc' makes the question ANSWERED — → continues (never skips).
+  // A real skip must come from an EMPTY draft (→ on a blank question).
+  // The skip clears draft.custom: returning must show (skipped) with no
+  // stale text, and re-entering the edit reseeds EMPTY.
   const f = new QuestionFlow([
     { id: 'q1', question: 'First?' },
     { id: 'q2', question: 'Second?', options: [{ label: 'A' }] },
   ], () => {}, () => {})
   f.setMaxRows(24)
   render(f, 100)
-  f.handleInput('abc') // Q1 edit (uncommitted)
+  // Blank Q1 → (explicit) skip via →, then back: (skipped), no text.
   f.handleInput('\x1b') // navigation state
-  f.handleInput('\x1b[C') // → skip Q1 → Q2 (choices list)
+  f.handleInput('\x1b[C') // → skip Q1 (blank) → Q2 (choices list)
   let view = render(f, 100).join('\n')
   assert.ok(view.includes('Second?'), `precondition — Q2 shown:\n${view}`)
   f.handleInput('\x1b[D') // ← back to Q1
   view = render(f, 100).join('\n')
   assert.ok(view.includes('First?'), `← must return to Q1:\n${view}`)
   assert.ok(view.includes('(skipped)'), `Q1 must stay skipped:\n${view}`)
-  assert.ok(!view.includes('abc'), `the stale Input text must not show beside (skipped):\n${view}`)
-  // The skip ALSO cleared the draft: committing empty then re-entering
-  // still shows nothing stale.
+  // Re-entering the edit must not resurrect skipped text.
   f.handleInput('\x1b') // Q1 navigation (re-entered from Q2)
   f.handleInput('\r') // ↵ re-enter the edit
   view = render(f, 100).join('\n')
-  assert.ok(!view.includes('abc'), `re-entering the edit must not resurrect the skipped text:\n${view}`)
+  assert.ok(view.includes('Type your answer'), `the skipped edit must reseed empty:\n${view}`)
 })
 
-test('uncommitted edit is dropped on a real tab change regardless of the next question type', () => {
-  // Contract: in-progress free-text survives ONLY an Esc → navigation →
-  // ↵ round trip on the SAME question. Once the user actually pages to
-  // another question (←/→/skip/commit-advance), the uncommitted edit is
-  // dropped and re-entry reseeds from the committed draft — the outcome
-  // must NOT depend on whether the intermediate question itself uses the
-  // free-text Input (round finding: a choices stopover used to leave the
-  // old owner alive, so the text survived only for that path).
+test('live draft: typed text survives → (no skip) and ← back (optionless)', () => {
+  // The plan §8.3 sibling path: typed nonblank text → Esc → → must
+  // CONTINUE (answered), not skip; ← back restores the live text.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'First?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('abc') // Q1 live draft (no Enter)
+  f.handleInput('\x1b') // Esc → navigation state (draft kept)
+  f.handleInput('\x1b[C') // → answered continuation (NOT skip) → Q2
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `→ must continue to Q2:\n${view}`)
+  f.handleInput('\x1b[D') // ← back to Q1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('abc'), `the live draft must survive the round trip:\n${view}`)
+  assert.ok(!view.includes('(skipped)'), `a live-draft question must not be (skipped):\n${view}`)
+  // Re-enter the edit: the text is still editable (an optionless page
+  // re-enters the edit with ↵ from its NAVIGATION state — after ← the
+  // page is already in the edit layer).
+  f.handleInput('X')
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('abcX'), `the live text must still be editable:\n${view}`)
+  f.handleInput('\r') // commit Q1 → Q2
+  render(f, 100)
+  f.handleInput('\x1b[C') // → skip Q2 (blank) → review
+  render(f, 100)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [
+    { id: 'q1', selected: [], custom: 'abcX' },
+    { id: 'q2', selected: [] },
+  ])
+})
+
+test('live draft survives a real tab change regardless of the next question type', () => {
+  // NEW contract (plan §8.1): Input ownership / undo history is dropped
+  // on a question change, but the ANSWER TEXT survives in Draft.custom —
+  // it was synced on every mutation. Both stopover kinds must behave
+  // identically.
   const scenarios: Array<{ label: string; second: QuestionFlowQuestion }> = [
     { label: 'choices stopover', second: { id: 'q2', question: 'Second?', options: [{ label: 'B' }] } },
     { label: 'optionless stopover', second: { id: 'q2', question: 'Second?' } },
@@ -1278,7 +1312,7 @@ test('uncommitted edit is dropped on a real tab change regardless of the next qu
     ], () => {}, () => {})
     f.setMaxRows(24)
     render(f, 100)
-    f.handleInput('abc') // Q1 uncommitted
+    f.handleInput('abc') // Q1 live draft
     f.handleInput('\r') // commit → advance to Q2
     assert.ok(render(f, 100).join('\n').includes('Second?'), `${scenario.label} — precondition Q2 shown`)
     // ← back to Q1 (an optionless Q2 sits in its EDIT layer, where ← is
@@ -1286,7 +1320,7 @@ test('uncommitted edit is dropped on a real tab change regardless of the next qu
     if (scenario.second.options === undefined) f.handleInput('\x1b')
     f.handleInput('\x1b[D')
     render(f, 100)
-    f.handleInput('X') // edit the committed draft: abcX (uncommitted)
+    f.handleInput('X') // edit the live draft: abcX (no Enter)
     assert.ok(render(f, 100).join('\n').includes('abcX'), `${scenario.label} — precondition abcX typed:\n${render(f, 100).join('\n')}`)
     f.handleInput('\x1b') // Esc → navigation (Q1)
     f.handleInput('\x1b[C') // → moves to Q2 (REAL tab change)
@@ -1295,8 +1329,8 @@ test('uncommitted edit is dropped on a real tab change regardless of the next qu
     if (scenario.second.options === undefined) f.handleInput('\x1b')
     f.handleInput('\x1b[D')
     const back = render(f, 100).join('\n')
-    assert.ok(back.includes('abc'), `${scenario.label} — the committed draft survives the trip:\n${back}`)
-    assert.ok(!back.includes('abcX'), `${scenario.label} — the uncommitted X must be dropped on a REAL tab change:\n${back}`)
+    assert.ok(back.includes('abcX'), `${scenario.label} — the LIVE draft survives the tab change:\n${back}`)
+    assert.ok(!back.includes('(skipped)'), `${scenario.label} — the tab change must not skip:\n${back}`)
   }
 })
 
@@ -1402,7 +1436,7 @@ test('optionless pinned row click re-enters edit from navigation state (mouse pa
   assert.ok(pinnedRow >= 0, 'pinned input row must be recorded')
   f.clickRow(pinnedRow, 1)
   rendered = f.render(100)
-  assert.ok(rendered.some(line => line.includes('↵ confirm')), 'clicking the pinned row must re-enter edit mode')
+  assert.ok(rendered.some(line => line.includes('↵ review')), 'clicking the pinned row must re-enter edit mode')
   assert.ok(rendered.some(line => line.includes('hello')), 'the draft must be preserved across the re-entry')
 })
 
@@ -1629,4 +1663,588 @@ test('question: keyboard exit of the free-text edit cancels the pending mouse ge
   rendered = f.render(100).map(strip)
   assert.ok(rendered.some(line => line.includes('↵ edit')), 'the flow must stay in the navigation state')
   assert.ok(!rendered.some(line => line.includes('↵ confirm')), 'the release must not re-enter the edit')
+})
+
+// ── Question UX convergence: multi-select Space toggle / Enter continue ────
+// (plan: temp/2.0/dsh-pi-tui-question-ux-multiselect-free-text-plan-20260929.md)
+
+test('multi-select: Space toggles, Enter continues without toggling', () => {
+  // The new keyboard contract: Space = checkbox verb, Enter = the flow's
+  // continue verb (answered → advance, blank → skip). Enter on a
+  // highlighted ordinary option must NOT change its checkbox.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'C' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  let view = render(f, 100).join('\n')
+  f.handleInput(' ') // Space on A → checked, still Q1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('✓ Q1'), `Q1 must be answered after Space:\n${view}`)
+  assert.ok(view.includes('[✓] A'), `A must be checked:\n${view}`)
+  assert.ok(view.includes('Second?') === false, `Space must stay on Q1:\n${view}`)
+  f.handleInput('\x1b[B') // ↓ to B
+  f.handleInput(' ') // Space on B → A+B checked, still Q1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('[✓] A') && view.includes('[✓] B'), `A+B must be checked:\n${view}`)
+  // Enter CONTINUES (A+B stay checked; B must not be untoggled by Enter).
+  f.handleInput('\r')
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `Enter must continue to the next question:\n${view}`)
+  // Submit and verify the wire payload.
+  f.handleInput('1') // answer q2 → review
+  render(f, 100)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [
+    { id: 'q1', selected: ['A', 'B'] },
+    { id: 'q2', selected: ['C'] },
+  ])
+})
+
+test('multi-select: Enter on an ordinary option does NOT toggle it', () => {
+  // The headline Enter regression: cursor on B (unchecked), Enter must
+  // continue WITHOUT changing B's checkbox.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput(' ') // check A
+  render(f, 100)
+  f.handleInput('\x1b[B') // cursor to B (unchecked)
+  render(f, 100)
+  f.handleInput('\r') // Enter: continue — B stays unchecked
+  const review = render(f, 100).join('\n')
+  assert.ok(review.includes('A'), `Enter must reach the review page:\n${review}`)
+  assert.ok(!review.includes('B\n'), `B must not appear as an answer:\n${review}`)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
+})
+
+test('multi-select: digits toggle without advancing', () => {
+  // The digit route is the SELECTION action (toggle), not Enter's
+  // continue — the sibling path the plan calls out as easy to miss.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  let view = render(f, 100).join('\n')
+  f.handleInput('1') // toggle option 1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('[✓] A'), `digit 1 must toggle A:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `digit must NOT advance:\n${view}`)
+  f.handleInput('2') // toggle option 2
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('[✓] B'), `digit 2 must toggle B:\n${view}`)
+  f.handleInput('2') // toggle B off again
+  view = render(f, 100).join('\n')
+  assert.ok(!view.includes('[✓] B'), `digit 2 must untoggle B:\n${view}`)
+  assert.ok(view.includes('[✓] A'), `A must stay checked:\n${view}`)
+  f.handleInput('\r') // Enter continues → review
+  render(f, 100)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
+})
+
+test('multi-select: blank Enter reuses the continue/skip contract', () => {
+  // Enter on an UNANSWERED multi-select question = the same → contract:
+  // mark skipped and advance (never a stuck flow).
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'C' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('\r') // Enter with NO selection → skip + advance
+  const view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `blank Enter must advance:\n${view}`)
+  f.handleInput('1') // answer q2 → review
+  render(f, 100)
+  const review = render(f, 100).join('\n')
+  assert.ok(review.includes('(skipped)'), `the blank multi-select must be marked skipped:\n${review}`)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [
+    { id: 'q1', selected: [] },
+    { id: 'q2', selected: ['C'] },
+  ])
+})
+
+test('multi-select: OTHER_ROW Enter enters the edit, never continue', () => {
+  const f = makeFlow([{ id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }] }], 24)
+  render(f, 100)
+  f.handleInput('\x1b[B') // cursor onto OTHER_ROW
+  render(f, 100)
+  f.handleInput('\r') // Enter → enter edit
+  f.handleInput('hello world')
+  const view = render(f, 100).join('\n')
+  assert.ok(view.includes('hello world'), `Enter on OTHER_ROW must enter the edit (space incl.):\n${view}`)
+})
+
+test('text edit: Space types an ordinary space ("hello world")', () => {
+  // The regression the new question.toggleSelection action risks: the
+  // text edit must keep receiving raw spaces.
+  const f = makeFlow([{ id: 'q1', question: 'Say it' }], 24)
+  render(f, 100)
+  for (const ch of 'hello world') f.handleInput(ch)
+  const view = render(f, 100).join('\n')
+  assert.ok(view.includes('hello world'), `the typed space must land in the answer:\n${view}`)
+  // Choices-question edit variant.
+  const g = makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], 24)
+  enterOtherEdit(g, 1)
+  for (const ch of 'hello world') g.handleInput(ch)
+  assert.ok(render(g, 100).join('\n').includes('hello world'), 'the choices-edit variant must type spaces too')
+})
+
+test('choice custom: live draft survives Esc + navigation (no Enter)', () => {
+  // Plan §14.6: enter OTHER, type alice, Esc, → next, ← back — alice
+  // must remain (Draft-backed presentation) and re-edit shows alice.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  enterOtherEdit(f, 1)
+  f.handleInput('alice')
+  f.handleInput('\x1b') // Esc → option list (draft kept)
+  f.handleInput('\x1b[C') // → next (answered continuation — alice lives)
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `→ must continue to Q2:\n${view}`)
+  f.handleInput('\x1b[D') // ← back to Q1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('alice'), `the list mode must show the saved custom value:\n${view}`)
+  // Re-enter edit: walk the cursor onto the OTHER row first (the revisit
+  // resets the cursor to the recommended row).
+  render(f, 100)
+  f.handleInput('\x1b[B')
+  render(f, 100)
+  f.handleInput('\r')
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('alice'), `re-entering the edit must show alice:\n${view}`)
+})
+
+test('optionless live draft survives navigation without Enter', () => {
+  // Plan §14.7: Q1 optionless, type alice, Esc, → next, ← back — the
+  // re-entered edit still holds alice.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('alice')
+  f.handleInput('\x1b') // Esc → navigation
+  f.handleInput('\x1b[C') // → next (answered continuation)
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `→ must continue:\n${view}`)
+  f.handleInput('\x1b[D') // ← back
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('alice'), `the live draft must survive:\n${view}`)
+  // After ← the optionless page reopens in its EDIT layer (seeded from
+  // the live draft) — no extra ↵ needed; typing continues the text.
+  f.handleInput('X')
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('aliceX'), `the edit must reseed the live text:\n${view}`)
+})
+
+test('editing mutations all sync: Backspace + Esc + navigation', () => {
+  // Plan §14.8: a non-printable mutation must reach the draft too —
+  // type abc, Backspace (ab), Esc, navigate away/back → 'ab'.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('abc')
+  f.handleInput('\x7f') // Backspace → ab
+  f.handleInput('\x1b') // Esc → navigation
+  f.handleInput('\x1b[C') // → next
+  render(f, 100)
+  f.handleInput('\x1b[D') // ← back
+  const view = render(f, 100).join('\n')
+  assert.ok(view.includes('ab'), `the backspaced draft must survive navigation:\n${view}`)
+  assert.ok(!view.includes('abc'), `the deleted character must stay deleted:\n${view}`)
+})
+
+test('optionless re-entry first character syncs the draft (navigation auto-re-enter)', () => {
+  // The optionless NAVIGATION state hands a typed key straight to the
+  // shared Input (search-box semantics). That mutation path must sync
+  // Draft.custom too: the FIRST typed character after Esc must make the
+  // question answered, so → continues instead of skipping, and ← back
+  // still shows the character.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('\x1b') // Esc → navigation state (blank draft)
+  f.handleInput('x') // auto re-enter + first character
+  f.handleInput('\x1b') // Esc → navigation state again (draft now holds 'x')
+  f.handleInput('\x1b[C') // → must CONTINUE (answered), not skip
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('Second?'), `→ must continue after the re-entry character:\n${view}`)
+  f.handleInput('\x1b[D') // ← back to Q1
+  view = render(f, 100).join('\n')
+  assert.ok(view.includes('x'), `the re-entry character must survive:\n${view}`)
+  assert.ok(!view.includes('(skipped)'), `the re-entry character must prevent the skip mark:\n${view}`)
+})
+
+test('custom value visible after revisit (list mode, not the placeholder)', () => {
+  // Plan §14.10 / §9.2: a saved custom shows as [✓] <value> in list
+  // mode, never as the bare "Type something." placeholder.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Name?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  enterOtherEdit(f, 1)
+  f.handleInput('custom answer')
+  f.handleInput('\r') // commit → Q2
+  render(f, 100)
+  f.handleInput('\x1b[D') // ← back to Q1
+  const view = render(f, 100).join('\n')
+  assert.ok(view.includes('custom answer'), `the saved custom value must be visible:\n${view}`)
+  assert.ok(view.includes('[✓] custom answer'), `the OTHER row must show the value checked:\n${view}`)
+  const placeholderRow = view.split('\n').find(line => line.includes('Type something.'))
+  assert.ok(placeholderRow === undefined, `the placeholder must not render when a value exists:\n${view}`)
+})
+
+test('masked custom shows bullets in list mode after revisit, never plaintext', () => {
+  // Plan §9.4/§14.11: masked custom, commit / navigate away / back —
+  // the list-mode row contains bullets and NEVER the plaintext.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Secret', masked: true, options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  enterOtherEdit(f, 1)
+  for (const ch of 'secret') f.handleInput(ch)
+  f.handleInput('\r') // commit → Q2
+  render(f, 100)
+  f.handleInput('\x1b[D') // ← back to Q1 (list mode)
+  const view = render(f, 100).join('\n')
+  assert.ok(view.includes('••••••'), `the masked row must show bullets:\n${view}`)
+  assert.ok(!view.includes('secret'), `the plaintext must NEVER render:\n${view}`)
+})
+
+test('single-select existing selection + empty custom Enter survives (regression)', () => {
+  // Plan §14.9 (single variant): selected A, enter OTHER, do not type,
+  // Enter — the answer stays ['A']. (The comprehensive walkthrough lives
+  // in 'Enter on empty custom text never wipes an existing selection'
+  // above; this is the §14.9-anchored minimal pin.)
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('1') // select A → review
+  render(f, 100)
+  f.handleInput('\x1b[D') // ← back
+  enterOtherEdit(f, 2) // enter the edit (seeded with the empty draft)
+  f.handleInput('\r') // Enter with EMPTY text
+  render(f, 100)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }])
+})
+
+test('multi-select existing selection + empty custom Enter survives (regression)', () => {
+  // Plan §14.9 (multi variant): the comprehensive walkthrough lives in
+  // 'Enter on empty custom text never wipes an existing selection'; this
+  // is the §14.9-anchored minimal pin with the NEW Space toggle entry.
+  let done: unknown
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'X' }, { label: 'Y' }] },
+  ], (answers) => { done = answers }, () => {})
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput(' ') // toggle X (Space)
+  render(f, 100)
+  enterOtherEdit(f, 2) // enter the edit (empty draft)
+  f.handleInput('\r') // Enter with EMPTY text → keep selection, advance
+  render(f, 100)
+  f.handleInput('\r') // submit
+  assert.deepEqual(done, [{ id: 'q1', selected: ['X'] }])
+})
+
+test('multi-select mouse click toggles without advancing (mouse parity)', () => {
+  // Plan §14.13: clickRow → confirm() used to be the universal mouse
+  // entry; the multi-select click must be the SELECTION action.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  let rendered = f.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('[ ] A'))
+  assert.ok(rowA >= 0, 'option A row missing')
+  f.clickRow(rowA)
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('[✓] A'), `the first click must toggle A on:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `a multi-select click must NOT advance:\n${view}`)
+  f.clickRow(rowA)
+  view = render(f, 100).join('\n')
+  assert.ok(!view.includes('[✓] A'), `the second click must untoggle A:\n${view}`)
+  // OTHER click still enters the edit.
+  rendered = render(f, 100).map(strip)
+  const otherRow = rendered.findIndex(line => line.includes('Type something.'))
+  assert.ok(otherRow >= 0, 'free-text row missing')
+  f.clickRow(otherRow)
+  f.handleInput('hi')
+  assert.ok(render(f, 100).join('\n').includes('hi'), 'an OTHER click must enter the edit')
+})
+
+test('single-select click still selects and advances (mouse parity)', () => {
+  // The single-select mouse contract is unchanged: click = select +
+  // advance.
+  const f = new QuestionFlow([
+    { id: 'q1', question: 'Pick one', options: [{ label: 'A' }, { label: 'B' }] },
+  ], () => {}, () => {})
+  f.setMaxRows(24)
+  const rendered = f.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, 'option A row missing')
+  f.clickRow(rowA)
+  const view = render(f, 100).join('\n')
+  assert.ok(view.includes('Review your answer'), `a single-select click must select and advance:\n${view}`)
+})
+
+test('hint verbs: space toggle · ↵ continue/review in the multi list', () => {
+  // Plan §14.12: the multi list advertises the split verbs; a
+  // multi-question flow says ↵ continue, the last question ↵ review.
+  const f = makeFlow([
+    { id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], 24)
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('space toggle'), `multi list must advertise space toggle:\n${view}`)
+  assert.ok(view.includes('↵ continue'), `a non-final question must advertise ↵ continue:\n${view}`)
+  assert.ok(!view.includes('↵ toggle'), `the old ↵ toggle verb must be gone:\n${view}`)
+  // Narrow-width budget: the verbs drop progressively, esc cancel stays.
+  const narrow = render(f, 30).join('\n')
+  assert.ok(narrow.includes('esc cancel'), `esc cancel must survive the narrow budget:\n${narrow}`)
+  // Text edit on the LAST question says ↵ review.
+  const g = makeFlow([
+    { id: 'q1', question: 'First?', options: [{ label: 'B' }] },
+    { id: 'q2', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }] },
+  ], 24)
+  render(g, 100)
+  g.handleInput('1') // answer q1 → q2 (last)
+  render(g, 100)
+  g.handleInput('\x1b[B') // cursor to OTHER row
+  render(g, 100)
+  g.handleInput('\r') // enter edit
+  view = render(g, 100).join('\n')
+  assert.ok(view.includes('↵ review'), `the last question's edit must advertise ↵ review:\n${view}`)
+  // The single-select list keeps ↵ continue/review without space toggle.
+  const h = makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], 24)
+  view = render(h, 100).join('\n')
+  assert.ok(!view.includes('space toggle'), `single-select must not advertise space toggle:\n${view}`)
+  assert.ok(view.includes('↵ review'), `single-select last question must advertise ↵ review:\n${view}`)
+})
+
+test('ownsFixedKey: space is owned only by the multi-select list mode', () => {
+  // Plan §13: the new component action's mode-sensitive ownership. The
+  // end-to-end typing behavior ("hello world" survives in the edit) is
+  // pinned by 'text edit: Space types an ordinary space'; this test pins
+  // the OWNERSHIP boundary itself.
+  const multi = makeFlow([{ id: 'q1', question: 'Pick many', multiSelect: true, options: [{ label: 'A' }] }], 24)
+  render(multi, 100)
+  assert.equal(multi.ownsFixedKey(' '), true, 'multi list mode must own Space')
+  multi.handleInput('\x1b[B') // cursor to the OTHER row (still list mode)
+  render(multi, 100)
+  assert.equal(multi.ownsFixedKey(' '), true, 'multi list mode owns Space on the OTHER row too')
+  multi.handleInput('\r') // enter the edit
+  render(multi, 100)
+  // The typed space must NOT toggle the option (the edit path is Input
+  // typing, not the list-mode toggle).
+  multi.handleInput(' ')
+  const typed = render(multi, 100).join('\n')
+  assert.ok(!typed.split('\n').some(line => line.includes('[✓] A')), `the typed space must NOT toggle the option:\n${typed}`)
+
+  const single = makeFlow([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }], 24)
+  render(single, 100)
+  assert.equal(single.ownsFixedKey(' '), false, 'a single-select list must not own Space')
+})
+
+test('choosing an ordinary single-select option replaces the custom answer', () => {
+  // Plan §5.2: a single-select ordinary option clears custom. Without
+  // it, submit prefers the stale custom text and silently discards the
+  // option the user just chose (Enter, digit, and mouse paths).
+  const flows: Array<{ label: string; choose: (f: QuestionFlow) => void }> = [
+    {
+      label: 'Enter on the option row',
+      choose: (f) => {
+        f.handleInput('\x1b[A')
+        f.handleInput('\x1b[A') // cursor up to option A
+        f.handleInput('\r')
+      },
+    },
+    { label: 'digit', choose: (f) => { f.handleInput('1') } },
+  ]
+  for (const { label, choose } of flows) {
+    let done: unknown
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'Pick one thing', options: [{ label: 'A' }, { label: 'B' }] },
+    ], (answers) => { done = answers }, () => {})
+    f.setMaxRows(24)
+    render(f, 100)
+    f.handleInput('\x1b[B'); f.handleInput('\x1b[B')
+    render(f, 100)
+    f.handleInput('\r') // enter the OTHER edit
+    f.handleInput('alice')
+    f.handleInput('\x1b') // Esc → list (draft.custom = 'alice')
+    render(f, 100)
+    choose(f)
+    render(f, 100)
+    f.handleInput('\r') // submit
+    assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }], `${label} must replace the custom answer`)
+  }
+  // Mouse parity: click option A after a typed custom.
+  let done: unknown
+  const g = new QuestionFlow([
+    { id: 'q1', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
+  ], (answers) => { done = answers }, () => {})
+  g.setMaxRows(24)
+  let rendered = g.render(100).map(strip)
+  const rowA = rendered.findIndex(line => line.includes('[1] A'))
+  assert.ok(rowA >= 0, 'option A row missing')
+  g.handleInput('\x1b[B'); g.handleInput('\x1b[B')
+  render(g, 100)
+  g.handleInput('\r')
+  g.handleInput('typed')
+  g.handleInput('\x1b') // Esc → list
+  render(g, 100)
+  g.clickRow(rowA)
+  render(g, 100)
+  g.handleInput('\r') // submit
+  assert.deepEqual(done, [{ id: 'q1', selected: ['A'] }], 'the mouse click must replace the custom answer')
+})
+
+test('a synchronous Input submit never pollutes the next question (Kitty shift+enter seam)', () => {
+  // Input.handleInput is NOT pure: data === "\\n" (Ghostty's Kitty-mode
+  // shift+enter text mapping) fires onSubmit → commitOther → advance
+  // SYNCHRONOUSLY inside the delivery. The post-delivery sync must not
+  // then write the OLD question's live text into the NEW question's
+  // draft — the owner (tab + input identity) must be re-checked after
+  // the Input callback returns.
+  const setKitty = setKittyProtocolActive
+  setKitty(true)
+  try {
+    // In Kitty mode \\n is shift+enter (NOT question.confirm's enter), so
+    // QuestionFlow hands it to the Input — whose submit seam commits.
+    let done: unknown
+    const f = new QuestionFlow([
+      { id: 'q1', question: 'Name?', options: [{ label: 'A' }] },
+      { id: 'q2', question: 'Second?', options: [{ label: 'B' }, { label: 'C' }] },
+    ], (answers) => { done = answers }, () => {})
+    f.setMaxRows(24)
+    render(f, 100)
+    f.handleInput('\x1b[B')
+    render(f, 100)
+    f.handleInput('\r') // enter Q1's OTHER edit
+    f.handleInput('alice')
+    f.handleInput('\n') // synchronous submit seam → advance to Q2 (choices)
+    const q2View = render(f, 100).join('\n')
+    assert.ok(q2View.includes('Second?'), `the seam must advance to Q2:\n${q2View}`)
+    // Q2's OTHER row must NOT show Q1's text.
+    assert.ok(!q2View.includes('alice'), `Q1's live text must never pollute Q2:\n${q2View}`)
+    // And the submitted payload keeps each question's own answer.
+    f.handleInput('\x1b[C') // skip blank Q2 → review
+    render(f, 100)
+    f.handleInput('\r') // submit
+    assert.deepEqual(done, [
+      { id: 'q1', selected: [], custom: 'alice' },
+      { id: 'q2', selected: [] },
+    ])
+  } finally {
+    setKitty(false)
+  }
+})
+
+test('read-only Input operations never clear the skipped state', () => {
+  // A skipped blank question revisited: cursor movements and the Input's
+  // generic cancel must NOT resurrect the question as answered — only a
+  // real VALUE change may touch the answer semantics.
+  const make = (): QuestionFlow => new QuestionFlow([
+    { id: 'q1', question: 'Name?' },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }] },
+  ], () => {}, () => {})
+  // Cursor movement (Ctrl+A — value unchanged).
+  const f = make()
+  f.setMaxRows(24)
+  render(f, 100)
+  f.handleInput('\x1b') // navigation
+  f.handleInput('\x1b[C') // skip blank Q1
+  render(f, 100)
+  f.handleInput('\x1b[D') // back to Q1 (skipped, edit layer)
+  assert.ok(render(f, 100).join('\n').includes('(skipped)'), 'precondition — skipped note visible')
+  f.handleInput('\x01') // Ctrl+A — cursor to line start, no value change
+  let view = render(f, 100).join('\n')
+  assert.ok(view.includes('(skipped)'), `a cursor move must keep the skipped mark:\n${view}`)
+  assert.ok(view.includes('✓ Q1'), `the tab must stay answered:\n${view}`)
+  // The Input's generic cancel (Ctrl+C) exits the edit without typing —
+  // same invariant.
+  const g = make()
+  g.setMaxRows(24)
+  render(g, 100)
+  g.handleInput('\x1b')
+  g.handleInput('\x1b[C')
+  render(g, 100)
+  g.handleInput('\x1b[D')
+  render(g, 100)
+  g.handleInput('\x03') // Ctrl+C → exit the edit (no cancel from edit layer)
+  view = render(g, 100).join('\n')
+  assert.ok(view.includes('(skipped)'), `Ctrl+C without typing must keep the skipped mark:\n${view}`)
+})
+
+test('M3-3B draftSnapshot/initialDraft preserve progress across a park', () => {
+  // The park/reopen contract keeps the user's work: a controller snapshots the
+  // flow at teardown and seeds the SAME call's new flow from it.
+  const questions = [
+    { id: 'q1', question: 'First?', options: [{ label: 'a' }, { label: 'b' }] },
+    { id: 'q2', question: 'Second?' },
+  ]
+  const done: unknown[] = []
+  const flow = new QuestionFlow(questions, answers => { done.push(answers) }, () => {}, undefined, undefined)
+  // q1: select 'a' → advances to q2; there type free text and commit it.
+  flow.handleInput('1')
+  flow.handleInput('h')
+  flow.handleInput('i')
+  flow.handleInput('\r')
+  const draft = flow.draftSnapshot()
+  assert.equal(draft.tab, 2, 'the review page the user was on is preserved')
+  assert.deepEqual(draft.answers[0]!.selected, ['a'])
+  assert.equal(draft.answers[1]!.custom, 'hi')
+
+  // A fresh flow for the SAME call restores exactly that progress.
+  const restored = new QuestionFlow(questions, () => {}, () => {}, undefined, undefined, draft)
+  assert.deepEqual(restored.draftSnapshot(), draft, 'the parked progress is restored verbatim')
+  assert.deepEqual(done, [], 'no flow settled merely by snapshotting')
+
+  // Without a seed the flow starts empty (a different call never inherits it).
+  const fresh = new QuestionFlow(questions, () => {}, () => {}, undefined, undefined)
+  const freshDraft = fresh.draftSnapshot()
+  assert.deepEqual(freshDraft.answers[0]!.selected, [])
+  assert.equal(freshDraft.answers[1]!.custom, '')
+  assert.equal(freshDraft.tab, 0)
+})
+
+test('M3-3B onDraftChange reports every real mutation', () => {
+  const seen: number[] = []
+  const flow = new QuestionFlow(
+    [{ id: 'q1', question: 'Pick', options: [{ label: 'a' }, { label: 'b' }], multiSelect: true }],
+    () => {},
+    () => {},
+    undefined,
+    (draft) => { seen.push(draft.answers[0]!.selected.length) },
+  )
+  flow.handleInput('1')
+  flow.handleInput('2')
+  assert.deepEqual(seen, [1, 2], 'each real mutation reports the current draft')
 })

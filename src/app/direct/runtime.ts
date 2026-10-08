@@ -24,7 +24,7 @@
  */
 
 import type { Agent, AgentHandle, ModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Diag } from '../../diag.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { Backend } from '../../runtime/backend.ts'
 import type { TuiSettingsConfig } from '../../runtime/config-port.ts'
@@ -53,7 +53,9 @@ import type { SessionOwnerRetirement } from '../session/owner-access.ts'
 export interface DirectViewedQueueAgent {
   readonly parentSessionId: string
   readonly childSessionId: string
-  readonly agent: Agent
+  /** The exact writer subject the viewer published: on Direct it IS the live
+   *  child Agent object (identity comparison against the registry). */
+  readonly subject: { readonly session: { readonly id: string } }
 }
 
 /** The narrow model-selection operations the runner still needs. */
@@ -220,7 +222,7 @@ export function createDirectApplicationRuntime(deps: DirectApplicationRuntimeDep
     if (viewed === undefined || viewed.childSessionId !== sessionId) return undefined
     if (live?.session.id !== viewed.parentSessionId) return undefined
     const agent = host.registeredAgentFor(sessionId)
-    if (agent === undefined || agent !== viewed.agent || agent.session.id !== sessionId) return undefined
+    if (agent === undefined || (agent as object) !== viewed.subject || agent.session.id !== sessionId) return undefined
     if (agent.session.header.parentSession !== viewed.parentSessionId) return undefined
     return agent
   }

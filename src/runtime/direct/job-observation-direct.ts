@@ -13,10 +13,10 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/job-observation-direct
  */
 
-import { runOwned } from '../../detached.ts'
-import type { Diag } from '../../diag.ts'
-import { safeErrorMessage } from '../../error-boundary.ts'
-import type { JobObservationPort, JobObservedSnapshot } from '../job-observation-port.ts'
+import { runOwned } from '../process/tasks.ts'
+import type { Diag } from '../process/diagnostics.ts'
+import { safeErrorMessage } from '../process/errors.ts'
+import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../job-observation-port.ts'
 
 /** The minimal Cordis context surface this adapter needs (structural). */
 export interface JobObservationHostContextLike {
@@ -52,6 +52,17 @@ export interface JobControllerServiceLike {
     request: { readonly sessionId?: string; readonly jobId: unknown },
     signal: AbortSignal,
   ): AsyncIterable<JobFollowFrameLike>
+}
+
+/**
+ * The official local Job registry subset this adapter mutates. It is the
+ * Direct zone's human-kill admission (`JobRegistry.get` fences by the caller's
+ * owning session; `kill` returns the registry's own admission or throws).
+ */
+export interface JobRegistryServiceLike {
+  /** The public registry read; throws when this caller cannot see the row. */
+  get(jobId: unknown, caller: unknown): unknown
+  kill(jobId: unknown, caller: unknown, reason: string): 'requested' | 'already-finished'
 }
 
 /** The retained-output tail bound (a presentation preview, not an archive). */
@@ -156,5 +167,41 @@ export class DirectJobObservationPort implements JobObservationPort {
       closed = true
       abort.abort()
     }
+  }
+
+  /**
+   * Stop one Job through the official local registry — the Direct zone's ONE
+   * mutation. It shares no state with {@link open}: the admission is only the
+   * registry's own `kill` result, and local observation/roster state is never
+   * mutated optimistically.
+   *
+   * The admission order mirrors the official Host `JobController.kill`: prove
+   * the row is still in this caller's visible list, then kill. The registry's
+   * `get` throws exactly when the row is unknown or owned by another session,
+   * which is a proven business non-commit (`not-found`); a `kill` throw is a
+   * proven pre-admission refusal (`rejected`).
+   */
+  async stop(sessionId: string, jobId: string): Promise<JobStopOutcome> {
+    const registry = this.ctx.get('jobs') as JobRegistryServiceLike | undefined
+    if (registry === undefined) {
+      throw new Error('jobs service unavailable: the supported DSH base plus the pi-tui bundle must mount @deepseek-ai/dsh-jobs-local')
+    }
+    try {
+      registry.get(jobId, sessionId)
+    } catch {
+      return { kind: 'not-found' }
+    }
+    let outcome: 'requested' | 'already-finished'
+    try {
+      // The reason is DELIBERATELY the same human-kill wording the official
+      // Host `JobController.kill` records over the wire ("cancelled by the
+      // user"): the Direct and Remote paths then converge on ONE intentional
+      // durable detail instead of per-surface strings. The official registry
+      // merges it into a `killed` settlement's detail.
+      outcome = registry.kill(jobId, sessionId, 'cancelled by the user')
+    } catch (error) {
+      return { kind: 'rejected', message: safeErrorMessage(error) }
+    }
+    return outcome === 'requested' ? { kind: 'requested' } : { kind: 'already-finished' }
   }
 }

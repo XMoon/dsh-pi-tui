@@ -21,7 +21,7 @@
 
 import { Container, HStack, Markdown, Spacer, VStack, type Component } from '@xmoon76/pi-tui'
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
-import { color, HOST_MARKDOWN_OPTIONS, markdownTheme } from '../../theme.ts'
+import { color, HOST_MARKDOWN_OPTIONS, markdownTheme } from '../../tui/theme/runtime.ts'
 import type { ExtensionView, StyledSpan, TextView } from '../public-types.ts'
 import { renderSpans, sanitizeSpanText } from './slot-outlet.ts'
 

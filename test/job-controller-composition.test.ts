@@ -26,7 +26,7 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { JobHandle, JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { DirectJobObservationPort } from '../src/runtime/direct/job-observation-direct.ts'
 import type { JobObservedSnapshot } from '../src/runtime/job-observation-port.ts'
-import { createDiag } from '../src/diag.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 
 const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 

@@ -1,9 +1,22 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import ts from 'typescript'
 
-import { compositionFile, compositionOccurrences, compositionSource, compositionSources } from './support/composition-surface.ts'
-import { aliasAwareConstructionSites, ownerFile, ownerOccurrences, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { compositionFile, compositionFilesUnder, compositionOccurrences, compositionSource, compositionSourceUnder, compositionSources } from './support/composition-surface.ts'
+import {
+  aliasAwareConstructionSites,
+  ownerFile,
+  ownerOccurrences,
+  productionFilesUnder,
+  productionScriptKind,
+  productionSource,
+  productionSources,
+  productionSourcesUnder,
+  unwrapExpression,
+} from './support/owner-modules.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 /**
  * A5 composition-inventory locks (plan §22/§23/§29/§44 A5-0).
@@ -94,11 +107,12 @@ const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
   ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
-test('A5: the composition surface is the entry plus the composition root', () => {
+test('A5: the composition surface is the entry plus the composition zone', () => {
   const sources = compositionSources()
   assert.equal(sources[0].rel, 'src/index.ts', 'the package entry is the first composition-surface file')
-  for (const { rel } of sources) {
-    assert.ok(rel === 'src/index.ts' || rel === 'src/app/bootstrap.ts', `${rel} is not a composition-surface file`)
+  assert.equal(sources[1].rel, 'src/app/bootstrap.ts', 'the composition facade is the second composition-surface file')
+  for (const { rel } of sources.slice(2)) {
+    assert.ok(rel.startsWith('src/app/bootstrap/'), `${rel} is not a composition-surface file`)
   }
 })
 
@@ -114,13 +128,19 @@ test('A5a: the composition ROOT owns every composition site (the entry owns none
   // aggregate counts below cannot catch a regression that moves a construction
   // back into the entry while deleting it from the composition root — the
   // count stays 1 and every aggregate lock stays green (A5a review P2).
-  assert.deepEqual(
-    compositionSources().map(({ rel }) => rel),
-    ['src/index.ts', 'src/app/bootstrap.ts'],
-    'the composition surface must be exactly the package entry plus the composition root',
-  )
+  //
+  // TS2: the composition ROOT is the whole composition zone — the facade plus
+  // every `src/app/bootstrap/**` helper. The entry stays excluded absolutely;
+  // "the root owns it" means the zone owns it (the helper split is checked by
+  // the per-module location locks in test/a5b-bootstrap-closure.test.ts).
+  const files = compositionSources().map(({ rel }) => rel)
+  assert.equal(files[0], 'src/index.ts', 'the composition surface must start with the package entry')
+  assert.equal(files[1], 'src/app/bootstrap.ts', 'the composition facade must follow the entry')
+  for (const rel of files.slice(2)) {
+    assert.ok(rel.startsWith('src/app/bootstrap/'), `the composition surface must not widen past the bootstrap zone (${rel})`)
+  }
   const entry = compositionFile('src/index.ts')
-  const root = compositionFile('src/app/bootstrap.ts')
+  const root = compositionSource()
 
   // Plan §29 markers: the entry carries no composition/assembly at all.
   for (const marker of [
@@ -181,21 +201,21 @@ test('A5: every single-owner construction has exactly its expected count across 
 
 /**
  * Literals that legitimately occur once OUTSIDE the A5b single-owner rows, each
- * pinned to its exact production file. These are two documented facts, not
- * escapes:
+ * pinned to its exact production file. These are documented facts, not escapes:
  *
  * - `app/session/runtime.ts` DECLARES the `bindSessionRuntime(` factory that the
- *   composition root calls — the declaration is not a second construction;
- * - `runtime/remote/presentation-read-shadow.ts` folds a throwaway transcript
- *   window for the Direct/Remote parity oracle — a detached observation, not a
- *   live transcript owner.
+ *   composition root calls — the declaration is not a second construction.
  *
  * The whole-tree guard pins each to that exact file, so a construction added
  * anywhere (including inside these files) still fails the count.
+ *
+ * TS6 removed the other entry: the Direct/Remote presentation parity oracle's
+ * throwaway `new TranscriptWindowController(` left production `src/**` for
+ * `scripts/support/presentation-read-shadow.ts`, so it is no longer a
+ * production construction site at all.
  */
 const WHOLE_TREE_NON_OWNER_SITES: Readonly<Record<string, readonly string[]>> = {
   'bindSessionRuntime(': ['src/app/session/runtime.ts'],
-  'new TranscriptWindowController(': ['src/runtime/remote/presentation-read-shadow.ts'],
 }
 
 test('A5: no production file outside the pinned owners holds a single-owner construction', () => {
@@ -248,16 +268,6 @@ test('A5: no production file outside the pinned owners holds a single-owner cons
  * `(surface.start as ...)(...)`, ...) so a parenthesized / cast / non-null call
  * cannot hide a composition-root construction from the guard below.
  */
-/**
- * Legitimate construction sites OUTSIDE the owner rows above. The detached
- * Direct/Remote presentation parity oracle builds its own transcript window (it
- * must not import the surface owner), so it is pinned explicitly here — the
- * alias-aware guard stays an EXACT whole-tree match rather than a subset.
- */
-const WHOLE_TREE_EXTRA_SITES: Readonly<Record<string, readonly string[]>> = {
-  TranscriptWindowController: ['src/runtime/remote/presentation-read-shadow.ts'],
-}
-
 /** The identifier a single-owner site calls or constructs. */
 function siteName(site: string): string {
   return site.replace(/^new /u, '').replace(/[(<{].*$/u, '')
@@ -287,11 +297,6 @@ test('A5: every single-owner construction is alias-aware unique across productio
     if (!owners.includes(ownerRel)) owners.push(ownerRel)
     expected.set(name, owners)
   }
-  for (const [name, extra] of Object.entries(WHOLE_TREE_EXTRA_SITES)) {
-    const owners = expected.get(name) ?? []
-    for (const rel of extra) if (!owners.includes(rel)) owners.push(rel)
-    expected.set(name, owners)
-  }
   for (const [name, owners] of expected) {
     assert.deepEqual(
       aliasAwareConstructionSites(name),
@@ -301,8 +306,11 @@ test('A5: every single-owner construction is alias-aware unique across productio
   }
 })
 
-function calledCallees(source: string): string[] {
-  const sf = ts.createSourceFile('module.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+function calledCallees(source: string, rel = 'module.ts'): string[] {
+  // The parser kind follows the FILE (`.tsx` => TSX): a whole-tree scan over
+  // `productionSources()` includes `.tsx`, and a legal JSX attribute/child
+  // holding this call would otherwise parse to nothing (TS2 §19).
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel))
   const out: string[] = []
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
@@ -353,7 +361,7 @@ test('A5: the composition-root construction calls occur only in the composition 
   ]
   const byCall = new Map<string, string[]>(rootOnlyCalls.map(name => [name, []]))
   for (const { rel, source } of productionSources()) {
-    for (const callee of calledCallees(source)) {
+    for (const callee of calledCallees(source, rel)) {
       byCall.get(callee)?.push(rel)
     }
   }
@@ -368,12 +376,12 @@ test('A5: the composition-root construction calls occur only in the composition 
 
 /** The composition root's Host subscriptions: event name -> its ONE owner. */
 const HOST_SUBSCRIPTIONS: Readonly<Record<string, string>> = {
-  'session/event': 'src/app/bootstrap.ts',
-  'subagent/start': 'src/app/bootstrap.ts',
-  'subagent/end': 'src/app/bootstrap.ts',
-  'agent/status': 'src/app/bootstrap.ts',
-  'llm/adapters-updated': 'src/app/bootstrap.ts',
-  'settings/document-updated': 'src/app/bootstrap.ts',
+  'session/event': 'src/app/bootstrap/event-wiring.ts',
+  'subagent/start': 'src/app/bootstrap/event-wiring.ts',
+  'subagent/end': 'src/app/bootstrap/event-wiring.ts',
+  'agent/status': 'src/app/bootstrap/event-wiring.ts',
+  'llm/adapters-updated': 'src/app/bootstrap/event-wiring.ts',
+  'settings/document-updated': 'src/app/bootstrap/event-wiring.ts',
 }
 
 /**
@@ -388,10 +396,26 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['approval/request', 'src/runtime/direct/interaction-direct.ts'],
   ['plugin-manager/install-state', 'src/runtime/direct/plugin-manager-direct.ts'],
   ['plugin-manager/install-log', 'src/runtime/direct/plugin-manager-direct.ts'],
+  ['plugin-manager/changed', 'src/runtime/direct/plugin-manager-direct.ts'],
   ['agent/assistant-stream', 'src/runtime/direct/assistant-stream-direct.ts'],
   ['agent/disposed', 'src/runtime/direct/assistant-stream-direct.ts'],
-  ['skills/change', 'src/skill-catalog.ts'],
+  ['skills/change', 'src/runtime/direct/skill-catalog.ts'],
   ['commands/change', 'src/commands.ts'],
+]
+
+/**
+ * The REMOTE-BRANCH counterpart of three subscriptions the Direct branch owns:
+ * the private `piTuiTerminalProgress` Host row observes the same Host events on
+ * the other backend branch of the same process (plan R2 §6.4). The two owners
+ * never run together (the Direct rows are gated by `if (direct)` and the Host
+ * row is mounted only by the Remote composition), but both sites exist
+ * statically, so both are pinned BY BRANCH: a third site — or a second one in
+ * either file — still fails.
+ */
+const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
+  ['session/event', 'src/app/remote/terminal-progress-host.ts'],
+  ['agent/status', 'src/app/remote/terminal-progress-host.ts'],
+  ['agent/disposed', 'src/app/remote/terminal-progress-host.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */
@@ -403,8 +427,11 @@ const DYNAMIC_SUBSCRIPTION_SITES: readonly string[] = ['src/runtime/direct/confi
  * `this.ctx.on` receiver and a computed `ctx['on']` are all the SAME fact. A
  * source-string match (`"ctx.on('session/event'"`) would miss all of them.
  */
-function hostSubscriptions(source: string): { events: string[]; dynamicCount: number } {
-  const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+function hostSubscriptions(source: string, rel = 'probe.ts'): { events: string[]; dynamicCount: number } {
+  // The parser kind follows the FILE (`.tsx` => TSX): without it a legal JSX
+  // attribute/child subscription is invisible to this whole-tree inventory
+  // (TS2 §19).
+  const file = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel))
   const events: string[] = []
   let dynamicCount = 0
   const isCtxOn = (callee: ts.Expression): boolean => {
@@ -439,7 +466,7 @@ test('A5: the Host subscription inventory is unique and AST-complete across prod
   const byEvent = new Map<string, string[]>()
   const dynamicSites: string[] = []
   for (const { rel, source } of productionSources()) {
-    const { events, dynamicCount } = hostSubscriptions(source)
+    const { events, dynamicCount } = hostSubscriptions(source, rel)
     for (let index = 0; index < dynamicCount; index += 1) dynamicSites.push(rel)
     for (const event of events) {
       const sites = byEvent.get(event) ?? []
@@ -447,20 +474,24 @@ test('A5: the Host subscription inventory is unique and AST-complete across prod
       byEvent.set(event, sites)
     }
   }
-  const expected = new Map<string, string>([
+  const expected = new Map<string, string[]>()
+  for (const [event, rel] of [
     ...Object.entries(HOST_SUBSCRIPTIONS),
-    ...OTHER_HOST_SUBSCRIPTIONS.map(([event, rel]) => [event, rel] as const),
-  ])
+    ...OTHER_HOST_SUBSCRIPTIONS,
+    ...REMOTE_BRANCH_SUBSCRIPTIONS,
+  ]) {
+    expected.set(event, [...expected.get(event) ?? [], rel])
+  }
   assert.deepEqual(
     [...byEvent.keys()].sort(),
     [...expected.keys()].sort(),
     'the production Host-subscription inventory changed: every ctx.on(event, …) must be listed with its owner',
   )
-  for (const [event, owner] of expected) {
+  for (const [event, owners] of expected) {
     assert.deepEqual(
-      byEvent.get(event),
-      [owner],
-      `${event} must be subscribed exactly once, from ${owner}`,
+      [...byEvent.get(event) ?? []].sort(),
+      [...owners].sort(),
+      `${event} must be subscribed exactly from its inventoried owner(s): ${owners.join(', ')}`,
     )
   }
   assert.deepEqual(
@@ -509,4 +540,199 @@ test('A5: the composition surface keeps the startup order', () => {
     assert.ok(at > cursor, `${step} must come after the previous startup step`)
     cursor = at
   }
+})
+
+test('A5/TS2: the Host-subscription phases keep their frozen startup interleaving', () => {
+  // §0/§12/§85/§91 Pass 3: the startup wiring order is BEHAVIOR. The baseline
+  // interleaved the six application-level subscriptions with the Direct
+  // live-assistant-stream acquire — `session/event` BEFORE it, the other five
+  // AFTER it and its abort binding — so a throwing stream install left exactly
+  // the listeners the baseline had installed. One collapsed installation call
+  // reorders that; this lock pins the two-phase interleaving and the phase
+  // contents.
+  const source = compositionSource()
+  const order = [
+    'installSessionEventWiring({ ctx, direct: remoteSources === undefined, surface })',
+    'const directAssistantRuntime = directRuntime()',
+    'const assistantStreamHandle = directAssistantRuntime.installAssistantStream({',
+    "lifecycleController.signal.addEventListener('abort', assistantStreamHandle, { once: true })",
+    'installRuntimeEventWiring({ ctx, direct: remoteSources === undefined, surface })',
+    "const disposeCredentialSubscription = backend.config.credentials.onChanged(",
+  ]
+  let cursor = -1
+  for (const step of order) {
+    const at = source.indexOf(step)
+    assert.ok(at >= 0, `the startup wiring must contain ${step}`)
+    assert.ok(at > cursor, `${step} must come after the previous startup wiring step`)
+    cursor = at
+  }
+
+  // The phase SPLIT itself: exactly one declaration + one call per phase, and
+  // phase 1 installs exactly ONE listener (the throwing-install window's active
+  // set), while phase 2 installs the other five IN THE BASELINE ORDER.
+  assert.equal(compositionOccurrences('installSessionEventWiring('), 2,
+    'phase 1 must have exactly one declaration and one call site')
+  assert.equal(compositionOccurrences('installRuntimeEventWiring('), 2,
+    'phase 2 must have exactly one declaration and one call site')
+  const wiring = readFileSync(new URL('../src/app/bootstrap/event-wiring.ts', import.meta.url), 'utf8')
+  const phaseTwoAt = wiring.indexOf('export function installRuntimeEventWiring(')
+  assert.ok(phaseTwoAt > 0, 'the phase-2 installation must exist')
+  const phaseOne = wiring.slice(0, phaseTwoAt)
+  const phaseTwo = wiring.slice(phaseTwoAt)
+  assert.equal(phaseOne.split('ctx.on(').length - 1, 1,
+    'phase 1 installs exactly ONE listener, so a throwing stream install leaves exactly that one active')
+  assert.ok(phaseOne.includes("ctx.on('session/event'"), 'phase 1 owns the Direct durable firehose')
+  let phaseCursor = -1
+  for (const event of [
+    'subagent/start',
+    'subagent/end',
+    'agent/status',
+    'llm/adapters-updated',
+    'settings/document-updated',
+  ]) {
+    assert.ok(!phaseOne.includes(`ctx.on('${event}'`), `${event} must NOT be installed before the stream acquire`)
+    const at = phaseTwo.indexOf(`ctx.on('${event}'`)
+    assert.ok(at > phaseCursor, `${event} must keep its baseline registration order inside phase 2`)
+    phaseCursor = at
+  }
+  assert.equal(phaseTwo.split('ctx.on(').length - 1, 5, 'phase 2 installs exactly the other five listeners')
+})
+
+test('A5/TS2: a .tsx production duplicate cannot escape the single-owner scans', (t) => {
+  // TS1 closed the `.tsx` hole in the production architecture gate; this helper
+  // (the whole-tree duplicate DETECTOR behind the A5b single-owner locks) must
+  // scan the SAME extension set, and must parse a `.tsx` module as TSX. Without
+  // both, a JSX-bearing production module could hold a second composition
+  // construction invisibly.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-a5b-tsx-')
+  mkdirSync(join(root, 'src', 'app', 'surface'), { recursive: true })
+  writeFileSync(join(root, 'src', 'app', 'bootstrap.ts'), 'export const bootstrap = 1\n')
+  const jsxSource = [
+    'export function Probe() {',
+    '  return (',
+    '    <section data-probe={createSessionOwnershipCore({})}>',
+    '      probe',
+    '    </section>',
+    '  )',
+    '}',
+    '',
+  ].join('\n')
+  const rel = 'src/app/surface/duplicate.tsx'
+  writeFileSync(join(root, rel), jsxSource)
+
+  const sources = productionSourcesUnder(root)
+  assert.deepEqual(
+    sources.map(({ rel: scanned }) => scanned),
+    ['src/app/bootstrap.ts', rel],
+    'the production scan must include the .tsx module',
+  )
+  assert.deepEqual(
+    aliasAwareConstructionSites('createSessionOwnershipCore', sources),
+    [rel],
+    'a duplicate composition construction in a .tsx production module must be attributed to its own file',
+  )
+  // Positive control for the parser kind: under the WRONG kind the JSX file is
+  // not a valid module, so the scan of the same bytes cannot be the reason this
+  // passes. The same construction in a real `.ts` file is still found.
+  const tsSpelling = [{ rel: 'src/app/surface/duplicate.ts', source: 'export const s = createSessionOwnershipCore({})\n' }]
+  assert.deepEqual(aliasAwareConstructionSites('createSessionOwnershipCore', tsSpelling), ['src/app/surface/duplicate.ts'])
+  assert.deepEqual(
+    aliasAwareConstructionSites('createSessionOwnershipCore', [{ rel: 'src/app/surface/duplicate.ts', source: jsxSource }]),
+    [],
+    'the JSX source parsed as plain TS must not silently look like a scanned module — the extension drives the parser kind',
+  )
+})
+
+test('A5/TS2: the composition zone is enumerated RECURSIVELY (nested helpers included)', (t) => {
+  // The zone is the WHOLE `src/app/bootstrap/**` subtree (§7/§18/§20): a
+  // one-level `readdir` lets a nested helper escape the composition/owner-surface
+  // locks while the architecture gate (which treats the directory as the zone)
+  // still accepts it. Proven through the REAL enumerators the locks use, and
+  // through the real composition surface on a fixture tree.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-zone-nested-')
+  mkdirSync(join(root, 'src', 'app', 'bootstrap', 'nested'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.ts'), 'export const entry = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap.ts'), 'export const bootstrap = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap', 'top.ts'), 'export const top = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap', 'nested', 'probe.tsx'), 'export const probe = <span />\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap', 'nested', 'alt.mts'), 'export const alt = 1\n')
+  writeFileSync(join(root, 'src', 'app', 'bootstrap', 'nested', 'ignored.md'), 'not source\n')
+  assert.deepEqual(
+    compositionFilesUnder(root),
+    [
+      'src/index.ts',
+      'src/app/bootstrap.ts',
+      'src/app/bootstrap/nested/alt.mts',
+      'src/app/bootstrap/nested/probe.tsx',
+      'src/app/bootstrap/top.ts',
+    ],
+    'the composition surface must include a NESTED zone helper over every production extension',
+  )
+  // The SAME enumerator feeds OWNER_MODULES (`bootstrapHelperModules`), so the
+  // aggregate bag/single-owner locks see nested helpers too.
+  assert.deepEqual(
+    productionFilesUnder(root, 'src/app/bootstrap'),
+    [
+      'src/app/bootstrap/nested/alt.mts',
+      'src/app/bootstrap/nested/probe.tsx',
+      'src/app/bootstrap/top.ts',
+    ],
+  )
+  // ...and their CONTENT is part of what the content locks scan: a bad
+  // universal-dependency bag (or a hard-coded chord) hidden in a nested helper
+  // must be visible to the composed surface text, not just to the file list.
+  writeFileSync(
+    join(root, 'src', 'app', 'bootstrap', 'nested', 'bad.ts'),
+    'interface EverythingBag { readonly everything: unknown }\n',
+  )
+  const composed = compositionSourceUnder(root)
+  assert.ok(composed.includes('interface EverythingBag {'),
+    'a bag declared in a NESTED composition helper must appear in the composed composition surface')
+  assert.ok(composed.includes('// >>> src/app/bootstrap/nested/bad.ts'),
+    'the composed surface must banner the nested helper it now covers')
+  // The real tree is unchanged by the recursion: every helper is flat today
+  // (TS8-F2 added the exit controller, the legacy settings migration and the
+  // authoritative running-profile read as composition helpers).
+  assert.deepEqual(
+    productionFilesUnder(process.cwd(), 'src/app/bootstrap'),
+    [
+      'src/app/bootstrap/event-wiring.ts',
+      'src/app/bootstrap/exit.ts',
+      'src/app/bootstrap/legacy-settings-migration.ts',
+      'src/app/bootstrap/lifecycle.ts',
+      'src/app/bootstrap/presentation-bridge.ts',
+      'src/app/bootstrap/profile.ts',
+      'src/app/bootstrap/runtime-selection.ts',
+      'src/app/bootstrap/session-startup.ts',
+      'src/app/bootstrap/task-source.ts',
+    ],
+  )
+})
+
+test('A5/TS2: the JSX hard cases are visible to the whole-tree AST walkers', () => {
+  // A legal JSX ATTRIBUTE position hides the construct from a TS parse, so a
+  // `.tsx` production module would otherwise escape the Host-subscription
+  // inventory and the callee scan while `productionSources()` already scans it.
+  // Each case is asserted BOTH ways: the TSX parse finds it, and the SAME bytes
+  // parsed as plain TS find nothing — so the extension, not the scanner's
+  // incidental recovery, is what makes these pass.
+  const hostInAttribute = "export const view = <Box value={ctx.on('session/event', () => {})} />\n"
+  assert.deepEqual(hostSubscriptions(hostInAttribute, 'probe.tsx').events, ['session/event'])
+  assert.deepEqual(hostSubscriptions(hostInAttribute, 'probe.ts').events, [],
+    'the same bytes parsed as TS must yield NO subscription (TSX is a hard case, not a recovered one)')
+
+  const callInAttribute = 'export const view = <Box value={createSurfaceRuntime(options)} />\n'
+  assert.ok(calledCallees(callInAttribute, 'probe.tsx').includes('createSurfaceRuntime'))
+  assert.deepEqual(calledCallees(callInAttribute, 'probe.ts'), [],
+    'the same bytes parsed as TS must yield NO callee')
+
+  const callInChild = 'export const view = <Box>{createSurfaceRuntime(options)}</Box>\n'
+  assert.ok(calledCallees(callInChild, 'probe.tsx').includes('createSurfaceRuntime'))
+  assert.deepEqual(calledCallees(callInChild, 'probe.ts'), [])
+
+  // The default kind stays TS for the pre-existing `.ts` fixtures/helpers.
+  assert.ok(calledCallees('(surface.start)({})').includes('surface.start'))
+  assert.deepEqual(hostSubscriptions("ctx.on('agent/status', () => {})").events, ['agent/status'])
 })

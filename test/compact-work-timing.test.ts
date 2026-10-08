@@ -13,10 +13,11 @@ import { test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptTimingOf } from '../src/transcript.ts'
-import { summarizeWorkSpan, formatWorkHeaderLine, compactWorkBody, CompactWorkComponent, type CompactWorkSummary } from '../src/compact-work.ts'
-import { isTranscriptWorkMember } from '../src/transcript-projection.ts'
-import { compactActionSourceOf } from '../src/compact-process-preview.ts'
-import { compactActionPresentation } from '../src/compact-process-preview.ts'
+import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/tui/components/transcript/compact-work.ts'
+import { summarizeWorkSpan, type CompactWorkSummary } from '../src/tui/transcript/work-summary.ts'
+import { isTranscriptWorkMember } from '../src/tui/transcript/structure.ts'
+import { compactActionSourceOf } from '../src/tui/transcript/process-summary.ts'
+import { compactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'
 
 /** The summary's action stats as a plain record, for exact assertions. */
 function statsOf(summary: CompactWorkSummary): { total: number; types: Record<string, number> } {
@@ -30,8 +31,8 @@ function statsOf(summary: CompactWorkSummary): { total: number; types: Record<st
 function genuineToolTypes(summary: CompactWorkSummary): Map<string, number> {
   return new Map([...summary.actionStats.types].filter(([name]) => name !== 'subagent' && name !== 'retry' && !name.startsWith('/')))
 }
-import type { TranscriptWorkSpan } from '../src/transcript-projection.ts'
-import { projectTranscriptStructure } from '../src/transcript-projection.ts'
+import type { TranscriptWorkSpan } from '../src/tui/transcript/structure.ts'
+import { projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 
 const T0 = 1_000_000
 

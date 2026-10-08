@@ -7,9 +7,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DraftImageStore } from '../src/image/draft-store.ts'
-import { commandIsLocalForAttachments, commandRejectsImages, isLocalCommandLine, LOCAL_COMMANDS, normalizeSkillInvocation, SESSIONLESS_COMMANDS } from '../src/index.ts'
-import type { HostCommandClaim } from '../src/commands.ts'
+import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
+import { commandIsLocalForAttachments, commandRejectsImages, isLocalCommandLine, LOCAL_COMMANDS, normalizeSkillInvocation, resolveSubmitDelivery, SESSIONLESS_COMMANDS } from '../src/index.ts'
 
 function storeWithImage(): DraftImageStore {
   const store = new DraftImageStore()
@@ -64,13 +63,13 @@ test('a /skill <name> invocation with an image is agent input (bare /skill stays
     { name: 'skill', rawInput: ' grilling' },
     `/skill grilling ${image.placeholder}`,
     store,
-    commandIsLocalForAttachments({ name: 'skill', rawInput: ' grilling' }, undefined, undefined),
+    commandIsLocalForAttachments({ name: 'skill', rawInput: ' grilling' }, undefined, undefined, false),
   ), false, '/skill <name> + image is not rejected')
   assert.equal(commandRejectsImages(
     { name: 'skill', rawInput: '' },
     '/skill',
     store,
-    commandIsLocalForAttachments({ name: 'skill', rawInput: '' }, undefined, undefined),
+    commandIsLocalForAttachments({ name: 'skill', rawInput: '' }, undefined, undefined, false),
   ), false, 'no image attached → nothing to reject')
 })
 
@@ -102,12 +101,12 @@ test('a LIVE skill wrapper is agent-facing even when a client contribution share
   // route (its own slash line + injected body) supports images.
   const contribution = (name: string): boolean => name === 'grilling'
   const wrapper = (name: string): boolean => name === 'grilling'
-  assert.equal(isLocalCommandLine('grilling', wrapper, contribution), false,
+  assert.equal(isLocalCommandLine('grilling', wrapper, contribution, false), false,
     'a live skill wrapper is agent-facing (multimodal), never a local command')
-  assert.equal(isLocalCommandLine('grilling', undefined, contribution), true,
+  assert.equal(isLocalCommandLine('grilling', undefined, contribution, false), true,
     'without a live wrapper the contribution IS the local client command')
-  assert.equal(isLocalCommandLine('help', wrapper, contribution), true, 'core local commands stay local')
-  assert.equal(isLocalCommandLine('plain', wrapper, contribution), false, 'an unknown name is not local')
+  assert.equal(isLocalCommandLine('help', wrapper, contribution, false), true, 'core local commands stay local')
+  assert.equal(isLocalCommandLine('plain', wrapper, contribution, false), false, 'an unknown name is not local')
 })
 
 test('a client command with a staged attachment is REJECTED as a local command (never run with a live attachment)', () => {
@@ -117,29 +116,16 @@ test('a client command with a staged attachment is REJECTED as a local command (
   // skill wrapper of the same name stays agent-facing and is allowed.
   const store = storeWithImage()
   const image = store.values()[0]!
-  const clientCommand = commandIsLocalForAttachments({ name: 'panel', rawInput: '' }, undefined, name => name === 'panel')
+  const clientCommand = commandIsLocalForAttachments({ name: 'panel', rawInput: '' }, undefined, name => name === 'panel', false)
   assert.equal(commandRejectsImages({ name: 'panel' }, `/panel ${image.placeholder}`, store, clientCommand), true,
     'a client command rejects attachments')
-  const skillWrapper = commandIsLocalForAttachments({ name: 'grilling', rawInput: ' args' }, name => name === 'grilling', name => name === 'grilling')
+  const skillWrapper = commandIsLocalForAttachments({ name: 'grilling', rawInput: ' args' }, name => name === 'grilling', name => name === 'grilling', false)
   assert.equal(commandRejectsImages({ name: 'grilling' }, `/grilling args ${image.placeholder}`, store, skillWrapper), false,
     'a live skill wrapper is agent-facing even when a client contribution shares the name')
-  const explicitSkill = commandIsLocalForAttachments({ name: 'skill', rawInput: ' grilling' }, undefined, undefined)
+  const explicitSkill = commandIsLocalForAttachments({ name: 'skill', rawInput: ' grilling' }, undefined, undefined, false)
   assert.equal(commandRejectsImages({ name: 'skill' }, `/skill grilling ${image.placeholder}`, store, explicitSkill), false,
     'an explicit /skill <name> invocation is agent-facing')
 })
-
-/** A host catalog stub with the real claim semantics (DSH `matchEnter`): a
- * descriptor with `input` claims its argued line, an execute-kind one claims
- * the bare token only, and a name the catalog does not hold is unresolved.
- * The catalogue is keyed by name. */
-function hostCatalog(rows: Record<string, { leadingInput?: boolean; attachments?: boolean }>) {
-  return (parsed: { name: string; rawInput?: string }): HostCommandClaim | undefined => {
-    const row = rows[parsed.name]
-    if (row === undefined) return undefined
-    if (row.leadingInput !== true && (parsed.rawInput?.trim() ?? '') !== '') return { claimed: false }
-    return { claimed: true, attachments: row.attachments === true }
-  }
-}
 
 test('a HOST claim outranks a same-named client contribution in the attachment gate', () => {
   // Host authority: a contribution must never turn an attachment-bearing
@@ -151,13 +137,15 @@ test('a HOST claim outranks a same-named client contribution in the attachment g
     { name: 'deploy', rawInput: ' prod' },
     undefined,
     name => name === 'deploy',
-    hostCatalog({ deploy: { leadingInput: true } }),
+    true,
   )
   assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy prod ${image.placeholder}`, store, colliding), false,
     'a host-claimed line is never a local command (the host route owns it)')
-  const core = commandIsLocalForAttachments({ name: 'help', rawInput: '' }, undefined, undefined, hostCatalog({ help: { leadingInput: true } }))
-  assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), true,
-    'a TUI-owned local command stays local even if a registry claim exists for it')
+  const core = commandIsLocalForAttachments({ name: 'help', rawInput: '' }, undefined, undefined, true)
+  assert.equal(core, false,
+    '§D3 line authority (review round 2): a host-RESOLVED name is never TUI-local — even a LOCAL_COMMANDS member defers to the host route when the catalog claims its line')
+  assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), false,
+    'the host descriptor owns the attachment policy of its own claimed line')
 })
 
 test('a client contribution claims the BARE token only: an argued line keeps its attachments', () => {
@@ -167,12 +155,11 @@ test('a client contribution claims the BARE token only: an argued line keeps its
   const store = storeWithImage()
   const image = store.values()[0]!
   const isClientCommand = (name: string): boolean => name === 'deploy'
-  const host = hostCatalog({})
-  const bare = commandIsLocalForAttachments({ name: 'deploy', rawInput: '' }, undefined, isClientCommand, host)
+  const bare = commandIsLocalForAttachments({ name: 'deploy', rawInput: '' }, undefined, isClientCommand, false)
   assert.equal(bare, true, 'the bare token IS the contribution invocation (a local client command)')
   assert.equal(commandRejectsImages({ name: 'deploy' }, `/deploy ${image.placeholder}`, store, bare), true,
     '…whose attachment-bearing form is impossible, but the classification is local')
-  const argued = commandIsLocalForAttachments({ name: 'deploy', rawInput: ' explain' }, undefined, isClientCommand, host)
+  const argued = commandIsLocalForAttachments({ name: 'deploy', rawInput: ' explain' }, undefined, isClientCommand, false)
   assert.equal(argued, false, 'an argued line of a contribution name is an ordinary submission')
   assert.equal(commandRejectsImages({ name: 'deploy', rawInput: ' explain' }, `/deploy explain ${image.placeholder}`, store, argued), false,
     'the argued line keeps its image (no local-command refusal)')
@@ -186,16 +173,109 @@ test('the host claim is LINE-level: an execute-kind command does not claim its a
   // refusal, and never a rejected "local command".
   const store = storeWithImage()
   const image = store.values()[0]!
-  const host = hostCatalog({ compact: {}, goal: { leadingInput: true } })
-  const bareCompact = commandIsLocalForAttachments({ name: 'compact', rawInput: '' }, undefined, undefined, host)
+  const bareCompact = commandIsLocalForAttachments({ name: 'compact', rawInput: '' }, undefined, undefined, true)
   assert.equal(bareCompact, false, 'the bare token IS the execute-kind invocation')
-  const arguedCompact = commandIsLocalForAttachments({ name: 'compact', rawInput: ' extra' }, undefined, undefined, host)
+  const arguedCompact = commandIsLocalForAttachments({ name: 'compact', rawInput: ' extra' }, undefined, undefined, true)
   assert.equal(arguedCompact, false, 'an argued line of an execute-kind command is an ordinary submission')
-  const arguedGoal = commandIsLocalForAttachments({ name: 'goal', rawInput: ' ship it' }, undefined, undefined, host)
+  const arguedGoal = commandIsLocalForAttachments({ name: 'goal', rawInput: ' ship it' }, undefined, undefined, true)
   assert.equal(arguedGoal, false, 'a leadingInput command claims its argued line')
   // Without a client contribution of the same name both lines are ordinary
   // submissions in the attachment gate — the refusal decision belongs to the
   // dispatch, which distinguishes the claimed bare line from the rest.
   assert.equal(commandRejectsImages({ name: 'compact', rawInput: ' extra' }, `/compact extra ${image.placeholder}`, store, arguedCompact), false,
     'the argued execute-kind line keeps its image')
+})
+
+test('§D3 line authority: a HOST-RESOLVED name is never TUI-local (argued /export foo keeps attachments + ordinary-prompt semantics)', () => {
+  // The frozen rc.2 Host /export (dsh-session-log-export) is execute-kind
+  // (no leadingInput): its BARE token is a Host invocation, its ARGUED line
+  // is an ordinary submission. The TUI also owns a Client /export built-in —
+  // the host view must outrank the LOCAL_COMMANDS term in BOTH cases
+  // (review round 2, external finding: the three sibling gates used to
+  // disagree with the dispatch's precedence fix).
+  assert.equal(isLocalCommandLine('export', undefined, undefined, true), false,
+    'a CLAIMED host line is a host command, never TUI-local')
+  assert.equal(isLocalCommandLine('export', undefined, undefined, true), false,
+    'a RESOLVED-but-unclaimed argued line is an ordinary submission, never TUI-local (attachments allowed)')
+  assert.equal(isLocalCommandLine('export', undefined, undefined, false), true,
+    'with the host catalog not resolving the name at all, the TUI built-in stays local')
+  // The attachment gate rides the same order end-to-end (the hostResolvesName
+  // discriminator is NAME authority: both the bare and the argued line of a
+  // resolved Host name defer to the host route).
+  assert.equal(commandIsLocalForAttachments({ name: 'export', rawInput: 'foo' }, undefined, undefined, true), false,
+    'an argued /export foo line keeps its attachments (ordinary multimodal submission)')
+  assert.equal(commandIsLocalForAttachments({ name: 'export', rawInput: '' }, undefined, undefined, true), false,
+    'the bare /export Host invocation is a HOST line — the TUI-local attachment refusal never applies (the host admission owns its policy)')
+})
+
+
+test('§D3 Direct parity matrix (review round 2 external gate): the TUI-built-in observable behavior is unchanged when no Host name collides', () => {
+  // The Direct matrix the external review froze: with the authoritative Host
+  // catalog NOT resolving a TUI built-in name, every observable classification
+  // keeps its pre-precedence behavior — only a REAL host-resolved name changes
+  // routing (the collision case above).
+  const noHost = false
+  // /settings bare: still an immediately-executed TUI local command.
+  assert.equal(isLocalCommandLine('settings', undefined, undefined, noHost), true)
+  // /help while running: still the queue placeholder (a local command never
+  // steers), NOT the ordinary queue/steer policy.
+  assert.equal(resolveSubmitDelivery({ name: 'help', rawInput: '' }, true, 'enter', 'steer', isLocalCommandLine('help', undefined, undefined, noHost)), 'queue')
+  // /export with NO external Host claim: the TUI built-in path (local).
+  assert.equal(isLocalCommandLine('export', undefined, undefined, noHost), true)
+  // An argued line of a NO-collision TUI built-in: execute-kind built-ins keep
+  // their ordinary-prompt busy policy only where the builtin itself declares
+  // it; the local set stays local (the LOCAL_COMMANDS term rules unresolved
+  // names exactly as before).
+  assert.equal(resolveSubmitDelivery({ name: 'export', rawInput: 'foo' }, true, 'enter', 'steer', isLocalCommandLine('export', undefined, undefined, noHost)), 'queue')
+  // A genuinely ordinary prompt line still follows the composer policy: the
+  // accelerated CHORD takes the busyEnter preference's OPPOSITE (web parity)
+  // — chord + steer-preference queues, chord + queue-preference steers. The
+  // point: a host-resolved argued line participates in that policy instead of
+  // the local-command queue placeholder.
+  assert.equal(resolveSubmitDelivery({ name: 'export', rawInput: 'foo' }, true, 'accelerated', 'steer', false), 'queue',
+    'chord takes the preference opposite — ordinary busy policy, not the local placeholder')
+  assert.equal(resolveSubmitDelivery({ name: 'export', rawInput: 'foo' }, true, 'accelerated', 'queue', false), 'steer',
+    'the steer side of the ordinary busy policy is reachable for a host-resolved argued line')
+})
+
+/* ── PR5 supplement: the Client self-claim authority correction ─────────── */
+
+test('PR5: a TUI built-in\'s own Client registration never reads as Host territory (the PR4 self-claim regression)', () => {
+  // The PR4 regression shape: on the Remote branch the TUI's own /status
+  // registration appears in the EFFECTIVE claim union, so the retired
+  // line-claim discriminator answered "host territory" and /status under a
+  // running session resolved to steer. The corrected primitive derives
+  // Host-NAME authority from the AUTHORITATIVE catalog alone.
+  const clientSelfClaimPresent = true
+  assert.equal(clientSelfClaimPresent, true, 'fixture: the union carries the Client self-claim')
+  // Host catalog does NOT resolve 'status' → the TUI built-in stays LOCAL
+  // (never steered) even while its own Client registration is claimed.
+  assert.equal(isLocalCommandLine('status', undefined, undefined, false), true,
+    '/status is a TUI-local line when the authoritative Host catalog does not resolve it')
+  // The same correction rides the attachment gate.
+  assert.equal(commandIsLocalForAttachments({ name: 'status', rawInput: '' }, undefined, undefined, false), true,
+    'the attachment gate classifies /status as a local command (refuses staged images)')
+  // A REAL Host-resolved name still defers to the Host route (both the
+  // local-command term and a same-named contribution).
+  assert.equal(isLocalCommandLine('export', undefined, undefined, true), false,
+    'a Host-resolved name is never TUI-local (the rc.2 Host /export collision)')
+  // The busy delivery consumes the same classification: a TUI local line
+  // under steer-mode busy input takes the QUEUE placeholder, never steer.
+  assert.equal(resolveSubmitDelivery({ name: 'status', rawInput: '' }, true, 'enter', 'steer', isLocalCommandLine('status', undefined, undefined, false)), 'queue',
+    '/status under running + steer-mode busyEnter resolves to queue (the Client handler runs), never steer')
+  assert.equal(resolveSubmitDelivery({ name: 'status', rawInput: '' }, true, 'accelerated', 'queue', isLocalCommandLine('status', undefined, undefined, false)), 'queue',
+    'the accelerated gesture takes the same local-command placeholder')
+  // Negative control: an agent-facing line still follows the busy policy.
+  assert.equal(resolveSubmitDelivery(undefined, true, 'enter', 'steer', false), 'steer',
+    'a plain prompt under steer-mode busy input still steers')
+})
+
+test('PR5: /exit and /quit are sessionless aliases with identical no-session behavior', () => {
+  // PR5 supplement §6: `/quit` is `/exit`'s alias (registered as such), so
+  // BOTH must ride SESSIONLESS_COMMANDS — before a session exists neither
+  // may create one on its way to exiting.
+  assert.equal(SESSIONLESS_COMMANDS.has('exit'), true, '/exit is sessionless')
+  assert.equal(SESSIONLESS_COMMANDS.has('quit'), true, '/quit (the /exit alias) is sessionless too')
+  assert.equal(LOCAL_COMMANDS.has('exit'), true)
+  assert.equal(LOCAL_COMMANDS.has('quit'), true)
 })

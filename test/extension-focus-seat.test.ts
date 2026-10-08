@@ -21,8 +21,8 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Text } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
-import { EditorRegistry } from '../src/editor-registry.ts'
-import type { SaveLocationDeps } from '../src/save-location.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
+import type { SaveLocationDeps } from '../src/tui/interaction/save-location.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -31,7 +31,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

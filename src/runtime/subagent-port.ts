@@ -1,20 +1,69 @@
 /**
  * The subagent domain port (D2.1 extension) — the semantic contract
  * between the TUI and subagent control. Direct implements it over the dsh
- * official service today; a Remote adapter is a later milestone.
+ * official service; an experimental Remote adapter implements the same port
+ * over the wire. Direct remains the production/default backend.
  *
- * The port owns human prompt delivery and continuable-child interruption.
- * Parent/child authority is explicit for both operations; no UI row or root
- * inference crosses this boundary.
+ * The port owns human prompt delivery and continuable-child interruption, and
+ * the DETACHED wire/application DTOs that cross it (TS8-F4 owns them here so the
+ * adapter modules never depend on an application/root module). Parent/child
+ * authority is explicit for both operations; no UI row or root inference
+ * crosses this boundary.
  *
  * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
  * @module @xmoon76/dsh-pi-tui/runtime/subagent-port
  */
 
-import type {
-  SubagentPromptOutcome,
-  SubagentViewerSubmitRequest,
-} from '../subagent-viewer-submit.ts'
+/** One human-authored content part for a viewer prompt. The DTO mirrors
+ * the official `PromptContentPart` vocabulary from the DSH subagent API;
+ * `prompt()` admits image parts through the Host attachment store, so the
+ * delivery contract is not locked to text-only — the viewer's image intake
+ * joins in a later milestone without another port change. */
+export type SubagentPromptContentPart =
+  | { readonly type: 'text'; readonly text: string }
+  | {
+    readonly type: 'image'
+    readonly mediaType: string
+    readonly data: string
+    readonly name?: string
+  }
+
+/** The semantic prompt request from the viewer (mirrors
+ * SubagentViewerSubmit without importing TuiApp). The runner resolves the
+ * composer gesture to `delivery`; the `requestId` and `mode: 'continuable'`
+ * are added at the Host adapter boundary. */
+export interface SubagentViewerSubmitRequest {
+  readonly parentSessionId: string
+  readonly childSessionId: string
+  readonly delivery: 'queue' | 'steer'
+  readonly content: readonly SubagentPromptContentPart[]
+}
+
+/** Why a prompt was NOT accepted (the child inbox never received it). */
+export type SubagentPromptReject =
+  /** The addressed parent session is not live or is not the viewer's
+   * parent anymore (switch / new / resume / teardown while sending). */
+  | { readonly kind: 'parent-unavailable' }
+  /** The child id no longer carries a supported continuation state
+   * (one-shot id, unknown id, not resumable). */
+  | { readonly kind: 'stale-child' }
+  /** The parent authority / ownership was rejected by the runtime. */
+  | { readonly kind: 'unauthorized' }
+  /** The continuation runtime is absent or the child's inbox cannot admit
+   * the message right now (draining / activation disposal). */
+  | { readonly kind: 'unavailable' }
+  /** The caller's signal aborted the delivery BEFORE inbox acceptance. */
+  | { readonly kind: 'cancelled' }
+  /** Any other failure (message only; safeErrorMessage-style text). */
+  | { readonly kind: 'error'; readonly message: string }
+
+export type SubagentPromptOutcome =
+  | { readonly kind: 'ok'; readonly messageId: unknown }
+  | { readonly kind: 'rejected'; readonly reason: SubagentPromptReject }
+  /** The delivery was dispatched but no settlement could be proven (a carrier
+   * failure or an unidentified internal error): the child may already own the
+   * message. Never a proven "not sent", and never an automatic replay. */
+  | { readonly kind: 'indeterminate'; readonly message: string }
 
 /** The caller-owned per-call context for a prompt delivery (cancellation,
  * text canonicalization). The runner provides these; the port never reaches

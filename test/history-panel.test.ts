@@ -11,9 +11,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { HistoryPanel, HISTORY_PANEL_FOOTER, HISTORY_PANEL_SPLIT_WIDTH, historyOverlayGeometry } from '../src/history-panel.ts'
-import type { HistorySearchResult, HistorySearchSource } from '../src/history-search.ts'
-import type { HistoryScope } from '../src/history-search.ts'
+import { HistoryPanel, HISTORY_PANEL_FOOTER, HISTORY_PANEL_SPLIT_WIDTH, historyOverlayGeometry } from '../src/tui/panels/history-panel.ts'
+import type { HistorySearchResult, HistorySearchSource } from '../src/client/history/search.ts'
+import type { HistoryScope } from '../src/client/history/search.ts'
 
 const visibleWidthOf = visibleWidth
 
@@ -28,18 +28,18 @@ class FakeSource implements HistorySearchSource {
   fail = false
   /** Manually-settled pending searches (deterministic race control — the
    * test resolves them in the exact order it wants; no wall-clock timing). */
-  pending: Array<{ resolve: (page: import('../src/history-search.ts').HistorySearchPage) => void; reject: (error: unknown) => void }> = []
+  pending: Array<{ resolve: (page: import('../src/client/history/search.ts').HistorySearchPage) => void; reject: (error: unknown) => void }> = []
   /** When true, `search()` returns a deferred the test resolves via
    * {@link resolveNext}. Otherwise it resolves after the delay. */
   manual = false
-  search(request: import('../src/history-search.ts').HistorySearchRequest): Promise<import('../src/history-search.ts').HistorySearchPage> {
+  search(request: import('../src/client/history/search.ts').HistorySearchRequest): Promise<import('../src/client/history/search.ts').HistorySearchPage> {
     this.requests.push({
       scope: request.scope, query: request.query, cwd: request.cwd,
       sessionId: request.sessionId, limit: request.limit,
     })
     if (this.fail) return Promise.reject(new Error('boom'))
     if (this.manual) {
-      return new Promise<import('../src/history-search.ts').HistorySearchPage>((resolve, reject) => {
+      return new Promise<import('../src/client/history/search.ts').HistorySearchPage>((resolve, reject) => {
         this.pending.push({ resolve, reject })
       })
     }
@@ -67,7 +67,7 @@ function row(content: string, ts: number, cwd = '/a', id = content): HistorySear
   return { id, content, cwd, ts, sourceFile: '/a/h.jsonl', sourceByteOffset: 0 }
 }
 
-function makePanel(source: FakeSource, opts: Partial<import('../src/history-panel.ts').HistoryPanelOptions> = {}) {
+function makePanel(source: FakeSource, opts: Partial<import('../src/tui/panels/history-panel.ts').HistoryPanelOptions> = {}) {
   let accepted: string | undefined
   let closed = 0
   const panel = new HistoryPanel({

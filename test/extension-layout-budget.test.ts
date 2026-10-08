@@ -29,7 +29,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -397,12 +397,13 @@ test('the header badge budget accounts for host title, plan and viewer badges', 
   host.refreshOutlets()
   app.refreshChrome()
   await settle()
-  // Wide host content: title + plan + viewer badges. The badge run must be
-  // re-budgeted against the ACTUAL host-owned width (not the fixed prefix),
-  // so a 3-cell badge no longer fits and is truncated/dropped.
+  // Wide host content: title + plan. The badge run must be re-budgeted
+  // against the ACTUAL host-owned width (not the fixed prefix), so a 3-cell
+  // badge no longer fits and is truncated/dropped. The viewer identity no
+  // longer rides the header (it moved to the viewer subject bar), so only
+  // the session title and the plan badge consume the host-owned width here.
   app.setSessionTitle('a-very-long-session-title-that-keeps-growing')
   app.setPlanMode(true)
-  app.setViewerMode({ parentSessionId: 'session-main', childSessionId: 'c', label: 'research subagent', mode: 'one-shot', activity: 'running' })
   host.refreshOutlets()
   app.refreshChrome()
   await vt.waitForRender()
@@ -410,10 +411,10 @@ test('the header badge budget accounts for host title, plan and viewer badges', 
   const viewport = vt.getViewport().join('\n').split('\n')
   const headerRow = viewport[0] ?? ''
   // The badge run must be bounded by what the host chrome leaves free:
-  // `🐋  dsh-pi-tui · research subagent [plan] [viewing subagent · one-shot · read-only]` alone
-  // exceeds 40 columns, so the remaining budget is tiny — the badge text
-  // (with its 1 leading space + 3-cell run) cannot fit and is truncated.
-  const hostOwned = visibleWidth('🐋  dsh-pi-tui · research subagent [plan] [viewing subagent · one-shot · read-only]')
+  // `🐋  dsh-pi-tui · a-very-long-session-title-that-keeps-growing [plan]`
+  // alone exceeds 40 columns, so the remaining budget is tiny — the badge
+  // text (with its 1 leading space + 3-cell run) cannot fit and is truncated.
+  const hostOwned = visibleWidth('🐋  dsh-pi-tui · a-very-long-session-title-that-keeps-growing [plan]')
   const budget = Math.max(1, 40 - hostOwned - 2)
   assert.ok(
     visibleWidth(host.headerBadgeText()) <= Math.max(4, budget + 1) || !host.headerBadgeText().includes('[B]'),
@@ -435,7 +436,7 @@ test('the TuiApp chrome merges the budgeted outlet content (integration)', async
   ledger.register('chrome.header.badge', { id: 'budget' }, { text: 'budget-badge' }, 'p1')
   host.refreshOutlets()
   app.refreshChrome()
-  app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 0, steps: 0, statsLine: '' })
+  app.setStatus({ model: 'm', cwd: '/w', branch: '', turns: 0, steps: 0 })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('budget-badge'), `budgeted badge must render:\n${view}`)

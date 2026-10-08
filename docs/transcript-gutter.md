@@ -3,7 +3,8 @@
 ## What it is
 
 Every transcript block renders **two cells short of the terminal's right
-edge** (`TRANSCRIPT_RIGHT_GUTTER = 2` in `src/tui-app.ts`), so content never
+edge** (`TRANSCRIPT_RIGHT_GUTTER = 2` in
+`src/tui/components/transcript-leaves.ts`), so content never
 visually collides with the terminal boundary. The gutter is a property of
 the **transcript surface only** — the editor, footer, welcome card,
 overlays, pickers and other chrome keep the full terminal width.

@@ -11,13 +11,16 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
+import { createSurfaceRuntime, type SurfaceExtensionService } from '../src/app/surface/runtime.ts'
+import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -108,7 +111,7 @@ test('stale surface calls are benign no-ops after disposal', async () => {
   app.requestRender()
   app.requestRender(true)
   app.notify('after death')
-  app.setStatus({ model: 'x', cwd: '/w', branch: '', turns: 1, steps: 1, statsLine: '' })
+  app.setStatus({ model: 'x', cwd: '/w', branch: '', turns: 1, steps: 1 })
   app.setTasks([{ id: 't', label: 'l', status: 'running', kind: 'bash' }])
   app.setQueueItems([{ id: 'q', text: 't', mode: 'followup' }])
   app.setTodoSummary([{ content: 'todo', status: 'in_progress' }])
@@ -232,4 +235,96 @@ test('fullscreen toggles and transcript search are benign no-ops after dispose',
   assert.equal(app.isFullscreen(), false, 'fullscreen must stay off after dispose')
   assert.equal(app.isSearching(), false, 'search must stay closed after dispose')
   await settle()
+})
+
+test('M3-6 PR3: one final-dispose cleanup failure cannot skip later cleanup or the generation retirement', (t) => {
+  // Deliberately NOT started: no process TUI slot is claimed, so this
+  // fault-injected final teardown can never poison the shared process slot for
+  // later tests (the plan's Step 3 isolation rule).
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const failure = new Error('stop failed')
+  t.mock.method(app, 'stop', () => { throw failure })
+  const before = app.getSurfaceGeneration()
+
+  assert.throws(() => app.dispose(), (error: unknown) => error === failure)
+  assert.equal(app.isDisposed(), true, 'the disposed latch is committed before the failing step')
+  assert.ok(app.getSurfaceGeneration() > before,
+    'the generation retirement still ran after the failing cleanup step')
+
+  app.dispose()
+  assert.ok(app.getSurfaceGeneration() > before, 'a second dispose is inert')
+})
+
+/**
+ * M3-6 PR3 SurfaceRuntime aggregate continuation (SUPPORTING owner-level proof).
+ * The real owner is exercised unmounted: a throwing extension cleanup must not
+ * prevent the LATER extension-surface bridge detach, which pins the aggregate
+ * batch ordering itself. The plan's Step 4 requirement — a throwing
+ * TuiApp/app-owned cleanup must not strand the later plugin/theme/extension
+ * releases ON A MOUNTED surface — is proven decisively by the mounted Remote
+ * runner case `runner-remote-shutdown` L6-D; the sibling TuiApp final-dispose
+ * case above pins the TuiApp-owned batch continuation without a claim.
+ */
+/** The null terminal notification presentation (the terminal sequences are
+ *  asserted by the notification suites; these fixtures exercise the surface
+ *  aggregate without a real terminal). */
+const nullPresentation = {
+  handleFocusReport: () => {},
+  markFocused: () => {},
+  focusState: () => 'focused' as const,
+  notify: () => {},
+  enableFocusReporting: () => {},
+  disableFocusReporting: () => {},
+}
+
+test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge detach', () => {
+  const surface =  createSurfaceRuntime({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: nullPresentation,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    terminalProgress: undefined,
+    mainProgressAuthority: 'local-events',
+    createPluginManagerPanel,
+  })
+  const failure = new Error('theme hook release failed')
+  let themeReleased = 0
+  let detachCalls = 0
+  const service = {
+    _ledger: () => new ExtensionLedger(),
+    setThemeUnloadedHook: () => () => {
+      themeReleased += 1
+      throw failure
+    },
+    detachSurface: () => { detachCalls += 1 },
+  } as unknown as SurfaceExtensionService
+
+  surface.attachExtensionHost(service)
+  assert.throws(() => surface.dispose(), (error: unknown) => error === failure)
+  assert.equal(themeReleased, 1, 'the theme-unload hook release ran once')
+  assert.equal(detachCalls, 1, 'the extension bridge detach still ran after the throwing release')
+
+  surface.dispose()
+  assert.equal(detachCalls, 1, 'a second dispose is inert')
+})
+
+test('M3-6 PR3: one throwing tracked keybinding-editor disposal cannot strand its siblings', () => {
+  // Not started: this exercises the final-dispose teardown without claiming the
+  // process slot, so the failing panel can never poison the shared slot (the
+  // same isolation rule as the final-dispose case above).
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const disposed: string[] = []
+  const first = { dispose: () => { disposed.push('first'); throw new Error('first panel dispose failed') } } as never
+  const second = { dispose: () => { disposed.push('second') } } as never
+  app.trackKeybindingEditor(first)
+  app.trackKeybindingEditor(second)
+
+  assert.throws(() => app.dispose(), /first panel dispose failed/)
+  assert.deepEqual(disposed, ['first', 'second'],
+    'the later tracked panel was still disposed after the first threw')
+
+  app.dispose()
+  assert.deepEqual(disposed, ['first', 'second'], 'a second dispose is inert')
 })

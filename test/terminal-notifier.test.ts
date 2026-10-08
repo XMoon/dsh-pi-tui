@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { EventEmitter } from 'node:events'
-import { guardedStreamWriter, resolveAutoMethod, sanitizeOscPayload, TerminalNotifier } from '../src/notification/terminal-notifier.ts'
+import { guardedStreamWriter, resolveAutoMethod, sanitizeOscPayload, TerminalNotifier } from '../src/tui/notification/terminal-notifier.ts'
 
 /** A writer that records every sequence. */
 function recordingWriter(): { written: string[]; write(sequence: string): void } {
@@ -38,12 +38,16 @@ test('osc777 writes the notify-send form with title and body', () => {
   assert.deepEqual(writer.written, ['\x1b]777;notify;DSH;Turn complete\x07'])
 })
 
-test('auto resolves from the terminal environment (Codex-aligned OSC 9 whitelist)', () => {
+test('auto resolves from the terminal environment (verified OSC 9 whitelist)', () => {
   // Confirmed OSC 9 implementations (by TERM_PROGRAM).
   assert.equal(resolveAutoMethod({ TERM_PROGRAM: 'iTerm.app' }), 'osc9')
   assert.equal(resolveAutoMethod({ TERM_PROGRAM: 'WezTerm' }), 'osc9')
   assert.equal(resolveAutoMethod({ TERM_PROGRAM: 'Ghostty' }), 'osc9')
   assert.equal(resolveAutoMethod({ TERM_PROGRAM: 'WarpTerminal' }), 'osc9')
+  // Tern: locally verified in a real 0.5.0 Remote pane (OSC 9 toast AND the
+  // OSC 9;4 progress indicator both render), matched case-insensitively.
+  assert.equal(resolveAutoMethod({ TERM_PROGRAM: 'tern' }), 'osc9')
+  assert.equal(resolveAutoMethod({ TERM_PROGRAM: 'TERN' }), 'osc9')
   // Kitty: by TERM alias and by its window-id env marker.
   assert.equal(resolveAutoMethod({ TERM: 'xterm-kitty' }), 'osc9')
   assert.equal(resolveAutoMethod({ KITTY_WINDOW_ID: '1' }), 'osc9')
@@ -66,6 +70,11 @@ test('auto emits through the resolved method', () => {
   const notifier = new TerminalNotifier(writer)
   notifier.notify('auto', 'DSH', 'Turn complete', { TERM_PROGRAM: 'iTerm.app' })
   assert.deepEqual(writer.written, ['\x1b]9;Turn complete\x07'])
+  // Tern resolves to the OSC 9 toast under auto (the verified real-pane path).
+  const ternWriter = recordingWriter()
+  const ternNotifier = new TerminalNotifier(ternWriter)
+  ternNotifier.notify('auto', 'DSH', 'Turn complete', { TERM_PROGRAM: 'tern' })
+  assert.deepEqual(ternWriter.written, ['\x1b]9;Turn complete\x07'])
   const bellWriter = recordingWriter()
   const bellNotifier = new TerminalNotifier(bellWriter)
   bellNotifier.notify('auto', 'DSH', 'Turn complete', {})

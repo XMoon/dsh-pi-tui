@@ -10,8 +10,8 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { projectCompact } from '../src/compact-projection.ts'
-import { clusterAdjacentAmbientContext } from '../src/context-presentation.ts'
+import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
+import { clusterAdjacentAmbientContext } from '../src/tui/transcript/context-structure.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -199,6 +199,47 @@ test('9.2 a Work disclosure from an older window is not re-applied to a new page
   await vt.waitForRender()
   assert.equal(app.expandedWorkOwnersForTest().has(newOwner), false, 'the new page owner starts collapsed')
   assert.match(vt.getViewport().join('\n'), /▸ Activity.*· 1 action · read ×1/)
+})
+
+// --- 2026-09-29 compact historical compaction: window authority §7.8/§7.9 ---
+
+test('a history window tail never impersonates the global latest (hasNewer=true)', async () => {
+  const { vt, app } = startApp()
+  // The window's LAST Work is only this page's tail — the transcript has
+  // newer content, so it must compact like any other historical span.
+  app.setTranscript(
+    [thinking(2, 'page tail action run'), tool(2, 'ok'), thinking(3, 'tail reasoning')],
+    new Map(),
+    { mode: 'history', endTurn: 3, firstTurn: 2, lastTurn: 3, hasNewer: true },
+  )
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.match(view, /▸ Activity · 1 action · read ×1/, `the page-tail action span stays header-only:\n${view}`)
+  assert.match(view, /▸ Thought/, `the page-tail think-only span reads Thought:\n${view}`)
+  assert.ok(!/Think:/.test(view), `no preview may survive on a hasNewer page tail:\n${view}`)
+})
+
+test('a window at the true tail (hasNewer=false) keeps the latest preview', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript(
+    [thinking(2, 'true tail reasoning'), tool(2, 'ok')],
+    new Map(),
+    { mode: 'history', endTurn: 2, firstTurn: 2, lastTurn: 2, hasNewer: false },
+  )
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.match(view, /Think:\s+true tail reasoning/, `the true-tail Work keeps its latest preview:\n${view}`)
+  assert.match(view, /Action:/, `the true-tail Work keeps its Action preview:\n${view}`)
+  // Round-trip: paging back to hasNewer=true must invalidate the cached
+  // component in the other direction too (true → false → true).
+  app.setTranscript(
+    [thinking(2, 'true tail reasoning'), tool(2, 'ok')],
+    new Map(),
+    { mode: 'history', endTurn: 2, firstTurn: 2, lastTurn: 2, hasNewer: true },
+  )
+  await vt.waitForRender()
+  const compacted = vt.getViewport().join('\n')
+  assert.ok(!/Think:/.test(compacted), `returning to a hasNewer page re-compacts the tail:\n${compacted}`)
 })
 
 // --- 9.3 restored legacy Context inside a window ---------------------------

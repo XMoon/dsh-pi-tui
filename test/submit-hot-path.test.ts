@@ -214,10 +214,15 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
       }
     },
     inject: (message: unknown) => { host?.injected.push(message) },
-    cancel: (_reason: unknown, options: { keepInbox: boolean }) => {
+    // The official Agent shape is `cancel(cause, options?)` — the knobs are
+    // OPTIONAL (`app/session/interrupt.ts`), and the Direct retirement's pre-cancel
+    // deliberately calls it with no knobs at all (the port hides them). The
+    // fake must tolerate the no-arg call instead of reading an undefined
+    // options object.
+    cancel: (_reason?: unknown, options?: { keepInbox?: boolean }) => {
       if (host === undefined) return
       host.cancelCalls += 1
-      host.lastCancelKeepInbox = options.keepInbox
+      if (options !== undefined) host.lastCancelKeepInbox = options.keepInbox
       // The interrupt transport: the test hook models the turn converging to
       // idle (the real Agent drains the turn and keeps the inbox).
       host.onCancel?.()
@@ -383,19 +388,84 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     name: string
     description?: string
     input?: { hint: string; attachments?: boolean }
+    definitionId?: string
     handler: (...args: never[]) => unknown
   }>()
   const executed: { line: string; attachments: readonly unknown[]; outcome: 'executed' | 'rejected' }[] = []
+  /** The registry-change notification the official service fires synchronously
+   *  per register/dispose; the runner's completions + Host-origin refresh
+   *  listens on it. Wired to the real context by `bootCommandHarness`. */
+  let emitChange: () => void = () => {}
+  /** The session-scoped command layers, keyed by the exact session id. */
+  const scopedLayers = new Map<string, Map<string, {
+    name: string
+    handler: (...args: never[]) => unknown
+    description?: string
+    input?: { hint: string; attachments?: boolean }
+    definitionId?: string
+  }>>()
+  /** The EFFECTIVE view for one agent: the global layer with the agent's
+   *  session-scoped entries shadowing it (official `ScopedLayers.merge`). */
+  const effectiveView = (agent: unknown): Map<string, {
+    name: string
+    handler: (...args: never[]) => unknown
+    description?: string
+    input?: { hint: string; attachments?: boolean }
+    definitionId?: string
+  }> => {
+    const merged = new Map(definitions)
+    const sessionId = (agent as { session?: { id?: string } } | undefined)?.session?.id
+    const layer = sessionId === undefined ? undefined : scopedLayers.get(sessionId)
+    if (layer !== undefined) for (const [name, definition] of layer) merged.set(name, definition)
+    return merged
+  }
   const commands = {
     register: (definition: {
       name: string
       handler: (...args: never[]) => unknown
       description?: string
       input?: { hint: string; attachments?: boolean }
+      definitionId?: string
     }): (() => void) => {
+      // The official registry refuses a same-LAYER duplicate by name
+      // (`command "<name>" is already registered`). The Direct mirror
+      // provenance depends on it: the TUI's compatibility mirror must LOSE to
+      // a pre-existing genuine Host command instead of silently overwriting it
+      // (an overwrite would make the genuine command unreachable and leave the
+      // origin map answering with our own mirror).
+      if (definitions.has(definition.name)) {
+        throw new Error(`command "${definition.name}" is already registered`)
+      }
       definitions.set(definition.name, definition)
+      emitChange()
       return () => {
-        if (definitions.get(definition.name) === definition) definitions.delete(definition.name)
+        if (definitions.get(definition.name) === definition) {
+          definitions.delete(definition.name)
+          emitChange()
+        }
+      }
+    },
+    // The SESSION-scoped layer (the official `ScopedLayers`): a scoped entry
+    // SHADOWS the global one for that exact session, and a same-name scoped
+    // registration is legal across layers — that is how a session's effective
+    // catalog differs from the standing one (a plugin's session-scoped
+    // command, or a descriptor the session commits).
+    registerScoped: (sessionId: string, definition: {
+      name: string
+      handler: (...args: never[]) => unknown
+      description?: string
+      input?: { hint: string; attachments?: boolean }
+      definitionId?: string
+    }): (() => void) => {
+      let layer = scopedLayers.get(sessionId)
+      if (layer === undefined) { layer = new Map(); scopedLayers.set(sessionId, layer) }
+      layer.set(definition.name, definition)
+      emitChange()
+      return () => {
+        if (scopedLayers.get(sessionId)?.get(definition.name) === definition) {
+          scopedLayers.get(sessionId)?.delete(definition.name)
+          emitChange()
+        }
       }
     },
     // The effective catalog mirrors the registry EXACTLY, the descriptor's
@@ -403,16 +473,22 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // `leadingInput` command (`/goal <objective>`) and an execute-kind one
     // (`/compact`). Fabricating an `input` for every row would erase the
     // command KIND and let a name-level routing bug pass.
-    list: () => [...definitions.values()].map(({ name, description, input }) => ({
+    list: (agent?: unknown) => [...(agent === undefined ? definitions : effectiveView(agent)).values()].map(({ name, description, input, definitionId }) => ({
       name,
       description: description ?? '',
+      // The official descriptor carries the registration's own
+      // `definitionId` (PR5 v2 §1C): the Host-origin derivation compares the
+      // EFFECTIVE WINNER's id against this surface's stamped Direct
+      // compatibility mirrors. Dropping it here would make every mirror look
+      // like a genuine Host command and let the R6-1/R6-2 authority bugs pass.
+      ...(definitionId === undefined ? {} : { definitionId }),
       ...(input === undefined ? {} : { input }),
     })),
     // The real commands service resolves a definition by name for the
     // global layer too (`find(undefined, name)`); the harness mirrors it so
     // a TUI-owned sessionless command runs LOCALLY in a deferred start
     // instead of falling through to the session dispatch.
-    find: (_agent: unknown, name: string) => definitions.get(name),
+    find: (agent: unknown, name: string) => effectiveView(agent).get(name),
     // A REGISTERED command executes through the command plane (the Host
     // command semantics): the handler runs with a CommandRuntime-shaped
     // invocation, so a real handler (e.g. /skill → loadSkill) delivers
@@ -421,7 +497,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     // ACTUAL executions are recorded — an attempted miss is not a command.
     execute: async (agent: unknown, line: string, attachments: readonly unknown[] = []) => {
       const name = line.trim().replace(/^\//, '').split(/\s+/)[0] ?? ''
-      const def = definitions.get(name)
+      const def = effectiveView(agent).get(name)
       // A name that does not resolve is NOT a command-plane call (the submit
       // falls back to the ordinary delivery). A RESOLVED invocation is
       // recorded WITH its settled outcome: the real host executor appends its
@@ -449,6 +525,8 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
       return { commandId: CommandId('cmd-test'), result }
     },
     handler: (name: string) => definitions.get(name)?.handler,
+    /** Test seam: wire the registry-change notification to the real context. */
+    setChangeEmitter: (emit: () => void) => { emitChange = emit },
   }
   return {
     counting,
@@ -476,14 +554,14 @@ function installVirtualProcessTerminal(vt: VirtualTerminal): () => void {
   const prototype = ProcessTerminal.prototype as object
   const names = [
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
     'columns', 'rows', 'kittyProtocolActive', 'modifyOtherKeysActive',
   ]
   const originals = new Map<string, PropertyDescriptor | undefined>()
   const virtual = vt as unknown as Record<string, unknown>
   const methods = new Set([
     'start', 'stop', 'drainInput', 'write', 'moveBy', 'hideCursor', 'showCursor',
-    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress',
+    'clearLine', 'clearFromCursor', 'clearScreen', 'setTitle', 'setProgress', 'setProgressState',
   ])
   for (const name of names) {
     originals.set(name, Object.getOwnPropertyDescriptor(prototype, name))
@@ -1030,7 +1108,16 @@ test('a failed submit clears the pending row and surfaces the error', async (t) 
   }
   const settled = vt.getViewport().join('\n')
   assert.ok(!settled.includes('Submitting…'), `the failed submit must clear the ack row:\n${settled}`)
-  assert.ok(settled.includes('submission failed'), `the failure must be surfaced:\n${settled}`)
+  // PR5 slice A: a PROVEN rejection (`session/agent-busy` for a refused Direct
+  // prompt admission) is settled structurally by the submission owner — the
+  // refusal's OWN message is surfaced, never the generic "submission failed"
+  // wrapper. The underlying reason stays in the structured `details`.
+  assert.ok(settled.includes('prompt rejected'),
+    `the refusal's own message must be surfaced:\n${settled}`)
+  assert.ok(!settled.includes('submission failed'),
+    'a proven rejection never takes the generic submission-failure path')
+  assert.equal(mounted.app.getDraft(), 'hello boom', 'the refused prompt restores the submitted draft')
+  assert.equal(harness.host.followedUp.length, 0, 'nothing was written')
 })
 
 test('a shell close and throttled tail flush after disposal are inert', async (t) => {
@@ -1088,7 +1175,7 @@ test('the review repro: an older `!` run dying late NEVER clears the newer pendi
 
   mounted.app.setDraft('!sleep 0.4')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
-  // B immediately: its runLocalShell aborts A's controller.
+  // B immediately: its user-shell run aborts A's controller.
   mounted.app.setDraft('!echo done')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   await waitForDelivery(harness.host, 'the newer `!echo` submit')
@@ -1144,8 +1231,8 @@ test('a cancellation-shaped prompt admission failure maps to agent-busy rejectio
   const settled = vt.getViewport().join('\n')
   assert.ok(!settled.includes('Submitting…'),
     `the cancelled submit must clear the ack row (never stuck pending):\n${settled}`)
-  assert.ok(settled.includes('submission failed'),
-    'a Direct prompt admission failure must surface as a rejection')
+  assert.ok(!settled.includes('submission failed'),
+    'a proven refusal is settled structurally, never via the generic submission-failure path')
   assert.ok(settled.includes('prompt rejected'),
     'the official agent-busy rejection message must be surfaced')
   assert.equal(mounted.app.getDraft(), 'hello cancel', 'a rejected prompt admission restores the submitted draft')
@@ -1229,6 +1316,8 @@ async function bootCommandHarness(
 ): Promise<{
   harness: ReturnType<typeof makeHarness>
   mounted: { dispose: () => Promise<void>; app: TuiApp }
+  /** The harness's Cordis context (durable session-event emission). */
+  context: Context
   /** Register a contribution AFTER the mount (a late/HMR plugin). */
   registerContribution(contribution: {
     id: string
@@ -1295,6 +1384,14 @@ async function bootCommandHarness(
     } as never)
   }
   const harness = makeHarness(home, { id: 'command-session', events: sessionEvents('resumed answer') })
+  // The official command service notifies `commands/change` on every
+  // register/dispose; the runner's completion + Host-origin refresh listens on
+  // it. Without the bridge a post-mount registration could never reach the
+  // effective catalog the routing gates read.
+  if (process.env.PR5_BISECT_NO_BRIDGE !== '1') {
+    ;(harness.commands as { setChangeEmitter(emit: () => void): void })
+      .setChangeEmitter(() => { context.emit('commands/change') })
+  }
   const hostCommandDisposers = new Map<string, () => void>()
   for (const entry of options.hostCommands ?? []) {
     const command: { name: string; input?: { hint: string; attachments?: boolean } } =
@@ -1418,6 +1515,7 @@ async function bootCommandHarness(
   return {
     harness,
     mounted,
+    context,
     registerContribution,
     imageSaves,
     fileSaves,
@@ -1937,7 +2035,8 @@ test('running + busyEnter=steer: an ordinary Enter presents a steering echo and 
   // The human-prompt local echo placement must match the resolved delivery
   // (steer), not the pre-policy `queue`.
   const pending = mounted.app.pendingInputForTest()
-  assert.ok(pending.steering.some(row => row.local === true && row.text === 'enter steer'),
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(pendingUsers.some(row => row.local === true && row.text === 'enter steer'),
     `the Enter steer must present in the steering lane: ${JSON.stringify(pending)}`)
   assert.ok(!pending.queued.some(row => row.local === true),
     `the Enter steer must not present as a queued row: ${JSON.stringify(pending.queued)}`)
@@ -1951,7 +2050,8 @@ test('running + busyEnter=queue: the accelerated chord presents a steering echo 
   mounted.app.setDraft('accelerated steer')
   ;(mounted.app as unknown as { submitDraft(request?: string): void }).submitDraft('accelerated')
   const pending = mounted.app.pendingInputForTest()
-  assert.ok(pending.steering.some(row => row.local === true && row.text === 'accelerated steer'),
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(pendingUsers.some(row => row.local === true && row.text === 'accelerated steer'),
     `the accelerated steer must present in the steering lane: ${JSON.stringify(pending)}`)
   assert.ok(!pending.queued.some(row => row.local === true),
     `the accelerated steer must not present as a queued row: ${JSON.stringify(pending.queued)}`)
@@ -2214,6 +2314,64 @@ test('own steer takes a history-browsed fullscreen viewport to the live tail; a 
     'a background authoritative steering row must not steal the viewport')
 })
 
+test('a background pending Context occurrence never steals a history-browsed viewport', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-history-context-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'history-context-session', events: longSessionEvents(30) })
+  harness.host.status = 'running'
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'history-context-session' })
+  harness.host.status = 'running'
+  mounted.app.setFullscreen(true)
+  await waitForRenderView(vt)
+
+  // Page into history, then browse away from the end.
+  mounted.app.scrollToTop({ disableFollow: true })
+  await waitForRenderView(vt)
+  const scroll = mounted.app.fullscreenScrollForTest()
+  assert.equal(scroll?.isFollowingEnd, false, 'precondition: the reader is browsing history')
+  const scrollTopBefore = scroll?.scrollTop ?? 0
+
+  // A background non-user Context occurrence settles while the Agent works.
+  harness.host.nextStep.push({
+    id: 'background-context-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'BACKGROUND-CONTEXT-PROBE' }],
+    source: { kind: 'plugin', plugin: 'jobs' },
+  })
+  context.emit('session/event', harness.session as never, event('agent/inbox/spliced', {
+    target: 'next-step',
+    start: 0,
+    inserted: [],
+  }, 991) as never)
+  await waitForRenderView(vt)
+  const afterContext = mounted.app.fullscreenScrollForTest()
+  assert.equal(afterContext?.isFollowingEnd, false,
+    'a background Context occurrence must not steal the viewport')
+  assert.equal(afterContext?.scrollTop, scrollTopBefore,
+    'the historical scrollTop must be preserved')
+
+  // Control: a new LOCAL human echo still returns to latest as before.
+  mounted.app.setDraft('HISTORY-CONTEXT-OWN')
+  ;(mounted.app as unknown as {
+    actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
+  }).actionDispatcher.dispatch('app.input.steer')
+  await waitForDelivery(harness.host, 'history context own')
+  await waitForRenderView(vt)
+  assert.equal(mounted.app.fullscreenScrollForTest()?.isFollowingEnd !== false, true,
+    'own input must still take the viewport back to the live tail')
+})
+
 test('a steer gesture keeps its gesture-time delivery mode across a FIFO status flip', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-steer-mode-')
@@ -2254,8 +2412,9 @@ test('a steer gesture keeps its gesture-time delivery mode across a FIFO status 
     actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
   }).actionDispatcher.dispatch('app.input.steer')
   const atGesture = mounted.app.pendingInputForTest()
-  assert.ok(atGesture.steering.some(row => row.local === true && row.text === 'steer with captured mode'),
-    `the running steer must present in the steering lane: ${JSON.stringify(atGesture.steering)}`)
+  const atGestureUsers = atGesture.tail.filter(item => item.kind === 'user').map(item => item.row)
+  assert.ok(atGestureUsers.some(row => row.local === true && row.text === 'steer with captured mode'),
+    `the running steer must present in the steering lane: ${JSON.stringify(atGesture)}`)
 
   // The agent flips idle while B waits on the FIFO turn.
   harness.host.status = 'idle'
@@ -2281,10 +2440,11 @@ test('a skill invocation installs no client-local submission echo', async (t) =>
   // (the skill handler owns the delivery and cannot complete the rpc
   // correlation), so no local echo exists even before the command resolves.
   const pending = mounted.app.pendingInputForTest()
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
   assert.ok(!pending.queued.some(row => row.local === true),
     `a skill invocation must not install a queue echo: ${JSON.stringify(pending.queued)}`)
-  assert.ok(!pending.steering.some(row => row.local === true),
-    `a skill invocation must not install a steering echo: ${JSON.stringify(pending.steering)}`)
+  assert.ok(!pendingUsers.some(row => row.local === true),
+    `a skill invocation must not install a steering echo: ${JSON.stringify(pendingUsers)}`)
   // The skill still delivers through its existing command path.
   await waitForDelivery(harness.host, 'skill invocation')
   assert.ok(harness.host.steered.length + harness.host.followedUp.length >= 1,
@@ -2307,15 +2467,16 @@ test('a submission refused by the transition fence leaves no pending echo', asyn
   assert.equal(await drainUntil(() => /session transition is in progress/.test(mounted.app.notifyTextForTest()), 5000), true,
     'the transition fence must refuse the submission')
   const pending = mounted.app.pendingInputForTest()
+  const pendingUsers = pending.tail.filter(item => item.kind === 'user').map(item => item.row)
   assert.ok(!pending.queued.some(row => row.local === true),
     `the refused submission must not leave a queue echo: ${JSON.stringify(pending.queued)}`)
-  assert.ok(!pending.steering.some(row => row.local === true),
-    `the refused submission must not leave a steering echo: ${JSON.stringify(pending.steering)}`)
+  assert.ok(!pendingUsers.some(row => row.local === true),
+    `the refused submission must not leave a steering echo: ${JSON.stringify(pendingUsers)}`)
   harness.releaseCreateGate()
   await transition
 })
 
-test('a context occurrence never becomes a pending user row', async (t) => {
+test('a context occurrence renders as the generic non-user Context tail row', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-context-lane-')
   const previousHome = process.env.DSH_HOME
@@ -2346,7 +2507,12 @@ test('a context occurrence never becomes a pending user row', async (t) => {
   }, 920) as never)
   await waitForRenderView(vt)
   const view = vt.getViewport().join('\n')
-  assert.ok(!view.includes('injected-context-marker'), `context must not render as pending user input:\n${view}`)
+  // The tail row is a generic NON-user Context card: its content preview is
+  // visible with a waiting-for-next-step status, never a user bubble marker,
+  // never a steering row, never a queue row.
+  assert.ok(view.includes('injected-context-marker'), `the pending Context preview must be visible:\n${view}`)
+  assert.ok(view.includes('waiting for next step…'), `the pending Context status must render:\n${view}`)
+  assert.ok(!view.includes('❯ injected-context-marker'), `context must not render as a user bubble:\n${view}`)
   assert.ok(!view.includes('steering…'), `context must not render as a steering row:\n${view}`)
   assert.ok(!view.includes('ctrl+s to steer all'), `context must not enter the queue pane:\n${view}`)
   void mounted
@@ -2584,6 +2750,141 @@ test('a name the host catalog resolves with an UNCLAIMED line never runs the col
     'the MODEL receives the raw line')
 })
 
+// QUALIFICATION GAP (recorded honestly, whole-PR F2): this case is NOT a
+// discriminating witness. Restoring the raw `isSkillInvocation` predicate in
+// either sibling still passes it, because the target line is already routed
+// ordinary at an earlier gate. The reviewer's diagnosis of WHY, and the recipe
+// for a real witness: this fixture boots `hostCommands: ['grilling']`, which
+// registers the Host name BEFORE mount, so `replaceSkillCommands` skips the
+// wrapper (`taken` contains the name) and `waitForSkillWrapper` is satisfied by
+// the Host name alone — no LIVE wrapper ever exists. A discriminating case must
+// follow the AC-2/R7-3 order instead: boot `skills: true` with NO same-name
+// hostCommands, first PROVE the `[skill]` wrapper is registered, and only then
+// `registerScoped('command-session', { name: 'grilling', handler })` WITHOUT
+// `input` — at that point an argued line is Host-reserved ordinary while the raw
+// skill predicate is genuinely true. The F2 evidence in this PR is the
+// structural guard (both siblings must consume the Host reservation), not this
+// test.
+test('whole-PR F2: an ordinary line under a Host name a LIVE skill wrapper shares takes the ORDINARY steer route', async (t) => {
+  // The RAW skill predicate used to outrank the classification on this sibling:
+  // with a live `/grilling` wrapper AND a genuine execute-kind Host `/grilling`,
+  // `/grilling args` is an ORDINARY submission (the Host does not claim the
+  // argued line) — so a steer must take the ordinary steer path, never the
+  // wrapper's skill delivery (which would run the wrapper handler and steer a
+  // rewritten line).
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'steer',
+    status: 'running',
+    skills: true,
+    hostCommands: ['grilling'],
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.host.steered.length + harness.host.followedUp.length > 0, 5_000)
+  assert.equal(harness.executed.some(entry => entry.line.startsWith('/grilling')), false,
+    `the wrapper must not run an ordinary line: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.steered.length, 1, 'the ordinary steer reaches the agent inbox')
+  const steered = harness.host.steered[0] as { content: readonly { text?: string }[] }
+  assert.deepEqual(steered.content.map(block => block.text), ['/grilling args'],
+    'the RAW line steers — never a rewritten skill invocation')
+})
+test('§D3 immediate echo (review F11): an argued line of a host-resolved name echoes BEFORE the FIFO turn it waits behind', async (t) => {
+  // The submit-time echo gate must consume the SAME §D3 line authority as
+  // the delivery/attachment/dispatch gates: a HOST-RESOLVED name is never a
+  // TUI-local line — `/export foo` (execute-kind Host /export resolves the
+  // name; the catalog does not claim THIS argued line) is an ORDINARY
+  // submission, so its local echo installs SYNCHRONOUSLY, before the FIFO
+  // turn. Without the unified gate the line vanished until an earlier
+  // blocked submission released the turn (external round-4 finding).
+  const { harness, mounted, context } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'running',
+    hostCommands: ['export'],
+  })
+  // Hold submission A's HOST-command execution open so the shared FIFO turn
+  // stays taken while `/export foo` is accepted.
+  let releaseSlow: (() => void) | undefined
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  const originalExecute = (harness.commands as {
+    execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+  }).execute.bind(harness.commands)
+  ;(harness.commands as { execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown> }).execute
+    = async (agent, line, attachments) => {
+      if (line.trim() === '/slowcmd') {
+        await slowGate
+        return { commandId: CommandId('cmd-slow'), result: { kind: 'success' } }
+      }
+      return originalExecute(agent, line, attachments)
+    }
+  ;(harness.commands as {
+    register(def: { name: string; handler: () => unknown }): () => void
+  }).register({ name: 'slowcmd', handler: () => ({ kind: 'success' }) })
+
+  // A: a host command still executing (it holds the FIFO turn).
+  mounted.app.setDraft('/slowcmd')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // B: an argued line of a host-resolved execute-kind name, accepted while
+  // A is still blocked.
+  mounted.app.setDraft('/export foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+
+  // A held gate MUST be released on EVERY exit path. `t.after` is NOT enough:
+  // the harness's own lifecycle cleanup (registered earlier) awaits the parked
+  // execution, so it runs — and blocks — BEFORE a later-registered after-hook;
+  // the fallback has to fire inside the test body, ahead of any teardown.
+  try {
+  // BEFORE the FIFO turn: the local echo is already installed (the install
+  // is synchronous — this is the exact gap the finding describes).
+  const pending = mounted.app.pendingInputForTest()
+  assert.ok(pending.queued.some(row => row.local === true && String(row.text).includes('/export foo')),
+    `the argued host-resolved line must echo before the FIFO turn: ${JSON.stringify(pending.queued)}`)
+  assert.equal(harness.host.steered.length + harness.host.followedUp.length, 0,
+    'B must still be waiting behind A (nothing was delivered yet)')
+
+  // The exclusions keep their original semantics against the SAME live
+  // catalog: the bare CLAIMED token `/export` is a Host command (no local
+  // echo), and a TUI built-in (`/status`) stays excluded as before.
+  mounted.app.setDraft('/export')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  mounted.app.setDraft('/status')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  const after = mounted.app.pendingInputForTest()
+  assert.ok(!after.queued.some(row => row.local === true && String(row.text).includes('/export') && !String(row.text).includes('foo')),
+    'the claimed bare /export is a Host command, never an ordinary echo')
+  assert.ok(!after.queued.some(row => row.local === true && String(row.text).includes('/status')),
+    'a TUI built-in stays excluded from the ordinary-prompt echo')
+
+  // Release: B is an ordinary submission — it reaches the agent exactly
+  // once as the raw line, and the local echo retires with its authoritative
+  // occurrence (never duplicated).
+  releaseSlow?.()
+  assert.equal(await drainUntil(() =>
+    harness.host.followedUp.some(message => JSON.stringify(message).includes('/export foo')), 5_000), true,
+    'the ordinary line must reach the agent once A releases')
+  const bMessage = harness.host.followedUp.find(message => JSON.stringify(message).includes('/export foo'))
+  const bRequest = ((bMessage as { source?: { rpcId?: string } }).source ?? {}).rpcId
+  assert.ok(bRequest !== undefined, 'the delivered line carries its correlation identity')
+  // The durable occurrence retires the local echo (the Direct correlation
+  // contract — never a duplicated row).
+  context.emit('session/event', harness.session as never, event('user/message', {
+    id: MessageId('d3-echo-b-durable'),
+    role: 'user',
+    content: [{ type: 'text', text: '/export foo' }],
+    source: { kind: 'user', rpcId: bRequest as never },
+  }, 961) as never)
+  assert.equal(await drainUntil(() => {
+    const settled = mounted.app.pendingInputForTest()
+    return !settled.queued.some(row => row.local === true && String(row.text).includes('/export foo'))
+  }, 5_000), true,
+    'the local echo retired with its authoritative occurrence')
+  } finally {
+    // Idempotent: the success path already released it above; a failing
+    // assertion reaches here instead of leaving the FIFO turn parked.
+    releaseSlow?.()
+  }
+})
+
 test('an unclaimed line of a host-resolved name keeps its attachment: ordinary multimodal submission', async (t) => {
   // The same collision state with a staged image: the attachment gate must not
   // classify the line as a local client command (the host catalog resolves the
@@ -2801,6 +3102,43 @@ test('a bridge-only client command joins the `/` menu (discoverable without a ho
   assert.equal(row?.description, 'toggle vim mode', 'the menu row carries the contribution description')
 })
 
+test('a sessionless `!!` ensures a Session first and executes in that Session workspace (M3-4 PR3 shell amendment)', async (t) => {
+  // The amendment: `!!` is Session/model-EXCLUDED, never sessionless — with
+  // no current Session the gesture ENSURES one, executes the command in that
+  // Session's workspace, and never writes the result into the Session.
+  const life = testLifecycle(t)
+  const marker = `ss-ensured-${Date.now()}.marker`
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  assert.equal(harness.createdSessionIds.length, 0, 'no session exists before the gesture')
+  mounted.app.setDraft(`!!touch ${marker}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // The session is created by the `!!` gesture itself (the amendment's
+  // ensure-Session rule).
+  for (let round = 0; round < 80 && harness.createdSessionIds.length === 0; round += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  assert.equal(harness.createdSessionIds.length, 1,
+    'the sessionless `!!` created its execution Session before running')
+  // The command really executed: the Direct adapter runs in the Session
+  // workspace — the deferred create uses the LAUNCH cwd, which this harness
+  // sets to the temporary DSH_HOME; the marker must appear there (existence
+  // is the discriminator; a never-run command leaves nothing).
+  const fs = await import('node:fs')
+  const path = await import('node:path')
+  const home = process.env.DSH_HOME ?? process.cwd()
+  const markerPath = path.join(home, marker)
+  await drainUntil(() => fs.existsSync(markerPath), 5000)
+  assert.equal(fs.existsSync(markerPath), true,
+    'the `!!` command executed in the ensured Session workspace (marker file created)')
+  // …and the result NEVER enters the Session (zero followup for `!!`).
+  assert.equal(harness.host.followedUp.filter(entry => JSON.stringify(entry).includes(marker)).length, 0,
+    'the `!!` result is excluded from Session/model context')
+})
+
 test('a client command is session-backed by default: the session resolves BEFORE the handler', async (t) => {
   const calls: string[] = []
   const { harness, mounted } = await bootCommandHarness(t, {
@@ -2978,6 +3316,125 @@ test('a DISAPPEARED host name never turns an attachment-bearing line into a loca
     'the model receives the multimodal prompt')
 })
 
+// QUALIFICATION (whole-PR R15-1, recorded honestly): this case documents the
+// INTENDED policy but is NOT a discriminating witness. Restoring the indirect
+// static-list clause in `lateAttachmentRefusal` still passes it — in this
+// fixture the deferred refusal does not surface a notice for the plane-owned
+// line under EITHER implementation, so the mounted observable cannot separate
+// them. R15-1's evidence is the authority-source fix (the classifier term is the
+// live Client claim only) plus the structural guard that forbids the indirect
+// call shape; the reviewer did not claim a mounted bare-`/kill` refusal either.
+test('whole-PR R15-1: a bare static-only name (/kill) keeps its ORDINARY attachment policy through the deferred classifier', async (t) => {
+  // `/kill` lives in the STATIC policy set (reserved-name validation + the
+  // collision catalog) with NO live Client registration and NO handler. The
+  // deferred attachment classifier used to reach the static list indirectly
+  // (`extensions.isLocal(..., LOCAL_COMMANDS)` -> `CommandBridge.isLocal`'s
+  // `staticLocal.has(name)` first statement), so a bare `/kill` re-entered the
+  // TUI family and REFUSED an attachment the submit-time classification had
+  // already allowed as an ordinary multimodal submission. The classifier now
+  // reads the live Client claim only.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-r15-1-kill-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+  })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/kill ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.host.followedUp.length > 0
+    || mounted.app.notifyTextForTest() !== ''
+    || harness.executed.length > 0, 10_000)
+  assert.doesNotMatch(mounted.app.notifyTextForTest(), /Attachments cannot be included/,
+    'a static-only name must never be re-classified as a TUI command by the deferred classifier')
+})
+
+test('whole-PR F1: a vanished SAME-NAME TUI Host command keeps the argued line ordinary WITH its attachment', async (t) => {
+  // The static TUI name list used to absorb this line after the disappearance:
+  // `/model` is in LOCAL_COMMANDS, so the final attachment classification
+  // re-judged the line as a TUI command and refused the attachment that was
+  // legal at submit time (the genuine Host execute-kind descriptor did not
+  // claim `/model <image>`).
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-f1-attach-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(2, 2))
+  const { harness, mounted, imageSaves, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    attachments: true,
+    // A genuine GLOBAL Host `/model`: execute-kind, so it never claims the
+    // argued form.
+    hostCommands: ['model'],
+  })
+  harness.onCreateSession(() => { disposeHostCommand('model') })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/model ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'vanished same-name TUI host command with an image')
+  assert.equal(mounted.app.notifyTextForTest(), '',
+    'the sticky submit-time non-invocation must not become a local-command refusal')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/model')),
+    `never the command plane: ${JSON.stringify(harness.executed)}`)
+  assert.equal(imageSaves.length, 1, 'the image is admitted through the ordinary model path')
+  const delivered = harness.host.followedUp[0] as { content: readonly { type: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.type), ['text', 'image'],
+    'the model receives the multimodal prompt')
+})
+
+test('whole-PR F1 control: the SAME vanished SAME-NAME line (no attachment) is delivered, never plane-run', async (t) => {
+  const life = testLifecycle(t)
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    hostCommands: ['model'],
+  })
+  harness.onCreateSession(() => { disposeHostCommand('model') })
+  mounted.app.setDraft('/model prod')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'vanished same-name TUI host command')
+  assert.equal(harness.createdSessionIds.length, 1, 'the ordinary path creates the session')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/model')),
+    `the vanished name is never asked to run the argued line: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the line is an ordinary submission')
+})
+
+test('whole-PR F1: a vanished genuine Host name is NOT reclaimed by a live skill wrapper (sticky non-invocation)', async (t) => {
+  // The discriminating case for the STICKY submit-time non-invocation: the
+  // genuine Host `/grilling` (execute-kind) does not claim `/grilling args`, so
+  // the line is an ordinary submission; the name then disappears while a LIVE
+  // skill wrapper `/grilling` remains. Without the sticky authority the wrapper
+  // term owns the line, and the skill route delivers the wrapper's skill body
+  // instead of the raw ordinary line.
+  const life = testLifecycle(t)
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+    skills: true,
+    hostCommands: ['grilling'],
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  harness.onCreateSession(() => { disposeHostCommand('grilling') })
+  mounted.app.setDraft('/grilling args')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'vanished host name beside a live wrapper')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/grilling')),
+    `the live wrapper must not reclaim the vanished name: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 1, 'the line is an ordinary submission')
+  const delivered = harness.host.followedUp[0] as { content: readonly { text?: string }[] }
+  assert.deepEqual(delivered.content.map(block => block.text), ['/grilling args'],
+    'the MODEL receives the raw line, not a rewritten skill invocation')
+})
+
 test('a deferred session where the host name DISAPPEARS keeps the argued line an ordinary submission', async (t) => {
   // The execute-kind -> unresolved mutation. The standing catalog resolves
   // /deploy as EXECUTE-KIND, so `/deploy prod` is a known NON-invocation when
@@ -3007,6 +3464,178 @@ test('a deferred session where the host name DISAPPEARS keeps the argued line an
     'a known non-invocation is never consumed as an advertised command miss, even when the name disappears')
 })
 
+test('AC-2/R7-3: a genuine Host command installed AFTER a live skill wrapper owns its name (a wrapper name must not erase it)', async (t) => {
+  // R7-3: the live skill wrapper `/grilling` exists FIRST; a plugin then
+  // installs a GENUINE Host `/grilling`. The wrapper disposer stays live, so the
+  // name-based wrapper shortcut in `hostOriginClaimOf` (`skillDisposers.has`)
+  // would hide the Host winner forever and the line would stay an agent-facing
+  // skill invocation. The OBSERVABLE difference is the attachment policy: a
+  // genuine Host command that declares no `attachments` must refuse the staged
+  // image, while the skill-invocation route is multimodal and would admit it.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-r73-wrapper-shadow-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(3, 3))
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    skills: true,
+    attachments: true,
+  })
+  await drainUntil(() => (harness.commands as { list(): readonly { name: string }[] })
+    .list().some(def => def.name === 'grilling'), 10_000)
+  // An AGENT-SCOPED genuine Host command takes the LIVE wrapper's name
+  // afterwards (the wrapper disposer stays live — the reachable order).
+  ;(harness.commands as {
+    registerScoped(sessionId: string, def: { name: string; handler: () => unknown; input?: { hint: string } }): void
+  }).registerScoped('command-session', { name: 'grilling', handler: () => ({ kind: 'success' }), input: { hint: '<topic>' } })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/grilling ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => /accept attachments/.test(mounted.app.notifyTextForTest()), 8_000)
+  assert.match(mounted.app.notifyTextForTest(), /\/grilling does not accept attachments; remove them first/,
+    `the genuine Host descriptor outranks the live wrapper name: ${mounted.app.notifyTextForTest()}`)
+  assert.match(mounted.app.getDraft(), /\[image #1/, 'the draft comes back with its attachment intact')
+  assert.deepEqual(imageSaves, [], 'nothing was admitted through the wrapper route')
+})
+
+test('whole-PR F4: an argued SESSIONLESS name a genuine Host descriptor does not claim stays an ordinary submission', async (t) => {
+  // The sessionless local route used to re-judge by NAME alone
+  // (`SESSIONLESS_COMMANDS.has(name)`), so a genuine Host `/model` whose
+  // execute-kind descriptor does not claim the ARGUED form was pulled back into
+  // the local command surface even though the classifier had already returned
+  // `ordinary-submission` with `hostNameReserved`.
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    // A DEFERRED start is the discriminating window: the sessionless LOCAL route
+    // runs its handler with no live agent, while an ordinary submission must
+    // create the session first (name-only re-judging therefore shows up as "no
+    // session, no delivery").
+    deferredStart: true,
+    // A genuine GLOBAL Host `/model` (execute-kind: it claims its bare token only).
+    hostCommands: ['model'],
+  })
+  mounted.app.setDraft('/model foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued sessionless-name collision')
+  assert.equal(harness.createdSessionIds.length, 1,
+    'an ordinary submission must create the session through the deferred-start gate')
+  assert.equal(harness.host.followedUp.length, 1,
+    `the argued line must be delivered as an ordinary submission: ${JSON.stringify(harness.host.followedUp)}`)
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/model')),
+    `it must never reach the command plane: ${JSON.stringify(harness.executed)}`)
+})
+
+test('whole-PR F4/F5: an ARGUED line of a no-input TUI name is an ORDINARY submission (official matchEnter)', async (t) => {
+  // `/model` declares no `input` descriptor, so the official admission makes
+  // `/model foo` an ordinary submission even with NO Host collision — the
+  // static name list must not answer ownership.
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  mounted.app.setDraft('/model foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForDelivery(harness.host, 'argued no-input TUI name')
+  assert.equal(harness.createdSessionIds.length, 1, 'ordinary submissions create the session')
+  assert.equal(harness.host.followedUp.length, 1, 'and are delivered to the agent')
+})
+
+test('whole-PR F4/F5 control: the BARE token of the same name stays the LOCAL TUI command', async (t) => {
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  mounted.app.setDraft('/model')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.executed.length > 0 || mounted.app.notifyTextForTest() !== '', 5_000)
+  assert.equal(harness.createdSessionIds.length, 0,
+    'a sessionless local command runs without creating a session')
+  assert.equal(harness.host.followedUp.length, 0, 'and is never delivered as a prompt')
+})
+
+test('whole-PR F4/F5 control: an ARGUED line of an input-declaring TUI name stays LOCAL', async (t) => {
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    deferredStart: true,
+  })
+  mounted.app.setDraft('/preset plan')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => harness.executed.length > 0 || mounted.app.notifyTextForTest() !== '', 5_000)
+  assert.equal(harness.createdSessionIds.length, 0,
+    'the input-describing Client definition claims the argued line and runs locally')
+  assert.equal(harness.host.followedUp.length, 0, 'and it is not delivered as a prompt')
+})
+test('AC-2/R7-1: a genuine Host leading-input collision next to the Client `/export` runs the Host execution exactly once', async (t) => {
+  // AC-2: given a real Host `/export` and this TUI's own Client `/export`, the
+  // Host-ORIGIN name/line claim must decide the final command-plane ownership.
+  // The Client descriptor is execute-kind, so the effective union reads
+  // `claimed:false` for the argued line; the genuine Host descriptor is
+  // leading-input and claims it. Reading the union (the R7-1 shadow) would hand
+  // the line to the ordinary-submission route and the Host command would never
+  // run.
+  const life = testLifecycle(t)
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    // The GENUINE Host `/export` owns the GLOBAL name: it is installed before
+    // the TUI mounts, so the TUI's same-name compatibility mirror is refused by
+    // the official same-layer duplicate rule and the genuine leading-input
+    // descriptor stays the effective winner.
+    hostCommands: [{ name: 'export', input: { hint: '<path>' } }],
+  })
+  mounted.app.setDraft('/export foo')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.length, 1,
+    `the genuine Host command executed exactly once: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.executed[0]?.line, '/export foo', 'the Host command receives the raw line')
+  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a model prompt')
+})
+
+test('AC-2/R7-2: a genuine Host `/skill` collision owns the attachment policy (the skill syntax predicate must not outrank it)', async (t) => {
+  // R7-2: `/skill <name>` is syntactically a skill invocation, but a GENUINE
+  // Host command owning that name outranks it (the classifier's Host precedence).
+  // This Host descriptor declares no `attachments`, so the staged image must be
+  // refused and the draft handed back — the parallel `isSkillInvocation`
+  // shortcut in the gate would have silently allowed it through.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pi-tui-r72-skill-collision-')
+  const path = join(root, 'shot.png')
+  await writeFile(path, pngHeader(3, 3))
+  const { harness, mounted, imageSaves } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    attachments: true,
+  })
+  // A plugin installs an AGENT-SCOPED real Host `/skill`: it shadows the TUI's
+  // global compatibility mirror for this exact session, and the registry-change
+  // notification refreshes the effective catalog the routing gates read.
+  ;(harness.commands as {
+    registerScoped(sessionId: string, def: { name: string; handler: () => unknown; input?: { hint: string } }): void
+  }).registerScoped('command-session', { name: 'skill', handler: () => ({ kind: 'success' }), input: { hint: '<name>' } })
+  const staged = await stageAttachmentDraft(harness, mounted, path)
+  assert.match(staged, /\[image #1/, `the image is staged: ${JSON.stringify(staged)}`)
+  mounted.app.setDraft(`/skill alpha ${staged.trim()}`)
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await drainUntil(() => /does not accept attachments/.test(mounted.app.notifyTextForTest()), 8_000)
+  assert.match(mounted.app.notifyTextForTest(), /\/skill does not accept attachments; remove them first/,
+    `the HOST declaration decides, never the skill syntax shortcut: ${mounted.app.notifyTextForTest()}`)
+  assert.match(mounted.app.getDraft(), /\[image #1/, 'the draft comes back with its attachment intact')
+  assert.deepEqual(imageSaves, [], 'nothing was admitted')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/skill')),
+    `the refused line never reaches the command plane: ${JSON.stringify(harness.executed)}`)
+})
+
 test('a deferred session that resolves a leadingInput host command executes its argued line', async (t) => {
   // The reverse descriptor mutation: the standing catalog resolves /deploy as
   // EXECUTE-KIND, so `/deploy prod` is not an invocation when submitted. The
@@ -3019,10 +3648,13 @@ test('a deferred session that resolves a leadingInput host command executes its 
     // Execute-kind at submit time (no `input`).
     hostCommands: ['deploy'],
   })
-  harness.onCreateSession(() => {
+  harness.onCreateSession(sessionId => {
+    // The SESSION's catalog commits a `leadingInput` /deploy — a scoped
+    // registration that SHADOWS the standing execute-kind one (the official
+    // scoped-over-global winner rule; a same-layer duplicate would be refused).
     ;(harness.commands as {
-      register(def: { name: string; handler: () => unknown; input?: { hint: string } }): void
-    }).register({ name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
+      registerScoped(sessionId: string, def: { name: string; handler: () => unknown; input?: { hint: string } }): void
+    }).registerScoped(sessionId, { name: 'deploy', handler: () => ({ kind: 'success' }), input: { hint: '<target>' } })
   })
   mounted.app.setDraft('/deploy prod')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -3049,11 +3681,13 @@ test('a deferred session that resolves an EXECUTE-KIND host command takes the ar
     // `leadingInput` at submit time: `/deploy prod` is a real invocation.
     hostCommands: [{ name: 'deploy', input: { hint: '<target>' } }],
   })
-  harness.onCreateSession(() => {
+  harness.onCreateSession(sessionId => {
     // The session's catalog replaces the descriptor with the execute-kind
-    // shape (no `input`).
-    ;(harness.commands as { register(def: { name: string; handler: () => unknown }): void })
-      .register({ name: 'deploy', handler: () => ({ kind: 'success' }) })
+    // shape (no `input`) — a scoped registration shadowing the standing
+    // `leadingInput` one (the official scoped-over-global winner rule).
+    ;(harness.commands as {
+      registerScoped(sessionId: string, def: { name: string; handler: () => unknown }): void
+    }).registerScoped(sessionId, { name: 'deploy', handler: () => ({ kind: 'success' }) })
   })
   mounted.app.setDraft('/deploy prod')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
@@ -3364,7 +3998,7 @@ for (const form of [
     // The strongest signal first: a shell that ran would have created the
     // marker (the placeholder text is passed as shell arguments).
     assert.equal(existsSync(marker), false, 'the shell never ran with the placeholder')
-    assert.match(mounted.app.notifyTextForTest(), /Attachments cannot be included in a local command\./)
+    assert.match(mounted.app.notifyTextForTest(), /Attachments cannot be included in a user-shell command\./)
     assert.equal(harness.host.followedUp.length, 0, 'nothing is posted to the session')
     assert.match(mounted.app.getDraft(), /\[image #1/, 'the draft comes back with its placeholder intact')
   })

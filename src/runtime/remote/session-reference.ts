@@ -9,11 +9,14 @@
  * NEW binding generation.
  *
  * This module is the only place the TUI declares its own consumer identity on
- * that contract, and the only place that owns the two lifetime patterns the
+ * that contract, and the only place that owns the three lifetime patterns the
  * adapters need:
  *
  * - {@link acquireMainSurfaceReference} — materialize/own the TUI's visible
  *   main surface (navigation create/open). Materializing is correct here.
+ * - {@link acquireChildViewReference} — own one subagent child viewer's exact
+ *   generation, addressed by its durable `SubagentAddress`. It NEVER
+ *   materializes a Host Agent: the child binding is the whole lifetime.
  * - {@link pinExistingGeneration} — borrow an EXISTING generation first and
  *   retain it only to pin that exact generation for one bounded async
  *   operation (writer/paging). A plain write/read must never cold-open a
@@ -40,11 +43,13 @@ declare module '@deepseek-ai/dsh-api-session-controller/client' {
     tuiMainView: unknown
     /** One bounded TUI operation pinning an already-existing generation. */
     tuiOperation: unknown
+    /** One TUI subagent child viewer's exact child Session generation. */
+    tuiChildView: unknown
   }
 }
 
 /** The TUI-owned official reference sources. */
-export type TuiSessionReferenceSource = 'tuiMainView' | 'tuiOperation'
+export type TuiSessionReferenceSource = 'tuiMainView' | 'tuiOperation' | 'tuiChildView'
 
 /** Structural official `SessionReference` — no concrete implementation import. */
 export interface RemoteSessionReferenceLike {
@@ -60,9 +65,20 @@ export interface RemoteSessionReferenceLike {
  * Structural official Session target. The official `retain()` accepts a
  * Session id string OR a durable direct-parent subagent address; both are
  * mirrored here so a real `ISessions` stays structurally assignable while this
- * adapter only ever passes plain id strings.
+ * adapter only ever passes plain id strings or one exact subagent address.
  */
-export type RemoteSessionTarget = string | { readonly childSessionId: string }
+export type RemoteSessionTarget = string | RemoteSubagentViewAddress
+
+/**
+ * One durable direct-parent subagent address: the exact browse address the
+ * official Task/subagent catalog carries. Retaining it owns one Client
+ * generation without creating or activating a Host Agent.
+ */
+export interface RemoteSubagentViewAddress {
+  readonly parentSessionId: string
+  readonly childSessionId: string
+  readonly mode: 'one-shot' | 'continuable' | 'unknown'
+}
 
 /** Structural official `ISessions` reference-acquisition subset. */
 export interface RemoteRetainSource {
@@ -103,6 +119,26 @@ export interface PinnedGeneration<B extends object> {
 }
 
 /**
+ * One TUI-owned child-viewer generation: acquired from the exact durable
+ * `SubagentAddress` the Task row carries and held for the whole viewer
+ * session. It owns Client lifetime ONLY — acquiring it never creates or
+ * activates a Host Agent, and `release()` is idempotent.
+ */
+export interface ChildViewReference<B extends object = object> {
+  readonly parentSessionId: string
+  readonly childSessionId: string
+  /** The exact generation this reference owns; identity, not a lookup. */
+  readonly bindingIdentity: B
+  /** This reference's cancellable wait for the shared initial history
+   *  `Session.open()` attempt to settle. A rejection means the child could
+   *  not be opened; the caller releases the handle and leaves the surface
+   *  untouched. */
+  readonly ready: Promise<unknown>
+  /** Release exactly once; idempotent afterwards. */
+  release(): void
+}
+
+/**
  * Acquire ownership of the TUI's visible main surface for one Session.
  *
  * This is the navigation acquisition: it may materialize a cold generation,
@@ -130,6 +166,47 @@ export function acquireMainSurfaceReference(
     sessionId,
     bindingIdentity: reference.binding as object,
     release: (): void => { reference.release() },
+  }
+}
+
+/**
+ * Acquire ownership of one subagent child viewer's exact Session generation.
+ *
+ * The address is the same durable `SubagentAddress` the Task row carries
+ * (`parentSessionId` + `childSessionId` + catalog `mode`), so the acquisition
+ * can never drift onto the main Session or fabricate a lineage. It does NOT
+ * materialize a Host Agent: a subagent child is retained by its address, and
+ * the official Client opens only the child's history.
+ *
+ * The returned handle owns Client lifetime until `release()`. A failed
+ * acquisition throws (the caller's viewer stays untouched); the caller awaits
+ * `ready` only when the viewer must start from a stable first window.
+ *
+ * @param sessions - official Client sessions face.
+ * @param address - exact durable subagent view address.
+ * @param signal - optional open cancellation (a viewer exit/switch).
+ * @returns the owned child-view reference handle.
+ */
+export function acquireChildViewReference<B extends object = object>(
+  sessions: RemoteRetainSource,
+  address: RemoteSubagentViewAddress,
+  signal?: AbortSignal,
+): ChildViewReference<B> {
+  const reference = sessions.retain(address, {
+    source: 'tuiChildView',
+    ...signal === undefined ? {} : { signal },
+  })
+  let released = false
+  return {
+    parentSessionId: address.parentSessionId,
+    childSessionId: reference.sessionId,
+    bindingIdentity: reference.binding as B,
+    ready: reference.ready,
+    release: (): void => {
+      if (released) return
+      released = true
+      reference.release()
+    },
   }
 }
 

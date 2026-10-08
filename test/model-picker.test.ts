@@ -1,5 +1,6 @@
 /**
- * Headless tests for the `/model` inline-effort picker (src/model-picker.ts):
+ * Headless tests for the `/model` inline-effort picker
+ * (src/tui/pickers/model-picker.ts):
  * the pure directory projection, the immediate loading panel + in-place
  * hydration, the provider-grouped model list, the hidden description/id, the
  * per-model inline effort (`←`/`→`) and its submit payload, plus write
@@ -18,14 +19,14 @@ import {
   projectModelDirectory,
   type ModelApplyOutcome,
   type ModelPickerCurrent,
-} from '../src/model-picker.ts'
+} from '../src/tui/pickers/model-picker.ts'
 import type { ModelDirectoryDto, ModelDirectoryModelDto, ModelSelectionDto } from '../src/runtime/catalog-port.ts'
-import { runOwned, type OwnedTaskOptions } from '../src/detached.ts'
-import { createDiag } from '../src/diag.ts'
+import { runOwned, type OwnedTaskOptions } from '../src/runtime/process/tasks.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Every TuiApp started here is stopped after each test (single-live-TUI
- *  slot; see src/process-tui-slot.ts). */
+ *  slot; see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {

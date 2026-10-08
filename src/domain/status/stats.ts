@@ -1,0 +1,1085 @@
+/**
+ * Session performance statistics folded from the event log, mirroring pi's
+ * footer usage line: turns/steps, LLM wall time, recent first-token
+ * latency, recent observable decode throughput, cache hit rate, and token
+ * totals. Pure and deterministic for headless tests.
+ *
+ * Accounting follows the Web's sessionStats/tokenUsage projections:
+ * - the FIRST TOKEN is any non-empty token delta — text, reasoning, or a
+ *   tool-call delta (the Web's isTokenDelta). The whole step's timing (LLM
+ *   wall, TTFT) settles at assistant/message, exactly like the projection;
+ *   a step that never produced a message (cancelled/failed) contributes no
+ *   timing at all;
+ * - usage is counted ONCE per attempt. An assistant/message or
+ *   its authoritative usage replaces its streaming `usage` fact;
+ *   the retry event opens a new same-step attempt so its provider totals add to the prior attempt;
+ * - turns/steps count at step/end (unique turns), like the projection;
+ * - the STATUS performance metrics (firstTokenMsAvg / tokensPerSec) are
+ *   RECENT-window figures over the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
+ *   valid completed steps, not session-lifetime averages. A throughput
+ *   sample is Σ output / Σ (first token → assistant/message) over the
+ *   latest 5 completed steps whose FINAL successful attempt exposes token
+ *   deltas at at least two distinct timestamps — the denominator aligns
+ *   with the DSH Web's decode throughput (first token → final assistant
+ *   message), and the extra `lastToken > firstToken` gate skips provider
+ *   burst delivery, whose real decode duration is unobservable from the
+ *   client. A route (provider + model) change clears both recent windows;
+ * - `llmMs` remains the session LIFETIME LLM wall — kept for debug,
+ *   /stats and session analysis, no longer shown in the default footer;
+ * - billed input = uncached + cache-read + cache-write (the Web's
+ *   billedInputTokens), and the cache-hit share divides by that sum.
+ *
+ * TS8-D moved this semantic/fact authority out of the legacy root
+ * `src/stats.ts`. Presentation formatting lives elsewhere: the /status Stats
+ * row formatter is `src/tui/commands/status.ts` and the compact token-count
+ * formatter is `src/tui/token-format.ts`.
+ * @module @xmoon76/dsh-pi-tui/domain/status/stats
+ */
+
+import { isReplacementSurfaceEvent, type SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  firstTokenTimeFromAssistantStream,
+  isAssistantTokenDelta,
+  StepUsageAccumulator,
+  tokenTimeRangeFromAssistantStream,
+  usageFromAssistantSettlement,
+  type UsageLike,
+} from '../transcript/usage.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
+
+/** Aggregated session statistics. */
+export interface SessionStats {
+  /** Completed turns. */
+  turns: number
+  /** Model requests (steps). */
+  steps: number
+  /** Total model wall time (step/start → assistant/message), ms — the
+   * session LIFETIME total (debug/stats surfaces; the default footer no
+   * longer shows it). */
+  llmMs: number
+  /** Average time from step/start to the first token over the RECENT
+   * window (the last {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} completed
+   * first-token steps), ms. */
+  firstTokenMsAvg: number
+  /** Recent observable decode throughput: Σ outputTokens / Σ (first token
+   * → assistant/message) over the RECENT window (the last
+   * {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} valid completed steps whose
+   * final successful attempt delivered token deltas at two distinct
+   * timestamps), tok/s. */
+  tokensPerSec: number
+  /** Cache-read share of billed input tokens, 0–100. */
+  cacheHitPct: number
+  /** Uncached input tokens. */
+  inputTokens: number
+  /** Output tokens. */
+  outputTokens: number
+  /** Context window advertised by the model route, when known. */
+  contextWindow?: number
+  /** Cache-read tokens (input share), accumulated while folding. */
+  cacheReadTokens: number
+  /** Cache-write tokens (input share), accumulated while folding. */
+  cacheWriteTokens: number
+}
+
+/**
+ * PR5 v2 §1B-2: the authority-grouped facts of one session's stats. Unlike
+ * the numeric compatibility type {@link SessionStats}, every group here can
+ * be ABSENT — an absent group means its authoritative source cannot answer
+ * (a Remote projection gap), never a zero stand-in. An authoritative zero
+ * stays a visible zero.
+ */
+export interface SessionStatsFacts {
+  /** Lifetime counters (the official `sessionStats` projection). */
+  readonly lifetime?: {
+    readonly turns?: number
+    readonly steps?: number
+    readonly llmMs?: number
+  }
+  /** Cumulative token totals (the official `tokenUsage` projection). */
+  readonly tokens?: {
+    readonly input: number
+    readonly output: number
+    readonly cacheRead: number
+    readonly cacheWrite: number
+    readonly cacheHitPct: number
+  }
+  /** The recent performance window — present only when the evidence is
+   *  authoritative (see the presentation-owned availability). */
+  readonly recent?: {
+    readonly firstTokenMsAvg: number
+    readonly tokensPerSec: number
+  }
+  /** The route's advertised context window, when known. */
+  readonly contextWindow?: number
+}
+
+/** Project a COMPLETE (Direct) fold onto the facts type: every group is
+ *  present — a full-log fold is authoritative by construction. */
+export function sessionStatsFactsOf(
+  stats: SessionStats,
+  options: { readonly recentAvailable?: boolean } = {},
+): SessionStatsFacts {
+  return {
+    lifetime: { turns: stats.turns, steps: stats.steps, llmMs: stats.llmMs },
+    tokens: {
+      input: stats.inputTokens,
+      output: stats.outputTokens,
+      cacheRead: stats.cacheReadTokens,
+      cacheWrite: stats.cacheWriteTokens,
+      cacheHitPct: stats.cacheHitPct,
+    },
+    ...(options.recentAvailable === false
+      ? {}
+      : { recent: { firstTokenMsAvg: stats.firstTokenMsAvg, tokensPerSec: stats.tokensPerSec } }),
+    ...(stats.contextWindow === undefined ? {} : { contextWindow: stats.contextWindow }),
+  }
+}
+
+const EMPTY: SessionStats = {
+  turns: 0,
+  steps: 0,
+  llmMs: 0,
+  firstTokenMsAvg: 0,
+  tokensPerSec: 0,
+  cacheHitPct: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+}
+
+/** The recent performance window's step count (plan §2.3): last-1 is too
+ * jittery across tool-call / reasoning / short-text steps; a session
+ * lifetime mixes in stale history; wall-clock windows go empty across
+ * long tool gaps. Five completed steps smooth the agent tool loop while
+ * staying responsive. */
+export const RECENT_PERFORMANCE_SAMPLE_LIMIT = 5
+
+/** How many throughput CANDIDATES the window physically retains (the
+ * derived metric still pools only {@link RECENT_PERFORMANCE_SAMPLE_LIMIT}
+ * of them — derive takes the latest five VALID samples). The extra
+ * candidates exist so an authoritative invalidation of one of the latest
+ * five BACKFILLS correctly: the window's contract is "the latest 5 valid
+ * samples", and a sample invalidated by a late duplicate stops being
+ * valid, letting the next-older retained candidate rejoin. Twice the
+ * window covers the worst case of every derived sample being
+ * invalidated; a duplicate older than the candidate buffer is a replay
+ * artifact beyond the recent contract. TTFT has no candidate buffer because
+ * late evidence can only fill a previously missing sample, never invalidate
+ * an existing first-token sample. */
+const RECENT_PERFORMANCE_CANDIDATE_LIMIT = RECENT_PERFORMANCE_SAMPLE_LIMIT * 2
+
+/** Key identifying one step's model output (turn + step). */
+function stepKey(turn: number, step: number): string {
+  return `${turn}/${step}`
+}
+
+/** The turn number encoded in a step key. */
+function turnOfStepKey(key: string): number {
+  const slash = key.indexOf('/')
+  return slash === -1 ? -1 : Number(key.slice(0, slash))
+}
+
+/** One step's timing accumulation, resolved at its boundaries. The usage
+ * field feeds the recent performance sampling (settleStep); the token
+ * ACCOUNTING itself lives in the shared {@link StepUsageAccumulator}, so
+ * the footer and the Focus per-turn projection can never drift. */
+interface StepTiming {
+  start?: number
+  /** The logical step's first token (TTFT), kept across retries. */
+  firstDelta?: number
+  /** The CURRENT/FINAL attempt's decode observability: the first and last
+   * token-bearing delta timestamps. Cleared at `assistant/attempt` and
+   * `llm/retry-started` so a failed attempt's token range never leaks into
+   * the final throughput sample; `last > first` is the observability gate. */
+  decodeFirstDelta?: number
+  decodeLastDelta?: number
+  completed?: number
+  usage?: UsageLike
+  /** One step may have at most one timing settlement. */
+  settled?: boolean
+  /** The completion's position in the recent window (assigned at the
+   * FIRST settlement; a late usage replacement reuses it). */
+  completionOrdinal?: number
+  /** The performance route the step's samples joined (provider + model)
+   * — a late replacement must not cross back into a reset window. */
+  routeKey?: string
+  /** The route LIFECYCLE epoch at settlement. The route STRING alone
+   * cannot gate a late replacement: A → B → A returns to an equal string
+   * while the window's samples belong to the SECOND A lifecycle — only
+   * an epoch match proves the same route generation. */
+  routeEpoch?: number
+}
+
+/** One recent observable-decode-throughput sample: the final successful
+ * attempt's decode span (first token → assistant/message) against its
+ * authoritative output tokens. Only steps whose final attempt delivered
+ * token deltas at two distinct timestamps (`last > first`) are sampled —
+ * a provider burst with a single-timestamp delivery is unobservable and
+ * skipped. */
+interface RecentThroughputSample {
+  key: string
+  ordinal: number
+  decodeMs: number
+  outputTokens: number
+}
+
+/** One recent TTFT sample (step/start → first token delta). */
+interface RecentTtftSample {
+  key: string
+  ordinal: number
+  ttftMs: number
+}
+
+/**
+ * The bounded recent performance window shared by both folds (plan §6.1):
+ * the latest {@link RECENT_PERFORMANCE_SAMPLE_LIMIT} VALID samples per
+ * metric, keyed by step, ordered by completion ordinal (throughput keeps
+ * {@link RECENT_PERFORMANCE_CANDIDATE_LIMIT} candidates so an
+ * invalidation backfills). A late authoritative usage replacement UPSERTS
+ * its step's sample (same ordinal) instead of appending a fake "newest"
+ * one — or REMOVES it when the replacement invalidates the sample. The
+ * window is route-scoped: the first settled message that clearly
+ * identifies a new provider + model clears both windows (bumping the
+ * route epoch) before its own samples join.
+ */
+
+/**
+ * Whether a bounded event window already proves the recent-performance
+ * sample window COMPLETE (plan §3.4's "whether enough valid samples are
+ * present"): the window's fold RETAINED a full TTFT window AND a full
+ * throughput CANDIDATE window. Counted by the SAME fold the derive uses —
+ * a step/end COUNT can never prove this (steps with no first token,
+ * burst-delivered steps, and failed steps contribute no valid samples),
+ * which is exactly why a count-based page-stop can present partial
+ * TTFT/TPS as if they were complete.
+ */
+export function hasEnoughRecentPerformanceSamples(events: readonly SessionEvent[]): boolean {
+  // The COMPLETE fold (never a simplified copy — duplicate-message replace/
+  // removeThroughput, attempt/retry handling, and the completed-turn fence
+  // all change which samples the window retains; review round 2 caught the
+  // drifted copy admitting a burst-invalidated window as complete).
+  return recentEvidenceComplete(foldSessionStats(events).recent)
+}
+
+/** The ONE "the recent window is complete" predicate, read off a LIVE window.
+ *  Shared by the whole-log helper above and by {@link StatsFolder}'s own fold so
+ *  a live append can re-answer it without a second scan or a second fold (F1). */
+function recentEvidenceComplete(recent: RecentPerformanceWindow): boolean {
+  const admitted = recent.admittedCounts()
+  return admitted.ttft >= RECENT_PERFORMANCE_SAMPLE_LIMIT
+    && admitted.throughput >= RECENT_PERFORMANCE_CANDIDATE_LIMIT
+}
+class RecentPerformanceWindow {
+  /** The route (provider + model) the current window belongs to. */
+  routeKey: string | undefined
+  /** The current route LIFECYCLE generation — bumped on every REAL route
+   * change (A → B → A bumps twice). Samples and settled steps carry the
+   * epoch they joined, so a late replacement can only mutate the window
+   * of its own generation, never a later one with an equal route string. */
+  routeEpoch = 0
+  private nextOrdinal = 0
+  private throughput: RecentThroughputSample[] = []
+  private ttft: RecentTtftSample[] = []
+
+  /** Claim the next completion ordinal (exactly once per step, at its
+   * first settlement). */
+  claimOrdinal(): number {
+    return this.nextOrdinal++
+  }
+
+  /** Observe a settled message's route key. The FIRST observation adopts
+   * it; a CHANGE clears both windows (and bumps the route epoch) so the
+   * new route's metrics start clean. A MISSING key never resets anything
+   * (fail-soft). */
+  observeRoute(routeKey: string | undefined): void {
+    if (routeKey !== undefined) {
+      if (this.routeKey === undefined) this.routeKey = routeKey
+      else if (this.routeKey !== routeKey) {
+        this.throughput = []
+        this.ttft = []
+        this.routeKey = routeKey
+        this.routeEpoch += 1
+      }
+    }
+  }
+
+  /** Upsert the step's TTFT sample (a replacement keeps its ordinal). */
+  upsertTtft(key: string, ordinal: number, ttftMs: number): void {
+    upsertSample(this.ttft, { key, ordinal, ttftMs }, RECENT_PERFORMANCE_SAMPLE_LIMIT)
+  }
+
+  /** Upsert the step's observable-decode-throughput sample. */
+  upsertThroughput(key: string, ordinal: number, decodeMs: number, outputTokens: number): void {
+    upsertSample(this.throughput, { key, ordinal, decodeMs, outputTokens }, RECENT_PERFORMANCE_CANDIDATE_LIMIT)
+  }
+
+  /** Drop the step's throughput sample (an authoritative replacement that
+   * invalidates the sample — e.g. outputTokens corrected to 0 — must not
+   * leave the superseded value in the window). No-op when absent. */
+  removeThroughput(key: string): void {
+    this.throughput = this.throughput.filter(sample => sample.key !== key)
+  }
+
+  /** The derived recent metrics (the ONE helper both folds share — plan
+   * §6.4). No samples → 0, the established compat behavior. */
+  derive(): { firstTokenMsAvg: number; tokensPerSec: number } {
+    const ttft = latestSamples(this.ttft)
+    const firstTokenMsAvg = ttft.length > 0
+      ? ttft.reduce((sum, sample) => sum + sample.ttftMs, 0) / ttft.length
+      : 0
+    const throughput = latestSamples(this.throughput)
+    const decodeMs = throughput.reduce((sum, sample) => sum + sample.decodeMs, 0)
+    const outputTokens = throughput.reduce((sum, sample) => sum + sample.outputTokens, 0)
+    const tokensPerSec = decodeMs > 0 ? Math.round((outputTokens * 1000) / decodeMs) : 0
+    return { firstTokenMsAvg, tokensPerSec }
+  }
+
+  /** The per-metric RETAINED sample counts (the §3.4 "whether enough valid
+   *  samples are present" contract): each window retains at most its own
+   *  limit, so a FULL window (count == limit) proves the window cannot be
+   *  starved — the derive's latest-five can still lose one sample to a late
+   *  invalidation and backfill from the retained candidates. */
+  admittedCounts(): { ttft: number; throughput: number } {
+    return { ttft: this.ttft.length, throughput: this.throughput.length }
+  }
+}
+
+/** Insert-or-replace by step key, then trim to the LATEST ordinals within
+ * the caller's retention limit (a late-valid old step joins at its
+ * ORIGINAL ordinal and may immediately fall out of the derived window —
+ * it is an old step, not a newest one). */
+function upsertSample<T extends { key: string; ordinal: number }>(samples: T[], sample: T, limit: number): void {
+  const index = samples.findIndex(existing => existing.key === sample.key)
+  if (index >= 0) samples[index] = sample
+  else samples.push(sample)
+  if (samples.length > limit) {
+    samples.sort((a, b) => a.ordinal - b.ordinal)
+    samples.splice(0, samples.length - limit)
+  }
+}
+
+/** The window's latest-N samples in completion order. */
+function latestSamples<T extends { ordinal: number }>(samples: readonly T[]): T[] {
+  return [...samples].sort((a, b) => a.ordinal - b.ordinal).slice(-RECENT_PERFORMANCE_SAMPLE_LIMIT)
+}
+
+/** The performance route key of a settled message: the (provider, model)
+ * TUPLE, encoded unambiguously — plain '/' concatenation would collide
+ * `("a/b", "c")` with `("a", "b/c")` and miss a real route change. A
+ * message without a clear model-source identity yields undefined — the
+ * window never resets on a missing key (fail-soft). */
+function routeKeyOf(message: { source?: unknown }): string | undefined {
+  const source = (message as { source?: { kind?: unknown; provider?: unknown; model?: unknown } }).source
+  if (source?.kind !== 'model') return undefined
+  if (typeof source.provider !== 'string' || typeof source.model !== 'string') return undefined
+  return JSON.stringify([source.provider, source.model])
+}
+
+/** Advance the late-replay fence and clear the previous turn once. */
+function advanceTimingTurn(
+  open: Map<string, StepTiming>,
+  settled: Map<string, StepTiming>,
+  ended: Set<string>,
+  current: number | undefined,
+  turn: number,
+): number | undefined {
+  // Event logs are normally monotonic. Keeping a monotonic fence also makes
+  // an out-of-order older replay unable to mutate the current turn's timing.
+  if (current === undefined || turn > current) {
+    open.clear()
+    settled.clear()
+    ended.clear()
+    return turn
+  }
+  return current
+}
+
+/**
+ * The bounded recent-performance helper (M3-4 PR4 §3.4): derive ONLY the
+ * recent-window figures (firstTokenMsAvg / tokensPerSec) from a bounded
+ * event window — the SAME fold, window and `RECENT_PERFORMANCE_SAMPLE_LIMIT`
+ * authority as the whole-log stats, so a Remote bounded-window composition
+ * and a Direct whole-log fold can never drift apart. No lifetime totals are
+ * derived here: a bounded window must not count session-lifetime figures.
+ * @param events - the bounded window's events (the exact binding's current
+ *  durable window, oldest-first).
+ * @returns the recent-window performance figures.
+ */
+export function recentPerformanceOf(events: readonly SessionEvent[]): Pick<SessionStats, 'firstTokenMsAvg' | 'tokensPerSec'> {
+  const derived = computeStats(events)
+  return { firstTokenMsAvg: derived.firstTokenMsAvg, tokensPerSec: derived.tokensPerSec }
+}
+
+/**
+ * Fold the session log into performance statistics.
+ * @param events - the session log.
+ * @returns aggregated statistics.
+ */
+export function computeStats(events: readonly SessionEvent[]): SessionStats {
+  return foldSessionStats(events).stats
+}
+
+/** The complete fold's private result: the stats plus the LIVE
+ *  recent-performance window the derive drew from (the §3.4 page-stop
+ *  contract reads its retained-sample counts — the SAME fold, never a
+ *  second simplified copy whose semantics could drift). */
+interface SessionFold {
+  readonly stats: SessionStats
+  readonly recent: RecentPerformanceWindow
+}
+
+function foldSessionStats(events: readonly SessionEvent[]): SessionFold {
+  const stats: SessionStats = { ...EMPTY }
+  const perStep = new Map<string, StepTiming>()
+  // Keep settled samples only until their turn closes, so a late duplicate
+  // assistant/message or assistant/attempt can replace its output-token sample
+  // without retaining timing state for the full session.
+  const settledPerStep = new Map<string, StepTiming>()
+  // Step boundaries are idempotent within the active turn; older boundaries
+  // are stale once the timing fence advances.
+  const endedSteps = new Set<string>()
+  const recent = new RecentPerformanceWindow()
+  const usage = new StepUsageAccumulator()
+  let completedTurnFence: number | undefined
+  let lastTurn: number | undefined
+  let settledTurn: number | undefined
+  const enterSettledTurn = (turn: number): void => {
+    settledTurn = advanceTimingTurn(perStep, settledPerStep, endedSteps, settledTurn, turn)
+  }
+
+  for (const event of events) {
+    // Replacement surface events belong to the model-visible compaction view,
+    // not the human transcript or its performance totals.
+    if (isReplacementSurfaceEvent(event)) continue
+    // The same lifecycle policy as the Focus fold: after turn/end a late
+    // step/usage/message event of that turn is a replay artifact and is
+    // ignored, so the footer and the Focus per-turn totals can never
+    // diverge (review finding).
+    if (event.type !== 'turn/end' && event.type !== 'request/context') {
+      const eventTurn = (event.data as { turn?: unknown }).turn
+      if (typeof eventTurn === 'number' && completedTurnFence !== undefined && eventTurn <= completedTurnFence) continue
+    }
+    const kind = event.type as string
+    // `llm/retry-started` closes the failed attempt's replacement slot while
+    // preserving its committed usage; the next attempt reuses the same step.
+    // It also starts a FRESH decode observability: the failed attempt's token
+    // range must not leak into the final throughput sample (the logical
+    // TTFT first token survives).
+    if (kind === 'llm/retry-started') {
+      const retry = event.data as { turn: number; step: number }
+      usage.onRetryStarted(retry.turn, retry.step)
+      const key = stepKey(retry.turn, retry.step)
+      const timing = settledTurn === retry.turn
+        ? perStep.get(key) ?? settledPerStep.get(key)
+        : undefined
+      if (timing !== undefined && timing.settled !== true) {
+        timing.decodeFirstDelta = undefined
+        timing.decodeLastDelta = undefined
+      }
+      continue
+    }
+    // `assistant/attempt` (Session v2, typed STRUCTURALLY): the attempt
+    // committed NO surface message, but its embedded stream carries the
+    // attempt's authoritative provider usage. Its logical-step timing stays
+    // open for a possible retry and eventual assistant/message settlement.
+    if (kind === 'assistant/attempt') {
+      const failed = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      const stream = failed.stream ?? []
+      const key = stepKey(failed.turn, failed.step)
+      const attemptUsage = usageFromAssistantSettlement('attempt', undefined, stream)
+      const attemptFirstToken = firstTokenTimeFromAssistantStream(stream)
+      const timing = settledTurn === failed.turn
+        ? perStep.get(key) ?? settledPerStep.get(key)
+        : undefined
+      if (timing !== undefined) {
+        if (timing.firstDelta === undefined && attemptFirstToken !== undefined) {
+          timing.firstDelta = attemptFirstToken
+          if (timing.settled === true) replaceRecentTtft(key, timing, attemptFirstToken, recent)
+        }
+        // A failed attempt's token range must not become the final
+        // throughput's decode span: clear it (TTFT keeps its first token).
+        if (timing.settled !== true) {
+          timing.decodeFirstDelta = undefined
+          timing.decodeLastDelta = undefined
+        }
+        if (timing.settled === true && attemptUsage !== undefined) {
+          timing.usage = attemptUsage
+          replaceRecentThroughput(key, timing, attemptUsage, recent)
+        }
+      }
+      usage.onAssistantAttempt(failed.turn, failed.step, attemptUsage)
+      // Keep the open logical-step timing: a retry reuses this (turn, step)
+      // and the eventual assistant/message must settle its wall/TTFT sample.
+      continue
+    }
+    switch (event.type) {
+      case 'turn/start': {
+        // Advance the shared usage accounting (review finding).
+        usage.onTurnStart(event.data.turn)
+        enterSettledTurn(event.data.turn)
+        break
+      }
+      case 'turn/end': {
+        if (completedTurnFence === undefined || event.data.turn > completedTurnFence) completedTurnFence = event.data.turn
+        // Turn/end can arrive out of order in replayed logs. Advance the shared
+        // usage fence before finalizing so older open steps settle only once.
+        usage.onTurnStart(event.data.turn)
+        // Finalize any still-open steps so the session total agrees with
+        // the Focus per-turn total (review finding).
+        usage.onTurnEnd(event.data.turn)
+        // Drop all timing state of the ended turn (interrupted steps never
+        // see their step/end; late events are replay artifacts).
+        enterSettledTurn(event.data.turn)
+        if (settledTurn === event.data.turn) {
+          perStep.clear()
+          settledPerStep.clear()
+          endedSteps.clear()
+        }
+        break
+      }
+      case 'step/start': {
+        const key = stepKey(event.data.turn, event.data.step)
+        enterSettledTurn(event.data.turn)
+        usage.onStepStart(event.data.turn, event.data.step)
+        if (settledTurn !== event.data.turn || endedSteps.has(key) || perStep.has(key)) break
+        settledPerStep.delete(key)
+        perStep.set(key, { start: event.time })
+        break
+      }
+      case 'step/end': {
+        const key = stepKey(event.data.turn, event.data.step)
+        enterSettledTurn(event.data.turn)
+        const currentTimingTurn = settledTurn === event.data.turn
+        const firstEnd = currentTimingTurn && !endedSteps.has(key)
+        // The projection counts turns/steps at one unique step/end and
+        // discards older-turn boundaries after the timing fence advances.
+        if (firstEnd) {
+          endedSteps.add(key)
+          if (lastTurn !== event.data.turn) {
+            stats.turns += 1
+            lastTurn = event.data.turn
+          }
+          stats.steps += 1
+        }
+        usage.onStepEnd(event.data.turn, event.data.step)
+        // The open timing entry is dropped at step/end, but retain its small
+        // settled sample until turn/end so a late authoritative message or
+        // attempt can replace output tokens without losing throughput parity.
+        const timing = currentTimingTurn ? perStep.get(key) : undefined
+        if (timing?.settled === true) settledPerStep.set(key, timing)
+        if (currentTimingTurn) perStep.delete(key)
+        break
+      }
+      case 'assistant/message': {
+        enterSettledTurn(event.data.turn)
+        const key = stepKey(event.data.turn, event.data.step)
+        const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
+        const tokenRange = tokenTimeRangeFromAssistantStream(event.data.stream)
+        const timing = settledTurn === event.data.turn
+          ? perStep.get(key) ?? settledPerStep.get(key)
+          : undefined
+        if (timing !== undefined) {
+          // TTFT: the durable stream fills a missing logical first token.
+          if (timing.firstDelta === undefined && tokenRange !== undefined) timing.firstDelta = tokenRange.first
+          // Throughput: the final successful message's embedded stream is
+          // its authoritative token evidence — it fills/corrects the decode
+          // range. A stream WITHOUT token deltas never clears live evidence.
+          if (tokenRange !== undefined) {
+            timing.decodeFirstDelta = tokenRange.first
+            timing.decodeLastDelta = tokenRange.last
+          }
+          // The message time is the step's LLM wall end and its usage is the
+          // authoritative one; the whole step settles HERE (projection
+          // semantics) — step/end only counts turns/steps and the usage.
+          // A duplicate authoritative message may replace token usage, but it
+          // must never add a second wall-time or performance sample.
+          if (timing.settled !== true) {
+            timing.completed = event.time
+            if (messageUsage !== undefined) timing.usage = messageUsage
+            settleStep(stats, key, timing, recent, routeKeyOf(event.data.message))
+            timing.settled = true
+          } else if (messageUsage !== undefined || tokenRange !== undefined) {
+            // A late duplicate reconciles the sample against the
+            // authoritative stream evidence: with new usage it swaps the
+            // numerator; without usage the RETAINED usage still re-checks
+            // the (possibly invalidated) decode range — a burst duplicate
+            // must remove the stale sample, never keep reporting it.
+            if (messageUsage !== undefined) timing.usage = messageUsage
+            if (timing.usage !== undefined) {
+              replaceRecentThroughput(key, timing, timing.usage, recent)
+            } else {
+              // No usage ever committed: the stream cannot create a sample,
+              // but it can invalidate a previously valid one.
+              recent.removeThroughput(key)
+            }
+          }
+        }
+        usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
+        break
+      }
+      case 'request/context': {
+        if (event.data.contextWindow !== undefined) stats.contextWindow = event.data.contextWindow
+        break
+      }
+      default:
+        break
+    }
+  }
+
+  applyDerivedPerformance(stats, recent)
+  const totals = usage.sessionTotals()
+  stats.inputTokens = totals.inputTokens
+  stats.outputTokens = totals.outputTokens
+  stats.cacheReadTokens = totals.cacheReadTokens
+  stats.cacheWriteTokens = totals.cacheWriteTokens
+  const billedInput = stats.inputTokens + stats.cacheReadTokens + stats.cacheWriteTokens
+  if (billedInput > 0) stats.cacheHitPct = (stats.cacheReadTokens * 100) / billedInput
+  return { stats, recent }
+}
+
+/** Write the recent window's derived metrics onto the stats (the ONE
+ * shared derive path for both folds — plan §6.4). */
+function applyDerivedPerformance(stats: SessionStats, recent: RecentPerformanceWindow): void {
+  const derived = recent.derive()
+  stats.firstTokenMsAvg = derived.firstTokenMsAvg
+  stats.tokensPerSec = derived.tokensPerSec
+}
+
+/** Settle one step's TIMING at its assistant/message boundary: the
+ * lifetime LLM wall, its completion ordinal, the route observation, and
+ * the recent TTFB / observable-decode-throughput samples. A step with no
+ * message (cancelled/failed) never reaches here. Usage is NOT settled
+ * here; step/end adds it once. */
+function settleStep(
+  stats: SessionStats,
+  key: string,
+  timing: StepTiming,
+  recent: RecentPerformanceWindow,
+  routeKey: string | undefined,
+): void {
+  const completed = timing.completed
+  if (completed === undefined) return
+  const start = timing.start
+  if (start !== undefined) stats.llmMs += Math.max(0, completed - start)
+  // One completion ordinal per step; the route check runs BEFORE the
+  // samples join, so a model/provider switch starts a clean window.
+  const ordinal = recent.claimOrdinal()
+  timing.completionOrdinal = ordinal
+  recent.observeRoute(routeKey)
+  timing.routeKey = recent.routeKey
+  timing.routeEpoch = recent.routeEpoch
+  const first = timing.firstDelta
+  if (first !== undefined && start !== undefined) {
+    // TTFT: step/start → first token (the projection's ttftMs). A latency
+    // sample — never token-weighted.
+    recent.upsertTtft(key, ordinal, Math.max(0, first - start))
+  }
+  const usage = timing.usage
+  const decodeFirst = timing.decodeFirstDelta
+  const decodeLast = timing.decodeLastDelta
+  if (
+    usage !== undefined
+    && usage.outputTokens > 0
+    && decodeFirst !== undefined
+    && decodeLast !== undefined
+    && decodeLast > decodeFirst
+  ) {
+    // Observable decode throughput: Σ output / Σ (first token →
+    // assistant/message) over the final successful attempt. The
+    // `last > first` gate is the ONLY admission condition — a burst
+    // delivered at a single timestamp is unobservable and skipped (no
+    // thresholds, clamps, or full-wall fallback).
+    const decodeMs = Math.max(0, completed - decodeFirst)
+    if (decodeMs > 0) {
+      recent.upsertThroughput(key, ordinal, decodeMs, usage.outputTokens)
+    }
+  }
+}
+
+/** Replace the throughput sample of an already-settled step from a late
+ * authoritative usage (assistant/message or assistant/attempt replay). The
+ * sample keeps its original completion ordinal — it replaces, never appends;
+ * llmMs and TTFB are never re-added; and an event belonging to a route the
+ * window has moved past must not resurrect its sample into the current window.
+ * The EPOCH is the authoritative gate: A → B → A returns to an equal
+ * route STRING while the window belongs to the second A lifecycle, so
+ * only `timing.routeEpoch === recent.routeEpoch` admits the replacement.
+ * The decode span is the settlement-time final-attempt range: a late usage
+ * only swaps the NUMERATOR (or removes the sample when it invalidates it —
+ * outputTokens corrected to 0 must not keep feeding the recent rate). A
+ * step that was never observable at settlement (no `last > first` range)
+ * can never become valid through late usage — burst evidence stays out. */
+function replaceRecentThroughput(
+  key: string,
+  timing: StepTiming,
+  usage: UsageLike,
+  recent: RecentPerformanceWindow,
+): void {
+  if (timing.routeKey !== undefined && recent.routeKey !== undefined && timing.routeKey !== recent.routeKey) return
+  if (timing.routeEpoch !== undefined && timing.routeEpoch !== recent.routeEpoch) return
+  if (timing.completionOrdinal === undefined) return
+  const first = timing.decodeFirstDelta
+  const last = timing.decodeLastDelta
+  const completed = timing.completed
+  if (first === undefined || last === undefined || last <= first || completed === undefined) {
+    // The step's final-attempt decode range is not observable — either it
+    // never was (a burst, no sample exists: no-op) or a late authoritative
+    // stream just invalidated a previously valid range (the stale sample
+    // must leave the window). Never keep reporting a superseded rate.
+    recent.removeThroughput(key)
+    return
+  }
+  const decodeMs = Math.max(0, completed - first)
+  if (usage.outputTokens <= 0 || decodeMs <= 0) {
+    recent.removeThroughput(key)
+    return
+  }
+  recent.upsertThroughput(key, timing.completionOrdinal, decodeMs, usage.outputTokens)
+}
+
+/** Fill the TTFT sample when a late attempt supplies the first token that the
+ * authoritative message did not embed. The sample keeps the settled step's
+ * ordinal and route lifecycle, just like a late usage replacement. */
+function replaceRecentTtft(
+  key: string,
+  timing: StepTiming,
+  firstDelta: number,
+  recent: RecentPerformanceWindow,
+): void {
+  if (timing.routeKey !== undefined && recent.routeKey !== undefined && timing.routeKey !== recent.routeKey) return
+  if (timing.routeEpoch !== undefined && timing.routeEpoch !== recent.routeEpoch) return
+  if (timing.completionOrdinal === undefined) return
+  if (timing.start === undefined) return
+  recent.upsertTtft(key, timing.completionOrdinal, Math.max(0, firstDelta - timing.start))
+}
+
+/** Token totals from one usage record (cache fields counted separately). */
+function addUsage(stats: SessionStats, usage: UsageLike): void {
+  stats.inputTokens += usage.inputTokens
+  stats.outputTokens += usage.outputTokens
+  stats.cacheReadTokens += usage.cacheReadTokens ?? 0
+  stats.cacheWriteTokens += usage.cacheWriteTokens ?? 0
+}
+
+/**
+ * Incremental stats folding: apply appended events and read `snapshot()`
+ * anytime. The footer refreshes on every step/turn boundary, so a per-event
+ * fold keeps a long session's status line O(1) instead of re-scanning the
+ * whole log (computeStats) per refresh.
+ */
+export class StatsFolder {
+  private readonly stats: SessionStats = { ...EMPTY }
+  private readonly perStep = new Map<string, StepTiming>()
+  // Retain only the current turn's settled samples for late message/attempt replay.
+  private readonly settledPerStep = new Map<string, StepTiming>()
+  // Step boundaries are idempotent within the active turn; older boundaries
+  // are stale once the timing fence advances.
+  private readonly endedSteps = new Set<string>()
+  private settledTurn: number | undefined
+  private readonly recent = new RecentPerformanceWindow()
+  /** The shared per-step usage accounting (same class as the Focus fold). */
+  private readonly usage = new StepUsageAccumulator()
+  /** Highest turn finalized by turn/end; older events are replay artifacts.
+   * A monotonic fence keeps lifecycle memory bounded across long sessions. */
+  private completedTurnFence: number | undefined
+  private lastTurn: number | undefined
+
+  /**
+   * Apply appended events in log order (a full log on resume, suffixes after).
+   * @param events - the appended session events.
+   */
+  apply(events: readonly SessionEvent[]): void {
+    for (const event of events) this.applyEvent(event)
+  }
+
+  /**
+   * Hydrate a cold session log through the same ordered fold as {@link apply}.
+   * The explicit entry point lets session bootstrap distinguish a full log
+   * from live suffixes; stats already has no secondary projection to defer.
+   */
+  hydrate(events: readonly SessionEvent[]): void {
+    this.apply(events)
+  }
+
+  /**
+   * Apply one live assistant stream input (Session v2 TRANSIENT plane).
+   * Live performance metrics (TTFT, recent throughput samples) come from
+   * the transient stream's timestamps/content; the durable plane carries
+   * no per-chunk accounting anymore. Chunk frames carry the performance
+   * content; the timing settles at the durable `assistant/message` on the
+   * `session/event` plane.
+   * An abandoned attempt has no durable usage or timing, so its
+   * provisional accounting is discarded; a committed `assistant/attempt`
+   * gets usage from its durable embedded stream.
+   */
+  applyLiveInput(input: AssistantLiveInput): void {
+    if (input.kind === 'end' && input.status === 'abandoned') {
+      this.settleFailedAttempt(input.turn, input.step, true)
+      return
+    }
+    if (input.kind === 'end' && input.settlement === 'attempt') {
+      this.settleFailedAttempt(input.turn, input.step, false)
+      return
+    }
+    if (input.kind !== 'chunk') return
+    this.applyAssistantChunk(input.turn, input.step, input.time, input.chunk)
+  }
+
+  /** Settle failed-attempt state. An abandoned live attempt discards its
+   * provisional usage and timing; a committed `assistant/attempt` keeps the
+   * logical-step timing open for a retry and gets usage from its durable
+   * embedded stream on the event plane. */
+  private settleFailedAttempt(turn: number, step: number, discardUsage: boolean, discardTiming = discardUsage): void {
+    if (this.completedTurnFence !== undefined && turn <= this.completedTurnFence) return
+    if (discardUsage) this.usage.discardStep(turn, step)
+    if (!discardTiming) return
+    const key = stepKey(turn, step)
+    const timing = this.perStep.get(key)
+    if (timing !== undefined && timing.settled !== true) {
+      // An abandoned attempt has no later assistant/message to settle its
+      // timing. A durable assistant/attempt keeps this open for a retry.
+      this.perStep.delete(key)
+    }
+  }
+
+  /** Fold one live assistant chunk (Session v2 transient plane) into the
+   * per-step timing: streaming usage (provisional — the durable
+   * `assistant/message` replaces it at settle), the first-token TTFT
+   * stamp, and the current attempt's decode observability range. */
+  private applyAssistantChunk(turn: number, step: number, time: number, chunk: AssistantLiveChunk): void {
+    // After turn/end a late live chunk is a replay artifact: it must not
+    // mutate the per-step timing/usage — the same completed-turn gate as
+    // the durable fold (mirrors TranscriptFolder's activity.completed).
+    if (this.completedTurnFence !== undefined && turn <= this.completedTurnFence) return
+    this.enterSettledTurn(turn)
+    if (chunk.type === 'usage') {
+      this.usage.onUsageChunk(turn, step, chunk.usage)
+      const key = stepKey(turn, step)
+      const timing = this.settledTurn === turn ? this.perStep.get(key) : undefined
+      if (timing !== undefined) {
+        // The LATEST chunk wins (the assembler value is cumulative) —
+        // the same replace rule as the shared accumulator.
+        timing.usage = chunk.usage
+      }
+    } else if (isAssistantTokenDelta(chunk)) {
+      const timing = this.settledTurn === turn
+        ? this.perStep.get(stepKey(turn, step))
+        : undefined
+      if (timing !== undefined && timing.settled !== true) {
+        if (timing.firstDelta === undefined) timing.firstDelta = time
+        // The current attempt's decode range: first token stamps the start,
+        // every token refreshes the last. `last > first` at settlement is
+        // the observability gate; non-token chunks never touch it.
+        if (timing.decodeFirstDelta === undefined) timing.decodeFirstDelta = time
+        timing.decodeLastDelta = time
+      }
+    }
+  }
+
+  /** The derived stats as of the last applied event. */
+  /**
+   * Whether THIS fold currently retains a COMPLETE recent-performance window —
+   * the SAME evidence {@link hasEnoughRecentPerformanceSamples} reads, taken
+   * from the window the fold already keeps while applying (never a second scan
+   * and never a second fold). Presentation-owned callers use it to let the
+   * availability bit follow LIVE evidence (F1), instead of waiting for the next
+   * `loadOlder`/rehydrate commit to re-prove it.
+   */
+  hasEnoughRecentEvidence(): boolean {
+    return recentEvidenceComplete(this.recent)
+  }
+
+  snapshot(): SessionStats {
+    const derived: SessionStats = { ...this.stats }
+    applyDerivedPerformance(derived, this.recent)
+    const totals = this.usage.sessionTotals()
+    derived.inputTokens = totals.inputTokens
+    derived.outputTokens = totals.outputTokens
+    derived.cacheReadTokens = totals.cacheReadTokens
+    derived.cacheWriteTokens = totals.cacheWriteTokens
+    const billedInput = derived.inputTokens + derived.cacheReadTokens + derived.cacheWriteTokens
+    if (billedInput > 0) derived.cacheHitPct = (derived.cacheReadTokens * 100) / billedInput
+    return derived
+  }
+
+  /** Advance the replay fence; a turn's settled samples are cleared once. */
+  private enterSettledTurn(turn: number): void {
+    this.settledTurn = advanceTimingTurn(this.perStep, this.settledPerStep, this.endedSteps, this.settledTurn, turn)
+  }
+
+  private applyEvent(event: SessionEvent): void {
+    // Keep incremental stats on the same append-origin event stream as the
+    // transcript and Focus folds; compaction replacements are model-only.
+    if (isReplacementSurfaceEvent(event)) return
+    if (event.type !== 'turn/end' && event.type !== 'request/context') {
+      const eventTurn = (event.data as { turn?: unknown }).turn
+      if (typeof eventTurn === 'number' && this.completedTurnFence !== undefined && eventTurn <= this.completedTurnFence) return
+    }
+    const kind = event.type as string
+    // `llm/retry-started` closes the failed attempt's replacement slot while
+    // preserving its committed usage; the retried attempt reuses the step.
+    // It also starts a FRESH decode observability: the failed attempt's token
+    // range must not leak into the final throughput sample (the logical
+    // TTFT first token survives).
+    if (kind === 'llm/retry-started') {
+      const data = event.data as { turn: number; step: number }
+      this.usage.onRetryStarted(data.turn, data.step)
+      const key = stepKey(data.turn, data.step)
+      const timing = this.settledTurn === data.turn
+        ? this.perStep.get(key) ?? this.settledPerStep.get(key)
+        : undefined
+      if (timing !== undefined && timing.settled !== true) {
+        timing.decodeFirstDelta = undefined
+        timing.decodeLastDelta = undefined
+      }
+      return
+    }
+    // `assistant/attempt` is a durable failed-attempt settlement. It has no
+    // surface message, but its embedded stream carries authoritative usage;
+    // keep logical-step timing open for a retry and final message.
+    if (kind === 'assistant/attempt') {
+      const data = event.data as { turn: number; step: number; stream?: readonly unknown[] }
+      const stream = data.stream ?? []
+      const key = stepKey(data.turn, data.step)
+      const attemptUsage = usageFromAssistantSettlement('attempt', undefined, stream)
+      const attemptFirstToken = firstTokenTimeFromAssistantStream(stream)
+      const timing = this.settledTurn === data.turn
+        ? this.perStep.get(key) ?? this.settledPerStep.get(key)
+        : undefined
+      if (timing !== undefined) {
+        if (timing.firstDelta === undefined && attemptFirstToken !== undefined) {
+          timing.firstDelta = attemptFirstToken
+          if (timing.settled === true) replaceRecentTtft(key, timing, attemptFirstToken, this.recent)
+        }
+        // A failed attempt's token range must not become the final
+        // throughput's decode span: clear it (TTFT keeps its first token).
+        if (timing.settled !== true) {
+          timing.decodeFirstDelta = undefined
+          timing.decodeLastDelta = undefined
+        }
+        if (timing.settled === true && attemptUsage !== undefined) {
+          timing.usage = attemptUsage
+          replaceRecentThroughput(key, timing, attemptUsage, this.recent)
+        }
+      }
+      // Keep timing open across the retry: assistant/attempt is evidence for
+      // the failed attempt, not the logical step's final timing boundary.
+      this.settleFailedAttempt(data.turn, data.step, true, false)
+      this.usage.onAssistantAttempt(data.turn, data.step, attemptUsage)
+      return
+    }
+    switch (event.type) {
+      case 'turn/start': {
+        // Advance the shared usage accounting (review finding).
+        this.usage.onTurnStart(event.data.turn)
+        this.enterSettledTurn(event.data.turn)
+        break
+      }
+      case 'turn/end': {
+        if (this.completedTurnFence === undefined || event.data.turn > this.completedTurnFence) this.completedTurnFence = event.data.turn
+        // Turn/end can arrive out of order in replayed logs. Advance the shared
+        // usage fence before finalizing so older open steps settle only once.
+        this.usage.onTurnStart(event.data.turn)
+        // Finalize any still-open steps so the session total agrees with
+        // the Focus per-turn total (review finding).
+        this.usage.onTurnEnd(event.data.turn)
+        // Drop all timing state of the ended turn (interrupted steps never
+        // see their step/end; late events are replay artifacts).
+        this.enterSettledTurn(event.data.turn)
+        if (this.settledTurn === event.data.turn) {
+          this.perStep.clear()
+          this.settledPerStep.clear()
+          this.endedSteps.clear()
+        }
+        break
+      }
+      case 'step/start': {
+        const key = stepKey(event.data.turn, event.data.step)
+        this.enterSettledTurn(event.data.turn)
+        this.usage.onStepStart(event.data.turn, event.data.step)
+        if (this.settledTurn !== event.data.turn || this.endedSteps.has(key) || this.perStep.has(key)) break
+        this.settledPerStep.delete(key)
+        this.perStep.set(key, { start: event.time })
+        break
+      }
+      case 'step/end': {
+        const key = stepKey(event.data.turn, event.data.step)
+        this.enterSettledTurn(event.data.turn)
+        const currentTimingTurn = this.settledTurn === event.data.turn
+        const firstEnd = currentTimingTurn && !this.endedSteps.has(key)
+        // The projection counts turns/steps at one unique step/end and
+        // discards older-turn boundaries after the timing fence advances.
+        if (firstEnd) {
+          this.endedSteps.add(key)
+          if (this.lastTurn !== event.data.turn) {
+            this.stats.turns += 1
+            this.lastTurn = event.data.turn
+          }
+          this.stats.steps += 1
+        }
+        this.usage.onStepEnd(event.data.turn, event.data.step)
+        // Drop the open entry, retaining only its small settled sample until
+        // turn/end so a late authoritative message can preserve throughput
+        // parity with the replacement token totals.
+        const timing = currentTimingTurn ? this.perStep.get(key) : undefined
+        if (timing?.settled === true) this.settledPerStep.set(key, timing)
+        if (currentTimingTurn) this.perStep.delete(key)
+        break
+      }
+      case 'assistant/message': {
+        this.enterSettledTurn(event.data.turn)
+        const key = stepKey(event.data.turn, event.data.step)
+        const messageUsage = usageFromAssistantSettlement('message', event.data.usage, event.data.stream)
+        const tokenRange = tokenTimeRangeFromAssistantStream(event.data.stream)
+        const timing = this.settledTurn === event.data.turn
+          ? this.perStep.get(key) ?? this.settledPerStep.get(key)
+          : undefined
+        if (timing !== undefined) {
+          // TTFT: the durable stream fills a missing logical first token.
+          if (timing.firstDelta === undefined && tokenRange !== undefined) timing.firstDelta = tokenRange.first
+          // Throughput: the final successful message's embedded stream is
+          // its authoritative token evidence — it fills/corrects the decode
+          // range. A stream WITHOUT token deltas never clears live evidence.
+          if (tokenRange !== undefined) {
+            timing.decodeFirstDelta = tokenRange.first
+            timing.decodeLastDelta = tokenRange.last
+          }
+          // Keep timing and performance sampling idempotent if a
+          // malformed/replayed log carries the same authoritative message
+          // more than once. The shared usage accumulator still applies
+          // replacement semantics below.
+          if (timing.settled !== true) {
+            timing.completed = event.time
+            if (messageUsage !== undefined) timing.usage = messageUsage
+            settleStep(this.stats, key, timing, this.recent, routeKeyOf(event.data.message))
+            timing.settled = true
+          } else if (messageUsage !== undefined || tokenRange !== undefined) {
+            // A late duplicate reconciles the sample against the
+            // authoritative stream evidence: with new usage it swaps the
+            // numerator; without usage the RETAINED usage still re-checks
+            // the (possibly invalidated) decode range — a burst duplicate
+            // must remove the stale sample, never keep reporting it.
+            if (messageUsage !== undefined) timing.usage = messageUsage
+            if (timing.usage !== undefined) {
+              replaceRecentThroughput(key, timing, timing.usage, this.recent)
+            } else {
+              // No usage ever committed: the stream cannot create a sample,
+              // but it can invalidate a previously valid one.
+              this.recent.removeThroughput(key)
+            }
+          }
+        }
+        this.usage.onAssistantMessage(event.data.turn, event.data.step, messageUsage)
+        break
+      }
+      case 'request/context': {
+        if (event.data.contextWindow !== undefined) this.stats.contextWindow = event.data.contextWindow
+        break
+      }
+      default:
+        break
+    }
+  }
+}
+

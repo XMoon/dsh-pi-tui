@@ -11,14 +11,18 @@
  *
  * Ownership:
  *
- * - the clipboard command runner (`createClipboardRunner()`), the paste
- *   environment (`clipboardEnv`) and the copy executor/policy
- *   (`runCopyCommand` / `copyEnv`);
+ * - this application owner COMPOSES the Client-local platform capabilities:
+ *   it wires the real execFile-backed command runner and the process/platform
+ *   facts into the `client/clipboard/**` policies. The clipboard platform
+ *   implementation itself (the OSC 52/native copy policy and the Wayland/X11/
+ *   macOS/Windows/WSL/Termux read probes) is owned by `client/**`, never by the
+ *   application layer;
  * - the two copy-intent entry points that share that ONE policy
  *   (`copySelection` for the fullscreen drag selection and `/copy`,
  *   `readClipboardText` for the fullscreen right-click paste);
  * - the paste-media image probe (`readClipboardImage`);
- * - the external-editor action (`openExternalEditor`).
+ * - the external-editor action (`openExternalEditor`) — deliberately still
+ *   application-owned; TS8-C does not move it.
  *
  * The module imports no Host session/agent package and performs no Host
  * lookup. `@module @xmoon76/dsh-pi-tui/app/surface/client-actions`
@@ -29,7 +33,7 @@ import { spawn } from 'node:child_process'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from '../../clipboard.ts'
+import { buildOsc52Sequence, copyToClipboard, type CopyEnvironment, type CopyExecutor } from '../../client/clipboard/copy.ts'
 import {
   commandOnPath,
   createClipboardRunner,
@@ -38,8 +42,8 @@ import {
   type ClipboardEnvironment,
   type ClipboardReadResult,
   type RunCommand,
-} from '../../image/clipboard.ts'
-import { parseShellWords } from '../../shell-words.ts'
+} from '../../client/clipboard/read.ts'
+import { parseShellWords } from '../../client/shell/words.ts'
 
 /** The client-local platform policy as the rest of the application consumes it. */
 export interface ClientActions {

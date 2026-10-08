@@ -17,6 +17,7 @@ import { apply as applyExtensionHost } from '../src/extensions.ts'
 import type { FooterItemContribution } from '../src/extension/public-types.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { enterChildDisplaySubject, exitChildDisplaySubject } from './support/display-subject.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -24,7 +25,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/process-tui-slot.ts). */
+ * never by stop() (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
   for (const app of [...startedApps]) {
@@ -144,8 +145,8 @@ test('a plugin registers a configurable footer item; the composer renders it und
     assert.equal(def?.minWidth, 8, `segment.minWidth must reach the item definition: ${JSON.stringify(def)}`)
     // And the composer honours it: at a width that cannot hold 8 cells,
     // the item is DROPPED (never truncated below its minWidth).
-    const { FooterComposer } = await import('../src/footer/composer.ts')
-    const { emptyStatusSnapshot } = await import('../src/status/types.ts')
+    const { FooterComposer } = await import('../src/tui/footer/composer.ts')
+    const { emptyStatusSnapshot } = await import('../src/domain/status/types.ts')
     const composer = new FooterComposer(app.getFooterItemRegistry())
     const narrow = composer.render({
       snapshot: emptyStatusSnapshot(),
@@ -229,8 +230,8 @@ test('the configurator lists extension items in the Available section and can ad
     await vt.waitForRender()
 
     // Open the configurator: the extension item appears in Available.
-    const { FooterConfiguratorModel } = await import('../src/footer/configurator-model.ts')
-    const { DEFAULT_FOOTER_LAYOUT } = await import('../src/footer/presets.ts')
+    const { FooterConfiguratorModel } = await import('../src/tui/footer/configurator-model.ts')
+    const { DEFAULT_FOOTER_LAYOUT } = await import('../src/domain/footer/presets.ts')
     const model = new FooterConfiguratorModel(DEFAULT_FOOTER_LAYOUT, app.getFooterItemRegistry())
     app.openFooterConfigurator({
       model,
@@ -470,16 +471,9 @@ test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subag
     // Enter the subagent viewer: the data source switches to the CHILD,
     // and a static plugin contribution (which has no snapshot access to
     // self-gate) must not describe the viewed child.
-    app.setViewerFooter({
-      label: 'child',
-      childSessionId: 'child-1',
-      mode: 'one-shot',
-      activity: 'inactive',
-      cwd: '/child-ws',
-      turns: 1,
-      steps: 1,
-      usage: undefined,
-      statsLine: '',
+    enterChildDisplaySubject(app, {
+      id: 'child-1', label: 'child', mode: 'one-shot', activity: 'inactive',
+      cwd: '/child-ws', turns: 1, steps: 1,
     })
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
@@ -487,7 +481,7 @@ test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subag
     assert.ok(!view.includes('[LEGACY]'), `the legacy ext:* bridge must hide while viewing too:\n${view}`)
     assert.ok(view.includes('child-ws'), `the child workspace must show:\n${view}`)
     // Leaving the viewer restores it.
-    app.setViewerFooter(undefined)
+    exitChildDisplaySubject(app, { model: 'm', cwd: 'c' })
     await vt.waitForRender()
     view = vt.getViewport().join('\n')
     assert.ok(view.includes('quota 82%'), `the item must return after the viewer closes:\n${view}`)
