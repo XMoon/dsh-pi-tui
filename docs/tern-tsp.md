@@ -205,8 +205,9 @@ pnpm gate:boundary
 ```
 
 A real Tern pane smoke is documented in
-[PR1 evidence § Real Tern smoke](./tern-tsp/evidence/pr1.md) (headless
-`tern serve` + `tern ctl`, `TERN_TSP_RECORD` recording, `tern ctl key/shot`).
+[PR1 evidence § Real Tern smoke](./tern-tsp/evidence/pr1.md#real-tern-smoke-t2)
+(headless `tern serve` + `tern ctl`, `TERN_TSP_RECORD` recording,
+`tern ctl key/shot`).
 
 Evidence levels — do not merge these into a stronger claim:
 
