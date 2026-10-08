@@ -17,6 +17,7 @@ import { TranscriptFolder, windowMessages } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { enterChildDisplaySubject } from './support/display-subject.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -120,6 +121,37 @@ test('an expanded Compact Work internal spacer collapses that Work (F6 blank-row
   view = vt.getViewport()
   assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the internal spacer collapses the owning Work')
   assert.ok(view.join('\n').includes('▸ Activity'), `the Work collapses to its header:\n${view.join('\n')}`)
+})
+
+test('an expanded Compact Work internal spacer still collapses that Work under a child subject bar', async () => {
+  // Same blank-row collapse as above, but with the pinned child subject bar
+  // above the transcript: the absolute row offset includes the bar, so the
+  // internal spacer must still resolve to its owning Work and collapse it.
+  const { vt, app } = startApp('compact')
+  const { messages, activities, owner } = fixture()
+  app.setTranscript(messages, activities)
+  enterChildDisplaySubject(app, {
+    id: 'child-1', label: 'research', mode: 'continuable', activity: 'running',
+    cwd: '/child', turns: 1, steps: 1,
+  })
+  app.setFullscreen(true)
+  await viewport(vt)
+  app.toggleWorkSpan(owner)
+  await viewport(vt)
+  const view = vt.getViewport()
+  const barY = view.findIndex(line => line.includes('‹ parent'))
+  assert.equal(barY, 1, `the child bar must be the row under the header:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('▾ Activity'), `precondition: the Work is open:\n${view.join('\n')}`)
+  const toolY = view.findIndex(line => line.includes('Read'))
+  assert.ok(toolY > barY, `precondition: the Work member row is visible below the bar:\n${view.join('\n')}`)
+  assert.ok(isBlankRow(view[toolY - 1]!), `the clicked row must be an internal blank spacer:\n${view.join('\n')}`)
+  click(vt, 3, toolY)
+  await vt.waitForRender()
+  const after = vt.getViewport()
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
+    `the internal spacer must collapse the owning Work with the bar present:\n${after.join('\n')}`)
+  assert.ok(after.join('\n').includes('▸ Activity'), `the Work collapses to its header:\n${after.join('\n')}`)
+  app.setFullscreen(false)
 })
 
 test('a collapsed fullscreen Focus reveals root + nested Work temporarily for search', async () => {
