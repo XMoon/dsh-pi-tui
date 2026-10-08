@@ -38,8 +38,14 @@ function plain(row: string): string {
   return stripTerminalSequences(row).trimEnd()
 }
 
+/** The CONTENT width of a rendered row (Text.render pads to the terminal
+ *  width, so `visibleWidth(row)` alone cannot detect a stale bake). */
+function contentWidth(row: string): number {
+  return visibleWidth(plain(row))
+}
+
 /** A real extension host with one header badge contribution, wired into the app. */
-function startAppWithHeaderBadge(): {
+function startAppWithHeaderBadge(columns = 40): {
   vt: VirtualTerminal
   app: TuiApp
   host: SurfaceHost
@@ -48,12 +54,12 @@ function startAppWithHeaderBadge(): {
   const ledger = new ExtensionLedger(() => {})
   let app!: TuiApp
   const host = new SurfaceHost(ledger, () => app.requestRender())
-  const started = startApp(40, 24, host)
+  const started = startApp(columns, 24, host)
   app = started.app
   host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
     surfaceId: host.surfaceId,
     generation: 1,
-    width: 40,
+    width: columns,
     height: 24,
     fullscreen: false,
     focusedSeat: 'editor',
@@ -130,6 +136,27 @@ test('a state badge is shown whole or dropped, never half-cut, on a narrow heade
   assert.equal(rows.length, 1, `21 cols: one row\n${rows.join('\n')}`)
   assert.ok(plain(rows[0]!).includes('[plan]'), `21 cols: the plan badge fits whole:\n${rows[0]}`)
   exact.app.dispose()
+})
+
+test('at the exact fixed-chrome width the extension run never clips a whole state badge', async () => {
+  // app mark (14) + ' [plan]' (7) = 21 = the terminal width: the extension run
+  // has ZERO room, so it must not be appended at all. Otherwise its min-1
+  // budget yields `…` and the final width bound cuts the plan badge's closing
+  // bracket (`🐋  dsh-pi-tui [plan…`).
+  const { vt, app, host } = startAppWithHeaderBadge(21)
+  app.setSessionTitle('L'.repeat(200))
+  app.setPlanMode(true)
+  app.refreshChrome()
+  host.refreshOutlets()
+  await vt.waitForRender()
+  const rows = app.headerRenderRowsForTest()
+  assert.equal(rows.length, 1, `one row at exactly 21 columns:\n${rows.join('\n')}`)
+  assert.ok(visibleWidth(rows[0]!) <= 21, `fits 21 (got ${visibleWidth(rows[0]!)}):\n${rows[0]}`)
+  assert.ok(plain(rows[0]!).includes('[plan]'),
+    `the plan badge must stay WHOLE at the exact fixed-chrome width:\n${plain(rows[0]!)}`)
+  assert.ok(!plain(rows[0]!).includes('[plan…'),
+    `the plan badge must never be half-cut:\n${plain(rows[0]!)}`)
+  app.dispose()
 })
 
 test('a CJK / emoji / ANSI title is truncated cell-safely to one row', async () => {
@@ -229,8 +256,10 @@ test('a host-less resize re-bakes the header at the new width (shrink and widen)
   await vt.waitForRender()
   rows = app.headerRenderRowsForTest()
   assert.equal(rows.length, 1, `widened to 120 cols: one row\n${rows.join('\n')}`)
-  assert.ok(visibleWidth(rows[0]!) > 80,
-    `widened to 120 cols: the header must re-bake (stale 80-col truncation detected, got ${visibleWidth(rows[0]!)}):\n${rows[0]}`)
+  // CONTENT width (Text.render pads to the terminal width, so visibleWidth
+  // alone would report 120 even for a stale 80-col truncation).
+  assert.ok(contentWidth(rows[0]!) > 80,
+    `widened to 120 cols: the header must re-bake (stale 80-col truncation detected, got ${contentWidth(rows[0]!)}):\n${plain(rows[0]!)}`)
   app.dispose()
 })
 

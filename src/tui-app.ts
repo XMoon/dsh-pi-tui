@@ -16188,9 +16188,13 @@ export class TuiApp {
     const includePlan = this.planMode && visibleWidth(appMark) + planText.length + 1 <= this.terminal.columns
     const beforeTitle = `${appMark}${includePlan ? ` ${color.warning(planText)}` : ''}`
     // The extension badge run is budgeted BEFORE the title (a long title must
-    // never starve it): it gets every cell the fixed chrome leaves.
-    this.extensionHost?.setHeaderBudget(Math.max(1, this.terminal.columns - visibleWidth(beforeTitle)))
-    const extensionBadges = this.extensionHost?.headerBadgeText() ?? ''
+    // never starve it): it gets every cell the fixed chrome leaves. When that
+    // is ZERO the outlet's min-1 budget would append a stray `…` the final
+    // width bound then clips — cutting a whole state badge's closing bracket —
+    // so the run is not appended at all and the fixed chrome owns the row.
+    const extensionRoom = this.terminal.columns - visibleWidth(beforeTitle)
+    this.extensionHost?.setHeaderBudget(Math.max(1, extensionRoom))
+    const extensionBadges = extensionRoom >= 1 ? (this.extensionHost?.headerBadgeText() ?? '') : ''
     const titleText = sanitizedPhysicalLine(this.sessionTitleText)
     const title = titleText === '' ? '' : ` · ${color.textMuted(titleText)}`
     const titleBudget = this.terminal.columns - visibleWidth(beforeTitle) - visibleWidth(extensionBadges)
