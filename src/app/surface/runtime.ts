@@ -249,6 +249,46 @@ export interface SurfaceRuntimeOptions {
    * application owner imports a `tui/**` path.
    */
   readonly createPluginManagerPanel: PluginManagerPanelFactory
+  /**
+   * PR2 (experimental, absent on the production path): a READ-ONLY observer of
+   * the active transcript projection the surface has ALREADY selected and
+   * committed. It is not an event/fold/window owner and must not drive the
+   * application: it only reads the frame the mounted app just received. The
+   * production composition root does not inject it, so `dsh --profile pi-tui`
+   * keeps its exact behaviour and no TSP code enters the product build graph.
+   */
+  readonly onTranscriptProjected?: (frame: TranscriptProjectionFrame) => void
+}
+
+/**
+ * PR2: one already-SELECTED, already-windowed transcript projection, published
+ * to the optional {@link SurfaceRuntimeOptions.onTranscriptProjected} observer
+ * AFTER the mounted app received it.
+ *
+ * The frame is a READ-ONLY snapshot of existing authorities: the messages are
+ * the exact array `setTranscript()` was called with, `subjectId`/`subjectKind`
+ * come from the SAME active-target selection the repaint used, and
+ * `sourceIdentity` is the projection SOURCE object, for `===` comparison only.
+ * It carries no generation of its own and is never a Host/Session identity.
+ */
+export interface TranscriptProjectionFrame {
+  /** The presentation subject the projection was selected for. */
+  readonly subjectKind: 'main' | 'viewed-child'
+  /**
+   * The active display subject id: the mounted viewed child, else the live
+   * main session. Undefined while the surface has no session yet — the frame's
+   * key scope is {@link sourceIdentity}, not this id.
+   */
+  readonly subjectId: string | undefined
+  /**
+   * Opaque identity of the projection SOURCE (the exact `TranscriptFolder`
+   * instance): a replacement fold — session commit, cold rehydrate, viewer
+   * switch — is a DIFFERENT object. Compare with `===` only; it is not a Host
+   * generation and exposes no mutable method to the observer.
+   */
+  readonly sourceIdentity: object
+  /** The windowed messages, exactly as committed to the mounted app. */
+  readonly messages: readonly TranscriptMessage[]
 }
 
 /** The surface owner the runner/bootstrap consumes. */
@@ -696,6 +736,39 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     )
   }
 
+  /**
+   * PR2: the optional read-only projection observer. Absent on the production
+   * path; released by {@link dispose} before the mounted app dies.
+   */
+  let projectionObserver = options.onTranscriptProjected
+
+  /**
+   * PR2: publish ONE already-computed projection to the optional read-only
+   * observer. It never re-windows, re-folds or re-reads the log: it hands over
+   * the SAME messages the mounted app just received, and re-checks the active
+   * target through the SAME owner reads the selection above used. A target the
+   * surface has already left, or a torn-down surface, publishes nothing — the
+   * currentness token is the target's own object identity, never an invented
+   * generation.
+   */
+  const publishProjected = (
+    folder: TranscriptFolder,
+    controller: TranscriptWindowController,
+    messages: readonly TranscriptMessage[],
+  ): void => {
+    if (projectionObserver === undefined || isCleanedUp()) return
+    // Re-sample AFTER the commit: `setTranscript()` can synchronously run
+    // plugin/modal callbacks that switch the viewed child or the session.
+    if (folder !== activeFolder() || controller !== activeWindow()) return
+    const viewedChildId = routing().viewedChildId()
+    projectionObserver({
+      subjectKind: viewedChildId === undefined ? 'main' : 'viewed-child',
+      subjectId: viewedChildId ?? routing().currentSessionId(),
+      sourceIdentity: folder,
+      messages,
+    })
+  }
+
   // Coalesced repaint: streaming events fold into the folder immediately
   // (cheap) but the view rebuild flushes at most every REPAINT_FLUSH_MS, and
   // immediately on turn/end (`paintNow`).
@@ -728,6 +801,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       lastTurn: projection.lastTurn,
       hasNewer: projection.hasNewer,
     }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.())
+    publishProjected(folder, controller, projection.messages)
   }
   /** Repaint the ACTIVE target (main or the mounted viewed child). */
   const repaintActive = (
@@ -1463,6 +1537,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     dispose() {
       if (disposed) return
       disposed = true
+      // PR2: drop the optional read-only projection observer BEFORE the mounted
+      // app dies, so no synchronous teardown callback can publish another frame
+      // to a sink that is about to be released.
+      projectionObserver = undefined
       // M3-6 PR3: the aggregate teardown is ONE ordered non-truncating batch
       // (the plan's frozen order) across the sub-owners. Each sub-owner retires
       // its own one-shot slots before its callbacks run, so a throwing
