@@ -229,6 +229,7 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
     notificationMode: undefined,
     notificationMethod: undefined,
     terminalProgress: undefined,
+    mainProgressAuthority: 'local-events',
     createPluginManagerPanel,
   })
   surface.attachEventRouting(routingSource)

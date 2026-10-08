@@ -279,7 +279,7 @@ test('the bootstrap caller-side abort rule is present in source (subscribe never
   const bootstrap = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
   const init = bootstrap.slice(
     bootstrap.indexOf('const initRemoteLiveSurface'),
-    bootstrap.indexOf('const disposeRemoteIngress') >= 0
+    bootstrap.indexOf('const disposeRemoteLiveSurface') >= 0
       ? bootstrap.indexOf('const initRemoteLiveSurface') + 2000
       : bootstrap.indexOf('const initRemoteLiveSurface') + 2600,
   )

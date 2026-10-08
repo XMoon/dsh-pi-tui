@@ -316,6 +316,10 @@ TUI 使用 DSH 提供的模型和设置服务。
 tmux 的 DCS passthrough,也不修改复用器设置);需要跨复用器保留状态时请直接
 使用支持它的外层终端。此外,OSC 7501 的语义状态只作用于当前 Main Agent。
 
+本项目的 Remote(实验性、自有 Host 组合)同样上报这套状态:Host 侧由本扩展自带的
+私有状态流提供,并与 Direct 共用同一份区间判定。**未安装本项目 Host 扩展的第三方
+DSH Host 不支持**这套上报(它没有对应的事件源)。
+
 其他插件注册到 `ctx.commands` 的 Slash Command 也会被自动发现。
 
 ### Footer 自定义

@@ -65,6 +65,7 @@ function surfaceOwner() {
     notificationMode: undefined,
     notificationMethod: undefined,
     terminalProgress: undefined,
+    mainProgressAuthority: 'local-events',
     createPluginManagerPanel,
   })
 }

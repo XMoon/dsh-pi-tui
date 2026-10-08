@@ -403,6 +403,21 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
   ['commands/change', 'src/commands.ts'],
 ]
 
+/**
+ * The REMOTE-BRANCH counterpart of three subscriptions the Direct branch owns:
+ * the private `piTuiTerminalProgress` Host row observes the same Host events on
+ * the other backend branch of the same process (plan R2 §6.4). The two owners
+ * never run together (the Direct rows are gated by `if (direct)` and the Host
+ * row is mounted only by the Remote composition), but both sites exist
+ * statically, so both are pinned BY BRANCH: a third site — or a second one in
+ * either file — still fails.
+ */
+const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
+  ['session/event', 'src/app/remote/terminal-progress-host.ts'],
+  ['agent/status', 'src/app/remote/terminal-progress-host.ts'],
+  ['agent/disposed', 'src/app/remote/terminal-progress-host.ts'],
+]
+
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */
 const DYNAMIC_SUBSCRIPTION_SITES: readonly string[] = ['src/runtime/direct/config-direct.ts']
 
@@ -459,20 +474,24 @@ test('A5: the Host subscription inventory is unique and AST-complete across prod
       byEvent.set(event, sites)
     }
   }
-  const expected = new Map<string, string>([
+  const expected = new Map<string, string[]>()
+  for (const [event, rel] of [
     ...Object.entries(HOST_SUBSCRIPTIONS),
-    ...OTHER_HOST_SUBSCRIPTIONS.map(([event, rel]) => [event, rel] as const),
-  ])
+    ...OTHER_HOST_SUBSCRIPTIONS,
+    ...REMOTE_BRANCH_SUBSCRIPTIONS,
+  ]) {
+    expected.set(event, [...expected.get(event) ?? [], rel])
+  }
   assert.deepEqual(
     [...byEvent.keys()].sort(),
     [...expected.keys()].sort(),
     'the production Host-subscription inventory changed: every ctx.on(event, …) must be listed with its owner',
   )
-  for (const [event, owner] of expected) {
+  for (const [event, owners] of expected) {
     assert.deepEqual(
-      byEvent.get(event),
-      [owner],
-      `${event} must be subscribed exactly once, from ${owner}`,
+      [...byEvent.get(event) ?? []].sort(),
+      [...owners].sort(),
+      `${event} must be subscribed exactly from its inventoried owner(s): ${owners.join(', ')}`,
     )
   }
   assert.deepEqual(

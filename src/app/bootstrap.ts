@@ -121,6 +121,7 @@ import { commandSummaryOf, type SurfaceCatalogSnapshot } from '../domain/catalog
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { createClientCommandRegistry } from './command/client-command-registry.ts'
 import { composeRemoteSessionStats, composeRemoteLastAssistantText } from './remote/session-facts-compose.ts'
+import { consumeRemoteTerminalProgress } from './remote/terminal-progress-source.ts'
 import { type HumanSkillCatalog } from '../domain/catalog/skill.ts'
 import { dangerCommand } from '../domain/shell/danger.ts'
 import { resolveInitialCatalog } from './direct/initial-catalog.ts'
@@ -462,6 +463,13 @@ export function applyRunnerWithRuntime(
       notificationMode: tuiSettings?.get().notificationMode,
       notificationMethod: tuiSettings?.get().notificationMethod,
       terminalProgress: tuiSettings?.get().terminalProgress,
+      // R1 §5.3: exactly ONE adapter owns the main terminal outcome. Direct
+      // keeps the local durable-event evidence; the Remote branch hands the
+      // outcome to the Host evidence stream, so the Remote durable ingress
+      // feeds the transcript without ever racing the Host for the same fact.
+      // The internal selection seam passes `override` ONLY for the Remote
+      // composition (the surface is created before `remoteSources` below).
+      mainProgressAuthority: override === undefined ? 'local-events' : 'host-snapshot',
       // The terminal-progress evidence fold reports an unknown upstream
       // `turn/end.reason.kind` here instead of guessing an outcome.
       diag,
@@ -1173,11 +1181,16 @@ export function applyRunnerWithRuntime(
      *  history boundary seam coalesces repeated gestures for the SAME subject
      *  into one official page; another subject pages independently). */
     let remoteHistoryLoadingFor: string | undefined
-    const disposeRemoteIngress = (): void => {
+    /** R2 §7.1: the ONE Remote Host terminal-progress watch of the CURRENT main
+     *  session owner. Its controller is the watch's cancellation lifetime. */
+    let remoteProgressHandle: { dispose(): void } | undefined
+    const disposeRemoteLiveSurface = (): void => {
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
+      remoteProgressHandle?.dispose()
+      remoteProgressHandle = undefined
     }
-    lifecycleController.signal.addEventListener('abort', disposeRemoteIngress, { once: true })
+    lifecycleController.signal.addEventListener('abort', disposeRemoteLiveSurface, { once: true })
 
     /**
      * Initialize the WHOLE Remote live surface for one session: hydrate
@@ -1189,7 +1202,7 @@ export function applyRunnerWithRuntime(
      */
     const initRemoteLiveSurface = async (sessionId: string): Promise<void> => {
       if (remoteSources === undefined || cleanedUp) return
-      disposeRemoteIngress()
+      disposeRemoteLiveSurface()
       // §6.5 lifecycle fence (subscribe side): the token is captured BEFORE
       // the hydrate await; a superseded owner (switch/new/fork or a same-id
       // rollover — every commit shape bumps the generation) must not install
@@ -1277,6 +1290,55 @@ export function applyRunnerWithRuntime(
           })
         },
       }, hydrate.revision)
+      // R2 §7.1/§7.2/§7.3: the Remote terminal-progress authority. The Host
+      // evidence stream is the ONLY writer of the main interval on this branch
+      // (the durable ingress above keeps feeding the transcript and is gated
+      // out of the local fold by `mainProgressAuthority`). The completion owner
+      // is re-committed to THIS session id here, so an owner switch, a
+      // window/reconnect re-init and an Agent replacement all reset the
+      // controller's `seenRunning` — an earlier running edge plus a later idle
+      // can never fabricate a completion. The snapshot the watch opens with
+      // re-asserts the Host's authoritative display state; a settled snapshot is
+      // committed by `Surface.applyRemoteMainProgress` (never notified).
+      surface.setCompletionOwner(sessionId)
+      const progressController = new AbortController()
+      remoteProgressHandle = {
+        dispose: () => { progressController.abort(new Error('remote terminal progress watch disposed')) },
+      }
+      runDetached('remote terminal progress watch', async () => {
+        let failed = true
+        try {
+          // The consumption RE-ESTABLISHES the authority when the Host retires
+          // the watch (an Agent disposal / same-id replacement) while this owner
+          // is still current; only an owner switch, a generation change, an abort
+          // or a real failure stops it (plan §6.4/§7.1).
+          await consumeRemoteTerminalProgress(
+            remoteSources.terminalProgress,
+            sessionId,
+            progressController.signal,
+            {
+              isCurrent: () => !cleanedUp
+                && ownership.currentSessionId() === sessionId
+                && ownership.generation() === initGeneration,
+              onFact: fact => { surface.applyRemoteMainProgress(fact, sessionId) },
+            },
+          )
+          failed = false
+        } finally {
+          // A FAILED stream (contract violation, lost transport identity, a Host
+          // that never answers) must not leave a stale `working` on the terminal:
+          // fail closed to idle. An expected stop (abort / owner or generation
+          // change) leaves the Host's last authoritative state untouched.
+          if (failed && !cleanedUp
+            && ownership.currentSessionId() === sessionId
+            && ownership.generation() === initGeneration) {
+            surface.applyRemoteMainProgress(
+              { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
+              sessionId,
+            )
+          }
+        }
+      }, { diag, sessionId: () => sessionId })
     }
 
     /** The transition gate protects ordinary session surface changes — `/new`,

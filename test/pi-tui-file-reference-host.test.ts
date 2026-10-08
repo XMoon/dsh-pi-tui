@@ -18,10 +18,15 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import {
-  PI_TUI_FILE_REFERENCES_CLIENT_CONTRIBUTION,
-  PI_TUI_FILE_REFERENCES_HOST_CONTRIBUTION,
+  PI_TUI_FILE_REFERENCE_PACKAGE,
   PI_TUI_FILE_REFERENCES_LIST,
 } from '../src/runtime/remote/pi-tui-file-reference-contract.ts'
+import {
+  PI_TUI_CLIENT_CONTRIBUTION,
+  PI_TUI_HOST_CONTRIBUTION,
+  PI_TUI_REMOTE_PACKAGE,
+} from '../src/runtime/remote/pi-tui-remote-contribution.ts'
+import { PI_TUI_TERMINAL_PROGRESS_PACKAGE } from '../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 import {
   PiTuiFileReferenceHostService,
   type FileReferencesServiceLike,
@@ -63,10 +68,18 @@ function hostDeps(
 }
 
 test('the private contract owns ONE invocation descriptor both contributions derive from', () => {
-  assert.equal(PI_TUI_FILE_REFERENCES_HOST_CONTRIBUTION.invocations[0], PI_TUI_FILE_REFERENCES_CLIENT_CONTRIBUTION.descriptors[0],
+  // rc.2 admits exactly ONE contribution per package identity (Host:
+  // `package#face`, Client: the package), so the package's single contribution
+  // carries every private descriptor; the Host registration and the Client
+  // mount must still share the SAME descriptor object.
+  assert.equal(PI_TUI_HOST_CONTRIBUTION.package, PI_TUI_REMOTE_PACKAGE)
+  assert.equal(PI_TUI_HOST_CONTRIBUTION.package, PI_TUI_FILE_REFERENCE_PACKAGE)
+  assert.equal(PI_TUI_HOST_CONTRIBUTION.package, PI_TUI_TERMINAL_PROGRESS_PACKAGE)
+  assert.equal(PI_TUI_HOST_CONTRIBUTION.face, 'host')
+  assert.equal(PI_TUI_HOST_CONTRIBUTION.invocations[0], PI_TUI_FILE_REFERENCES_LIST,
+    'the file-reference descriptor is registered by the package contribution')
+  assert.equal(PI_TUI_FILE_REFERENCES_LIST, PI_TUI_CLIENT_CONTRIBUTION.descriptors[0],
     'the Host registration and the Client contribution must share the exact descriptor object')
-  assert.equal(PI_TUI_FILE_REFERENCES_HOST_CONTRIBUTION.package, '@xmoon76/dsh-pi-tui')
-  assert.equal(PI_TUI_FILE_REFERENCES_HOST_CONTRIBUTION.face, 'host')
   assert.equal(PI_TUI_FILE_REFERENCES_LIST.id, '@xmoon76/dsh-pi-tui#piTuiFileReferences/list')
   assert.equal(PI_TUI_FILE_REFERENCES_LIST.service, 'piTuiFileReferences')
   assert.equal(PI_TUI_FILE_REFERENCES_LIST.namespace, 'piTuiFileReferences')
@@ -90,19 +103,32 @@ async function mountService(deps: PiTuiFileReferenceHostDeps): Promise<{
   return { service, ctx }
 }
 
-test('the Host service registers the endpoint in its OWN fiber and disposal withdraws it', async (t) => {
+test('the composition registers the endpoint in its OWN fiber and disposal withdraws it', async (t) => {
   const life = testLifecycle(t)
   const deps = hostDeps(life, {})
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
-  const fiber = ctx.inject(PiTuiFileReferenceHostService.inject, pluginCtx => {
+  // The composition owns the package contribution; the service row owns only
+  // its binding (see host-runtime.ts step 0a/0b).
+  const contribution = ctx.inject(['typert'], contributionCtx => {
+    contributionCtx.effect(
+      () => contributionCtx.typert.register(PI_TUI_HOST_CONTRIBUTION),
+      'pi-tui-private-remote-host-test',
+    )
+  })
+  await contribution
+  const service = ctx.inject(PiTuiFileReferenceHostService.inject, pluginCtx => {
     new PiTuiFileReferenceHostService(pluginCtx, deps)
   })
-  await fiber
+  await service
   assert.equal(ctx.typert.local.get('piTuiFileReferences/list')?.id,
     '@xmoon76/dsh-pi-tui#piTuiFileReferences/list',
     'the strict descriptor is registered on the Host')
-  await fiber.dispose()
+  await service.dispose()
+  assert.equal(ctx.typert.local.get('piTuiFileReferences/list')?.id,
+    '@xmoon76/dsh-pi-tui#piTuiFileReferences/list',
+    'disposing the service row alone leaves the package contribution registered')
+  await contribution.dispose()
   assert.equal(ctx.typert.local.get('piTuiFileReferences/list'), undefined,
     'unloading the composition withdraws the endpoint with its fiber')
   await ctx.fiber.dispose()

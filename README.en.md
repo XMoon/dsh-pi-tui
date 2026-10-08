@@ -358,6 +358,11 @@ not change multiplexer settings); use an outer terminal that supports it when
 the state must survive a multiplexer. The OSC 7501 semantic state describes the
 current Main Agent only.
 
+This project's own Remote composition (experimental, our Host) reports the same
+state: the Host side is served by this extension's private Host status stream and
+shares ONE interval classifier with Direct. **A third-party DSH Host without this
+extension's Host plugin is not supported** (it has no equivalent event source).
+
 Slash Commands registered by other plugins through `ctx.commands` are discovered automatically.
 
 ### Footer customization
