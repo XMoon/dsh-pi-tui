@@ -124,7 +124,7 @@ dsh --profile pi-tui --session <session-id>
 
 ### Conversation display
 
-`/display focus` 将运行中的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块；`/display full` 恢复普通 Transcript 展示。`/focus` 仍作为兼容命令保留。Compact 预设尚未开放，`/display compact` 会明确拒绝。
+`/display` 在三种展示预设间切换：`full`（默认）是普通 Transcript 展示；`focus` 将当前回合的 Thinking、Tool Call 和中间回复聚合为一个实时更新的 Thought 区块；`compact` 把连续的过程折叠为带 Header + `Think:` / `Action:` 预览的 `Activity` 段，会话与 assistant 的中间输出仍按时间顺序可见，注入的 notice / relay / recall 改为独立呈现（相邻的环境类注入合并为可展开的 Context 簇），展开用鼠标点击或 `Ctrl+O`。`/settings` 的 `Display` 行提供同一组取值并持久化；`/focus` 仍作为兼容命令保留。
 
 需要查看过程时可以展开，关闭 Focus 后恢复普通 Transcript 展示。全屏 Focus 中可以按 Thought root 批量展开/收起,也可以单独点击卡片;切换或缩放时会保留 viewport。展示预设只影响界面投影，不修改 Session 中保存的事件。
 

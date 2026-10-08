@@ -132,7 +132,7 @@ dsh --profile pi-tui --session <session-id>
 
 ### Conversation display
 
-`/display focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block; `/display full` restores the normal Transcript projection. `/focus` remains available as a compatibility command. The Compact preset is reserved and `/display compact` is rejected until its projection ships.
+`/display` switches between three presentation presets: `full` (default) is the normal Transcript projection; `focus` groups the current turn's Thinking, Tool Calls, and intermediate replies into a live Thought block; `compact` folds contiguous process into `Activity` spans with Header + `Think:` / `Action:` previews, keeps the session and assistant intermediate output visible in chronological order, renders injected notice / relay / recall entries separately (adjacent environment injections merge into an expandable Context cluster), and expands with a mouse click or `Ctrl+O`. The `Display` row in `/settings` offers the same values and persists the choice; `/focus` remains available as a compatibility command.
 
 The full process can still be expanded when needed. In fullscreen Focus, Thought roots can be expanded/collapsed in bulk or opened with an individual card click, and the viewport survives switches and resizes. Display presets only change presentation; they do not modify Session events.
 
