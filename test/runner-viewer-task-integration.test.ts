@@ -2439,7 +2439,7 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
     'the stale refusal must restore into the ADDRESSED child slot (surfaced when that child is viewed again)')
 })
 
-test('T6/T7: the real viewer shows a child’s OWN request/header model with NO registered modelSelection unit, and follows pending → consumed while mounted', async (t) => {
+test('T6/T7: Direct viewer shows the child’s used model and follows later request headers without a registered projection', async (t) => {
   // The shipped `dsh-base` + TUI composition mounts `ctx.sessionProjections`
   // but registers no `modelSelection` unit (its only registrant is the API
   // SessionController row of the web bundle). Before this fix the child subject
