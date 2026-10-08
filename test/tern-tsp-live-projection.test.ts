@@ -696,7 +696,19 @@ test('P2-10: a subject switch performed synchronously inside setTranscript drops
 
 // ── P2-10: a synchronous OWNER change never relabels the stale frame ────────
 
-test('P2-10: an owner handover under the SAME fold/window never relabels the stale frame', () => {
+/**
+ * SCOPE of this case: it proves that a frame whose commit is INTERRUPTED by a
+ * subject handover is DROPPED (the captured, still-displayed fold is never
+ * relabelled with the new subject's id), and that a later repaint publishes
+ * under the CURRENT subject.
+ *
+ * It does NOT prove that the new subject has its own hydrated transcript: this
+ * fixture deliberately keeps A's fold and window mounted (no B hydration), and
+ * because the fold is not replaced the source identity is unchanged. Fold
+ * replacement and source re-scoping are covered by P2-06/P2-07 (and the real
+ * hydration paths by P2-01/P2-07).
+ */
+test('P2-10: an owner handover under the SAME fold/window drops the interrupted frame', () => {
   const seen: TranscriptProjectionFrame[] = []
   const harness = mountHarness({ onTranscriptProjected: frame => void seen.push(frame) })
   try {
@@ -711,15 +723,18 @@ test('P2-10: an owner handover under the SAME fold/window never relabels the sta
     // objects are unchanged, only the SUBJECT identity moved.
     harness.armCommitHook(() => harness.handoverOwner('session-owner-b'))
     harness.surface.paintNow()
-    assert.equal(seen.length, 1, 'A\'s messages are never relabelled with B\'s subject id')
+    assert.equal(seen.length, 1, 'the interrupted frame is dropped: A\'s messages are never relabelled with B\'s subject id')
     harness.armCommitHook(undefined)
 
-    // B's own valid projection publishes again, as B.
+    // A later repaint publishes again, under the CURRENT subject. The fold is
+    // still A's (B was never hydrated in this fixture), so the identity token is
+    // unchanged — that is the low-level contract this case covers, not a claim
+    // that B's own transcript exists.
     harness.surface.paintNow()
     assert.equal(seen.length, 2, 'the current subject publishes normally')
     assert.equal(seen[1]!.subjectId, 'session-owner-b')
     assert.equal(seen[0]!.sourceIdentity, seen[1]!.sourceIdentity,
-      'the same fold keeps its identity: only the subject identity was re-scoped away')
+      'the same (still-mounted) fold keeps its identity: only the subject identity moved')
   } finally {
     harness.dispose()
   }

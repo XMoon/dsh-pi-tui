@@ -80,7 +80,7 @@ separately, as the Direct install consults it before `applyAssistantInput`.
 | P2-07 | Remote bounded window / `loadOlder` re-window | DONE (L3/L4): the production `initLiveRemoteSession` commits the truncated window, then the production `rehydrateFromWindow()` installs the widened fold — new identity scope, the ONE window controller retained and re-bound, earlier history present, the newer tail preserved, and the frame carrying the committed array. The §6.5 stale-read fence is covered too (a mid-read ownership move installs nothing and publishes nothing). The reader's own `hasMore`/`loadOlder` wire semantics stay with the history-extension and Remote suites; this is L3/L4 application integration, not L6 | `P2-07` |
 | P2-08 | Read merge / Context clustering | INHERITED from PR1 (mapper `View.ops` rebuild case, `test/tern-tsp-transcript-spike.test.ts`); not re-asserted through the live chain | PR1 T6 |
 | P2-09 | Repaint coalescing / unchanged view | DONE: three events in one flush window commit once; a repaint of an identical projection emits **zero ops** on the wire | `P2-09` |
-| P2-10 | Synchronous subject switch / owner handover inside `setTranscript` | DONE: a viewer switch AND an owner handover under the SAME fold/window both drop the stale frame (see the discrimination table) | `P2-10` |
+| P2-10 | Synchronous subject switch / owner handover inside `setTranscript` | DONE: an in-flight frame whose commit is interrupted by a subject change is DROPPED — the still-mounted fold/window is never relabelled with the new subject's id, and a later repaint publishes under the current subject. It does NOT prove the new subject has completed hydration: the fixture deliberately keeps the previous fold mounted, so fold replacement and source re-scoping are covered separately by `P2-06/P2-07` and the real hydration paths by `P2-01`/`P2-07` | `P2-10` |
 | P2-11 | `dispose()` / late event / SDK close | DONE: a late routed event still schedules a repaint, and no frame is published; the SDK closes with `keep:false` and restores raw mode on its own tty | `P2-11`, `P2-01/P2-02` |
 | P2-12 | Physical stdin ownership | DONE as source lock + object identity: PiTui's `VirtualTerminal` and the SDK's `TermInput`/`TermOutput` are different objects; a PiTui keystroke reaches neither the SDK input nor the wire; production never handshakes | `P2-12/P2-14` |
 | P2-13 | Docs migration / index | DONE: one canonical entry, PR1 archived, no dangling reference (`docs/tern-tsp/evidence/pr1.md` keeps the old path only in its migration note) | `rg` check |
@@ -168,7 +168,9 @@ Proved (on the snapshots above):
    synchronous subject switch OR owner handover inside the commit, a stale Remote
    read and a disposed surface all publish nothing; and replacing the fold under
    the SAME Session id produces a new identity scope, so the same id is never
-   treated as the same view.
+   treated as the same view. The owner-handover case covers the INTERRUPTED
+   commit only — the new subject's own hydrated content is the `P2-01`/`P2-07`
+   evidence, not this one.
 4. The production path is unchanged and SDK-free: no `src/**` import, no
    composition wiring, PiTui keeps its own tty.
 
@@ -192,7 +194,16 @@ NOT proved (do not read the tests as these):
    consumer lifetime; Read-group/Context reparenting legitimately rebuilds ids.
 7. **No performance claim.** The only measured signal is the zero-op frame for an
    unchanged projection; no long-session refresh benchmark was run.
-8. **Read-only is type-level plus the opaque token**, with no defensive copy of
+8. **The session-switch hydration window is mirrored, not hidden.** A frame reports
+   what the mounted app currently displays together with the routing's CURRENT
+   subject id. During a session switch the app keeps showing the previous
+   subject's transcript until `hydratePresentation` commits the new fold and
+   repaints, so a frame inside that window carries the new subject id with the
+   previous fold's content — exactly the production PiTui behaviour, but a
+   consumer must not treat that content as the new subject's. PR2 adds no second
+   hydration gate on purpose; the renderer policy for that window is a PR3
+   decision (see the handoff below).
+9. **Read-only is type-level plus the opaque token**, with no defensive copy of
    the committed array: a consumer that ignores the `readonly` type could still
    mutate the array the app holds. That is out of the documented contract, and
    the seam deliberately does not pay for a copy.
@@ -223,6 +234,11 @@ NOT proved (do not read the tests as these):
    drives the production `SessionPresentation` hydration/rehydrate paths
    underneath the real mounted surface; what `mountRunner` would add is the
    real Host wire, i.e. the deferred L6.)
+8. During a session switch the mounted app keeps showing the previous subject's
+   transcript until `hydratePresentation` commits the new fold; the seam mirrors
+   that window (see the NOT-proved list). Decide the TSP renderer policy for it —
+   keep the previous transcript, show a loading state, or suppress the pane —
+   rather than presenting the previous content as the new subject's.
 
 ## Review history
 
@@ -231,6 +247,7 @@ NOT proved (do not read the tests as these):
 | Internal R1 (durable reviewer, reviewed `bfeac1d0`; code/test identical to `7f06f7b5`) | needs-fixes | P2 `docs/tern-tsp.md` still described `sourceIdentity` as the fold instance → corrected to the opaque token. P2 plan §2 MUST #1/#3 Remote ownership/window replacement + same-id rehydrate not delivered → `P2-06/P2-07` seam-level replacement test added; the real Remote wire rollover recorded as *Deferred with owner* above. P3 raw-mode timing → reworded against the shipped SDK's `handshake()`. P3 the `routeSessionEvent` fence list wrongly included the exact-Agent fence → split (with the note that `isCurrentAssistantAgent` is asserted separately). P3 the P2-06 parenthetical conflated a subject switch with a same-id rebind → rephrased. Non-blocking read-only observation → recorded as an explicit limit above. |
 | Internal R2 (same reviewer, delta `bfeac1d0..67f13aae`) | **accepted-with-followups** | All five R1 findings verified fixed; it ran `node --test test/tern-tsp-live-projection.test.ts` itself (9/0) and accepted the wire-level Remote rollover as `DEFERRED_WITH_OWNER` (subject to the plan owner's confirmation). New P3: the fixture's `replaceMain()` also swapped the window controller, which production never does — fixed by replacing only the fold and re-binding the ONE retained controller (`session-presentation.ts`), with the comments and the P2-07 row corrected. |
 | Internal R3 (same reviewer, delta `67f13aae..1f5b10be`) | **accepted** | No findings. The P3 is closed: the fixture now matches the production folder/window lifecycle, and the decisive identity-change + stability assertions are intact; the reviewer re-ran the suite itself (9/0 on `1f5b10be`). No P0–P3 remained open on the reviewer side. |
+| External (plan owner, PR2 review at `5875ed59`) | P3 (precision, non-blocking) | The P2-10 owner-handover case proves only that an INTERRUPTED frame is dropped: the fixture deliberately keeps the previous fold mounted, so it says nothing about the new subject's hydration. The test comment, its title, the P2-10 row and this document's proved/NOT-proved lists now state that explicitly, and the session-switch hydration window is recorded as a PR3 renderer decision (handoff item 8). No code change was required. |
 | External (plan owner, PR #257 review at `7b8464b5`) | needs-fixes (three items; the wire-level Remote rollover stays deferred) | FIX-1: `publishProjected()` must not re-read the subject after the commit — capture the active target before it and require the whole identity (folder, controller, kind, id) to match afterwards; a regression must prove an owner handover under the SAME fold/window is dropped. FIX-2: P2-01 must cover the real `SessionPresentation` cold hydration, not only the first routed event. FIX-3: P2-07 must drive the real `rehydrateFromWindow()`, not a manual fixture fold swap. All three landed in `76e29cf3` (13 tests); the discrimination mutations are in the table above. |
 | Internal R4 (same reviewer, delta `7b8464b5..76e29cf3`) | needs-fixes | FIX-1/FIX-2/FIX-3 verified correct and the deferred scope accepted; one NEW P2: an unreverted fragment of a discrimination mutation had left `projectionTokens` as a strong `Map` (retaining every replaced fold once an observer is attached) while its comment documented weak collection. Fixed in `51885735` back to `WeakMap`; the same commit also turned the reviewer's weak same-fold-check observation into a direct count of the production fold's `window()` calls. |
 | Internal R5 (same reviewer, delta `76e29cf3..51885735`) | **accepted-with-followups** | No code/test finding remains: the `WeakMap` restore and the `window()`-count assertions (unbound original + `.apply`, identity restored first in `dispose()`) are confirmed, and the reviewer re-ran the suite itself (13/0 on `51885735`). The only remaining items were the docs commit and the stage-final lanes. |
