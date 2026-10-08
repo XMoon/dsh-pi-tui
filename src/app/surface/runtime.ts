@@ -761,7 +761,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * replaced fold's token be collected. This deliberately does NOT give the
    * read-only observer the mutable fold instance.
    */
-  const projectionTokens = new Map<object, object>()
+  const projectionTokens = new WeakMap<object, object>()
   const projectionTokenFor = (source: object): object => {
     let token = projectionTokens.get(source)
     if (token === undefined) {
