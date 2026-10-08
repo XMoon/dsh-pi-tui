@@ -593,6 +593,12 @@ function sameSearchTarget(left: TranscriptSearchPresentationTarget | undefined, 
  * compaction/summary → compaction/end (foldCompactionEvent). */
 export type { CompactionPhase }
 
+/** One live, ephemeral preview of a tool call whose arguments are still
+ * streaming. The canonical owner is `app/surface/streaming-tool-preparing.ts`
+ * (TS8-F6); this stable root keeps the type re-export for source
+ * compatibility, exactly like {@link CompactionPhase}. */
+export type { StreamingToolPreview } from './app/surface/streaming-tool-preparing.ts'
+
 /** The indeterminate progress-bar frames shown while a compaction runs:
  * width 12 / block 3, the same visual weight as the footer context bar. */
 const COMPACTION_PROGRESS_FRAMES = indeterminateProgressFrames()
