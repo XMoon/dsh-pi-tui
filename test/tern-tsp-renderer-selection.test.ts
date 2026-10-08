@@ -158,13 +158,19 @@ class ScriptedTern {
  */
 async function selectRenderer(options: {
   readonly env: Record<string, string | undefined>
-  readonly tern: ScriptedTern
   readonly requestExit?: () => void
   readonly onFatal?: (error: unknown) => void
-  /** A forced connector outcome: `null` = the SDK declined; a throw = fatal. */
-  readonly connectOutcome?: () => Promise<Session | null>
+  /**
+   * The official SDK connect boundary: `null` = the SDK declined the pane, a
+   * throw = the fatal connect failure. Only this boundary is replaced — the
+   * PRODUCTION connector and `connectTspRenderer` (with its owned-session
+   * mount-failure release) always stay in the path (R3-3).
+   */
+  readonly connect?: () => Promise<Session | null>
   /** Records the connector invocation (proves the default path never probes). */
   readonly onConnect?: () => void
+  /** Records the connector's secondary-restoration diagnostics (R2-3). */
+  readonly onLogError?: (message: string, fields?: Record<string, unknown>) => void
 }): Promise<SurfaceRendererMount | undefined> {
   const { selectRendererMount, productionTspConnector } = await import('../src/app/bootstrap/renderer-selection.ts')
   const production = productionTspConnector({
@@ -172,25 +178,18 @@ async function selectRenderer(options: {
     requestExit: options.requestExit ?? ((): void => {}),
     onFatal: options.onFatal ?? ((): void => {}),
     log: (): void => {},
-    logError: (): void => {},
+    logError: (message, fields) => { options.onLogError?.(message, fields) },
+    ...(options.connect === undefined ? {} : { connect: options.connect }),
   })
-  const connectTsp = async () => {
-    options.onConnect?.()
-    if (options.connectOutcome === undefined) return await production()
-    const session = await options.connectOutcome()
-    if (session === null) return undefined
-    const { mountTspRenderer } = await import('../src/tui/tsp/session.ts')
-    return mountTspRenderer(session, {
-      requestExit: options.requestExit ?? ((): void => {}),
-      ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
-    })
-  }
   return selectRendererMount({
     cwd: '/tmp',
     requestExit: options.requestExit ?? ((): void => {}),
     onFatal: options.onFatal ?? ((): void => {}),
     log: (): void => {},
-    connectTsp: connectTsp as never,
+    connectTsp: async () => {
+      options.onConnect?.()
+      return await production()
+    },
     env: options.env,
   })
 }
@@ -331,8 +330,7 @@ test('A-01: the PRODUCTION selection + a real SDK connect mounts the TSP rendere
   // The PRODUCTION selector, with the shipped SDK connect over the scripted pane.
   const mount = await selectRenderer({
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
-    tern,
-    connectOutcome: async () => {
+    connect: async () => {
       const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
       assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
       return session
@@ -373,8 +371,7 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
 
   const renderer = await selectRenderer({
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
-    tern,
-    connectOutcome: async () => await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 50 }),
+    connect: async () => await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 50 }),
   })
   assert.equal(renderer, undefined, 'the selection seam yields no renderer mount on null')
 
@@ -398,7 +395,7 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
 test('A-03: without the opt-in the PRODUCTION selection never invokes the connector', async () => {
   const tern = new ScriptedTern()
   let connectorCalls = 0
-  const renderer = await selectRenderer({ env: {}, tern, onConnect: () => { connectorCalls += 1 } })
+  const renderer = await selectRenderer({ env: {}, onConnect: () => { connectorCalls += 1 } })
   assert.equal(renderer, undefined, 'no renderer mount without the opt-in')
   assert.equal(connectorCalls, 0,
     'the production selection never reached the TSP connector (so no SDK import/connect/probe)')
@@ -416,12 +413,10 @@ test('A-03: without the opt-in the PRODUCTION selection never invokes the connec
 // ── A-07 (selection half): a connect throw is a startup failure ─────────────
 
 test('A-07: a SDK connect THROW propagates — never mapped to null or a fallback', async () => {
-  const tern = new ScriptedTern()
   await assert.rejects(
     selectRenderer({
       env: { DSH_PI_TUI_RENDERER: 'tsp' },
-      tern,
-      connectOutcome: async () => { throw new Error('handshake exploded') },
+      connect: async () => { throw new Error('handshake exploded') },
     }),
     /handshake exploded/,
     'the connect failure escapes the selection seam (the runner fatal path owns it)',
@@ -432,7 +427,7 @@ test('A-07: a SDK connect THROW propagates — never mapped to null or a fallbac
 
 test('A-03b: TERM_PROGRAM=tern alone never selects the TSP renderer', async () => {
   const tern = new ScriptedTern()
-  const renderer = await selectRenderer({ env: { TERM_PROGRAM: 'tern' }, tern })
+  const renderer = await selectRenderer({ env: { TERM_PROGRAM: 'tern' } })
   assert.equal(renderer, undefined)
   assert.equal(tern.probed, false, 'no probe without the explicit opt-in env')
 })
@@ -440,13 +435,14 @@ test('A-03b: TERM_PROGRAM=tern alone never selects the TSP renderer', async () =
 
 // ── L6 composition fallback: the FULL runner with the opt-in on a non-TSP tty ──
 
-test('L6 composition: DSH_PI_TUI_RENDERER=tsp on a non-TSP environment mounts PiTui end-to-end', async () => {
+test('L6 composition: DSH_PI_TUI_RENDERER=tsp on a non-TSP environment mounts PiTui end-to-end', async (t) => {
   const { Context } = await import('@deepseek-ai/cordis')
-  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
+  const { readFileSync } = await import('node:fs')
   const { join } = await import('node:path')
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
   const { makeHarness, mountRunner, installVirtualProcessTerminal, disposeContext } = await import('./support/runner-harness.ts')
-  const home = mkdtempSync(join(tmpdir(), 'pr3a-l6-'))
+  const life = testLifecycle(t)
+  const home = life.tempDir('pr3a-l6-')
   const logFile = join(home, 'diag.log')
   const harness = makeHarness(home)
   const vt = new VirtualTerminal(110, 32)
@@ -475,7 +471,6 @@ test('L6 composition: DSH_PI_TUI_RENDERER=tsp on a non-TSP environment mounts Pi
     if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
     else process.env.DSH_PI_TUI_LOG = previousLog
     restoreTerminal()
-    rmSync(home, { recursive: true, force: true })
   }
 })
 
@@ -530,11 +525,19 @@ interface LifecycleHarness {
   release(): void
 }
 
-function mountLifecycle(options: { readonly throwInViewer?: boolean } = {}): LifecycleHarness {
+function mountLifecycle(options: {
+  readonly throwInViewer?: boolean
+  /** Runs SYNCHRONOUSLY from the batch's abort step — the R3-1 re-entry trigger. */
+  readonly onAbort?: () => void
+} = {}): LifecycleHarness {
   const order: string[] = []
   let release!: () => void
   const held = new Promise<void>(resolve => { release = () => { order.push('tty-released'); resolve() } })
   let cleaned = false
+  // The surface slot mirrors `SurfaceRuntime.rendererRelease`: it starts as an
+  // already-resolved promise and only becomes the real release once `dispose()`
+  // runs. That is the exact R3-1 window.
+  let slot: Promise<void> = Promise.resolve()
   const surface = {
     retireCompletionOwner: () => { order.push('retireCompletionOwner') },
     disableFocusReporting: () => { order.push('disableFocusReporting') },
@@ -542,8 +545,8 @@ function mountLifecycle(options: { readonly throwInViewer?: boolean } = {}): Lif
     disposeJobEvents: () => { order.push('disposeJobEvents') },
     disposeJobObservation: () => { order.push('disposeJobObservation') },
     disposeTaskBrowser: () => { order.push('disposeTaskBrowser') },
-    dispose: () => { order.push('surface.dispose') },
-    whenRendererReleased: () => held,
+    dispose: () => { order.push('surface.dispose'); slot = held },
+    whenRendererReleased: () => slot,
   }
   const noop = (): void => {}
   const lifecycle = createSurfaceLifecycle({
@@ -551,7 +554,7 @@ function mountLifecycle(options: { readonly throwInViewer?: boolean } = {}): Lif
     isCleanedUp: () => cleaned,
     markCleanedUp: () => { cleaned = true },
     surface,
-    abortLifecycle: () => { order.push('abort') },
+    abortLifecycle: () => { order.push('abort'); options.onAbort?.() },
     disposeViewer: () => {
       if (options.throwInViewer === true) throw new Error('viewer disposal failed')
       order.push('disposeViewer')
@@ -628,4 +631,50 @@ test('R2-1c: the exit path with a throwing sibling still orders release -> hint 
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(seen, ['cleanup-error', 'hint', 'exit'],
     'the failure is recorded AFTER the release, and the hint/exit follow it')
+})
+
+// ── R3-1: a SYNCHRONOUS re-entrant teardown shares the published transaction ──
+
+test('R3-1a: a synchronous re-entrant teardown cannot reach hint/appExit before the tty release', async () => {
+  const holder: { requestExit(): void } = { requestExit: () => {} }
+  // The re-entry trigger: the batch's `abortLifecycle` synchronously dispatches
+  // the exit intent (the production shape — an abort listener reaching
+  // `requestExit` while `disposeSurface()` is still inside its batch).
+  const { lifecycle, order, release } = mountLifecycle({ onAbort: () => { holder.requestExit() } })
+  const { requestExit } = createExitController({
+    diag: { info: () => {}, error: () => {} },
+    cleanup: () => lifecycle.disposeSurface(),
+    hint: () => order.push('hint'),
+    resumeHint: () => 'resume',
+    exit: () => order.push('exit'),
+  })
+  holder.requestExit = requestExit
+
+  const first = lifecycle.disposeSurface()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(!order.includes('hint') && !order.includes('exit'),
+    `the re-entrant exit path awaited the real release (order: ${order.join(',')})`)
+
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(order.indexOf('tty-released') < order.indexOf('hint'),
+    'the hint lands after the tty release')
+  assert.deepEqual(order.slice(-2), ['hint', 'exit'], 'the exit follows the hint, once')
+  await first
+})
+
+test('R3-1b: the first and the re-entrant caller observe the SAME complete teardown outcome', async () => {
+  const { lifecycle, release } = mountLifecycle({ throwInViewer: true })
+  const first = lifecycle.disposeSurface()
+  const second = lifecycle.disposeSurface()
+  assert.ok(first instanceof Promise && second instanceof Promise)
+  assert.equal(second, first, 'both callers await the SAME published transaction')
+
+  release()
+  const outcomes = await Promise.allSettled([first, second])
+  assert.equal(outcomes[0]!.status, 'rejected', 'the batch failure reaches the first caller')
+  assert.equal(outcomes[1]!.status, 'rejected',
+    'the second caller no longer sees a FULFILLED raw release')
+  assert.equal(outcomes[0]!.reason, outcomes[1]!.reason,
+    'the SAME failure is surfaced to both callers')
 })

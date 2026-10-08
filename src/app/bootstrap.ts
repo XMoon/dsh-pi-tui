@@ -2246,7 +2246,7 @@ export function applyRunnerWithRuntime(
     // mount goes through the runner's fatal lifecycle (error outcome, no
     // resume hint) — never a normal appExit(0).
     const rendererOnFatal = (error: unknown): void => {
-      void fatalLifecycle.handleStartupFailure(error)
+      void fatalLifecycle.handleStartupFailure(error) // allowlist: fatal lifecycle root — see AGENTS.md
     }
     const rendererMount = await selectRendererMount({
       cwd,

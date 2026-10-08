@@ -57,7 +57,7 @@ const COMPOSITION_INVENTORY: ReadonlyArray<readonly [string, string]> = [
   ['presentation event routing attach', 'surface.attachEventRouting('],
   ['interaction provider attach', 'surface.attachInteraction('],
   ['command registration', 'command.register({ snapshot: initialSnapshot, skills: initialSkills })'],
-  ['surface teardown', 'const disposeSurface = (): void => {'],
+  ['surface teardown', 'const disposeSurface = (): Promise<void> | void => {'],
   ['startup lifecycle root', 'const startRunner = async (): Promise<void> => {'],
   ['terminal-total fatal catch', 'const handleStartupFailure = async (error: unknown): Promise<void> => {'],
 ]
@@ -505,7 +505,7 @@ test('A5: the composition surface keeps the documented surface release order', (
   // Plan §12.2/§38: the teardown order is behaviour. The composition root only
   // orchestrates; every release hook is surface-owned.
   const source = compositionSource()
-  const cleanupStart = source.indexOf('const disposeSurface = (): void => {')
+  const cleanupStart = source.indexOf('const disposeSurface = (): Promise<void> | void => {')
   assert.ok(cleanupStart >= 0, 'disposeSurface must exist')
   const cleanup = source.slice(cleanupStart, source.indexOf('diag.dispose()', cleanupStart) + 20)
   const order = [
@@ -704,6 +704,7 @@ test('A5/TS2: the composition zone is enumerated RECURSIVELY (nested helpers inc
       'src/app/bootstrap/lifecycle.ts',
       'src/app/bootstrap/presentation-bridge.ts',
       'src/app/bootstrap/profile.ts',
+      'src/app/bootstrap/renderer-selection.ts',
       'src/app/bootstrap/runtime-selection.ts',
       'src/app/bootstrap/session-startup.ts',
       'src/app/bootstrap/task-source.ts',

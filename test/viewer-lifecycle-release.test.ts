@@ -28,6 +28,7 @@ import type { SurfaceRuntime } from '../src/app/surface/runtime.ts'
 import type { SessionPresentationEvent } from '../src/app/surface/session-presentation.ts'
 import { toolSummaryKeys } from '../src/tui/transcript/tool-presentation.ts'
 import { compositionSource } from './support/composition-surface.ts'
+import { displaySeamStub } from './support/display-seam-stub.ts'
 
 const viewerSource = readFileSync(
   new URL('../src/app/surface/viewer-runtime.ts', import.meta.url),
@@ -103,7 +104,7 @@ test('F2: the runner surface disposal tears the viewer down before the surface/a
   // run this teardown before the viewer owner exists, so it must never capture a
   // `viewer` value (TDZ) — it reads `viewerRef` at call time.
   const zone = compositionSource()
-  const disposal = span('const disposeSurface = (): void => {', 'const registerRunnerDisposal', zone)
+  const disposal = span('const disposeSurface = (', 'const registerRunnerDisposal', zone)
   const viewerDisposeAt = disposal.indexOf('() => disposeViewer(),')
   const surfaceDisposeAt = disposal.indexOf('surface.dispose()')
   assert.ok(viewerDisposeAt >= 0, 'the runner must release the mounted/pending viewer on surface disposal')
@@ -147,7 +148,7 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
   const scopeProvider = span('imageScope: () => {', 'readImage: (ref, context) => {', bootstrapSource)
   assert.ok(scopeProvider.includes('viewer.read()'),
     'the token follows the viewed child while its viewer is mounted')
-  assert.ok(scopeProvider.includes('app.getViewerGeneration()'),
+  assert.ok(scopeProvider.includes('surface.display.getViewerGeneration()'),
     'a SAME-ID reopen is a NEW viewer generation, so it is a new scope lifetime')
   assert.ok(scopeProvider.includes('ownership.generation()'),
     'the main subject scope follows the owner generation, not the bare session id')
@@ -248,6 +249,8 @@ test('M3-6 PR3: a throwing ingress disposer cannot strand the retained child bin
     routeSessionEvent: () => {},
     repaint: () => {},
     refreshPendingInput: () => {},
+    // The viewer's admission reads the renderer-neutral capability seam.
+    display: displaySeamStub(),
     app: {
       enterFocusViewerScope: () => {},
       setViewerMode: () => {},

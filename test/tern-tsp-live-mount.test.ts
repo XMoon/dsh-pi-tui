@@ -216,6 +216,8 @@ const nullPresentation = {
 
 interface Harness {
   readonly surface: SurfaceRuntime<SessionEvent>
+  /** The REAL `surface.start` inputs, so a second start can be driven as-is. */
+  readonly startDeps: Parameters<SurfaceRuntime<SessionEvent>['start']>[0]
   readonly tern: ScriptedTern
   route(event: SessionEvent): void
   /** Replace the main fold under the same session id (re-hydration shape). */
@@ -303,7 +305,7 @@ async function mountTspHarness(options: { requestExit?: () => void; onFatal?: (e
     },
     releaseUnmounted: async () => { await mountedRenderer?.dispose() },
   }
-  surface.start({
+  const startDeps: Parameters<SurfaceRuntime<SessionEvent>['start']>[0] = {
     events: { onSubmit: () => {}, onExit: () => {} },
     renderer,
     workspaceRoot: '/tmp',
@@ -320,10 +322,12 @@ async function mountTspHarness(options: { requestExit?: () => void; onFatal?: (e
     openExternalUrl: () => {},
     readClipboardText: async () => undefined,
     imageFallbackColor: text => text,
-  })
+  }
+  surface.start(startDeps)
 
   return {
     surface,
+    startDeps,
     tern,
     session,
     route(event) {
@@ -616,20 +620,20 @@ test('A-11: a real SDK iterator failure routes the SAME error to the FATAL inten
     // Manufacture a REAL mounted failure through the shipped SDK route: a node
     // handler that throws. The SDK's #chain catches it and rejects the next
     // iterator read with that exact error (session.ts #fail).
+    const mountedFailure = new Error('mounted tty died')
     const sdkSurface = session.surface('s1')
     assert.ok(sdkSurface !== undefined, 'the mounted renderer owns surface s1')
     sdkSurface.render(ui.col(
       { key: 'probe' },
-      ui.text({ key: 'boom', onAction: { boom: () => { throw new Error('mounted tty died') } } } as never, 'x'),
+      ui.text({ key: 'boom', onAction: { boom: () => { throw mountedFailure } } } as never, 'x'),
     ))
     await settle()
     harnessFreeInput(tern, { ev: 'action', sf: 's1', id: 'main.probe.boom', act: 'boom', mods: [] })
     await settle()
 
     assert.equal(fatalCount, 1, 'the input loop surfaced the failure exactly once')
-    assert.ok(fatal instanceof Error, 'the FATAL intent received the error')
-    assert.equal((fatal as Error).message, 'mounted tty died',
-      'the SAME SDK error reaches the fatal route (not a re-wrap, not a normal exit)')
+    assert.equal(fatal, mountedFailure,
+      'the SAME error INSTANCE reaches the fatal route (identity, not message equality)')
     assert.equal(exits, 0, 'a mounted failure NEVER reports a normal exit intent')
   } finally {
     await renderer.dispose()
@@ -638,7 +642,7 @@ test('A-11: a real SDK iterator failure routes the SAME error to the FATAL inten
 
 // ── A-12 (F7): a failed mount closes the already-connected SDK session ─────
 
-test('A-12: a rejected mount closes the connected SDK session (no leaked tty owner)', async () => {
+test('A-12: a rejected mount closes the connected SDK session once (no leaked tty owner)', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let closes = 0
@@ -655,40 +659,117 @@ test('A-12: a rejected mount closes the connected SDK session (no leaked tty own
       connectTspRenderer({ requestExit: () => {}, connect: async () => session, connectTimeout: 50 }),
       /open exploded/,
     )
-    // Both ownership boundaries (mountTspRenderer's own `open` guard and
-    // connectTspRenderer's mount guard) release the session; the SDK close is
-    // idempotent, so the invariant is "closed, never leaked".
-    assert.ok(closes >= 1, `the connected session was closed on the failed mount (${closes} call(s))`)
+    // R2-3 ownership: the CONNECTOR is the one owner that connected the session,
+    // so it performs the ONE release; `mountTspRenderer` re-raises a throwing
+    // `open` without closing (a second close would be a double owner).
+    assert.equal(closes, 1, `the connector closed the session exactly once (${closes})`)
   } finally {
     session.open = originalOpen
     if (closes === 0) await session.close().catch(() => {})
   }
 })
 
-test('A-12b: the PRODUCTION selection handshake releases a rejected mount', async () => {
+test('A-12c: a secondary tty-restoration failure never replaces the primary mount error', async () => {
+  const tern = new ScriptedTern()
+  const session = await openSession(tern)
+  let closes = 0
+  const originalClose = session.close.bind(session)
+  const originalOpen = session.open.bind(session)
+  session.open = () => { throw new Error('open exploded') }
+  session.close = async () => { closes += 1; throw new Error('raw restore exploded') }
+  const recorded: { message: string; fields?: Record<string, unknown> }[] = []
+  try {
+    const { connectTspRenderer } = await import('../src/tui/tsp/session.ts')
+    await assert.rejects(
+      connectTspRenderer({
+        requestExit: () => {},
+        connect: async () => session,
+        connectTimeout: 50,
+        logError: (message, fields) => { recorded.push({ message, fields }) },
+      }),
+      /open exploded/,
+      'the PRIMARY mount error is the one that propagates',
+    )
+    assert.equal(closes, 1, 'the release was ATTEMPTED exactly once')
+    assert.equal(recorded.length, 1, 'the secondary restoration failure is recorded, never swallowed')
+    assert.match(String(recorded[0]!.fields?.error), /raw restore exploded/)
+    assert.match(String(recorded[0]!.fields?.primary), /open exploded/)
+  } finally {
+    session.open = originalOpen
+    session.close = originalClose
+    await session.close().catch(() => {})
+  }
+})
+
+test('A-12d: a mounted teardown preserves BOTH close failures (never truncates the first)', async () => {
+  const tern = new ScriptedTern()
+  const session = await openSession(tern)
+  const renderer = mountTspRenderer(session, { requestExit: () => {}, onFatal: () => {} })
+  await settle()
+  const sdkSurface = session.surface('s1')
+  assert.ok(sdkSurface !== undefined, 'the mounted renderer owns surface s1')
+  const surfaceFailure = new Error('surface close exploded')
+  const sessionFailure = new Error('session close exploded')
+  // Fault injection at the SDK boundary: keep the UNBOUND originals so the
+  // teardown can still release the real tty afterwards.
+  const originalSurfaceClose = sdkSurface.close
+  const originalSessionClose = session.close
+  sdkSurface.close = async () => { throw surfaceFailure }
+  session.close = async () => { throw sessionFailure }
+  try {
+    const failure = await renderer.dispose().then(() => undefined, (error: unknown) => error)
+    assert.ok(failure instanceof AggregateError,
+      `both close failures surface together (got ${String(failure)})`)
+    assert.deepEqual((failure as AggregateError).errors, [surfaceFailure, sessionFailure],
+      'the FIRST failure keeps its position instead of being discarded')
+  } finally {
+    sdkSurface.close = originalSurfaceClose
+    session.close = originalSessionClose
+    await sdkSurface.close({ keep: false }).catch(() => {})
+    await session.close().catch(() => {})
+  }
+})
+
+test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.start rejected', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let closes = 0
   const originalClose = session.close.bind(session)
   session.close = async () => { closes += 1; await originalClose() }
   const { selectRendererMount, productionTspConnector } = await import('../src/app/bootstrap/renderer-selection.ts')
-  const { mountTspRenderer } = await import('../src/tui/tsp/session.ts')
   const requestExit = (): void => {}
+  // ONLY the SDK connect boundary is replaced: the PRODUCTION connector and its
+  // real `connectTspRenderer` (owned-session release + diagnostics) are the ones
+  // under test (R3-3).
   const mount = await selectRendererMount({
     cwd: '/tmp',
     requestExit,
     onFatal: () => {},
     log: () => {},
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
-    connectTsp: async () => mountTspRenderer(session, { requestExit }),
+    connectTsp: productionTspConnector({
+      cwd: '/tmp', requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
+      connect: async () => session,
+    }),
   })
-  assert.ok(mount !== undefined, 'the handshake produced a mount')
-  // The surface REJECTED the mount (the HMR-disposed case): the composition
-  // releases the connected renderer through the SAME handshake accessor.
-  await mount.releaseUnmounted()
-  await mount.releaseUnmounted()
-  assert.equal(closes, 1, 'the handshake release is idempotent and closes exactly once')
-  void productionTspConnector
+  assert.ok(mount !== undefined, 'the PRODUCTION connector produced a mount')
+
+  const harness = await mountTspHarness()
+  try {
+    // The runner was disposed while the SDK handshake was in flight: a REAL
+    // `surface.start` rejection on an already-mounted surface. The mount never
+    // transferred ownership, so bootstrap's catch releases it — this route.
+    assert.throws(
+      () => { harness.surface.start({ ...harness.startDeps, renderer: mount }) },
+      /the surface is already mounted/,
+      'the REAL surface.start rejected the mount',
+    )
+    await mount.releaseUnmounted()
+    await mount.releaseUnmounted()
+    assert.equal(closes, 1, 'the handshake release is idempotent and closes exactly once')
+  } finally {
+    harness.dispose()
+  }
 })
 
 // ── A-13 (F3): the hydrate-tail reset never clears hydrated facts ───────────

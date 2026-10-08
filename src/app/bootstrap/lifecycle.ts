@@ -95,10 +95,10 @@ export interface SurfaceLifecycleDeps {
 /** The surface/fiber lifecycle of one composition instance. */
 export interface SurfaceLifecycle {
   /**
-   * The ONE idempotent client-surface teardown (frozen §12 order). Returns
-   * the renderer-release promise when the teardown actually ran (PR3-A: the
-   * caller awaits it before hint/exit/retirement); `void` when already
-   * cleaned up.
+   * The ONE idempotent client-surface teardown (frozen §12 order). Every
+   * caller — the one that runs the ordered batch and a synchronous re-entrant
+   * one (R3-1) — awaits the SAME transaction: the renderer release followed by
+   * the batch failure, which the caller surfaces before hint/exit/retirement.
    */
   disposeSurface(): Promise<void> | void
   /** Register the fiber disposer: surface teardown, retirement, transport. */
@@ -138,13 +138,31 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
    * The release promise of the FIRST teardown, kept so an idempotent SECOND
    * cleanup (a second fiber disposer, a late fatal) still AWAITS the same
    * renderer release instead of racing ahead to retirement/transport.
+   *
+   * R3-1: this slot holds the COMPLETE teardown transaction and is published
+   * BEFORE the ordered batch runs, so it is settled with the renderer release
+   * AND the batch failure that follows it.
    */
   let disposeRelease: Promise<void> | undefined
   const disposeSurface = (): Promise<void> | void => {
-    // Already torn down: hand back the SAME release promise (never `void` —
-    // a second caller must still await the tty restore).
-    if (isCleanedUp()) return disposeRelease ?? surface.whenRendererReleased()
+    // Already torn down: hand back the SAME transaction (never `void` — a
+    // second caller must still await the tty restore and the batch failure).
+    if (isCleanedUp()) return disposeRelease
     markCleanedUp()
+    // R3-1: publish the shared transaction BEFORE any step of the ordered batch
+    // runs. The batch can synchronously RE-ENTER this entry — `abortLifecycle`
+    // below runs the real `AbortController.abort()`, whose listeners include the
+    // exit path (`requestExit` -> `cleanup` -> this function). Assigning the slot
+    // after the batch would hand that re-entrant caller the surface's
+    // not-yet-started release (an already-resolved promise), so the hint and
+    // `appExit` would run while the renderer STILL owns the tty. Every caller now
+    // awaits ONE promise and observes the same complete outcome.
+    let settleRelease!: () => void
+    let failRelease!: (error: unknown) => void
+    disposeRelease = new Promise<void>((resolve, reject) => {
+      settleRelease = resolve
+      failRelease = reject
+    })
     // Fence the completion-notification controller (surface-owned, A4-4):
     // after teardown a late `agent/status` idle from the old live agent must
     // never emit a notification into a dead surface (the identity fence drops
@@ -230,14 +248,17 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     // restore; the aggregated sync failure is then rethrown to their
     // non-truncating recorder (awaited first, never dropped, never truncated).
     const release = surface.whenRendererReleased()
-    disposeRelease = release
-    if (batchFailure !== undefined) {
-      return release.then(
+    const composed = batchFailure === undefined
+      ? release
+      : release.then(
         () => { throw batchFailure },
         releaseError => { throw new AggregateError([batchFailure, releaseError], 'surface disposal') },
       )
-    }
-    return release
+    // Publish the COMPLETE outcome (release + batch failure) to every caller of
+    // this teardown — the first one included, which is why the slot is returned
+    // rather than the private `composed` intermediate.
+    void composed.then(settleRelease, failRelease) // allowlist: the published transaction IS this outcome — every caller awaits it, so its rejection is delivered, never dropped
+    return disposeRelease
   }
 
   // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
@@ -270,7 +291,11 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       })()
       const releaseSettled = Promise.resolve(released).catch(error => {
         try {
-          diag.error('renderer release failed', { error: safeErrorMessage(error) })
+          // The teardown transaction rejects with the batch failure and/or the
+          // renderer release failure: ONE honest label covers both (the exact
+          // error text stays in the field, and the terminal-total fatal path
+          // records the same failure under the same message).
+          diag.error('surface dispose failed', { error: safeErrorMessage(error) })
         } catch {
           // No lower sink.
         }
