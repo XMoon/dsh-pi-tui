@@ -895,6 +895,9 @@ interface PresentationHarness {
   rehydrate(): Promise<void>
   mainFolder(): TranscriptFolder
   mainWindow(): TranscriptWindowController
+  /** How many times the production fold was asked for a window (the ONE
+   *  projection call of each repaint; the observer must add none). */
+  windowCalls(): number
   dispose(): void
 }
 
@@ -917,6 +920,17 @@ function mountPresentationHarness(options: {
   let current = true
   let midRead: (() => void) | undefined
   const liveTransportToken: unknown = { generation: 1 }
+  // Count the production fold's projection calls: every repaint projects ONCE
+  // through `folder.window()`, and the observer must never add another.
+  const folderPrototype = TranscriptFolder.prototype as unknown as {
+    window: (...args: never[]) => unknown
+  }
+  const originalFolderWindow = folderPrototype.window
+  let windowCalls = 0
+  folderPrototype.window = function (this: unknown, ...args: never[]): unknown {
+    windowCalls += 1
+    return originalFolderWindow.apply(this, args)
+  }
 
   const surface = createSurfaceRuntime<SessionEvent>({
     tuiVersion: '0.0.0-test',
@@ -1074,7 +1088,9 @@ function mountPresentationHarness(options: {
     async rehydrate() { await presentation.rehydrateFromWindow(options.sessionId) },
     mainFolder: () => presentation.mainFolder(),
     mainWindow: () => presentation.mainWindow(),
+    windowCalls: () => windowCalls,
     dispose() {
+      folderPrototype.window = originalFolderWindow
       surface.dispose()
       restoreTerminal()
     },
@@ -1106,6 +1122,8 @@ test('P2-01: the production Direct cold hydration publishes the first projection
     assert.equal(frame.messages, harness.committed[0], 'the frame carries the committed array itself')
     assert.ok(hasUserText(frame.messages, 'cold hydrated prompt'), 'the hydrated prompt is in the first projection')
     assert.ok(frame.messages.some(message => message.kind === 'assistant'), 'the hydrated answer is in the first projection')
+    assert.equal(harness.windowCalls(), 1,
+      'the first projection asked the fold for a window exactly once: the observer added no second projection')
     assert.equal(harness.mainFolder().messages().length, frame.messages.length,
       'the observed projection is the fold the production hydration installed')
     assert.ok(tern.frames.length > 0, 'the hydrated first projection rendered through the real SDK')
@@ -1148,6 +1166,7 @@ test('P2-07: the production Remote rehydrate publishes the widened window as a n
     assert.equal(hasUserText(first.messages, 'older prompt'), false, 'the unpaged history is not projected')
     const controllerBefore = harness.mainWindow()
     const staleFolder = harness.mainFolder()
+    const projectionsBefore = harness.windowCalls()
 
     // The older page joins the reader window: the production rehydrate replaces
     // the fold itself.
@@ -1155,6 +1174,8 @@ test('P2-07: the production Remote rehydrate publishes the widened window as a n
     await harness.rehydrate()
     await settle()
     assert.equal(harness.frames.length, 2, 'the widened window published')
+    assert.equal(harness.windowCalls(), projectionsBefore + 1,
+      'the widened window projected exactly once: no extra re-fold from the seam')
     const second = harness.frames[1]!
     assert.equal(second.subjectId, REMOTE_ID, 'the Session id did not change')
     assert.notEqual(second.sourceIdentity, first.sourceIdentity, 'the widened window is a NEW fold scope')
