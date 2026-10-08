@@ -373,17 +373,17 @@ The final TS8-F assertion set (plan §11.4) and where each one is enforced:
 | 1 | no legacy root remains | `findFinalSourceRootStateViolations` + `scripts/source-root-baseline.json` |
 | 2 | stable set is exactly the seven entries/facades | same |
 | 3 | no retired TS8-F root exists | `findRetiredSourceRootViolations` + `RETIRED_SOURCE_ROOTS` (48 names) |
-| 4 | no production import targets a retired root path | same function (the import half) |
+| 4 | no production import targets a retired root path | same function (static imports/re-exports AND statically knowable value dynamic imports; a computed specifier stays out of scope) |
 | 5 | no old-root forwarding shim | 3 + 4 (a shim is a recreated file that imports the old path) |
 | 6 | `runtime/process/**` cannot import app/tui/client/direct/remote | `runtime-process-imports-inner-layers`, `runtime-process-imports-dsh-implementation` |
-| 7 | `runtime/remote/**` cannot import `runtime/direct/**` | `direct-import-outside-composition` |
+| 7 | `runtime/remote/**` cannot import `runtime/direct/**` | rule `runtime-remote-imports-direct`; the one reviewed HF1 Host-side bridge exception is `REMOTE_TO_DIRECT_APPROVED_BRIDGES` (asserted to stay exactly one file) |
 | 8 | `app/**` outside the composition zone cannot import concrete `tui/**` | `app-imports-tui` |
 | 9 | `domain/task/**`, `domain/communication/**`, `domain/command/**` stay free of Host/TUI/app implementation | `domain-imports-app`/`-tui`/`-client`/`-remote-composition` + `scripts/client-boundary-gate.mjs` (no new Host-coupling debt) |
 | 10 | `domain/transcript/**` closed-world rules | `domain-transcript-imports-backend-mechanics` |
-| 11 | concrete extension registries live under `extension/internal/**` only | root ledger (a root registry would be an unclassified root) + `extension-public-declaration-imports-tui` |
+| 11 | concrete extension registries live under `extension/internal/**` only | `findConcreteRegistryPlacementViolations` (a nested `extension/**/*-registry.ts` outside `internal/**` fails; the root ledger and `extension-public-declaration-imports-tui` cover the root and declaration faces) |
 | 12 | package export set unchanged | `test/public-entrypoint-compat.test.ts` + `pnpm pack:release` |
 | 13 | packed declarations expose no private implementation dependency | `scripts/tarball-smoke.mjs` (postpack) + `typecheck:bundle` |
-| 14 | `startup.ts` remains a zero-dependency island | `startup-imports-remote-composition` + the startup reachability pass + `test/startup.test.ts` |
+| 14 | `startup.ts` stays isolated from the optional application/runtime/backend/TUI runner graph | `findStartupIslandViolations` (its package, Node built-in, JSON-data and fully erased type imports stay legal) + `startup-imports-remote-composition` for the Remote-composition reachability |
 | 15 | `client/**` stays Client-local (no Host durable authority) | `scripts/client-boundary-gate.mjs` + `client-imports-remote-composition` |
 
 ## Existing directory convergence

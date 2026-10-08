@@ -24,17 +24,20 @@ import {
   buildStaticEdges,
   collectSourceEntries,
   findDirectAdapterConstructions,
+  findConcreteRegistryPlacementViolations,
   findFinalSourceRootStateViolations,
   findRemoteDynamicImportViolations,
   findRetiredSourceDirectoryViolations,
   findRetiredSourceRootViolations,
   findSourceRootViolations,
+  findStartupIslandViolations,
   findViolations,
   isBootstrapCompositionFile,
   isDirectCompositionFile,
   isDshImplementationPackage,
   isRemoteComposition,
   isRuntimeProcessSubtree,
+  listSourceFilesUnder,
   listSourceRootDirectories,
   listSourceRootFiles,
   parseImportSpecifiers,
@@ -46,6 +49,7 @@ import {
   resolveRelativeImport,
   RETIRED_SOURCE_DIRECTORIES,
   RETIRED_SOURCE_ROOTS,
+  REMOTE_TO_DIRECT_APPROVED_BRIDGES,
   FINAL_STABLE_SOURCE_ROOTS,
   scriptKindOf,
   SOURCE_EXTENSIONS,
@@ -1829,4 +1833,79 @@ test('TS8-F retired roots: a recreated file or a dangling old-path import is rej
   assert.deepEqual(findRetiredSourceRootViolations([], [
     entry('app/surface/example.ts', '// see src/diff.ts for the old derivation\n'),
   ]), [])
+})
+
+test('TS8-F final assertion 7: a Remote adapter cannot import the Direct implementation (HF1 bridge excepted)', () => {
+  // `direct-import-outside-composition` treats the whole runtime/** layer as
+  // Direct composition, so runtime/remote was silently exempt; this rule is
+  // the actual assertion.
+  for (const specifier of ['../direct/example.ts', '../direct/nested/deep.ts']) {
+    const violations = findViolations([entry('runtime/remote/example.ts', `import { x } from '${specifier}'\n`)])
+    assert.equal(violations.length, 1, `${specifier} from a Remote adapter must fail`)
+    assert.equal(violations[0].rule, 'runtime-remote-imports-direct')
+  }
+  // The statically knowable dynamic edge is the same edge.
+  assert.equal(findViolations([
+    entry('runtime/remote/example.ts', "const load = () => import('../direct/example.ts')\n"),
+  ]).filter(v => v.rule === 'runtime-remote-imports-direct').length, 1)
+  // The reviewed HF1 Host-side construction bridge keeps its direct helpers.
+  assert.deepEqual([...REMOTE_TO_DIRECT_APPROVED_BRIDGES], ['runtime/remote/pi-tui-file-reference-host-bridge.ts'],
+    'the exception set must stay exactly the one documented HF1 bridge')
+  for (const rel of REMOTE_TO_DIRECT_APPROVED_BRIDGES) {
+    assert.equal(findViolations([entry(rel, "import { x } from '../direct/x.ts'\n")]).length, 0,
+      `${rel} is the approved Host-construction exception`)
+  }
+  // A Remote adapter importing anything else stays legal.
+  assert.deepEqual(findViolations([
+    entry('runtime/remote/example.ts', "import { x } from '../backend-loader.ts'\n"),
+  ]), [])
+})
+
+test('TS8-F final assertion 11: a concrete extension registry must live under extension/internal/**', () => {
+  assert.deepEqual(findConcreteRegistryPlacementViolations(listSourceFilesUnder('src')), [],
+    'the real tree keeps every concrete extension registry under extension/internal/**')
+  for (const rel of ['extension/keybinding-registry.ts', 'extension/nested/renderer-registry.ts']) {
+    const violations = findConcreteRegistryPlacementViolations([rel])
+    assert.equal(violations.length, 1, `${rel} must fail the concrete-registry placement check`)
+    assert.match(violations[0], /outside extension\/internal\/\*\*/)
+  }
+  assert.deepEqual(findConcreteRegistryPlacementViolations(['extension/internal/renderer-registry.ts']), [])
+  // Registry-shaped modules outside the extension tree are out of this
+  // assertion's scope (app/tui own their own registries).
+  assert.deepEqual(findConcreteRegistryPlacementViolations([
+    'app/command/client-command-registry.ts',
+    'tui/footer/item-registry.ts',
+  ]), [])
+})
+
+test('TS8-F final assertion 14: the startup island must not reach a repository implementation module', () => {
+  const real = collectSourceEntries()
+  assert.equal(real.some(entryItem => entryItem.rel === 'startup.ts'), true, 'the real startup entry exists')
+  assert.deepEqual(findStartupIslandViolations(real), [],
+    'the real startup island reaches no repository implementation module')
+  // A direct application-graph edge is the reviewer's counterexample.
+  assert.equal(findStartupIslandViolations([
+    entry('startup.ts', "import './app/surface/runtime.ts'\n"),
+    entry('app/surface/runtime.ts', ''),
+  ]).length, 1)
+  // A transitive edge fails too, and the reported module is the offending hop.
+  assert.equal(findStartupIslandViolations([
+    entry('startup.ts', "import './tui/x.ts'\n"),
+    entry('tui/x.ts', "import '../runtime/backend-loader.ts'\n"),
+    entry('runtime/backend-loader.ts', ''),
+  ]).length, 2)
+  // The island's legitimate imports build no repository edge: packages, Node
+  // built-ins, JSON data and a FULLY ERASED type face stay legal.
+  assert.deepEqual(findStartupIslandViolations([
+    entry('startup.ts', "import { Command } from 'commander'\nimport { readFileSync } from 'node:fs'\n"
+      + "import compat from './dsh-compat-matrix.json' with { type: 'json' }\n"
+      + "import type { Context } from '@deepseek-ai/cordis'\nimport type { X } from './tui/x.ts'\n"),
+    entry('tui/x.ts', ''),
+  ]), [])
+  // Under verbatimModuleSyntax an INLINE type import still emits a runtime
+  // module load, so it is a repository edge.
+  assert.equal(findStartupIslandViolations([
+    entry('startup.ts', "import { type X } from './tui/x.ts'\n"),
+    entry('tui/x.ts', ''),
+  ]).length, 1)
 })
