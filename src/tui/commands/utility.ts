@@ -56,6 +56,9 @@ export function registerHelpCommand({ runner, registerOne }: HelpCommandDeps): v
       // M4: the key labels come from the EFFECTIVE keymap (plan §18) — a
       // user remap updates /help automatically; the UI never hard-codes a
       // physical shortcut.
+      // PR3-A: /help's keymap labels are PiTui chrome; explicit unavailability
+      // on a non-PiTui renderer instead of a crash.
+      if (app === undefined) return { kind: 'error', text: 'keymap labels are unavailable in this renderer' }
       const keybindings = app.keybindingsManager()
       const keysLabel = (action: AppKeybindingId): string => {
         // The full effective label: ALL direct keys AND ALL leader
@@ -89,6 +92,7 @@ export function registerHelpCommand({ runner, registerOne }: HelpCommandDeps): v
             currentValue: '',
           })),
       ]
+      if (app === undefined) return { kind: 'error', text: 'the settings panel is unavailable in this renderer' }
       app.openSettings(rows, () => {}, () => {})
       return { kind: 'success' }
     },

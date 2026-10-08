@@ -29,6 +29,7 @@ import { rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPane
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-attention.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
 import type { TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
@@ -168,8 +169,15 @@ export interface TaskBrowserViewState {
 
 /** The narrow inputs of the Task Center owner; one cohesive lifetime. */
 export interface TaskRuntimeOptions {
-  /** The mounted app (throws before `start()`), read through the aggregate. */
+  /** The mounted app (throws before `start()`), read through the aggregate.
+   * PiTui-only sinks (browser/viewer/panel chrome, action receipts) read it;
+   * background-reachable roster commits go through {@link display}. */
   readonly mounted: () => TuiApp
+  /** PR3-A: the renderer-facing display seam. Background roster/summary
+   * commits and the attention reset are reachable while a read-only TSP
+   * renderer owns the terminal; they consult the seam's capability flags and
+   * are skipped (not faked) when the renderer presents no Task Center. */
+  readonly display: () => SurfaceDisplaySeam
   /** The runner's cleanup latch (the ORIGINAL `cleanedUp` fence). */
   readonly isCleanedUp: () => boolean
   /** The injected Question-attention read/subscription (never the controller). */
@@ -508,6 +516,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   }
   const commitBadge = (running: ReadonlyArray<{ id: string; label: string }>): void => {
     if (options.isCleanedUp()) return
+    // PR3-A: the roster badge is Task-Center chrome; a renderer without it
+    // (read-only TSP) legitimately skips the commit — never a fake roster.
+    if (!options.display().supportsTaskCenter) return
     options.mounted().setAgents(running.map(entry => ({
       id: entry.id,
       label: entry.label,
@@ -521,6 +532,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // browser too — and it excludes the Job rows that `rows()` carries.
     taskCatalogDescendants = summary.totalAgents
     if (options.isCleanedUp()) return
+    if (!options.display().supportsTaskCenter) return
     options.mounted().setTaskSummary(summary)
   }
   const commitRefreshState = (state: 'loading' | 'ready' | 'stale', error?: string): void => {
@@ -1078,7 +1090,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
             startedAt: job.startedAt,
             finishedAt: job.finishedAt,
           }))
-          options.mounted().setTasks(tasks)
+          if (options.display().supportsTaskCenter) options.mounted().setTasks(tasks)
           // A jobs-only session has no catalog coordinator, so this is the
           // ONLY refresh channel for an OPEN browser. Keep it in step with
           // the registry, or a Job detail's hidden parent returns with stale
@@ -1156,7 +1168,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         refreshAgents = (): void => {
           if (options.isCleanedUp()) return
           if (source.sessionId() === undefined) {
-            options.mounted().setAgents([])
+            if (options.display().supportsTaskCenter) options.mounted().setAgents([])
             return
           }
           taskCatalogRefreshPendingInvalidations += 1
@@ -1169,7 +1181,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         refreshAgentRuntimeOnly = (): void => {
           if (options.isCleanedUp()) return
           if (source.sessionId() === undefined) {
-            options.mounted().setAgents([])
+            if (options.display().supportsTaskCenter) options.mounted().setAgents([])
             return
           }
           taskRuntime!.refreshRuntime()
@@ -1199,7 +1211,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // A session switch drops the old session's Question attention with the
       // rest of the Task Center state: its parked count must not arm the new
       // session's footer trigger.
-      options.mounted().setQuestionAttention(0)
+      if (options.display().supportsTaskCenter) options.mounted().setQuestionAttention(0)
       // Invalidate the coalescing gate BEFORE any close/dispose that can
       // synchronously run a callback: the old session's slow traversal must
       // neither hold the new session's refresh back (`inFlight`) nor clear the
@@ -1225,9 +1237,11 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // The dataset scope is session-scoped too: a switched-in session must
       // never inherit a Workflow-scoped browser (PR2 plan §10.8).
       taskBrowserScope = { kind: 'all' }
-      options.mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
-      options.mounted().setTasks([])
-      options.mounted().setAgents([])
+      if (options.display().supportsTaskCenter) {
+        options.mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
+        options.mounted().setTasks([])
+      }
+      if (options.display().supportsTaskCenter) options.mounted().setAgents([])
       taskBrowserRows = []
     },
     openTasksBrowser(viewMode, restoreState, scope, header) {

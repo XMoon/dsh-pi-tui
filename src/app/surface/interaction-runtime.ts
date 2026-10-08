@@ -46,6 +46,16 @@ export interface InteractionRuntimeOptions {
   readonly mounted: () => TuiApp
   /** The mounted app WITHOUT the not-mounted throw (the teardown path reads it). */
   readonly liveApp: () => TuiApp | undefined
+  /**
+   * PR3-A: the renderer-facing display seam. When the live renderer cannot
+   * present interactive modals (`supportsModals === false`, the read-only TSP
+   * renderer), `attach` registers the LEGAL fail-closed answerers instead of
+   * the interactive ones: approvals resolve `'unavailable'` (the official
+   * policy's no-answerer outcome — never an implicit allow), questions
+   * delegate to `next()` (the Host's own timeout/continued lifecycle owns
+   * them), and the dock pins an observable notice.
+   */
+  readonly display: () => import('./display-seam.ts').SurfaceDisplaySeam
   /** The live routed session id (the authoritative read of a settled answer). */
   readonly currentSessionId: () => string | undefined
   /** The surface coalesced repaint (the controller asks for it after a mutation). */
@@ -96,6 +106,26 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
 
   return {
     attach(port, deps) {
+      // PR3-A: a renderer that cannot present interactive modals (the
+      // read-only TSP renderer) still registers BOTH answerers, but
+      // fail-closed: approvals resolve `'unavailable'` (the official
+      // `ask`-policy no-answerer outcome — NEVER an implicit allow), questions
+      // delegate to `next()` so the Host's own timed-wait/continued lifecycle
+      // owns them, and the dock pins an OBSERVABLE notice. No promise is
+      // swallowed and no answer is fabricated.
+      if (options.display().supportsModals === false) {
+        options.display().setDockNotice({
+          id: 'modals-unsupported',
+          text: 'Question/Approval dialogs are not answerable in this read-only renderer — approvals fail closed and questions time out to their continued lifecycle',
+          kind: 'info',
+        })
+        port.onApprovalRequest((req, next) => {
+          if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
+          return Promise.resolve<ApprovalOutcome>('unavailable')
+        })
+        port.questions.onRequest(async (_request, next) => next())
+        return
+      }
       // The interactive answerer: every approval ask becomes a dialog. An
       // already-aborted request settles cancelled synchronously; otherwise
       // the prompt's own abort signal withdraws it (turn cancel). P7c: the

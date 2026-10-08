@@ -712,6 +712,7 @@ test('T10: the spike imports no PiTui owner and no application/client module', a
     /^\.\/support\/tern-tsp-transcript-view\.ts$/,
     /^(?:\.\.\/)+src\/domain\//,
     /^(?:\.\.\/)+src\/tui\/transcript\//,
+    /^(?:\.\.\/)+src\/tui\/tsp\/transcript-view\.ts$/,
     /^(?:\.\.\/)+src\/runtime\/assistant-stream-port\.ts$/,
   ]
   for (const path of ['scripts/tern-tsp-transcript-spike.mts', 'scripts/support/tern-tsp-transcript-view.ts']) {

@@ -111,6 +111,7 @@ import { createSessionScopeAuthority, type LiveSessionScope } from '../app/sessi
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
+import { productionTspConnector, selectRendererMount } from './bootstrap/renderer-selection.ts'
 import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
@@ -725,7 +726,7 @@ export function applyRunnerWithRuntime(
         },
         notifyResumeFailure: () => {
           if (resumeFailure !== undefined) {
-            app.notify(resumeFailure, 'error')
+            surface.display.notify(resumeFailure, 'error')
             resumeFailure = undefined
           }
         },
@@ -1393,7 +1394,10 @@ export function applyRunnerWithRuntime(
       ctx,
       diag,
       signal: lifecycleController.signal,
-      app: () => app,
+      app: () => app as TuiApp,
+      // PR3-A: registration/refresh failures are background-reachable under a
+      // read-only TSP renderer; the notice goes through the display seam.
+      notify: (text, kind) => surface.display.notify(text, kind),
       liveAgent: () => agentNow(),
       sessionScope,
       ownership,
@@ -1691,9 +1695,11 @@ export function applyRunnerWithRuntime(
     })
     // A5b-2: the client-local input-history owner (known cwds, the canonical
     // last row and the per-session recall projection). Constructed before the
-    // mount; it only touches the app inside `activateBootRecall`.
+    // mount; it only touches the display seam inside `activateBootRecall`.
     const history = createInputHistory({
-      surface: { get app() { return app } },
+      // Late-bound: the seam exists only after `surface.start` below; the
+      // owner reads it inside `activateBootRecall` (a post-mount step).
+      surface: { get display() { return surface.display } },
       clientCwd: cwd,
       sessionCwd: () => status.sessionCwd(),
       diag,
@@ -1704,7 +1710,7 @@ export function applyRunnerWithRuntime(
     // surface, so the guard is initialized before any refresh callback exists.
     let cleanedUp = false
 
-    let app: TuiApp
+    let app: TuiApp | undefined
     /**
      * The stable display-subject lifetime tokens for image reads (M3-5 PR2): one
      * slot for the MAIN presentation (keyed by owner generation + session id) and
@@ -1832,7 +1838,7 @@ export function applyRunnerWithRuntime(
     // (M3-4 PR3 shell amendment; the frozen selection-boundary contract).
     const userShellPort = backend.hostUserShell
     const localShell = createUserShell<Agent>({
-      app: () => app,
+      app: () => app as TuiApp,
       diag,
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
@@ -1977,7 +1983,7 @@ export function applyRunnerWithRuntime(
     // in SubmissionRuntime + SessionRuntime.withWriter; this owner only
     // supplies the semantic hooks.
     const submission = createSubmissionController<Agent>({
-      app: () => app,
+      app: () => app as TuiApp,
       diag,
       signal,
       isCleanedUp: () => cleanedUp,
@@ -2099,7 +2105,7 @@ export function applyRunnerWithRuntime(
     // `/transcript`), including its in-flight dedupe set and save-location
     // dialog. Consumed by the session dispatch below.
     const artifacts = createArtifactSaveOwner<Agent>({
-      app: () => app,
+      app: () => app as TuiApp,
       isCleanedUp: () => cleanedUp,
       signal,
       diag,
@@ -2228,13 +2234,37 @@ export function applyRunnerWithRuntime(
         signal: () => lifecycleController.signal,
       },
     })
+    // PR3-A (experimental): the ONE renderer selection, before the mount.
+    // `DSH_PI_TUI_RENDERER=tsp` opts into the Tern TSP renderer: the official
+    // SDK connects BEFORE PiTui could take stdin. `null` (no TSP in this
+    // terminal) falls back to the unchanged PiTui mount below; a connect
+    // FAILURE propagates to this root's fatal catch — never a silent
+    // fallback. The import is lazy, so the default path never loads the SDK
+    // (and `src/startup.ts` stays dependency-free). No `TERM_PROGRAM`
+    // inference: the SDK's own probe is the only capability authority.
+    // The mounted-renderer FATAL route (F6): an SDK input-loop failure after
+    // mount goes through the runner's fatal lifecycle (error outcome, no
+    // resume hint) — never a normal appExit(0).
+    const rendererOnFatal = (error: unknown): void => {
+      void fatalLifecycle.handleStartupFailure(error)
+    }
+    const rendererMount = await selectRendererMount({
+      cwd,
+      requestExit: () => requestExit(),
+      onFatal: rendererOnFatal,
+      log: (message, fields) => diag.info(message, fields),
+      connectTsp: productionTspConnector(cwd, () => requestExit(), rendererOnFatal, (message, fields) => diag.info(message, fields)),
+      env: process.env,
+    })
     // A4: mount through the surface owner. The surface builds the surface-local
     // option wiring (image loader, history-search binding, clipboard/link
     // capabilities, extension registries + input routes, resize/workflow hooks)
     // from these narrow injected capabilities and owns the mounted TuiApp from
     // here on.
-    surface.start({
+    try {
+      surface.start({
       events: applicationEvents.events,
+      ...(rendererMount === undefined ? {} : { renderer: rendererMount }),
       workspaceRoot: cwd,
       // The structural icon palette: read ONCE at startup from the persisted
       // document; runtime switches go through app.setIconStyle (the /settings
@@ -2296,7 +2326,7 @@ export function applyRunnerWithRuntime(
           }
           return imageScopeMain
         }
-        const key = `child:${app.getViewerGeneration()}:${sessionId}`
+        const key = `child:${surface.display.getViewerGeneration()}:${sessionId}`
         if (imageScopeChild !== undefined && imageScopeChild.key === key) return imageScopeChild
         imageScopeChild = {
           key,
@@ -2365,79 +2395,62 @@ export function applyRunnerWithRuntime(
       // injects the image fallback colour, so `app/surface/**` never imports a
       // `tui/theme/**` path.
       imageFallbackColor: color.textDim,
-    })
-    // The mounted surface is now live; the runner borrows the reference (the
-    // surface owner keeps the lifetime).
-    app = surface.app
-    settings.applySafeKeybindingsMode()
-    settings.applyUserKeybindings()
-    // M3: the user keybindings reload seam is EXPLICIT — `/keybindings
-    // reload` re-reads the settings document and re-validates/rebuilds the
-    // keymap (plan §12/§16). There is deliberately NO automatic settings
-    // watch here: a `watch(callback)` would be a Direct-only dependency —
-    // the TuiSettingsConfig port is get/replace only, a future Remote
-    // adapter cannot map a callback across the process boundary, and the
-    // migration rule forbids callbacks across the wire (see
-    // docs/client-server-migration.md). A settings edit takes effect after
-    // `/keybindings reload`; the fail-soft parser above keeps the keymap's
-    // last-known-good state on any read/parse error.
-    // M2: the plugin contributions compile into the effective keymap at the
-    // LOWEST priority (a Host action always wins). A4-5: the sync and its
-    // registry subscription are surface-owned (`surface.bindPluginKeybinds`);
-    // the surface syncs on every invalidation (the manager skips unchanged
-    // rules, so the rebuild is cheap) and releases the subscription with the
-    // surface teardown.
-    surface.bindPluginKeybinds()
-
-    // The Task Browser opener, the browser-scope reset and the Workflow card
-    // action sink are A4-6 surface-owned (`surface.openTasksBrowser` /
-    // `surface.resetTasks` / the surface-internal workflow handler wired as the
-    // app's `onWorkflowAction`); the runner only forwards the `/tasks` entry
-    // below.
-    // M3: attach the extension host to the mounted surface chrome once per
-    // generation (F-1): the header/dock/footer merge extension content, and the
-    // service's capability set + state bridge become live. A4-5: the whole
-    // attach composition is surface-owned; the runner supplies only the
-    // late-bound command-completion refresh (a client command contribution may
-    // join the `/` menu after mount).
-    surface.attachSurfaceSeams({ refreshCommandCompletions: () => command.refreshCompletions() })
-    // (new installs default to 'on' — alt screen by default): boot applies
-    // it FIRST so the alt screen owns the terminal input handler before any
-    // theme query below targets "the active screen" — a query sent while the
-    // main screen still owned input would have its reply swallowed by the
-    // alt screen's OSC 11 consumer and time out, silently disabling `auto`.
-    // Focus Mode's TUI projection is a persisted visual preference like
-    // Home/End/fullscreen/theme: the app must reflect the RESTORED state
-    // before the first frame — otherwise the system prompt would tell the
-    // model the user cannot see the process while the UI still shows it in
-    // full (review blocker: the two halves of Focus would split).
-    // The app already receives the shared displayState at construction, so the
-    // first mounted frame cannot flash a different preset.
-    // Terminal focus reporting (CSI ? 1004) for the completion
-    // notification policy: enabled at TUI mount, disabled in cleanup so
-    // the mode never leaks into the shell after exit. The app already
-    // passes the ESC[I/ESC[O reports through to the surface's tracker
-    // (A4-4). The guarded writer swallows a broken-stream error; a
-    // synchronous throw is contained so a dead stdout can never fail the
-    // TUI mount.
-    surface.enableFocusReporting()
-    // A5b-2: the RESTORED display preferences (Home/End, wheel, fullscreen,
-    // theme) are applied by their owner at this SAME startup position — before
-    // the first frame and after the alt screen owns input.
-    settings.applyBootDisplay()
-    settings.applyFooterSettings()
-    // The retired per-cwd input history (which used to live inside the old
-    // settings namespace) is deliberately NOT migrated in PR A (plan §8.5):
-    // it stays in the read-only legacy settings.yaml(.imported); the JSONL
-    // history store remains the sole live history authority.
-    // Input history is loaded PER SESSION by initLiveSession (keyed on the
-    // live session's cwd), never once at boot: a session switch to another
-    // workspace must replace the recall history, not keep the old one. With
-    // a DEFERRED start no session exists yet, so initLiveSession has not
-    // run: seed the recall history from the LAUNCH cwd now, so ↑ works
-    // immediately in a fresh window (the per-session reseed replaces it
-    // when the first session is born).
-    history.activateBootRecall()
+      })
+    } catch (error) {
+      // PR3-A ownership handshake: the surface rejected the mount (most
+      // often: the runner was disposed while the SDK handshake was in
+      // flight). The connected session is OWNED and must be closed before the
+      // error reaches the fatal path — otherwise raw-mode stdin stays held
+      // with no registered disposer.
+      if (rendererMount !== undefined) await rendererMount.releaseUnmounted().catch(() => {})
+      throw error
+    }
+    // The mounted surface is now live. On the PiTui branch the runner borrows
+    // the TuiApp reference (the surface owner keeps the lifetime); the TSP
+    // renderer branch has NO TuiApp (the slot stays undefined: command
+    // registrations skip their completions install, input-gated execution
+    // paths never run) — every PiTui-only step below (the
+    // keymap/theme/footer boot application, the plugin-keybinding sync, the
+    // extension chrome seams, focus reporting) is skipped for it, exactly as
+    // the A0 audit classified them (display-preference chrome, never business
+    // state: Tern owns its own theme, keymap and chrome).
+    const tspRenderer = rendererMount !== undefined
+    if (!tspRenderer) {
+      app = surface.app
+      settings.applySafeKeybindingsMode()
+      settings.applyUserKeybindings()
+      // M3: the user keybindings reload seam is EXPLICIT — `/keybindings
+      // reload` re-reads the settings document and re-validates/rebuilds the
+      // keymap (plan §12/§16). There is deliberately NO automatic settings
+      // watch here: a `watch(callback)` would be a Direct-only dependency —
+      // the TuiSettingsConfig port is get/replace only, a future Remote
+      // adapter cannot map a callback across the process boundary, and the
+      // migration rule forbids callbacks across the wire (see
+      // docs/client-server-migration.md). A settings edit takes effect after
+      // `/keybindings reload`; the fail-soft parser above keeps the keymap's
+      // last-known-good state on any read/parse error.
+      // M2: the plugin contributions compile into the effective keymap at the
+      // LOWEST priority (a Host action always wins). A4-5: the sync and its
+      // registry subscription are surface-owned (`surface.bindPluginKeybinds`);
+      // the surface syncs on every invalidation (the manager skips unchanged
+      // rules, so the rebuild is cheap) and releases the subscription with the
+      // surface teardown.
+      surface.bindPluginKeybinds()
+      surface.attachSurfaceSeams({ refreshCommandCompletions: () => command.refreshCompletions() })
+      // Terminal focus reporting (CSI ? 1004) for the completion notification
+      // policy: enabled at TUI mount, disabled in cleanup so the mode never
+      // leaks into the shell after exit. Skipped on TSP: the ANSI write would
+      // fight the SDK-owned tty (Tern owns focus presentation).
+      surface.enableFocusReporting()
+      // A5b-2: the RESTORED display preferences (Home/End, wheel, fullscreen,
+      // theme) are applied by their owner at this SAME startup position. They
+      // are PiTui chrome; Tern owns the equivalent presentation natively.
+      settings.applyBootDisplay()
+      settings.applyFooterSettings()
+      // The editor recall seed is PiTui-only on this branch (the read-only
+      // renderer has no editor); the JSONL history store still accumulates.
+      history.activateBootRecall()
+    }
     // Fresh/deferred startup title: no session yet — cwd identity only. The
     // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
     status.refreshTerminalTitle()
@@ -2744,8 +2757,8 @@ export function applyRunnerWithRuntime(
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
         mergeDraftIntoEditor: (text) => {
-          const merged = mergeDraft(app.getDraft(), text)
-          app.setEditorText(merged)
+          const merged = mergeDraft((app as TuiApp).getDraft(), text)
+          ;(app as TuiApp).setEditorText(merged)
           return merged === text
         },
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
@@ -2771,12 +2784,12 @@ export function applyRunnerWithRuntime(
         },
         settleLocalSubmission: (requestId) => submission.settleLocalSubmission(requestId),
         settleSubmitAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),
-        notify: (message, kind) => app.notify(message, kind),
+        notify: (message, kind) => (app as TuiApp).notify(message, kind),
         refuseByTransitionFence: (text) => refuseByTransitionFence(
           text,
-          () => app.getDraft(),
-          (t) => app.setEditorText(t),
-          (m, k) => app.notify(m, k),
+          () => (app as TuiApp).getDraft(),
+          (t) => (app as TuiApp).setEditorText(t),
+          (m, k) => (app as TuiApp).notify(m, k),
         ),
         prepareMessage: (text, requestId) => remoteSources === undefined
           // Direct: the Direct UserMessage preparation runs the Host
@@ -2805,7 +2818,7 @@ export function applyRunnerWithRuntime(
       // duplicate refresh.
       await presentation.initLiveSession(startupAgent)
     } else {
-      app.setWelcomeIdle(true)
+      surface.display.setWelcomeIdle(true)
       status.refresh()
       status.refreshTerminalTitle()
       status.refreshTerminalCwd()
@@ -2835,11 +2848,11 @@ export function applyRunnerWithRuntime(
       }
     }
     if (surfaceNotice !== undefined) {
-      app.notify(surfaceNotice, 'error')
+      surface.display.notify(surfaceNotice, 'error')
       surfaceNotice = undefined
     }
     if (resumeFailure !== undefined) {
-      app.notify(resumeFailure, 'error')
+      surface.display.notify(resumeFailure, 'error')
       resumeFailure = undefined
     }
     // A4-7 (plan §16): the presentation event routing is SURFACE-owned. The
@@ -2859,7 +2872,7 @@ export function applyRunnerWithRuntime(
       runDetached('turn flush', () => sessions.flush(flushed), {
         diag,
         sessionId: () => flushed.id,
-        notify: (message) => app.notify(
+        notify: (message) => surface.display.notify(
           `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
           'error',
         ),

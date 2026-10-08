@@ -11,14 +11,20 @@ evidence ledger. Per-PR measurements live under
   in-band semantic UI protocol: a program running inside a Tern pane sends a
   semantic node tree plus incremental ops, and Tern owns the native layout,
   styling and rendering. The program keeps its own state and input loop.
-- **Production is PiTui only.** `dsh --profile pi-tui` renders through the
-  vendored PiTui surface. There is no TSP flag, profile, setting, command or
-  automatic selection, and `src/startup.ts` stays dependency-free. TSP is
-  currently dev/test-only.
+- **Production default is PiTui.** `dsh --profile pi-tui` renders through the
+  vendored PiTui surface. PR3-A adds ONE experimental internal opt-in
+  (`DSH_PI_TUI_RENDERER=tsp`, no profile/setting/command/public CLI): when it
+  is set and the official SDK `connect()` succeeds, the Tern TSP renderer
+  owns the terminal as a read-only live transcript; `connect() === null`
+  mounts PiTui unchanged and a connect throw is a startup failure. Default
+  environments never load the SDK (lazy import) and `src/startup.ts` stays
+  dependency-free.
 - **What exists:** PR1 (a standalone opt-in replay spike with a real Tern pane
-  smoke) and PR2 (an optional read-only projection observer that lets an
-  isolated TSP consumer render the live application projection). Both are
-  experimental; neither replaces PiTui.
+  smoke), PR2 (an optional read-only projection observer that lets an isolated
+  TSP consumer render the live application projection), and PR3-A (the
+  single-tty read-only TSP renderer mount behind the internal experimental
+  opt-in). All are experimental; only PR3-A can own the product terminal, and
+  it is read-only.
 - **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm,
   `devDependencies` only) against real Tern `0.6.2 (4b3ed42)`, on
   `next @ a4473563`. A future SDK or pane version may change any field below.
@@ -27,9 +33,9 @@ evidence ledger. Per-PR measurements live under
 | Item | State |
 |---|---|
 | PR1 replay spike → real Tern pane | DONE (manual, opt-in script) |
-| PR2 live application projection (routed events, production cold hydration, Remote re-window) → isolated TSP surface | IMPLEMENTED on `feat/tern-tsp-pr2-live-presentation` ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257); see the ledger; update to DONE when merged) |
-| TSP pane as the product renderer (one physical tty) | PLANNED (PR3) |
-| Editor/submit/Question/Approval inside TSP | PLANNED (PR3+) |
+| PR2 live application projection (routed events, production cold hydration, Remote re-window) → isolated TSP surface | DONE (merged, [#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) |
+| PR3-A single-tty read-only TSP live mount (experimental opt-in `DSH_PI_TUI_RENDERER=tsp`) | IN PROGRESS (this PR) |
+| Editor/submit/Question/Approval inside TSP | PLANNED (PR3-B) |
 
 ## Upstream protocol and SDK
 
@@ -191,12 +197,14 @@ and the editor/input authority behind it, are PR3 scope; building a second
 
 | Capability | State |
 |---|---|
-| PiTui full application (`dsh --profile pi-tui`) | Production, unchanged by PR1/PR2 |
-| Canonical projection → native TSP nodes (mapper) | DONE (pure, unit-covered) |
+| PiTui full application (`dsh --profile pi-tui`) | Production, unchanged by PR1/PR2/PR3-A |
+| Canonical projection → native TSP nodes (mapper) | DONE (pure, unit-covered; the production copy lives in `src/tui/tsp/transcript-view.ts`) |
 | Replay spike in a real Tern pane | DONE (PR1; real Tern 0.6.2, 7 acked frames) |
 | Live application projection → isolated TSP surface | DONE in tests (PR2) |
-| Live application projection → real Tern pane | UNVERIFIED (PR3) |
-| TSP as the single product renderer / editor owner | PLANNED (PR3) |
+| Single-tty read-only TSP renderer (PR3-A, opt-in env) | IMPLEMENTED (scripted-tty tests; real-pane smoke in the PR3-A evidence) |
+| Live application projection → real Tern pane (product) | PR3-A manual smoke (see evidence); still experimental |
+| Editor/submit input inside TSP | PLANNED (PR3-B) |
+| Question/Approval modals inside TSP | LEGALLY FAIL-CLOSED in PR3-A (unavailable / Host-continued + dock notice); interactive in PR3-B+ |
 | Search/Reveal/Focus parity inside TSP | PLANNED (PR4–PR5) |
 | ExtensionView / custom renderers over TSP | PLANNED (policy undefined) |
 | SSH, tmux, screen, zellij, `TERN_TSP=0` | Unsupported by the SDK (`connect()` declines) |
@@ -237,7 +245,8 @@ Evidence levels — do not merge these into a stronger claim:
 |---|---|---|---|---|
 | PR1 ([#256](https://github.com/XMoon/dsh-pi-tui/pull/256)) | DONE (merged) | Canonical transcript → native TSP nodes; real Tern 0.6.2 render, incremental ops, clean/signal close | Live application wiring; editor/input; durable identity | [./tern-tsp/evidence/pr1.md](./tern-tsp/evidence/pr1.md) |
 | PR2 ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) | IMPLEMENTED (this PR) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty, including the production cold hydration and the Remote re-window (`rehydrateFromWindow`) | Real Tern pane; product renderer selection; editor/input; Remote wire rollover (deferred with owner) | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
-| PR3+ | PLANNED | Renderer selection at one composition point; editor/input authority; Question/Approval hand-off | — | — |
+| PR3-A | IN PROGRESS (this PR) | One renderer selection at the composition root (SDK connect before PiTui; null→PiTui, throw→fatal); single SDK tty owner; read-only live transcript + status/notices through the display seam; Loading policy; fail-closed modals | Editor/input (PR3-B); real-pane parity of every capability | [./tern-tsp/evidence/pr3-a.md](./tern-tsp/evidence/pr3-a.md) |
+| PR3-B+ | PLANNED | Editor/input authority; interactive Question/Approval | — | — |
 
 ## Next decisions
 

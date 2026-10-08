@@ -41,7 +41,8 @@ import { usageFromStats } from '../../domain/status/derive-usage.ts'
 import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { resolveDisplaySubject } from '../../domain/status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, StatusPatch, StatusSnapshot, ViewStatus, WorkspaceStatus } from '../../domain/status/types.ts'
-import type { StatusData, TuiApp } from '../../tui-app.ts'
+import type { StatusData } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 
 /** The live-agent facts the status derivation reads. */
 export interface StatusLiveAgent {
@@ -81,7 +82,8 @@ export interface StatusRemoteFacts {
 
 /** The narrow surface capabilities the status owner needs. */
 export interface StatusSurface {
-  readonly app: TuiApp
+  /** PR3-A: renderer-neutral display commits (welcome/title/cwd/notify). */
+  readonly display: SurfaceDisplaySeam
   readonly status: { snapshot(): StatusSnapshot }
   /** ONE atomic display-subject commit (M3-5 PR1 §9.7): the store patch
    *  (including `view`), the legacy display fields and the presentation
@@ -331,10 +333,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       // fallback, never guessed defaults).
       const facts = deps.remote === undefined ? undefined : mainSessionStatus()
       if (facts === undefined) {
-        deps.surface.app.setWelcomeIdle(true)
+        deps.surface.display.setWelcomeIdle(true)
         return
       }
-      deps.surface.app.setWelcomeCard({
+      deps.surface.display.setWelcomeCard({
         cwd: facts.cwd ?? '',
         sessionId: facts.sessionId,
         // F2/PR5 truthfulness: an ABSENT `model` projection fact is
@@ -351,7 +353,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const current = deps.model.selection()
     const provider = current?.provider ?? agent.options.provider
     const model = current?.model ?? agent.options.model
-    deps.surface.app.setWelcomeCard({
+    deps.surface.display.setWelcomeCard({
       cwd: sessionCwd(),
       sessionId: agent.session.id,
       model: `${provider}/${model}`,
@@ -414,7 +416,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    */
   const refreshTerminalTitle = (): void => {
     deps.updateTerminalTitle({
-      sessionTitle: deps.surface.app.getSessionTitle(),
+      sessionTitle: deps.surface.display.getSessionTitle(),
       // The OFFICIAL fact (a live session whose row carries no cwd yields
       // the plain 'dsh' title — the client cwd never impersonates the
       // session's Host workspace).
@@ -449,7 +451,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   /** Forward the terminal-local cwd to the mounted TUI (it owns the write and
    *  the terminal-ownership lifecycle; see TuiApp.setTerminalCwd). */
   const refreshTerminalCwd = (): void => {
-    deps.surface.app.setTerminalCwd(terminalCwdFact())
+    deps.surface.display.setTerminalCwd(terminalCwdFact())
   }
 
   /** The footer model label: the live selection (with effort) when one exists,
@@ -877,7 +879,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         if (!authority.isScopeCurrent(scope)) return
         if (!authority.isTransportTokenCurrent(transportToken)) return
         if (outcome.kind === 'unavailable') {
-          deps.surface.app.notify(outcome.cause === 'commands'
+          deps.surface.display.notify(outcome.cause === 'commands'
             ? 'permission switch unavailable (commands service)'
             : 'permission switch unavailable (presets not composed)', 'error')
           return
@@ -888,7 +890,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           // and NEVER retry automatically (an ambiguous dispatch must not
           // duplicate). The pushed projection repaints the committed value
           // if the switch landed.
-          deps.surface.app.notify(
+          deps.surface.display.notify(
             `permission switch to ${next} was dispatched but the result is unknown — check the footer before relying on it`,
             'error',
           )
@@ -897,7 +899,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         // APPLIED: do NOT install next as committed locally — the pushed
         // permissions projection repaints the footer (§D7). The notice is
         // the gesture's own feedback, never a committed-value claim.
-        deps.surface.app.notify(next === 'danger-full-access'
+        deps.surface.display.notify(next === 'danger-full-access'
           ? `⚠ ${next} — no approvals`
           : `permission: ${next}`,
         next === 'danger-full-access' ? 'error' : 'info')
@@ -910,7 +912,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           if (deps.isCleanedUp()) return
           if (!authority.isScopeCurrent(scope)) return
           if (!authority.isTransportTokenCurrent(transportToken)) return
-          deps.surface.app.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
+          deps.surface.display.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
         },
       })
       return
@@ -927,7 +929,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const next = names[(index + 1) % names.length] ?? names[0]
     if (next === undefined || next === current) return
     permission.set(agent.session, next)
-    deps.surface.app.notify(next === 'danger-full-access'
+    deps.surface.display.notify(next === 'danger-full-access'
       ? `⚠ ${next} — no approvals`
       : `permission: ${next}`,
     next === 'danger-full-access' ? 'error' : 'info')

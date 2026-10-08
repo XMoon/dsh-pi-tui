@@ -27,12 +27,12 @@ import { dshHome, type Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import { historyFilePath, loadHistoryFile, loadHistoryRecords, type ParsedHistoryRecord } from '../../client/history/store.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../submission/history-persist.ts'
-import type { TuiApp } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 
 /** The narrow capabilities the history owner consumes. */
 export interface InputHistoryDeps {
   /** The mounted app (the editor recall API). */
-  readonly surface: { readonly app: TuiApp }
+  readonly surface: { readonly display: SurfaceDisplaySeam }
   /** The resolved CLIENT working directory (a composition prerequisite). */
   readonly clientCwd: string
   /** The LIVE session's workspace (the status owner). */
@@ -133,7 +133,7 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
     const entries = loadHistoryFile(historyFilePath(dshHome(process.env), deps.clientCwd))
     lastHistoryContent = entries.at(-1)
     // File order is oldest-first; TuiApp's recall API takes newest-first.
-    deps.surface.app.resetInputHistory([...entries].reverse())
+    deps.surface.display.resetInputHistory([...entries].reverse())
   }
 
   /**
@@ -165,7 +165,7 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
       diag: deps.diag,
       notify: (message) => {
         if (deps.isCleanedUp()) return
-        deps.surface.app.notify(message, 'error')
+        deps.surface.display.notify(message, 'error')
       },
       recoverable: () => true,
     })

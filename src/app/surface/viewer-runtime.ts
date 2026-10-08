@@ -402,6 +402,14 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     depth = 1,
   ): Promise<void> => {
     if (deps.isCleanedUp()) return
+    // PR3-A capability gate at the REAL viewer admission point: a renderer
+    // that cannot present the viewer (the read-only TSP mount) declines the
+    // open with an OBSERVABLE notice instead of mounting into chrome that
+    // does not exist. No second admission path is created.
+    if (!deps.surface.display.supportsViewer) {
+      deps.surface.display.notify('the subagent viewer is not available in this renderer', 'error')
+      return
+    }
     // Surface authority (plan §6.10): mode is the durable semantic, the
     // access is what THIS surface may do — only a direct (depth 1)
     // continuable child is interactive from the root.
