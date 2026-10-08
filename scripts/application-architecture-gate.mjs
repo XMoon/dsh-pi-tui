@@ -1267,9 +1267,146 @@ export function findRetiredSourceDirectoryViolations(directories = listSourceRoo
       + '(domain/client/tui/runtime/direct); place new code in its canonical layer instead')
 }
 
+/**
+ * The retired TS8-F root MODULES (plan §11.4 assertions 3-5, §11.5): every
+ * physical root removed by F1–F6, with its canonical owner recorded in the
+ * master disposition ledger (plan §12). `builtins.ts` is deliberately NOT in
+ * this list — F7 reclassifies it as a stable root.
+ *
+ * The list is a FORBIDDEN set, not a migration ledger: a recreated file (a
+ * forwarding shim, an old-path re-export or a resurrected helper) and any
+ * production import that still names the retired root path are both
+ * violations. The root ledger governs placement; this governs retirement.
+ */
+export const RETIRED_SOURCE_ROOTS = [
+  'authorization.ts',
+  'bounded-output.ts',
+  'command-policy.ts',
+  'communication-policy.ts',
+  'compact-text-preview.ts',
+  'compaction-presentation.ts',
+  'detached.ts',
+  'diag.ts',
+  'diff.ts',
+  'disposal.ts',
+  'dsh-profile.ts',
+  'dsh-version.ts',
+  'error-boundary.ts',
+  'exit.ts',
+  'focus-timing.ts',
+  'focus.ts',
+  'git-attribution.ts',
+  'git-branch.ts',
+  'legacy-settings-migration.ts',
+  'local-shell-card.ts',
+  'long-message-disclosure.ts',
+  'presentation-lines.ts',
+  'process-tui-slot.ts',
+  'progress.ts',
+  'provider-catalog.ts',
+  'scroll-render-profile.ts',
+  'search-overlay.ts',
+  'search-profile.ts',
+  'search.ts',
+  'session-artifact-filename.ts',
+  'sessions.ts',
+  'skill-reference-completion.ts',
+  'startup-status.ts',
+  'streaming-tool-preparing.ts',
+  'subagent-viewer-submit.ts',
+  'subagent-viewer.ts',
+  'task-browser-runtime.ts',
+  'task-center-attention.ts',
+  'task-presentation.ts',
+  'tasks-browser.ts',
+  'terminal-title.ts',
+  'thinking-preview.ts',
+  'tool-presentation-client.ts',
+  'transcript-render-profile.ts',
+  'tui-config.ts',
+  'wheel-scroll.ts',
+  'workflow-presentation.ts',
+  'working.ts',
+]
+
+/**
+ * The final TS8-F stable-root set (plan §11.1/§11.4 assertions 1-2). The
+ * migration is CLOSED: no legacy root may remain and the stable set is exactly
+ * these seven entries/facades/compatibility islands. Adding or renaming a root
+ * is a deliberate contract change (docs + this list + the baseline together).
+ */
+export const FINAL_STABLE_SOURCE_ROOTS = [
+  'builtins.ts',
+  'commands.ts',
+  'extensions.ts',
+  'index.ts',
+  'startup.ts',
+  'transcript.ts',
+  'tui-app.ts',
+]
+
+/**
+ * Fail-closed retired-root check (plan §11.4/§11.5): no retired TS8-F root may
+ * exist as a file, and no production module may still import one — the second
+ * half is what makes a dangling old-path import a gate violation rather than a
+ * typecheck-only symptom.
+ * @param currentRootFiles the current `src/*.ts|tsx|mts|cts` names.
+ * @param entries the collected `{ rel, source }` production entries.
+ */
+export function findRetiredSourceRootViolations(
+  currentRootFiles = listSourceRootFiles(),
+  entries = collectSourceEntries(),
+) {
+  const violations = []
+  const present = new Set(currentRootFiles)
+  const retired = new Set(RETIRED_SOURCE_ROOTS)
+  for (const name of RETIRED_SOURCE_ROOTS) {
+    if (present.has(name)) {
+      violations.push(`retired TS8-F root recreated: src/${name} — its canonical owner replaced it; `
+        + 'a root shim/resurrected helper is forbidden (plan §11.4 assertions 3/5)')
+    }
+  }
+  for (const entry of entries) {
+    for (const { specifier, line } of parseImportSpecifiers(entry.source, entry.rel)) {
+      const resolved = resolveRelativeImport(entry.rel, specifier)
+      if (resolved === undefined) continue
+      const target = staticImportCandidates(resolved).find(candidate => retired.has(candidate)) ?? resolved
+      if (retired.has(target)) {
+        violations.push(`src/${entry.rel}:${line} imports the retired TS8-F root path (${specifier}) — `
+          + 'import the canonical owner instead (plan §11.4 assertion 4)')
+      }
+    }
+  }
+  return violations
+}
+
+/**
+ * Fail-closed FINAL-state check (plan §11.4 assertions 1-2): the checked-in
+ * baseline must already describe the closed migration — an empty legacy set
+ * and exactly the seven stable roots. Without this a later PR could add a
+ * legacy root again and the "shrinking ledger" would silently reopen.
+ */
+export function findFinalSourceRootStateViolations(baseline) {
+  const violations = []
+  if (baseline.legacy.length > 0) {
+    violations.push(`the TS8-F root migration is CLOSED: no legacy root may remain, found ${baseline.legacy.length} `
+      + `(${baseline.legacy.map(name => `src/${name}`).join(', ')})`)
+  }
+  const declared = [...baseline.stable].sort()
+  const expected = [...FINAL_STABLE_SOURCE_ROOTS].sort()
+  if (declared.join(',') !== expected.join(',')) {
+    violations.push('the stable root set must be exactly the seven final entries/facades: '
+      + `${expected.join(', ')} (found ${declared.join(', ') || 'none'})`)
+  }
+  return violations
+}
+
 function main() {
   const entries = collectSourceEntries()
-  const rootViolations = findSourceRootViolations(readSourceRootBaseline(), listSourceRootFiles())
+  const baseline = readSourceRootBaseline()
+  const rootViolations = findSourceRootViolations(baseline, listSourceRootFiles())
+  const finalStateViolations = findFinalSourceRootStateViolations(baseline)
+  const retiredRootViolations = findRetiredSourceRootViolations(listSourceRootFiles(), entries)
   const retiredViolations = findRetiredSourceDirectoryViolations()
   if (process.argv.includes('--report')) {
     console.log(`application-architecture-gate: scanned ${entries.length} src file(s)`)
@@ -1278,9 +1415,10 @@ function main() {
     console.log('  rule remote-dynamic-import-owner')
     console.log('  rule surface-constructs-direct-adapter')
     console.log('  composition zone: app/bootstrap.ts + app/bootstrap/**')
-    const baseline = readSourceRootBaseline()
     console.log(`  source-root baseline: ${baseline.stable.length} stable + ${baseline.legacy.length} legacy root module(s)`)
     console.log(`  retired feature directories: ${RETIRED_SOURCE_DIRECTORIES.join(', ')}`)
+    console.log(`  retired TS8-F roots (forbidden): ${RETIRED_SOURCE_ROOTS.length}`)
+    console.log(`  final stable roots: ${FINAL_STABLE_SOURCE_ROOTS.join(', ')}`)
     return
   }
   const violations = findViolations(entries)
@@ -1288,6 +1426,18 @@ function main() {
     console.error('application-architecture-gate: retired source directory recreated:')
     for (const detail of retiredViolations) console.error(`  ${detail}`)
     console.error('\nSee docs/architecture.md (source module placement).')
+    process.exit(1)
+  }
+  if (retiredRootViolations.length > 0) {
+    console.error('application-architecture-gate: retired TS8-F root reused:')
+    for (const detail of retiredRootViolations) console.error(`  ${detail}`)
+    console.error('\nSee docs/architecture.md (source module placement).')
+    process.exit(1)
+  }
+  if (finalStateViolations.length > 0) {
+    console.error('application-architecture-gate: final source-root state violated:')
+    for (const detail of finalStateViolations) console.error(`  ${detail}`)
+    console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
     process.exit(1)
   }
   if (rootViolations.length > 0) {

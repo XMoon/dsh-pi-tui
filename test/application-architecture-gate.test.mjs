@@ -24,8 +24,10 @@ import {
   buildStaticEdges,
   collectSourceEntries,
   findDirectAdapterConstructions,
+  findFinalSourceRootStateViolations,
   findRemoteDynamicImportViolations,
   findRetiredSourceDirectoryViolations,
+  findRetiredSourceRootViolations,
   findSourceRootViolations,
   findViolations,
   isBootstrapCompositionFile,
@@ -43,6 +45,8 @@ import {
   REMOTE_DYNAMIC_IMPORT_TARGET,
   resolveRelativeImport,
   RETIRED_SOURCE_DIRECTORIES,
+  RETIRED_SOURCE_ROOTS,
+  FINAL_STABLE_SOURCE_ROOTS,
   scriptKindOf,
   SOURCE_EXTENSIONS,
   STARTUP_REMOTE_COMPOSITION_RULE,
@@ -1676,11 +1680,12 @@ test('the source-root baseline accepts the exact captured tree and fails closed 
   const current = listSourceRootFiles()
   assert.deepEqual(findSourceRootViolations(baseline, current), [],
     'the checked-in baseline must match the exact current root module set')
-  // The stable set is the deliberate root facade contract; legacy is the
-  // mechanically generated remainder (no hand selection).
-  assert.deepEqual(baseline.stable, ['commands.ts', 'extensions.ts', 'index.ts', 'startup.ts', 'transcript.ts', 'tui-app.ts'])
+  // The stable set is the deliberate root facade contract; the legacy set is
+  // EMPTY because F7 closed the TS8-F migration (the final state is enforced
+  // by `findFinalSourceRootStateViolations` in the dedicated tests below).
+  assert.deepEqual(baseline.stable, ['builtins.ts', 'commands.ts', 'extensions.ts', 'index.ts', 'startup.ts', 'transcript.ts', 'tui-app.ts'])
   assert.deepEqual(baseline.legacy, current.filter(name => !baseline.stable.includes(name)))
-  assert.equal(baseline.legacy.length > 0, true, 'legacy entries exist during the train')
+  assert.equal(baseline.legacy.length, 0, 'the TS8-F train is closed: no legacy root remains')
   // Mutation fixtures: never touch the real baseline.
   const mutated = (patch) => findSourceRootViolations({ ...baseline, ...patch }, current)
   assert.match(mutated({ legacy: [...baseline.legacy, 'new-feature.ts'] }).join('\n'), /new-feature\.ts/,
@@ -1765,5 +1770,63 @@ test('TS8-E: the Stable extension public declaration sources reject TUI implemen
   assert.deepEqual(findViolations([
     entry('extension/internal/keybinding-registry.ts', "import { canonicalizeKeyId } from '../../tui/keybindings/key-identity.ts'\n"),
     entry('tui/keybindings/key-identity.ts', 'export const canonicalizeKeyId = (value) => value\n'),
+  ]), [])
+})
+
+// ── TS8-F final state (plan §11.4 assertions 1-5, §11.5) ────────────────────
+
+test('TS8-F final state: the checked-in root baseline is the CLOSED 7-stable / 0-legacy ledger', () => {
+  const baseline = readSourceRootBaseline()
+  assert.deepEqual([...baseline.stable].sort(), [...FINAL_STABLE_SOURCE_ROOTS].sort(),
+    'the stable root set must be exactly the seven final entries/facades')
+  assert.deepEqual(baseline.legacy, [], 'no legacy root may remain once TS8-F closes')
+  assert.deepEqual(findFinalSourceRootStateViolations(baseline), [])
+  assert.deepEqual(findSourceRootViolations(baseline, listSourceRootFiles()), [],
+    'the real tree must match the closed ledger exactly')
+})
+
+test('TS8-F final state: a re-opened legacy root or a changed stable set is rejected', () => {
+  const baseline = readSourceRootBaseline()
+  const reopened = findFinalSourceRootStateViolations({ ...baseline, legacy: ['leftover.ts'] })
+  assert.equal(reopened.length, 1)
+  assert.match(reopened[0], /no legacy root may remain/)
+  assert.equal(findFinalSourceRootStateViolations({ ...baseline, stable: baseline.stable.slice(1) }).length, 1,
+    'a missing stable entry must fail')
+  assert.equal(findFinalSourceRootStateViolations({ ...baseline, stable: [...baseline.stable, 'extra.ts'] }).length, 1,
+    'an extra stable entry must fail')
+})
+
+test('TS8-F retired roots are a closed forbidden set (48 physical roots, builtins excluded)', () => {
+  assert.equal(RETIRED_SOURCE_ROOTS.length, 48, 'all 48 physical roots removed by F1-F6 are forbidden')
+  assert.equal(new Set(RETIRED_SOURCE_ROOTS).size, 48, 'the retired set has no duplicates')
+  assert.equal(RETIRED_SOURCE_ROOTS.includes('builtins.ts'), false,
+    'builtins.ts is reclassified STABLE by F7, never retired')
+  assert.deepEqual(findRetiredSourceRootViolations(listSourceRootFiles(), collectSourceEntries()), [],
+    'no retired root exists today and no production import names one')
+})
+
+test('TS8-F retired roots: a recreated file or a dangling old-path import is rejected', () => {
+  const recreated = findRetiredSourceRootViolations(['diff.ts', ...listSourceRootFiles()], [])
+  assert.equal(recreated.length, 1)
+  assert.match(recreated[0], /retired TS8-F root recreated: src\/diff\.ts/)
+  for (const [rel, specifier] of [['app/surface/example.ts', '../../diff.ts'], ['tui/transcript/example.ts', '../../diff.ts']]) {
+    const violations = findRetiredSourceRootViolations([], [
+      entry(rel, `import { renderDiffView } from '${specifier}'\n`),
+    ])
+    assert.equal(violations.length, 1, `${rel} -> ${specifier} must resolve to the retired root`)
+    assert.match(violations[0], /imports the retired TS8-F root path/)
+  }
+  // A specifier that resolves to a NESTED sibling of the same basename is not
+  // the retired root.
+  assert.deepEqual(findRetiredSourceRootViolations([], [
+    entry('app/surface/example.ts', "import { x } from './diff.ts'\n"),
+  ]), [])
+  // A canonical sibling that merely shares the basename stays legal.
+  assert.deepEqual(findRetiredSourceRootViolations([], [
+    entry('tui/components/transcript/diff.ts', "import { localHunkRows } from '../../transcript/diff-projection.ts'\n"),
+  ]), [])
+  // A comment naming the old path is not an import.
+  assert.deepEqual(findRetiredSourceRootViolations([], [
+    entry('app/surface/example.ts', '// see src/diff.ts for the old derivation\n'),
   ]), [])
 })
