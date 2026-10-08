@@ -1,6 +1,7 @@
 {
   "version": 1,
   "stable": [
+    "builtins.ts",
     "commands.ts",
     "extensions.ts",
     "index.ts",
@@ -8,7 +9,5 @@
     "transcript.ts",
     "tui-app.ts"
   ],
-  "legacy": [
-    "builtins.ts"
-  ]
+  "legacy": []
 }
