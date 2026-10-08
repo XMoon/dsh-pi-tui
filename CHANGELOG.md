@@ -48,7 +48,7 @@
   它,没有可显示的子会话待办时就隐藏,绝不回退成父会话的摘要。
 
 - 子代理查看器改用固定在 Header 下方的单行「主题栏」表达子会话身份:导航提示
-  `‹ parent`、子会话标签、`● running` / `○ inactive` 活动状态,以及子会话自己
+  `‹ back`、子会话标签、`● running` / `○ inactive` 活动状态,以及子会话自己
   真实的 `provider/model @effort`(子会话状态尚无模型时显示 `model ?`,绝不借用
   主会话模型);主会话 Header 恢复显示主会话标题,旧的 `[viewing subagent · …]`
   标记与 footer 里的身份块 `view-scope` 不再出现(旧自定义布局中残留的
@@ -57,6 +57,12 @@
   用量统计:主题栏与 footer 都会显示同一个子会话模型(重复为预期),两者读同一份
   `composition.model`,绝不回退主会话模型;footer 原有的格式化、窄屏 compact/drop
   与 `/footer` 自定义行为不变。
+
+- 顶部 Header 现在严格保持单行:应用标识、Plan 标记与扩展 Header Badge 的语义不变,
+  主会话标题按终端 cell 宽度做 ANSI/CJK/Emoji 安全截断(空间不足时省略号截断,
+  再不足则整体省略),在任何宽度、regular/fullscreen 与 full/compact/focus 下都不再
+  换行。修复了超长主标题(尤其在打开子代理查看器时)可能占满窄屏、把编辑器与固定
+  chrome 挤出屏幕的问题。
 
 ### 修复
 

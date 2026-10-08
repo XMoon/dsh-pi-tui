@@ -241,7 +241,7 @@ test('the FIRST frame after entering the viewer already shows the child subject'
   // NO extra refresh: this is the first frame after the viewer opens.
   await vt.waitForRender()
   const first = vt.getViewport().join('\n')
-  assert.ok(first.includes('‹ parent'), `the first frame must show the subject-bar navigation:\n${first}`)
+  assert.ok(first.includes('‹ back'), `the first frame must show the subject-bar navigation:\n${first}`)
   assert.ok(first.includes('research'), `the first frame must show the child label:\n${first}`)
   assert.ok(first.includes('model ?'), `an absent child model renders the unknown token, never the parent's:\n${first}`)
   assert.ok(first.includes('child-ws'), `the first frame must show the child workspace:\n${first}`)
@@ -251,7 +251,7 @@ test('the FIRST frame after entering the viewer already shows the child subject'
   await vt.waitForRender()
   const after = vt.getViewport().join('\n')
   assert.ok(after.includes('p/m'), `leaving the viewer must restore the parent footer immediately:\n${after}`)
-  assert.ok(!after.includes('‹ parent'), `leaving the viewer must clear the subject bar:\n${after}`)
+  assert.ok(!after.includes('‹ back'), `leaving the viewer must clear the subject bar:\n${after}`)
   app.stop()
 })
 

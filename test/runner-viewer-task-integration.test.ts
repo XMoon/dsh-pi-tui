@@ -2058,7 +2058,7 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   // the bounded fold's 10/2), the official context window, the child todo
   // count and the child workspace.
   const viewA = vt.getViewport().join('\n')
-  assert.ok(viewA.includes('‹ parent'), `the viewer subject bar must render:\n${viewA}`)
+  assert.ok(viewA.includes('‹ back'), `the viewer subject bar must render:\n${viewA}`)
   assert.ok(viewA.includes('child display subject A'), `the child label must render:\n${viewA}`)
   assert.ok(viewA.includes('child-a-ws'), `the child workspace must render:\n${viewA}`)
   assert.ok(viewA.includes('deepseek/child-a-model'), `the child model must render:\n${viewA}`)
@@ -2217,7 +2217,7 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(restored.includes('p/parent-model'), `the parent footer must return:\n${restored}`)
   assert.ok(restored.includes('display-subject-parent'), `the parent welcome card must return:\n${restored}`)
   assert.ok(!restored.includes('[subagent · continuable]'), `the viewer badge must clear:\n${restored}`)
-  assert.ok(!restored.includes('‹ parent'), `the subject bar must clear on exit:\n${restored}`)
+  assert.ok(!restored.includes('‹ back'), `the subject bar must clear on exit:\n${restored}`)
   assert.ok(!restored.includes('child-b-ws'), `the child workspace must clear:\n${restored}`)
 
   // NEGATIVE CONTROL: with child A's official SessionStatus projection REMOVED,

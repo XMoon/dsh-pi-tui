@@ -627,7 +627,7 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   let view = vt.getViewport().join('\n')
   // The child identity lives in the subject bar; the viewer footer carries
   // the child's OWN usage facts (the model/identity is not duplicated).
-  assert.ok(view.includes('‹ parent'), `the subject-bar navigation is missing:\n${view}`)
+  assert.ok(view.includes('‹ back'), `the subject-bar navigation is missing:\n${view}`)
   assert.ok(view.includes('research'), `child label missing from the subject bar:\n${view}`)
   assert.ok(view.includes('t3/s5'), `child turn/step counters missing:\n${view}`)
   assert.ok(view.includes('TTFB 12.3s'), `child stats line missing:\n${view}`)
@@ -638,7 +638,7 @@ test('the footer switches to the viewed child\u2019s identity and back on exit',
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('parent-model'), `the parent footer must return:\n${view}`)
-  assert.ok(!view.includes('‹ parent'), `the subject bar must clear on exit:\n${view}`)
+  assert.ok(!view.includes('‹ back'), `the subject bar must clear on exit:\n${view}`)
   assert.ok(!view.includes('[subagent'), `the retired viewer badge must never render:\n${view}`)
   app.stop()
 })
@@ -661,7 +661,7 @@ test('the one-shot viewer footer drops the stats line under the compact preset',
   })
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('‹ parent') && view.includes('audit'), `the subject bar must show the child:\n${view}`)
+  assert.ok(view.includes('‹ back') && view.includes('audit'), `the subject bar must show the child:\n${view}`)
   assert.ok(!view.includes('[subagent'), `the retired viewer badge must never render:\n${view}`)
   assert.ok(!view.includes('TTFB 12.3s'), `compact preset must drop the stats line:\n${view}`)
   exitChildDisplaySubject(app)

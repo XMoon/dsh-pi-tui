@@ -282,10 +282,10 @@ The child viewer identity is NOT a Footer item and is NOT configurable through
 one pinned row directly under the global header:
 
 ```text
-‹ parent  reviewer · Audit ownership     ● running   deepseek/v4 @high
+‹ back  reviewer · Audit ownership     ● running   deepseek/v4 @high
 ```
 
-- `‹ parent` is a navigation affordance (Esc exits the viewer); it is not a
+- `‹ back` is a navigation affordance (Esc exits the viewer); it is not a
   clickable control.
 - The child label, its `● running` / `○ inactive` activity and its real
   `provider/model @effort` come from the child's own committed SessionStatus
@@ -298,7 +298,7 @@ one pinned row directly under the global header:
   it flows with the terminal scrollback like the rest of the document.
 - Narrow terminals drop information in a fixed order: the optional title
   first, then the label is trimmed (keeping at least 6 cells), then the
-  activity words collapse to a marker, then `parent` collapses to `‹`, then
+  activity words collapse to a marker, then `back` collapses to `‹`, then
   `@effort`, then `provider/`, and the model id is ellipsized last.
 
 Because the bar is an independent, always-visible core identity, the builtin

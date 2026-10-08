@@ -114,18 +114,18 @@ test('the subject bar is exactly one pinned row under the header in fullscreen, 
   app.setTranscript(longUserMessage().messages())
   app.setFullscreen(true)
   let view = await rows(vt)
-  assert.ok(!view.join('\n').includes('‹ parent'), `main fullscreen must have no subject bar:\n${view.join('\n')}`)
+  assert.ok(!view.join('\n').includes('‹ back'), `main fullscreen must have no subject bar:\n${view.join('\n')}`)
 
   enterChildDisplaySubject(app, { ...CHILD })
   view = await rows(vt)
-  const barRows = view.filter(row => row.includes('‹ parent'))
+  const barRows = view.filter(row => row.includes('‹ back'))
   assert.equal(barRows.length, 1, `the child bar must be exactly one physical line:\n${view.join('\n')}`)
-  assert.equal(view.findIndex(row => row.includes('‹ parent')), 1,
+  assert.equal(view.findIndex(row => row.includes('‹ back')), 1,
     `the bar must sit directly under the header:\n${view.join('\n')}`)
 
   exitChildDisplaySubject(app)
   view = await rows(vt)
-  assert.ok(!view.join('\n').includes('‹ parent'), `exiting must clear the bar with no ghost row:\n${view.join('\n')}`)
+  assert.ok(!view.join('\n').includes('‹ back'), `exiting must clear the bar with no ghost row:\n${view.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
 })
@@ -137,7 +137,7 @@ test('a fullscreen click on the bar never reaches the transcript; the first tran
   app.setFullscreen(true)
   let view = await rows(vt)
   assert.equal(compactMarkerCount(view), 1, `precondition: the long user bubble is collapsed:\n${view.join('\n')}`)
-  const barY = view.findIndex(row => row.includes('‹ parent'))
+  const barY = view.findIndex(row => row.includes('‹ back'))
   assert.ok(barY >= 0, `the subject bar must be visible:\n${view.join('\n')}`)
 
   // The bar row is chrome, NOT transcript row 0: a click there is inert.
@@ -159,7 +159,7 @@ test('wheel scrolling never moves the pinned subject bar', async () => {
   enterChildDisplaySubject(app, { ...CHILD })
   app.setFullscreen(true)
   await rows(vt)
-  const barYBefore = (await rows(vt)).findIndex(row => row.includes('‹ parent'))
+  const barYBefore = (await rows(vt)).findIndex(row => row.includes('‹ back'))
   const transcriptBefore = (await rows(vt)).join('\n')
   for (let i = 0; i < 4; i += 1) {
     vt.sendInput('\x1b[<64;10;5M')
@@ -167,7 +167,7 @@ test('wheel scrolling never moves the pinned subject bar', async () => {
   }
   const after = await rows(vt)
   assert.notEqual(after.join('\n'), transcriptBefore, 'the wheel input must scroll the transcript')
-  assert.equal(after.findIndex(row => row.includes('‹ parent')), barYBefore,
+  assert.equal(after.findIndex(row => row.includes('‹ back')), barYBefore,
     `the bar must stay pinned while the transcript scrolls:\n${after.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
@@ -186,7 +186,7 @@ test('a Question-owned modal inspection uses the SAME bar-inclusive transcript o
   await rows(vt)
   let view = await rows(vt)
   assert.equal(compactMarkerCount(view), 1, `precondition: the user bubble is collapsed:\n${view.join('\n')}`)
-  const barY = view.findIndex(row => row.includes('‹ parent'))
+  const barY = view.findIndex(row => row.includes('‹ back'))
   assert.ok(barY >= 0, `the subject bar must stay visible under the question:\n${view.join('\n')}`)
 
   clickCell(vt, 10, barY)
@@ -211,7 +211,7 @@ test('PageUp scrolls the transcript while the subject bar stays pinned', async (
   await rows(vt)
   const after = await rows(vt)
   assert.notEqual(after.join('\n'), before, 'PageUp must scroll the transcript')
-  assert.equal(after.findIndex(row => row.includes('‹ parent')), 1,
+  assert.equal(after.findIndex(row => row.includes('‹ back')), 1,
     `the bar must stay pinned across PageUp:\n${after.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
@@ -225,14 +225,14 @@ test('the transcript search overlay keeps the bar pinned through a reveal', asyn
   await rows(vt)
   vt.sendInput('\x06') // Ctrl+F opens the transcript search
   await rows(vt)
-  assert.equal((await rows(vt)).findIndex(row => row.includes('‹ parent')), 1,
+  assert.equal((await rows(vt)).findIndex(row => row.includes('‹ back')), 1,
     'the bar must stay pinned with the search overlay open')
   vt.sendInput('prompt 3')
   await rows(vt)
   vt.sendInput('\r') // reveal the match
   await rows(vt)
   const revealed = await rows(vt)
-  assert.equal(revealed.findIndex(row => row.includes('‹ parent')), 1,
+  assert.equal(revealed.findIndex(row => row.includes('‹ back')), 1,
     `the bar must stay pinned across the search reveal:\n${revealed.join('\n')}`)
   assert.ok(revealed.some(row => row.includes('prompt 3')),
     `the revealed match must be visible in the viewport:\n${revealed.join('\n')}`)
@@ -247,7 +247,7 @@ test('a transcript press is fenced when a resize lands before the release', asyn
   app.setFullscreen(true)
   let view = await rows(vt)
   assert.equal(compactMarkerCount(view), 1, `precondition: the bubble is collapsed:\n${view.join('\n')}`)
-  const y = view.findIndex(row => row.includes('‹ parent')) + 1
+  const y = view.findIndex(row => row.includes('‹ back')) + 1
   vt.sendInput(`\x1b[<0;10;${y + 1}M`) // press the first transcript row
   vt.resize(100, 20) // a resize lands before the release
   await rows(vt)
@@ -260,7 +260,7 @@ test('a transcript press is fenced when a resize lands before the release', asyn
   // still resolves the first transcript row correctly.
   await new Promise(resolve => setTimeout(resolve, 600))
   view = await rows(vt)
-  const barY = view.findIndex(row => row.includes('‹ parent'))
+  const barY = view.findIndex(row => row.includes('‹ back'))
   clickCell(vt, 10, barY + 1)
   view = await rows(vt)
   assert.equal(compactMarkerCount(view), 0,
@@ -275,7 +275,7 @@ test('the LAST visible transcript row maps to its own bubble with the bar presen
   enterChildDisplaySubject(app, { ...CHILD })
   app.setFullscreen(true)
   const view = await rows(vt)
-  const barY = view.findIndex(row => row.includes('‹ parent'))
+  const barY = view.findIndex(row => row.includes('‹ back'))
   assert.equal(barY, 1, `the bar is pinned under the header:\n${view.join('\n')}`)
   // The bottom-most VISIBLE row that belongs to a transcript bubble.
   let lastY = -1
@@ -295,8 +295,34 @@ test('the LAST visible transcript row maps to its own bubble with the bar presen
   const after = await rows(vt)
   assert.ok(after.some(row => row.includes(hidden)),
     `the clicked last-visible row must expand its OWN bubble (${hidden} must become visible):\nBEFORE:\n${view.join('\n')}\nAFTER:\n${after.join('\n')}`)
-  assert.equal(after.findIndex(row => row.includes('‹ parent')), 1,
+  assert.equal(after.findIndex(row => row.includes('‹ back')), 1,
     `the bar stays pinned after the bottom-row click:\n${after.join('\n')}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a very long main session title never pushes the bar or editor out of a short fullscreen', async () => {
+  // The PR restores the MAIN session title in the header while a child is
+  // viewed. A long title must not let the header eat the whole viewport and
+  // push the pinned subject bar / editor out (external review P2).
+  const { vt, app } = startApp(20, 10)
+  app.setSessionTitle('L'.repeat(200))
+  app.setStatus({ model: 'p/m', cwd: '/w', turns: 1, steps: 1 })
+  await rows(vt)
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  await rows(vt)
+  const lines = vt.getViewport()
+  const plain = lines.map(line => stripTerminalSequences(line).trimEnd())
+  // At 20 columns the bar degrades to the `‹` marker; the header must stay
+  // ONE physical row so the bar sits directly under it.
+  const barY = plain.findIndex(line => line.includes('‹'))
+  assert.equal(barY, 1, `the subject bar must be the row under the header:\n${plain.join('\n')}`)
+  assert.ok(plain[barY]!.includes('resea'), `the bar must keep an identifiable child label:\n${plain.join('\n')}`)
+  const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1, `the editor top border must survive:\n${plain.join('\n')}`)
+  assert.ok(lines.slice(editorTop + 1).some(line => line.includes('─'.repeat(10))),
+    `the editor bottom border must survive:\n${plain.join('\n')}`)
   app.setFullscreen(false)
   app.stop()
 })
