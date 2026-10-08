@@ -668,7 +668,40 @@ export const ARCHITECTURE_RULES = [
     checksValueDynamicImport: true,
     checksBareDynamicImport: true,
   },
+  {
+    // TS8-F final assertion 7 (plan §11.4): a Remote CLIENT adapter must not
+    // reach the Direct implementation. `direct-import-outside-composition`
+    // cannot express this because the whole `runtime/**` layer is treated as
+    // Direct composition there, so `runtime/remote/**` was silently exempt.
+    //
+    // The ONE approved exception is the pre-existing HF1 Host-side
+    // construction bridge (docs/client-server-coupling.md): it shares the
+    // existing Host authority and is the only reviewed remote -> direct edge.
+    // The exception is encoded as an explicit reviewed set (asserted to be
+    // exactly that one file by the gate tests), never as a broad allowlist.
+    id: 'runtime-remote-imports-direct',
+    message:
+      'src/runtime/remote/** is the Remote CLIENT adapter layer: it must not import the Direct implementation '
+      + '(runtime/direct/**). The only reviewed exception is the HF1 Host-side construction bridge in '
+      + 'REMOTE_TO_DIRECT_APPROVED_BRIDGES (docs/client-server-coupling.md) — a new remote -> direct edge means the '
+      + 'fact belongs behind a semantic port, not behind a new exception',
+    applies: (srcRel) => srcRel.startsWith('runtime/remote/') && !REMOTE_TO_DIRECT_APPROVED_BRIDGES.has(srcRel),
+    forbids: (resolved) => resolved.startsWith('runtime/direct/'),
+    // `await import('../direct/x.ts')` is the same edge as a static import.
+    checksValueDynamicImport: true,
+  },
 ]
+
+/**
+ * The reviewed `runtime/remote/**` -> `runtime/direct/**` exceptions (plan
+ * §11.4 assertion 7). Exactly one file today: the HF1 Host-side construction
+ * bridge, whose Direct helper usage is an approved, documented exception
+ * (`docs/client-server-coupling.md`). The gate tests assert this set stays
+ * exactly one entry, so it cannot grow into a general allowlist.
+ */
+export const REMOTE_TO_DIRECT_APPROVED_BRIDGES = new Set([
+  'runtime/remote/pi-tui-file-reference-host-bridge.ts',
+])
 
 /**
  * The startup static-graph rule (evaluated over reachability, not per file):
@@ -1367,7 +1400,15 @@ export function findRetiredSourceRootViolations(
     }
   }
   for (const entry of entries) {
-    for (const { specifier, line } of parseImportSpecifiers(entry.source, entry.rel)) {
+    // Both parsers are required: `parseImportSpecifiers` covers static imports
+    // and static re-exports, `parseValueDynamicImports` covers the statically
+    // knowable VALUE dynamic forms (`import('...')`, `import(`...`)`, and their
+    // transparent wrappers). A computed specifier stays out of scope.
+    const specifiers = [
+      ...parseImportSpecifiers(entry.source, entry.rel).map(hit => ({ specifier: hit.specifier, line: hit.line })),
+      ...parseValueDynamicImports(entry.source, entry.rel),
+    ]
+    for (const { specifier, line } of specifiers) {
       const resolved = resolveRelativeImport(entry.rel, specifier)
       if (resolved === undefined) continue
       const target = staticImportCandidates(resolved).find(candidate => retired.has(candidate)) ?? resolved
@@ -1375,6 +1416,68 @@ export function findRetiredSourceRootViolations(
         violations.push(`src/${entry.rel}:${line} imports the retired TS8-F root path (${specifier}) — `
           + 'import the canonical owner instead (plan §11.4 assertion 4)')
       }
+    }
+  }
+  return violations
+}
+
+/**
+ * Fail-closed concrete-extension-registry placement check (plan §11.4
+ * assertion 11): the concrete extension registries live under
+ * `extension/internal/**` only. The root ledger governs the package root and
+ * the public-declaration rule governs the published declaration sources, so a
+ * NESTED concrete registry (e.g. `extension/keybinding-registry.ts`) would
+ * otherwise slip through both — this is the positive-location companion.
+ * @param files every source file under `src/`, src-relative.
+ */
+export function findConcreteRegistryPlacementViolations(files = listSourceFilesUnder(SRC)) {
+  return files
+    .filter(rel => rel.startsWith('extension/'))
+    .filter(rel => /(^|\/)[^/]*-registry\.[a-z]+$/.test(rel))
+    .filter(rel => !rel.startsWith('extension/internal/'))
+    .map(rel => `src/${rel} is a concrete extension registry outside extension/internal/** — `
+      + 'the public extension entries stay declaration/service facades; the concrete registries live under '
+      + 'extension/internal/** (plan §11.4 assertion 11)')
+}
+
+/**
+ * Fail-closed startup-island check (plan §11.4 assertion 14): the
+ * `src/startup.ts` compatibility island is isolated from the optional
+ * application/runtime/backend/TUI runner graph. It may keep its existing
+ * package, Node built-in, JSON-data and FULLY ERASED type imports (those build
+ * no repository edge); a repository implementation module reached statically —
+ * directly or transitively — is a violation, and an inline
+ * `import { type X } from './repo.ts'` counts because `verbatimModuleSyntax`
+ * still emits a runtime module load for it.
+ * @param entries the collected `{ rel, source }` production entries.
+ */
+export function findStartupIslandViolations(entries = collectSourceEntries()) {
+  const startupRel = 'startup.ts'
+  if (!entries.some(entry => entry.rel === startupRel)) return []
+  const known = new Set(entries.map(entry => entry.rel))
+  const edges = new Map()
+  for (const { rel, source } of entries) {
+    const targets = new Set()
+    for (const hit of parseImportSpecifiers(source, rel)) {
+      if (hit.moduleTypeOnly === true) continue
+      const resolved = resolveRelativeImport(rel, hit.specifier)
+      if (resolved === undefined) continue
+      const target = staticImportCandidates(resolved).find(candidate => known.has(candidate))
+      if (target !== undefined) targets.add(target)
+    }
+    edges.set(rel, targets)
+  }
+  const violations = []
+  const seen = new Set([startupRel])
+  const queue = [startupRel]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    for (const next of edges.get(current) ?? []) {
+      if (seen.has(next)) continue
+      seen.add(next)
+      queue.push(next)
+      violations.push(`src/${next} is statically reachable from src/startup.ts — the startup compatibility island `
+        + 'must not enter the repository application/runtime/backend/TUI graph (plan §11.4 assertion 14)')
     }
   }
   return violations
@@ -1407,6 +1510,8 @@ function main() {
   const rootViolations = findSourceRootViolations(baseline, listSourceRootFiles())
   const finalStateViolations = findFinalSourceRootStateViolations(baseline)
   const retiredRootViolations = findRetiredSourceRootViolations(listSourceRootFiles(), entries)
+  const registryPlacementViolations = findConcreteRegistryPlacementViolations()
+  const startupIslandViolations = findStartupIslandViolations(entries)
   const retiredViolations = findRetiredSourceDirectoryViolations()
   if (process.argv.includes('--report')) {
     console.log(`application-architecture-gate: scanned ${entries.length} src file(s)`)
@@ -1414,6 +1519,8 @@ function main() {
     console.log(`  rule ${STARTUP_REMOTE_COMPOSITION_RULE.id}`)
     console.log('  rule remote-dynamic-import-owner')
     console.log('  rule surface-constructs-direct-adapter')
+    console.log('  check concrete extension registries under extension/internal/**')
+    console.log('  check startup.ts does not statically reach a repository implementation module')
     console.log('  composition zone: app/bootstrap.ts + app/bootstrap/**')
     console.log(`  source-root baseline: ${baseline.stable.length} stable + ${baseline.legacy.length} legacy root module(s)`)
     console.log(`  retired feature directories: ${RETIRED_SOURCE_DIRECTORIES.join(', ')}`)
@@ -1437,6 +1544,18 @@ function main() {
   if (finalStateViolations.length > 0) {
     console.error('application-architecture-gate: final source-root state violated:')
     for (const detail of finalStateViolations) console.error(`  ${detail}`)
+    console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
+    process.exit(1)
+  }
+  if (registryPlacementViolations.length > 0) {
+    console.error('application-architecture-gate: concrete extension registry placement violated:')
+    for (const detail of registryPlacementViolations) console.error(`  ${detail}`)
+    console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
+    process.exit(1)
+  }
+  if (startupIslandViolations.length > 0) {
+    console.error('application-architecture-gate: startup compatibility island violated:')
+    for (const detail of startupIslandViolations) console.error(`  ${detail}`)
     console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
     process.exit(1)
   }
