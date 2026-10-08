@@ -6067,3 +6067,52 @@ removed.
   `smoke:startup-strictness`, `compat:dsh:npm`, `compat:dsh:client-family`).
 
 Root ledger: `stable = 5`, `legacy = 86`.
+
+## TS8-F status (DONE) — final source-root convergence (stable = 7, legacy = 0)
+
+TS8-F closes the Post-M3 root convergence: all 49 residual root modules carry an
+accepted final disposition — 48 retired into their canonical owners with no
+forwarding shim, and `builtins.ts` reclassified as a stable package/plugin entry
+— so the ledger ends at
+
+```text
+stable = 7   builtins.ts, commands.ts, extensions.ts, index.ts, startup.ts,
+             transcript.ts, tui-app.ts
+legacy = 0
+```
+
+Delivery followed the frozen seven-PR order: F1 process foundation, F2
+bootstrap/config/launcher, F3 command/communication policy, F4
+session/viewer/task, F5 transcript/search/disclosure, F6
+tool/shell/terminal/completion, F7 final closure.
+
+### Contract / invariants
+
+- `scripts/source-root-baseline.json` is CLOSED and actively enforced: the
+  stable set must be exactly those seven entries, no legacy root may reappear,
+  and all 48 retired root modules are forbidden — a recreated file, or a
+  production import naming the old path in its static (import/re-export) or
+  statically knowable value-dynamic spelling, fails the architecture gate.
+- The `runtime/process/**` inner-layer contract, the Remote CLIENT -> Direct
+  prohibition (with its two reviewed HF1 Host-side construction-bridge edges,
+  scoped per source -> target), the concrete extension-registry identity
+  placement, the `startup.ts` compatibility-island isolation and the `app/**`
+  -> concrete `tui/**` direction are enforced by the gate;
+  `docs/architecture.md` maps every final assertion to its guard.
+- Direct remains the production/default backend and no Remote wire, schema,
+  generation/currentness or Session-ownership semantic changed; the Host/Client
+  coupling inventory is unchanged (`docs/client-server-coupling.md`, boundary
+  gate baseline unchanged at 31 files).
+
+### Qualification
+
+- `pnpm verify:prepush` on the final HEAD: the fork/tooling/docs suites, the
+  architecture / boundary / keybinding / naming / session-event /
+  installation-doc / pi-divergence / pi-vendor gates, `pnpm audit`, and
+  `pack:release` (`typecheck:bundle` + the product suite + the eight
+  public/postpack smokes).
+- Migration and compatibility lanes: `smoke:official-presets`,
+  `smoke:boundary`, `smoke:startup-strictness`, the five `smoke:remote-*-parity`
+  lanes, `compat:dsh:npm`, `compat:dsh:client-family` and `git diff --check`.
+
+Root ledger: `stable = 7`, `legacy = 0`.
