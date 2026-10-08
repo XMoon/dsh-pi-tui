@@ -11,13 +11,14 @@
  * outcomes: the Host already owns that, with the SAME shared interval fold the
  * Direct branch uses.
  *
- * Snapshot provenance (plan §6.3): a watch ALWAYS opens with the authoritative
- * snapshot of the instant it subscribed, but a snapshot may only carry a
- * `done`/`error` when it CONTINUES an interval this Client already observed —
- * same `hostEpoch` + same `agentEpoch` as the last accepted frame. Any other
- * snapshot is honestly `idle` (a new binding must never inherit a historical
- * result it cannot prove), so the Surface never displays a stale completion
- * and the completion controller is never fed by an opening snapshot.
+ * Snapshot provenance (plan §6.3, owner review P1): a watch ALWAYS opens with the
+ * snapshot of the instant it subscribed, and provenance NEVER crosses watches —
+ * the baseline carries only the Host's CURRENT `running` truth with `idle` and is
+ * marked `restart`. A proven `done`/`error` is only ever delivered by an `update`
+ * of the watch that observed its interval, so a re-adopted owner, a re-retained
+ * binding or a reconnect can never inherit a historical result (the plan's "a new
+ * binding defaults to idle"). The Surface therefore never displays a stale
+ * completion, and an opening snapshot is never completion evidence.
  *
  * @module @xmoon76/dsh-pi-tui/app/remote/terminal-progress-source
  */
@@ -125,9 +126,11 @@ export async function consumeRemoteTerminalProgress(
   }
 }
 
-/** One accepted frame: the provenance the next frame is judged against. */
+/**
+ * One accepted frame of ONE watch: the provenance the next frame is judged
+ * against. It is created per watch and never crosses one.
+ */
 interface AcceptedState {
-  readonly sessionId: string
   readonly hostEpoch: string
   readonly agentEpoch: number
   readonly revision: number
@@ -222,7 +225,7 @@ export function createRemoteTerminalProgressSource(
           const fact = acceptFrame(frame, sessionId, opened, accepted)
           if (fact === undefined) continue
           opened = true
-          accepted = { sessionId, hostEpoch: frame.hostEpoch, agentEpoch: frame.agentEpoch, revision: frame.revision }
+          accepted = { hostEpoch: frame.hostEpoch, agentEpoch: frame.agentEpoch, revision: frame.revision }
           yield fact
         }
       } finally {

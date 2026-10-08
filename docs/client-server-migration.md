@@ -6218,9 +6218,16 @@ follow-up implementation plan's acceptance tests pass.
   drops the record.
 - `app/remote/terminal-progress-source.ts` is the Client source. It validates
   every frame structurally (rc.2 does NOT apply the descriptor's result codec to
-  stream downlink items), re-checks the Connection generation and the exact
-  retained binding per frame, and lets a snapshot carry a proven `done`/`error`
-  only when it continues an interval this Client already observed.
+  stream downlink items) and re-checks the Connection generation and the exact
+  retained binding per frame. Its provenance never crosses watches: every watch's
+  opening snapshot carries only the Host's CURRENT `running` truth with `idle`
+  (marked `restart`), so a re-adopted TUI owner, a re-retained binding or a
+  reconnect can never inherit a settled `done`/`error` — a proven result is only
+  ever delivered by an `update` of the watch that observed its interval. That is
+  the plan's §6.3 "a new binding defaults to idle" taken as the unconditional
+  choice: the optional "verified restore of the same interval" branch is
+  deliberately NOT implemented, because the Client holds no proof that survives
+  the watch (owner review of this PR).
 - `Surface.applyRemoteMainProgress` is the ONE Remote commit: the Host's proven
   `(running, outcome)` enters the same single terminal commit as Direct, and only
   a real `update` frame feeds the completion controller, so an opening snapshot
@@ -6251,6 +6258,8 @@ L3  test/remote-terminal-progress-host.test.ts       real Cordis dispatch, stale
 L5  test/remote-terminal-progress-wire.test.ts       production Host row + Client source + in-process carrier
 L6  test/remote-terminal-progress-lifecycle.test.ts  real AgentLoop -> ... -> OSC bytes; same-id replacement;
                                                      child viewer; notification mode
+L6  test/runner-remote-terminal-progress.test.ts     PRODUCTION runner: real startup/owner commit/hydration ->
+                                                     real AgentLoop -> OSC bytes; a real owner switch
     pnpm verify:prepush                              typechecks, fork/docs/tooling, gates, audit, pack smokes
 ```
 
