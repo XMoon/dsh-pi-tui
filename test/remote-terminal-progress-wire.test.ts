@@ -59,6 +59,7 @@ import type { RemoteMainProgressFact } from '../src/app/application-runtime.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from '../src/app/remote/client-runtime.ts'
 import { createRemoteHostRuntime, type RemoteHostRuntime } from '../src/app/remote/host-runtime.ts'
 import {
+  consumeRemoteTerminalProgress,
   createRemoteTerminalProgressSource,
   type RemoteTerminalProgressSource,
 } from '../src/app/remote/terminal-progress-source.ts'
@@ -478,6 +479,33 @@ async function drain(source: RemoteTerminalProgressSource, sessionId: string): P
   for await (const fact of source.open(sessionId, new AbortController().signal)) facts.push(fact)
   return facts
 }
+
+test('L5: the consumption fails closed on a silent Host and stops quietly on abort or an owner move', async () => {
+  const sessionId = 'r2-source-session'
+  // A Host row that retires every watch without ever delivering a frame: the
+  // consumer must bound the re-establishments and report a failure, never spin.
+  const silent: RemoteTerminalProgressSource = { async *open() {} }
+  await assert.rejects(
+    consumeRemoteTerminalProgress(silent, sessionId, new AbortController().signal, {
+      isCurrent: () => true,
+      onFact: () => {},
+    }),
+    /ended without a frame/,
+    'a frame-less watch is a broken authority: bounded, then failed',
+  )
+
+  // The caller's own abort and an owner move are EXPECTED stops, not failures.
+  const aborted = new AbortController()
+  aborted.abort()
+  await consumeRemoteTerminalProgress(silent, sessionId, aborted.signal, {
+    isCurrent: () => true,
+    onFact: () => {},
+  })
+  await consumeRemoteTerminalProgress(silent, sessionId, new AbortController().signal, {
+    isCurrent: () => false,
+    onFact: () => {},
+  })
+})
 
 test('L5: the Client source validates every frame and fences provenance/transport', async () => {
   const sessionId = 'r2-source-session'

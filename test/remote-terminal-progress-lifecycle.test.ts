@@ -535,19 +535,33 @@ test('L6: a same-id Agent replacement re-establishes the watch and drives the ne
         + ` | consumptionError=${String(consumptionError)}`)
     }
 
+    // The first lifetime's five frames are exact; the RE-OPENED segment is judged
+    // order-independently: whether the Host retires the old watch before or after
+    // the successor is published only decides whether the baseline snapshot
+    // already carries the resumed epoch, so the invariant is the SHAPE, not the
+    // position of the `restart` bit.
     assert.deepEqual(
-      facts.map(fact => `${fact.kind}:${String(fact.restart)}:${String(fact.running)}:${fact.outcome}`),
-      [
-        'snapshot:true:false:idle',
-        'update:false:true:idle',
-        'update:false:false:done',
-        'snapshot:true:false:idle',
-        // The resumed Agent is a NEW lifetime: its first edge restarts the lineage.
-        'update:true:true:idle',
-        'update:false:false:done',
-      ],
-      `the replacement lifetime is observed through a re-established watch: ${JSON.stringify(facts)}`,
+      facts.slice(0, 3).map(fact => `${fact.kind}:${String(fact.restart)}:${String(fact.running)}:${fact.outcome}`),
+      ['snapshot:true:false:idle', 'update:false:true:idle', 'update:false:false:done'],
+      `the first lifetime drives the screen: ${JSON.stringify(facts)}`,
     )
+    const reopened = facts.slice(3)
+    assert.equal(reopened.length, 3, `the re-established watch delivers exactly three frames: ${JSON.stringify(facts)}`)
+    assert.deepEqual(
+      { kind: reopened[0]!.kind, restart: reopened[0]!.restart, running: reopened[0]!.running, outcome: reopened[0]!.outcome },
+      { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
+      'the re-established watch opens with an idle restart baseline',
+    )
+    const runningEdges = reopened.filter(fact => fact.kind === 'update' && fact.running)
+    const settles = reopened.filter(fact => fact.kind === 'update' && !fact.running)
+    assert.equal(runningEdges.length, 1, `exactly one running edge of the successor: ${JSON.stringify(reopened)}`)
+    assert.deepEqual(
+      settles.map(fact => `${String(fact.running)}:${fact.outcome}`),
+      ['false:done'],
+      `the successor settles done exactly once: ${JSON.stringify(reopened)}`,
+    )
+    assert.ok(reopened.some(fact => fact.restart),
+      'the successor is marked as a NEW lineage on the edge that carries its epoch')
     assert.deepEqual(loop.surface.programWrites, [IDLE, WORKING, DONE, IDLE, WORKING, DONE],
       'the terminal keeps tracking the main Agent across the replacement')
 
@@ -592,6 +606,38 @@ test('L6: opening/reconnect snapshots never notify; a real update running->idle 
 })
 
 // ── PROOF 9 ────────────────────────────────────────────────────────────────
+
+test('L6: the Remote feed honors the notification mode (disabled, then re-enabled)', async () => {
+  const sessionId = 'r2-l6-mode'
+  const surface = mountSurfaceProbe(sessionId, 'off')
+  try {
+    // `unfocused` mode notifies only while the terminal is NOT focused, so the
+    // re-enabled half needs the same focus state the production path reports.
+    surface.surface.handleTerminalFocus(false)
+    const first = scriptedSource([[
+      frameOf({ sessionId, running: false, outcome: 'idle', revision: 1 }),
+      frameOf({ sessionId, kind: 'update', running: true, outcome: 'idle', revision: 2 }),
+      frameOf({ sessionId, kind: 'update', running: false, outcome: 'done', revision: 3 }),
+    ]])
+    await feed(first, surface, sessionId)
+    assert.deepEqual(surface.notifications, [],
+      'a disabled completion notification suppresses the Remote settle too')
+
+    // Re-enabled: the SAME feed now notifies exactly once, so the witness above
+    // is the mode, not a missing edge.
+    surface.surface.setNotificationMode('unfocused')
+    const second = scriptedSource([[
+      frameOf({ sessionId, running: false, outcome: 'idle', revision: 1 }),
+      frameOf({ sessionId, kind: 'update', running: true, outcome: 'idle', revision: 2 }),
+      frameOf({ sessionId, kind: 'update', running: false, outcome: 'done', revision: 3 }),
+    ]])
+    await feed(second, surface, sessionId)
+    assert.deepEqual(surface.notifications, ['auto:DSH:Turn complete'],
+      're-enabling the mode restores exactly one completion from the Remote feed')
+  } finally {
+    surface.dispose()
+  }
+})
 
 test('L6: an owner switch re-baselines the controller so a late idle never notifies', async () => {
   const sessionId = 'r2-l6-owner'
