@@ -106,18 +106,31 @@ export function createRemoteTerminalProgressSource(
     opened: boolean,
   ): RemoteMainProgressFact | undefined => {
     const previous = accepted?.sessionId === sessionId ? accepted : undefined
+    const continues = previous !== undefined
+      && previous.hostEpoch === frame.hostEpoch
+      && previous.agentEpoch === frame.agentEpoch
     if (!opened) {
       if (frame.kind !== 'snapshot') {
         throw new Error(`the Remote terminal-progress stream of ${sessionId} did not open with a snapshot`)
       }
-      return { kind: 'snapshot', running: frame.running, outcome: snapshotOutcome(frame, previous) }
+      return {
+        kind: 'snapshot',
+        restart: !continues,
+        running: frame.running,
+        outcome: snapshotOutcome(frame, previous),
+      }
     }
     if (previous !== undefined && frame.revision < previous.revision) {
       throw new Error(`the Remote terminal-progress stream of ${sessionId} moved its revision backwards`)
     }
     if (frame.kind === 'snapshot') {
       // A second snapshot re-baselines the same watch under the same rules.
-      return { kind: 'snapshot', running: frame.running, outcome: snapshotOutcome(frame, previous) }
+      return {
+        kind: 'snapshot',
+        restart: !continues,
+        running: frame.running,
+        outcome: snapshotOutcome(frame, previous),
+      }
     }
     if (previous === undefined) return undefined
     if (frame.hostEpoch !== previous.hostEpoch) {
@@ -130,7 +143,12 @@ export function createRemoteTerminalProgressSource(
     // Agent lifetime (a rebind always carries the next revision) must be newer
     // too: a duplicate or out-of-order frame can never overwrite a newer truth.
     if (frame.revision <= previous.revision) return undefined
-    return { kind: 'update', running: frame.running, outcome: frame.outcome }
+    return {
+      kind: 'update',
+      restart: frame.agentEpoch > previous.agentEpoch,
+      running: frame.running,
+      outcome: frame.outcome,
+    }
   }
 
   return {

@@ -1578,6 +1578,66 @@ test('the Remote authority keeps the durable ingress out of the local interval',
   }
 })
 
+test('the Remote feed commits the Host fact, and a lineage restart re-baselines the controller', async () => {
+  const notifications: string[] = []
+  const presentation: TerminalNotificationPresentation = {
+    ...nullPresentation,
+    notify: (method, title, body) => { notifications.push(`${method}:${title}:${body}`) },
+  }
+  const h = mountSurface((controls) => controls.setOwner('main'), {
+    presentation,
+    // 'always': the fixture never reports terminal focus, and the controller's
+    // initial focus is honestly 'unfocused' (mode 'unfocused' would suppress).
+    notificationMode: 'always',
+    notificationMethod: 'bell',
+  })
+  try {
+    await drain()
+    const feed = (
+      fact: { kind: 'snapshot' | 'update'; restart: boolean; running: boolean; outcome: 'idle' | 'done' | 'error' },
+    ): void => { h.surfaceRuntime.applyRemoteMainProgress(fact, 'main') }
+
+    // 1. The first edge of a fresh lineage: the restart frame IS a real Host
+    //    update, so (after re-baselining) it feeds the controller.
+    feed({ kind: 'update', restart: true, running: true, outcome: 'idle' })
+    await drain()
+    assert.deepEqual(h.programWrites, [IDLE, WORKING], 'the Remote fact drives the same single commit as Direct')
+
+    // 2. A NEW lineage that is already idle (Host remount / Agent replacement):
+    //    the display adopts idle, but the PREVIOUS lineage's running edge must
+    //    never pair with it into a false completion.
+    feed({ kind: 'update', restart: true, running: false, outcome: 'idle' })
+    await drain()
+    assert.deepEqual(h.programWrites, [IDLE, WORKING, IDLE], 'the restarted lineage shows idle')
+    assert.deepEqual(notifications, [], 'a lineage restart never notifies')
+
+    // 3. The same lineage still notifies exactly once: a continued running edge
+    //    followed by a continued settle.
+    feed({ kind: 'update', restart: true, running: true, outcome: 'idle' })
+    await drain()
+    feed({ kind: 'update', restart: false, running: false, outcome: 'done' })
+    await drain()
+    assert.deepEqual(notifications, ['bell:DSH:Turn complete'],
+      'the real running -> idle edge of one lineage notifies once')
+
+    // 4. A CONNECTING snapshot of the SAME lineage is display truth only: it
+    //    never notifies, and the following real idle edge still notifies once.
+    notifications.length = 0
+    feed({ kind: 'update', restart: false, running: true, outcome: 'idle' })
+    feed({ kind: 'snapshot', restart: false, running: true, outcome: 'idle' })
+    await drain()
+    assert.deepEqual(notifications, [], 'an opening snapshot never notifies')
+    feed({ kind: 'update', restart: false, running: false, outcome: 'done' })
+    await drain()
+    assert.deepEqual(notifications, ['bell:DSH:Turn complete'],
+      'the interval observed running before the snapshot still notifies once')
+    assert.deepEqual(h.programWrites, [IDLE, WORKING, IDLE, WORKING, DONE, WORKING, DONE],
+      'the snapshot re-asserts the running display without a duplicate write')
+  } finally {
+    h.dispose()
+  }
+})
+
 test('L4: the Direct adapter publishes exactly the shared fold commits for the same evidence', async () => {
   // R1 §5.4: the SAME explainable evidence sequence drives (a) the mounted
   // surface's real Direct adapter and (b) a bare shared-fold instance. The two

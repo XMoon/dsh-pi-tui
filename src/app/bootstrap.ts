@@ -1310,7 +1310,7 @@ export function applyRunnerWithRuntime(
           for await (const fact of remoteSources.terminalProgress.open(sessionId, progressController.signal)) {
             if (cleanedUp) return
             if (ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration) return
-            surface.applyRemoteMainProgress(fact.kind, sessionId, fact)
+            surface.applyRemoteMainProgress(fact, sessionId)
           }
           ended = true
         } finally {
@@ -1322,7 +1322,10 @@ export function applyRunnerWithRuntime(
           if (!ended && !cleanedUp
             && ownership.currentSessionId() === sessionId
             && ownership.generation() === initGeneration) {
-            surface.applyRemoteMainProgress('snapshot', sessionId, { running: false, outcome: 'idle' })
+            surface.applyRemoteMainProgress(
+              { kind: 'snapshot', restart: true, running: false, outcome: 'idle' },
+              sessionId,
+            )
           }
         }
       }, { diag, sessionId: () => sessionId })

@@ -298,17 +298,24 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * the only entry that writes the interval there — with the SAME single
    * `(active, outcome)` commit the Direct path uses, never a second writer.
    *
-   * `kind` is the wire frame kind: `snapshot` is the opening authoritative read
-   * (display truth only — it NEVER feeds the completion controller, so a
+   * `fact.kind` is the wire frame kind: `snapshot` is the opening authoritative
+   * read (display truth only — it NEVER feeds the completion controller, so a
    * reconnect can neither notify nor revive a historical result), while
    * `update` is a real Host edge and feeds the controller exactly like a Direct
-   * `agent/status` transition. `identity` is the committed main-session identity
-   * the controller must recognize.
+   * `agent/status` transition. `fact.restart` (a new interval lineage: Host
+   * remount / Agent replacement / no provable continuity) re-baselines the
+   * controller instead of feeding it, so an earlier running edge can never pair
+   * with this frame's idle into a false completion. `identity` is the committed
+   * main-session identity the controller must recognize.
    */
   applyRemoteMainProgress(
-    kind: 'snapshot' | 'update',
+    fact: {
+      readonly kind: 'snapshot' | 'update'
+      readonly restart: boolean
+      readonly running: boolean
+      readonly outcome: TerminalProgressOutcome
+    },
     identity: string,
-    progress: { readonly running: boolean; readonly outcome: TerminalProgressOutcome },
   ): void
   /**
    * A4-4 status COMMIT coordination (plan §13.1): the runner keeps the
@@ -1293,14 +1300,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     onAgentStatus(agentId, status) {
       notification.onAgentStatus(agentId, status)
     },
-    applyRemoteMainProgress(kind, identity, progress) {
+    applyRemoteMainProgress(fact, identity) {
       // The Remote Host already classified this fact with the shared fold: the
       // interval ADOPTS it (no local turn evidence is fabricated) and publishes
       // it through the one commit. The progress commit lands BEFORE the
       // completion feed, so a settled transition clears the busy state before
       // the controller may emit its toast (the same order as Direct).
-      commitMainAgentProgress(interval.apply({ active: progress.running, outcome: progress.outcome }))
-      if (kind === 'update') notification.onAgentStatus(identity, progress.running ? 'running' : 'idle')
+      commitMainAgentProgress(interval.apply({ active: fact.running, outcome: fact.outcome }))
+      if (fact.restart) {
+        // A new lineage re-baselines the controller (the same rebind the Direct
+        // owner commit performs), so its `seenRunning` cannot survive from an
+        // interval this frame does not continue.
+        notification.setCompletionOwner(identity)
+        // The restart frame is NOT completion evidence when it is an opening
+        // snapshot (plan §7.3); a real Host `update` IS the first edge of the new
+        // lineage and feeds the controller after the reset.
+        if (fact.kind === 'update') notification.onAgentStatus(identity, fact.running ? 'running' : 'idle')
+        return
+      }
+      if (fact.kind === 'update') notification.onAgentStatus(identity, fact.running ? 'running' : 'idle')
     },
     retireCompletionOwner() {
       // Final surface teardown (plan §4.4): the notification owner is withdrawn

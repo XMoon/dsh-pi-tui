@@ -174,6 +174,14 @@ export interface RemoteTransportLifetime {
  */
 export interface RemoteMainProgressFact {
   readonly kind: 'snapshot' | 'update'
+  /**
+   * Whether this frame opens a NEW interval lineage (a fresh watch with no
+   * provable continuity, a Host remount, or an Agent replacement) instead of
+   * continuing one this Client already observed. The display adopts both, but a
+   * restart MUST re-baseline the completion controller: a previous running edge
+   * may never pair with this frame's `idle` into a false completion.
+   */
+  readonly restart: boolean
   readonly running: boolean
   /** The SAME settled-outcome vocabulary the Direct adapter uses (declared
    *  once in `domain/terminal-progress/settings.ts`). */
