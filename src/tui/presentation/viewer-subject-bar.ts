@@ -17,11 +17,14 @@
  * @module @xmoon76/dsh-pi-tui/tui/presentation/viewer-subject-bar
  */
 
-import { stripTerminalSequences, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
+import { sanitizedPhysicalLine } from './lines.ts'
 import { color } from '../theme/runtime.ts'
 
-/** The navigation affordance: Esc returns to the parent session. */
+/** The navigation affordance: Esc returns to the main session (even when the
+ *  displayed child is nested — the viewer never navigates to the direct
+ *  parent), so the label is `back`, not `parent`. */
 const NAVIGATION_FULL = '‹ back'
 /** The narrow fallback of the navigation affordance. */
 const NAVIGATION_SHORT = '‹'
@@ -35,18 +38,6 @@ const RIGHT_SEPARATOR = '   '
 const GROUP_GAP_MIN_CELLS = 2
 /** The explicit unknown-model stand-in — never the parent's model. */
 const UNKNOWN_MODEL = 'model ?'
-
-/** Collapse one raw projection string into a SINGLE display line: complete
- *  terminal escape sequences (CSI/OSC/… — a raw label/title/model must never
- *  inject colour or control) are stripped WHOLE via the shared primitive,
- *  then line breaks/tabs become spaces and any remaining control character is
- *  dropped. A Host projection string has no single-line guarantee, so the bar
- *  enforces its own pinned-row contract here. */
-function oneLine(text: string): string {
-  return stripTerminalSequences(text)
-    .replace(/[\u0009-\u000d]+/g, ' ')
-    .replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u009f]/g, '')
-}
 
 /**
  * Render the viewer subject bar.
@@ -70,9 +61,9 @@ export function renderViewerSubjectBar(input: {
   // Every rendered text field is a Host projection string (external data):
   // normalize each to ONE display line before measuring. The single-physical-
   // line contract must hold for any label/title/model a projection carries.
-  const labelText = subject.label === undefined ? '' : oneLine(subject.label)
+  const labelText = subject.label === undefined ? '' : sanitizedPhysicalLine(subject.label)
   const label = labelText === '' ? undefined : labelText
-  const titleText = input.childTitle === undefined ? '' : oneLine(input.childTitle)
+  const titleText = input.childTitle === undefined ? '' : sanitizedPhysicalLine(input.childTitle)
   const title = titleText === '' || titleText === label ? undefined : titleText
 
   const navigation = {
@@ -149,9 +140,9 @@ function identityOf(label: string | undefined, title: string | undefined): strin
  * never fabricates one; a missing model yields the explicit unknown token. */
 function modelVariantsOf(model: StatusSnapshot['composition']['model']): string[] {
   if (model === undefined) return [UNKNOWN_MODEL]
-  const provider = model.provider === undefined ? undefined : oneLine(model.provider)
-  const effort = model.reasoningEffort === undefined ? undefined : oneLine(model.reasoningEffort)
-  const id = oneLine(model.id)
+  const provider = model.provider === undefined ? undefined : sanitizedPhysicalLine(model.provider)
+  const effort = model.reasoningEffort === undefined ? undefined : sanitizedPhysicalLine(model.reasoningEffort)
+  const id = sanitizedPhysicalLine(model.id)
   const variants: string[] = []
   if (provider !== undefined && provider !== '') {
     variants.push(`${provider}/${id}${effort === undefined ? '' : ` @${effort}`}`)

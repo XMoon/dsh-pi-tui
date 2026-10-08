@@ -137,6 +137,7 @@ import type { StatusStore } from './domain/status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
 import { displayPolicyFor } from './tui/transcript/display-policy.ts'
 import { renderViewerSubjectBar as renderViewerSubjectBarLine } from './tui/presentation/viewer-subject-bar.ts'
+import { sanitizedPhysicalLine } from './tui/presentation/lines.ts'
 import { isDisplayPresetAvailable, isFocusDisplayPreset } from './domain/display/preset.ts'
 import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './domain/status/types.ts'
 import { deriveActivityStatus } from './domain/status/derive-activity.ts'
@@ -15570,9 +15571,12 @@ export class TuiApp {
       if (widthChanged) {
         this.lastTranscriptWidth = width
         if (this.messageRows.length > 0) this.rebuildMessages()
-        // The subject bar bakes its own width-aware truncation at setText
-        // time: a width change must re-project it at the new width on this
-        // same geometry pass (viewer UX plan §4.2).
+        // Both the header and the subject bar bake their width-aware
+        // truncation at setText time: a width change must re-project them at
+        // the new width on this same geometry pass, independent of whether an
+        // extension host exists (viewer UX plan §4.2; the host-less TuiApp
+        // never reaches refreshChrome's conditional rebake).
+        this.renderHeader()
         this.renderViewerSubjectBar()
       }
       if (widthChanged) {
@@ -16169,21 +16173,26 @@ export class TuiApp {
    * bar (DECISION B, viewer UX plan §1.2 — the old `[viewing subagent …]`
    * badge and the viewer-label override are retired). */
   private renderHeader(): void {
-    // STRICT one-physical-line header (external review P2): the app mark, the
-    // plan badge and the extension badge run keep their existing semantics,
-    // and the SESSION TITLE is the flexible element — ANSI/CJK/emoji-safe
-    // truncated to whatever those leave, dropped when no cell remains. The
-    // semantic sources are unchanged; only the title's rendered width is
-    // bounded. Re-derived on EVERY render so a resize/title change re-bakes it.
-    const beforeTitle = `🐋  dsh-pi-tui${this.planMode ? ` ${color.warning('[plan]')}` : ''}`
-    const title = this.sessionTitleText === '' ? '' : ` · ${color.textMuted(this.sessionTitleText)}`
-    // Host-owned header budget (plan §19, follow-up P1): the extension badge
-    // run gets what the FIXED chrome plus the (untruncated) title leaves;
-    // -2 reserves the trailing space + a safety cell.
-    this.extensionHost?.setHeaderBudget(Math.max(1,
-      this.terminal.columns - visibleWidth(beforeTitle) - visibleWidth(title) - 2))
+    // STRICT one-physical-line header. Deterministic priority (external review
+    // round 2): the app mark, the complete plan badge and the extension badge
+    // run are budgeted FIRST; the SESSION TITLE is the flexible element and
+    // takes only the remainder (dropped when no cell remains). The title is
+    // projected onto one physical row at this display boundary (complete
+    // terminal sequences stripped, line breaks/tabs normalized, remaining
+    // controls dropped) and cell-width truncated. The semantic
+    // `sessionTitleText` stays RAW; only its rendered form is bounded.
+    const appMark = '🐋  dsh-pi-tui'
+    const planText = '[plan]'
+    // A STATE badge is shown whole or dropped — never half-cut (so narrow
+    // terminals cannot render `[pla…`).
+    const includePlan = this.planMode && visibleWidth(appMark) + planText.length + 1 <= this.terminal.columns
+    const beforeTitle = `${appMark}${includePlan ? ` ${color.warning(planText)}` : ''}`
+    // The extension badge run is budgeted BEFORE the title (a long title must
+    // never starve it): it gets every cell the fixed chrome leaves.
+    this.extensionHost?.setHeaderBudget(Math.max(1, this.terminal.columns - visibleWidth(beforeTitle)))
     const extensionBadges = this.extensionHost?.headerBadgeText() ?? ''
-    // The title occupies whatever the fixed chrome and the badge run leave.
+    const titleText = sanitizedPhysicalLine(this.sessionTitleText)
+    const title = titleText === '' ? '' : ` · ${color.textMuted(titleText)}`
     const titleBudget = this.terminal.columns - visibleWidth(beforeTitle) - visibleWidth(extensionBadges)
     const fittedTitle = title === '' || titleBudget <= 0 ? '' : truncateToWidth(title, titleBudget, '…')
     // Belt-and-braces: the composed row can never exceed the terminal width
