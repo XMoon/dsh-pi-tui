@@ -268,7 +268,7 @@ export interface SurfaceRuntimeOptions {
  * The frame is a READ-ONLY snapshot of existing authorities: the messages are
  * the exact array `setTranscript()` was called with, `subjectId`/`subjectKind`
  * come from the SAME active-target selection the repaint used, and
- * `sourceIdentity` is the projection SOURCE object, for `===` comparison only.
+ * `sourceIdentity` is an opaque per-source token, for `===` comparison only.
  * It carries no generation of its own and is never a Host/Session identity.
  */
 export interface TranscriptProjectionFrame {
@@ -281,10 +281,12 @@ export interface TranscriptProjectionFrame {
    */
   readonly subjectId: string | undefined
   /**
-   * Opaque identity of the projection SOURCE (the exact `TranscriptFolder`
-   * instance): a replacement fold — session commit, cold rehydrate, viewer
-   * switch — is a DIFFERENT object. Compare with `===` only; it is not a Host
-   * generation and exposes no mutable method to the observer.
+   * The OPAQUE identity of the projection source: the SAME bare object for
+   * every frame projected from one `TranscriptFolder`, a DIFFERENT one once
+   * that fold is replaced (session commit, cold rehydrate, viewer switch).
+   * Compare with `===` only. It is deliberately not the fold instance — the
+   * read-only observer can reach no application method through it — and it is
+   * not a Host generation.
    */
   readonly sourceIdentity: object
   /** The windowed messages, exactly as committed to the mounted app. */
@@ -741,6 +743,22 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * path; released by {@link dispose} before the mounted app dies.
    */
   let projectionObserver = options.onTranscriptProjected
+  /**
+   * PR2: the opaque per-source identity tokens handed to the observer. One bare
+   * object per projection source: the SAME fold always maps to the SAME token
+   * (so the observer can re-scope its keys by `===`), and the weak map lets a
+   * replaced fold's token be collected. This deliberately does NOT give the
+   * read-only observer the mutable fold instance.
+   */
+  const projectionTokens = new WeakMap<object, object>()
+  const projectionTokenFor = (source: object): object => {
+    let token = projectionTokens.get(source)
+    if (token === undefined) {
+      token = {}
+      projectionTokens.set(source, token)
+    }
+    return token
+  }
 
   /**
    * PR2: publish ONE already-computed projection to the optional read-only
@@ -764,7 +782,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     projectionObserver({
       subjectKind: viewedChildId === undefined ? 'main' : 'viewed-child',
       subjectId: viewedChildId ?? routing().currentSessionId(),
-      sourceIdentity: folder,
+      sourceIdentity: projectionTokenFor(folder),
       messages,
     })
   }
