@@ -23,7 +23,7 @@ import type { CompositionLike, DirectOwnerPoolLike } from './session-lifecycle-d
 import type { DirectSessionLiveResolvers } from './session-direct.ts'
 import type { LiveAgentLike } from './session-writer-direct.ts'
 import type { DirectPendingAgentLike } from './pending-input-reader-direct.ts'
-import type { SessionModelSelectionOwnerLike } from './model-selection-direct.ts'
+import type { DurableModelSelectionReader, SessionModelSelectionOwnerLike } from './model-selection-direct.ts'
 import { DirectSubagentPort } from './subagent-direct.ts'
 import { DirectSessionReader } from './session-direct.ts'
 import { DirectPendingInputReader } from './pending-input-reader-direct.ts'
@@ -56,8 +56,14 @@ export interface DirectBackendDeps {
   readonly diag: Diag
   /** The persisted TUI-settings facade (absent without the Settings service). */
   readonly tuiSettings: TuiSettingsConfig | undefined
-  /** The per-Agent model-selection owner (shared with the runner's picker). */
-  readonly modelSelections: SessionModelSelectionOwnerLike
+  /**
+   * The ONE per-Agent model-selection owner (shared with the runner's picker):
+   * it serves the catalog WRITE seam AND the session reader's Direct-only
+   * durable read. The two capabilities are intersected here on purpose — the
+   * reader must never be handed a second owner, and a composition that supplies
+   * only the write half must fail to compile.
+   */
+  readonly modelSelections: SessionModelSelectionOwnerLike & DurableModelSelectionReader
   /** The Direct Session ownership pool (lifecycle retirement/claim). */
   readonly ownerPool: DirectOwnerPoolLike
   /** Resolve one preset composition (the runner's compose). */
@@ -74,7 +80,7 @@ export interface DirectBackendDeps {
 export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
   return createDirectBackend(
     new DirectSubagentPort(deps.ctx),
-    new DirectSessionReader(deps.ctx, deps.liveResolvers),
+    new DirectSessionReader(deps.ctx, deps.liveResolvers, deps.modelSelections),
     new DirectPendingInputReader(deps.queueAgentFor),
     new DirectSessionWriter(deps.ctx, deps.agentFor, deps.queueAgentFor),
     new DirectSessionLifecycle(deps.ctx, deps.compose, deps.ownerPool),

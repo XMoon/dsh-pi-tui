@@ -34,6 +34,7 @@ function makeDeps(): DirectBackendDeps {
       setCurrent: () => {},
       selectForNextRequest: () => {},
       serializeImageAdmission: async (_agent, operation) => operation(),
+      durableProjectionForSession: () => ({ lastUsed: null, next: null }),
     },
     ownerPool: { claim: () => undefined, park: () => {} },
     compose: async () => ({ setup: () => {} }),

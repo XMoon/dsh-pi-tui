@@ -27,7 +27,13 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { directTurnOutlineCompat } from '../src/runtime/direct/turn-outline-compat.ts'
 import { rewindOutlineRows } from '../src/app/surface/rewind-presentation.ts'
-import { DirectSessionReader } from '../src/runtime/direct/session-direct.ts'
+import { DirectSessionReader, type DurableModelSelectionReader } from '../src/runtime/direct/session-direct.ts'
+
+/** The reader's Direct-only durable model-selection read is REQUIRED by the
+ *  constructor; these outline tests never exercise it. */
+const NO_DURABLE_MODEL_SELECTION: DurableModelSelectionReader = {
+  durableProjectionForSession: () => ({ lastUsed: null, next: null }),
+}
 
 function event<K extends string>(type: K, data: Record<string, unknown>, seq: number): SessionEvent {
   return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
@@ -70,7 +76,7 @@ function readerWith(options: {
   }
   return new DirectSessionReader(
     { get: (name: string) => (name === 'sessionProjections' ? options.projections : undefined) } as never,
-    { agentOf: () => agent } as never,
+    { agentOf: () => agent } as never, NO_DURABLE_MODEL_SELECTION
   )
 }
 

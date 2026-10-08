@@ -14,7 +14,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { DirectSessionReader, type HostContextLike, type SessionQueryLike } from '../src/runtime/direct/session-direct.ts'
+import { DirectSessionReader, type DurableModelSelectionReader, type HostContextLike, type SessionQueryLike } from '../src/runtime/direct/session-direct.ts'
+import { DirectModelSelectionOwner } from '../src/runtime/direct/model-selection-direct.ts'
 
 function header(id: string, createdAt: number, extra: Partial<{
   cwd: string
@@ -68,6 +69,14 @@ function host(services: Record<string, unknown>): HostContextLike {
   return { get: (name) => services[name] }
 }
 
+/** The reader's Direct-only durable model-selection read is REQUIRED by the
+ *  constructor. The listing/projection/search/blank tests below never exercise
+ *  the compat path, so they declare an explicit empty fact (both official wire
+ *  slots `null`) instead of a silently missing dependency. */
+const NO_DURABLE_MODEL_SELECTION: DurableModelSelectionReader = {
+  durableProjectionForSession: () => ({ lastUsed: null, next: null }),
+}
+
 function row(id: string, createdAt: number, live = false) {
   return { id, updatedAt: createdAt, createdAt, live }
 }
@@ -83,7 +92,7 @@ test('list prefers the semantic query engine and sorts newest-first', async () =
   }), {
     sessionOf: id => String(id) === 'session-new' ? liveSession : undefined,
     agentOf: () => undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list('session-new')
   assert.ok(rows !== undefined)
   assert.deepEqual(rows.map(r => r.id), ['session-new', 'session-old'])
@@ -111,7 +120,7 @@ test('list matches master visibility: cold cwd-less rows are omitted but live ro
   }), {
     sessionOf: id => String(id) === 'live-no-cwd' ? liveSession : undefined,
     agentOf: () => undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.deepEqual(rows?.map(row => row.id), ['live-no-cwd', 'cold-visible'])
   const projections = await reader.projectionBatch([
@@ -139,7 +148,7 @@ test('list uses sessionListMetadata activity through the header-only cache face'
           : undefined
       },
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.ok(rows !== undefined)
   assert.deepEqual(rows.map(r => r.id), ['session-old', 'session-new'])
@@ -156,7 +165,7 @@ test('list falls back to createdAt when activity projection is unavailable', asy
       { header: header('session-old', 100), live: false },
       { header: header('session-new', 300), live: false },
     ]),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.ok(rows !== undefined)
   assert.deepEqual(rows.map(r => r.id), ['session-new', 'session-old'])
@@ -174,7 +183,7 @@ test('list uses a lifecycle-matched seeded cold cache row for activity', async (
         return { values: { sessionListMetadata: { blank: false, lastPromptAt: 900 } } }
       },
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.deepEqual(rows?.map(r => r.id), ['session-seeded'])
   assert.deepEqual(rows?.map(r => r.updatedAt), [900])
@@ -182,7 +191,7 @@ test('list uses a lifecycle-matched seeded cold cache row for activity', async (
 })
 
 test('list without the session-query engine is explicitly unavailable', async () => {
-  const reader = new DirectSessionReader(host({}))
+  const reader = new DirectSessionReader(host({}), undefined, NO_DURABLE_MODEL_SELECTION)
   assert.equal(await reader.list('session-b'), undefined)
 })
 
@@ -207,7 +216,7 @@ test('projectionBatch uses live projection and composed preset without cold read
   }), {
     sessionOf: id => String(id) === 'session-live' ? session : undefined,
     agentOf: id => String(id) === 'session-live' ? liveAgent : undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.title, 'live title')
   assert.equal((await reader.projectionBatch(rows!)).get('session-live')?.preset, 'minimal')
@@ -228,7 +237,7 @@ test('live preset falls back to the materialized agentPreset cell only when comp
   }), {
     sessionOf: id => String(id) === 'session-live-fallback' ? session : undefined,
     agentOf: id => String(id) === 'session-live-fallback' ? liveAgent : undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.deepEqual((await reader.projectionBatch(rows!)).get('session-live-fallback'), { title: 'live title', preset: 'cordis' })
 })
@@ -267,7 +276,7 @@ test('live projection uses cached cells and never falls back to cold metadata', 
   }), {
     sessionOf: id => String(id) === 'session-live-miss' ? session : undefined,
     agentOf: id => String(id) === 'session-live-miss' ? liveAgent : undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.deepEqual(await reader.projectionBatch(rows!), new Map())
   assert.equal(materializingSnapshots, 0)
@@ -297,7 +306,7 @@ test('a live row stays cache-free when its Agent mapping races teardown', async 
   }), {
     sessionOf: id => String(id) === 'session-live-race' ? session : undefined,
     agentOf: () => undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.deepEqual(rows?.map(row => row.id), ['session-live-race'])
   assert.deepEqual(await reader.projectionBatch(rows!), new Map())
@@ -321,7 +330,7 @@ test('list captures the attached Session header and live activity after query li
   }), {
     sessionOf: id => String(id) === 'session-live-header' ? liveSession : undefined,
     agentOf: () => undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.deepEqual(rows, [{ id: 'session-live-header', updatedAt: 1_200, createdAt: 900, cwd: '/attached', parentSession: undefined, origin: undefined, live: true }])
 })
@@ -347,7 +356,7 @@ test('projectionBatch classifies live rows from the attached Session without col
   }), {
     sessionOf: id => attached && String(id) === 'session-toctou' ? session : undefined,
     agentOf: id => attached && String(id) === 'session-toctou' ? agent : undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   const liveNow = await reader.projectionBatch([{ id: 'session-toctou', updatedAt: 500, createdAt: 500, live: false }])
   assert.deepEqual(liveNow.get('session-toctou'), { title: 'attached title', preset: 'attached' })
   attached = false
@@ -370,7 +379,7 @@ test('projectionBatch treats a row that became live after listing as live', asyn
   }), {
     sessionOf: id => attached && String(id) === 'session-late-live' ? session : undefined,
     agentOf: id => attached && String(id) === 'session-late-live' ? agent : undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   attached = true
   const projections = await reader.projectionBatch([{ id: 'session-late-live', updatedAt: 600, createdAt: 600, live: false }])
   assert.equal(projections.get('session-late-live')?.title, 'late live title')
@@ -394,7 +403,7 @@ test('projectionBatch reads a fully cached row through the header-only face', as
       list: async () => [{ id: 'ptc' }],
       resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
   assert.deepEqual(calls.map(call => call.keys), [['sessionListMetadata'], ['title', 'agentPreset']])
@@ -422,7 +431,7 @@ test('projectionBatch uses the predecessor title hint without a cold observation
         return { values: { title: 'predecessor title' } }
       },
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
   assert.equal(projections.get('session-predecessor')?.title, 'predecessor title')
@@ -452,7 +461,7 @@ test('projectionBatch keeps partial cache values and leaves misses unknown', asy
         return undefined
       },
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
   assert.deepEqual(projections.get('session-partial'), { title: 'partial title' })
@@ -482,7 +491,7 @@ test('projectionBatch surfaces a lifecycle-matched seeded cache row', async () =
         return { values: { title: 'seeded title', agentPreset: 'ptc' } }
       },
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
   assert.deepEqual(projections.get('session-seeded'), { title: 'seeded title', preset: 'ptc' })
@@ -501,7 +510,7 @@ test('projectionBatch preserves a native cached code projection', async () => {
       list: async () => [{ id: 'ptc' }],
       resolve: async (id?: string) => ({ id: id ?? 'ptc' }),
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   assert.deepEqual((await reader.projectionBatch(rows!)).get('session-code'), { title: 'kept title', preset: 'code' })
 })
@@ -516,7 +525,7 @@ test('projectionBatch keeps cached preset values without a roster resolver', asy
         ? { values: { title: 'healthy title', agentPreset: 'ptc' } }
         : { values: { title: 'kept title', agentPreset: 'code' } },
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const rows = await reader.list(undefined)
   const projections = await reader.projectionBatch(rows!)
   assert.deepEqual(projections.get('session-healthy'), { title: 'healthy title', preset: 'ptc' })
@@ -529,7 +538,7 @@ test('projectionBatch rejects an already-aborted signal before reading', async (
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: header('session-a', 100), live: false }]),
     sessionProjectionCache: { cachedSnapshot: () => { throw new Error('must not read') } },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   await assert.rejects(reader.projectionBatch([row('session-a', 100)], controller.signal), /abort/i)
 })
 
@@ -545,7 +554,7 @@ test('search calls searchSessions with the official filters and returns the page
       calls.push({ query: request.query, eventFilters: request.eventFilters, limit: request.limit, signal: exec?.signal })
       return { items: [hit('session-hit')] }
     }),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const page = await reader.search('needle', controller.signal)
   assert.deepEqual(page, { items: [{ sessionId: 'session-hit', snippet: 'needle in session-hit' }], hasMore: false })
   assert.equal(calls.length, 1)
@@ -564,7 +573,7 @@ test('search excludes cold cwd-less sessions from the visible corpus', async () 
       { header: header('hidden-match', 300, { cwd: undefined }), live: false },
       { header: header('visible-match', 200, { cwd: '/workspace' }), live: false },
     ], async () => ({ items: [hit('hidden-match'), hit('visible-match')] })),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const page = await reader.search('needle')
   assert.deepEqual(page, { items: [{ sessionId: 'visible-match', snippet: 'needle in visible-match' }], hasMore: false })
 })
@@ -581,18 +590,18 @@ test('search finds a match beyond the old newest-100 cutoff', async () => {
   const oldest = { header: header('oldest-match', 1, { cwd: '/workspace' }), live: false }
   const reader = new DirectSessionReader(host({
     sessionQuery: query([...older, oldest], async () => ({ items: [hit('oldest-match')] })),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const page = await reader.search('needle')
   assert.deepEqual(page, { items: [{ sessionId: 'oldest-match', snippet: 'needle in oldest-match' }], hasMore: false })
 })
 
 test('search without the searchSessions capability is explicitly unavailable', async () => {
-  const reader = new DirectSessionReader(host({ sessionQuery: query([{ header: header('session-hit', 200), live: false }]) }))
+  const reader = new DirectSessionReader(host({ sessionQuery: query([{ header: header('session-hit', 200), live: false }]) }), undefined, NO_DURABLE_MODEL_SELECTION)
   assert.equal(await reader.search('needle'), undefined)
 })
 
 test('search without the session-query engine is explicitly unavailable', async () => {
-  const reader = new DirectSessionReader(host({}))
+  const reader = new DirectSessionReader(host({}), undefined, NO_DURABLE_MODEL_SELECTION)
   assert.equal(await reader.search('needle'), undefined)
 })
 
@@ -600,7 +609,7 @@ test('search validates the query before capability detection', async () => {
   // Plan §6.3 / master parity: query validation comes FIRST — an invalid
   // query is a caller error and rejects even when the capability is
   // missing (it must not degrade to the unavailable `undefined`).
-  const reader = new DirectSessionReader(host({}))
+  const reader = new DirectSessionReader(host({}), undefined, NO_DURABLE_MODEL_SELECTION)
   await assert.rejects(reader.search('   '), /must not be empty/)
   await assert.rejects(reader.search('x'.repeat(501)), /at most 500/)
   await assert.rejects(reader.search('a\0b'), /must not contain NUL/)
@@ -621,7 +630,7 @@ test('search calls searchSessions as a method of the query service (receiver pre
       return { items: [hit('session-hit')] }
     },
   }
-  const reader = new DirectSessionReader(host({ sessionQuery: service }))
+  const reader = new DirectSessionReader(host({ sessionQuery: service }), undefined, NO_DURABLE_MODEL_SELECTION)
   const page = await reader.search('needle')
   assert.deepEqual(page, { items: [{ sessionId: 'session-hit', snippet: 'needle in session-hit' }], hasMore: false })
 })
@@ -637,7 +646,7 @@ test('search maps a list-side provider abort to a cancellation', async () => {
       },
       searchSessions: async () => { throw new Error('search provider must not be reached') },
     },
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   await assert.rejects(reader.search('needle'), error => {
     assert.equal((error as Error).name, 'AbortError', 'a list-side abort must map to an abort-shaped error')
     return true
@@ -650,7 +659,7 @@ test('search rejects an aborted signal even when the capability is missing', asy
   // "capability unavailable" `undefined` (port contract).
   const controller = new AbortController()
   controller.abort()
-  const reader = new DirectSessionReader(host({}))
+  const reader = new DirectSessionReader(host({}), undefined, NO_DURABLE_MODEL_SELECTION)
   await assert.rejects(reader.search('needle', controller.signal), /abort/i)
 })
 
@@ -659,7 +668,7 @@ test('search returns undefined when semantic search is explicitly disabled', asy
     sessionQuery: query([{ header: header('session-hit', 200, { cwd: '/workspace' }), live: false }], async () => {
       throw Object.assign(new Error('search disabled'), { code: 'SESSION_QUERY_SEARCH_DISABLED' })
     }),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   assert.equal(await reader.search('needle'), undefined)
 })
 
@@ -667,7 +676,7 @@ test('search rejects a real provider failure', async () => {
   const refusal = Object.assign(new Error('unknown durable event'), { name: 'SessionFormatUnsupportedError' })
   const reader = new DirectSessionReader(host({
     sessionQuery: query([{ header: header('session-unknown', 100, { cwd: '/workspace' }), live: false }], async () => { throw refusal }),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   await assert.rejects(reader.search('needle'), error => error === refusal)
 })
 
@@ -681,7 +690,7 @@ test('search caps the page at 20 hits and reports hasMore', async () => {
       }
       return { items: headers.slice(20).map(item => hit(String(item.id))) }
     }),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   const page = await reader.search('needle')
   assert.ok(page !== undefined)
   assert.equal(page.items.length, 20)
@@ -697,7 +706,7 @@ test('search returns an empty page when no cwd-bearing session exists', async ()
       providerCalls += 1
       return { items: [] }
     }),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   assert.deepEqual(await reader.search('needle'), { items: [], hasMore: false })
   assert.equal(providerCalls, 0, 'an empty visible corpus must not call the provider')
 })
@@ -709,7 +718,7 @@ test('search honors cancellation through list and provider', async () => {
     sessionQuery: query([{ header: header('session-hit', 200, { cwd: '/workspace' }), live: false }], async () => {
       throw new Error('provider must not be reached')
     }),
-  }))
+  }), undefined, NO_DURABLE_MODEL_SELECTION)
   await assert.rejects(reader.search('needle', controller.signal), /abort/i)
 })
 
@@ -725,7 +734,7 @@ test('blank reads the Host turn-boundary authority for the live Session', () => 
   }), {
     sessionOf: id => String(id) === 'session-blank' ? session : undefined,
     agentOf: id => String(id) === 'session-blank' ? liveAgent : undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   assert.equal(reader.blank('session-blank'), true, 'a turn boundary with no turn is blank')
   boundary = { openTurnStartSeq: null, lastTurn: 2 }
   assert.equal(reader.blank('session-blank'), false, 'a started turn makes the Session non-blank')
@@ -743,6 +752,158 @@ test('blank is undefined (never a crash) when the projection read throws', () =>
   }), {
     sessionOf: id => String(id) === 'session-blank-throw' ? session : undefined,
     agentOf: id => String(id) === 'session-blank-throw' ? liveAgent : undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   assert.equal(reader.blank('session-blank-throw'), undefined)
+})
+
+/* ── the Direct-only durable model-selection compat read (T3/T4/T5) ──────────
+ *
+ * The `dsh-base` + TUI profile does not compose the row that registers the
+ * official `modelSelection` projection unit, so the registry omits the key and
+ * the child subject bar rendered `model ?` although the Session had recorded
+ * its route. The reader now answers from the exact Session's own durable facts —
+ * and ONLY while that key is absent.
+ */
+
+/** A real child Session fixture: its OWN log plus the latest `request/header`
+ *  config, exactly what the Direct compat read consumes. */
+function childSession(id: string, cwd: string, events: readonly Record<string, unknown>[] = []) {
+  const last = events.findLast(entry => entry.type === 'request/header')
+  return {
+    header: { id: SessionId(id), cwd, createdAt: 1, version: 4, isSeeded: false },
+    seq: events.length,
+    snapshotEvents: () => events,
+    requestHeader: () => (last as { data?: { header?: unknown } } | undefined)?.data?.header,
+  }
+}
+
+/** The official `sessionProjections.snapshot` face over an explicit wire-value
+ *  table: a key the table does not OWN is ABSENT, exactly like a projection unit
+ *  that is not registered in the process. */
+function projectionsFace(valuesBySession: Record<string, Record<string, unknown>>) {
+  return {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const all = valuesBySession[String(session.header.id)] ?? {}
+      if (keys === undefined) return { values: { ...all } }
+      const values: Record<string, unknown> = {}
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(all, key)) values[key] = all[key]
+      }
+      return { values }
+    },
+  }
+}
+
+function requestHeaderEvent(provider: string, model: string, reasoningEffort?: string) {
+  return {
+    type: 'request/header',
+    data: { header: { config: { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } } },
+  }
+}
+
+/** The ONE real Direct owner, with a distinctly-labelled global default so a
+ *  leak is visible. */
+function modelOwner(defaultSelection?: { provider: string; model: string }) {
+  return new DirectModelSelectionOwner({ currentSelection: () => defaultSelection })
+}
+
+test('T3: an ABSENT modelSelection key reads THIS child Session’s own request header, other facts intact', () => {
+  const child = childSession('child-a', '/child-ws', [requestHeaderEvent('deepseek', 'child-model', 'high')])
+  const services = {
+    sessionProjections: projectionsFace({
+      'child-a': {
+        title: 'child title',
+        permissions: { currentValue: 'workspace-write' },
+        contextPressure: { pressureTokens: 300, contextWindow: 4000 },
+        tokenUsage: { uncachedInputTokens: 21, outputTokens: 9, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        todos: [{ content: 'CHILD-TODO', status: 'pending' }],
+      },
+    }),
+  }
+  const resolvers = {
+    sessionOf: (id: string) => String(id) === 'child-a' ? child : undefined,
+    agentOf: () => undefined,
+  }
+  const reader = new DirectSessionReader(host(services), resolvers, modelOwner({ provider: 'parent', model: 'parent-model' }))
+  const status = reader.sessionStatus('child-a')
+  assert.ok(status, 'the attached child Session must answer')
+  assert.deepEqual(status.model, { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
+    'the compat read must surface the child Session’s own used route')
+  assert.equal(status.title, 'child title', 'the other official projection facts stay intact')
+  assert.equal(status.cwd, '/child-ws')
+  assert.equal(status.permission, 'workspace-write')
+  assert.deepEqual(status.todos, [{ content: 'CHILD-TODO', status: 'pending' }])
+  assert.deepEqual(status.usage, { uncachedInputTokens: 21, outputTokens: 9, cacheReadTokens: 0, cacheWriteTokens: 0 })
+  assert.notEqual(status.model?.provider, 'parent', 'the parent/default model must never ride the child')
+
+  // CONTROL: the exact same Session through a reader with the empty compat read
+  // reports the DEFECT this fix removes (`model ?`: no model at all).
+  const control = new DirectSessionReader(host(services), resolvers, NO_DURABLE_MODEL_SELECTION)
+  assert.equal(control.sessionStatus('child-a')?.model, undefined,
+    'CONTROL: without the compat read the same attached Session reads no model')
+  assert.equal(control.sessionStatus('child-a')?.title, 'child title')
+})
+
+test('T3b: the compat read consumes the Session’s incremental request-header cache and never scans the log', () => {
+  const child = childSession('child-a', '/child-ws', [requestHeaderEvent('deepseek', 'child-model', 'high')])
+  // A Session whose LOG ACCESS IS OFF: any full-log read inside the status path
+  // would throw and the reader's catch would answer `undefined` for the WHOLE
+  // status. The model must still be present — the approved compat scope restores
+  // the latest USED route with no log scan (and therefore no new deprecated
+  // history-reader call site).
+  const logFree = {
+    header: child.header,
+    requestHeader: child.requestHeader,
+    snapshotEvents: (): readonly Record<string, unknown>[] => {
+      throw new Error('the Direct model compat read must not scan the Session log')
+    },
+  }
+  const reader = new DirectSessionReader(host({ sessionProjections: projectionsFace({}) }), {
+    sessionOf: () => logFree,
+    agentOf: () => undefined,
+  }, modelOwner({ provider: 'parent', model: 'parent-model' }))
+  const status = reader.sessionStatus('child-a')
+  assert.ok(status, 'the log-free Session must still answer')
+  assert.deepEqual(status.model, { provider: 'deepseek', model: 'child-model', reasoningEffort: 'high' },
+    'the route comes from the Session’s own request-header cache, never from a log scan')
+  assert.notEqual(status.model?.provider, 'parent', 'and never from the default')
+})
+
+test('T4: a PRESENT official modelSelection key always wins, even with both official slots null', () => {
+  const child = childSession('child-present', '/child-ws', [requestHeaderEvent('local', 'local-model')])
+  const resolvers = {
+    sessionOf: (id: string) => String(id) === 'child-present' ? child : undefined,
+    agentOf: () => undefined,
+  }
+  const none = new DirectSessionReader(host({
+    sessionProjections: projectionsFace({ 'child-present': { modelSelection: { next: null, lastUsed: null } } }),
+  }), resolvers, modelOwner({ provider: 'parent', model: 'parent-model' }))
+  assert.equal(none.sessionStatus('child-present')?.model, undefined,
+    'the registered unit’s legal `{ next: null, lastUsed: null }` must NOT fall back to the Session log')
+
+  const official = new DirectSessionReader(host({
+    sessionProjections: projectionsFace({
+      'child-present': { modelSelection: { next: null, lastUsed: { provider: 'official', model: 'official-model' } } },
+    }),
+  }), resolvers, modelOwner({ provider: 'parent', model: 'parent-model' }))
+  assert.deepEqual(official.sessionStatus('child-present')?.model, { provider: 'official', model: 'official-model' },
+    'the official projection value is never overridden by the local header')
+})
+
+test('T5: no durable child fact reads UNKNOWN (never parent/default); A→B→A follows the Session identity', () => {
+  const childA = childSession('child-a', '/a', [requestHeaderEvent('deepseek', 'model-a')])
+  const childB = childSession('child-b', '/b', [requestHeaderEvent('deepseek', 'model-b')])
+  const bare = childSession('child-bare', '/bare')
+  const sessions: Record<string, unknown> = { 'child-a': childA, 'child-b': childB, 'child-bare': bare }
+  const reader = new DirectSessionReader(host({ sessionProjections: projectionsFace({}) }), {
+    sessionOf: id => sessions[String(id)],
+    agentOf: () => undefined,
+  }, modelOwner({ provider: 'parent', model: 'parent-model' }))
+  assert.equal(reader.sessionStatus('child-bare')?.model, undefined,
+    'a child Session with no durable model fact is UNKNOWN — never the parent or the global default')
+  assert.deepEqual(reader.sessionStatus('child-a')?.model, { provider: 'deepseek', model: 'model-a' })
+  assert.deepEqual(reader.sessionStatus('child-b')?.model, { provider: 'deepseek', model: 'model-b' })
+  assert.deepEqual(reader.sessionStatus('child-a')?.model, { provider: 'deepseek', model: 'model-a' },
+    'returning to A must not carry B’s model')
+  assert.equal(reader.sessionStatus('child-missing'), undefined, 'an unmounted Session is still unavailable')
 })

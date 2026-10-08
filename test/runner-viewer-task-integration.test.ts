@@ -30,6 +30,7 @@ import {
   liveChunkFrame,
   liveCommittedEnd,
   liveStart,
+  modelEvent,
 } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -2436,4 +2437,451 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
   await openViewer()
   assert.equal(app.getDraft(), 'delayed refusal text',
     'the stale refusal must restore into the ADDRESSED child slot (surfaced when that child is viewed again)')
+})
+
+test('T6/T7: the real viewer shows a child’s OWN request/header model with NO registered modelSelection unit, and follows pending → consumed while mounted', async (t) => {
+  // The shipped `dsh-base` + TUI composition mounts `ctx.sessionProjections`
+  // but registers no `modelSelection` unit (its only registrant is the API
+  // SessionController row of the web bundle). Before this fix the child subject
+  // bar therefore rendered `model ?` although the child Session had already
+  // recorded the route it really used. This test drives the REAL runner entry
+  // (`/tasks` → viewer) against a registry that owns no `modelSelection` key and
+  // a child Session that really logged its `request/header`.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-direct-subagent-model-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(140, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const childACwd = join(home, 'model-child-a-ws')
+  const childBCwd = join(home, 'model-child-b-ws')
+  const parent = fakeSession({
+    id: 'direct-model-parent',
+    header: { id: 'direct-model-parent', cwd: home, createdAt: 1_700_000_000_100, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const childA = fakeSession({
+    id: 'direct-model-child-a',
+    header: { id: 'direct-model-child-a', cwd: childACwd, createdAt: 1_700_000_000_101, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('child a answer'),
+      modelEvent('request/header', { header: { config: { provider: 'deepseek', model: 'child-a-used-model', reasoningEffort: 'high' } }, reason: 'initial' }, 6),
+    ],
+  })
+  const childB = fakeSession({
+    id: 'direct-model-child-b',
+    header: { id: 'direct-model-child-b', cwd: childBCwd, createdAt: 1_700_000_000_102, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('child b answer'),
+      modelEvent('request/header', { header: { config: { provider: 'deepseek', model: 'child-b-used-model' } }, reason: 'initial' }, 6),
+    ],
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: childA.id, label: 'model child A', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: childB.id, label: 'model child B', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  // The process default is deliberately labelled: a leak is unmistakable.
+  const harness = makeHarness(home, [parent, childA, childB], { provider: 'global', model: 'global-default-model' }, undefined, undefined, subagents)
+  for (const id of [childA.id, childB.id]) {
+    const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: id })
+    life.defer(() => handle.dispose())
+  }
+  context = new Context()
+  // The official projection face: other keys ARE owned, `modelSelection` is
+  // ABSENT (not null) for every Session — exactly the shipped registry.
+  const ownedValues: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+    [childA.id]: { permissions: { currentValue: 'workspace-write' } },
+    [childB.id]: { permissions: { currentValue: 'read-only' } },
+  }
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values = ownedValues[String(session.header.id)] ?? {}
+      if (keys === undefined) return { values: { ...values } }
+      return {
+        values: Object.fromEntries(keys
+          .filter(key => key in values)
+          .map(key => [key, (values as Record<string, unknown>)[key]])),
+      }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await vt.waitForRender()
+
+  for (const session of [childA, childB]) {
+    ;(liveAgentOf(harness, session.id) as { status: 'idle' | 'running' }).status = 'running'
+  }
+
+  // ── T6: the REAL Task Center entry mounts child A ─────────────────────────
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'child A must mount through the real Task Center entry')
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-used-model',
+    'the committed display subject must carry the child Session’s own used route')
+  assert.equal(probe.capturedChildStatus?.composition.model?.reasoningEffort, 'high',
+    'the raw request-header effort must survive into the shared composition fact')
+  const barA = app.viewerSubjectBarRenderRowsForTest().join('\n')
+  assert.ok(barA.includes('deepseek/child-a-used-model'), `the SUBJECT BAR must show the child model:\n${barA}`)
+  assert.ok(barA.includes('@high'), `the SUBJECT BAR must keep the used effort:\n${barA}`)
+  assert.ok(barA.includes('model child A'), `the identity must still render:\n${barA}`)
+  const viewA = vt.getViewport().join('\n')
+  assert.ok(viewA.includes('[deepseek/child-a-used-model @high]'),
+    `the child FOOTER model badge must read the SAME child fact:\n${viewA}`)
+  assert.ok(!viewA.includes('model ?'), `the unknown stand-in must be gone for a child that requested:\n${viewA}`)
+  assert.ok(!viewA.includes('global-default-model'), `the global default must never stand in for the child:\n${viewA}`)
+  assert.ok(!viewA.includes('child-b-used-model'), `child B must not leak into A’s surface:\n${viewA}`)
+
+  // ── T7: while mounted, the child makes a NEW request on a DIFFERENT model ──
+  const appendToChildA = (type: string, data: unknown): SessionEvent =>
+    childA.append!(type, data) as SessionEvent
+  const explicitEvent = appendToChildA('request/header', {
+    header: { config: { provider: 'anthropic', model: 'child-a-explicit-model', reasoningEffort: 'max' } },
+    reason: 'change',
+  })
+  context.emit('session/event', childA as never, explicitEvent)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-explicit-model',
+    'EXPLICIT child route: the child’s own new request header owns the surface')
+  assert.equal(probe.capturedChildStatus?.composition.model?.provider, 'anthropic')
+  assert.equal(probe.capturedChildStatus?.composition.model?.reasoningEffort, 'max')
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('anthropic/child-a-explicit-model'),
+    'the subject bar must follow the child’s own latest request')
+
+  // DOCUMENTED REDUCTION (owner-approved scope): an unconsumed pending intent is
+  // NOT reproduced by the compat source, so a lone `model/selection` must NOT
+  // move the child surface — the latest USED route stays.
+  const pendingEvent = appendToChildA('model/selection', {
+    provider: 'google', model: 'child-a-pending-only-model', reasoningEffort: 'low',
+  })
+  context.emit('session/event', childA as never, pendingEvent)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-explicit-model',
+    'a lone child model/selection is OUT OF SCOPE for the compat read and must not move the surface')
+  assert.ok(!app.viewerSubjectBarRenderRowsForTest().join('\n').includes('child-a-pending-only-model'),
+    'the pending-only model must never reach the subject bar through this compat path')
+
+  // The PARENT switching its own route while the child is displayed must not
+  // touch the child surface.
+  const parentSwitch = parent.append!('request/header', {
+    header: { config: { provider: 'parent-provider', model: 'parent-after-switch', reasoningEffort: 'high' } },
+    reason: 'change',
+  }) as SessionEvent
+  context.emit('session/event', parent as never, parentSwitch)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-explicit-model',
+    'a parent route switch must never repaint the displayed child')
+  const viewAfterParentSwitch = vt.getViewport().join('\n')
+  assert.ok(!viewAfterParentSwitch.includes('parent-after-switch'),
+    `the parent’s new model must not leak into the child surface:\n${viewAfterParentSwitch}`)
+
+  // ── T7 continued: child A → child B through the SAME real entry ───────────
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\x1b[B')
+  await settle()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-b-used-model',
+    'child B must read ITS OWN request header')
+  const viewB = vt.getViewport().join('\n')
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('deepseek/child-b-used-model'))
+  assert.ok(!viewB.includes('child-a-explicit-model'), `A’s model must not survive into B:\n${viewB}`)
+  assert.ok(!viewB.includes('child-a-pending-only-model'), `A’s pending-only intent must not survive into B:\n${viewB}`)
+
+  // Leaving the viewer restores the MAIN subject's own facts.
+  input('\x1b')
+  await settle()
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(!restored.includes('‹ back'), `the subject bar must clear on exit:\n${restored}`)
+  assert.ok(!restored.includes('child-b-used-model'), `the child model must not linger on the main subject:\n${restored}`)
+})
+
+test('T6b (owner item 1): a child that USED the same route as the process default reads it through the absence branch, never as a default fill', async (t) => {
+  // The inherited-route case: the child's own `request/header` carries exactly
+  // the process default's provider/model, so a default-fill bug would render the
+  // SAME string and a broken compat read would render `model ?`. The test
+  // therefore also moves the process default afterwards and requires the child
+  // surface to stay on the route recorded in the child's OWN log.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-direct-model-inherited-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(140, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent = fakeSession({
+    id: 'inherited-parent',
+    header: { id: 'inherited-parent', cwd: home, createdAt: 1_700_000_000_300, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child = fakeSession({
+    id: 'inherited-child',
+    header: { id: 'inherited-child', cwd: join(home, 'inherited-child-ws'), createdAt: 1_700_000_000_301, version: SESSION_FORMAT_VERSION },
+    events: [
+      ...sessionEvents('inherited child answer'),
+      modelEvent('request/header', {
+        header: { config: { provider: 'shared', model: 'shared-inherited-model' } },
+        reason: 'initial',
+      }, 6),
+    ],
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: child.id, label: 'inherited child', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'shared', model: 'shared-inherited-model' }, undefined, undefined, subagents)
+  const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => handle.dispose())
+  context = new Context()
+  // The shipped registry: no `modelSelection` unit is registered for any Session.
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values: Record<string, unknown> = String(session.header.id) === child.id
+        ? { permissions: { currentValue: 'workspace-write' } }
+        : {}
+      if (keys === undefined) return { values: { ...values } }
+      return { values: Object.fromEntries(keys.filter(key => key in values).map(key => [key, values[key]])) }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await vt.waitForRender()
+  ;(liveAgentOf(harness, child.id) as { status: 'idle' | 'running' }).status = 'running'
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the inherited child must mount through the real Task Center entry')
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'shared-inherited-model',
+    'the child’s OWN used route must reach the display subject through the absence branch')
+  assert.equal(probe.capturedChildStatus?.composition.model?.provider, 'shared')
+  const bar = app.viewerSubjectBarRenderRowsForTest().join('\n')
+  assert.ok(bar.includes('shared/shared-inherited-model'), `the subject bar must show the inherited-and-used route:\n${bar}`)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model ?'), `the unknown stand-in must be gone for a child that requested:\n${view}`)
+  assert.ok(view.includes('[shared/shared-inherited-model]'), `the child footer badge must read the same fact:\n${view}`)
+
+  // DISCRIMINATOR: a process-default FILL would move here; the child's own
+  // recorded route must not.
+  const defaultModel = harness.defaultModel as { saveSelection: (next: { provider: string; model: string }) => Promise<unknown> }
+  await defaultModel.saveSelection({ provider: 'switched', model: 'switched-default-model' })
+  const refresh = child.append!('todo/write', { todos: [{ content: 'INHERITED-REFRESH', status: 'pending' }] }) as SessionEvent
+  context.emit('session/event', child as never, refresh)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'shared-inherited-model',
+    'the child surface must never follow the process default')
+  const after = vt.getViewport().join('\n')
+  assert.ok(!after.includes('switched-default-model'), `the changed process default must not leak into the child surface:\n${after}`)
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('shared/shared-inherited-model'),
+    'the subject bar still renders the child’s own used route')
+})
+
+test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost on a ≥2,000-event child Session', async (t) => {
+  // Every durable child event makes the viewer re-derive the display subject,
+  // which invokes the Direct compat read. The compat source answers from the
+  // Session's own incrementally maintained `requestHeader()` (no log scan), so
+  // this test drives the REAL routing on a 2,000+ event child Session and records
+  // a per-event DISTRIBUTION (mean/p50/p95/max) for the same 100 appends with the
+  // official `modelSelection` key absent (compat active) and present (compat
+  // skipped). Numbers are printed; the assertion is a frame-budget ceiling.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-direct-model-perf-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(120, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  // 501 legal turns = 2,004 durable events, plus the child's own request header
+  // (so the compat fold has a real value to find).
+  const bulk: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 501; turn++) {
+    bulk.push(event('turn/start', { turn }, seq++))
+    bulk.push(event('step/start', { turn, step: 0 }, seq++))
+    bulk.push(event('step/end', { turn, step: 0 }, seq++))
+    bulk.push(event('turn/end', { turn, reason: { kind: 'completed' } }, seq++))
+  }
+  bulk.push(modelEvent('request/header', {
+    header: { config: { provider: 'deepseek', model: 'perf-child-model', reasoningEffort: 'high' } },
+    reason: 'initial',
+  }, bulk.length))
+  assert.equal(bulk.length, 2005, 'the perf fixture must exceed 2,000 legal durable events')
+  const parent = fakeSession({
+    id: 'perf-parent',
+    header: { id: 'perf-parent', cwd: home, createdAt: 1_700_000_000_200, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child = fakeSession({
+    id: 'perf-child',
+    header: { id: 'perf-child', cwd: join(home, 'perf-child-ws'), createdAt: 1_700_000_000_201, version: SESSION_FORMAT_VERSION },
+    events: bulk,
+  })
+  const subagents = {
+    listDescendants: async () => [
+      { kind: 'child', id: child.id, label: 'perf child', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+    ],
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'global', model: 'global-default-model' }, undefined, undefined, subagents)
+  const handle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => handle.dispose())
+  context = new Context()
+  /** Flipped between the two measurement phases: the registry OWNS the
+   *  official key only in the control phase. */
+  let ownsOfficialKey = false
+  context.provide('sessionProjections', {
+    snapshot: (session: { header: { id: string } }, keys?: readonly string[]) => {
+      const values: Record<string, unknown> = String(session.header.id) === child.id && ownsOfficialKey
+        ? { modelSelection: { lastUsed: { provider: 'official', model: 'official-model' }, next: null } }
+        : {}
+      if (keys === undefined) return { values: { ...values } }
+      return { values: Object.fromEntries(keys.filter(key => key in values).map(key => [key, values[key]])) }
+    },
+    stateOf: (_session: unknown, key: string) => key === 'turnBoundary'
+      ? { 'next-step': [], 'next-turn': [] }
+      : undefined,
+  } as never)
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
+    tui.handleTerminalInput(data)
+  }
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler)
+  await settle()
+  await vt.waitForRender()
+  ;(liveAgentOf(harness, child.id) as { status: 'idle' | 'running' }).status = 'running'
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+  input('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.notEqual(app.getViewerGeneration(), 0, 'the perf child must be mounted in the viewer')
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'perf-child-model',
+    'the compat read must already be live on this 2,005-event Session')
+
+  const appendAndRefresh = (label: string): void => {
+    const appended = child.append!('todo/write', { todos: [{ content: label, status: 'pending' }] }) as SessionEvent
+    context!.emit('session/event', child as never, appended)
+  }
+  // Deterministic work counter (load-independent): every full-log read the status
+  // path performs shows up here. The compat read must add ZERO log scans.
+  const originalSnapshotEvents = child.snapshotEvents
+  let logScans = 0
+  child.snapshotEvents = () => { logScans += 1; return originalSnapshotEvents() }
+  const measure = (phase: string, offset: number) => {
+    logScans = 0
+    const samples: number[] = []
+    for (let index = 0; index < 100; index++) {
+      const started = performance.now()
+      appendAndRefresh(`PERF-${phase}-${offset + index}`)
+      samples.push(performance.now() - started)
+    }
+    const sorted = [...samples].sort((left, right) => left - right)
+    const at = (quantile: number): number => sorted[Math.min(sorted.length - 1, Math.floor(quantile * sorted.length))]!
+    const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length
+    console.log(
+      `[perf] ${phase}: n=${samples.length} logScans=${logScans} mean=${mean.toFixed(3)} `
+      + `p50=${at(0.5).toFixed(3)} p95=${at(0.95).toFixed(3)} max=${sorted[sorted.length - 1]!.toFixed(3)} ms/event`,
+    )
+    return { mean, p95: at(0.95), max: sorted[sorted.length - 1]!, logScans }
+  }
+  for (let index = 0; index < 10; index++) appendAndRefresh('PERF-warmup')
+  await settle()
+  await vt.waitForRender()
+  const compat = measure('compat (modelSelection unit ABSENT)', 1000)
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'perf-child-model',
+    'PHASE PROOF: with the key absent the surface reads the 2,005-event Session’s own request header')
+  ownsOfficialKey = true
+  const official = measure('official (modelSelection unit PRESENT)', 2000)
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedChildStatus?.composition.model?.id, 'official-model',
+    'PHASE PROOF: once the key is owned the official value takes over (the compat read is skipped)')
+  // The load-independent assertion: enabling the compat read must not add a single
+  // Session-log scan to the refresh path (the only super-constant cost this lane
+  // exists to rule out). The wall-clock figures are printed as a distribution and
+  // guarded only by a generous stall ceiling, because the fixture's
+  // `requestHeader()` is a naive re-derivation while production's is an
+  // incrementally maintained cache — so the measured delta is an upper bound.
+  assert.equal(compat.logScans, official.logScans,
+    `the compat read must add no Session-log scan (compat ${compat.logScans}, official ${official.logScans})`)
+  console.log(`[perf] compat overhead over the official path: mean ${(compat.mean - official.mean).toFixed(3)}`
+    + ` p95 ${(compat.p95 - official.p95).toFixed(3)} max ${(compat.max - official.max).toFixed(3)} ms/event`)
+  assert.ok(compat.p95 < 50,
+    `no refresh lane may stall pathologically; measured p95 ${compat.p95.toFixed(3)} ms/event`)
 })

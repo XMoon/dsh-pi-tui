@@ -9,8 +9,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { DirectSessionReader, type HostContextLike } from '../src/runtime/direct/session-direct.ts'
+import { DirectSessionReader, type DurableModelSelectionReader, type HostContextLike } from '../src/runtime/direct/session-direct.ts'
 import { contextPressureOccupancy } from '../src/runtime/session-reader-port.ts'
+
+/** The reader's Direct-only durable model-selection read is REQUIRED by the
+ *  constructor. These projection-mapping tests assert the OFFICIAL key path, so
+ *  they declare an explicit empty fact and never enable the compat read. */
+const NO_DURABLE_MODEL_SELECTION: DurableModelSelectionReader = {
+  durableProjectionForSession: () => ({ lastUsed: null, next: null }),
+}
 
 /** The structural Host projection reader face the M3-3A reads consume. */
 function projectionsHost(valuesBySession: Readonly<Record<string, Readonly<Record<string, unknown>>>>): {
@@ -58,7 +65,7 @@ function reader(
       ? ({ header: { id: SessionId(String(id)), cwd: cwds[String(id)] } }) as never
       : undefined,
     agentOf: id => agentOf(id) as never,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   return { direct, snapshotKeys: projections.snapshotKeys }
 }
 
@@ -75,7 +82,7 @@ test('R3 (Direct): an absent projection capability or value reads unmeasured', (
   const noService = new DirectSessionReader({ get: () => undefined }, {
     sessionOf: () => ({ header: {} }) as never,
     agentOf: () => ({ session: { header: {} } }) as never,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   assert.equal(noService.measureContext('s'), undefined, 'no sessionProjections service = unavailable')
   const { direct: noAgent } = reader({})
   assert.equal(noAgent.measureContext('unknown'), undefined, 'no live agent = unavailable')
@@ -95,7 +102,7 @@ test('R6 (Direct): a throwing projection read is unmeasured, never a crash', () 
   }, {
     sessionOf: () => ({ header: {} }) as never,
     agentOf: () => ({ session: { header: {} } }) as never,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   assert.equal(direct.measureContext('s'), undefined)
   assert.equal(direct.turnOutline('s'), undefined)
   assert.equal(direct.sessionStatus('s'), undefined)
@@ -241,6 +248,6 @@ test('M3-5 §9.1: a retained Session without the projection service reads unavai
   const direct = new DirectSessionReader({ get: () => undefined }, {
     sessionOf: () => ({ header: { id: SessionId('s'), cwd: '/s' } }) as never,
     agentOf: () => undefined,
-  })
+  }, NO_DURABLE_MODEL_SELECTION)
   assert.equal(direct.sessionStatus('s'), undefined)
 })

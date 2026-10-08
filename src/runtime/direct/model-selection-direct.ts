@@ -16,6 +16,7 @@ import {
   copyModelSelection,
   foldPendingModelSelection,
   normalizeModelSelection,
+  rawSelectionFromRequestHeader,
   sameModelSelection,
   selectionFromRequestHeader,
   type ModelSelectionValue,
@@ -29,6 +30,42 @@ export interface DefaultModelServiceLike {
 /** A per-Agent installed selection plus the raw pending-intent consumer. */
 export interface InstalledModelSelection extends ModelSelectionRef {
   consume(provider: string, model: string, reasoningEffort: string | undefined): boolean
+}
+
+/** The exact Session fact the Direct durable model-selection read needs: the
+ *  Session's OWN incrementally maintained latest-request cache. Structural, so no
+ *  Host Session type enters this dependency. */
+export interface DurableModelSelectionSessionLike {
+  requestHeader(): unknown
+}
+
+/** The official rc.2 `modelSelection` wire shape: `lastUsed` is the latest
+ *  request header's route, `next` is the unconsumed intent when one exists. Both
+ *  are `null` when the Session carries no durable selection fact yet. */
+export interface DurableModelSelectionProjection {
+  readonly lastUsed: ModelSelectionValue | null
+  readonly next: ModelSelectionValue | null
+}
+
+/**
+ * The Direct-only read of one exact Session's own durable model-selection facts,
+ * in the official `modelSelection` wire shape. It is deliberately SEPARATE from
+ * {@link SessionModelSelectionOwnerLike} (the catalog WRITE seam): only the
+ * session reader consumes it, and it is read-only.
+ *
+ * It exists because the upstream `modelSelection` unit is registered by the API
+ * SessionController row alone, which the `dsh-base` + TUI profile does not
+ * compose: the registry then omits the key entirely, and the official read
+ * answers "unavailable" while the Session has in fact recorded its route.
+ */
+export interface DurableModelSelectionReader {
+  /**
+   * The exact Session's own latest used route. It reads that Session's own
+   * request header only — never the Agent's current choice, the global default
+   * or another Session — and it neither installs a request listener nor appends
+   * an event.
+   */
+  durableProjectionForSession(session: DurableModelSelectionSessionLike): DurableModelSelectionProjection
 }
 
 /** The structural seam consumed by the Direct catalog adapter. */
@@ -73,7 +110,7 @@ function requestHeaderOf(agent: Agent): unknown {
  * is read on every fallback access, so a sessionless `/model` update or an
  * external default change is never frozen at runner startup.
  */
-export class DirectModelSelectionOwner implements SessionModelSelectionOwnerLike {
+export class DirectModelSelectionOwner implements SessionModelSelectionOwnerLike, DurableModelSelectionReader {
   private readonly installed = new WeakMap<Agent, InstalledModelSelection>()
   /** The per-Agent model-selection / image prompt-admission chain (rc.2
    *  `ApiSessionAgentController.serializeImageAdmission`). Overlapping model
@@ -192,6 +229,29 @@ export class DirectModelSelectionOwner implements SessionModelSelectionOwnerLike
     if (record?.type !== 'model/selection') return
     const normalized = normalizeModelSelection(record.data)
     if (normalized !== undefined) this.installForAgent(agent).current = agentSelection(normalized)
+  }
+
+  /**
+   * The exact Session's OWN latest used route, in the official `modelSelection`
+   * wire shape, for the compositions whose Session projection registry does not
+   * register the upstream unit. Purely synchronous and read-only: it installs no
+   * request listener, appends no event, and reads no Agent choice, no global
+   * default and no other Session.
+   *
+   * SCOPE (owner-approved revision, 2026-10-08): only `lastUsed` is restored,
+   * from the Session's own incrementally maintained `requestHeader()` — never a
+   * log scan, so this compat source adds no deprecated synchronous history-reader
+   * call site and does not touch the frozen debt baseline. The upstream
+   * `next = pending ?? lastUsed` slot therefore reads as `lastUsed`: an
+   * unconsumed pending `model/selection` intent is deliberately NOT reproduced
+   * here, so this source must never be described as the complete official
+   * semantic. `lastUsed` keeps the upstream's RAW `config.reasoningEffort`
+   * (the Agent-restore policy, which strips an adapter default, would disagree
+   * with the official wire value).
+   */
+  durableProjectionForSession(session: DurableModelSelectionSessionLike): DurableModelSelectionProjection {
+    const lastUsed = rawSelectionFromRequestHeader(session.requestHeader())
+    return { lastUsed: lastUsed ?? null, next: lastUsed ?? null }
   }
 
   /** Expose a detached selection for Direct catalog DTOs. */
