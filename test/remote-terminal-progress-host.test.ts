@@ -154,7 +154,7 @@ test('every official reason classifies, an unknown one is reported, an unmatched
     host.emit('agent/status', { agent: live, status: 'idle' })
     const [settled] = await read(iterator, 1, 'L6')
     assert.equal(settled.outcome, expected, `reason ${kind ?? '<none>'} must settle ${expected}`)
-    await iterator.return?.()
+    await iterator.return?.(undefined)
   }
   assert.deepEqual(reported, ['a-future-kind'], 'exactly the unknown upstream kind is reported')
 })
@@ -179,7 +179,7 @@ test('the latest closed turn decides and the Session OBJECT is the identity fenc
   host.emit('agent/status', { agent: live, status: 'idle' })
   const [settled] = await read(first, 1, 'L9')
   assert.equal(settled.outcome, 'error', 'the LAST valid closed turn of the interval decides')
-  await first.return?.()
+  await first.return?.(undefined)
 
   // 2. A same-id but DIFFERENT Session object cannot contribute evidence.
   const replacedSession = { id: SESSION_ID }
@@ -192,7 +192,7 @@ test('the latest closed turn decides and the Session OBJECT is the identity fenc
   host.emit('agent/status', { agent: live, status: 'idle' })
   const [fenced] = await read(second, 1, 'L12')
   assert.equal(fenced.outcome, 'idle', 'a foreign Session object never contributes terminal evidence')
-  await second.return?.()
+  await second.return?.(undefined)
 
   // 3. The SAME Session object still does.
   const third = host.service.watch(SESSION_ID, controller.signal)[Symbol.asyncIterator]()
@@ -204,7 +204,7 @@ test('the latest closed turn decides and the Session OBJECT is the identity fenc
   host.emit('agent/status', { agent: live, status: 'idle' })
   const [proven] = await read(third, 1, 'L15')
   assert.equal(proven.outcome, 'done', 'the bound Agent Session object still proves its own turn')
-  await third.return?.()
+  await third.return?.(undefined)
 })
 
 test('an Agent replacement opens a new epoch and inherits nothing', async (t) => {
@@ -236,7 +236,7 @@ test('an Agent replacement opens a new epoch and inherits nothing', async (t) =>
     { kind: 'update', running: false, outcome: 'idle', agentEpoch: 2 },
     'the replacement publishes a fresh idle interval under a new epoch',
   )
-  await iterator.return?.()
+  await iterator.return?.(undefined)
 })
 
 test('an Agent disposal retires a live interval, ends the watchers and drops the record', async (t) => {
@@ -272,7 +272,7 @@ test('an Agent disposal retires a live interval, ends the watchers and drops the
     { running: false, outcome: 'idle' },
     'a disposed Agent leaves no retained completion behind',
   )
-  await reopened.return?.()
+  await reopened.return?.(undefined)
 })
 
 test('the cut loses no edge and replays none, and the fiber disposal closes the watchers', async (t) => {

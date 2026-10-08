@@ -81,6 +81,8 @@ export interface PiTuiTerminalProgressHostDeps {
 
 /** One session's evidence state. */
 interface SessionRecord {
+  /** The session id this record serves (the wire frame's identity). */
+  readonly sessionId: string
   /** The bound Agent object of the CURRENT lifetime, or undefined until bound. */
   agent: LiveAgentLike | undefined
   /** The exact Session object of the bound Agent (identity fence for events). */
@@ -276,6 +278,7 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
     let record = this.records.get(sessionId)
     if (record === undefined) {
       record = {
+        sessionId,
         agent: undefined,
         session: undefined,
         agentEpoch: 0,
@@ -322,11 +325,9 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
   }
 
   private broadcast(record: SessionRecord, kind: 'update'): void {
-    const sessionId = this.sessionIdOf(record)
-    if (sessionId === undefined) return
     const frame: PiTuiTerminalProgressFrame = {
       kind,
-      sessionId,
+      sessionId: record.sessionId,
       hostEpoch: this.hostEpoch,
       agentEpoch: record.agentEpoch,
       revision: record.revision,
@@ -334,13 +335,6 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
       outcome: record.outcome,
     }
     for (const subscriber of record.subscribers) subscriber.push(frame)
-  }
-
-  private sessionIdOf(record: SessionRecord): string | undefined {
-    for (const [sessionId, candidate] of this.records) {
-      if (candidate === record) return sessionId
-    }
-    return undefined
   }
 
   /** End every watcher (the row's fiber is going away). */
