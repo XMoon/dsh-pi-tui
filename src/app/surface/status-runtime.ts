@@ -403,6 +403,14 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * every identity change: fresh startup, session create/resume/switch,
    * and session/title events (the session title event lands in the
    * header through setSessionTitle; the OSC title follows).
+   *
+   * The OSC 0 identity and the OSC 7 terminal-LOCAL cwd are DIFFERENT
+   * authorities: this one names the session (so the official session
+   * workspace fact is the identity fallback on BOTH branches), while
+   * `refreshTerminalCwd` publishes the terminal-local cwd and fails closed on
+   * Remote. The frozen F6 plan §10.12 line "Remote Host cwd never becomes
+   * Client terminal title cwd" conflated the two; the F6 plan-owner ruling
+   * settled it in favour of this contract (see `docs/architecture.md`).
    */
   const refreshTerminalTitle = (): void => {
     deps.updateTerminalTitle({

@@ -12,6 +12,7 @@ import { afterEach, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { TuiApp } from '../src/tui-app.ts'
 import { isTernTerminal, ternCwdSequence, ternProgressState } from '../src/tui/terminal/tern.ts'
+import { terminalTitleOf } from '../src/tui/terminal/title.ts'
 import { createStatusRuntime, type StatusRuntimeDeps } from '../src/app/surface/status-runtime.ts'
 import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -242,6 +243,8 @@ function cwdHarness(options: {
   live?: { cwd?: string }
   clientCwd?: string
   sessionTitle?: string
+  /** The OFFICIAL session projection's cwd the Remote branch reads. */
+  projectedCwd?: string
 }): CwdHarness {
   const forwarded: (string | undefined)[] = []
   const titles: { sessionTitle?: string; cwd?: string }[] = []
@@ -267,7 +270,7 @@ function cwdHarness(options: {
     generation: () => 1,
     currentSessionId: () => 'main',
     measureContext: () => undefined,
-    sessionStatus: () => undefined,
+    sessionStatus: () => options.projectedCwd === undefined ? undefined : { cwd: options.projectedCwd },
     model: {
       selection: () => undefined,
       currentOf: () => undefined,
@@ -316,22 +319,58 @@ test('a DSH Remote backend never publishes a Host cwd into the Client terminal',
     'the Remote Host workspace fails closed: the pane belongs to the Client machine')
 })
 
-// ── Status layer: the terminal TITLE identity facts (the composition applies
+// ── Status layer: the OSC 0 terminal TITLE contract (the composition applies
 //    the OSC policy; this owner supplies semantic facts only) ───────────────
+//
+// The F6 plan-owner ruling (2026-10-08) settled §10.12: OSC 0 is IDENTITY
+// (session title first, else the OFFICIAL session workspace cwd on BOTH
+// branches), while OSC 7 is the terminal-LOCAL cwd and keeps its own
+// Remote fail-closed rule. The frozen line "Remote Host cwd never becomes
+// Client terminal title cwd" was the plan's own conflation of the two
+// authorities and is corrected here, NOT implemented as a behavior change.
 
-test('the title seam receives the session title first, with the session cwd as the fallback fact', () => {
-  const h = cwdHarness({ live: { cwd: '/work/A' }, sessionTitle: 'Fix queue bug' })
+/** The observable title the composition policy derives from one seam call. */
+function composedTitle(h: CwdHarness): string {
+  return terminalTitleOf(h.titles.at(-1)!)
+}
+
+test('a session title leads on both branches, with the session cwd as the fallback fact', () => {
+  const direct = cwdHarness({ live: { cwd: '/work/A' }, sessionTitle: 'Fix queue bug' })
+  direct.refreshTitle()
+  assert.deepEqual(direct.titles, [{ sessionTitle: 'Fix queue bug', cwd: '/work/A' }])
+  assert.equal(composedTitle(direct), 'dsh · Fix queue bug')
+
+  const remote = cwdHarness({ remote: true, projectedCwd: '/host/alpha', sessionTitle: 'Fix bug' })
+  remote.refreshTitle()
+  assert.deepEqual(remote.titles, [{ sessionTitle: 'Fix bug', cwd: '/host/alpha' }])
+  assert.equal(composedTitle(remote), 'dsh · Fix bug')
+})
+
+test('a Direct session without a title uses the official session cwd (last two path segments)', () => {
+  const h = cwdHarness({ live: { cwd: '/repo/work' } })
   h.refreshTitle()
-  assert.deepEqual(h.titles, [{ sessionTitle: 'Fix queue bug', cwd: '/work/A' }])
+  assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: '/repo/work' }])
+  assert.equal(composedTitle(h), 'dsh · repo/work')
 })
 
 test('a sessionless Direct surface supplies the launch cwd to the title seam', () => {
   const h = cwdHarness({ clientCwd: '/client/launch' })
   h.refreshTitle()
   assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: '/client/launch' }])
+  assert.equal(composedTitle(h), 'dsh · client/launch')
 })
 
-test('a Remote surface never supplies the Client launch cwd as the session workspace title fact', () => {
+test('a Remote session with a projected Host cwd uses it as OSC 0 identity (plan-owner ruling A)', () => {
+  // OSC 0 names the session, so the official session workspace is the
+  // identity fallback and on Remote that fact IS the projected Host cwd. It
+  // is display identity only: the OSC 7 terminal-local cwd never forwards it.
+  const h = cwdHarness({ remote: true, projectedCwd: '/host/alpha', clientCwd: '/client/beta' })
+  h.refreshTitle()
+  assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: '/host/alpha' }])
+  assert.equal(composedTitle(h), 'dsh · host/alpha')
+})
+
+test('a Remote session without a projected cwd falls back to the bare brand, never the Client launch cwd', () => {
   // The official projection is the ONLY workspace authority on the Remote
   // branch: with no projected cwd the fact is undefined, so the title policy
   // falls back to the bare brand instead of impersonating a Host workspace
@@ -339,4 +378,5 @@ test('a Remote surface never supplies the Client launch cwd as the session works
   const h = cwdHarness({ remote: true, clientCwd: '/client/launch' })
   h.refreshTitle()
   assert.deepEqual(h.titles, [{ sessionTitle: '', cwd: undefined }])
+  assert.equal(composedTitle(h), 'dsh')
 })

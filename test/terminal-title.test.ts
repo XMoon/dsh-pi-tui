@@ -2,14 +2,31 @@
  * Headless tests for the terminal window title policy
  * (src/tui/terminal/title.ts):
  * session-title-first composition, short-cwd fallback, the bare `dsh`
- * fallback, display-width capping (CJK / emoji / ZWJ safe), and the
- * no-UUID guarantee.
+ * fallback, display-width capping (CJK / emoji / ZWJ safe), the no-UUID
+ * guarantee, the OSC 0 sink, and the CONNECTED composition proof (a real
+ * mounted runner whose session title change reaches the real injected seam
+ * and the captured stdout OSC frame).
  * @module @xmoon76/dsh-pi-tui/terminal-title.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { visibleWidth } from '@xmoon76/pi-tui'
+import {
+  disposeContext,
+  event,
+  fakeSession,
+  installVirtualProcessTerminal,
+  makeHarness,
+  mountRunner,
+  sessionEvents,
+  settle,
+} from './support/runner-harness.ts'
+import { installProbe } from './support/runner-session-fixtures.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 import {
   MAX_TERMINAL_TITLE_WIDTH,
   sanitizeTitleText,
@@ -179,4 +196,82 @@ test('a hostile session title cannot escape the OSC payload at the sink', () => 
   assert.equal(text.includes('\x07'), false, 'no BEL may survive inside the payload')
   assert.equal(text.includes('INJECTED'), false, 'the embedded sequence is stripped, not emitted')
   assert.ok(text.includes('pwned'), 'the visible identity text survives')
+})
+
+// ── Connected proof: real runner → status → injected seam → OSC 0 sink ──────
+
+test('a real runner session title reaches the OSC 0 sink through the injected composition seam', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-title-composition-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const session = fakeSession({
+    id: 'title-composition-session',
+    header: {
+      id: 'title-composition-session',
+      cwd: home,
+      createdAt: 1_700_000_000_000,
+      version: SESSION_FORMAT_VERSION,
+    },
+    events: sessionEvents('answer'),
+  })
+  const harness = makeHarness(home, [session], { provider: 'p', model: 'm' })
+  context = new Context()
+
+  // `setTerminalTitle` writes to process.stdout and is a no-op off a TTY, so
+  // the receiver is patched for the duration: the ORIGINAL descriptor is
+  // restored, and every non-title write still reaches the test reporter.
+  const frames: string[] = []
+  const originalWrite = process.stdout.write
+  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+  process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+    const text = String(chunk)
+    if (text.includes('\x1b]0;')) frames.push(text)
+    return (originalWrite as unknown as (chunk: unknown, ...rest: unknown[]) => boolean)
+      .call(process.stdout, chunk, ...rest)
+  }) as typeof process.stdout.write
+  Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true, writable: true })
+  life.defer(() => {
+    process.stdout.write = originalWrite
+    if (originalIsTTY === undefined) delete (process.stdout as { isTTY?: boolean }).isTTY
+    else Object.defineProperty(process.stdout, 'isTTY', originalIsTTY)
+  })
+
+  fiber = await mountRunner(context, home, harness, { sessionId: session.id }, { sessionId: session.id })
+  assert.ok(probe.apps.at(-1), 'the production runner must create a TuiApp')
+
+  // The real session/title event drives: routing -> mounted setSessionTitle ->
+  // onTitleChanged -> status.refreshTerminalTitle -> the bootstrap-injected
+  // seam -> terminalTitleOf -> setTerminalTitle -> stdout.
+  context.emit('session/event', session as never, event('session/title', {
+    title: 'Fix queue bug', messageSeqs: [], source: { kind: 'user' },
+  }, 1))
+  await settle()
+  assert.ok(frames.includes('\x1b]0;dsh · Fix queue bug\x07'),
+    `the composed title must reach stdout as one OSC 0 frame:\n${JSON.stringify(frames)}`)
+
+  // The same live chain applies the sanitizer: a hostile title cannot escape.
+  context.emit('session/event', session as never, event('session/title', {
+    title: 'pwned \x1b]0;INJECTED\x07', messageSeqs: [], source: { kind: 'user' },
+  }, 2))
+  await settle()
+  const last = frames.at(-1)!
+  assert.ok(last.startsWith('\x1b]0;') && last.endsWith('\x07'), `one intact OSC frame:\n${JSON.stringify(last)}`)
+  const payload = last.slice('\x1b]0;'.length, -'\x07'.length)
+  assert.equal(payload.includes('\x1b'), false, 'no ESC may survive inside the live payload')
+  assert.equal(payload.includes('\x07'), false, 'no BEL may survive inside the live payload')
+  assert.equal(payload.includes('INJECTED'), false, 'the live policy strips the embedded sequence')
 })
