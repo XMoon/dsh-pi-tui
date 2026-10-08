@@ -185,6 +185,10 @@ export function registerStatusCommand({ runner, registerOne }: StatusCommandDeps
       const contextTokens = forceContext === undefined
         ? runner.sessionReader.measureContext(scope.sessionId)
         : forceContext()
+      // PR3-A: the settings panel is PiTui chrome; unreachable without editor
+      // input on a non-PiTui renderer (runner.app undefined there).
+      const app = runner.app
+      if (app === undefined) return { kind: 'error', text: 'the settings panel is unavailable in this renderer' }
       app.openSettings(
         [
           {

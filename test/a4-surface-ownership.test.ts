@@ -115,7 +115,7 @@ test('A4: the mounted TuiApp has exactly one lifetime owner', () => {
 test('A4: the runner releases the surface-owned resources in the documented order', () => {
   // Plan §12.2: the teardown order is behavior. The runner only orchestrates;
   // every release hook is surface-owned.
-  const cleanupStart = indexSource.indexOf('const disposeSurface = (): void => {')
+  const cleanupStart = indexSource.indexOf('const disposeSurface = (): Promise<void> | void => {')
   assert.ok(cleanupStart >= 0, 'disposeSurface must exist')
   const cleanup = indexSource.slice(cleanupStart, indexSource.indexOf('diag.dispose()', cleanupStart) + 20)
   const order = [
@@ -263,8 +263,8 @@ test('A4-4: the status commit and the pending-input presentation are surface-own
   // app (M3-5 PR1 §9.7).
   assert.match(surface, /commitStatus\(\n?\s*patch: StatusPatch,/u,
     'the surface must own the status commit')
-  assert.match(surface, /mounted\(\)\.commitDisplaySubject\(patch, legacyFacts, presentation\)/u,
-    'the surface must commit the display-subject payload through the app')
+  assert.match(surface, /displaySeam\(\)\.commitDisplaySubject\(patch, legacyFacts, presentation\)/u,
+    'the surface must commit the display-subject payload through the display seam')
   assert.match(statusSource, /deps\.surface\.commitStatus\(patch,/u,
     'the status owner must delegate the status commit to the surface')
   assert.doesNotMatch(statusSource, /deps\.surface\.status\.update\(/u,

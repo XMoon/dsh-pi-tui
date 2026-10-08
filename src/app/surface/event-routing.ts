@@ -21,7 +21,8 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/event-routing
  */
 
-import type { TodoItem, TuiApp } from '../../tui-app.ts'
+import type { TodoItem } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { StreamingToolPreview } from './streaming-tool-preparing.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
@@ -223,7 +224,7 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
 export interface EventRoutingDeps<Event extends RoutedSessionEvent> {
   /** The injected routing source; throws while routing is not attached. */
   readonly source: () => SurfaceEventRoutingSource<Event>
-  readonly mounted: () => TuiApp
+  readonly mounted: () => SurfaceDisplaySeam
   readonly openingJournal: OpeningJournal<Event>
   /** Any current-Session activity re-derives continued-question answerability. */
   readonly reconcileQuestions: () => void
@@ -455,9 +456,9 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // instead, and the next real session event repaints the transcript.
     const isKnob = event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode'
     if (!isKnob) options.schedulePaint()
-    if (event.type === 'todo/write') options.mounted().setTodoSummary((event.data as { readonly todos: readonly TodoItem[] }).todos)
-    if (event.type === 'plan/mode') options.mounted().setPlanMode((event.data as { readonly active: boolean }).active)
-    if (event.type === 'session/title') options.mounted().setSessionTitle(source.sessionTitleOf(event))
+    if (event.type === 'todo/write') options.mounted().commitStatusFacts({ todos: (event.data as { readonly todos: readonly TodoItem[] }).todos })
+    if (event.type === 'plan/mode') options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
+    if (event.type === 'session/title') options.mounted().commitStatusFacts({ sessionTitle: source.sessionTitleOf(event) })
     // A permission switch (command, Shift+Tab, settings panel) lands as
     // knob events between turns: refresh the footer mode badge right away
     // instead of waiting for the next step/turn boundary.
@@ -520,13 +521,12 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     const compacted = foldCompactionEvent({ id: compactingId }, event as never)
     compactingId = compacted.id
     if (compacted.phase === 'summarizing') {
-      options.mounted().setCompactionPhase('summarizing')
       // Busy while compacting: a single Esc cancels the compaction (pi
       // parity — compaction rides the turn signal).
-      options.mounted().setBusy(true)
+      options.mounted().commitStatusFacts({ compactionPhase: 'summarizing', busy: true })
     }
     if (compacted.phase === 'applying') {
-      options.mounted().setCompactionPhase('applying')
+      options.mounted().commitStatusFacts({ compactionPhase: 'applying' })
     }
     if (compacted.clear) {
       // The compacted replacement has committed to the live session
@@ -538,7 +538,13 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // Compaction rewrites the model-visible surface: re-measure NOW
       // (the footer would otherwise show stale pressure until the next
       // step/start or turn/end).
-      settleCompactionSurface(options.mounted(), () => {
+      // PR3-A: the PUBLIC settle contract keeps its three setters; the seam
+      // side adapts onto it (one aggregated commit).
+      settleCompactionSurface({
+        setCompactionPhase: phase => options.mounted().commitStatusFacts({ compactionPhase: phase }),
+        setBusy: busy => options.mounted().commitStatusFacts({ busy }),
+        setWorking: working => options.mounted().commitStatusFacts({ working }),
+      }, () => {
         source.markContextDirty()
         source.refreshContextMeasurement('compaction-end')
       }, source.currentWorkingFromLog())
@@ -561,10 +567,9 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // and the submit timeline stamps the turn boundary.
       source.settleLocalSubmitAck('turn started')
       source.markSubmitLatency(ownerSessionId, 'turn.start')
-      options.mounted().setWorking(true)
-      options.mounted().setBusy(true)
+      options.mounted().commitStatusFacts({ working: true, busy: true })
     } else if (event.type === 'turn/end') {
-      options.mounted().setWorking(false)
+      options.mounted().commitStatusFacts({ working: false })
       // NOTE: the submit-latency timeline is deliberately NOT reset on
       // turn/end — a submission accepted while this turn was running
       // (busy/queue) is processed by the NEXT turn, and resetting here
@@ -575,7 +580,7 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // A turn end must not clear the busy flag while a compaction is
       // still in flight (an interrupted turn can close before its
       // compaction settles) — the single-Esc cancel stays armed.
-      options.mounted().setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
+      options.mounted().commitStatusFacts({ busy: busyAfterTurnBoundary('turn/end', compactingId !== undefined) })
       options.paintNow()
       // Persist each completed turn so a crash loses at most the live
       // turn. Detached: a flush rejection must never surface as an
@@ -706,11 +711,8 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
 
   const applyResumedCompaction = (id: string | undefined, active: boolean): void => {
     compactingId = id
-    options.mounted().setCompactionPhase(active ? 'summarizing' : 'idle')
-    if (active) {
-      options.mounted().setBusy(true)
-      options.mounted().setWorking(true)
-    }
+    options.mounted().commitStatusFacts({ compactionPhase: active ? 'summarizing' : 'idle' })
+    if (active) options.mounted().commitStatusFacts({ busy: true, working: true })
   }
 
   return {

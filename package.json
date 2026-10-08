@@ -74,6 +74,7 @@
     }
   },
   "dependencies": {
+    "@stencil-hq/tern": "0.1.0",
     "chalk": "^5.4.1",
     "commander": "^15.0.0",
     "diff": "^9.0.0",
@@ -223,7 +224,6 @@
     "@deepseek-ai/dsh-web-app": "0.2.0-rc.2",
     "@deepseek-ai/dsh-workspace": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "~3.18.4",
-    "@stencil-hq/tern": "0.1.0",
     "@types/node": "^22.0.0",
     "@xmoon76/pi-tui": "workspace:^0.84.4",
     "@xterm/headless": "5.5.0",

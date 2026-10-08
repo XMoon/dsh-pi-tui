@@ -294,6 +294,7 @@ function fakeRunnerDeps(options: {
     diag: silentDiag,
     signal: new AbortController().signal,
     app: () => app,
+    notify: () => {},
     liveAgent: () => undefined,
     sessionScope: {
       capture: () => scopeFacts.captureSessionScope(),

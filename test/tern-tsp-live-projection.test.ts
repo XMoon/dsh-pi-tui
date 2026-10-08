@@ -58,6 +58,7 @@ import {
 } from '../src/app/surface/runtime.ts'
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
+import type { SubmissionPresentationItem } from '../src/app/submission/presentation.ts'
 import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
 import { TranscriptNodeKeys, transcriptView } from '../scripts/support/tern-tsp-transcript-view.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
@@ -185,6 +186,12 @@ interface Harness {
 function mountHarness(options: {
   readonly onTranscriptProjected: (frame: TranscriptProjectionFrame) => void
   readonly duringCommit?: () => void
+  /** PR3-A F10: a controllable pending subject (the own-input scroll guard). */
+  readonly pending?: {
+    readonly subjectId: string
+    readonly echoes: () => readonly SubmissionPresentationItem[] | undefined
+    readonly snapshot?: () => { readonly running: boolean; readonly items: readonly unknown[] } | undefined
+  }
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const restoreTerminal = installVirtualProcessTerminal(vt)
@@ -239,9 +246,9 @@ function mountHarness(options: {
     viewedChild: () => childPresentation(),
     mainFolder: () => folder,
     viewedChildFolder: () => viewed!.folder,
-    pendingSubjectId: () => undefined,
-    pendingSnapshot: () => undefined,
-    submissionEchoes: () => undefined,
+    pendingSubjectId: () => options.pending?.subjectId,
+    pendingSnapshot: () => options.pending?.snapshot?.() as never,
+    submissionEchoes: () => options.pending?.echoes(),
     queueTextOf: () => '',
     exitView: () => { viewed = undefined },
     refreshStatusCheap: () => {},
@@ -869,8 +876,10 @@ test('P2-12/P2-14: the TSP sink owns its own tty and no product source imports t
     harness.dispose()
   }
 
-  // The SDK stays OUT of the product build graph and out of the production
-  // composition: the production path never injects the observer.
+  // PR3-A: the SDK now legitimately lives in the product graph, but ONLY in
+  // the TSP renderer module (src/tui/tsp/**); everywhere else in src/** the
+  // specifier stays forbidden, and the production composition still never
+  // injects the PR2 observer.
   const sources: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -882,6 +891,7 @@ test('P2-12/P2-14: the TSP sink owns its own tty and no product source imports t
   walk(join(ROOT, 'src'))
   assert.ok(sources.length > 0)
   for (const path of sources) {
+    if (relative(ROOT, path).replaceAll('\\', '/').startsWith('src/tui/tsp/')) continue
     assert.doesNotMatch(readFileSync(path, 'utf8'), /@stencil-hq\/tern/u, `${relative(ROOT, path)} must not import the TSP SDK`)
   }
   const bootstrap = readFileSync(join(ROOT, 'src', 'app', 'bootstrap.ts'), 'utf8')
@@ -1247,6 +1257,64 @@ test('P2-07: a stale Remote read installs no fold and publishes nothing', async 
     await harness.rehydrate()
     assert.equal(seen.length, 2, 'the current widening commits')
     assert.ok(hasUserText(seen[1]!.messages, 'older prompt'))
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── F10: the pending refresh only scrolls for NEW OWN input (PiTui default) ──
+
+test('F10: a background pending refresh never yanks the reader; a new own echo does', async () => {
+  const ownEcho = (requestId: string, text: string): SubmissionPresentationItem => ({
+    requestId,
+    placement: 'transcript',
+    text,
+    createdAt: 1,
+    attachments: [],
+    foldableText: true,
+  })
+  let echoes: readonly SubmissionPresentationItem[] | undefined
+  let snapshot: { readonly running: boolean; readonly items: readonly unknown[] } | undefined
+  const harness = mountHarness({
+    onTranscriptProjected: () => {},
+    pending: {
+      subjectId: SESSION_ID,
+      echoes: () => echoes,
+      snapshot: () => snapshot,
+    },
+  })
+  try {
+    const app = harness.app
+    const prototype = Object.getPrototypeOf(app) as { scrollToBottom: TuiApp['scrollToBottom'] }
+    const original = prototype.scrollToBottom
+    let scrolls = 0
+    app.scrollToBottom = (...args: Parameters<TuiApp['scrollToBottom']>) => {
+      scrolls += 1
+      return original.call(app, ...args)
+    }
+    try {
+      // An empty refresh (another client's activity) never moves the viewport.
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 0, 'an empty refresh never scrolls')
+
+      // An authoritative BACKGROUND `context` occurrence is not own input.
+      snapshot = {
+        running: true,
+        items: [{ id: 'bg-1', placement: 'context', content: [{ type: 'text', text: 'background context' }] }],
+      }
+      harness.surface.refreshPendingInput()
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 0, 'a background Context occurrence never scrolls (even repeated)')
+
+      // A NEW client-local own echo takes the viewport exactly once.
+      echoes = [ownEcho('local-1', 'my own input')]
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 1, 'a NEW own echo scrolls exactly once')
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 1, 'an unchanged own echo does not scroll again')
+    } finally {
+      app.scrollToBottom = original
+    }
   } finally {
     harness.dispose()
   }

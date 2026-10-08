@@ -96,7 +96,9 @@ export function foldCompactionEvent(
  * on purpose: referencing the full {@link TuiApp} class from a public
  * export would inline the whole surface (and its internal registry/
  * presentation dependencies) into the published declaration bundle. The
- * settle contract only needs the three phase/busy/working setters. */
+ * settle contract needs the three phase/busy/working setters; PR3-A keeps
+ * this PUBLIC shape unchanged (it is re-exported from the package entry)
+ * and adapts it internally onto the display seam's aggregated commit. */
 export interface CompactionSettleSurface {
   setCompactionPhase(phase: 'idle'): void
   setBusy(busy: boolean): void

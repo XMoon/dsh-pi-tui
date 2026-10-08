@@ -270,7 +270,9 @@ export type PermissionPresetResult =
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
   ctx: Context
-  app: TuiApp
+  /** PR3-A: undefined while a non-PiTui renderer owns the terminal; the
+   * boot-mandatory completions install skips, executions are input-gated. */
+  app: TuiApp | undefined
   /** The runner's diagnostics channel (stderr + $DSH_HOME/logs). */
   diag: Diag
   /** The current session id. SYNC display/diagnostics ONLY — never an operation
@@ -861,6 +863,10 @@ export function registerTuiCommands(
   withDelivery<T>(delivery: SubmitDelivery, run: () => T): T
 } {
   const { ctx, app } = runner
+  // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
+  // (the read-only TSP mount). The boot-mandatory completions install skips
+  // with a diagnostic; every command EXECUTION path is input-gated (no editor
+  // input exists on that renderer) and keeps its typed access.
   const cwd = runner.cwd
   const signal = runner.signal
   const commands = runner.commandRegistry
@@ -1036,7 +1042,7 @@ export function registerTuiCommands(
       diag: runner.diag,
       // Diagnostics name the live session at settle time, never the payload.
       sessionId: () => runner.currentSessionId,
-      notify: options.notify === true ? (message) => app.notify(message, 'error') : undefined,
+      notify: options.notify === true ? (message) => (app as TuiApp).notify(message, 'error') : undefined,
       recoverable: options.notify === true ? () => true : undefined,
     })
   }
@@ -1216,6 +1222,10 @@ export function registerTuiCommands(
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
     const extensionAutocomplete = runner.extensions?.autocomplete
+    if (app === undefined) {
+      runner.diag.info('command completions install skipped: no PiTui editor surface', {})
+      return
+    }
     app.setCommandCompletions(
       display.map(command => ({
         name: command.name,
@@ -1371,7 +1381,8 @@ export function registerTuiCommands(
       const fresh = reported.filter(entry => !notifiedCollisions.has(entry.identity))
       if (fresh.length > 0) {
         for (const entry of fresh) notifiedCollisions.add(entry.identity)
-        app.notify(reported.map(entry => entry.message).join(' · '), 'error')
+        if (app === undefined) runner.diag.warn('command completions collisions', { collisions: reported.map(entry => entry.message).join(' · ') })
+        else app.notify(reported.map(entry => entry.message).join(' · '), 'error')
       }
       try {
         ctx.logger.error(`tui-runner: ${message}`)
@@ -1503,7 +1514,7 @@ export function registerTuiCommands(
 
   const settingsCommands = createSettingsCommands({
     runner,
-    app,
+    app: app as TuiApp,
     registerOne,
     registerTuiCommand,
     detach,
@@ -1518,7 +1529,7 @@ export function registerTuiCommands(
 
   const sessionCommands = createSessionCommands({
     runner,
-    app,
+    app: app as TuiApp,
     registerOne,
     registerTuiCommand,
     detach,
@@ -1756,8 +1767,9 @@ export function registerTuiCommands(
       }
     } catch (error) {
       if (error instanceof TransitionInProgressError) {
-        const merged = mergeDraft(app.getDraft(), line)
-        app.setEditorText(merged)
+        const liveApp = app as TuiApp
+        const merged = mergeDraft(liveApp.getDraft(), line)
+        liveApp.setEditorText(merged)
         recordCommandDraftDisposition(commandId, 'restored')
         return { kind: 'error', text: merged === line
           ? 'a session transition is in progress — try again in a moment'
@@ -2006,7 +2018,7 @@ export function registerTuiCommands(
 
   const skillsCommandDeps: SkillsCommandDeps = {
     runner,
-    app,
+    app: app as TuiApp,
     registerOne,
     detach,
     recordExtensionError,
@@ -2022,7 +2034,7 @@ export function registerTuiCommands(
 
 
   registerReloadCommand(skillsCommandDeps)
-  const modelCommands = createModelCommands({ runner, app, registerOne, recordCommandDraftDisposition })
+  const modelCommands = createModelCommands({ runner, app: app as TuiApp, registerOne, recordCommandDraftDisposition })
   modelCommands.registerModel()
 
   sessionCommands.registerNew()
@@ -2049,7 +2061,7 @@ export function registerTuiCommands(
 
   sessionCommands.registerTitle()
 
-  const artifactCommands = createArtifactsCommands({ runner, app, registerOne, registerTuiCommand, detach })
+  const artifactCommands = createArtifactsCommands({ runner, app: app as TuiApp, registerOne, registerTuiCommand, detach })
   artifactCommands.registerCopy()
 
 
@@ -2065,7 +2077,7 @@ export function registerTuiCommands(
 
   registerStatusCommand({ runner, registerOne })
 
-  const authCommands = createAuthCommands({ runner, app, registerOne })
+  const authCommands = createAuthCommands({ runner, app: app as TuiApp, registerOne })
   authCommands.registerLogin()
 
   authCommands.registerLogout()

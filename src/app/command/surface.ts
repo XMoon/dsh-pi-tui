@@ -114,8 +114,12 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly diag: Diag
   /** The runner lifetime signal (the catalog coordinator). */
   readonly signal: AbortSignal
-  /** The mounted app, read live (the mount precedes every command path). */
+  /** The mounted app, read live (the mount precedes every command path);
+   *  PiTui-only editor/panel sinks — unreachable without editor input. */
   readonly app: () => TuiApp
+  /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
+   *  are background-reachable under a read-only TSP renderer). */
+  readonly notify: (text: string, kind?: 'error' | 'info') => void
   /** The exact live Agent of the current owner, or undefined. */
   readonly liveAgent: () => ExactAgent | undefined
   /** The session scope authority (the ONLY currentness source). */
@@ -505,14 +509,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // follow-up cannot be double-settled (a second settle would clear
         // the follow-up's in-flight flag while it is still running).
         if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
-          deps.app().notify(outcome.notice, 'error')
+          deps.notify(outcome.notice, 'error')
         }
         skillsChangeGate.settled()
       },
       onCancel: () => { skillsChangeGate.settled() },
       onError: (error) => {
         skillsChangeGate.settled()
-        deps.app().notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
+        deps.notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
       },
     })
   })
@@ -674,7 +678,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         const names = installed.registrationFailures.join('; ')
         deps.logError(`tui-runner: commands not registered (claimed by the Host composition): ${names}`)
         deps.diag.warn('command name collisions', { failures: [...installed.registrationFailures] })
-        deps.app().notify(`not registered (claimed elsewhere): ${names}`, 'error')
+        deps.notify(`not registered (claimed elsewhere): ${names}`, 'error')
       }
       wasAdvertisedClaim = installed.wasAdvertised
       hostClaimOf = installed.hostClaimOf
@@ -774,8 +778,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       commandsRegistered = false
       const message = safeErrorMessage(error)
       deps.logError(`tui-runner: command registration failed: ${message}`)
-      deps.diag.error('command registration failed', { error: message })
-      deps.app().notify(`command registration failed: ${message}`, 'error')
+      deps.diag.error('command registration failed', { error: message, ...(error instanceof Error && error.stack ? { stack: error.stack } : {}) })
+      deps.notify(`command registration failed: ${message}`, 'error')
     }
   }
 

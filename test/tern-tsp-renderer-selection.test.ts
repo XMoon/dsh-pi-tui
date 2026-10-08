@@ -1,0 +1,497 @@
+/**
+ * PR3-A renderer-selection contract tests (Tern Surface Protocol).
+ *
+ * The chain under test is the PRODUCTION composition decision:
+ *
+ *     $DSH_PI_TUI_RENDERER (the only opt-in authority)
+ *       -> the bootstrap-level selection seam (connect BEFORE PiTui)
+ *       -> SurfaceRuntime.start({ renderer? }) vs startProcessTui
+ *
+ * A-01: opt-in + a real SDK connect success ⇒ the TSP renderer mounts, and
+ *       `startProcessTui` NEVER runs (no TuiApp, no process-slot claim, the
+ *       SDK session owns the tty).
+ * A-02: `connect() === null` ⇒ the PiTui mount runs unchanged (TSP surface
+ *       never opened).
+ * A-03: no opt-in ⇒ no SDK import/connect at all.
+ * A-07 (selection half): a connect THROW is a startup failure — it propagates
+ *       out of the selection seam; it is NEVER mapped to `null`/fallback.
+ *
+ * STANDS-IN: the terminal is a scripted tty answering the official handshake
+ * (the same fixture family PR2 used); the app graph is the real
+ * `SurfaceRuntime` + a minimal routing source, as in PR2. Nothing here claims
+ * a real Tern pane (that is the manual smoke in docs/tern-tsp/evidence/pr3-a.md).
+ *
+ * @module @xmoon76/dsh-pi-tui/tern-tsp-renderer-selection.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { EventEmitter } from 'node:events'
+import { connect as sdkConnect, concatBytes } from '@stencil-hq/tern'
+import type { Op } from '@stencil-hq/tern'
+import type { ConnectOptions, Session, TermInput, TermOutput } from '@stencil-hq/tern'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { RoutedSessionEvent } from '../src/app/surface/event-routing.ts'
+import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
+import {
+  createSurfaceRuntime,
+  type SurfaceRuntime,
+  type SurfaceRendererMount,
+} from '../src/app/surface/runtime.ts'
+import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
+import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
+import { installVirtualProcessTerminal } from './support/runner-harness.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+
+const ENCODER = new TextEncoder()
+const DECODER = new TextDecoder()
+const SESSION_ID = 'session-pr3a-sel'
+
+// ── The scripted Tern pane (same shape PR2 used) ────────────────────────────
+
+class FakeInput extends EventEmitter implements TermInput {
+  readonly isTTY: boolean
+  isRaw = false
+  readonly raw: boolean[] = []
+  readonly received: string[] = []
+  constructor(isTTY = true) {
+    super()
+    this.isTTY = isTTY
+    this.on('data', (bytes: Uint8Array) => { this.received.push(DECODER.decode(bytes)) })
+  }
+  setRawMode(mode: boolean): void {
+    this.isRaw = mode
+    this.raw.push(mode)
+  }
+  type(text: string): void {
+    this.emit('data', ENCODER.encode(text))
+  }
+}
+
+class FakeOutput implements TermOutput {
+  readonly isTTY: boolean
+  readonly columns = 100
+  readonly chunks: Uint8Array[] = []
+  onWrite: ((bytes: Uint8Array) => void) | undefined
+  constructor(isTTY = true) {
+    this.isTTY = isTTY
+  }
+  write(data: Uint8Array | string): boolean {
+    const bytes = typeof data === 'string' ? ENCODER.encode(data) : data
+    this.chunks.push(bytes)
+    this.onWrite?.(bytes)
+    return true
+  }
+  text(): string {
+    return DECODER.decode(concatBytes(this.chunks))
+  }
+}
+
+const HELLO = {
+  r: 'hello',
+  v: 1,
+  term: 'tern',
+  ver: '0.6.2',
+  kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool'],
+  features: ['flow', 'styles'],
+  apc: 65536,
+  credits: 2,
+  cols: 120,
+  cell: { w: 8, h: 17 },
+  dark: true,
+  reduceMotion: false,
+  hour12: false,
+}
+
+interface WireFrame {
+  readonly sf: string
+  readonly s: number
+  readonly ops: readonly Op[]
+}
+
+function decodeFrames(text: string): WireFrame[] {
+  const frames: WireFrame[] = []
+  for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
+    frames.push(JSON.parse(match[1]!) as WireFrame)
+  }
+  return frames
+}
+
+class ScriptedTern {
+  readonly input = new FakeInput()
+  readonly output = new FakeOutput()
+  /** Every `o` (open) body on the wire. */
+  readonly opened: unknown[] = []
+  /** Whether a DA1/hello probe ever ran (the SDK connected). */
+  probed = false
+
+  constructor() {
+    this.output.onWrite = bytes => {
+      const text = DECODER.decode(bytes)
+      if (text.includes('\u001b[c')) {
+        this.probed = true
+        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c`), 1)
+        return
+      }
+      for (const match of text.matchAll(/\u001b_to?;o;([\s\S]*?)\u001b\\/g)) {
+        try { this.opened.push(JSON.parse(match[1]!)) } catch { /* not an open */ }
+      }
+      // A real pane acks every frame it drew (credit flow control).
+      for (const frame of decodeFrames(text)) {
+        setTimeout(() => this.input.type(
+          `\u001b_tsp;e;${JSON.stringify({ ev: 'ack', sf: frame.sf, s: frame.s })}\u001b\\`,
+        ), 0)
+      }
+    }
+  }
+}
+
+/** The selection seam under test: the SAME logic bootstrap.ts runs. */
+async function selectRenderer(options: {
+  readonly env: Record<string, string | undefined>
+  readonly tern: ScriptedTern
+  readonly requestExit?: () => void
+  readonly importSession?: () => Promise<Session | null>
+}): Promise<SurfaceRendererMount | undefined> {
+  if (options.env.DSH_PI_TUI_RENDERER !== 'tsp') return undefined
+  const { connectTspRenderer } = await import('../src/tui/tsp/session.ts')
+  const connect = options.importSession === undefined ? undefined
+    : async () => options.importSession!()
+  const tsp = await connectTspRenderer({
+    ...(connect === undefined ? {} : { connect: connect as typeof sdkConnect }),
+    requestExit: options.requestExit ?? ((): void => {}),
+    connectTimeout: 500,
+  })
+  if (tsp === undefined) return undefined
+  return { mount: () => ({ display: tsp.display, dispose: () => tsp.dispose() }), releaseUnmounted: () => tsp.dispose() }
+}
+
+// ── The real app-graph harness (the PR2 shape, minimal) ─────────────────────
+
+const nullPresentation = {
+  handleFocusReport: () => {},
+  markFocused: () => {},
+  focusState: () => 'focused' as const,
+  notify: () => {},
+  enableFocusReporting: () => {},
+  disableFocusReporting: () => {},
+}
+
+interface Harness {
+  readonly surface: SurfaceRuntime<SessionEvent>
+  mount(renderer?: SurfaceRendererMount): void
+  route(event: SessionEvent): void
+  dispose(): void
+}
+
+function mountHarness(): Harness {
+  const vt = new VirtualTerminal(100, 30)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const folder = new TranscriptFolder()
+  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+  const source: SurfaceEventRoutingSource<SessionEvent> = {
+    isCleanedUp: () => false,
+    isAttachedSession: session => session.id === SESSION_ID,
+    currentSessionId: () => SESSION_ID,
+    hasLiveAgent: () => true,
+    completionOwnerId: () => undefined,
+    observeMainEvent: () => ({ refreshAgents: false }),
+    appendOpeningViewerEvent: () => false,
+    main: () => ({
+      folder: { apply: (events: readonly SessionEvent[]) => folder.apply(events) },
+      stats: { apply: () => {} },
+      get window() { return controller },
+      previews: new Map(),
+      applyToolPreview: () => {},
+      refreshRecentPerformanceAvailability: () => {},
+    }),
+    viewedChildId: () => undefined,
+    viewedChild: () => { throw new Error('no viewer in this harness') },
+    mainFolder: () => folder,
+    viewedChildFolder: () => { throw new Error('no viewer in this harness') },
+    pendingSubjectId: () => undefined,
+    pendingSnapshot: () => undefined,
+    submissionEchoes: () => undefined,
+    queueTextOf: () => '',
+    exitView: () => {},
+    refreshStatusCheap: () => {},
+    refreshStatusAndWelcome: () => {},
+    applyGoalChange: () => {},
+    sessionTitleOf: () => undefined,
+    extendLoadedHistory: () => false,
+    settleLocalSubmitAck: () => {},
+    markSubmitLatency: () => {},
+    observeDurableSubmission: () => {},
+    markContextDirty: () => {},
+    refreshContextMeasurement: () => {},
+    currentWorkingFromLog: () => false,
+    flushTurn: () => {},
+    registeredAgentIs: () => false,
+    isCurrentOwnerAgent: () => false,
+    viewedChildAgent: () => undefined,
+    setViewedChildAgent: () => {},
+    setViewedQueueAgent: () => {},
+    agentForSession: () => undefined,
+    applyViewedChildAssistantInput: () => { throw new Error('no viewer in this harness') },
+    applyMainAssistantInput: input => folder.applyLiveInput(input),
+  }
+  const surface = createSurfaceRuntime<SessionEvent>({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: nullPresentation,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    mainProgressAuthority: 'local-events',
+    terminalProgress: undefined,
+    createPluginManagerPanel,
+  })
+  surface.attachEventRouting(source)
+  return {
+    surface,
+    mount(renderer) {
+      surface.start({
+        events: { onSubmit: () => {}, onExit: () => {} },
+        ...(renderer === undefined ? {} : { renderer }),
+        workspaceRoot: '/tmp',
+        iconStyle: 'emoji',
+        displayState: { preset: 'compact' },
+        historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
+        readImage: () => Promise.reject(new Error('not exercised')),
+        imageScope: () => undefined,
+        present: { call: () => undefined, result: () => undefined },
+        sessionCwd: () => '/tmp',
+        sessionId: () => SESSION_ID,
+        onTerminalResize: () => {},
+        copySelection: async () => false,
+        openExternalUrl: () => {},
+        readClipboardText: async () => undefined,
+        imageFallbackColor: text => text,
+      })
+    },
+    route(event) {
+      surface.routeSessionEvent({ id: SESSION_ID }, event)
+    },
+    dispose() {
+      surface.dispose()
+      restoreTerminal()
+    },
+  }
+}
+
+function userMessage(seq: number, text: string): SessionEvent {
+  return {
+    type: 'user/message',
+    seq: SessionSeq(seq),
+    time: 1_700_000_000_000 + seq,
+    data: {
+      id: `u-${seq}` as never,
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    },
+  } as unknown as SessionEvent
+}
+
+async function settle(): Promise<void> {
+  for (let index = 0; index < 40; index += 1) await new Promise(resolve => setTimeout(resolve, 3))
+}
+
+// ── A-01: opt-in + real SDK connect success ⇒ TSP-only mount ────────────────
+
+test('A-01: opt-in + SDK connect success mounts the TSP renderer and never starts a TuiApp', async () => {
+  const tern = new ScriptedTern()
+  // A REAL SDK connect against the scripted pane (the shipped connect path).
+  const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+  assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
+
+  const mountCalls: string[] = []
+  const { mountTspRenderer } = await import('../src/tui/tsp/session.ts')
+  const renderer: SurfaceRendererMount = {
+    mount: () => {
+      mountCalls.push('tsp')
+      return mountTspRenderer(session, { requestExit: () => {} })
+    },
+    releaseUnmounted: async () => { await session.close() },
+  }
+  const harness = mountHarness()
+  try {
+    harness.mount(renderer)
+    await settle()
+
+    assert.deepEqual(mountCalls, ['tsp'], 'the TSP renderer mounted exactly once')
+    // NO TuiApp exists: reading surface.app throws, the display seam answers.
+    assert.throws(() => harness.surface.app, /the surface is not mounted/,
+      'no TuiApp exists on the TSP branch')
+    assert.equal(harness.surface.display.supportsModals, false)
+    // The SDK session owns the tty: raw mode was taken by the SDK only.
+    assert.deepEqual(tern.input.raw.includes(true), true, 'the SDK took raw mode')
+    assert.ok(tern.output.text().includes('\u001b_tsp;o;'), 'the TSP surface opened on the real wire')
+
+    // The live transcript reaches the renderer through the real projection.
+    harness.route({ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } } as never)
+    harness.route(userMessage(1, 'selects the renderer'))
+    harness.surface.paintNow()
+    await settle()
+    assert.ok(tern.output.text().includes('selects the renderer'), 'the routed message rendered on the TSP wire')
+  } finally {
+    harness.dispose()
+    await session.close()
+  }
+})
+
+// ── A-02: connect() === null ⇒ the unchanged PiTui mount ────────────────────
+
+test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', async () => {
+  const tern = new ScriptedTern()
+  // The pane never answers the probe: the shipped SDK declines (returns null).
+  tern.output.onWrite = () => {}
+
+  const renderer = await selectRenderer({
+    env: { DSH_PI_TUI_RENDERER: 'tsp' },
+    tern,
+    importSession: async () => await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 50 }),
+  })
+  assert.equal(renderer, undefined, 'the selection seam yields no renderer mount on null')
+
+  const harness = mountHarness()
+  try {
+    harness.mount(renderer)
+    // The PiTui mount succeeded: a TuiApp exists and renders.
+    assert.equal(typeof harness.surface.app.start, 'function', 'the PiTui TuiApp mounted')
+    harness.route(userMessage(1, 'pitui fallback'))
+    harness.surface.paintNow()
+    await settle()
+    const wire = tern.output.text()
+    assert.ok(!wire.includes('\u001b_tsp;o;') && !wire.includes('\u001b_tsp;f;'), 'no TSP surface opened or framed after the declined probe')
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── A-03: no opt-in ⇒ no SDK probe at all ───────────────────────────────────
+
+test('A-03: without the opt-in the selection never imports/connects the SDK', async () => {
+  const tern = new ScriptedTern()
+  const imports: string[] = []
+  const renderer = await selectRenderer({ env: {}, tern })
+  assert.equal(renderer, undefined, 'no renderer mount without the opt-in')
+  assert.equal(tern.probed, false, 'the SDK probe never ran')
+  assert.deepEqual(imports, [])
+
+  const harness = mountHarness()
+  try {
+    harness.mount(renderer)
+    assert.equal(typeof harness.surface.app.start, 'function', 'the default PiTui mount ran')
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── A-07 (selection half): a connect throw is a startup failure ─────────────
+
+test('A-07: a SDK connect THROW propagates — never mapped to null or a fallback', async () => {
+  const tern = new ScriptedTern()
+  await assert.rejects(
+    selectRenderer({
+      env: { DSH_PI_TUI_RENDERER: 'tsp' },
+      tern,
+      importSession: async () => { throw new Error('handshake exploded') },
+    }),
+    /handshake exploded/,
+    'the connect failure escapes the selection seam (the runner fatal path owns it)',
+  )
+})
+
+// ── The env name is the ONLY authority (no TERM_PROGRAM inference) ──────────
+
+test('A-03b: TERM_PROGRAM=tern alone never selects the TSP renderer', async () => {
+  const tern = new ScriptedTern()
+  const renderer = await selectRenderer({ env: { TERM_PROGRAM: 'tern' }, tern })
+  assert.equal(renderer, undefined)
+  assert.equal(tern.probed, false, 'no probe without the explicit opt-in env')
+})
+
+
+// ── L6 composition fallback: the FULL runner with the opt-in on a non-TSP tty ──
+
+test('L6 composition: DSH_PI_TUI_RENDERER=tsp on a non-TSP environment mounts PiTui end-to-end', async () => {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { makeHarness, mountRunner, installVirtualProcessTerminal, disposeContext } = await import('./support/runner-harness.ts')
+  const home = mkdtempSync(join(tmpdir(), 'pr3a-l6-'))
+  const logFile = join(home, 'diag.log')
+  const harness = makeHarness(home)
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  const previousRenderer = process.env.DSH_PI_TUI_RENDERER
+  const previousLog = process.env.DSH_PI_TUI_LOG
+  process.env.DSH_PI_TUI_RENDERER = 'tsp'
+  process.env.DSH_PI_TUI_LOG = logFile
+  const ctx = new Context()
+  try {
+    // stdin is NOT a TTY under node:test: the shipped SDK connect declines,
+    // the selection yields no renderer, and the FULL production composition
+    // mounts PiTui — every boot-mandatory step (pending input, command
+    // registration with its completions install, interaction attach) runs.
+    const fiber = await mountRunner(ctx, home, harness, {}, {})
+    await disposeContext(ctx)
+    await fiber.dispose()
+    const log = readFileSync(logFile, 'utf8')
+    assert.ok(log.includes('tsp renderer unavailable (SDK declined); mounting PiTui'),
+      'the selection logged the honest decline')
+    assert.ok(!log.includes('fatal'),
+      'the composition reached no fatal path with the opt-in present')
+  } finally {
+    if (previousRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
+    else process.env.DSH_PI_TUI_RENDERER = previousRenderer
+    if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLog
+    restoreTerminal()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// ── F1: the exit orchestration AWAITS the renderer release ─────────────────
+
+test('F1: the exit controller awaits the renderer release before the hint/appExit', async () => {
+  const { createExitController } = await import('../src/app/bootstrap/exit.ts')
+  const order: string[] = []
+  let release: (() => void) | undefined
+  const { requestExit } = createExitController({
+    diag: { info: () => {}, error: () => {} },
+    cleanup: () => new Promise<void>(resolve => {
+      order.push('cleanup')
+      release = () => { order.push('tty-released'); resolve() }
+    }),
+    hint: () => order.push('hint'),
+    resumeHint: () => 'resume',
+    exit: () => order.push('exit'),
+  })
+  requestExit()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(order, ['cleanup'], 'nothing after cleanup runs while the renderer still owns the tty')
+  release!()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(order, ['cleanup', 'tty-released', 'hint', 'exit'],
+    'the hint and appExit run only after the SDK restored the terminal')
+})
+
+// ── F8: the PUBLIC compaction settle contract is unchanged ──────────────────
+
+test('F8: the public settleCompactionSurface keeps its three-setter structural contract', async () => {
+  const { settleCompactionSurface } = await import('../src/index.ts')
+  const calls: string[] = []
+  let refreshes = 0
+  // An OLD (pre-PR3-A) third-party-style caller object: the public shape must
+  // not have been repurposed to the aggregated seam member.
+  settleCompactionSurface({
+    setCompactionPhase: phase => calls.push(`phase:${phase}`),
+    setBusy: busy => calls.push(`busy:${busy}`),
+    setWorking: working => calls.push(`working:${working}`),
+  }, () => { refreshes += 1 }, true)
+  assert.deepEqual(calls, ['phase:idle', 'busy:true', 'working:true'],
+    'the public surface still calls the three setters')
+  assert.equal(refreshes, 1, 'the settle still refreshes once')
+})

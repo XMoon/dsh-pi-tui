@@ -40,7 +40,8 @@ import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
-import type { TuiApp } from '../../tui-app.ts'
+import type { TodoItem } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from './runtime.ts'
 
 /**
@@ -70,11 +71,10 @@ export interface PresentationCurrentFacts {
 function applyCurrentFacts(
   facts: PresentationCurrentFacts,
   status: { setGoalText: (text: string | undefined) => void },
-  app: TuiApp,
+  display: Pick<SurfaceDisplaySeam, 'commitStatusFacts'>,
 ): void {
   status.setGoalText(facts.goal === undefined || facts.goal === null ? undefined : goalTextOf(facts.goal))
-  app.setSessionTitle(facts.title)
-  app.setTodoSummary(facts.todos ?? [])
+  display.commitStatusFacts({ sessionTitle: facts.title, todos: facts.todos ?? [] })
 }
 
 /**
@@ -432,8 +432,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     deps.surface.resetSearchPresentation()
     windowController.latest()
     windowController.setTurns(folder.groupedTurns())
-    deps.surface.app.setSearchResult(0, 0)
-    deps.surface.app.clearSessionOverrides()
+    deps.surface.display.setSearchResult(0, 0)
+    // PR3-A: the generation bump is the ONE hydration-window signal. The new
+    // owner has been published but its fold has not committed yet, so the
+    // renderer raises its explicit Loading state and FENCES the retired
+    // projection source: a late repaint still reading the OLD fold can never
+    // lift Loading nor relabel old rows as the new subject.
+    deps.surface.display.beginSessionHydration()
     // A new session owns the surface: the whole Task Center (the Job child
     // overlay FIRST, then the browser, then the cached catalog + the
     // synchronous badge/summary/row mirrors) is reset by the surface owner
@@ -540,26 +545,26 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       eventCount: events.length,
       elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
     })
-    deps.surface.app.setPlanMode(input.planActive)
-    deps.surface.app.setWorking(input.working)
-    deps.surface.app.setBusy(input.working)
+    deps.surface.display.commitStatusFacts({ planMode: input.planActive, working: input.working, busy: input.working })
     if (input.facts !== undefined) {
       // REMOTE: the official projections ARE the current-value authority. An
       // unavailable one is OMITTED — the bounded window never stands in for a
       // session-global fact (a recent window is not a session's current title,
       // goal or standing todo list).
-      applyCurrentFacts(input.facts, deps.status, deps.surface.app)
+      applyCurrentFacts(input.facts, deps.status, deps.surface.display)
     } else {
       // DIRECT: the COMPLETE log is the fold authority for the same facts.
       deps.status.setGoalText(timedBootstrapScan(deps.diag, 'goal', events.length, () => foldGoal(events)))
-      deps.surface.app.setSessionTitle(timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events)))
-      deps.surface.app.setTodoSummary(timedBootstrapScan(deps.diag, 'todo', events.length, () => {
-        for (let index = events.length - 1; index >= 0; index -= 1) {
-          const event = events[index]
-          if (event?.type === 'todo/write') return (event.data as { readonly todos: Parameters<TuiApp['setTodoSummary']>[0] }).todos
-        }
-        return []
-      }))
+      deps.surface.display.commitStatusFacts({
+        sessionTitle: timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events)),
+        todos: timedBootstrapScan(deps.diag, 'todo', events.length, () => {
+          for (let index = events.length - 1; index >= 0; index -= 1) {
+            const event = events[index]
+            if (event?.type === 'todo/write') return (event.data as { readonly todos: readonly TodoItem[] }).todos
+          }
+          return []
+        }),
+      })
     }
     // A resumed session may be mid-compaction. Reset the old phase first;
     // then re-arm only the newest live bracket, matching the log fold.
@@ -567,11 +572,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // A4-7: the `compactingId` routing state and the phase/busy/working
     // presentation are surface-owned (plan §16).
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
-    deps.surface.app.clearLocalMessages()
-    deps.surface.app.clearNotify() // a notice from the previous session is stale here
-    // Issue #8: a stale keyboard exit confirmation must not exit the NEW
-    // session.
-    deps.surface.app.clearExitConfirmation()
+    // A notice / keyboard exit confirmation from the previous session is
+    // stale here; this HYDRATE-TAIL clear touches only those transients — the
+    // status facts committed just above (title/todo/working/plan/compaction)
+    // and the transcript stay.
+    deps.surface.display.resetSessionFacts()
     deps.surface.repaint()
     // PR D2: the first usable frame paints with the cached measurement
     // (or none); the context measure is deferred one event-loop turn so
@@ -602,7 +607,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // File order is oldest-first; TuiApp's recall API takes newest-first,
     // so the session-filtered projection is reversed at the seed.
     const sessionRecall = recallHistoryForSession(historyRecords, input.sessionId)
-    deps.surface.app.resetInputHistory([...sessionRecall].reverse())
+    deps.surface.display.resetInputHistory([...sessionRecall].reverse())
     // Session identity commit (create/resume/switch): the title AND the
     // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()
@@ -614,8 +619,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const initLiveSession = async (agent: LiveSessionAgent<Event>): Promise<void> => {
     if (deps.isCleanedUp()) return
     // Session transitions invalidate transient keyboard confirmation before
-    // any asynchronous hydration or bootstrap work begins.
-    deps.surface.app.clearExitConfirmation()
+    // any asynchronous hydration or bootstrap work begins, and open the
+    // hydration window (PR3-A: Loading + retired-source fence until the new
+    // fold's first commit).
+    deps.surface.display.beginSessionHydration()
     // Setup installs this before publication; the idempotent call also
     // covers test/direct adapters that hand an already-live Agent back to
     // the runner. Its fold is the resume source of truth.
@@ -651,7 +658,8 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const initLiveRemoteSession = async (sessionId: string): Promise<RemoteHydrationOutcome | undefined> => {
     if (deps.isCleanedUp()) return undefined
     if (deps.remote === undefined) return undefined
-    deps.surface.app.clearExitConfirmation()
+    // PR3-A: the same hydration-window signal on the Remote branch.
+    deps.surface.display.beginSessionHydration()
     // The fence tokens are captured BEFORE the await (plan §7.5 order:
     // capture subject/generation/transport identity → read → verify →
     // hydrate): the TUI ownership generation AND the Remote transport
@@ -738,7 +746,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    */
   const applySessionCurrentFacts = (sessionId: string): void => {
     if (deps.remote === undefined) return
-    applyCurrentFacts(deps.remote.facts(sessionId), deps.status, deps.surface.app)
+    applyCurrentFacts(deps.remote.facts(sessionId), deps.status, deps.surface.display)
   }
 
   const rehydrateFromWindow = async (sessionId: string): Promise<void> => {

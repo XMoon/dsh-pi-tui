@@ -37,10 +37,18 @@ export interface ExitDiagLike {
 export interface ExitControllerDeps {
   /** The runner diagnostics channel. */
   diag: ExitDiagLike
-  /** Idempotent Client-surface teardown (abort lifecycle, stop TUI). The
+  /**
+   * Idempotent Client-surface teardown (abort lifecycle, stop TUI). The
    * Direct owned-session retirement is NOT part of this step — it runs in
-   * the application-tree disposal after `exit` (see the module doc). */
-  cleanup(): void
+   * the application-tree disposal after `exit` (see the module doc).
+   *
+   * PR3-A: may return a promise — the ONE renderer-release promise (the SDK
+   * tty restore on the TSP branch). It is AWAITED before the retirement
+   * preparation, the resume hint and `appExit`, so no exit byte or successor
+   * renderer can race the terminal still owned by the previous renderer. A
+   * rejection is recorded and never skips a later step.
+   */
+  cleanup(): void | Promise<void>
   /**
    * Synchronous Direct-host retirement preparation, invoked after `cleanup`
    * and before the resume hint / `appExit`. It must NOT await the full Host
@@ -94,7 +102,10 @@ export function createExitController(deps: ExitControllerDeps): { requestExit():
       // inside the appExit disposal (see the module doc).
       safeDiag(deps.diag, 'info', 'exit', { code: 0 })
       try {
-        deps.cleanup()
+        // PR3-A: AWAIT the renderer release (a no-op on PiTui) so the tty is
+        // restored before the hint/appExit; a rejection lands in the same
+        // recorded, non-truncating step.
+        await deps.cleanup()
       } catch (cleanupError) {
         safeDiag(deps.diag, 'error', 'cleanup failed', { error: safeErrorMessage(cleanupError) })
       }

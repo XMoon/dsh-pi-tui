@@ -609,6 +609,7 @@ function mountSurface(
   const agentInteraction = createInteractionRuntime({
     mounted: () => surface.app,
     liveApp: () => surface.app,
+    display: () => surface.display,
     currentSessionId: () => 'session-terminal-progress-test',
     schedulePaint: () => {},
     diag: () => SILENT_DIAG,
