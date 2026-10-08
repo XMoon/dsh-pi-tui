@@ -133,7 +133,13 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
   live afterwards, so a `setTranscript()` that synchronously switches the
   subject (viewer open/exit), hands the session over to another owner while the
   previous fold/window are still mounted, or tears the surface down drops the
-  stale frame; `dispose()` releases the observer before the app dies.
+  stale frame; `dispose()` releases the observer before the app dies. This guard
+  covers the INTERRUPTED commit. It does not gate the session-switch window in
+  which the app keeps displaying the previous subject's transcript until the new
+  hydration commits (`hydratePresentation` replaces the fold and repaints): a
+  frame there carries the new subject id with the still-displayed fold's content,
+  so a consumer must not treat that content as the new subject's — the renderer
+  policy for that window is a PR3 decision (see *Next decisions*).
 - `test/tern-tsp-live-projection.test.ts` (13 tests) drives the REAL routing
   bodies, fold/window, `repaintTarget` and mounted `TuiApp`, and renders through
   the real SDK surface on a separate scripted TTY: routed durable events, live
@@ -253,6 +259,12 @@ Open questions the next TSP PR must answer (recorded, not implemented):
 6. When TSP gains Search/Reveal, how do we reuse
    `src/tui/transcript/{reveal,container-owner}.ts` without moving PiTui
    geometry into the TSP consumer?
+
+7. During a session switch the mounted app keeps showing the previous subject's
+   transcript until the hydration commit replaces the fold. Decide the TSP
+   renderer policy for that window — keep the previous transcript, show a
+   loading state, or suppress the pane — instead of presenting the previous
+   content as the new subject's.
 
 **Updating this document:** after every TSP PR, update *Current implementation*,
 *Compatibility and capability matrix* and *Milestones and evidence ledger*, and
