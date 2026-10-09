@@ -221,6 +221,32 @@ test('B1/F1: insertIntoEditor merging with a following combining cluster keeps t
   assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
 })
 
+test('B1/F1: deleting a separator that FUSES two clusters keeps the caret boundary-aligned', () => {
+  // The round-2 probe shape: '🇦x🇧' (two flag halves separated by 'x').
+  // Deleting the separator merges the regional indicators into ONE flag
+  // cluster; the caret must normalize onto the fused boundary so a
+  // following backspace consumes the WHOLE flag, never a partial one.
+  const { composer } = composerWithSinks()
+  for (const ch of ['🇦', 'x', '🇧']) composer.applyKey(key(ch, { text: ch }))
+  assert.equal(composer.state().text, '🇦x🇧')
+  // Delete at the caret (end, cursor 4) removes nothing ahead; use Delete at
+  // cursor 2 (after 🇦, before x) — removes 'x' and fuses 🇦+🇧.
+  composer.applyKey(key('home'))                    // cursor 0
+  composer.applyKey(key('right'))                   // cursor 2 (after 🇦)
+  const edit = composer.applyKey(key('delete'))     // removes 'x'; 🇦🇧 fuse
+  assert.deepEqual(edit, { kind: 'edited' })
+  const fused = composer.state()
+  assert.equal(fused.text, '🇦🇧', 'the separator removal fused the indicators')
+  assert.ok(fused.cursor === 0 || fused.cursor === 4,
+    `the caret normalized onto a fused-cluster boundary (got ${fused.cursor})`)
+  // Whatever the boundary, a following backspace consumes a WHOLE cluster —
+  // never a lone surrogate half.
+  if (fused.cursor > 0) composer.applyKey(key('backspace'))
+  const after = composer.state()
+  assert.ok(!/\uD83C|\uD83E|\uDDE6|\uDDE7/.test(after.text) || after.text === '',
+    'no partial flag remains after the backspace')
+})
+
 // ── F2: every port mutator commits an authoritative render ───────────────────
 
 test('B1/F2: setDraft/setEditorText/insertIntoEditor each notify exactly one render', () => {
@@ -591,19 +617,28 @@ test('B1/L2/F4: a dispose before the bind discards the held keys unconsumed', as
 })
 
 test('B1/L2/F4: the bound exit handler routes the composer exit gesture', async () => {
-  const harness = await mountPane()
+  const tern = new ScriptedTern()
+  const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+  assert.ok(session !== null)
+  // SEPARATE counters: the renderer's injected requestExit and the BOUND
+  // exit handler are different observers — a shared counter would green
+  // even if the bound handler were never called (the round-2 review's
+  // false-green finding).
+  let rendererExits = 0
+  let boundExits = 0
+  const renderer = mountTspRenderer(session, { requestExit: () => { rendererExits += 1 } })
+  renderer.bindInput({ exit: () => { boundExits += 1 }, noteUserInput: () => {} })
+  await settle()
   try {
-    harness.tern.input.type('\x1b') // Escape: unknown control key, inert
+    tern.input.type('a')
     await settle()
-    assert.equal(harness.exitCount(), 0)
-    // Ctrl+C routes the EXIT handler (the bound projection), matching
-    // isQuitKey; the empty-draft Ctrl+D does too, through the reducer.
-    harness.tern.input.type('\x03')
+    tern.input.type('\x03') // Ctrl+C: the exit intent
     await settle()
-    assert.equal(harness.exitCount(), 1, 'Ctrl+C routed through the bound exit handler')
+    assert.equal(boundExits, 1, 'the BOUND exit handler observed the exit gesture')
+    assert.equal(rendererExits, 0, 'the bound path does NOT also fire the injected requestExit')
   } finally {
-    await harness.dispose()
-    await harness.session.close()
+    await renderer.dispose()
+    await session.close()
   }
 })
 
@@ -618,6 +653,70 @@ test('B1/L2/F4: real user input is observed only through the bound projection', 
     harness.tern.input.type('\x1b\x1b[Z')
     await settle()
     assert.equal(harness.userInputs(), before, 'unknown control keys are not user activity')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('B1/L2/F4: a held key orders the pre-bind Ctrl+D — no exit before the bind replays it', async () => {
+  // The round-2 ordered-semantics finding: a held 'a' (not yet applied) plus
+  // Ctrl+D must NOT pre-bind-exit on the empty live draft — the gesture's
+  // emptiness depends on the held edits and re-decides IN ARRIVAL ORDER at
+  // the bind.
+  const harness = await mountPane({ bind: false })
+  try {
+    harness.tern.input.type('a')
+    await settle()
+    harness.tern.input.type('\x04') // Ctrl+D with a held non-empty draft pending
+    await settle()
+    assert.equal(harness.exitCount(), 0, 'no pre-bind exit while the held key makes the draft non-empty')
+    // The bind replays 'a' then Ctrl+D in order: 'a' applies, Ctrl+D meets a
+    // NON-empty draft and is an editor no-op — still no exit.
+    harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} })
+    await settle()
+    assert.equal(harness.exitCount(), 0, 'the replayed Ctrl+D saw the applied draft and did not exit')
+    const editor = lastEditorProps(harness.frames())
+    assert.equal(editor?.text, 'a', 'the held key applied at the bind, in order')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('B1/L2: the empty-draft Ctrl+D exit shape (the real-pane v4 tail) through the bound loop', async () => {
+  // The exact shape the real-pane smoke's tail exercised: type two chars,
+  // clear them with backspaces, then \x04 — ONE exit, after the draft is
+  // truly empty. (The real pane's Control+d chord delivers no byte — the
+  // PR1 tool limitation — so this scripted lane is the exit-path proof.)
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type('ab')
+    await settle()
+    harness.tern.input.type('\x7f\x7f')
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, '', 'the draft cleared')
+    harness.tern.input.type('\x04')
+    await settle()
+    assert.equal(harness.exitCount(), 1, 'the empty-draft Ctrl+D routed exactly one exit')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('B1/L2/F4: a pre-bind input flood fails loud ONCE and still replays the held prefix', async () => {
+  const harness = await mountPane({ bind: false })
+  try {
+    // Over 128 held keys: the 129th trips the ONE observable overflow notice.
+    harness.tern.input.type('a'.repeat(200))
+    await settle()
+    const wire = harness.tern.output.text()
+    assert.ok(wire.includes('were dropped'), 'the overflow is observable (fail loud), not a silent drop')
+    harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} })
+    await settle()
+    const editor = lastEditorProps(harness.frames())
+    assert.equal(editor?.text, 'a'.repeat(128), 'the held PREFIX (the bounded queue) still replayed at the bind')
   } finally {
     await harness.dispose()
     await harness.session.close()

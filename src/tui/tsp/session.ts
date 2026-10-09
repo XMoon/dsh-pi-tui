@@ -482,16 +482,27 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   const heldKeys: Key[] = []
   const HELD_KEYS_LIMIT = 128
+  let heldOverflowed = false
   let inputBound = false
   /** The bound application input handlers (B1: editor-local + lifecycle). */
   let boundHandlers: TspInputHandlers | undefined
 
+  /** Route one exit-intent decision to the BOUND handler when bound. */
+  const routeExit = (held: boolean): void => {
+    if (exitRequested) return
+    exitRequested = true
+    options.log?.('tsp renderer: exit key', { held })
+    if (boundHandlers !== undefined) boundHandlers.exit()
+    else options.requestExit()
+  }
+
   const dispatchKey = (key: Key): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. No active modal in B1 (supportsModals stays false).
-    // 3. The interrupt/exit intent routes through the SAME exit orchestration
-    //    as PiTui's Ctrl+C (B2 binds the real cancel; B1 keeps the quit
-    //    route) — legal in the pre-binding window too.
+    // 3. The interrupt/exit intent routes through the BOUND exit handler
+    //    when the application binding exists (the same orchestration as
+    //    PiTui's Ctrl+C; B2 binds the real cancel); pre-bind it routes the
+    //    injected exit directly (the PR3-A compatibility window).
     if (key.ctrl === true && key.name === 'c') return true
     // 4. The composer reducer owns everything else (Ctrl+D empty-exit,
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
@@ -512,13 +523,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const routeInput = (input: SessionInput): boolean => {
     if (input.type !== 'key') return false
     const key = input.key
-    // The legal pre-binding exit intents bypass the held queue (a quit during
-    // the compatibility window must not wait for a bind that never comes —
-    // e.g. a cancelled startup).
+    // Ctrl+C is the UNCONDITIONAL exit intent — legal in the pre-binding
+    // window too (a quit during a cancelled startup must not wait for a
+    // bind that never comes).
     if (key.ctrl === true && key.name === 'c') return true
-    if (key.ctrl === true && key.name === 'd' && composer.getDraft() === '') return true
+    // The empty-draft Ctrl+D exit is ORDER-dependent (the reducer decides it
+    // against the live draft): pre-bind, it may act directly ONLY while the
+    // held queue is EMPTY — with held keys the draft's emptiness is not yet
+    // knowable (the held edits have not applied), so the gesture must wait
+    // and re-decide in arrival order at the bind.
     if (!inputBound) {
-      if (heldKeys.length < HELD_KEYS_LIMIT) heldKeys.push(key)
+      if (key.ctrl === true && key.name === 'd' && heldKeys.length === 0 && composer.getDraft() === '') return true
+      if (heldKeys.length < HELD_KEYS_LIMIT) {
+        heldKeys.push(key)
+      } else if (!heldOverflowed) {
+        // Fail loud ONCE (never a silent drop): the pre-bind window received
+        // more input than the bounded queue holds. The dropped tail is
+        // observable on the dock; the held prefix still replays at the bind.
+        heldOverflowed = true
+        display.notify('too much input arrived before startup finished — later keys were dropped', 'error')
+      }
       return false
     }
     return dispatchKey(key)
@@ -529,12 +553,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       try {
         for await (const input of session) {
           if (disposed) return
-          if (routeInput(input)) {
-            if (exitRequested) continue
-            exitRequested = true
-            options.log?.('tsp renderer: exit key', { key: input.type === 'key' ? input.key.name : undefined })
-            options.requestExit()
-          }
+          if (routeInput(input)) routeExit(false)
         }
       } catch (error) {
         if (disposed) return
@@ -580,18 +599,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       inputBound = true
       boundHandlers = handlers
       // Consume the held pre-bind keys ONCE, in arrival order. An exit
-      // intent among them (possible only if the draft emptied through held
-      // edits — the legal PRE-bind Ctrl+C/Ctrl+D already acted) routes the
-      // exit; the caller's handlers now observe every subsequent key.
+      // intent among them (possible only when held edits emptied the draft)
+      // routes the exit through the same bound handler; the caller's
+      // handlers now observe every subsequent key.
       const held = heldKeys.splice(0, heldKeys.length)
       for (const key of held) {
         if (disposed) return
-        if (dispatchKey(key)) {
-          if (exitRequested) continue
-          exitRequested = true
-          options.log?.('tsp renderer: exit key (held)', { key: key.name })
-          options.requestExit()
-        }
+        if (dispatchKey(key)) routeExit(true)
       }
     },
     dispose: async () => {
