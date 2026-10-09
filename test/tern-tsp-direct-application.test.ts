@@ -48,7 +48,7 @@ test('B2/Direct-L6: a TSP Enter drives a REAL Agent turn and the streamed reply 
   // The exact-once witness: a ONE-TO-ONE recorder on the PRODUCTION-created
   // Direct session writer (the unbound prototype original; every call goes
   // through `original.call(this)` and the recorded outcome is the original's).
-  const promptCalls: Array<{ readonly sessionId: string; readonly mode: 'queue' | 'steer'; readonly agentStatus: string; readonly outcome: { readonly kind: string } }> = []
+  const promptCalls: Array<{ readonly sessionId: string; readonly mode: 'queue' | 'steer'; readonly message: unknown; readonly agentStatus: string; readonly outcome: { readonly kind: string } }> = []
   const recorder = fixture.recordPrompts(call => { promptCalls.push(call) })
   try {
     await directSettle(3_000)
@@ -68,12 +68,15 @@ test('B2/Direct-L6: a TSP Enter drives a REAL Agent turn and the streamed reply 
     // boundary) leaves this array empty and FAILS the assertions below.
     assert.equal(recorder.calls(), 0, 'no prompt write happened before the gesture')
     fixture.pane.input.type('\r')
-    // The canonical You occurrence's PRODUCER facts, not a wire substring the
-    // composer draft could already satisfy: the real writer settled exactly
-    // ONE committed prompt for this session.
-    await waitFor('the committed prompt write', () => recorder.calls() === 1, 30_000)
-    assert.equal(recorder.calls(), 1, 'the production writer settled EXACTLY ONE prompt (never two, never zero)')
+    // The submission's own PRODUCER facts — not a wire substring the composer
+    // draft could already satisfy: wait for the write's SETTLED record (the
+    // recorder counts settled writes only, so `calls() === 1` implies the
+    // record exists), then assert on THAT record.
+    await waitFor('the committed prompt write to SETTLE',
+      () => recorder.calls() === 1 && promptCalls.length === 1, 30_000)
     const call = promptCalls[0]!
+    assert.ok(JSON.stringify(call.message).includes('hello official direct'),
+      'the settled record carries the submitted prepared message')
     assert.equal(call.outcome.kind, 'committed', 'the one write settled committed')
     assert.equal(call.mode, 'queue', 'an idle-start submission queues')
     assert.equal(call.agentStatus, 'running',
@@ -84,10 +87,11 @@ test('B2/Direct-L6: a TSP Enter drives a REAL Agent turn and the streamed reply 
     const wire = fixture.pane.output.text()
     assert.ok(wire.includes('DIRECT-L6-OK'),
       'the scripted model stream reached the canonical fold and the SDK pane')
-    // Post-turn stability: no second write ever fires (the exact-once fact is
-    // a terminal state, not a race snapshot).
+    // Post-turn stability: no second write ever SETTLES (the exact-once fact
+    // is a terminal state, not a race snapshot).
     await directSettle(2_000)
-    assert.equal(recorder.calls(), 1, 'no further prompt write happened after the turn')
+    assert.equal(recorder.calls(), 1, 'no further prompt write settled after the turn')
+    assert.equal(promptCalls.length, 1, 'the settled-record array agrees (exactly one)')
     assert.equal(fixture.modelCalls(), 1, 'no further model turn happened either')
     recorder.detach()
   } finally {

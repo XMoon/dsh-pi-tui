@@ -124,18 +124,31 @@ export interface DirectTspFixture {
    * input bytes (the prepared message), the resolved live Agent (session id +
    * status) and the settled outcome; the caller asserts `calls === 1` itself.
    */
+  /**
+   * Attach a SETTLED-RECORD recorder to the PRODUCTION-created Direct session
+   * writer's `prompt` (the exact-once qualification). The patch follows the
+   * repo's producer-fact rules: the UNBOUND prototype original is saved
+   * (never `.bind`), every call goes through `original.call(instance)` and
+   * the recorder returns the ORIGINAL outcome unchanged. A record — and the
+   * `calls()` count — is emitted only AFTER the write settles (never at
+   * entry, so `calls() === N` always implies `records.length === N`); each
+   * record carries the prepared message, the resolved live Agent (session id
+   * + status) and the settled outcome. The caller asserts on a SPECIFIC
+   * settled record (by index/identity), never on a bare entry count.
+   */
   recordPrompts(record: (call: {
     readonly sessionId: string
     readonly mode: 'queue' | 'steer'
+    readonly message: unknown
     readonly agentStatus: string
     readonly outcome: WriteOutcome
   }) => void): { readonly calls: () => number; readonly detach: () => void }
   /**
-   * Patch the PRODUCTION writer's `cancel` to return a fixed outcome (the
-   * cancel-ERROR qualification: a `rejected` cancel must surface through the
-   * renderer-neutral notice sink). Same producer-fact rules as
-   * {@link recordPrompts}: the unbound prototype original, `original.call`,
-   * and `detach()` restoring the same function identity.
+   * FAULT-INJECTION override for the production writer's `cancel` (the
+   * cancel-ERROR qualification): saves the unbound original (identity
+   * restored on detach) but does NOT forward — every call returns the fixed
+   * outcome. This is deliberately NOT a recorder; the injected outcome is
+   * the subject under test.
    */
   recordCancels(outcome: () => WriteOutcome): { readonly detach: () => void }
   settle(): Promise<void>
@@ -387,29 +400,34 @@ export async function createDirectTspFixture(
   const recordPrompts = (record: (call: {
     readonly sessionId: string
     readonly mode: 'queue' | 'steer'
+    readonly message: unknown
     readonly agentStatus: string
     readonly outcome: WriteOutcome
   }) => void): { readonly calls: () => number; readonly detach: () => void } => {
     const prototype = DirectSessionWriter.prototype as unknown as {
       prompt(this: DirectSessionWriter, sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome>
-      readonly agentFor: (sessionId: string) => { readonly session: { readonly id: string }; readonly status: string } | undefined
     }
     const originalPrompt = prototype.prompt
-    let calls = 0
+    const settled: unknown[] = []
     prototype.prompt = async function (this: DirectSessionWriter, sessionId, message, mode) {
-      calls += 1
       const outcome = await originalPrompt.call(this, sessionId, message, mode)
+      // The record — and the count — exist only AFTER the write settles: a
+      // caller waiting on `calls()` can never observe an entry whose settled
+      // record is still missing (the round-4 fake-green: the busy guard once
+      // matched the warm-up's committed record while the real second write
+      // was still pending and later rejected).
+      settled.push(undefined)
       const agent = (this as unknown as { agentFor(id: string): { session: { id: string }; status: string } | undefined }).agentFor(sessionId)
-      record({ sessionId, mode, agentStatus: agent?.status ?? 'unresolved', outcome })
+      record({ sessionId, mode, message, agentStatus: agent?.status ?? 'unresolved', outcome })
       return outcome
     }
     return {
-      calls: () => calls,
+      calls: () => settled.length,
       detach: () => { prototype.prompt = originalPrompt },
     }
   }
 
-  /** The cancel-ERROR seam: force the production `cancel` outcome. */
+  /** The cancel-ERROR fault-injection seam: force the production outcome. */
   const recordCancels = (outcome: () => WriteOutcome): { readonly detach: () => void } => {
     const prototype = DirectSessionWriter.prototype as unknown as {
       cancel(this: DirectSessionWriter, sessionId: string): Promise<WriteOutcome>
