@@ -338,9 +338,9 @@ test('TSP runner: the REAL composition consumes a LIVE session increment into th
   const life = testLifecycle(t)
   const home = life.tempDir('pr3a-tsp-live-')
   const logFile = join(home, 'diag.log')
-  // A standing session with history (events 0..5, so `seq` is the LAST event index 5):
-  // the composition RESUMES it and the increment below continues from seq 6 — the
-  // shape the other runner suites use.
+  // A standing session with history: the initial events occupy indices 0..5, so the
+  // next event index is 6. The composition RESUMES it and the increment below
+  // continues from 6 — the shape the other runner suites use.
   const session = fakeSession({
     id: 'pr3a-live',
     header: { id: 'pr3a-live', cwd: home, createdAt: 0, version: 1 },
