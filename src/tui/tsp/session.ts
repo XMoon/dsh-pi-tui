@@ -196,6 +196,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let lastMain: Node | undefined
   const dock: DockState = { statusLine: READ_ONLY_BANNER, notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
+  /**
+   * PR3-A supports NO viewer, so this read is the explicit UNSUPPORTED capability
+   * (the seam's `supportsViewer` is false and `enterView` declines at its real
+   * admission point). It is deliberately NOT a generation authority: a future
+   * renderer that presents a viewer must read the EXISTING viewer owner's
+   * generation instead of maintaining a second one here.
+   */
   let viewerGeneration = 0
 
   /** Re-render both regions in ONE frame (the SDK diffs). */

@@ -708,6 +708,7 @@ test('A5/TS2: the composition zone is enumerated RECURSIVELY (nested helpers inc
       'src/app/bootstrap/runtime-selection.ts',
       'src/app/bootstrap/session-startup.ts',
       'src/app/bootstrap/task-source.ts',
+      'src/app/bootstrap/terminal-output.ts',
     ],
   )
 })

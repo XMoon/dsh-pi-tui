@@ -14,16 +14,8 @@ import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
 /** What the selection needs from the composition root. */
 export interface RendererSelectionDeps {
-  readonly cwd: string
-  /** The exit intent (the TSP quit key routes through the SAME exit path). */
-  readonly requestExit: () => void
   /** Diagnostics sink for the selection's own lifecycle facts. */
   readonly log: (message: string, fields?: Record<string, unknown>) => void
-  /**
-   * The FATAL intent of a mounted renderer failure (the SDK input loop died).
-   * The composition root routes it to the runner's fatal lifecycle.
-   */
-  readonly onFatal: (error: unknown) => void
   /**
    * The lazy TSP connector (the production default imports the renderer
    * module and connects through the official SDK). Tests inject a scripted

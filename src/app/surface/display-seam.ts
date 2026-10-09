@@ -18,6 +18,12 @@
  *
  * This is deliberately NOT a second presentation authority: no fold, no
  * window, no event routing, no session identity lives here.
+ *
+ * Debt (PR3-B): the seam still imports PiTui-shaped PRESENTATION types
+ * (`TranscriptSearchPresentation`, `StatusData`, `DisplaySubjectPresentation`)
+ * from `tui-app.ts`. They are type-only and the architecture gate accepts them,
+ * but the search/viewport-shaped parameters belong to the PiTui adapter side, so
+ * the contract should be narrowed before PR3-B extends it further.
  * @module @xmoon76/dsh-pi-tui/app/surface/display-seam
  */
 
