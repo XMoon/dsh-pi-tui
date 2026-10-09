@@ -410,6 +410,55 @@ involved — the text is injected), and bracketed paste / control-chord delivery
 (those remain the B1-recorded `tern ctl` limitations). The scripted-pane suites
 still carry the paste/exit-path coverage.
 
+
+### Direct production-equivalent fixture and the B2 admission matrix (§6.2)
+
+`test/support/direct-tsp-fixture.ts` is the Direct counterpart of the Remote
+application fixture: the rc.2 Host composition is mounted for real and the TUI
+runner boots against it with the TSP pane owning the tty.
+
+PRODUCTION PREREQUISITES REPRODUCED
+- real Host service composition via `mountAgentLoopTestDependencies` +
+  `mountAgentLoopTestHarness` (REAL live Agents), plus persistence (Jsonl),
+  storage/domain, credentials, workspace, filesystem, presets, userQuestions,
+  attachments (`@deepseek-ai/dsh-attachment-local`), jobs + job controller,
+  commands, API gateway, loader and the TUI's own extension host and builtins
+  row
+- the REAL `applyRunner` composition, the REAL `SubmissionController`, the REAL
+  Direct `SessionWriter`, the REAL command catalog/origin derivation, the REAL
+  extension command bridge and the Real TSP renderer over the shipped SDK
+  `connect`
+
+TEST STAND-INS / SUBSTITUTIONS
+- the MODEL only: a scripted streaming `LlmAdapter` registered on the Host
+  `llm` service (it can also HOLD its stream to keep a turn running, and records
+  whether its request observed an abort)
+- `fileReferences`: the empty workspace index stand-in
+- the scripted tty (the pane)
+
+DELIBERATELY ABSENT
+- generated Remote client L5/L6 (not part of B)
+- native editor edit/undo/send (disabled by contract)
+- a session-scoped skill catalog: a fixture provider makes a skill name
+  ADVERTISED, but the fixture does not compose a session-scoped catalog that
+  resolves it, so no successful live skill INVOCATION is claimed here. What is
+  proven is the advertised-miss consumption of that name (below) and the
+  predicate's `not-a-tui-builtin` verdict for the skill family.
+
+Matrix proven on this fixture (`test/tern-tsp-direct-application.test.ts`,
+`test/tern-tsp-direct-admission.test.ts`):
+
+| Case | What it proves |
+|---|---|
+| SDK keys → composer → `onSubmit` → real controller → real writer → real Agent turn → scripted stream → canonical fold → SDK frames | the whole L6 chain automatically, with a pre-gesture negative control on the assistant text |
+| a GENUINE Host command sharing a TUI builtin's name | the authoritative catalog wins: the Host SINK runs and the TSP builtin gate never captures it |
+| a FAILING Host command | the real controller rolls the submitted line back into the live composer |
+| a refused `!` line | NO input-history row is written (an accepted prompt is the positive control for the same isolated store) |
+| `busyEnter=queue` vs `steer`, plain Enter into a RUNNING turn | the REAL configured preference decides queue vs steer, with exactly ONE pending delivery row per gesture |
+| Esc during a RUNNING turn | the existing cancellation path runs end-to-end: the live model request observes its abort, and the TUI never exits |
+| a registered CLIENT-EXTENSION contribution | it runs; the TSP builtin gate does not touch the extension family |
+| an advertised name missing from the created session | the EXISTING advertised-miss path consumes it with its own notice, never a TSP-style refusal |
+
 ### Remaining / deferred (tracked owners)
 
 - Clipboard image/path intake, plugin semantic actions, `@` completion and the
