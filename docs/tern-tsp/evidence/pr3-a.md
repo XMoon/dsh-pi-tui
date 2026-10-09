@@ -299,14 +299,39 @@ Provenance of this record, kept explicit:
 
 - the three logged errors above were observed on the `3d2cd24d` build (the range
   in which they reproduce is that build);
-- the acquisition/cancellation fixes landed after it (`012eae25`, `9f1fce73`);
-  a partial re-run there captured **no** `cleanup failed` / `surface dispose
-  failed` / `fatal … already disposed` line and returned to the shell — but the
-  capture could not be completed into a diag/wire proof (see `Known limits`), so
-  it does NOT re-establish the pane rows above;
-- the rows above therefore remain recorded on `748589ca` and must be
-  re-established with a complete capture before the manual smoke is claimed for
-  the current build.
+- the acquisition/cancellation fixes landed after it (`012eae25`, `9f1fce73`,
+  `b0832be1`, `3c9b1e08`) and a **complete capture on the current build now
+  exists** — see below;
+- the rows above therefore remain recorded on `748589ca`.
+
+#### Current-build pane capture (complete)
+
+`3c9b1e08` + a fresh `dist/` (from `pack:release`), temporary
+`~/.dsh/profiles/pi-tui-pr3a` linking this worktree, headless `tern serve --control
+… --out …`, scenario `deferred start → wait → shot → key q → wait → shot → shell
+echo`. The full diag record (`$DSH_HOME/logs/pi-tui-<pid>.log` — see the recipe
+note below) reads:
+
+```text
+INFO  boot pid=49503 dsh=0.2.0-rc.2 … session=(deferred) preset=default services=…settings,skills,userQuestions,approval,permissionPresets
+INFO  skill catalog standing ready preset=standard skills=6 complete=true
+INFO  tsp renderer selected
+INFO  tsp renderer: quit key key=q
+INFO  exit code=0
+INFO  retire complete failures=0
+```
+
+No `fatal`, no `cleanup failed`, no `surface dispose failed`, no `the surface is
+not mounted` — the two defects recorded above (the unconditional Pi-footer read
+and the pre-mount exit FATAL) are absent on the current build, and the exit is
+clean (code 0, retirement `failures=0`). The pane rows above are therefore the
+recorded history of `748589ca`; the current build's evidence is this capture.
+
+Recipe note (a testing fact, not a product finding): the `dsh` launcher does NOT
+pass `DSH_PI_TUI_LOG` through to the app, so the pane writes its diag to the
+DEFAULT path `$DSH_HOME/logs/pi-tui-<pid>.log`. Read the newest file there
+(`pi-tui-<pid>.log` matching the pane's PID) for a complete capture — the pane's
+own scrollback is not a substitute (it truncates and buffers).
 
 Read-only live updates: the resumed-session smoke proves the FULL chain (fold →
 canonical structure → PR1 mapper → SDK surface → real Tern render, ack loop
@@ -318,14 +343,11 @@ turn is not a substitute for it.
 
 ### Known limits (recorded, not claimed done)
 
-- **Pane re-run:** the three logged errors (`cleanup failed` / `surface dispose
-  failed` / `fatal … already disposed`) were observed on the `3d2cd24d` build.
-  The acquisition/cancellation and footer fixes landed after it
-  (`012eae25`, `9f1fce73`, `b0832be1`); the partial re-run there captured none of
-  them and returned to the shell, but could not be completed into a diag/wire
-  proof — so the current build is NOT claimed to reproduce them AND the pane rows
-  above are NOT re-established either. A production-level guard for this window
-  and a complete current-build pane capture both remain outstanding.
+- **Pane history vs current build:** the three logged errors (`cleanup failed` /
+  `surface dispose failed` / `fatal … already disposed`) belong to the `3d2cd24d`
+  build. The fixes landed after it and the CURRENT build has a complete capture
+  with none of them (see "Current-build pane capture"), plus the production-level
+  guards in `test/tern-tsp-runner-teardown.test.ts`.
 - The lanes above are the LOCAL stage-final pass. CI has not run for this branch,
   and the published-DSH compatibility lanes (`compat:dsh:npm`,
   `compat:dsh:client-family`) plus the migration smokes (`smoke:remote-*`,
