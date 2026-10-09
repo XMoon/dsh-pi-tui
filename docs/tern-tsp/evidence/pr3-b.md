@@ -371,6 +371,35 @@ What the record shows, in order:
    the real pane, not a single settled render.
 5. **The session**: a real Session is created and its title reaches the dock.
 
+
+**Artifact manifest (this round).** All artifacts live under `/tmp` (outside the
+repository and outside the private DSH storage). Synthetic, non-secret prompts.
+
+| Artifact | Path | Content hash (sha256) |
+|---|---|---|
+| TSP wire record (the authoritative evidence) | `/tmp/tern-b2-rec.jsonl` | `4fcb9eeaa7da73626e32fe56b71263e2275e2682d615c15a1fceb48c731d3b12` |
+| Tern scenario 1 (prompt 1 + shots) | `/tmp/tern-b2-scenario.txt` | `078d2a23a6bd54e7e1b4406e992ed0ae242e115150e32caeb482d2cb7ba144ca` |
+| Tern scenario 2 (prompt 2 + shot) | `/tmp/tern-b2-scenario2.txt` | `2393e1785837d4a04166136d31d6074d0ebe95f790f0f747ae274655ff0f16dd` |
+| Pane/serve log | `/tmp/tern-b2-serve.log` | — |
+| Screenshots | `/tmp/serve/b2p-1-initial.png`, `b2p-2-typed.png`, `b2p-3-streamed.png`, `b2p-4-stream-long.png` (each with a `.layout.json`) | — |
+
+Prompts (exactly as typed): `Reply with exactly: B2-PHYSICAL-OK`, and
+`Write the numbers 1 to 40 separated by spaces, then stop.`
+
+Launch: a THROWAWAY DSH profile at `~/.dsh/profiles/b2-physical` whose
+`package.json` links `@xmoon76/dsh-pi-tui` to THIS worktree (bundles
+`@deepseek-ai/dsh-base` + `@xmoon76/dsh-pi-tui`); the pane ran
+`DSH_PI_TUI_RENDERER=tsp TERN_TSP_RECORD=/tmp/tern-b2-rec.jsonl dsh --profile b2-physical`
+inside `tern serve --control /tmp/tern-b2.sock --out /tmp`.
+
+Key frames in the record (frame numbers are the SDK surface sequence `s`): the
+per-key composer edits; the composer `replace ""` clearing at the submit; the
+`dock.pending-submit` row; the client-local `dock.tail-0` echo; the canonical
+`main.s1-msg-1` You card carrying the prompt; `dock.status` … `working`; the
+`main.s1-msg-5` Assistant card; and for prompt 2 the `main.s1-msg-8` Assistant
+card created with body text `1` followed by a `text` APPEND carrying the rest,
+then the stream marker clearing.
+
 Explicitly NOT claimed here: any IME composition (no GUI input method is
 involved — the text is injected), and bracketed paste / control-chord delivery
 (those remain the B1-recorded `tern ctl` limitations). The scripted-pane suites

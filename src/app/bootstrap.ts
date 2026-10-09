@@ -3115,12 +3115,13 @@ export function applyRunnerWithRuntime(
     // the narrow presentation inputs: the paired tool-call argument lookup
     // (the surface never reads the session-event feed) and the pure
     // dangerous-command predicate.
-    // PR3-B §3.3: the ONE input bind. It runs here — after the renderer
-    // capability settled, after the command catalog registered (`/exit`,
-    // `/quit` and every Host claim are live) and after the interaction owner
-    // attached — so the renderer's held pre-bind keys are consumed against
-    // READY facts, never against an empty catalog or a not-yet-settled
-    // capability. A no-op on the PiTui branch.
+    // PR3-B §3.3: the ONE input bind. It runs here because the renderer's held
+    // pre-bind keys must be consumed against READY facts: the renderer
+    // capability settled before the mount, the command catalog is registered
+    // (`/exit`, `/quit` and every Host claim are live) and the runtime event
+    // wiring is installed. The Question/Approval attach just below is NOT a
+    // prerequisite — it owns modals, not the input projection. A no-op on the
+    // PiTui branch.
     surface.bindRendererInput()
     // The approval/question presentation providers are A4-7 surface-owned
     // (`surface.attachInteraction`, plan §13.3/§16). The runner injects only
