@@ -186,7 +186,7 @@ for (const busyEnter of ['queue', 'steer'] as const) {
       const life = testLifecycle(t)
       let releaseStream!: () => void
       const held = new Promise<void>(resolve => { releaseStream = resolve })
-      const promptCalls: Array<{ readonly mode: 'queue' | 'steer'; readonly outcome: { readonly kind: string } }> = []
+      const promptCalls: Array<{ readonly mode: 'queue' | 'steer'; readonly message: unknown; readonly outcome: { readonly kind: string } }> = []
       const fixture = await createDirectTspFixture(life, {
         deltas: ['LATE-REPLY'],
         streamHold: () => held,
@@ -202,26 +202,33 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         await directSettle()
         fixture.pane.input.type('\r')
         await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
-        await waitFor('the first committed prompt', () => recorder.calls() === 1, 25_000)
-        assert.equal(recorder.calls(), 1, 'the first (idle-start) submission is the running turn')
-        const beforeCalls = recorder.calls()
+        await waitFor('the first settled prompt', () => recorder.calls() === 1 && promptCalls.length === 1, 25_000)
+        assert.equal(promptCalls.length, recorder.calls(), 'the settled records and the count agree (a settled-only recorder)')
+        const beforeSettled = recorder.calls()
         // The second submission while the turn runs, with the chosen gesture.
         fixture.pane.input.type('second prompt')
         await directSettle()
         fixture.pane.input.type(gesture === 'enter' ? '\r' : CTRL_ENTER)
-        // The AUTHORITATIVE delivery: the real Direct writer settled the second
-        // prompt with the web-parity mode (Enter = the preference, the
-        // accelerated chord = its OPPOSITE) — a producer fact, never a wire
-        // regex over presentation rows.
-        await waitFor(`the busy ${gesture} delivery`, () => recorder.calls() === beforeCalls + 1, 25_000)
-        const second = promptCalls.at(-1)!
+        // The AUTHORITATIVE delivery: wait for THE SECOND WRITE'S OWN SETTLED
+        // RECORD (index `beforeSettled` — never `at(-1)` of a possibly-still
+        // warm-up-only tail), then assert on THAT record: its prepared
+        // message identifies the second submission, its mode is the
+        // web-parity delivery (Enter = the preference, the accelerated chord
+        // = its OPPOSITE) and its outcome is the ORIGINAL's (a delayed
+        // rejection surfaces here and FAILS the committed assertion — the
+        // round-4 fake-green shape).
+        await waitFor(`the busy ${gesture} delivery to SETTLE`,
+          () => promptCalls.length === beforeSettled + 1 && recorder.calls() === beforeSettled + 1, 25_000)
+        const second = promptCalls[beforeSettled]!
+        assert.ok(JSON.stringify(second.message).includes('second prompt'),
+          'the settled record under assertion IS the second submission (identified by its prepared message)')
         const expected: 'queue' | 'steer' = gesture === 'enter'
           ? busyEnter
           : busyEnter === 'queue' ? 'steer' : 'queue'
         assert.equal(second.mode, expected,
           `${gesture} into a running turn delivered as ${expected} (busyEnter=${busyEnter})`)
         assert.equal(second.outcome.kind, 'committed', 'the busy delivery settled committed')
-        assert.equal(recorder.calls(), beforeCalls + 1, 'exactly ONE write for the second submission (no double-send)')
+        assert.equal(promptCalls.length, beforeSettled + 1, 'exactly ONE settled write for the second submission (no double-send)')
         // Exactly ONE pending delivery row exists for the second submission.
         await directSettle(1_000)
         const wire = fixture.pane.output.text()

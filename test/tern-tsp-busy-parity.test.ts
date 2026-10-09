@@ -2,14 +2,17 @@
  * PR3-B B2 round 3: the PiTui-side busy-parity CONTROL for the Direct TSP
  * matrix (`tern-tsp-direct-admission`).
  *
- * The review's qualification: the SAME persisted preference × the SAME two
- * gestures, on the OTHER renderer, through the SAME authorities — the real
- * `applyRunner` composition reading the real volatile `busyEnter` config, and
- * the Direct writer's delivery observed at the PRODUCER (`followup`/`steer`
- * on the live stand-in agent, exactly the authority `submit-hot-path`'s
- * integration cases read). PiTui mounts over the virtual process terminal, so
- * the comparison isolates the renderer variable: everything below the input
- * gesture is the identical production path the TSP matrix drives.
+ * The review's qualification: the SAME busyEnter preference × the SAME two
+ * gestures, on the OTHER renderer, through the SAME configuration and policy
+ * authorities — the real `applyRunner` composition reading the real VOLATILE
+ * `busyEnter` config (the exact authority `applyRunner` consumes in both
+ * renderers; disk persistence is not exercised here), with the delivery
+ * observed at the PRODUCER (`followup`/`steer` on the live stand-in agent —
+ * the harness Agent is a stand-in, so this control does not claim the
+ * official AgentLoop L6; that is the Direct fixture's own matrix). PiTui
+ * mounts over the virtual process terminal, so the comparison isolates the
+ * renderer variable: the submission policy below the gesture is the
+ * identical production path the TSP matrix drives.
  *
  * @module @xmoon76/dsh-pi-tui/tern-tsp-busy-parity.test
  */
