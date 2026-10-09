@@ -773,7 +773,7 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
     await mount.releaseUnmounted()
     assert.equal(closes, 1, 'the handshake release is idempotent and closes exactly once')
   } finally {
-    harness.dispose()
+    await harness.dispose()
   }
 })
 
@@ -935,18 +935,21 @@ test('the live harness OWNS its renderer release: a failed close surfaces, never
     await settle()
     const output = harness.tern.output
     const original = output.onWrite
+    const closeFailure = new Error('close write exploded')
     let armed = true
     output.onWrite = (bytes: Uint8Array): void => {
       if (armed && DECODER.decode(bytes).includes('\u001b_tsp;x;')) {
         armed = false
-        throw new Error('close write exploded')
+        throw closeFailure
       }
       original?.(bytes)
     }
-    // The release outcome belongs to THIS caller: exactly one observable rejection.
+    // The release outcome belongs to THIS caller, with the EXACT injected identity.
     const failure = await harness.dispose().then(() => undefined, (error: unknown) => error)
-    assert.ok(failure !== undefined,
-      'the failed renderer release surfaces to the disposing caller (the harness owns it)')
+    assert.equal(failure, closeFailure,
+      'the failed renderer release surfaces to the disposing caller as the SAME error')
+    assert.equal(harness.tern.input.raw.at(-1), false,
+      'the failing release still restored the tty (raw mode off)')
     // Give Node a turn to report any UNOWNED rejection before asserting.
     await new Promise(resolve => setTimeout(resolve, 60))
     assert.deepEqual(unhandled, [],
