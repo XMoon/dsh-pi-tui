@@ -525,6 +525,8 @@ interface LifecycleHarness {
   release(): void
   /** Settle the acquisition stage (the ownership transfer / the cancelled release). */
   acquire(): void
+  /** REJECT the acquisition stage (the acquired tty owner was NOT released). */
+  failAcquire(error: unknown): void
 }
 
 function mountLifecycle(options: {
@@ -566,7 +568,11 @@ function mountLifecycle(options: {
   // The acquisition stage: settled by default (the ownership transfer already
   // happened in these fixtures); `holdAcquisition` keeps it pending.
   let settleAcquired!: () => void
-  const acquired = new Promise<void>(resolve => { settleAcquired = resolve })
+  let rejectAcquired!: (error: unknown) => void
+  const acquired = new Promise<void>((resolve, reject) => {
+    settleAcquired = resolve
+    rejectAcquired = reject
+  })
   if (options.holdAcquisition !== true) settleAcquired()
   const lifecycle = createSurfaceLifecycle({
     diag: { debug: noop, info: noop, warn: noop, error: () => { order.push('cleanup-error') }, dispose: noop },
@@ -593,7 +599,13 @@ function mountLifecycle(options: {
     registerDisposal: () => {},
     whenRendererAcquired: () => acquired,
   })
-  return { lifecycle, order, release: () => release(), acquire: () => settleAcquired() }
+  return {
+    lifecycle,
+    order,
+    release: () => release(),
+    acquire: () => settleAcquired(),
+    failAcquire: (error: unknown) => rejectAcquired(error),
+  }
 }
 
 test('R2-1a: a SECOND cleanup awaits the SAME renderer release (never races to retirement)', async () => {
@@ -787,4 +799,33 @@ test('R4-1b: the ACQUISITION stage alone still gates the exit after the release 
   acquire()
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(order.slice(-2), ['hint', 'exit'])
+})
+
+test('R5-2: a FAILED acquisition release rejects the shared teardown outcome', async () => {
+  // The transaction contract the bootstrap cancellation/rejected-handoff branches
+  // depend on: when the acquired tty owner was NOT released, the published
+  // teardown must REJECT — a fulfilled teardown with a live tty is exactly the
+  // failure this locks. (The bootstrap branch itself needs the runner fixture;
+  // this pins the contract at its consumer.)
+  const { lifecycle, release, failAcquire } = mountLifecycle({ holdAcquisition: true })
+  const released = lifecycle.disposeSurface()
+  assert.ok(released instanceof Promise)
+  release()
+  const releaseError = new Error('acquired renderer close exploded')
+  failAcquire(releaseError)
+  const outcome = await Promise.allSettled([released])
+  assert.equal(outcome[0]!.status, 'rejected',
+    'the teardown is NOT fulfilled while the acquired tty is still held')
+  assert.equal(outcome[0]!.reason, releaseError, 'the exact acquired-release failure is surfaced')
+})
+
+test('R5-2b: an acquisition release that rejects `undefined` is still a failure', async () => {
+  const { lifecycle, release, failAcquire } = mountLifecycle({ holdAcquisition: true })
+  const released = lifecycle.disposeSurface()
+  assert.ok(released instanceof Promise)
+  release()
+  failAcquire(undefined)
+  const outcome = await Promise.allSettled([released])
+  assert.equal(outcome[0]!.status, 'rejected', 'PRESENCE decides, never the payload value')
+  assert.equal(outcome[0]!.reason, undefined)
 })
