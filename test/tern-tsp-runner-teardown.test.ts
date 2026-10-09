@@ -388,3 +388,48 @@ test('TSP runner: the REAL composition consumes a LIVE session increment into th
     await owned.settle()
   }
 })
+
+test('TSP runner: the application writes NO unmanaged terminal sequences while the SDK owns the tty', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const { fakeSession, sessionEvents } = await import('./support/runner-harness.ts')
+  const life = testLifecycle(t)
+  const home = life.tempDir('pr3a-tsp-terminal-')
+  const logFile = join(home, 'diag.log')
+  const session = fakeSession({
+    id: 'pr3a-terminal',
+    header: { id: 'pr3a-terminal', cwd: home, createdAt: 0, version: 1 },
+    events: sessionEvents('pr3a terminal probe'),
+  })
+  const owned = await ownTspBoot({ life, home, logFile, session, appExit: () => {} })
+  try {
+    await waitUntil('the hydrated session on the SDK pane',
+      () => owned.pane.output.text().includes('pr3a terminal probe'), 15_000)
+    // The SDK's handshake and frames are APC sequences (`ESC _tsp;…`); the
+    // APPLICATION must not add any of its own terminal control sequences.
+    const during = owned.pane.output.text()
+    assert.ok(!during.includes('\u001b]0;'), 'no unmanaged OSC 0 window title while the SDK owns the tty')
+    assert.ok(!/\u001b\]9;|\u001b\]777;/.test(during),
+      'no unmanaged OSC 9/777 completion notification while the SDK owns the tty')
+    assert.ok(!/\u001b\[\?1004[hl]/.test(during),
+      'no unmanaged CSI ?1004 focus reporting while the SDK owns the tty')
+
+    await owned.settle()
+    const after = owned.pane.output.text()
+    assert.ok(!/\u001b\[\?1004[hl]/.test(after),
+      'the TSP exit cleanup writes no focus-reporting mode either (the SDK owns the tty)')
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('terminal-output gate: permissive by default, suspended only for a TSP attempt', async () => {
+  const { createTerminalOutputGate } = await import('../src/app/bootstrap/terminal-output.ts')
+  const gate = createTerminalOutputGate()
+  // PiTui is the default owner: the application-side writers keep their unchanged
+  // behaviour until a TSP attempt suspends them.
+  assert.equal(gate.applicationOwnsTerminal(), true, 'the default owner is PiTui')
+  gate.suspend()
+  assert.equal(gate.applicationOwnsTerminal(), false, 'a TSP attempt suspends the writers')
+  gate.resume() // the honest SDK decline hands the tty back to PiTui
+  assert.equal(gate.applicationOwnsTerminal(), true, 'the decline restores the PiTui behaviour')
+})

@@ -742,9 +742,6 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
   // real `connectTspRenderer` (owned-session release + diagnostics) are the ones
   // under test (R3-3).
   const mount = await selectRendererMount({
-    cwd: '/tmp',
-    requestExit,
-    onFatal: () => {},
     log: () => {},
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
     connectTsp: productionTspConnector({

@@ -182,9 +182,6 @@ async function selectRenderer(options: {
     ...(options.connect === undefined ? {} : { connect: options.connect }),
   })
   return selectRendererMount({
-    cwd: '/tmp',
-    requestExit: options.requestExit ?? ((): void => {}),
-    onFatal: options.onFatal ?? ((): void => {}),
     log: (): void => {},
     connectTsp: async () => {
       options.onConnect?.()

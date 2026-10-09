@@ -113,6 +113,7 @@ import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount } from './bootstrap/renderer-selection.ts'
+import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
 import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
@@ -220,10 +221,21 @@ export function applyRunnerWithRuntime(
   // into the shell. The guarded writer swallows broken-stream async
   // errors; every use is additionally wrapped for synchronous throws.
   const notificationWriter = guardedStreamWriter(process.stdout)
+  // The ONE physical-terminal output gate: the application may only write terminal
+  // control sequences while PiTui owns the tty (see `app/bootstrap/terminal-output`).
+  const terminalOutput = createTerminalOutputGate()
   // The composition zone selects the concrete terminal notification
   // presentation (TS5 §14.3); the application surface consumes the structural
-  // port and keeps the completion lifecycle.
-  const notificationPresentation = createTerminalNotificationPresentation({ writer: notificationWriter })
+  // port and keeps the completion lifecycle. Its writer is ALSO the focus-reporting
+  // path (the exit cleanup disables the mode through it), so gating it here covers
+  // both — no unmanaged OSC 9/777 or CSI ?1004 while the SDK owns the tty.
+  const notificationPresentation = createTerminalNotificationPresentation({
+    writer: {
+      write: (sequence: string) => {
+        if (terminalOutput.applicationOwnsTerminal()) notificationWriter.write(sequence)
+      },
+    },
+  })
   // A process-wide guarded stderr writer for user-visible warnings: the
   // error listener swallows async stream errors (EPIPE when the terminal
   // closed — a plain try/catch around write() cannot see those), and every
@@ -1622,7 +1634,12 @@ export function applyRunnerWithRuntime(
       // The composition owns the terminal policy: the status owner supplies
       // the semantic identity facts and this applies OSC 0 (width/ANSI
       // mechanics stay in `tui/terminal/title.ts`).
-      updateTerminalTitle: (context) => setTerminalTitle(terminalTitleOf(context)),
+      updateTerminalTitle: (context) => {
+        // The window title is terminal output too: while the SDK owns the tty the
+        // session identity stays a display fact (the renderer's own status line).
+        if (!terminalOutput.applicationOwnsTerminal()) return
+        setTerminalTitle(terminalTitleOf(context))
+      },
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
       // PR4 §6.2/§6.3: the permission-cycle authority — the projection's
@@ -2288,11 +2305,11 @@ export function applyRunnerWithRuntime(
       settleAcquisition = resolve
       failAcquisition = reject
     })
+    // The TSP attempt owns the tty from the moment the connector starts; an honest
+    // decline hands it back to PiTui (the unchanged default).
+    terminalOutput.suspend()
     try {
       rendererMount = await selectRendererMount({
-        cwd,
-        requestExit: () => requestExit(),
-        onFatal: rendererOnFatal,
         log: (message, fields) => diag.info(message, fields),
         connectTsp: productionTspConnector({
           cwd,
@@ -2310,6 +2327,7 @@ export function applyRunnerWithRuntime(
       settleAcquisition?.()
       throw error
     }
+    if (rendererMount === undefined && !cleanedUp) terminalOutput.resume()
     if (cleanedUp) {
       // CANCELLED while the SDK handshake was in flight: release the acquired tty
       // owner (ONE close, raw restored), skip the mount AND the PiTui fallback,
