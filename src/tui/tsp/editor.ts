@@ -2,10 +2,22 @@
  * TspComposer (PR3-B §3.4): the TSP renderer's ONE program-owned composer.
  *
  * State is `{ text, cursor, focused }`; `cursor` is in **UTF-16 code units**
- * (the SDK `ui.editor` contract). All edits move through {@link TspComposer.applyKey}
- * — the renderer's single input path — which never splits surrogate pairs or
- * grapheme clusters (movement/caret edits use `Intl.Segmenter`, available on
- * Node 24).
+ * (the SDK `ui.editor` contract) and is kept at a **grapheme-cluster
+ * boundary** at all times (the B1 review F1 invariant): a numeric replacement
+ * clamps AND normalizes the caret to a boundary (forward affinity — the caret
+ * lands at the containing cluster's END, matching the editor convention for
+ * text inserted before it); an insertion normalizes the caret after any merge
+ * the inserted fragment caused with the following combining/ZWJ cluster; both
+ * deletion endpoints are cluster-aligned. This holds for every entry — the
+ * reducer, the composer-port mutators, and the clamp — so a legal key/paste
+ * sequence (e.g. paste a combining mark, Home, type a letter merging into one
+ * cluster) can never strand a lone surrogate or a partial cluster.
+ *
+ * Every authoritative state mutation (the reducer's accepted edits AND the
+ * composer-port mutators `setDraft`/`setEditorText`/`insertIntoEditor`)
+ * notifies the `onChanged` sink exactly once, so the owning renderer commits a
+ * new controlled-editor frame (the B1 review F2 invariant — a restored draft
+ * must reach the wire, never only `getDraft()`).
  *
  * This object owns NO Host dependencies: it is Client-local editor state. The
  * dock rendering that presents it and the `SubmissionComposerPort` adapter
@@ -39,11 +51,35 @@ export type TspComposerEdit =
 /** The grapheme segmenter (`Intl.Segmenter` on Node 24; one shared instance). */
 const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })
 
+/** The boundaries (start offsets) of every grapheme cluster in `text`. */
+function clusterBoundaries(text: string): number[] {
+  const starts: number[] = []
+  for (const { index } of segmenter.segment(text)) starts.push(index)
+  return starts
+}
+
+/**
+ * Normalize a caret candidate onto a grapheme-cluster boundary (the F1
+ * invariant). A candidate inside a cluster moves FORWARD to that cluster's
+ * end (editor affinity: text replaced shorter than the old caret keeps the
+ * caret after the cluster it was reading); candidates at/beyond the text end
+ * clamp to the end.
+ */
+function boundaryCursor(text: string, cursor: number): number {
+  const clamped = Math.max(0, Math.min(text.length, cursor))
+  let end = 0
+  for (const { index, segment } of segmenter.segment(text)) {
+    const clusterEnd = index + segment.length
+    if (index < clamped && clusterEnd > clamped) return clusterEnd
+    if (clusterEnd <= clamped) end = clusterEnd
+  }
+  return end
+}
+
 /**
  * The UTF-16 offset where the grapheme cluster immediately LEFT of `cursor`
  * begins — the destination of a caret-left / the cut start of a backspace.
- * A cursor inside a cluster (only possible via a bad clamp) still consumes
- * that whole cluster. Never splits a surrogate pair or a ZWJ sequence.
+ * `cursor` must already be boundary-aligned (the reducer maintains that).
  */
 function previousGraphemeStart(text: string, cursor: number): number {
   let result = 0
@@ -56,8 +92,7 @@ function previousGraphemeStart(text: string, cursor: number): number {
 
 /**
  * The UTF-16 offset where the grapheme cluster at/RIGHT of `cursor` ends —
- * the destination of a caret-right / the cut end of a delete. A cursor
- * already at the text end stays there.
+ * the destination of a caret-right / the cut end of a delete.
  */
 function nextGraphemeEnd(text: string, cursor: number): number {
   for (const { index, segment } of segmenter.segment(text)) {
@@ -67,46 +102,50 @@ function nextGraphemeEnd(text: string, cursor: number): number {
   return text.length
 }
 
-/** Clamp a caret candidate into `[0, text.length]`. */
-function clampCursor(text: string, cursor: number): number {
-  return Math.max(0, Math.min(text.length, cursor))
-}
-
-/**
- * Create the TSP composer. The sinks surface the application's composer-port
- * facts onto the renderer's own presentation (the dock); the composer derives
- * no queue/submit state of its own.
- */
-export function createTspComposer(sinks: {
+/** The sinks the composer notifies: the owning renderer renders ONE frame per
+ *  authoritative mutation, plus the application-facing presentation facts. */
+export interface TspComposerSinks {
+  /** ONE authoritative editor state changed (reducer edit or port mutator). */
+  readonly onChanged: () => void
   /** The sink for the pending-row fact ('submit'/'queued'/undefined clears). */
   readonly setSubmitPending: (detail: SubmitPendingDetail | undefined) => void
   /** The sink for transient notices. */
   readonly notify: (text: string, kind?: 'info' | 'error') => void
-}): TspComposer {
+}
+
+/**
+ * Create the TSP composer. The sinks surface both the render trigger and the
+ * application's composer-port facts onto the renderer's own presentation.
+ */
+export function createTspComposer(sinks: TspComposerSinks): TspComposer {
   let text = ''
   let cursor = 0
   let focused = false
 
-  /** The controlled-editor props state (UTF-16 cursor, SDK contract). */
   const state = (): TspComposerState => ({ text, cursor, focused })
   const setFocused = (next: boolean): void => { focused = next }
+
+  /** Replace the text (port mutator): clamp + normalize the caret, notify. */
+  const replaceText = (next: string): void => {
+    text = next
+    cursor = boundaryCursor(next, cursor)
+    sinks.onChanged()
+  }
+  /** Insert at the caret (reducer/port): normalize after any cluster merge. */
   const insert = (fragment: string): void => {
     text = text.slice(0, cursor) + fragment + text.slice(cursor)
-    cursor += fragment.length
+    // The fragment may MERGE with the following cluster (a combining mark or
+    // ZWJ suffix): the caret lands at the END of the cluster it now sits in.
+    cursor = boundaryCursor(text, cursor + fragment.length)
+    sinks.onChanged()
   }
 
   return {
     state,
     setFocused,
     getDraft: () => text,
-    setDraft(next) {
-      text = next
-      cursor = clampCursor(next, cursor)
-    },
-    setEditorText(next) {
-      text = next
-      cursor = clampCursor(next, cursor)
-    },
+    setDraft: replaceText,
+    setEditorText: replaceText,
     insertIntoEditor: insert,
     notify: (message, kind) => sinks.notify(message, kind),
     setSubmitPending: detail => sinks.setSubmitPending(detail),
@@ -149,25 +188,31 @@ export function createTspComposer(sinks: {
       switch (key.name) {
         case 'backspace': {
           if (cursor === 0) return { kind: 'none' }
+          // Both endpoints cluster-aligned: the cut start is the previous
+          // cluster's start; the cut end is the (aligned) caret itself.
           const start = previousGraphemeStart(text, cursor)
           text = text.slice(0, start) + text.slice(cursor)
           cursor = start
+          sinks.onChanged()
           return { kind: 'edited' }
         }
         case 'delete': {
           if (cursor >= text.length) return { kind: 'none' }
           const end = nextGraphemeEnd(text, cursor)
           text = text.slice(0, cursor) + text.slice(end)
+          sinks.onChanged()
           return { kind: 'edited' }
         }
         case 'left': {
           if (cursor === 0) return { kind: 'none' }
           cursor = previousGraphemeStart(text, cursor)
+          sinks.onChanged()
           return { kind: 'edited' }
         }
         case 'right': {
           if (cursor >= text.length) return { kind: 'none' }
           cursor = nextGraphemeEnd(text, cursor)
+          sinks.onChanged()
           return { kind: 'edited' }
         }
         case 'home': {
@@ -175,6 +220,7 @@ export function createTspComposer(sinks: {
           // The start of the line containing the caret (multi-line draft).
           const lineStart = text.lastIndexOf('\n', cursor - 1) + 1
           cursor = lineStart
+          sinks.onChanged()
           return { kind: 'edited' }
         }
         case 'end': {
@@ -183,6 +229,7 @@ export function createTspComposer(sinks: {
           const lineEnd = nextNewline === -1 ? text.length : nextNewline
           if (cursor === lineEnd) return { kind: 'none' }
           cursor = lineEnd
+          sinks.onChanged()
           return { kind: 'edited' }
         }
         default:

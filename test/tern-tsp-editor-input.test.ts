@@ -49,14 +49,16 @@ function key(name: string, modifiers: { ctrl?: boolean; shift?: boolean; alt?: b
 }
 
 /** A composer with recording sinks (the reducer layer's observer). */
-function composerWithSinks(): { composer: TspComposer; pending: Array<string | undefined>; notices: string[] } {
+function composerWithSinks(): { composer: TspComposer; pending: Array<string | undefined>; notices: string[]; changes: () => number } {
   const pending: Array<string | undefined> = []
   const notices: string[] = []
+  let changeCount = 0
   const composer = createTspComposer({
+    onChanged: () => { changeCount += 1 },
     setSubmitPending: detail => { pending.push(detail) },
     notify: text => { notices.push(text) },
   })
-  return { composer, pending, notices }
+  return { composer, pending, notices, changes: () => changeCount }
 }
 
 // ── Layer 1: the reducer (pure composer semantics) ──────────────────────────
@@ -176,6 +178,68 @@ test('B1: the port members — draft clamp, pending sink, settled no-op', () => 
   assert.deepEqual(notices, ['a notice'])
 })
 
+// ── F1: the cursor-boundary invariant (real-SDK reachable shapes) ────────────
+
+test('B1/F1: paste a combining mark, Home, type a letter — the merged cluster never strands its mark', () => {
+  // The reviewer's REAL-SDK probe shape: bracketed-paste U+0301 (combining
+  // acute), Home, then 'a' merges into ONE grapheme 'á'. The caret must land
+  // at the merged cluster's END and backspace consumes the WHOLE cluster.
+  const { composer } = composerWithSinks()
+  composer.applyKey(key('paste', { text: '\u0301' }))
+  composer.applyKey(key('home'))
+  composer.applyKey(key('a', { text: 'a' }))
+  // 'a' + U+0301 is ONE grapheme; the caret sits at its end (2), not inside.
+  assert.equal(composer.state().text, 'a\u0301')
+  assert.equal(composer.state().cursor, 2, 'the caret normalized to the merged cluster end')
+  // Backspace consumes the WHOLE cluster — no lone combining mark remains.
+  composer.applyKey(key('backspace'))
+  assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
+})
+
+test('B1/F1: setEditorText with a shorter surrogate text keeps the caret boundary-aligned', () => {
+  // The reviewer's second REAL shape: type 'x' (caret 1), then
+  // setEditorText('👍') — the numeric clamp would keep 1, INSIDE the pair.
+  const { composer } = composerWithSinks()
+  composer.applyKey(key('x', { text: 'x' }))
+  composer.setEditorText('👍')
+  assert.equal(composer.state().cursor, 2, 'the clamp normalized forward to the cluster end')
+  composer.applyKey(key('backspace'))
+  assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false },
+    'backspace consumed the whole surrogate pair — no lone \\udc4d remains')
+})
+
+test('B1/F1: insertIntoEditor merging with a following combining cluster keeps the caret aligned', () => {
+  // Insertion may MERGE with the following cluster (a ZWJ/combining suffix):
+  // the caret must end at the merged cluster's end, never inside it.
+  const { composer } = composerWithSinks()
+  composer.setDraft('\u0301') // a lone combining mark (paste shape)
+  composer.applyKey(key('home'))
+  composer.insertIntoEditor('a')
+  assert.equal(composer.state().text, 'a\u0301')
+  assert.equal(composer.state().cursor, 2, 'the inserted letter merged with the mark; caret at the cluster end')
+  composer.applyKey(key('backspace'))
+  assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
+})
+
+// ── F2: every port mutator commits an authoritative render ───────────────────
+
+test('B1/F2: setDraft/setEditorText/insertIntoEditor each notify exactly one render', () => {
+  const { composer, changes } = composerWithSinks()
+  const before = changes()
+  composer.setDraft('one')
+  const afterSet = changes()
+  assert.equal(afterSet - before, 1, 'setDraft rendered once')
+  composer.setEditorText('two')
+  assert.equal(changes() - afterSet, 1, 'setEditorText rendered once')
+  const afterReplace = changes()
+  composer.insertIntoEditor('!')
+  assert.equal(changes() - afterReplace, 1, 'insertIntoEditor rendered once')
+  // Reads never render.
+  const afterInsert = changes()
+  composer.getDraft()
+  composer.state()
+  assert.equal(changes(), afterInsert, 'reads do not render')
+})
 // ── Layer 2: the REAL SDK loop over the scripted pane ───────────────────────
 
 class FakeInput extends EventEmitter implements TermInput {
@@ -257,10 +321,11 @@ interface PaneHarness {
   readonly session: Session
   exitCount(): number
   frames(): WireFrame[]
+  userInputs(): number
   dispose(): Promise<void>
 }
 
-async function mountPane(options: { withHandshake?: string } = {}): Promise<PaneHarness> {
+async function mountPane(options: { withHandshake?: string; bind?: boolean } = {}): Promise<PaneHarness> {
   const tern = new ScriptedTern()
   const queued = options.withHandshake
   if (queued !== undefined) {
@@ -272,15 +337,25 @@ async function mountPane(options: { withHandshake?: string } = {}): Promise<Pane
   const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
   assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
   let exitCount = 0
+  let userInputs = 0
   const renderer = mountTspRenderer(session, {
     requestExit: () => { exitCount += 1 },
   })
+  // The SurfaceRuntime.start commit point binds the input projection (the
+  // default mirrors production); the F4 tests opt out to drive the window.
+  if (options.bind !== false) {
+    renderer.bindInput({
+      exit: () => { exitCount += 1 },
+      noteUserInput: () => { userInputs += 1 },
+    })
+  }
   await settle()
   return {
     renderer,
     tern,
     session,
     exitCount: () => exitCount,
+    userInputs: () => userInputs,
     frames: () => framesOf(tern.output.text()),
     dispose: () => renderer.dispose(),
   }
@@ -351,6 +426,34 @@ test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor
     await settle()
     const editor2 = lastEditorProps(harness.frames())
     assert.equal(editor2?.text, 'hi好', 'CJK input commits as one edit')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('B1/L2/F2: the composer-port mutators reach the wire through the real SDK chain', async () => {
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type('old')
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, 'old')
+    const framesBefore = harness.frames().length
+    // The F2 regression: a programmatic port mutation MUST commit a new
+    // controlled frame — not only getDraft() (the B2 draft-restore path
+    // depends on this being visible). No notice/pending side effects.
+    harness.renderer.composer.setEditorText('restored draft')
+    await settle()
+    const frames = harness.frames()
+    assert.ok(frames.length > framesBefore, 'the port mutation committed a new frame')
+    assert.equal(lastEditorProps(frames)?.text, 'restored draft', 'the wire carries the restored text')
+    // setDraft and insertIntoEditor share the same sink.
+    harness.renderer.composer.setDraft('two')
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, 'two')
+    harness.renderer.composer.insertIntoEditor('!')
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, 'two!')
   } finally {
     await harness.dispose()
     await harness.session.close()
@@ -447,5 +550,76 @@ test('B1/L2: an early Ctrl+D in the handshake batch routes the legal exit', asyn
   } finally {
     await harness.dispose().catch(() => {})
     await harness.session.close().catch(() => {})
+  }
+})
+
+// ── F4: the editor-local/lifecycle binding and the held pre-bind window ─────
+
+test('B1/L2/F4: keys before the bind are HELD, then consumed exactly once at the bind', async () => {
+  // No bind yet (bind: false mirrors a connect that outlived the startup
+  // commit): the typed keys must NOT reach the editor — they wait.
+  const harness = await mountPane({ bind: false })
+  try {
+    harness.tern.input.type('held')
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, '', 'a pre-bind key never edits the composer')
+    assert.equal(harness.userInputs(), 0, 'no user activity is observed before the bind')
+    // The bind consumes the held keys ONCE, in arrival order.
+    harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} })
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, 'held', 'the bind consumed the held keys')
+    // A second bind is refused — exactly ONE input owner.
+    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} }),
+      /already bound/, 'a second bind throws')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('B1/L2/F4: a dispose before the bind discards the held keys unconsumed', async () => {
+  const harness = await mountPane({ bind: false })
+  harness.tern.input.type('doomed')
+  await harness.dispose()
+  await harness.session.close()
+  const framesBefore = harness.frames().length
+  // A late bind after dispose is refused; the held keys died with the renderer.
+  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} }), /disposed/)
+  harness.tern.input.type('late')
+  await settle()
+  assert.equal(harness.frames().length, framesBefore, 'nothing renders after dispose — the queue was discarded')
+})
+
+test('B1/L2/F4: the bound exit handler routes the composer exit gesture', async () => {
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type('\x1b') // Escape: unknown control key, inert
+    await settle()
+    assert.equal(harness.exitCount(), 0)
+    // Ctrl+C routes the EXIT handler (the bound projection), matching
+    // isQuitKey; the empty-draft Ctrl+D does too, through the reducer.
+    harness.tern.input.type('\x03')
+    await settle()
+    assert.equal(harness.exitCount(), 1, 'Ctrl+C routed through the bound exit handler')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('B1/L2/F4: real user input is observed only through the bound projection', async () => {
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type('a')
+    await settle()
+    assert.ok(harness.userInputs() >= 1, 'an editable key observed as user activity')
+    const before = harness.userInputs()
+    // Pure unknown CONTROL sequences (no printable text): no activity.
+    harness.tern.input.type('\x1b\x1b[Z')
+    await settle()
+    assert.equal(harness.userInputs(), before, 'unknown control keys are not user activity')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
   }
 })
