@@ -67,10 +67,9 @@ PROVED on the real pane (from the v4 record):
   finding.
 - **Focus**: the `["focus","dock.composer"]` op is on the wire after the
   first committed frame.
-- **Typed input**: the SDK COALESCED the four ASCII keys into two editor
-  text ops (`replace "t"` for the first key, then ONE `append "xt"` for
-  the rest — frame-level coalescing is the SDK's own); a cursor `set` op
-  accompanied each key.
+- **Typed input**: the SDK coalesced the four ASCII keys into THREE editor
+  text ops (`replace "t"`, `append "e"`, `append "xt"`) with THREE cursor
+  `set` ops (1/2/4) — frame-level coalescing is the SDK's own, not ours.
 - **CJK/emoji**: `你好` as single-unit edits; `👍` as ONE 2-unit surrogate
   edit (cursor 6→8) — never split.
 - **Enter refused**: the notice `the TSP composer is not wired for submission
