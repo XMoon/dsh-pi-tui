@@ -87,11 +87,12 @@ export interface TspPane {
   releaseHandshake(): void
   /** Never answer the probe: the shipped SDK declines after its timeout. */
   decline(): void
-  /** Make the `x` close frame's write throw (the acquired release fails). */
+  /** Make the FIRST `x` close-frame write throw (the acquired release fails). */
   failCloseWrite(value: unknown): void
   /** Whether the official SDK ever ran its DA1 probe (i.e. connected). */
   probed(): boolean
-  /** `x {"id":…,"keep":false}` frames on the wire (the session close count). */
+  /** Successfully RECORDED `x {"id":…,"keep":false}` surface frames (not a
+   *  count of Session.close() calls: a failed `x` write is not recorded here). */
   closeFrames(): number
   /** Frame ops sent, per surface, in order. */
   frameCount(): number
@@ -106,6 +107,7 @@ export function installTspPane(): TspPane {
   let queued = ''
   let mode: 'reply' | 'hold' | 'decline' = 'reply'
   let closeFailure: { readonly set: boolean; readonly value: unknown } = { set: false, value: undefined }
+  let closeFailureValue: unknown
   let heldReply: (() => void) | undefined
   const closeBodies: string[] = []
   let frames = 0
@@ -126,7 +128,13 @@ export function installTspPane(): TspPane {
       reply()
       return
     }
-    if (closeFailure.set && /\u001b_tsp;x;/.test(text)) throw closeFailure.value
+    if (closeFailure.set && /\u001b_tsp;x;/.test(text)) {
+      // Fail the FIRST close-frame write only: the SDK's own close sequence may
+      // write more than once, and a second failure would aggregate instead of
+      // rejecting with the EXACT injected value (R7-1).
+      closeFailure = { set: false, value: undefined }
+      throw closeFailureValue
+    }
     for (const match of text.matchAll(/\u001b_tsp;x;([\s\S]*?)\u001b\\/g)) closeBodies.push(match[1]!)
     for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
       frames += 1
@@ -145,7 +153,7 @@ export function installTspPane(): TspPane {
   // The shipped SDK declines inside multiplexers (`TMUX`/`STY`/`ZELLIJ` are
   // truthy even as "0") and under an explicit `TERN_TSP=0`. Clear them for the
   // duration: the simulated pane IS the tty authority here.
-  const declined = ['TMUX', 'STY', 'ZELLIJ', 'TERN_TSP'] as const
+  const declined = ['TMUX', 'STY', 'ZELLIJ', 'TERN_TSP', 'DSH_PI_TUI_RENDERER', 'DSH_PI_TUI_LOG'] as const
   const previousEnv = new Map<string, string | undefined>()
   for (const name of declined) {
     previousEnv.set(name, process.env[name])
@@ -159,7 +167,7 @@ export function installTspPane(): TspPane {
     holdHandshake: () => { mode = 'hold' },
     releaseHandshake: () => { mode = 'reply'; const run = heldReply; heldReply = undefined; run?.() },
     decline: () => { mode = 'decline' },
-    failCloseWrite: (value: unknown) => { closeFailure = { set: true, value } },
+    failCloseWrite: (value: unknown) => { closeFailure = { set: true, value }; closeFailureValue = value },
     probed: () => probed,
     closeFrames: () => closeBodies.length,
     frameCount: () => frames,
