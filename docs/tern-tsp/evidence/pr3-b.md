@@ -39,7 +39,7 @@ current.
 
 | Command | Snapshot | Result |
 |---|---|---|
-| `node --test test/tern-tsp-editor-input.test.ts` | round-2 HEAD | 30/30 pass (round-1: 17/17; round-2 added the two F1 probe shapes, the port render sink, the held/bind/discard guards, the ordered pre-bind Ctrl+D, the v4-tail exit shape, the flood/overflow guard, the separated-counter bound-exit) |
+| `node --test test/tern-tsp-editor-input.test.ts` | external-review HEAD | 31/31 pass (round-1: 17/17; round-2: the F1 probe shapes, the port render sink, the held/bind/discard guards, the ordered pre-bind Ctrl+D, the v4-tail exit shape, the flood/overflow guard; external round: the bound cancel semantics — Ctrl+C/Escape fire exactly one cancel and zero exits — and the one-frame-per-edit double-render guard) |
 | `node --test test/tern-tsp-live-mount.test.ts` | round-2 HEAD | 17/17 pass (A-04b updated; re-run per round) |
 | `node --test test/tern-tsp-renderer-selection.test.ts` | round-2 HEAD | 19/19 pass |
 | `node --test test/tern-tsp-runner-teardown.test.ts` | round-2 HEAD | 12/12 pass |
@@ -161,6 +161,19 @@ production mount:
   final Ctrl+D never saw an empty draft, and an image was cited without
   inspection. Fixed by the PARTIAL redo above (complete record, truthful
   tool-limitation boundaries) — no claim exceeds its artifact.
+- **External review (PR #262, on `348e1870`)** — 1 P2 + 1 P3:
+  - P2: bound Ctrl+C/Escape violated the frozen §3.4 row-3 semantics (both
+    were exit/unconditional — interrupting a live Agent would have killed
+    the TUI). Fixed: `SurfaceInputBinding`/`TspInputHandlers` gain
+    `cancel()`, wired at `SurfaceRuntime.start` to the existing
+    `deps.events.onCancel` (the UserShell interrupt path B0 already made
+    renderer-neutral). Bound Ctrl+C AND Escape route exactly one cancel and
+    never an exit; the empty-draft Ctrl+D stays the exit gesture; pre-bind
+    Ctrl+C keeps the PR3-A emergency-exit compatibility. Guard tests assert
+    the cancel/exit separation with independent counters.
+  - P3: every accepted edit rendered twice (dispatchKey's render() on top of
+    the composer's onChanged sink). Fixed: dispatchKey no longer renders;
+    a one-frame-per-edit wire guard pins it.
 - **F4 (bindInput missing)** — the plan's §3.3 transitional B1 contract was
   silently moved to B2. Fixed by IMPLEMENTING it (not amending the plan):
   the bounded pre-bind hold queue, the once-only `bindInput` (second bind

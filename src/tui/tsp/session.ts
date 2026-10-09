@@ -91,8 +91,14 @@ const NOTICE_LIMIT = 3
  * application gesture.
  */
 export interface TspInputHandlers {
-  /** The keyboard exit intent (Ctrl+C / empty Ctrl+D through the composer). */
+  /** The keyboard exit intent (the empty-draft Ctrl+D through the composer). */
   exit(): void
+  /**
+   * The interrupt/cancel intent — the EXISTING application cancel path
+   * (PR3-B §3.4 row 3): aborts a running local shell / interrupts the live
+   * Agent; NEVER an unconditional exit.
+   */
+  cancel(): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
 }
@@ -498,16 +504,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
 
   const dispatchKey = (key: Key): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
-    // 2. No active modal in B1 (supportsModals stays false).
-    // 3. The interrupt/exit intent routes through the BOUND exit handler
-    //    when the application binding exists (the same orchestration as
-    //    PiTui's Ctrl+C; B2 binds the real cancel); pre-bind it routes the
-    //    injected exit directly (the PR3-A compatibility window).
-    if (key.ctrl === true && key.name === 'c') return true
+    // 2. No active modal in B1 (supportsModals stays false) — with a live
+    //    modal (B3) the modal owns these keys FIRST.
+    // 3. The interrupt/cancel intent (PR3-B §3.4 row 3): Ctrl+C and Escape
+    //    map to the EXISTING application cancel path — never an
+    //    unconditional exit. Interrupting a live Agent must not kill the
+    //    TUI. The composer's exit-empty (below) is the only exit gesture.
+    if (key.ctrl === true && key.name === 'c') {
+      if (boundHandlers !== undefined) {
+        boundHandlers.cancel()
+        return false
+      }
+      return true
+    }
+    if (key.name === 'escape') {
+      if (boundHandlers !== undefined) {
+        boundHandlers.cancel()
+      }
+      return false
+    }
     // 4. The composer reducer owns everything else (Ctrl+D empty-exit,
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
     const edit = composer.applyKey(key)
-    if (edit.kind === 'edited') render()
     if (edit.kind === 'submit') {
       // B1: the application submit admission is not wired yet — refuse
       // EXPLICITLY and keep the draft (no Host mutation, no success notice).
@@ -523,10 +541,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const routeInput = (input: SessionInput): boolean => {
     if (input.type !== 'key') return false
     const key = input.key
-    // Ctrl+C is the UNCONDITIONAL exit intent — legal in the pre-binding
-    // window too (a quit during a cancelled startup must not wait for a
-    // bind that never comes).
-    if (key.ctrl === true && key.name === 'c') return true
+    // PRE-BIND Ctrl+C keeps the PR3-A emergency-exit compatibility (a quit
+    // during a cancelled startup must not wait for a bind that never comes);
+    // once bound it becomes the CANCEL intent (dispatchKey). Escape has no
+    // emergency semantics and is held like any other key.
+    if (key.ctrl === true && key.name === 'c' && !inputBound) return true
     // The empty-draft Ctrl+D exit is ORDER-dependent (the reducer decides it
     // against the live draft): pre-bind, it may act directly ONLY while the
     // held queue is EMPTY — with held keys the draft's emptiness is not yet
@@ -645,10 +664,12 @@ function pendingRowText(row: PendingInputPresentation['tail'][number], index: nu
 }
 
 /**
- * Whether one decoded key is the EXIT intent (exported for tests): Ctrl+C
- * always; Ctrl+D only through the composer reducer's empty-draft branch. The
- * PR3-A read-only `q` quit retired when the composer became active — a typed
- * `q` is editor text now.
+ * Whether one decoded key is the PRE-BIND emergency EXIT intent (exported
+ * for tests): only Ctrl+C before the application binding exists (the PR3-A
+ * compatibility window — a cancelled startup still needs its quit). Once
+ * bound, Ctrl+C becomes the CANCEL intent and the composer's empty-draft
+ * Ctrl+D is the exit gesture (dispatchKey/applyKey). The PR3-A read-only
+ * `q` quit retired when the composer became active.
  */
 export function isQuitKey(key: { readonly name: string; readonly ctrl?: boolean }): boolean {
   if (key.name === 'c') return key.ctrl === true

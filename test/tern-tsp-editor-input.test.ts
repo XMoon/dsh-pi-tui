@@ -390,6 +390,7 @@ interface PaneHarness {
   exitCount(): number
   frames(): WireFrame[]
   userInputs(): number
+  cancels(): number
   dispose(): Promise<void>
 }
 
@@ -406,6 +407,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
   assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
   let exitCount = 0
   let userInputs = 0
+  let cancelCount = 0
   const renderer = mountTspRenderer(session, {
     requestExit: () => { exitCount += 1 },
   })
@@ -414,6 +416,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
   if (options.bind !== false) {
     renderer.bindInput({
       exit: () => { exitCount += 1 },
+      cancel: () => { cancelCount += 1 },
       noteUserInput: () => { userInputs += 1 },
     })
   }
@@ -424,6 +427,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
     session,
     exitCount: () => exitCount,
     userInputs: () => userInputs,
+    cancels: () => cancelCount,
     frames: () => framesOf(tern.output.text()),
     dispose: () => renderer.dispose(),
   }
@@ -483,11 +487,21 @@ test('B1/L2: the dock renders the controlled editor and focuses it after the fir
   }
 })
 
-test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor', async () => {
+test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor (ONE frame per edit)', async () => {
   const harness = await mountPane()
   try {
-    harness.tern.input.type('hi')
+    const framesBefore = harness.frames().length
+    harness.tern.input.type('h')
     await settle()
+    // The external review's P3 guard: one accepted edit commits exactly ONE
+    // frame — the composer's onChanged sink renders; dispatchKey must not
+    // render again (a double render would appear as two frames or a
+    // duplicated view construction on the wire).
+    const afterFirst = harness.frames().length
+    assert.equal(afterFirst - framesBefore, 1, 'one edit = one frame (no double render)')
+    harness.tern.input.type('i')
+    await settle()
+    assert.equal(harness.frames().length - afterFirst, 1, 'the second edit also committed exactly one frame')
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'hi', 'the typed bytes reached the controlled editor text')
     harness.tern.input.type('好')
@@ -565,7 +579,7 @@ test('B1/L2: a paste stays one edit and never dispatches commands', async () => 
   }
 })
 
-test('B1/L2: Ctrl+C routes the exit intent; a typed q does not', async () => {
+test('B1/L2: a bound Ctrl+C cancels (never exits); a typed q does not', async () => {
   const harness = await mountPane()
   try {
     harness.tern.input.type('q')
@@ -573,9 +587,16 @@ test('B1/L2: Ctrl+C routes the exit intent; a typed q does not', async () => {
     assert.equal(harness.exitCount(), 0, 'q is editor text in B1')
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'q')
+    // BOUND Ctrl+C is the cancel intent (PR3-B §3.4): no exit fires.
     harness.tern.input.type('\x03')
     await settle()
-    assert.equal(harness.exitCount(), 1, 'Ctrl+C routes the SAME exit orchestration')
+    assert.equal(harness.cancels(), 1, 'Ctrl+C routed the cancel intent exactly once')
+    assert.equal(harness.exitCount(), 0, 'a bound Ctrl+C never exits the TUI')
+    // Escape shares the cancel mapping.
+    harness.tern.input.type('\x1b')
+    await settle()
+    assert.equal(harness.cancels(), 2, 'Escape routed the cancel intent')
+    assert.equal(harness.exitCount(), 0)
   } finally {
     await harness.dispose()
     await harness.session.close()
@@ -633,11 +654,11 @@ test('B1/L2/F4: keys before the bind are HELD, then consumed exactly once at the
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'a pre-bind key never edits the composer')
     assert.equal(harness.userInputs(), 0, 'no user activity is observed before the bind')
     // The bind consumes the held keys ONCE, in arrival order.
-    harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, 'held', 'the bind consumed the held keys')
     // A second bind is refused — exactly ONE input owner.
-    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} }),
+    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} }),
       /already bound/, 'a second bind throws')
   } finally {
     await harness.dispose()
@@ -652,7 +673,7 @@ test('B1/L2/F4: a dispose before the bind discards the held keys unconsumed', as
   await harness.session.close()
   const framesBefore = harness.frames().length
   // A late bind after dispose is refused; the held keys died with the renderer.
-  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} }), /disposed/)
+  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} }), /disposed/)
   harness.tern.input.type('late')
   await settle()
   assert.equal(harness.frames().length, framesBefore, 'nothing renders after dispose — the queue was discarded')
@@ -668,16 +689,34 @@ test('B1/L2/F4: the bound exit handler routes the composer exit gesture', async 
   // false-green finding).
   let rendererExits = 0
   let boundExits = 0
+  let boundCancels = 0
   const renderer = mountTspRenderer(session, { requestExit: () => { rendererExits += 1 } })
-  renderer.bindInput({ exit: () => { boundExits += 1 }, noteUserInput: () => {} })
+  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, noteUserInput: () => {} })
   await settle()
   try {
     tern.input.type('a')
     await settle()
-    tern.input.type('\x03') // Ctrl+C: the exit intent
+    // Ctrl+C is the CANCEL intent (PR3-B §3.4 row 3): the bound cancel
+    // handler fires exactly once; NEITHER the bound exit NOR the renderer's
+    // injected requestExit may fire.
+    tern.input.type('\x03')
     await settle()
-    assert.equal(boundExits, 1, 'the BOUND exit handler observed the exit gesture')
-    assert.equal(rendererExits, 0, 'the bound path does NOT also fire the injected requestExit')
+    assert.equal(boundCancels, 1, 'Ctrl+C routed to the BOUND cancel handler exactly once')
+    assert.equal(boundExits, 0, 'Ctrl+C did NOT fire the bound exit handler')
+    assert.equal(rendererExits, 0, 'Ctrl+C did NOT fire the injected requestExit')
+    // Escape shares the cancel mapping.
+    tern.input.type('\x1b')
+    await settle()
+    assert.equal(boundCancels, 2, 'Escape routed to the BOUND cancel handler')
+    assert.equal(boundExits, 0)
+    assert.equal(rendererExits, 0)
+    // The empty-draft Ctrl+D remains the EXIT gesture.
+    tern.input.type('\x7f')
+    await settle()
+    tern.input.type('\x04')
+    await settle()
+    assert.equal(boundExits, 1, 'the empty-draft Ctrl+D routed the bound exit handler')
+    assert.equal(rendererExits, 0, 'the bound exit does not fire the injected requestExit')
   } finally {
     await renderer.dispose()
     await session.close()
@@ -715,7 +754,7 @@ test('B1/L2/F4: a held key orders the pre-bind Ctrl+D — no exit before the bin
     assert.equal(harness.exitCount(), 0, 'no pre-bind exit while the held key makes the draft non-empty')
     // The bind replays 'a' then Ctrl+D in order: 'a' applies, Ctrl+D meets a
     // NON-empty draft and is an editor no-op — still no exit.
-    harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
     await settle()
     assert.equal(harness.exitCount(), 0, 'the replayed Ctrl+D saw the applied draft and did not exit')
     const editor = lastEditorProps(harness.frames())
@@ -755,7 +794,7 @@ test('B1/L2/F4: a pre-bind input flood fails loud ONCE and still replays the hel
     await settle()
     const wire = harness.tern.output.text()
     assert.ok(wire.includes('were dropped'), 'the overflow is observable (fail loud), not a silent drop')
-    harness.renderer.bindInput({ exit: () => {}, noteUserInput: () => {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
     await settle()
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'a'.repeat(128), 'the held PREFIX (the bounded queue) still replayed at the bind')
