@@ -487,21 +487,11 @@ test('B1/L2: the dock renders the controlled editor and focuses it after the fir
   }
 })
 
-test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor (ONE frame per edit)', async () => {
+test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor', async () => {
   const harness = await mountPane()
   try {
-    const framesBefore = harness.frames().length
-    harness.tern.input.type('h')
+    harness.tern.input.type('hi')
     await settle()
-    // The external review's P3 guard: one accepted edit commits exactly ONE
-    // frame — the composer's onChanged sink renders; dispatchKey must not
-    // render again (a double render would appear as two frames or a
-    // duplicated view construction on the wire).
-    const afterFirst = harness.frames().length
-    assert.equal(afterFirst - framesBefore, 1, 'one edit = one frame (no double render)')
-    harness.tern.input.type('i')
-    await settle()
-    assert.equal(harness.frames().length - afterFirst, 1, 'the second edit also committed exactly one frame')
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'hi', 'the typed bytes reached the controlled editor text')
     harness.tern.input.type('好')
@@ -512,6 +502,44 @@ test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor
     await harness.dispose()
     await harness.session.close()
   }
+})
+
+test('B1/L2/P3: one accepted edit calls Surface.render exactly ONCE (no double render)', async () => {
+  // The round-6 review's discriminating-power ruling: a WIRE-frame count
+  // cannot detect a duplicate render (the SDK's diff suppresses empty
+  // updates — verified by the reviewer's probe). Observe the REAL
+  // production-created Surface's render CALLS instead: wrap session.open
+  // (the consumer-production path) so the surface mountTspRenderer creates
+  // carries a counting render wrapper; the receiver is preserved through
+  // the original function reference.
+  const tern = new ScriptedTern()
+  const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+  assert.ok(session !== null)
+  let renderCalls = 0
+  const originalOpen = session.open
+  session.open = function (this: typeof session, options: Parameters<typeof session.open>[0]) {
+    const surface = originalOpen.call(this, options)
+    const originalRender = surface.render
+    surface.render = function (this: typeof surface, view: Parameters<typeof surface.render>[0]) {
+      renderCalls += 1
+      return originalRender.call(this, view)
+    }
+    return surface
+  }
+  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
+  await settle()
+  const baseline = renderCalls
+  tern.input.type('h')
+  await settle()
+  assert.equal(renderCalls - baseline, 1, `one accepted edit = exactly one Surface.render call (got ${renderCalls - baseline})`)
+  tern.input.type('i')
+  await settle()
+  assert.equal(renderCalls - baseline, 2, 'the second edit added exactly one more render call')
+  const editor = lastEditorProps(framesOf(tern.output.text()))
+  assert.equal(editor?.text, 'hi', 'the edits still landed')
+  await renderer.dispose()
+  await session.close()
 })
 
 test('B1/L2/F2: the composer-port mutators reach the wire through the real SDK chain', async () => {
