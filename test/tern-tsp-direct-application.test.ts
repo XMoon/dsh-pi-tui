@@ -45,8 +45,13 @@ test('B2/Direct-L6: a TSP Enter drives a REAL Agent turn and the streamed reply 
   const { testLifecycle } = await import('./support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['DIRECT', '-L6', '-OK'] })
+  // The exact-once witness: a ONE-TO-ONE recorder on the PRODUCTION-created
+  // Direct session writer (the unbound prototype original; every call goes
+  // through `original.call(this)` and the recorded outcome is the original's).
+  const promptCalls: Array<{ readonly sessionId: string; readonly mode: 'queue' | 'steer'; readonly agentStatus: string; readonly outcome: { readonly kind: string } }> = []
+  const recorder = fixture.recordPrompts(call => { promptCalls.push(call) })
   try {
-    directSettle(3_000) // let the real Host composition + runner boot settle
+    await directSettle(3_000)
     await directSettle(2_000)
     fixture.pane.input.type('hello official direct')
     await directSettle()
@@ -57,15 +62,36 @@ test('B2/Direct-L6: a TSP Enter drives a REAL Agent turn and the streamed reply 
     // pre-seeded frame or a fixture that renders the script eagerly.
     assert.ok(!fixture.pane.output.text().includes('DIRECT-L6-OK'),
       'the assistant text is absent until the gesture is submitted')
+    // NEGATIVE CONTROL (writer): no prompt was written before the gesture, so
+    // the later `calls === 1` is caused by the Enter — never by a boot-time or
+    // eager write. The mutation the review ran (ignore Enter at the input
+    // boundary) leaves this array empty and FAILS the assertions below.
+    assert.equal(recorder.calls(), 0, 'no prompt write happened before the gesture')
     fixture.pane.input.type('\r')
-    // The canonical transcript gains the You card (the official user occurrence).
-    await waitFor('the canonical You card', () => fixture.pane.output.text().includes('hello official direct'))
-    // The REAL Agent turn runs and its streamed reply reaches the pane.
+    // The canonical You occurrence's PRODUCER facts, not a wire substring the
+    // composer draft could already satisfy: the real writer settled exactly
+    // ONE committed prompt for this session.
+    await waitFor('the committed prompt write', () => recorder.calls() === 1, 30_000)
+    assert.equal(recorder.calls(), 1, 'the production writer settled EXACTLY ONE prompt (never two, never zero)')
+    const call = promptCalls[0]!
+    assert.equal(call.outcome.kind, 'committed', 'the one write settled committed')
+    assert.equal(call.mode, 'queue', 'an idle-start submission queues')
+    assert.equal(call.agentStatus, 'running',
+      'the write addressed the REAL live Agent (resolved through the production agentFor)')
+    // The REAL Agent turn ran: the scripted model served exactly one request.
     await waitFor('the streamed assistant reply', () => fixture.pane.output.text().includes('DIRECT-L6-OK'), 30_000)
+    assert.equal(fixture.modelCalls(), 1, 'exactly ONE real Agent turn ran')
     const wire = fixture.pane.output.text()
     assert.ok(wire.includes('DIRECT-L6-OK'),
       'the scripted model stream reached the canonical fold and the SDK pane')
+    // Post-turn stability: no second write ever fires (the exact-once fact is
+    // a terminal state, not a race snapshot).
+    await directSettle(2_000)
+    assert.equal(recorder.calls(), 1, 'no further prompt write happened after the turn')
+    assert.equal(fixture.modelCalls(), 1, 'no further model turn happened either')
+    recorder.detach()
   } finally {
+    recorder.detach()
     await fixture.settle()
   }
 })

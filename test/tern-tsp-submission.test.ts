@@ -86,7 +86,12 @@ interface Harness {
 async function mountPane(
   onSubmit: (text: string, request: string) => void,
   /** Opt out of the commit-point bind so a test can drive the held window. */
-  options: { bind?: boolean } = {},
+  options: {
+    bind?: boolean
+    /** Lifecycle-intent recorders for the default binding (cancel/exit). */
+    onCancel?: () => void
+    onExit?: () => void
+  } = {},
 ): Promise<Harness> {
   const input = new FakeInput()
   const output = new FakeOutput()
@@ -115,8 +120,8 @@ async function mountPane(
   const renderer = mountTspRenderer(session, { requestExit: () => {} })
   if (options.bind !== false) {
     renderer.bindInput({
-      exit: () => {},
-      cancel: () => {},
+      exit: () => { options.onExit?.() },
+      cancel: () => { options.onCancel?.() },
       submit: (text, request) => onSubmit(text, request),
       steer: () => {},
       noteUserInput: () => {},
@@ -282,6 +287,49 @@ test('B2: a key HELD across a generation bump cannot submit when the bind replay
     })
     await settle()
     assert.deepEqual(submissions, [], 'the held Enter did NOT cross the hydration fence at the replay')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B2: a hydration that NEVER commits stays fail-closed (Loading retained, no submit, cancel still live)', async () => {
+  // The never-commit terminal state the round-3 review asked to pin: when the
+  // owner's hydrate fails BEFORE any new-subject frame, the renderer cannot
+  // lift the fence itself (only a NEW source token commits it away). The
+  // honest witness is the RENDERER's own contract: the Loading state stays,
+  // the retained draft is preserved (never silently editable nor submittable
+  // against the outgoing subject), and the lifecycle intents remain live —
+  // the owner's failure handling (session-presentation records the failure
+  // and continues; the runner never exits from a renderer-local fence).
+  const submissions: string[] = []
+  let cancels = 0
+  let exits = 0
+  const harness = await mountPane((text) => { submissions.push(text) }, {
+    onCancel: () => { cancels += 1 },
+    onExit: () => { exits += 1 },
+  })
+  try {
+    harness.input.type('draft of the outgoing subject')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'draft of the outgoing subject')
+    // The owner's hydrate began and NEVER commits a new subject.
+    harness.renderer.display.beginSessionHydration()
+    await settle(1_000)
+    // The Loading state is retained (no new-subject frame ever committed).
+    assert.ok(harness.output.text().includes('Loading session'),
+      'the never-committing hydration keeps the explicit Loading state')
+    // The draft is preserved and untouchable: neither edits nor submits cross.
+    harness.input.type('X')
+    harness.input.type('\r')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'draft of the outgoing subject',
+      'the fenced composer kept the outgoing draft verbatim')
+    assert.deepEqual(submissions, [], 'no submit crossed the never-lifted fence')
+    // The LIFECYCLE intents stay live (the fence must not lock the user in).
+    harness.input.type('\u001b')
+    await settle()
+    assert.equal(cancels, 1, 'Escape still reaches the cancel intent (fail-closed, never locked)')
+    assert.equal(exits, 0, 'the fence itself never exits the TUI')
   } finally {
     await harness.dispose()
   }

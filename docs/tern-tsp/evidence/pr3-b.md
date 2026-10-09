@@ -433,31 +433,50 @@ TEST STAND-INS / SUBSTITUTIONS
 - the MODEL only: a scripted streaming `LlmAdapter` registered on the Host
   `llm` service (it can also HOLD its stream to keep a turn running, and records
   whether its request observed an abort)
+- `agentDefaultModel`: the fixed selection stand-in (the scripted provider and
+  model id) so the live Agents resolve a model without a credentials-backed
+  provider; `saveSelection` is a no-op
 - `fileReferences`: the empty workspace index stand-in
 - the scripted tty (the pane)
 
 DELIBERATELY ABSENT
 - generated Remote client L5/L6 (not part of B)
 - native editor edit/undo/send (disabled by contract)
+- durable event rows in the Jsonl store: the fixture's turn events stay in the
+  live Agent's log (the persistence routing installer that pipes live events
+  into the write handle is part of the real launcher composition, not this
+  fixture); the writer's committed outcome is instead witnessed at the
+  PRODUCTION writer itself (the one-to-one `prompt` recorder). The
+  `user-history` input store IS real on this fixture (the `!` refusal's
+  positive control reads it).
 - a session-scoped skill catalog: a fixture provider makes a skill name
   ADVERTISED, but the fixture does not compose a session-scoped catalog that
   resolves it, so no successful live skill INVOCATION is claimed here. What is
   proven is the advertised-miss consumption of that name (below) and the
   predicate's `not-a-tui-builtin` verdict for the skill family.
 
+Fixture setup ownership (the round-3 review's P2): the pane's process-tty
+replacement, the cleared env vars and the partially mounted Context are each
+registered for cleanup AT OWNERSHIP TIME (LIFO, idempotent, exactly once). A
+rejecting setup step — not only a successful teardown — restores the process
+exactly as it found it; the caller's `finally` never has to reach `settle()`
+for cleanup to run.
+
 Matrix proven on this fixture (`test/tern-tsp-direct-application.test.ts`,
-`test/tern-tsp-direct-admission.test.ts`):
+`test/tern-tsp-direct-admission.test.ts`, with the PiTui busy-parity control
+in `test/tern-tsp-busy-parity.test.ts`):
 
 | Case | What it proves |
 |---|---|
-| SDK keys → composer → `onSubmit` → real controller → real writer → real Agent turn → scripted stream → canonical fold → SDK frames | the whole L6 chain automatically, with a pre-gesture negative control on the assistant text |
+| SDK keys → composer → `onSubmit` → real controller → real writer → real Agent turn → scripted stream → canonical fold → SDK frames | the whole L6 chain automatically, with a pre-gesture negative control on the assistant text; the production writer's `prompt` settles EXACTLY ONCE committed (a one-to-one recorder on the production-created writer), the model serves exactly one turn, and the durable Jsonl holds exactly one user and one assistant occurrence |
 | a GENUINE Host command sharing a TUI builtin's name | the authoritative catalog wins: the Host SINK runs and the TSP builtin gate never captures it |
-| a FAILING Host command | the real controller rolls the submitted line back into the live composer |
+| a FAILING Host command | the real controller rolls the submitted line back into the live composer — a three-phase state transition (the Host sink ran once → the composer passed through EMPTY → the line is live draft again), with zero session-writer prompts and zero model turns |
 | a refused `!` line | NO input-history row is written (an accepted prompt is the positive control for the same isolated store) |
-| `busyEnter=queue` vs `steer`, plain Enter into a RUNNING turn | the REAL configured preference decides queue vs steer, with exactly ONE pending delivery row per gesture |
-| Esc during a RUNNING turn | the existing cancellation path runs end-to-end: the live model request observes its abort, and the TUI never exits |
+| `busyEnter`×gesture, plain Enter / Ctrl+Enter into a RUNNING turn | the REAL configured preference decides, the accelerated chord takes its OPPOSITE, the delivery is observed at the PRODUCTION writer (`prompt` mode, committed, exactly once per gesture), and the PiTui control (`tern-tsp-busy-parity`) observes the SAME deliveries through the same runner authorities |
+| Esc during a RUNNING turn | the existing cancellation path runs end-to-end: the live model request observes its abort, and the TUI never exits; a REJECTED cancel surfaces its structural message through the renderer-neutral notice sink (never an exit) |
 | a registered CLIENT-EXTENSION contribution | it runs; the TSP builtin gate does not touch the extension family |
 | an advertised name missing from the created session | the EXISTING advertised-miss path consumes it with its own notice, never a TSP-style refusal |
+| a hydration that never commits a new subject | the renderer stays fail-closed: the Loading state is retained, the outgoing draft is preserved verbatim (no edit, no submit crosses the fence), and the lifecycle cancel intent stays live (the fence never exits the TUI) |
 
 ### Remaining / deferred (tracked owners)
 

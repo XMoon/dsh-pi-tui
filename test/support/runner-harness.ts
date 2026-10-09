@@ -140,6 +140,15 @@ export interface RunnerHarness {
    *  (default false keeps the historical `session/agent-busy` degradation every
    *  existing suite was written against). */
   readonly promptAcceptance: { value: boolean }
+  /** PR3-B B2 round 3: every delivered prompt (`followup`/`steer`), the SAME
+   *  producer fact the PiTui parity suites read (`submit-hot-path`'s
+   *  `host.followedUp`/`host.steered`) — the busy-parity control's authority. */
+  readonly delivered: ReadonlyArray<{ readonly mode: 'queue' | 'steer'; readonly message: unknown; readonly sessionId: string }>
+  /** PR3-B B2 round 3: the live stand-in agents, read as a SNAPSHOT at call
+   *  time (a later create/resume still appears on the next call) — a
+   *  busy-window control can force their status exactly like
+   *  `submit-hot-path`'s `harness.host.status`. */
+  readonly liveAgents: () => ReadonlyArray<{ status: string }>
   /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
    * `flush:<id>` / `dispose:<id>`) in call order — the Direct
    * owned-session retirement assertions. */
@@ -160,6 +169,8 @@ export function fakeAgent(
   retirementEvents?: string[],
   /** The OPT-IN prompt-acceptance box (see `makeHarness`). */
   promptAcceptance: { value: boolean } = { value: false },
+  /** The harness-level delivery log (see `makeHarness`'s `delivered`). */
+  delivered: DeliveredPrompt[] = [],
 ): Agent {
   // A small structural Agent context is sufficient for the Direct setup
   // callbacks.
@@ -173,7 +184,7 @@ export function fakeAgent(
   // stuck in its pre-commit quiesce.
   let cancelled = false
   let releaseIdle: (() => void) | undefined
-  const prompts: DeliveredPrompt[] = []
+  const prompts: DeliveredPrompt[] = delivered
   /**
    * The Direct writer's prompt acceptance is OPT-IN: suites written against a
    * non-accepting stand-in (the user-shell cards, which settle with their own
@@ -262,6 +273,8 @@ export function makeHarness(
    *  needs the writer to COMMIT; the default keeps the historical
    *  `session/agent-busy` behaviour every existing suite was written against). */
   const promptAcceptance = { value: false }
+  /** PR3-B B2 round 3: the harness-level delivery log (`delivered`). */
+  const deliveredLog: DeliveredPrompt[] = []
   const retirementEvents: string[] = []
   const createOptions: { provider?: string; model?: string }[] = []
   const createInheritedEventCounts: (number | undefined)[] = []
@@ -278,6 +291,7 @@ export function makeHarness(
       whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id),
       retirementEvents,
       promptAcceptance,
+      deliveredLog,
     )
     live.set(session.id, agent)
     return {
@@ -440,7 +454,7 @@ export function makeHarness(
   const subagentsService = typeof subagents === 'function'
     ? (subagents as (events: string[]) => unknown)(retirementEvents)
     : subagents
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents, commandSettlements, resumeSessionIds, disposeFailures, promptAcceptance }
+  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents, commandSettlements, resumeSessionIds, disposeFailures, promptAcceptance, delivered: deliveredLog, liveAgents: () => [...live.values()] as Array<{ status: string }> }
 }
 
 export async function settle(): Promise<void> {
