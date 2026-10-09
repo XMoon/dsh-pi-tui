@@ -45,9 +45,9 @@ current.
 | `node --test test/tern-tsp-runner-teardown.test.ts` | round-2 HEAD | 12/12 pass |
 | `node --test test/tern-tsp-pr3b-ports.test.ts` | round-2 HEAD | 5/5 pass |
 | `pnpm typecheck:bundle` | round-2 HEAD | pass |
-| `pnpm gate:architecture` / `pnpm gate:boundary` | `02d0a974` (re-run at round-2 HEAD below) | pass (452 files) / pass (31 files) |
-| `pnpm test:product` | `02d0a974` = 7504/7504; round-2 HEAD re-run recorded at push time | pass |
-| `pnpm verify:prepush` | `ca847758` = pass after the banner fix; `02d0a974` = pass; round-2 HEAD = recorded at push time | pass |
+| `pnpm gate:architecture` / `pnpm gate:boundary` | `43ffa950` | pass (452 files) / pass (31 files) |
+| `pnpm test:product` | `43ffa950` | 7509/7509 pass |
+| `pnpm verify:prepush` | `ca847758` pass (after the banner fix); `02d0a974` pass; `43ffa950` pass | pass |
 | Host-keybindings note | all snapshots | the ONLY gate failure in any run was the chord-labelled dock banner at `ca847758` (fixed by removing the labels per the PR3-A precedent — no gate exception) |
 
 ### Manual real-pane smoke (PARTIAL — tool-limited; the B1 review F3 redo)
