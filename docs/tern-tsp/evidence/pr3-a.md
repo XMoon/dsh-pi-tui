@@ -290,10 +290,13 @@ An instrumented run shows an `exit` intent reaching `createExitController`
 **before** `surface.start`: the exit tears the surface down, so `start()` finds
 it already disposed and the startup root reports a FATAL, while the pre-mount
 teardown reads the not-yet-mounted surface and fails too. The exit caller inside
-that window was **not identified by an entry stack** at that time. The EXISTING
-guards do not cover this window — it is scriptable (a held handshake with a
-queued SDK key reproduces it deterministically), and a production-level guard is
-still outstanding.
+that window was **not identified by an entry stack** at that time. The window is
+scriptable — a queued SDK key decoded with the handshake, or a held handshake plus
+a real fiber unload, reproduces it deterministically — and
+`test/tern-tsp-runner-teardown.test.ts` now guards it at the PRODUCTION level
+(the real connector → real surface/lifecycle/exit through `mountRunner`).
+What remains outstanding for this stage is the LIVE-consumption gate below, not
+this window.
 
 Provenance of this record, kept explicit:
 
@@ -327,11 +330,12 @@ and the pre-mount exit FATAL) are absent on the current build, and the exit is
 clean (code 0, retirement `failures=0`). The pane rows above are therefore the
 recorded history of `748589ca`; the current build's evidence is this capture.
 
-Recipe note (a testing fact, not a product finding): the `dsh` launcher does NOT
-pass `DSH_PI_TUI_LOG` through to the app, so the pane writes its diag to the
-DEFAULT path `$DSH_HOME/logs/pi-tui-<pid>.log`. Read the newest file there
-(`pi-tui-<pid>.log` matching the pane's PID) for a complete capture — the pane's
-own scrollback is not a substitute (it truncates and buffers).
+Recipe note (a testing fact for THIS launch path, not a universal launcher claim):
+in this pane launch the `DSH_PI_TUI_LOG` given on the command line did not reach
+the app (`bootstrap.ts` still resolves it with `diagFromEnv(process.env)`), so the
+diag landed on the DEFAULT `$DSH_HOME/logs/pi-tui-<pid>.log`. Read the file matching
+the pane's own PID for a complete capture — the pane's scrollback is not a
+substitute (it truncates and buffers).
 
 Read-only live updates: the resumed-session smoke proves the FULL chain (fold →
 canonical structure → PR1 mapper → SDK surface → real Tern render, ack loop
