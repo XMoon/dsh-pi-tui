@@ -206,7 +206,8 @@ interface Harness {
   readonly surface: SurfaceRuntime<SessionEvent>
   mount(renderer?: SurfaceRendererMount): void
   route(event: SessionEvent): void
-  dispose(): void
+  /** Owns the real renderer-release outcome, then restores the terminal. */
+  dispose(): Promise<void>
 }
 
 function mountHarness(): Harness {
@@ -270,8 +271,19 @@ function mountHarness(): Harness {
     createPluginManagerPanel,
   })
   surface.attachEventRouting(source)
+  const dispose = async (): Promise<void> => {
+    try {
+      surface.dispose()
+      // The release outcome belongs to the CALLER: a failed renderer release must
+      // surface here (never as an unowned rejection), before the terminal is restored.
+      await surface.whenRendererReleased()
+    } finally {
+      restoreTerminal()
+    }
+  }
   return {
     surface,
+    dispose,
     mount(renderer) {
       surface.start({
         events: { onSubmit: () => {}, onExit: () => {} },
@@ -294,10 +306,6 @@ function mountHarness(): Harness {
     },
     route(event) {
       surface.routeSessionEvent({ id: SESSION_ID }, event)
-    },
-    dispose() {
-      surface.dispose()
-      restoreTerminal()
     },
   }
 }
@@ -355,7 +363,7 @@ test('A-01: the PRODUCTION selection + a real SDK connect mounts the TSP rendere
     await settle()
     assert.ok(tern.output.text().includes('selects the renderer'), 'the routed message rendered on the TSP wire')
   } finally {
-    harness.dispose()
+    await harness.dispose()
   }
 })
 
@@ -383,7 +391,7 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
     const wire = tern.output.text()
     assert.ok(!wire.includes('\u001b_tsp;o;') && !wire.includes('\u001b_tsp;f;'), 'no TSP surface opened or framed after the declined probe')
   } finally {
-    harness.dispose()
+    await harness.dispose()
   }
 })
 
@@ -403,7 +411,7 @@ test('A-03: without the opt-in the PRODUCTION selection never invokes the connec
     harness.mount(renderer)
     assert.equal(typeof harness.surface.app.start, 'function', 'the default PiTui mount ran')
   } finally {
-    harness.dispose()
+    await harness.dispose()
   }
 })
 
