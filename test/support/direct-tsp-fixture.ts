@@ -60,16 +60,36 @@ export const DIRECT_TSP_PROVIDER = 'scripted'
  */
 export class ScriptedStreamingAdapter extends LlmAdapter {
   private readonly deltas: readonly string[]
-  constructor(deltas: readonly string[]) {
+  private readonly hold: (() => Promise<void>) | undefined
+  /** Every model request that observed its caller's ABORT (the authoritative
+   *  fact that an existing cancellation path reached the live request). */
+  readonly aborts: string[] = []
+  constructor(deltas: readonly string[], hold?: () => Promise<void>) {
     super()
     this.deltas = deltas
+    this.hold = hold
   }
 
   override listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string }>> {
     return Promise.resolve([{ provider, id: DIRECT_TSP_MODEL, name: 'Scripted Model' }])
   }
 
-  override async *stream(): AsyncIterable<StreamChunk> {
+  override async *stream(options: { readonly signal?: AbortSignal }): AsyncIterable<StreamChunk> {
+    // A HELD stream keeps the turn RUNNING until the test releases it (the
+    // busy/running-window cases need a live turn, not a finished one). It must
+    // still OBEY the caller's abort signal: a cancelled turn has to end.
+    if (this.hold !== undefined) {
+      const signal = options.signal
+      if (signal !== undefined) signal.addEventListener('abort', () => this.aborts.push('aborted'), { once: true })
+      await Promise.race([
+        this.hold(),
+        new Promise<never>((_, reject) => {
+          if (signal === undefined) return
+          if (signal.aborted) { reject(new Error('cancelled')); return }
+          signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })
+        }),
+      ])
+    }
     yield { type: 'block-start', index: 0, blockType: 'text' }
     for (const delta of this.deltas) yield { type: 'text-delta', index: 0, text: delta }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: this.deltas.join('') } }
@@ -80,6 +100,8 @@ export interface DirectTspFixture {
   readonly pane: TspPane
   readonly ctx: Context
   readonly workRoot: string
+  /** How many live model requests observed their caller's abort. */
+  cancellations(): number
   settle(): Promise<void>
 }
 
@@ -106,8 +128,25 @@ export async function createDirectTspFixture(
   options: {
     /** The assistant deltas the scripted model streams (default: one line). */
     readonly deltas?: readonly string[]
+    /** Keep the model stream OPEN until this resolves (a running turn). */
+    readonly streamHold?: () => Promise<void>
+    /** Extra TUI plugin config (e.g. `{ busyEnter: 'steer' }`) — the SAME
+     *  volatile authority `applyRunner` reads, so the busy preference under
+     *  test is the real configured one. */
+    readonly tuiConfig?: Record<string, unknown>
     readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
     readonly appExit?: () => void
+    /**
+     * GENUINE Host commands registered into the REAL command catalog before the
+     * runner boots (the Host-same-name winner and command-failure cases). Each
+     * handler records its invocation so a test can observe the Host SINK.
+     */
+    readonly hostCommands?: ReadonlyArray<{
+      readonly name: string
+      readonly description: string
+      readonly definitionId?: string
+      readonly handler: (invocation: { readonly rawInput: string }) => unknown
+    }>
   } = {},
 ): Promise<DirectTspFixture> {
   const workRoot = life.tempDir('dsh-b2-direct-')
@@ -122,8 +161,17 @@ export async function createDirectTspFixture(
   await mountAgentLoopTestDependencies(ctx)
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
-  ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK']))
+  const llmAdapter = new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
+  ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], llmAdapter)
   await ctx.plugin(CommandRuntime)
+  for (const command of options.hostCommands ?? []) {
+    ctx.commands.register({
+      name: command.name,
+      description: command.description,
+      ...(command.definitionId === undefined ? {} : { definitionId: command.definitionId as never }),
+      handler: (invocation) => command.handler({ rawInput: invocation.rawInput }) as never,
+    })
+  }
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ provider: DIRECT_TSP_PROVIDER, model: DIRECT_TSP_MODEL }),
     saveSelection: async () => {},
@@ -157,12 +205,20 @@ export async function createDirectTspFixture(
 
   process.env.DSH_PI_TUI_RENDERER = 'tsp'
   process.env.DSH_PI_TUI_LOG = join(workRoot, 'diag.log')
+  // Isolate the DSH home for this fixture: the input-history and session
+  // stores must land under the work root, never in the developer's real
+  // `~/.dsh` (and so a "no history row was written" assertion is meaningful).
+  const previousDshHome = process.env.DSH_HOME
+  process.env.DSH_HOME = workRoot
   ctx.provide('appExit', options.appExit ?? (() => {}))
   ctx.provide(TUI_STARTUP_SERVICE, {
     ...(options.startup ?? {}),
     shippedPresetRoot: workRoot,
   } as never)
-  const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ fullscreen: 'off' } as never)))
+  const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
+    pluginCtx,
+    TuiConfigSchema({ fullscreen: 'off', ...options.tuiConfig } as never),
+  ))
   fibers.push(runnerFiber)
 
   let settlement: Promise<void> | undefined
@@ -175,6 +231,8 @@ export async function createDirectTspFixture(
         await ctx.fiber.dispose()
       } finally {
         pane.restore()
+        if (previousDshHome === undefined) delete process.env.DSH_HOME
+        else process.env.DSH_HOME = previousDshHome
       }
     })()
     return settlement
@@ -185,6 +243,7 @@ export async function createDirectTspFixture(
     pane,
     ctx,
     workRoot,
+    cancellations: () => llmAdapter.aborts.length,
     settle,
   }
 }
