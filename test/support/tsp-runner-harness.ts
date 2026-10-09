@@ -40,6 +40,15 @@ export interface OwnedTspRunner {
     readonly retirementEvents: readonly string[]
     readonly promptAcceptance: { value: boolean }
   }
+  /**
+   * The delivered Direct-writer prompts (queue/steer), via the harness
+   * stand-in agent — the SAME authority the PiTui parity suites read
+   * (`submit-hot-path`'s `host.followedUp`/`host.steered`): flipping
+   * `promptAcceptance` on makes `followup`/`steer` record here.
+   */
+  readonly delivered: ReadonlyArray<{ readonly mode: 'queue' | 'steer'; readonly message: unknown; readonly sessionId: string }>
+  /** Force the fake live Agent's status (the busy window). */
+  setAgentStatus(status: 'idle' | 'running'): void
   readonly settle: () => Promise<void>
 }
 
@@ -55,6 +64,10 @@ export async function ownTspBoot(options: {
   /** Let the Direct writer COMMIT prompts (the harness default is the
    *  historical `session/agent-busy` degradation). */
   readonly acceptPrompts?: boolean
+  /** Extra runner config (e.g. `{ busyEnter: 'steer' }`) — the SAME volatile
+   *  authority `applyRunner` reads, so the preference under test is the real
+   *  configured one. */
+  readonly config?: Record<string, unknown>
   /** Runs with the owned pane BEFORE the connector can probe it. */
   readonly beforeMount?: (pane: TspPane) => void
 }): Promise<OwnedTspRunner> {
@@ -90,12 +103,20 @@ export async function ownTspBoot(options: {
   fiber = await mountRunner(
     ctx, options.home, harness,
     options.session === undefined ? {} : { sessionId: options.session.id },
-    options.session === undefined ? {} : { sessionId: options.session.id },
+    options.config ?? {},
     options.appExit ?? (() => {}),
   )
+  const delivered = (harness as unknown as { delivered: Array<{ mode: 'queue' | 'steer'; message: unknown; sessionId: string }> }).delivered ?? []
   const owned: OwnedTspRunner = {
     pane,
     harness: harness as unknown as OwnedTspRunner['harness'],
+    delivered,
+    setAgentStatus: (status) => {
+      const registry = (harness as unknown as {
+        liveAgents?: () => ReadonlyArray<{ status: string }>
+      }).liveAgents
+      for (const agent of registry?.() ?? []) agent.status = status
+    },
     settle: settleAll,
   }
   if (options.acceptPrompts === true) {

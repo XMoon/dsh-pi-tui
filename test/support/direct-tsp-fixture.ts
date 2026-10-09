@@ -18,7 +18,10 @@
  *
  * TEST STAND-INS / SUBSTITUTIONS
  * - the scripted streaming LLM adapter (the model endpoint only)
- * - the empty `fileReferences` stand-in and the `loader` readiness stub
+ * - `agentDefaultModel`: the fixed selection stand-in (`scripted` /
+ *   `scripted-model`) so the live Agents resolve a model without a
+ *   credentials-backed provider; `saveSelection` is a no-op
+ * - the empty `fileReferences` stand-in (the workspace index)
  * - the scripted tty (the pane)
  *
  * @module @xmoon76/dsh-pi-tui/test/support/direct-tsp-fixture
@@ -46,6 +49,8 @@ import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { WriteOutcome } from '../../src/runtime/session-writer-port.ts'
+import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
@@ -110,6 +115,29 @@ export interface DirectTspFixture {
   cancellations(): number
   /** How many model requests the scripted adapter served. */
   modelCalls(): number
+  /**
+   * Attach a ONE-TO-ONE recorder to the PRODUCTION-CREATED Direct session
+   * writer's `prompt` (the review's exact-once qualification). The patch
+   * follows the repo's producer-fact rules: the UNBOUND prototype original is
+   * saved (never `.bind`), every call goes through `original.call(instance)`
+   * and the recorder returns the ORIGINAL outcome unchanged. `record` sees the
+   * input bytes (the prepared message), the resolved live Agent (session id +
+   * status) and the settled outcome; the caller asserts `calls === 1` itself.
+   */
+  recordPrompts(record: (call: {
+    readonly sessionId: string
+    readonly mode: 'queue' | 'steer'
+    readonly agentStatus: string
+    readonly outcome: WriteOutcome
+  }) => void): { readonly calls: () => number; readonly detach: () => void }
+  /**
+   * Patch the PRODUCTION writer's `cancel` to return a fixed outcome (the
+   * cancel-ERROR qualification: a `rejected` cancel must surface through the
+   * renderer-neutral notice sink). Same producer-fact rules as
+   * {@link recordPrompts}: the unbound prototype original, `original.call`,
+   * and `detach()` restoring the same function identity.
+   */
+  recordCancels(outcome: () => WriteOutcome): { readonly detach: () => void }
   settle(): Promise<void>
 }
 
@@ -173,15 +201,55 @@ export async function createDirectTspFixture(
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
   const pane = installTspPane()
-  const ctx = new Context()
+  // OWNERSHIP, not success-contingency: the pane replaced the PROCESS tty and
+  // cleared five env vars the instant it was installed. From this point on,
+  // ANY setup failure below must still restore them — the caller's `finally`
+  // only runs `settle()` when the factory itself SUCCEEDS, so the fixture
+  // registers its own idempotent cleanup at each ownership acquisition and
+  // drops the registration only into the ONE settlement below (the review's
+  // setup-ownership finding: a rejecting `ctx.plugin` used to leak the new
+  // stdin/stdout getters into every later test in the process).
+  const cleanup: Array<() => Promise<void> | void> = []
+  /** Ownership cleanups run LAST, LIFO, EXACTLY ONCE (success or reject). */
+  const runSetupCleanup = async (): Promise<void> => {
+    for (const step of cleanup.reverse()) await step()
+    cleanup.length = 0
+  }
+  const ownCleanup = (step: () => Promise<void> | void): void => { cleanup.push(step) }
+  ownCleanup(() => pane.restore())
+  let previousDshHome: string | undefined
+  // Declared OUTSIDE the try so the success return below (and the recorder
+  // closures) can read the mounted Context even on the last-statement path.
+  let ctx!: Context
+  let llmAdapter!: ScriptedStreamingAdapter
   const fibers: Fiber[] = []
   let persistenceFiber: Fiber | undefined
+  let settlement: Promise<void> | undefined
+  const settle = (): Promise<void> => {
+    settlement ??= (async () => {
+      pane.releaseHandshake()
+      try {
+        for (const fiber of fibers.reverse()) await Promise.resolve(fiber.dispose())
+        await persistenceFiber?.dispose()
+        await ctx.fiber.dispose()
+      } finally {
+        // The registered ownership cleanups run LAST and exactly once —
+        // whether setup SUCCEEDED (this normal teardown) or REJECTED (the
+        // catch below, which is the setup-ownership fix).
+        await runSetupCleanup()
+      }
+    })()
+    return settlement
+  }
+  try {
+  ctx = new Context()
+  ownCleanup(() => ctx.fiber.dispose())
 
   await ctx.plugin(TypertRegistry)
   await mountAgentLoopTestDependencies(ctx)
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
-  const llmAdapter = new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
+  llmAdapter = new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
   ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], llmAdapter)
   await ctx.plugin(CommandRuntime)
   for (const command of options.hostCommands ?? []) {
@@ -228,8 +296,12 @@ export async function createDirectTspFixture(
   // Isolate the DSH home for this fixture: the input-history and session
   // stores must land under the work root, never in the developer's real
   // `~/.dsh` (and so a "no history row was written" assertion is meaningful).
-  const previousDshHome = process.env.DSH_HOME
+  previousDshHome = process.env.DSH_HOME
   process.env.DSH_HOME = workRoot
+  ownCleanup(() => {
+    if (previousDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousDshHome
+  })
   ctx.provide('appExit', options.appExit ?? (() => {}))
   ctx.provide(TUI_STARTUP_SERVICE, {
     ...(options.startup ?? {}),
@@ -292,23 +364,62 @@ export async function createDirectTspFixture(
   ))
   fibers.push(runnerFiber, contributionFiber, builtinsFiber, extensionFiber)
 
-  let settlement: Promise<void> | undefined
-  const settle = (): Promise<void> => {
-    settlement ??= (async () => {
-      pane.releaseHandshake()
-      try {
-        for (const fiber of fibers.reverse()) await Promise.resolve(fiber.dispose())
-        await persistenceFiber?.dispose()
-        await ctx.fiber.dispose()
-      } finally {
-        pane.restore()
-        if (previousDshHome === undefined) delete process.env.DSH_HOME
-        else process.env.DSH_HOME = previousDshHome
-      }
-    })()
-    return settlement
-  }
   life.defer(() => settle())
+  } catch (error) {
+    // PARTIAL SETUP: the factory rejects, so the caller's `finally` can never
+    // reach `settle()`. Run the registered ownership cleanups here — the pane
+    // tty restoration, the env vars and the partially mounted Context — so a
+    // rejecting setup leaves the process exactly as it found it.
+    await runSetupCleanup()
+    throw error
+  }
+
+  /**
+   * The production-created writer observation. `createDirectRuntimeBackend`
+   * constructs the writer INSIDE the mounted runner as a `DirectSessionWriter`
+   * over this exact module class, so patching the PROTOTYPE observes every
+   * production write with the true receiver identity (the same
+   * `TuiApp.prototype.start` shape every Direct runner suite uses — never a
+   * re-bound copy). The recorder is one-to-one: single call →
+   * `original.call(this, ...)` → `record(v)` → return `v`; `detach()`
+   * restores the SAME function identity.
+   */
+  const recordPrompts = (record: (call: {
+    readonly sessionId: string
+    readonly mode: 'queue' | 'steer'
+    readonly agentStatus: string
+    readonly outcome: WriteOutcome
+  }) => void): { readonly calls: () => number; readonly detach: () => void } => {
+    const prototype = DirectSessionWriter.prototype as unknown as {
+      prompt(this: DirectSessionWriter, sessionId: string, message: unknown, mode: 'queue' | 'steer'): Promise<WriteOutcome>
+      readonly agentFor: (sessionId: string) => { readonly session: { readonly id: string }; readonly status: string } | undefined
+    }
+    const originalPrompt = prototype.prompt
+    let calls = 0
+    prototype.prompt = async function (this: DirectSessionWriter, sessionId, message, mode) {
+      calls += 1
+      const outcome = await originalPrompt.call(this, sessionId, message, mode)
+      const agent = (this as unknown as { agentFor(id: string): { session: { id: string }; status: string } | undefined }).agentFor(sessionId)
+      record({ sessionId, mode, agentStatus: agent?.status ?? 'unresolved', outcome })
+      return outcome
+    }
+    return {
+      calls: () => calls,
+      detach: () => { prototype.prompt = originalPrompt },
+    }
+  }
+
+  /** The cancel-ERROR seam: force the production `cancel` outcome. */
+  const recordCancels = (outcome: () => WriteOutcome): { readonly detach: () => void } => {
+    const prototype = DirectSessionWriter.prototype as unknown as {
+      cancel(this: DirectSessionWriter, sessionId: string): Promise<WriteOutcome>
+    }
+    const originalCancel = prototype.cancel
+    prototype.cancel = async function (this: DirectSessionWriter) {
+      return outcome()
+    }
+    return { detach: () => { prototype.cancel = originalCancel } }
+  }
 
   return {
     pane,
@@ -316,6 +427,8 @@ export async function createDirectTspFixture(
     workRoot,
     cancellations: () => llmAdapter.aborts.length,
     modelCalls: () => llmAdapter.calls,
+    recordPrompts,
+    recordCancels,
     settle,
   }
 }
