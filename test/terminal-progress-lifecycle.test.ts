@@ -2851,6 +2851,8 @@ function disposeThroughProductionLifecycle(h: SurfaceHarness): () => void {
     retireOwnedSession: async () => ({}) as never,
     disposeSelectedTransport: async () => {},
     registerDisposal: () => {},
+    // No renderer acquisition in this harness: the stage is already settled.
+    whenRendererAcquired: () => Promise.resolve(),
   })
   return () => lifecycle.disposeSurface()
 }
