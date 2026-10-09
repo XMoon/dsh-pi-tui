@@ -438,6 +438,12 @@ cross-process Remote live and PR3-B input stay out of scope.
 
 - **Supported** (Tern pane): the SDK's own hello reply (`term=tern ver=0.6.3`) →
   `tsp renderer selected` → the TSP surface renders (the captures above).
+Both were re-captured after the terminal-output gate (`73748b07`, head
+`7d889189`), because that change gates the application-side terminal writers:
+the Tern pane still records `tsp renderer selected` with no fatal, only the
+handshake/frames write to the tty, and the tmux pane still records the honest
+decline.
+
 - **Fallback** (a terminal without TSP, forced with the official `TERN_TSP=0`
   switch, in a real `tmux` pane): the diag records
   `tsp renderer unavailable (SDK declined); mounting PiTui` and the PiTui UI
