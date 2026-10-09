@@ -305,3 +305,49 @@ structurally.
   and the guard now proves the first notice's content + zero card calls
   (not a strict exactly-once count). B1 must implement the member against the
   real composer state — the inert throw must not be inherited.
+
+## B2 — `feat(tern-tsp): shared submit, busy policy and command admission`
+
+- **Base**: the merged B1 tip of `next`.
+
+### What changed (source anchors)
+
+| Zone | Change |
+|---|---|
+| `src/app/surface/runtime.ts` | `SurfaceInputBinding` gains `submit(text, request)` / `steer(text)`; `SurfaceRuntime.start` builds them from the already-constructed `deps.events.onSubmit` / `onSteer` (the optional member is guarded) at its exact commit point, so a TSP Enter rides the ONE existing `SubmissionController` — never a renderer-owned writer. |
+| `src/tui/tsp/session.ts` | The composer's submit gesture implements the §3.4 ordering: snapshot the serialized draft, CLEAR the composer BEFORE the callback, never re-apply a stale pre-callback snapshot. The pre-bind window keeps holding keys; the B1 "composer not ready" refusal retired with the real binding (it had become unreachable — `dispatchKey` only runs bound). |
+| `src/app/command/tsp-capability.ts` (new) | The pure post-classification predicate: given the ALREADY-authoritatively-selected winner and the parsed builtin name, it answers only "is this selected TUI builtin available on the TSP renderer?" (`exit`/`quit` only). Not a parser; never consults `hostClaimOf`/the completion union; no state, no IO. |
+| `src/app/submission/controller.ts` | One shared renderer-capability refusal for TUI-origin builtins at the POST-CLASSIFICATION admission (`This command's UI is not available in TSP yet`, draft restored) — a genuine Host-origin command of the same spelling keeps its precedence. `!`/`!!` are refused at the ORIGINAL shell-branch admission BEFORE `persistHistory`/`ensureSession`/`acceptLocalSubmitAck`/`shell.run`, so a refused shell line creates no Host process, no history row and no Session (`User-shell UI is not available in TSP yet`, draft restored). |
+| `src/app/surface/application-events.ts` | `ApplicationEventsSurface` gains the renderer-neutral composer projection; the newly reachable draft read (`isImageDraft`) uses it. Clipboard image/path intake, plugin semantic actions and the PiTui panels stay PiTui-only and are unreachable on TSP in B2 (deliberately not implemented — PR4). |
+| `src/app/bootstrap.ts` | Injects the two renderer capabilities as LIVE getters over the same settled flag (`supportsLocalShellCards`, `supportsTuiBuiltinUi`), so the SDK-decline fallback (PiTui mounts) correctly keeps both available. |
+
+### Busy / steer policy
+
+The renderer never derives or fabricates a delivery mode: it passes the user's
+GESTURE through (`enter` / `accelerated`) and lets the existing
+`resolveSubmitDelivery` + the persisted `busyEnter` preference decide queue vs
+steer. Parity with PiTui is therefore structural (one policy, one classifier),
+not a second implementation — and the gesture pass-through is pinned by the
+renderer tests.
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `node --test test/tern-tsp-editor-input.test.ts` | pass (the submit cases are now B2: bound Enter submits once with the composer already empty at the callback; Ctrl+Enter submits the accelerated gesture; a pre-bind Enter is held then replayed in order) |
+| `node --test test/tern-tsp-command-admission.test.ts` (new) | pass — the predicate with the REAL classifier, plus the Host-same-name / extension / skill / unknown-name negative controls |
+| `node --test test/tern-tsp-runner-interactive.test.ts` (new) | pass — on the REAL Direct runner over the TSP pane: `/settings` refused with the notice + draft restored; `/exit` allowed and routes the exit orchestration; `!echo hi` refused with a recorder Host shell executor recording ZERO runs and the draft restored; a plain Enter takes the application submit path and the composer is cleared before the callback |
+| whole TSP suite set | pass |
+| `pnpm typecheck:bundle` / build / `gate:architecture` / `gate:boundary` | pass |
+| `pnpm test:product` | pass (zero failures) |
+
+### Remaining / deferred (tracked owners)
+
+- **Real Tern pane submit + Assistant streaming** (plan §6.4 / the B2 merge
+  gate): the Direct-Agent streaming demonstration on the physical pane stays
+  with **B4**'s mandatory real-pane matrix, under the same Owner Amendment A1
+  boundary B1 recorded (no scripted substitution may be presented as physical
+  proof).
+- Clipboard image/path intake, plugin semantic actions, `@` completion and the
+  PiTui panels on TSP: **PR4** UI parity.
+- Question/Approval: **B3**.
