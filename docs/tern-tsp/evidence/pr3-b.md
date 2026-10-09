@@ -39,15 +39,15 @@ current.
 
 | Command | Snapshot | Result |
 |---|---|---|
-| `node --test test/tern-tsp-editor-input.test.ts` | external-review HEAD | 31/31 pass (round-1: 17/17; round-2: the F1 probe shapes, the port render sink, the held/bind/discard guards, the ordered pre-bind Ctrl+D, the v4-tail exit shape, the flood/overflow guard; external round: the bound cancel semantics — Ctrl+C/Escape fire exactly one cancel and zero exits — and the one-frame-per-edit double-render guard) |
+| `node --test test/tern-tsp-editor-input.test.ts` | `aa097322` (final) | **32/32 pass** — includes the Surface.render-call observer guard (one render per accepted edit; a wire-frame count is NOT discriminating — historical: 31/31 at `c4aaaf79` carried a one-frame-per-edit guard; round-1 17/17; round-2 added the F1 probe shapes, the port render sink, the held/bind/discard guards, the ordered pre-bind Ctrl+D, the v4-tail exit shape, the flood/overflow guard; the external round added the bound cancel semantics) |
 | `node --test test/tern-tsp-live-mount.test.ts` | round-2 HEAD | 17/17 pass (A-04b updated; re-run per round) |
 | `node --test test/tern-tsp-renderer-selection.test.ts` | round-2 HEAD | 19/19 pass |
 | `node --test test/tern-tsp-runner-teardown.test.ts` | round-2 HEAD | 12/12 pass |
 | `node --test test/tern-tsp-pr3b-ports.test.ts` | round-2 HEAD | 5/5 pass |
 | `pnpm typecheck:bundle` | round-2 HEAD | pass |
 | `pnpm gate:architecture` / `pnpm gate:boundary` | `43ffa950` | pass (452 files) / pass (31 files) |
-| `pnpm test:product` | `43ffa950` | 7509/7509 pass |
-| `pnpm verify:prepush` | `ca847758` pass (after the banner fix); `02d0a974` pass; `43ffa950` pass | pass |
+| `pnpm test:product` | `43ffa950` = 7509/7509; `aa097322` = 7510/7510 | pass |
+| `pnpm verify:prepush` | `ca847758` pass (after the banner fix); `02d0a974` pass; `43ffa950` pass; `aa097322` pass | pass |
 | Host-keybindings note | all snapshots | the ONLY gate failure in any run was the chord-labelled dock banner at `ca847758` (fixed by removing the labels per the PR3-A precedent — no gate exception) |
 
 ### Manual real-pane smoke (B1 IMPLEMENTATION DONE / MERGE QUALIFIED BY OWNER AMENDMENT A1)
