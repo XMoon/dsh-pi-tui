@@ -50,7 +50,36 @@ current.
 | `pnpm verify:prepush` | `ca847758` pass (after the banner fix); `02d0a974` pass; `43ffa950` pass | pass |
 | Host-keybindings note | all snapshots | the ONLY gate failure in any run was the chord-labelled dock banner at `ca847758` (fixed by removing the labels per the PR3-A precedent — no gate exception) |
 
-### Manual real-pane smoke (PARTIAL — tool-limited; the B1 review F3 redo)
+### Manual real-pane smoke (B1 IMPLEMENTATION DONE / MERGE QUALIFIED BY OWNER AMENDMENT A1)
+
+**Owner Amendment A1 (2026-10-09)** — approved by the stage owner; the full
+text lives in the plan next to the B1 merge gate. Verdict table:
+
+| Item | B1 verdict | Final closure point |
+|---|---|---|
+| Real-pane per-key, CJK, emoji, caret, draft clearing | `VERIFIED` | B1 |
+| Bracketed-paste atomicity | `SCRIPTED_VERIFIED` | B4: real physical paste |
+| Ctrl+C / Ctrl+D physical key behavior | `SCRIPTED_VERIFIED` | B4: real-pane key presses |
+| Real IME composition/commit | `NOT_TESTABLE_HEADLESS` | B4: real GUI-environment IME test |
+| SDK lifecycle, input ownership, regression lanes | accepted on existing evidence | B1 |
+
+Binding constraints carried from the amendment: typing CJK directly is NOT
+IME testing (B4 must use a real input method: candidate selection, commit,
+caret checks); B-01's full end-to-end qualification still waits for B4;
+B2/B3 gates are unchanged (no scripted-substitution precedent); B4 has no
+further automatic deferral — an unobtainable environment records `BLOCKED`
+and PR3-B is NOT DONE.
+
+Environment facts: the driving tool `tern ctl` cannot inject
+bracketed-paste bytes (its `type` verb sends literal text — demonstrated by
+the v2/v3 records where `\u001b[200~` arrived as six printable
+characters) and delivers no byte for control chords (Tern's GUI consumes
+them — the PR1-recorded limitation); the host is a headless SSH session
+(`DISPLAY`/`WAYLAND_DISPLAY` empty) with no GUI/input-method framework, so
+real IME is physically impossible here.
+
+The PARTIAL record below (the F3 redo) is the evidence behind the
+`VERIFIED` rows.
 
 Method: real Tern 0.6.3, headless `tern serve --control … --out /tmp/serve` +
 `tern ctl --file` scenarios `run`ning the REAL `connectTspRenderer` +
