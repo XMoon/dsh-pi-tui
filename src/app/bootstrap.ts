@@ -1730,6 +1730,14 @@ export function applyRunnerWithRuntime(
 
     let app: TuiApp | undefined
     /**
+     * PR3-B B2: whether the mounted surface is the experimental TSP renderer.
+     * Settled when the renderer selection transfers ownership (before
+     * `surface.start` returns) and read LIVE by the shell admission — a
+     * pre-selection predicate would misreport the SDK-decline fallback,
+     * where PiTui mounts and its shell CARDS ARE available.
+     */
+    let tspRendererActive = false
+    /**
      * The stable display-subject lifetime tokens for image reads (M3-5 PR2): one
      * slot for the MAIN presentation (keyed by owner generation + session id) and
      * one for the VIEWED CHILD (keyed by viewer generation + child id). Each slot
@@ -2117,6 +2125,16 @@ export function applyRunnerWithRuntime(
         run: (text, ackToken) => localShell.run(text, ackToken),
         interrupt: () => localShell.interrupt(),
       },
+      // PR3-B B2-5: the TSP renderer has no local-shell cards; the
+      // SubmissionController refuses `!`/`!!` at its ORIGINAL shell-branch
+      // admission. Read LIVE (the renderer is selected after this owner is
+      // constructed); the SDK-decline fallback mounts PiTui, so the cards
+      // stay available there.
+      get supportsLocalShellCards() { return !tspRendererActive },
+      // PR3-B B2-3: the TSP renderer has no PiTui builtin panels/pickers, so
+      // a TUI-origin builtin other than /exit//quit is refused at the
+      // post-classification admission. Same live discriminator as above.
+      get supportsTuiBuiltinUi() { return !tspRendererActive },
       model: { selected: { get current() { return model.selected.current } } },
       image: {
         // D12 (TS8-C): the Direct Host attachment/model services are injected
@@ -2565,6 +2583,7 @@ export function applyRunnerWithRuntime(
     // the A0 audit classified them (display-preference chrome, never business
     // state: Tern owns its own theme, keymap and chrome).
     const tspRenderer = rendererMount !== undefined
+    tspRendererActive = tspRenderer
     if (!tspRenderer) {
       app = surface.app
       settings.applySafeKeybindingsMode()

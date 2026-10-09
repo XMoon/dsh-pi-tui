@@ -57,6 +57,7 @@ import { viewerCanonicalizeScope } from './viewer-submission.ts'
 import type { SubagentPromptOutcome, SubagentViewerSubmitRequest } from '../../runtime/subagent-port.ts'
 import type { SessionForkOutcome } from '../session/runtime.ts'
 import type { SubmissionController } from '../submission/controller.ts'
+import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { ClientActions } from './client-actions.ts'
 import type { SettingsRuntime } from './settings-runtime.ts'
 import type { StatusRuntime } from './status-runtime.ts'
@@ -96,6 +97,15 @@ export interface ApplicationEventsViewer {
 /** The mounted-surface capabilities the event adapter drives. */
 export interface ApplicationEventsSurface {
   readonly app: TuiApp
+  /**
+   * PR3-B B2-6: the renderer-neutral composer projection. The MAIN composer
+   * draft lives here (on the PiTui branch it is the same live `TuiApp`; on the
+   * TSP branch it is the renderer's own composer), so the newly reachable
+   * submission-path reads never touch a PiTui-only member. `app` stays for the
+   * PiTui-only chrome (clipboard panels, plugin actions, viewer/child drafts),
+   * which are NOT reachable on the TSP renderer in B2.
+   */
+  readonly composer: SubmissionComposerPort
   handleTerminalFocus(focused: boolean): void
   noteUserInput(): void
   openTasksBrowser(viewMode: 'quick' | 'full'): void
@@ -418,7 +428,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     onSubmit: (text, request) => deps.submission.submit(text, request),
     // The image-only submit gate (plan §11.1): an empty-text draft with staged
     // images is a real submission.
-    isImageDraft: () => draftHasImages(deps.surface.app.getDraft(), deps.drafts.images),
+    isImageDraft: () => draftHasImages(deps.surface.composer.getDraft(), deps.drafts.images),
     // The in-process EDITOR history must never recall a multimodal line after
     // its drafts were consumed — the placeholders would re-send as plain text
     // (the persisted JSONL history has the same guard; review finding: the

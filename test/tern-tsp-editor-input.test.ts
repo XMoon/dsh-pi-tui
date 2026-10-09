@@ -417,6 +417,8 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
     renderer.bindInput({
       exit: () => { exitCount += 1 },
       cancel: () => { cancelCount += 1 },
+      submit: () => {},
+      steer: () => {},
       noteUserInput: () => { userInputs += 1 },
     })
   }
@@ -527,7 +529,7 @@ test('B1/L2/P3: one accepted edit calls Surface.render exactly ONCE (no double r
     return surface
   }
   const renderer = mountTspRenderer(session, { requestExit: () => {} })
-  renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
+  renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {} })
   await settle()
   const baseline = renderCalls
   tern.input.type('h')
@@ -570,21 +572,70 @@ test('B1/L2/F2: the composer-port mutators reach the wire through the real SDK c
   }
 })
 
-test('B1/L2: Enter is refused with the explicit notice and the draft is preserved', async () => {
-  const harness = await mountPane()
+test('B2/L2: a bound Enter submits the snapshot and clears the composer BEFORE the callback', async () => {
+  // §3.4 submission gesture ordering: snapshot, clear, then callback — the
+  // callback observes an EMPTY composer (a synchronous restore merges into
+  // it rather than being erased by a post-callback clear).
+  const tern = new ScriptedTern()
+  const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+  assert.ok(session !== null)
+  const submissions: Array<{ text: string; request: string; draftAtCallback: string }> = []
+  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  renderer.bindInput({
+    exit: () => {},
+    cancel: () => {},
+    submit: (text, request) => { submissions.push({ text, request, draftAtCallback: renderer.composer.getDraft() }) },
+    steer: () => {},
+    noteUserInput: () => {},
+  })
+  await settle()
   try {
-    harness.tern.input.type('draft text')
+    tern.input.type('draft text')
     await settle()
-    harness.tern.input.type('\r')
+    assert.equal(renderer.composer.getDraft(), 'draft text')
+    tern.input.type('\r')
     await settle()
-    const wire = harness.tern.output.text()
-    assert.ok(wire.includes('not wired for submission yet'), 'the B1 refusal notice is observable')
-    const editor = lastEditorProps(harness.frames())
-    assert.equal(editor?.text, 'draft text', 'the draft survives the refused submit gesture')
-    assert.equal(harness.exitCount(), 0, 'a refused submit never exits')
+    assert.deepEqual(submissions, [{ text: 'draft text', request: 'enter', draftAtCallback: '' }],
+      'one submit with the serialized draft; the composer was already empty at the callback')
+    assert.equal(renderer.composer.getDraft(), '', 'the draft stays cleared after the submit')
+    // Ctrl+Enter is the same one-submit path with the accelerated gesture.
+    tern.input.type('again')
+    await settle()
+    tern.input.type('\u001b[13;5u') // kitty ctrl+enter (the modern encoding)
+    await settle()
+    assert.equal(submissions.length, 2, 'the accelerated chord submitted once')
+    assert.equal(submissions[1]!.request, 'accelerated')
+    assert.equal(submissions[1]!.text, 'again')
   } finally {
-    await harness.dispose()
-    await harness.session.close()
+    await renderer.dispose()
+    await session.close()
+  }
+})
+
+test('B2/L2: a PRE-BIND Enter is held and submits at the bind, never before it', async () => {
+  // Nothing may reach the application before the commit-point binding
+  // exists: the pre-bind Enter waits in the held queue and is applied (as a
+  // real submission) only when bindInput consumes the queue in order.
+  const tern = new ScriptedTern()
+  const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+  assert.ok(session !== null)
+  const heldSubmits: string[] = []
+  const renderer = mountTspRenderer(session, { requestExit: () => {} })
+  try {
+    tern.input.type('draft text\r')
+    await settle()
+    assert.deepEqual(heldSubmits, [] as string[], 'no submission before the bind')
+    assert.equal(renderer.composer.getDraft(), '', 'the held keys never touched the composer')
+    renderer.bindInput({
+      exit: () => {}, cancel: () => {},
+      submit: (text: string) => { heldSubmits.push(text) },
+      steer: () => {}, noteUserInput: () => {},
+    })
+    await settle()
+    assert.deepEqual(heldSubmits, ['draft text'] as string[], 'the held keys replayed in order: the text then the submit')
+  } finally {
+    await renderer.dispose()
+    await session.close()
   }
 })
 
@@ -682,11 +733,11 @@ test('B1/L2/F4: keys before the bind are HELD, then consumed exactly once at the
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'a pre-bind key never edits the composer')
     assert.equal(harness.userInputs(), 0, 'no user activity is observed before the bind')
     // The bind consumes the held keys ONCE, in arrival order.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {} })
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, 'held', 'the bind consumed the held keys')
     // A second bind is refused — exactly ONE input owner.
-    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} }),
+    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {} }),
       /already bound/, 'a second bind throws')
   } finally {
     await harness.dispose()
@@ -701,7 +752,7 @@ test('B1/L2/F4: a dispose before the bind discards the held keys unconsumed', as
   await harness.session.close()
   const framesBefore = harness.frames().length
   // A late bind after dispose is refused; the held keys died with the renderer.
-  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} }), /disposed/)
+  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {} }), /disposed/)
   harness.tern.input.type('late')
   await settle()
   assert.equal(harness.frames().length, framesBefore, 'nothing renders after dispose — the queue was discarded')
@@ -719,7 +770,7 @@ test('B1/L2/F4: the bound exit handler routes the composer exit gesture', async 
   let boundExits = 0
   let boundCancels = 0
   const renderer = mountTspRenderer(session, { requestExit: () => { rendererExits += 1 } })
-  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, noteUserInput: () => {} })
+  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, noteUserInput: () => {} })
   await settle()
   try {
     tern.input.type('a')
@@ -782,7 +833,7 @@ test('B1/L2/F4: a held key orders the pre-bind Ctrl+D — no exit before the bin
     assert.equal(harness.exitCount(), 0, 'no pre-bind exit while the held key makes the draft non-empty')
     // The bind replays 'a' then Ctrl+D in order: 'a' applies, Ctrl+D meets a
     // NON-empty draft and is an editor no-op — still no exit.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {} })
     await settle()
     assert.equal(harness.exitCount(), 0, 'the replayed Ctrl+D saw the applied draft and did not exit')
     const editor = lastEditorProps(harness.frames())
@@ -822,7 +873,7 @@ test('B1/L2/F4: a pre-bind input flood fails loud ONCE and still replays the hel
     await settle()
     const wire = harness.tern.output.text()
     assert.ok(wire.includes('were dropped'), 'the overflow is observable (fail loud), not a silent drop')
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, noteUserInput: () => {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, noteUserInput: () => {} })
     await settle()
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'a'.repeat(128), 'the held PREFIX (the bounded queue) still replayed at the bind')

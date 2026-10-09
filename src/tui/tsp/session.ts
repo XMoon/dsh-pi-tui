@@ -40,6 +40,7 @@
 
 import { connect as sdkConnect, ui } from '@stencil-hq/tern'
 import type { Key, Node, Session, SessionInput, Surface } from '@stencil-hq/tern'
+import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import { cancellationError } from '../../runtime/process/tasks.ts'
 import type {
   DisplayDockNotice,
@@ -70,9 +71,6 @@ import { TranscriptNodeKeys, transcriptView } from './transcript-view.ts'
  */
 const DOCK_BANNER = 'DSH TSP renderer · experimental composer'
 
-/** The B1 refusal notice for submit gestures (B2 binds the real onSubmit). */
-const SUBMIT_NOT_READY = 'the TSP composer is not wired for submission yet — the draft was preserved'
-
 /** The renderer-local dock state (banner + status facts + welcome + notices). */
 interface DockState {
   statusLine: string
@@ -99,6 +97,19 @@ export interface TspInputHandlers {
    * Agent; NEVER an unconditional exit.
    */
   cancel(): void
+  /**
+   * PR3-B B2 (§3.4 submission gesture ordering): the EXISTING application
+   * submit entry — `ApplicationEvents.events.onSubmit(text, request)`. The
+   * renderer snapshots the draft, CLEARS the composer BEFORE the callback
+   * (so a synchronous failure restoration merges into the empty/current
+   * draft), and never applies a stale pre-callback snapshot afterwards.
+   */
+  submit(text: string, request: ComposerSubmitRequest): void
+  /**
+   * PR3-B B2: the draft-steer entry (`events.onSteer`) with the same
+   * before-callback ordering; the submission controller owns the outcome.
+   */
+  steer(text: string): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
 }
@@ -502,7 +513,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     else options.requestExit()
   }
 
-  const dispatchKey = (key: Key): boolean => {
+  const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. No active modal in B1 (supportsModals stays false) — with a live
     //    modal (B3) the modal owns these keys FIRST.
@@ -511,28 +522,29 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    unconditional exit. Interrupting a live Agent must not kill the
     //    TUI. The composer's exit-empty (below) is the only exit gesture.
     if (key.ctrl === true && key.name === 'c') {
-      if (boundHandlers !== undefined) {
-        boundHandlers.cancel()
-        return false
-      }
-      return true
+      handlers.cancel()
+      return false
     }
     if (key.name === 'escape') {
-      if (boundHandlers !== undefined) {
-        boundHandlers.cancel()
-      }
+      handlers.cancel()
       return false
     }
     // 4. The composer reducer owns everything else (Ctrl+D empty-exit,
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
     const edit = composer.applyKey(key)
     if (edit.kind === 'submit') {
-      // B1: the application submit admission is not wired yet — refuse
-      // EXPLICITLY and keep the draft (no Host mutation, no success notice).
-      if (boundHandlers !== undefined) boundHandlers.noteUserInput()
-      display.notify(SUBMIT_NOT_READY, 'info')
+      handlers.noteUserInput()
+      // PR3-B §3.4 submission gesture ordering: snapshot the serialized
+      // draft, CLEAR the composer BEFORE invoking onSubmit (a synchronous
+      // rejection/restore merges into the empty draft instead of being
+      // erased by a post-callback clear), and never re-apply a stale
+      // pre-callback editor snapshot afterwards. The submission controller
+      // owns the business outcome (admission, rollback, queue).
+      const serializedDraft = composer.getDraft()
+      composer.setDraft('')
+      handlers.submit(serializedDraft, edit.gesture)
     }
-    if (edit.kind === 'edited' && boundHandlers !== undefined) boundHandlers.noteUserInput()
+    if (edit.kind === 'edited') handlers.noteUserInput()
     if (edit.kind === 'exit-empty') return true
     return false
   }
@@ -564,7 +576,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       return false
     }
-    return dispatchKey(key)
+    // `inputBound` implies `boundHandlers` (bindInput sets both together);
+    // assert the pairing for the type system rather than silently defaulting.
+    if (boundHandlers === undefined) throw new Error('the TSP input is bound without handlers')
+    return dispatchKey(key, boundHandlers)
   }
 
   const inputLoop = (): void => {
@@ -624,7 +639,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const held = heldKeys.splice(0, heldKeys.length)
       for (const key of held) {
         if (disposed) return
-        if (dispatchKey(key)) routeExit(true)
+        if (dispatchKey(key, handlers)) routeExit(true)
       }
     },
     dispose: async () => {
