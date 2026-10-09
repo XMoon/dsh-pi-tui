@@ -39,7 +39,7 @@
  */
 
 import { connect as sdkConnect, ui } from '@stencil-hq/tern'
-import type { Node, Session, SessionInput, Surface } from '@stencil-hq/tern'
+import type { Key, Node, Session, SessionInput, Surface } from '@stencil-hq/tern'
 import { cancellationError } from '../../runtime/process/tasks.ts'
 import type {
   DisplayDockNotice,
@@ -83,6 +83,30 @@ interface DockState {
 /** How many transient notices the dock keeps (oldest evicted). */
 const NOTICE_LIMIT = 3
 
+/**
+ * PR3-B §3.3 (the B1 slice): the renderer's editor-local + lifecycle input
+ * handlers, bound ONCE by `SurfaceRuntime.start`. The submission members
+ * arrive with B2 (the plan's transitional contract); B1 delivers the
+ * lifecycle/user-activity projection so a pre-bind key can never act as an
+ * application gesture.
+ */
+export interface TspInputHandlers {
+  /** The keyboard exit intent (Ctrl+C / empty Ctrl+D through the composer). */
+  exit(): void
+  /** Real user input on the editor seat (editable/submit keys). */
+  noteUserInput(): void
+}
+
+/** The B1 binding: editor-local + lifecycle only (submissions are B2). */
+export interface TspInputBinding {
+  /**
+   * Bind the application handlers ONCE (a second bind throws — exactly ONE
+   * input owner). Consumes the held pre-bind keys in arrival order; the
+   * legal pre-bind exit intents already acted and are NOT re-delivered.
+   */
+  bindInput(handlers: TspInputHandlers): void
+}
+
 /** What the TSP renderer needs from the composition root. */
 export interface TspRendererOptions {
   /** The workspace root for tool-args path relativization in the mapper. */
@@ -114,14 +138,12 @@ export interface TspRendererOptions {
 }
 
 /** The mounted TSP renderer (the display seam + the one-shot disposer). */
-export interface TspRenderer {
+export interface TspRenderer extends TspInputBinding {
   readonly display: SurfaceDisplaySeam
   /**
-   * PR3-B §B0: the INERT composer projection. The TSP renderer has no editor
-   * yet (B1 mounts the real controlled composer), so every member throws —
-   * no submission code path can silently no-op against a renderer that owns
-   * no editor. The submission owner never reaches this port in B0: the TSP
-   * input path is still read-only.
+   * PR3-B B1: the composer projection backed by the renderer's ONE
+   * program-owned composer (`getDraft()` reads the VISIBLE editor, never a
+   * hidden PiTui instance). Every port mutator commits a controlled frame.
    */
   readonly composer: SubmissionComposerPort
   /**
@@ -231,10 +253,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /**
    * PR3-B B1: the ONE program-owned composer. The SDK controls the editor
    * node (`text`/`cursor` in UTF-16 units); the native edit/undo/send
-   * features are NOT advertised — every accepted edit re-renders the
-   * controlled state in the next frame.
+   * features are NOT advertised — every authoritative mutation (a reducer
+   * edit OR a composer-port mutator) re-renders the controlled state in one
+   * frame through the `onChanged` sink.
    */
   const composer: TspComposer = createTspComposer({
+    onChanged: () => render(),
     setSubmitPending: (detail) => {
       pendingSubmit = detail
       render()
@@ -447,29 +471,57 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // ── Input: the ONE SDK loop, the fixed §3.4 precedence ──
   // (B1: no modal exists yet — the interaction runtime's fail-closed
   // admission owns Question/Approval; a loop failure is FATAL.)
-  const consumeKey = (key: Parameters<TspComposer['applyKey']>[0]): boolean => {
+  /**
+   * PR3-B §3.3 (the B1 review F4 contract): keys arriving BEFORE the
+   * application binding are HELD in this bounded renderer-local queue (the
+   * loop starts at connect, before `SurfaceRuntime.start` commits ownership).
+   * `bindInput` consumes it exactly ONCE; a dispose without binding discards
+   * it unconsumed. The LEGAL early exit intents (Ctrl+C, empty-draft Ctrl+D —
+   * the PR3-A compatibility window) bypass the queue and route the same exit
+   * controller; nothing else acts before the binding exists.
+   */
+  const heldKeys: Key[] = []
+  const HELD_KEYS_LIMIT = 128
+  let inputBound = false
+  /** The bound application input handlers (B1: editor-local + lifecycle). */
+  let boundHandlers: TspInputHandlers | undefined
+
+  const dispatchKey = (key: Key): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. No active modal in B1 (supportsModals stays false).
-    // 3. The interrupt/cancel intent routes through the SAME exit/cancel
-    //    orchestration as PiTui's Ctrl+C (B1 keeps the quit route: there is
-    //    no live-turn cancel wiring yet — B2 binds onCancel).
+    // 3. The interrupt/exit intent routes through the SAME exit orchestration
+    //    as PiTui's Ctrl+C (B2 binds the real cancel; B1 keeps the quit
+    //    route) — legal in the pre-binding window too.
     if (key.ctrl === true && key.name === 'c') return true
     // 4. The composer reducer owns everything else (Ctrl+D empty-exit,
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
     const edit = composer.applyKey(key)
     if (edit.kind === 'edited') render()
     if (edit.kind === 'submit') {
-      // B1: the admission is not wired yet — refuse EXPLICITLY and keep the
-      // draft (no Host mutation, no success notice).
+      // B1: the application submit admission is not wired yet — refuse
+      // EXPLICITLY and keep the draft (no Host mutation, no success notice).
+      if (boundHandlers !== undefined) boundHandlers.noteUserInput()
       display.notify(SUBMIT_NOT_READY, 'info')
     }
+    if (edit.kind === 'edited' && boundHandlers !== undefined) boundHandlers.noteUserInput()
     if (edit.kind === 'exit-empty') return true
     return false
   }
 
-  const consumeInput = (input: SessionInput): boolean => {
+  /** Route one input: exit intents act; everything else waits for the bind. */
+  const routeInput = (input: SessionInput): boolean => {
     if (input.type !== 'key') return false
-    return consumeKey(input.key)
+    const key = input.key
+    // The legal pre-binding exit intents bypass the held queue (a quit during
+    // the compatibility window must not wait for a bind that never comes —
+    // e.g. a cancelled startup).
+    if (key.ctrl === true && key.name === 'c') return true
+    if (key.ctrl === true && key.name === 'd' && composer.getDraft() === '') return true
+    if (!inputBound) {
+      if (heldKeys.length < HELD_KEYS_LIMIT) heldKeys.push(key)
+      return false
+    }
+    return dispatchKey(key)
   }
 
   const inputLoop = (): void => {
@@ -477,7 +529,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       try {
         for await (const input of session) {
           if (disposed) return
-          if (consumeInput(input)) {
+          if (routeInput(input)) {
             if (exitRequested) continue
             exitRequested = true
             options.log?.('tsp renderer: exit key', { key: input.type === 'key' ? input.key.name : undefined })
@@ -522,6 +574,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     display,
     composer: composerPort,
     interaction: inertInteraction,
+    bindInput: (handlers) => {
+      if (disposed) throw new Error('the TSP renderer is disposed')
+      if (inputBound) throw new Error('the TSP renderer input is already bound')
+      inputBound = true
+      boundHandlers = handlers
+      // Consume the held pre-bind keys ONCE, in arrival order. An exit
+      // intent among them (possible only if the draft emptied through held
+      // edits — the legal PRE-bind Ctrl+C/Ctrl+D already acted) routes the
+      // exit; the caller's handlers now observe every subsequent key.
+      const held = heldKeys.splice(0, heldKeys.length)
+      for (const key of held) {
+        if (disposed) return
+        if (dispatchKey(key)) {
+          if (exitRequested) continue
+          exitRequested = true
+          options.log?.('tsp renderer: exit key (held)', { key: key.name })
+          options.requestExit()
+        }
+      }
+    },
     dispose: async () => {
       if (disposed) return
       disposed = true

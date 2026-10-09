@@ -179,6 +179,21 @@ export type {
 const REPAINT_FLUSH_MS = 50
 
 /**
+ * PR3-B §3.3 (the B1 slice): the renderer-facing input binding — a NARROW
+ * structural projection of the existing `TuiAppEvents` (the lifecycle/user
+ * activity members), constructed at the `SurfaceRuntime.start` composition
+ * site from the exact already-built callbacks. B2 widens this with the
+ * submission members (`submit`/`steer`/`cancel`); B1 binds editor-local +
+ * lifecycle only, so no pre-bind key can act as an application gesture.
+ */
+export interface SurfaceInputBinding {
+  /** The keyboard exit intent (the SAME orchestration as `/exit`). */
+  exit(): void
+  /** Real user input on the editor seat (editable/submit keys). */
+  noteUserInput(): void
+}
+
+/**
  * PR3-A: one already-connected renderer mount the composition root hands to
  * {@link SurfaceRuntime.start} instead of the default PiTui process mount.
  * The mount owns its own terminal (the TSP SDK session); the surface never
@@ -194,19 +209,26 @@ export interface SurfaceRendererMount {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
     /**
-     * PR3-B §3.1: the renderer's composer projection. B0 mounts only an
-     * INERT implementation (the TSP renderer has no editor yet — reads throw
-     * so no code path can silently no-op); B1 replaces it with the real
-     * controlled composer.
+     * PR3-B §3.1: the renderer's composer projection (B1: the TSP
+     * renderer's ONE program-owned composer; the PiTui branch is the live
+     * `TuiApp` itself).
      */
     readonly composer: SubmissionComposerPort
     /**
-     * PR3-B §3.2: the renderer's modal presenter. B0 mounts only an INERT
+     * PR3-B §3.2: the renderer's modal presenter. B1 keeps the INERT
      * implementation (no TSP form exists; every ask rejects — fail-closed,
      * consistent with `supportsModals === false`); B3 replaces it with the
      * real TSP interaction presenter.
      */
     readonly interaction: SurfaceInteractionPresenter
+    /**
+     * PR3-B §3.3 (the B1 review F4 contract): bind the application input
+     * handlers ONCE. The renderer holds pre-bind keys in a bounded
+     * renderer-local queue and consumes them exactly once here; a dispose
+     * before the bind discards the queue unconsumed. B1 binds the
+     * editor-local/lifecycle projection; B2 widens it with submissions.
+     */
+    readonly bindInput: (handlers: SurfaceInputBinding) => void
     /**
      * Stop the renderer and release its terminal ONCE (the TSP branch closes
      * the SDK surface then the session). May be async; the surface disposal
@@ -1727,6 +1749,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         composerPort = mounted.composer
         interactionPresenter = mounted.interaction
         rendererDispose = mounted.dispose
+        // PR3-B §3.3: bind the application input projection at the SAME
+        // start() commit point — the renderer's held pre-bind keys are
+        // consumed exactly once, here. The projection uses the EXACT
+        // already-constructed callbacks from the runner's events table
+        // (preserving their receiver/signature); B2 widens it with the
+        // submission members.
+        mounted.bindInput({
+          exit: () => deps.events.onExit(),
+          noteUserInput: () => deps.events.onUserInput?.(),
+        })
         return
       }
       // A4-8 (plan §17): the transcript-navigation and Ctrl+R search
