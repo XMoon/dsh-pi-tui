@@ -11,7 +11,7 @@
  *
  * - an already-aborted approval request settles `cancelled` SYNCHRONOUSLY (the
  *   prompt's own signal withdraws it otherwise) and the ownership of the
- *   approval prompt stays with the mounted app;
+ *   approval prompt stays with the injected presenter;
  * - the settled `userQuestions` projection is the authoritative final answer of
  *   a timed-out call: the transcript card renders what the user finally answered,
  *   never the timeout payload;
@@ -26,8 +26,8 @@
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
-import type { TuiApp } from '../../tui-app.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
+import type { SurfaceInteractionPresenter } from './interaction-presenter.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
 import { QuestionSurfaceController } from './question-controller.ts'
 
@@ -42,10 +42,17 @@ export interface SurfaceInteractionDeps {
 
 /** The narrow inputs of the approval/question owner; one cohesive lifetime. */
 export interface InteractionRuntimeOptions {
-  /** The mounted app (throws before `start()`), read through the aggregate. */
-  readonly mounted: () => TuiApp
-  /** The mounted app WITHOUT the not-mounted throw (the teardown path reads it). */
-  readonly liveApp: () => TuiApp | undefined
+  /**
+   * PR3-B §3.2: the renderer-facing modal presenter. The composition injects
+   * the narrow `SurfaceInteractionPresenter` projection here (the PiTui
+   * branch delegates to the live `TuiApp`; a TSP presenter is mounted only
+   * after its real form exists — until B3 the TSP branch stays fail-closed).
+   * Reads before `start()` throw, exactly like the previous `mounted()` read.
+   */
+  readonly presenter: () => SurfaceInteractionPresenter
+  /** The mounted presenter WITHOUT the not-mounted throw (the teardown path
+   *  reads it; `undefined` when no presenter is live). */
+  readonly livePresenter: () => SurfaceInteractionPresenter | undefined
   /**
    * PR3-A: the renderer-facing display seam. When the live renderer cannot
    * present interactive modals (`supportsModals === false`, the read-only TSP
@@ -147,7 +154,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       port.onApprovalRequest((req, next) => {
         if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
         const args = req.callId === undefined ? undefined : deps.lookupCallArgs(req.callId)
-        return options.mounted().showApprovalPrompt({
+        return options.presenter().showApprovalPrompt({
           toolName: req.toolName,
           reason: req.reason,
           signal: req.signal,
@@ -164,7 +171,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       // M3-3B: the settled `userQuestions` projection is the authoritative
       // final answer of a timed-out call, so the transcript card renders what
       // the user finally answered instead of the timeout payload.
-      options.mounted().setSettledQuestionAnswersLookup((callId) => {
+      options.presenter().setSettledQuestionAnswersLookup((callId) => {
         const sessionId = options.currentSessionId()
         if (sessionId === undefined) return undefined
         return port.questions.snapshot(sessionId)?.settled.find(entry => entry.callId === callId)?.answers
@@ -174,8 +181,8 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         // The controller decides per presentation whether the Agent is blocked
         // on the answer: a LIVE foreground wait is, a CONTINUED late answer is not.
         ask: (questions, signal, status, agentInputWait) =>
-          options.mounted().askQuestions(questions, signal, status, agentInputWait),
-        notify: (message, level) => { options.mounted().notify(message, level) },
+          options.presenter().askQuestions(questions, signal, status, agentInputWait),
+        notify: (message, level) => { options.presenter().notify(message, level) },
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
         diag: options.diag(),
@@ -204,7 +211,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       runSyncDisposalSteps('interaction runtime disposal', [
         () => questionAttention?.(),
         () => controller?.dispose(),
-        () => options.liveApp()?.setSettledQuestionAnswersLookup(undefined),
+        () => options.livePresenter()?.setSettledQuestionAnswersLookup(undefined),
       ])
     },
   }

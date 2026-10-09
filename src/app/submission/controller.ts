@@ -48,7 +48,8 @@ import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckSt
 import { SubmitLatencyTracker, type SubmitLatencyPhase } from './latency.ts'
 import { DirectSubmissionPresentation, type SubmissionPresentationSource } from './presentation.ts'
 import { mergeDraft, refuseByTransitionFence } from './steer.ts'
-import type { ComposerSubmitRequest, TuiApp } from '../../tui-app.ts'
+import type { ComposerSubmitRequest } from '../../tui-app.ts'
+import type { SubmissionComposerPort } from './composer-port.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptSubmission, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
@@ -120,8 +121,14 @@ export interface SubmissionExtensionsDeps {
 
 /** The narrow capabilities the submission controller consumes. */
 export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike> {
-  /** The mounted app (editor, notifications, submit-pending row). */
-  readonly app: () => TuiApp
+  /**
+   * The composer surface (editor draft/restore/insert, notices, the
+   * submit-ack row and the settled-card clear). PR3-B §3.1: this is the
+   * narrow `SubmissionComposerPort` — the PiTui branch injects the live
+   * `TuiApp` (structurally compatible); a TSP renderer injects its own
+   * composer. The submission owner never reads panel/chrome members.
+   */
+  readonly app: () => SubmissionComposerPort
   readonly diag: Diag
   /** The runner lifetime signal (a disposed gesture never restores/notifies). */
   readonly signal: AbortSignal

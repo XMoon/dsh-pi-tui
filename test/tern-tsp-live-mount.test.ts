@@ -882,8 +882,8 @@ test('A-08b: the interaction owner registers fail-closed answerers on a modal-le
     setApprovalPolicy: () => true,
   }
   const interaction = createInteractionRuntime({
-    mounted: () => { throw new Error('no TuiApp on the TSP branch') },
-    liveApp: () => undefined,
+    presenter: () => { throw new Error('no TuiApp on the TSP branch') },
+    livePresenter: () => undefined,
     display: () => display as never,
     currentSessionId: () => 'session-a08',
     schedulePaint: () => {},

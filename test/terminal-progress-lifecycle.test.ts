@@ -607,8 +607,8 @@ function mountSurface(
     setApprovalPolicy: () => true,
   } as unknown as InteractionPort
   const agentInteraction = createInteractionRuntime({
-    mounted: () => surface.app,
-    liveApp: () => surface.app,
+    presenter: () => surface.app,
+    livePresenter: () => surface.app,
     display: () => surface.display,
     currentSessionId: () => 'session-terminal-progress-test',
     schedulePaint: () => {},

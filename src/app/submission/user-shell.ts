@@ -45,8 +45,21 @@ const USER_SHELL_TAIL_FLUSH_MS = 200
 
 /** The narrow capabilities the user shell consumes. */
 export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
-  /** The mounted app (shell card + notifications). */
+  /**
+   * The PiTui local-card surface (shell card presentation). The `!`/`!!` run
+   * is PiTui-only in PR3-B — the TSP renderer refuses at the submission
+   * admission before this owner's `run()` can execute — so this seam stays a
+   * `TuiApp` and is never exercised on the TSP branch.
+   */
   readonly app: () => TuiApp
+  /**
+   * The renderer-neutral notice sink (PR3-B §B0-7): every failure/interrupt
+   * notification routes through here (`surface.display.notify`), so the Esc
+   * interrupt path cannot reach PiTui-only `TuiApp` members when a non-PiTui
+   * renderer owns the terminal. The injected implementation never throws on
+   * a disposed surface.
+   */
+  readonly notify: (message: string, kind?: 'error' | 'info') => void
   readonly diag: Diag
   readonly isCleanedUp: () => boolean
   /** The exact live Agent of the current owner, or undefined (Direct-only
@@ -164,11 +177,11 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
             : outcome.kind === 'indeterminate'
               ? 'session cancellation result is indeterminate — do not retry automatically'
               : 'session cancellation was cancelled'
-        deps.app().notify(message, 'error')
+        deps.notify(message, 'error')
       },
       onError: (error) => {
         if (deps.isCleanedUp() || deps.ownership.generation() !== generation) return
-        deps.app().notify(safeErrorMessage(error), 'error')
+        deps.notify(safeErrorMessage(error), 'error')
       },
     })
   }
@@ -245,7 +258,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
         clearSettledLocalMessages: () => deps.app().clearSettledLocalMessages(),
         notify: (message, kind) => {
           if (deps.isCleanedUp()) return
-          deps.app().notify(message, kind)
+          deps.notify(message, kind)
         },
         markDispatch: (sessionId) => deps.submission.markDispatch(sessionId),
         writerSection: deps.writerSection,
