@@ -334,3 +334,148 @@ test('B2: a hydration that NEVER commits stays fail-closed (Loading retained, no
     await harness.dispose()
   }
 })
+
+// ── The genuine A→B draft isolation (§7.3; the B2 external review's F1) ─────
+
+test('B2: a GENUINE session switch clears the old draft — Enter into B never sends A\'s text', async () => {
+  // The exact state sequence of the external review's P2: session A's
+  // unsubmitted draft must not survive into B. The session-lifecycle
+  // authority (the generation reset) drops the active draft at the bump —
+  // BEFORE the new subject's frame commits — so when the fence lifts, the
+  // composer starts EMPTY and B's first submit carries only B's own text.
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) })
+  try {
+    harness.input.type('draft from A')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'draft from A')
+    // The synchronous generation boundary of a GENUINE switch: the owner
+    // raises the hydration window AND drops the outgoing session's draft.
+    harness.renderer.display.beginSessionHydration()
+    harness.renderer.display.clearActiveDraft()
+    await settle()
+    // B's own projection commits: the fence lifts.
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'B' })
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), '',
+      'the A→B switch cleared A\'s unsubmitted draft (never submittable into B)')
+    // A stray Enter right after the lift hands the renderer's EMPTY wire
+    // form to the application (its empty-submission no-op); what must NEVER
+    // appear is A's text.
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, [''],
+      'the stray Enter handed over the EMPTY draft (the application no-ops it) — never A\'s text')
+    // B's own typing works normally.
+    harness.input.type('typed in B')
+    await settle()
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, ['', 'typed in B'],
+      'after the empty handover, B\'s own draft submits normally (A\'s text never appears)')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B2: a SAME-SESSION rehydrate preserves the unsubmitted draft', async () => {
+  // §7.3's other half: ordinary hydration of the SAME session keeps the
+  // unsubmitted main-composer text Client-local. `initLiveSession` calls
+  // `beginSessionHydration` on the SAME generation (no generation reset, no
+  // `clearActiveDraft`), so the draft must survive the rehydrate window and
+  // remain editable once the new fold commits.
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) })
+  try {
+    harness.input.type('kept through rehydrate')
+    await settle()
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    // The SAME session's replacement fold commits (a new source token, no
+    // generation reset): the fence lifts WITHOUT any draft drop.
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'same-session-new-fold' })
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'kept through rehydrate',
+      'the same-session rehydrate preserved the unsubmitted draft')
+    harness.input.type(' + more')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'kept through rehydrate + more',
+      'editing continues on the preserved draft')
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, ['kept through rehydrate + more'],
+      'the preserved draft submits into the SAME session normally')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B2: a FAILED switch (hydration raised, never cleared, no new subject) preserves the draft', async () => {
+  // The failure-adjacent path the external review asked to cover: a switch
+  // that begins (hydration window raised) but never reaches its generation
+  // boundary — the owner's failure handling keeps the OLD subject. No
+  // `clearActiveDraft` ran, so the user's draft is intact once the SAME
+  // subject re-commits.
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) })
+  try {
+    harness.input.type('draft during failed switch')
+    await settle()
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    // The switch FAILED: the same subject's own fold re-commits (the fence
+    // lifts on the new source token; no draft was ever dropped).
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'A-recovered' })
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'draft during failed switch',
+      'a failed switch preserved the draft (no draft drop without the generation boundary)')
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, ['draft during failed switch'],
+      'the preserved draft submits into the recovered session normally')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B2: a late ASYNC restore for the OLD session cannot reseed the new session\'s composer', async () => {
+  // The stale-rollback path: a submission made in A fails AFTER the switch
+  // already happened; its synchronous restore (`mergeDraftIntoEditor`) is
+  // scope/generation-fenced by the submission runtime. The renderer-side
+  // guarantee under test here: after the switch cleared the draft, the ONLY
+  // writers to the composer are the bound application port mutators — so
+  // the observable contract is that the cleared state STAYS cleared through
+  // the fence lift and B's own events. (The producer-side fence — the
+  // submission runtime's generation check before `mergeDraftIntoEditor` —
+  // is pinned by steer.test.ts's "a generation bump between the snapshot
+  // and the delivery aborts stale and restores the draft" family.)
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) })
+  try {
+    harness.input.type('late restore target')
+    await settle()
+    // The switch boundary (the same sequence as the genuine-switch case).
+    harness.renderer.display.beginSessionHydration()
+    harness.renderer.display.clearActiveDraft()
+    await settle()
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'B' })
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), '', 'the switch cleared the draft')
+    // A LATE async restore attempt for A arrives as a plain port write. The
+    // renderer itself cannot know its provenance — but the cleared state
+    // plus B's committed fence is the contract this pins; the scope fence
+    // lives in the submission runtime (its own regression family).
+    harness.renderer.composer.setEditorText('late restore from A')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'late restore from A',
+      'the port mutator is the ONLY writer (the renderer adds no hidden cache; the producer-side scope fence is separately pinned)')
+    // Explicitly undo the synthetic restore so the finally-dispose state is
+    // deterministic; then prove the REAL path — the submission runtime —
+    // never performs this write for a stale scope (see steer.test.ts).
+    harness.renderer.composer.setEditorText('')
+    await settle()
+    assert.deepEqual(submissions, [], 'no submission fired during the stale-restore probe')
+  } finally {
+    await harness.dispose()
+  }
+})

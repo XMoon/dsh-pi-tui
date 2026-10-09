@@ -98,6 +98,9 @@ interface Harness {
   rehydrate(): Promise<void>
   /** The synchronous generation-bump reset (the A2 seam). */
   resetForGeneration(): void
+  /** PR3-B §7.3: how many times the generation reset dropped the active
+   *  draft through the display seam (the genuine-switch wiring witness). */
+  draftClears(): number
 }
 
 function harness(): Harness {
@@ -117,9 +120,13 @@ function harness(): Harness {
     clearSessionOverrides: () => {}, resetInputHistory: () => {},
   }
   const journal = createOpeningJournal<Record<string, unknown>>()
+  // PR3-B §7.3 (B2 external review F1): the generation reset's draft-drop
+  // WIRING — the seam records the call so the reset's own regression can
+  // prove the authority boundary reaches the renderer.
+  let draftClears = 0
   const surface = {
     app, openingJournal: journal,
-    display: displaySeamStub(),
+    display: displaySeamStub({ clearActiveDraft: () => { draftClears += 1 } }),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
     applyResumedCompaction: () => {}, repaint: () => {}, refreshPendingInput: () => {},
     refreshTasks: () => {}, refreshAgents: () => {},
@@ -218,6 +225,7 @@ function harness(): Harness {
       generation += 1
       presentation.resetForGeneration()
     },
+    draftClears: () => draftClears,
   }
 }
 
@@ -231,6 +239,25 @@ test('PR5 §3.2: a bounded window without enough samples starts UNAVAILABLE (unk
   h.setWindow(events, true)
   await h.coldHydrate()
   assert.equal(h.available(), false)
+})
+
+test('PR3-B §7.3: the generation reset drops the active draft through the seam (genuine A→B only)', async () => {
+  // The B2 external review's F1 wiring witness: the ONE draft-drop point is
+  // the SYNCHRONOUS generation boundary (`resetForGeneration` — the
+  // session-lifecycle authority a same-session rehydrate never crosses).
+  // The reset calls the seam exactly once; ordinary hydration and a window
+  // rehydrate (same generation, no reset) never touch it.
+  const h = harness()
+  h.setWindow([], false)
+  await h.coldHydrate()
+  assert.equal(h.draftClears(), 0, 'an ordinary cold hydrate never drops the draft')
+  await h.rehydrate()
+  assert.equal(h.draftClears(), 0, 'a same-session window rehydrate never drops the draft')
+  h.resetForGeneration()
+  assert.equal(h.draftClears(), 1,
+    'the synchronous generation reset dropped the active draft exactly once (the genuine-switch boundary)')
+  h.resetForGeneration()
+  assert.equal(h.draftClears(), 2, 'each genuine switch drops exactly once')
 })
 
 test('PR5 §3.2: a window that reached the history start is AVAILABLE even with zero valid samples', async () => {

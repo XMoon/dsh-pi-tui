@@ -126,6 +126,18 @@ export interface SurfaceDisplaySeam {
    * at the first commit carrying a DIFFERENT (new) source token.
    */
   beginSessionHydration(): void
+  /**
+   * PR3-B §7.3 (the B2 external-review F1): drop the ACTIVE editor's
+   * unsubmitted draft at the generation boundary of a genuine session
+   * switch — the old session's text must never be submittable into the new
+   * one once the hydration fence lifts. Called ONLY from the synchronous
+   * generation reset (the session-lifecycle authority), so an ordinary
+   * same-session rehydrate NEVER reaches it (its draft stays Client-local
+   * per the same rule). The PiTui adapter is a deliberate no-op: its
+   * long-standing cross-session draft retention is the PiTui contract; the
+   * plan's clear-on-switch rule scopes the TSP active draft only.
+   */
+  clearActiveDraft(): void
   /** Replace the editor input-history recall rows (editor-only; a read-only
    * renderer ignores the rows but still records the reset). */
   resetInputHistory(entries: readonly string[]): void

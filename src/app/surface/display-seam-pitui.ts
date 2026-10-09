@@ -56,6 +56,11 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
       app.clearExitConfirmation()
       app.clearSessionOverrides()
     },
+    clearActiveDraft() {
+      // PR3-B §7.3: deliberately INERT on PiTui — the main draft's
+      // cross-session retention is PiTui's long-standing contract; the
+      // plan's clear-on-switch rule scopes the TSP active draft only.
+    },
     resetInputHistory: entries => app.resetInputHistory(entries),
     setSearchResult: (index, count) => app.setSearchResult(index, count),
     notify: (text, kind) => app.notify(text, kind),
