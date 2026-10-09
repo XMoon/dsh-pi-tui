@@ -229,3 +229,64 @@ test('B2/Direct: Esc during a RUNNING turn cancels the turn through the existing
     await fixture.settle()
   }
 })
+
+// ── The CLIENT-EXTENSION command family ─────────────────────────────────────
+
+test('B2/Direct: a registered extension contribution runs (never refused by the TSP builtin gate)', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const calls: string[] = []
+  const fixture = await createDirectTspFixture(life, {
+    extensionCommands: [{
+      id: 'ext-probe',
+      name: 'extprobe',
+      description: 'An extension contribution',
+      sessionless: true,
+      handler: () => { calls.push('extprobe'); return { kind: 'success', text: 'ext ran' } },
+    }],
+  })
+  try {
+    await directSettle(4_000)
+    fixture.pane.input.type('/extprobe')
+    await directSettle()
+    fixture.pane.input.type('\r')
+    await waitFor('the extension contribution handler', () => calls.length > 0, 25_000)
+    assert.deepEqual(calls, ['extprobe'], 'the registered extension contribution ran exactly once')
+    assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
+      'a client-extension command is NOT refused by the TSP TUI-builtin gate')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+// ── The advertised-miss path (a name the standing catalog promised) ─────────
+
+test('B2/Direct: an advertised name missing from the created session is consumed as an advertised-miss, not a TSP refusal', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  // A fixture skill provider makes the name visible to the STANDING catalog
+  // (it is advertised to the composer), while the session-scoped catalog this
+  // fixture composes does not resolve it after the session is created — the
+  // exact advertised-miss shape. The gate under test is that the EXISTING
+  // advertised-miss consumption owns the line (with its own truthful notice)
+  // and it is never mislabelled as an unsupported TSP TUI builtin.
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['UNUSED'],
+    skills: [{ name: 'fixture-skill', description: 'A fixture skill', body: 'Do the fixture thing.' }],
+  })
+  try {
+    await directSettle(4_000)
+    fixture.pane.input.type('/fixture-skill')
+    await directSettle()
+    fixture.pane.input.type('\r')
+    await waitFor('the advertised-miss notice', () =>
+      fixture.pane.output.text().includes('is not available in the created session'), 25_000)
+    const wire = fixture.pane.output.text()
+    assert.ok(wire.includes('is not available in the created session'),
+      'the existing advertised-miss path consumed the line with its own notice')
+    assert.ok(!wire.includes('not available in TSP'),
+      'an advertised-miss is never mislabelled as an unsupported TSP TUI builtin')
+  } finally {
+    await fixture.settle()
+  }
+})

@@ -46,7 +46,10 @@ import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
+import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
+import { apply as applyBuiltins } from '../../src/builtins.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { installTspPane, type TspPane } from './tsp-terminal-fixture.ts'
 
@@ -64,6 +67,8 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
   /** Every model request that observed its caller's ABORT (the authoritative
    *  fact that an existing cancellation path reached the live request). */
   readonly aborts: string[] = []
+  /** How many model requests were issued (the skill path issues one too). */
+  calls = 0
   constructor(deltas: readonly string[], hold?: () => Promise<void>) {
     super()
     this.deltas = deltas
@@ -75,6 +80,7 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
   }
 
   override async *stream(options: { readonly signal?: AbortSignal }): AsyncIterable<StreamChunk> {
+    this.calls += 1
     // A HELD stream keeps the turn RUNNING until the test releases it (the
     // busy/running-window cases need a live turn, not a finished one). It must
     // still OBEY the caller's abort signal: a cancelled turn has to end.
@@ -102,6 +108,8 @@ export interface DirectTspFixture {
   readonly workRoot: string
   /** How many live model requests observed their caller's abort. */
   cancellations(): number
+  /** How many model requests the scripted adapter served. */
+  modelCalls(): number
   settle(): Promise<void>
 }
 
@@ -134,6 +142,18 @@ export async function createDirectTspFixture(
      *  volatile authority `applyRunner` reads, so the busy preference under
      *  test is the real configured one. */
     readonly tuiConfig?: Record<string, unknown>
+    /** SKILLS served by a fixture provider on the REAL `dsh-skill` registry
+     *  (the `skill-invocation` family — agent-facing input). */
+    readonly skills?: ReadonlyArray<{ readonly name: string; readonly description: string; readonly body: string }>
+    /** CLIENT-EXTENSION command contributions registered through the REAL
+     *  extension service (the `client-command`/`extension` family). */
+    readonly extensionCommands?: ReadonlyArray<{
+      readonly id: string
+      readonly name: string
+      readonly description: string
+      readonly sessionless?: boolean
+      readonly handler: () => unknown
+    }>
     readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
     readonly appExit?: () => void
     /**
@@ -215,11 +235,62 @@ export async function createDirectTspFixture(
     ...(options.startup ?? {}),
     shippedPresetRoot: workRoot,
   } as never)
+  // The Client-EXTENSION command family is REAL too: mount the TUI's own
+  // extension host (and the first-party chrome row) before the runner, so a
+  // registered contribution reaches the runner through the same service the
+  // production bundle provides.
+  if (options.skills !== undefined && options.skills.length > 0) {
+    await ctx.plugin(SkillRegistry, {})
+    const registry = ctx.get('skills') as unknown as {
+      registerProvider(provider: unknown): unknown
+    }
+    const skills = options.skills
+    // The registry takes a FACTORY `(control) => provider`.
+    registry.registerProvider((_control: unknown) => ({
+      name: 'b2-fixture-provider',
+      list: async () => skills.map(skill => ({
+        name: skill.name,
+        description: skill.description,
+        rank: 10,
+        invocation: { modelInvocable: true, userInvocable: true },
+        source: 'bundled',
+        provider: 'b2-fixture-provider',
+        locator: { name: skill.name },
+      })),
+      get: async (candidate: { locator: { name: string } }) => {
+        const skill = skills.find(entry => entry.name === candidate.locator.name)
+        return skill === undefined ? undefined : {
+          name: skill.name,
+          description: skill.description,
+          invocation: { modelInvocable: true, userInvocable: true },
+          source: 'bundled',
+          provider: 'b2-fixture-provider',
+          locator: candidate.locator,
+          content: skill.body,
+        }
+      },
+    }))
+  }
+  const extensionFiber = await ctx.plugin(applyExtensionHost as never, {} as never)
+  const builtinsFiber = await ctx.plugin(applyBuiltins as never, {} as never)
+  const contributionFiber = await ctx.plugin(((pluginCtx: Context) => {
+    const service = pluginCtx.get(PI_TUI_EXTENSIONS_SERVICE) as
+      { registerCommand(contribution: never): unknown } | undefined
+    for (const command of options.extensionCommands ?? []) {
+      service?.registerCommand({
+        id: command.id,
+        name: command.name,
+        description: command.description,
+        ...(command.sessionless === undefined ? {} : { sessionless: command.sessionless }),
+        handler: () => command.handler(),
+      } as never)
+    }
+  }) as never, {} as never)
   const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
     pluginCtx,
     TuiConfigSchema({ fullscreen: 'off', ...options.tuiConfig } as never),
   ))
-  fibers.push(runnerFiber)
+  fibers.push(runnerFiber, contributionFiber, builtinsFiber, extensionFiber)
 
   let settlement: Promise<void> | undefined
   const settle = (): Promise<void> => {
@@ -244,6 +315,7 @@ export async function createDirectTspFixture(
     ctx,
     workRoot,
     cancellations: () => llmAdapter.aborts.length,
+    modelCalls: () => llmAdapter.calls,
     settle,
   }
 }
