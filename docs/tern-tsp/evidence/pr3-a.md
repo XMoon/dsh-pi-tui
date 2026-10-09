@@ -337,13 +337,66 @@ diag landed on the DEFAULT `$DSH_HOME/logs/pi-tui-<pid>.log`. Read the file matc
 the pane's own PID for a complete capture — the pane's scrollback is not a
 substitute (it truncates and buffers).
 
-Read-only live updates: the resumed-session smoke proves the FULL chain (fold →
-canonical structure → PR1 mapper → SDK surface → real Tern render, ack loop
-under credits:2). **This is an UNMET acceptance gate**, not a scope hand-off:
-the plan requires the renderer to consume a real ongoing / resumed / externally
-produced event, and read-only does NOT mean replay-only. A current-build live
-tool/delta consumption record is still missing, and PR3-B's future interactive
-turn is not a substitute for it.
+### Same-process REAL live turn (real Tern pane) — the live-consumption gate
+
+The resumed-session smoke proves the full chain (fold → canonical structure → PR1
+mapper → SDK surface → real Tern render) but is replay. A REAL, same-process Agent
+turn was driven and consumed as follows.
+
+Method (temporary, OUTSIDE the product and the published package): a throwaway
+profile links this worktree and adds a local driver package through an official
+`dsh --patch` overlay row. The driver (1) turns on the shipped SDK's own wire
+recording (`TERN_TSP_RECORD`, read by the SDK's `connect`) BEFORE the renderer
+selection runs, (2) records the official Host event plane, and (3) resolves the
+SAME Agent the runner owns through the public `ctx.agents.get(sessionId)` and
+triggers exactly ONE turn with `Agent.followup(...)` — no second Agent, no second
+writer, no test-only product API, no B editor.
+
+```sh
+tern serve --control /tmp/tern-pr3a12.sock --out /tmp/pr3a-final3
+tern ctl --control /tmp/tern-pr3a12.sock run "read -t 0.5 -n 1 X"      # drain a stray key
+tern ctl --control /tmp/tern-pr3a12.sock run \
+  "env DSH_PI_TUI_RENDERER=tsp dsh --profile pi-tui-pr3a \
+     --patch /tmp/pr3a-live-patch.yml --session session-b2f75ed9-…"
+```
+
+Versions: Tern `0.6.3` (the SDK's own hello reply), `@stencil-hq/tern@0.1.0`, DSH
+`0.2.0-rc.2`, bundle `0.5.1` (this worktree), profile `~/.dsh/profiles/pi-tui-pr3a`.
+
+Identity + currentness: the driver resolved `ctx.agents.get('session-b2f75ed9-…')`
+with `agent.session.id === sessionId` (same identity) while the runner owned that
+session (`resume ok session=… seq=75`). ONE Agent, one writer.
+
+Official event sequence for the driver's turn (turn 6):
+
+| seq | event |
+|---|---|
+| 91 | `turn/start` turn=6 |
+| 93 | `step/start` step=1 |
+| 94 | `user/message` |
+| 95–96 | `request/header`, `session-log-deepseek/delivery-accepted` |
+| 97 | `assistant/message` |
+| 98 | **`tool/call`** |
+| 99 | **`tool/result`** |
+| 100–101 | `step/end`, `step/start` step=2 |
+| 103 | `assistant/message` (final answer) |
+| 104–105 | `step/end`, `turn/end` |
+
+SDK native ops (the SDK's own wire recording, 38 ops) for that turn:
+
+- `main.s1-msg-20` — the *You* card carrying the driver's prompt;
+- `main.s1-work-msg-21.msg-22` — the **tool** node `{"name":"bash","title":"Bash","status":"running","target":"Print the pr3a-live-marker string"}`;
+- `main.s1-work-msg-21.msg-22.result` — `{"k":"code","text":"pr3a-live-marker\n"}`, the real tool result;
+- `main.s1-msg-23` — the *Assistant* card with the final text.
+
+Incremental consumption (not a one-shot replay): the SAME nodes are updated in
+place across frames — `main.s1-work-msg-21.msg-21.body` 6×, `dock.status` 3×,
+`dock.pending-running` 2×, `main.s1-work-msg-21.msg-22` 2×.
+
+Limits of this record: the turn is triggered through the official Host event API
+from a test-only patch row (the plan's allowed real-runner-fixture trigger); the
+pane screenshot does not capture the SDK's native surface (use the ops + the diag);
+cross-process Remote live and PR3-B input stay out of scope.
 
 ### Known limits (recorded, not claimed done)
 
