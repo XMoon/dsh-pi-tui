@@ -189,6 +189,12 @@ const REPAINT_FLUSH_MS = 50
 export interface SurfaceInputBinding {
   /** The keyboard exit intent (the SAME orchestration as `/exit`). */
   exit(): void
+  /**
+   * The interrupt/cancel intent (the SAME orchestration as PiTui's
+   * Ctrl+C/Esc: abort a running local shell and interrupt the live Agent —
+   * never an unconditional exit; PR3-B §3.4 fixed keymap row 3).
+   */
+  cancel(): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
 }
@@ -1757,6 +1763,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // submission members.
         mounted.bindInput({
           exit: () => deps.events.onExit(),
+          cancel: () => deps.events.onCancel?.(),
           noteUserInput: () => deps.events.onUserInput?.(),
         })
         return
