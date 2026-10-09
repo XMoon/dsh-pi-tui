@@ -129,10 +129,16 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
   const state = (): TspComposerState => ({ text, cursor, focused })
   const setFocused = (next: boolean): void => { focused = next }
 
-  /** Replace the text (port mutator): clamp + normalize the caret, notify. */
+  /**
+   * Replace the text (port mutator): the caret moves to the END of the new
+   * text (boundary-aligned) and the change is committed. A replacement is not
+   * an in-place edit, so keeping a stale caret would leave the restored text
+   * with the caret at the OLD position — e.g. a rolled-back submission would
+   * land with the caret at 0, where Backspace does nothing.
+   */
   const replaceText = (next: string): void => {
     text = next
-    cursor = boundaryCursor(next, cursor)
+    cursor = boundaryCursor(next, next.length)
     sinks.onChanged()
   }
   /** Insert at the caret (reducer/port): normalize after any cluster merge. */
