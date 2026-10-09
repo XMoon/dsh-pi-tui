@@ -128,9 +128,14 @@ test('B0: the UserShell interrupt error notice routes through the injected rende
     prompt: () => Promise.resolve(),
     updateQueue: () => Promise.resolve(),
   }
+  // The neutral notify resolves the wait as soon as the REAL observable
+  // completion fires (no fixed delay); the timeout keeps a silent regression
+  // from hanging the suite.
+  let notifyArrived!: (message: string) => void
+  const notified = new Promise<string>(resolve => { notifyArrived = resolve })
   const shell = createUserShell<InterruptAgentLike>({
     app: () => appDouble as never,
-    notify: (message, kind) => { assert.equal(kind, 'error'); notices.push(message) },
+    notify: (message, kind) => { assert.equal(kind, 'error'); notices.push(message); notifyArrived(message) },
     diag: { debug() {}, info() {}, warn() {}, error() {}, dispose() {} },
     isCleanedUp: () => false,
     liveAgent: () => undefined,
@@ -150,8 +155,11 @@ test('B0: the UserShell interrupt error notice routes through the injected rende
   shell.interrupt()
   // The failed cancel surfaces through the NEUTRAL notify; the card members
   // were never touched by the interrupt path.
-  await new Promise(resolve => setTimeout(resolve, 20))
-  assert.ok(notices.length === 1 && notices[0]!.includes('cancel port refused'),
+  const firstNotice = await Promise.race([
+    notified,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the interrupt failure never reached the neutral notify')), 2_000)),
+  ])
+  assert.ok(firstNotice.includes('cancel port refused'),
     `the interrupt failure surfaced through the neutral notify: ${JSON.stringify(notices)}`)
   assert.deepEqual(cardCalls, [], 'the interrupt path never touches the PiTui local-card surface')
 })

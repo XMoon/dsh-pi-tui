@@ -68,6 +68,18 @@ structurally.
 
 ### Remaining exclusions (tracked owners)
 
+- `SurfaceRendererMount.bindInput` (plan §3.3): **DEFERRED_WITH_OWNER: B1.**
+  The external review ruled B0 must not add an empty `bindInput` to satisfy
+  the interface shape — B0's stage gate requires TSP to stay read-only, and
+  the real input binding (single bind, handshake-window early keys, teardown
+  discard) belongs to B1's SDK key/editor wiring.
+- Question-attention chrome coupling (`SurfaceRuntime` feeds
+  `InteractionRuntime.setQuestionAttention` through the PiTui
+  `mounted().setQuestionAttention`): **DEFERRED_WITH_OWNER: B3.** Unreachable
+  while `supportsModals === false` (the controller that publishes attention is
+  never attached on TSP); once B3 enables it, the attention presentation must
+  become renderer-neutral in the same slice — not an empty B0 interface
+  without a consumer.
 - TSP editor/input: **B1** (`tui/tsp/editor.ts`, controlled `ui.editor`).
 - TSP submit/command admission: **B2**.
 - TSP interactive modals (`supportsModals: true`): **B3** — the B0 inert
@@ -76,6 +88,13 @@ structurally.
 
 ### Review
 
+- **External review** (on `33a5b7e8`): 2 P3 findings + 2 boundary rulings —
+  P3-1 the inert `clearSettledLocalMessages` mapped to the WRONG state
+  (`display.setDockNotice(undefined)` clears the transient dock-notice stream,
+  not the settled-local-card set; fixed to fail-fast like every other inert
+  member); P3-2 the interrupt test waited a fixed 20 ms (fixed to a
+  notify-resolved promise with a 2 s timeout); rulings recorded above
+  (`bindInput` → B1, attention chrome → B3).
 - **Round 1** (durable reviewer, read-only, snapshot `33a5b7e8`, tree clean at
   start/end): **accepted** — zero P0/P1/P2. Coverage: all 14 files, every hunk;
   B0 zones 1-8 verified with code anchors; merge-gate items verified against

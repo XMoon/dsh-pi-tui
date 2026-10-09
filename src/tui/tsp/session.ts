@@ -432,7 +432,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
 
   render()
   /** The B0 INERT composer: no editor exists yet, so every member throws
-   *  (a silent no-op could fake a successful draft read). */
+   *  (a silent no-op could fake a successful draft read; a WRONG mapping —
+   *  e.g. clearing the dock-notice channel, which is a transient notice
+   *  stream, not the settled-local-card set — would seed B1 with the wrong
+   *  semantics). */
   const inertComposer: SubmissionComposerPort = {
     getDraft() { throw new Error('the TSP renderer has no composer yet') },
     setDraft() { throw new Error('the TSP renderer has no composer yet') },
@@ -440,7 +443,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     insertIntoEditor() { throw new Error('the TSP renderer has no composer yet') },
     notify(text, kind) { display.notify(text, kind) },
     setSubmitPending() { throw new Error('the TSP renderer has no composer yet') },
-    clearSettledLocalMessages() { display.setDockNotice(undefined) },
+    clearSettledLocalMessages() { throw new Error('the TSP renderer has no composer yet') },
   }
   /** The B0 INERT modal presenter: no form exists yet, so every ask rejects
    *  with the flow's cancellation error (never a fabricated answer). The
