@@ -1,8 +1,87 @@
 # Tern TSP PR3-B evidence — interactive pane (B0..B4)
 
-> **Status: B0 implemented and review-accepted on
-> `feat/tern-tsp-pr3-b0-ports` @ 33a5b7e8 — awaiting PR/merge; B1..B4 gates
-> open.**
+> **Status: B0 merged (`next @ 2c281826`); B1 implemented on
+> `feat/tern-tsp-pr3-b1-editor` — review gates open. B2..B4 pending.**
+
+## B1 — `feat(tern-tsp): controlled composer and SDK key input`
+
+- **Base**: `next @ 2c281826` (the merged B0).
+- **Scope**: the TSP renderer becomes composer-active — controlled
+  `ui.editor`, SDK key/paste through the ONE input loop, grapheme-safe
+  editing, the B1 submit refusal. NO backend submission (B2), no modals (B3).
+
+### What changed (source anchors)
+
+| Zone | Change |
+|---|---|
+| `src/tui/tsp/editor.ts` (new) | The ONE program-owned composer: state `{ text, cursor, focused }` (UTF-16 cursor), the port members, and `applyKey` — the fixed §3.4 editor-local reducer. Grapheme movement/deletion via `Intl.Segmenter` (never splits surrogate pairs/ZWJ clusters — verified: `👨‍👩‍👧` = 8 UTF-16 units, ONE cluster, consumed whole). Enter/Ctrl+Enter classify as submit GESTURES without mutating the draft; Shift+Enter inserts `\n`; paste is ONE atomic edit (SDK preserves `\r` bytes verbatim); Ctrl+D exits only on an empty draft; unknown control keys are ignored. `clearSettledLocalMessages` is a deliberate no-op (the B0 external-review P3-1 ruling: dock notices are a DIFFERENT state; the real settled-card surface arrives later). |
+| `src/tui/tsp/session.ts` | The dock renders the controlled editor (`key:'composer'`, `maxLines:8`, placeholder, prompt) and focuses `dock.composer` exactly once, AFTER the first committed frame (probe: the SDK emits `["focus","dock.composer"]` as its own frame; a focus before the node exists would be meaningless). The input loop's precedence: disposal fence → Ctrl+C (exit) → the composer reducer → submit gestures refused with the explicit `SUBMIT_NOT_READY` notice, draft preserved. `q` is TEXT (the PR3-A bare-`q` quit retired with the composer — `isQuitKey` now answers only Ctrl+C; the empty-draft Ctrl+D exit lives in the reducer). The composer PORT adapter is the composer object itself (B0's inert throws retired). The dock banner names the submit gestures. `setSubmitPending` surfaces the application's pending fact as a dock line ('Submitting…'/'Queued…'). |
+| `test/tern-tsp-editor-input.test.ts` (new) | 17 tests, two layers over the SAME production code: the reducer (printable/CJK/emoji inserts, surrogate/ZWJ-safe backspace/delete/left/right, line home/end, gesture classification, paste atomicity incl. `/exit\rq` never dispatching, Ctrl+D empty-vs-text, unknown keys, port members incl. the deliberate settled no-op) and the REAL SDK loop over the scripted pane (controlled editor on the wire + focus after the first frame, typed bytes → editor text, Enter refusal keeps the draft + observable notice, paste never dispatches, Ctrl+C routes exit while `q` is text, input-after-dispose inert, handshake-batched key consumed through the composer, handshake-batched empty-draft Ctrl+D routes the legal exit). |
+| `test/tern-tsp-live-mount.test.ts` | A-04b rewritten to the B1 exit semantics (`q` is editor text; Ctrl+D with a non-empty draft never exits). |
+| `test/support/tsp-terminal-fixture.ts` | Unchanged this PR (its `queueWithHandshake` already models the batch race; the B1 suite's pane copies that shape inline). |
+
+### Authority and lifetime
+
+Unchanged from B0: the composer is renderer-local editor state; no session,
+queue, writer or classifier authority. The input loop remains the ONE input
+path (no `process.stdin` listener, no second dispatcher). The exit/fatal
+taxonomy is untouched. Native SDK edit/undo/send features are NOT advertised
+(`sendable` unset).
+
+### Verification (worktree `feat/tern-tsp-pr3-b1-editor`, node v24.20.0, pnpm 11.7.0)
+
+| Command | Result |
+|---|---|
+| `node --test test/tern-tsp-editor-input.test.ts` | 17/17 pass |
+| `node --test test/tern-tsp-live-mount.test.ts` | 17/17 pass (A-04b updated) |
+| `node --test test/tern-tsp-renderer-selection.test.ts test/tern-tsp-runner-teardown.test.ts test/tern-tsp-pr3b-ports.test.ts` | 36/36 pass |
+| `pnpm typecheck:bundle` | pass |
+| `pnpm gate:architecture` | pass (452 files) |
+| `pnpm gate:boundary` | pass (31 files) |
+| `pnpm test:product` | 7495/7495 pass |
+| `pnpm verify:prepush` | pass (exit 0 — full pipeline; the first run failed ONLY the host-keybindings string-label gate on the chord-labelled dock banner, fixed by removing the chord labels per the PR3-A precedent — no gate exception needed) |
+
+### Manual real-pane smoke (DONE — real Tern 0.6.3, headless `tern serve` + `tern ctl`)
+
+Method: `tern serve --control /tmp/tern-b1.sock --out /tmp/serve` + a `tern ctl
+--file` scenario `run`ning the REAL `connectTspRenderer` (shipped SDK connect,
+no scripted pane) with `TERN_TSP_RECORD=/tmp/tern-b1-rec.jsonl`; 8 screenshots
+(`b1-1-initial` … `b1-8-exited` in `/tmp/serve`), all commands ok:true.
+
+Observed from the RECORD (the authoritative wire evidence, 46 messages):
+
+- **Controlled editor + focus:** the dock carries the `dock.composer` editor
+  node from the first frame; the SDK acked every frame.
+- **Typed input:** ASCII `t`,`e`,`x`,`t` each produced exactly one
+  `["set","dock.composer",{"cursor":n}]` + `["text","dock.composer","append",ch]`
+  pair — the incremental controlled-state contract on the REAL renderer.
+- **CJK/emoji:** `你好` committed as single-unit edits (cursor +1 each); `👍`
+  as one 2-unit surrogate-pair edit (cursor 583→585) — never a split.
+- **Paste never dispatches:** `/exit`, a raw `\r` and `q` arrived as CONTENT
+  (`append "/exit"`, the `\r` line, `append "q"`); no exit, no command.
+- **Enter refused:** the notice `the TSP composer is not wired for submission
+  yet — the draft was preserved` reached the REAL wire (three times — once per
+  earlier scenario rehearsal); the draft survived.
+- **Ctrl+D with text:** never exited (the pane kept rendering).
+- **Backspace + empty-draft Ctrl+D:** the backspaces walked the graphemes off
+  the tail (cursor 590→581→… one cluster per key, including the emoji pair);
+  the final `Control+d` on the empty draft produced the clean exit (the
+  process exited, `b1-8-exited` is the shell prompt again).
+- **The scenario's own `run` line seeded the shell-recall text into the
+  composer first** (the pane shell's input echo was live before the renderer
+  took the tty) — real input, correctly edited away by the backspace sweep;
+  kept as-is in the record as an honest artifact of the driving method.
+
+### Remaining exclusions (tracked owners)
+
+- Submit/command admission wiring: **B2** (`bindInput` per the B0 ruling —
+  single bind, the composer-not-ready refusal retires with it).
+- Interactive modals: **B3** (attention chrome neutralization included).
+- History recall (↑): explicitly not in B (the plan §3.4 history note).
+- `clearSettledLocalMessages` real semantics: with the local-card surface
+  (B1 deliberate no-op per the B0 P3-1 ruling).
+
+
 > This file accumulates per-PR evidence for PR3-B exactly as
 > [pr3-a.md](./pr3-a.md) did for PR3-A. Each PR section records its base SHA,
 > the behavioral contract anchors, the authority/lifetime changes, the actual
