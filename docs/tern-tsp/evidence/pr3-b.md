@@ -1,6 +1,8 @@
 # Tern TSP PR3-B evidence — interactive pane (B0..B4)
 
-> **Status: B0 in progress on `feat/tern-tsp-pr3-b0-ports` — stage gates open.**
+> **Status: B0 implemented and review-accepted on
+> `feat/tern-tsp-pr3-b0-ports` @ 33a5b7e8 — awaiting PR/merge; B1..B4 gates
+> open.**
 > This file accumulates per-PR evidence for PR3-B exactly as
 > [pr3-a.md](./pr3-a.md) did for PR3-A. Each PR section records its base SHA,
 > the behavioral contract anchors, the authority/lifetime changes, the actual
@@ -71,3 +73,13 @@ structurally.
 - TSP interactive modals (`supportsModals: true`): **B3** — the B0 inert
   presenter rejects every ask; the fail-closed admission still decides first.
 - Display-seam DTO narrowing: **PR4** (recorded in `docs/tern-tsp.md`).
+
+### Review
+
+- **Round 1** (durable reviewer, read-only, snapshot `33a5b7e8`, tree clean at
+  start/end): **accepted** — zero P0/P1/P2. Coverage: all 14 files, every hunk;
+  B0 zones 1-8 verified with code anchors; merge-gate items verified against
+  the supplied same-state evidence; the shared-seme analysis confirmed the
+  ports are pure projections (no new session/queue/writer/classifier
+  authority). "accepted ≠ merge authorization; B1-B4 and the PR4 display DTO
+  debt remain with their owners."
