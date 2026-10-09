@@ -111,6 +111,7 @@ import { createSessionScopeAuthority, type LiveSessionScope } from '../app/sessi
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
+import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount } from './bootstrap/renderer-selection.ts'
 import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
@@ -1857,6 +1858,16 @@ export function applyRunnerWithRuntime(
       },
     })
 
+    // PR3-A acquisition stage: the SDK renderer's tty lifetime STARTS when the
+    // connector returns the mounted renderer and ENDS when the surface's ordered
+    // teardown releases it. Between those two points the tty is OWNED but not
+    // yet transferred, so the teardown transaction must AWAIT this stage — a
+    // quit arriving during the SDK handshake would otherwise print the resume
+    // hint and request `appExit` while the renderer still owned the terminal.
+    // Settled on EVERY path: at the ownership transfer, or — when the runner was
+    // disposed mid-flight — after the acquired renderer has been released.
+    let settleAcquisition!: () => void
+    const rendererAcquisition = new Promise<void>(resolve => { settleAcquisition = resolve })
     // The ONE idempotent client-surface teardown + fiber disposer (TS2
     // §11/§12): the orchestration is owned by `app/bootstrap/lifecycle.ts`;
     // every released resource is an already-owned callback. The frozen §12
@@ -1865,6 +1876,7 @@ export function applyRunnerWithRuntime(
       diag,
       isCleanedUp: () => cleanedUp,
       markCleanedUp: () => { cleanedUp = true },
+      whenRendererAcquired: () => rendererAcquisition,
       surface,
       abortLifecycle: () => lifecycleController.abort(),
       disposeViewer: () => viewerRef?.dispose(),
@@ -2248,20 +2260,62 @@ export function applyRunnerWithRuntime(
     const rendererOnFatal = (error: unknown): void => {
       void fatalLifecycle.handleStartupFailure(error) // allowlist: fatal lifecycle root — see AGENTS.md
     }
-    const rendererMount = await selectRendererMount({
-      cwd,
-      requestExit: () => requestExit(),
-      onFatal: rendererOnFatal,
-      log: (message, fields) => diag.info(message, fields),
-      connectTsp: productionTspConnector({
+    let rendererMount: SurfaceRendererMount | undefined
+    let rendererTransferred = false
+    /**
+     * Release the ACQUIRED-but-not-transferred renderer, exactly once (inert
+     * after the ownership transfer, where the surface's ordered teardown owns
+     * it). Shared by the cancellation and the rejected-mount paths.
+     */
+    const releaseAcquiredRenderer = async (): Promise<void> => {
+      const acquired = rendererMount
+      rendererMount = undefined
+      if (rendererTransferred || acquired === undefined) return
+      await acquired.releaseUnmounted()
+    }
+    try {
+      rendererMount = await selectRendererMount({
         cwd,
         requestExit: () => requestExit(),
         onFatal: rendererOnFatal,
         log: (message, fields) => diag.info(message, fields),
-        logError: (message, fields) => diag.error(message, fields),
-      }),
-      env: process.env,
-    })
+        connectTsp: productionTspConnector({
+          cwd,
+          requestExit: () => requestExit(),
+          onFatal: rendererOnFatal,
+          log: (message, fields) => diag.info(message, fields),
+          logError: (message, fields) => diag.error(message, fields),
+        }),
+        env: process.env,
+      })
+    } catch (error) {
+      // A REAL connect failure: the runner's fatal path owns it. The acquisition
+      // stage is settled so the teardown transaction cannot wait on a renderer
+      // that was never acquired.
+      settleAcquisition()
+      throw error
+    }
+    if (cleanedUp) {
+      // CANCELLED while the SDK handshake was in flight: release the acquired tty
+      // owner (ONE close, raw restored), skip the mount AND the PiTui fallback,
+      // and stop this boot — the exit already owns the resume hint and
+      // `appExit`. The surface was correctly disposed, so `start` is NOT
+      // attempted: nothing is resurrected and no hot fallback starts a second
+      // renderer.
+      try {
+        await releaseAcquiredRenderer()
+      } catch (releaseError) {
+        try {
+          diag.error('tsp renderer: release failed after a cancelled startup', {
+            error: safeErrorMessage(releaseError),
+          })
+        } catch {
+          // A throwing diagnostics channel must not block the exit.
+        }
+      }
+      settleAcquisition()
+      return
+    }
     // A4: mount through the surface owner. The surface builds the surface-local
     // option wiring (image loader, history-search binding, clipboard/link
     // capabilities, extension registries + input routes, resize/workflow hooks)
@@ -2403,30 +2457,43 @@ export function applyRunnerWithRuntime(
       imageFallbackColor: color.textDim,
       })
     } catch (error) {
-      // PR3-A ownership handshake: the surface rejected the mount (most
-      // often: the runner was disposed while the SDK handshake was in
-      // flight). The connected session is OWNED and must be closed before the
-      // error reaches the fatal path — otherwise raw-mode stdin stays held
-      // with no registered disposer.
-      if (rendererMount !== undefined) {
-        // R2-3: the PRIMARY startup error keeps propagating; a secondary
-        // release failure is recorded (a silent `catch {}` would hide a tty
-        // that stayed in raw mode).
+      // PR3-A ownership handshake: the surface rejected the mount — most often
+      // because a teardown disposed it while the SDK handshake was in flight.
+      // The connected session is OWNED and must be closed before the error
+      // reaches the fatal path (otherwise raw-mode stdin stays held with no
+      // registered disposer) — and a rejection that coincides with an ALREADY
+      // running teardown is the CANCELLATION of this startup, not a startup
+      // failure: the exit transaction (which awaits the acquisition stage)
+      // finishes with the tty restored and owns the hint/`appExit`. `start()`
+      // keeps its disposed rejection: nothing is resurrected here.
+      let releaseFailure: unknown
+      // R2-3: the PRIMARY startup error keeps propagating; a secondary release
+      // failure is recorded (a silent `catch {}` would hide a tty that stayed in
+      // raw mode).
+      try {
+        await releaseAcquiredRenderer()
+      } catch (error_) {
+        releaseFailure = error_
+      }
+      if (releaseFailure !== undefined) {
         try {
-          await rendererMount.releaseUnmounted()
-        } catch (releaseError) {
-          try {
-            diag.error('tsp renderer: release failed after a rejected mount', {
-              error: safeErrorMessage(releaseError),
-              primary: safeErrorMessage(error),
-            })
-          } catch {
-            // A throwing diagnostics channel must not replace the primary.
-          }
+          diag.error('tsp renderer: release failed after a rejected mount', {
+            error: safeErrorMessage(releaseFailure),
+            primary: safeErrorMessage(error),
+          })
+        } catch {
+          // A throwing diagnostics channel must not replace the primary.
         }
       }
+      settleAcquisition()
+      if (cleanedUp) return
       throw error
     }
+    // The ownership transfer is COMPLETE on both branches: the TSP renderer (if
+    // any) now belongs to the surface's ordered teardown, and the PiTui branch
+    // acquired no renderer at all. The exit/fatal/HMR transaction may proceed.
+    rendererTransferred = rendererMount !== undefined
+    settleAcquisition()
     // The mounted surface is now live. On the PiTui branch the runner borrows
     // the TuiApp reference (the surface owner keeps the lifetime); the TSP
     // renderer branch has NO TuiApp (the slot stays undefined: command

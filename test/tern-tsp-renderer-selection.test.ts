@@ -523,6 +523,8 @@ interface LifecycleHarness {
   readonly lifecycle: import('../src/app/bootstrap/lifecycle.ts').SurfaceLifecycle
   readonly order: string[]
   release(): void
+  /** Settle the acquisition stage (the ownership transfer / the cancelled release). */
+  acquire(): void
 }
 
 function mountLifecycle(options: {
@@ -531,6 +533,8 @@ function mountLifecycle(options: {
   readonly viewerFailure?: unknown
   /** When present, the renderer RELEASE rejects with this value. */
   readonly releaseFailure?: unknown
+  /** Keeps the ACQUISITION stage pending so a test can prove the teardown waits. */
+  readonly holdAcquisition?: boolean
   /** Runs SYNCHRONOUSLY from the batch's abort step — the R3-1 re-entry trigger. */
   readonly onAbort?: () => void
 } = {}): LifecycleHarness {
@@ -559,6 +563,11 @@ function mountLifecycle(options: {
     whenRendererReleased: () => slot,
   }
   const noop = (): void => {}
+  // The acquisition stage: settled by default (the ownership transfer already
+  // happened in these fixtures); `holdAcquisition` keeps it pending.
+  let settleAcquired!: () => void
+  const acquired = new Promise<void>(resolve => { settleAcquired = resolve })
+  if (options.holdAcquisition !== true) settleAcquired()
   const lifecycle = createSurfaceLifecycle({
     diag: { debug: noop, info: noop, warn: noop, error: () => { order.push('cleanup-error') }, dispose: noop },
     isCleanedUp: () => cleaned,
@@ -582,8 +591,9 @@ function mountLifecycle(options: {
     retireOwnedSession: async () => ({ } as never),
     disposeSelectedTransport: async () => {},
     registerDisposal: () => {},
+    whenRendererAcquired: () => acquired,
   })
-  return { lifecycle, order, release: () => release() }
+  return { lifecycle, order, release: () => release(), acquire: () => settleAcquired() }
 }
 
 test('R2-1a: a SECOND cleanup awaits the SAME renderer release (never races to retirement)', async () => {
@@ -728,4 +738,53 @@ test('R4-3b: a sibling `throw undefined` and a failing release aggregate BOTH', 
     'the undefined batch failure and the release failure are surfaced together')
   assert.deepEqual((outcome[0]!.reason as AggregateError).errors, [undefined, releaseFailure],
     'the batch failure keeps its position and the exact release failure is preserved')
+})
+
+test('R4-1: the teardown transaction WAITS for the ACQUISITION stage', async () => {
+  // The SDK renderer owns the tty from `connect` until the application ownership
+  // transfer. A quit in that window must not print the hint / request `appExit`
+  // while the renderer still owns the terminal, so the teardown transaction
+  // composes the acquisition stage into its release.
+  const { lifecycle, order, release, acquire } = mountLifecycle({ holdAcquisition: true })
+  const { requestExit } = createExitController({
+    diag: { info: () => {}, error: () => {} },
+    cleanup: () => lifecycle.disposeSurface(),
+    hint: () => order.push('hint'),
+    resumeHint: () => 'resume',
+    exit: () => order.push('exit'),
+  })
+  requestExit()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(!order.includes('hint') && !order.includes('exit'),
+    `the exit cannot proceed while the handshake still owns the tty (order: ${order.join(',')})`)
+
+  acquire()
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(order.slice(-2), ['hint', 'exit'],
+    'the hint and appExit run only after BOTH the acquisition and the release settled')
+})
+
+test('R4-1b: the ACQUISITION stage alone still gates the exit after the release settled', async () => {
+  const { lifecycle, order, release, acquire } = mountLifecycle({ holdAcquisition: true })
+  const { requestExit } = createExitController({
+    diag: { info: () => {}, error: () => {} },
+    cleanup: () => lifecycle.disposeSurface(),
+    hint: () => order.push('hint'),
+    resumeHint: () => 'resume',
+    exit: () => order.push('exit'),
+  })
+  requestExit()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  // The renderer release settles FIRST; the exit must still wait for the
+  // acquisition stage — otherwise the hint/appExit would run while the SDK
+  // handshake still owns the terminal.
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(!order.includes('hint') && !order.includes('exit'),
+    `the exit still waits for the acquisition stage (order: ${order.join(',')})`)
+
+  acquire()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(order.slice(-2), ['hint', 'exit'])
 })

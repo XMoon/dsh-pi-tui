@@ -90,6 +90,15 @@ export interface SurfaceLifecycleDeps {
   readonly disposeSelectedTransport: () => Promise<void>
   /** The Cordis fiber-effect registration (`ctx.effect`); the effect body stays here. */
   readonly registerDisposal: (dispose: () => unknown) => void
+  /**
+   * PR3-A: the ACQUISITION-stage tty lifetime — settles at the application
+   * ownership transfer, or after a renderer acquired mid-flight has been
+   * released when the runner was disposed during the SDK handshake. The
+   * teardown transaction AWAITS it, so a quit arriving before the handoff can
+   * never print the resume hint or request `appExit` while the connected
+   * renderer still owns the terminal.
+   */
+  readonly whenRendererAcquired: () => Promise<void>
 }
 
 /** The surface/fiber lifecycle of one composition instance. */
@@ -127,6 +136,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     retireOwnedSession,
     disposeSelectedTransport,
     registerDisposal,
+    whenRendererAcquired,
   } = deps
 
   // Idempotent CLIENT-SURFACE teardown: abort lifecycle loads, stop the
@@ -247,12 +257,18 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     // NOTE: diag.dispose() is NOT here — the Direct owned-session
     // retirement (retireOwnedSession) records its diagnostics first and
     // closes diag last (see below).
-    // PR3-A: the ONE renderer-release promise (immediate on PiTui; the SDK tty
-    // release on the TSP branch). Captured on EVERY path — including a
-    // throwing sibling — so the exit/fatal/fiber callers always await the tty
-    // restore; the aggregated sync failure is then rethrown to their
-    // non-truncating recorder (awaited first, never dropped, never truncated).
-    const release = surface.whenRendererReleased()
+    // PR3-A: the ONE tty-release transaction — the SDK renderer's release
+    // (immediate on PiTui) AND the acquisition stage, which settles at the
+    // ownership transfer or after a renderer acquired mid-flight has been
+    // released on cancellation. Captured on EVERY path — including a throwing
+    // sibling — so the exit/fatal/fiber callers always await the tty restore
+    // before the hint/`appExit`/retirement; the aggregated sync failure is then
+    // rethrown to their non-truncating recorder (awaited first, never dropped,
+    // never truncated).
+    const release = Promise.all([
+      surface.whenRendererReleased(),
+      whenRendererAcquired(),
+    ]).then(() => undefined)
     const composed = !batchFailed
       ? release
       : release.then(
