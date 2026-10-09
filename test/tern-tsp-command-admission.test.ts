@@ -3,8 +3,9 @@
  *
  * The predicate is the module under test here; its PRODUCTION consumer (the
  * `SubmissionController` admission) is exercised end-to-end on the real runner
- * in `tern-tsp-runner-interactive.test.ts` — including the Host-same-name
- * negative control. This file deliberately does NOT re-implement the
+ * in `tern-tsp-runner-interactive.test.ts` with an UNKNOWN-slash-line negative
+ * control (the Host-same-name winner case needs the official Host catalog
+ * fixture and is tracked with the B2 qualification work, not claimed here). This file deliberately does NOT re-implement the
  * consumer's family guard: a helper that supplies the guard production lacks
  * would be green while production misroutes (the B2 review's F1).
  *
