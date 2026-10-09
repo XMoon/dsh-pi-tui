@@ -1407,7 +1407,7 @@ export function applyRunnerWithRuntime(
       ctx,
       diag,
       signal: lifecycleController.signal,
-      app: () => app as TuiApp,
+      app: () => app,
       // PR3-A: registration/refresh failures are background-reachable under a
       // read-only TSP renderer; the notice goes through the display seam.
       notify: (text, kind) => surface.display.notify(text, kind),
@@ -2388,6 +2388,11 @@ export function applyRunnerWithRuntime(
       }
       return
     }
+    // PR3-B B2 (§3.3): the renderer CAPABILITY settles here, before the mount
+    // and before any held input can be consumed — the surface's live getters
+    // (`supportsLocalShellCards`, `supportsTuiBuiltinUi`) must report the TSP
+    // renderer from the first bound key.
+    tspRendererActive = rendererMount !== undefined
     // A4: mount through the surface owner. The surface builds the surface-local
     // option wiring (image loader, history-search binding, clipboard/link
     // capabilities, extension registries + input routes, resize/workflow hooks)
@@ -2583,7 +2588,6 @@ export function applyRunnerWithRuntime(
     // the A0 audit classified them (display-preference chrome, never business
     // state: Tern owns its own theme, keymap and chrome).
     const tspRenderer = rendererMount !== undefined
-    tspRendererActive = tspRenderer
     if (!tspRenderer) {
       app = surface.app
       settings.applySafeKeybindingsMode()
@@ -2925,9 +2929,14 @@ export function applyRunnerWithRuntime(
           command.runner().withPromptAdmission(scope, line, task),
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        // PR3-B B2: the submission runtime's editor hooks are reachable on
+        // BOTH renderers now that the TSP pane submits. They must go through the
+        // renderer-neutral composer projection — the PiTui-only `app` binding is
+        // undefined on the TSP branch (the B2 review's newly-reachable-consumer
+        // requirement).
         mergeDraftIntoEditor: (text) => {
-          const merged = mergeDraft((app as TuiApp).getDraft(), text)
-          ;(app as TuiApp).setEditorText(merged)
+          const merged = mergeDraft(surface.composer.getDraft(), text)
+          surface.composer.setEditorText(merged)
           return merged === text
         },
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
@@ -2953,12 +2962,12 @@ export function applyRunnerWithRuntime(
         },
         settleLocalSubmission: (requestId) => submission.settleLocalSubmission(requestId),
         settleSubmitAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),
-        notify: (message, kind) => (app as TuiApp).notify(message, kind),
+        notify: (message, kind) => surface.display.notify(message, kind),
         refuseByTransitionFence: (text) => refuseByTransitionFence(
           text,
-          () => (app as TuiApp).getDraft(),
-          (t) => (app as TuiApp).setEditorText(t),
-          (m, k) => (app as TuiApp).notify(m, k),
+          () => surface.composer.getDraft(),
+          (t) => surface.composer.setEditorText(t),
+          (m, k) => surface.display.notify(m, k),
         ),
         prepareMessage: (text, requestId) => remoteSources === undefined
           // Direct: the Direct UserMessage preparation runs the Host
@@ -3101,6 +3110,18 @@ export function applyRunnerWithRuntime(
     // session-owned bootstrap work there avoids a second full-log scan on
     // resume and also makes session switches restore the same state.
 
+    // The approval/question presentation providers are A4-7 surface-owned
+    // (`surface.attachInteraction`, plan §13.3/§16). The runner injects only
+    // the narrow presentation inputs: the paired tool-call argument lookup
+    // (the surface never reads the session-event feed) and the pure
+    // dangerous-command predicate.
+    // PR3-B §3.3: the ONE input bind. It runs here — after the renderer
+    // capability settled, after the command catalog registered (`/exit`,
+    // `/quit` and every Host claim are live) and after the interaction owner
+    // attached — so the renderer's held pre-bind keys are consumed against
+    // READY facts, never against an empty catalog or a not-yet-settled
+    // capability. A no-op on the PiTui branch.
+    surface.bindRendererInput()
     // The approval/question presentation providers are A4-7 surface-owned
     // (`surface.attachInteraction`, plan §13.3/§16). The runner injects only
     // the narrow presentation inputs: the paired tool-call argument lookup

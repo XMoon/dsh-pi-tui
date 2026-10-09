@@ -341,13 +341,43 @@ renderer tests.
 | `pnpm typecheck:bundle` / build / `gate:architecture` / `gate:boundary` | pass |
 | `pnpm test:product` | pass (zero failures) |
 
+### Real Tern pane submit + Assistant streaming (the B2 merge-gate proof)
+
+**Delivered on a real Tern pane** (not a scripted tty). Method: a THROWAWAY DSH
+profile linking this worktree, booted as
+`DSH_PI_TUI_RENDERER=tsp dsh --profile <throwaway>` inside a headless
+`tern serve` pane with `TERN_TSP_RECORD` capturing the wire; the prompt was typed
+with `tern ctl type` and submitted with a real `key Enter`. Synthetic,
+non-secret prompts only.
+
+Environment: Tern 0.6.3, `dsh` 0.2.0-rc.2, this bundle (0.5.1) linked into the
+profile, Tern SDK 0.1.0, a real Direct Agent through the profile's LLM provider.
+
+What the record shows, in order:
+
+1. **Typed into the controlled composer**: one `set`+`text` op pair per key —
+   the program-owned editor state on the real renderer.
+2. **The submit gesture cleared the composer BEFORE the application write**
+   (§3.4 ordering): the composer `replace ""` frame lands, then the local
+   `Submitting…` pending row, then the client-local echo
+   `[1] you (sending…): <prompt>`.
+3. **The real application write**: the pending row is replaced by the
+   authoritative event, the canonical transcript gains the **You** card with the
+   exact prompt text, the status line reports `working`, and a running row
+   appears — one submission, no double-send.
+4. **Assistant streaming**: for a longer answer the Assistant card is created
+   with only its FIRST token, and the following frame carries a `text` APPEND
+   with the remainder, then the streaming marker clears — incremental deltas on
+   the real pane, not a single settled render.
+5. **The session**: a real Session is created and its title reaches the dock.
+
+Explicitly NOT claimed here: any IME composition (no GUI input method is
+involved — the text is injected), and bracketed paste / control-chord delivery
+(those remain the B1-recorded `tern ctl` limitations). The scripted-pane suites
+still carry the paste/exit-path coverage.
+
 ### Remaining / deferred (tracked owners)
 
-- **Real Tern pane submit + Assistant streaming** (plan §6.4 / the B2 merge
-  gate): the Direct-Agent streaming demonstration on the physical pane stays
-  with **B4**'s mandatory real-pane matrix, under the same Owner Amendment A1
-  boundary B1 recorded (no scripted substitution may be presented as physical
-  proof).
 - Clipboard image/path intake, plugin semantic actions, `@` completion and the
   PiTui panels on TSP: **PR4** UI parity.
 - Question/Approval: **B3**.

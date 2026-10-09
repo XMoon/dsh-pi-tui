@@ -204,3 +204,53 @@ test('B2: an accepted submit leaves an empty composer, so a second Enter cannot 
     await harness.dispose()
   }
 })
+
+// ── The session/hydration input fence (§3.4 row 1) ──────────────────────────
+
+test('B2: the hydration window accepts NO composer key and never submits', async () => {
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) })
+  try {
+    harness.input.type('draft before the switch')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'draft before the switch')
+    // A generation bump: the surface reports the hydration window (the new
+    // subject's frame has not committed yet).
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    harness.input.type('more')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'draft before the switch',
+      'the fence preserves the outgoing draft and accepts no edit')
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, [], 'no submit can cross the hydration fence')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B2: the fence lifts when the new subject commits, and the composer works again', async () => {
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) })
+  try {
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    harness.input.type('typed during the switch')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), '', 'still fenced')
+    // The new subject commits a projection: the fence lifts.
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'new' })
+    await settle()
+    harness.input.type('after the switch')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'after the switch',
+      'input is accepted again once the new subject committed')
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, ['after the switch'],
+      'a submit after the fence lift reaches the application normally')
+  } finally {
+    await harness.dispose()
+  }
+})
