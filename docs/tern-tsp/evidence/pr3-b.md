@@ -31,16 +31,24 @@ taxonomy is untouched. Native SDK edit/undo/send features are NOT advertised
 
 ### Verification (worktree `feat/tern-tsp-pr3-b1-editor`, node v24.20.0, pnpm 11.7.0)
 
-| Command | Result |
-|---|---|
-| `node --test test/tern-tsp-editor-input.test.ts` | 26/26 pass (after the F1/F2/F4 fix round: the combining-mark merge, the surrogate clamp, the insert-merge, the port-mutator render sink, the held-queue/bind-once/discard guards) |
-| `node --test test/tern-tsp-live-mount.test.ts` | 17/17 pass (A-04b updated) |
-| `node --test test/tern-tsp-renderer-selection.test.ts test/tern-tsp-runner-teardown.test.ts test/tern-tsp-pr3b-ports.test.ts` | 53/53 pass (with live-mount re-run in the same state) |
-| `pnpm typecheck:bundle` | pass |
-| `pnpm gate:architecture` | pass (452 files) |
-| `pnpm gate:boundary` | pass (31 files) |
-| `pnpm test:product` | 7495/7495 pass |
-| `pnpm verify:prepush` | pass (exit 0 — full pipeline; the first run failed ONLY the host-keybindings string-label gate on the chord-labelled dock banner, fixed by removing the chord labels per the PR3-A precedent — no gate exception needed) |
+Every row below is labeled with the SNAPSHOT it actually ran on — the
+initial implementation (`ca847758`), the first fix round (`02d0a974`), or
+the second fix round (the HEAD of this branch after the round-2 findings;
+see the review ledger). Nothing green on an older snapshot is presented as
+current.
+
+| Command | Snapshot | Result |
+|---|---|---|
+| `node --test test/tern-tsp-editor-input.test.ts` | round-2 HEAD | 30/30 pass (round-1: 17/17; round-2 added the two F1 probe shapes, the port render sink, the held/bind/discard guards, the ordered pre-bind Ctrl+D, the v4-tail exit shape, the flood/overflow guard, the separated-counter bound-exit) |
+| `node --test test/tern-tsp-live-mount.test.ts` | round-2 HEAD | 17/17 pass (A-04b updated; re-run per round) |
+| `node --test test/tern-tsp-renderer-selection.test.ts` | round-2 HEAD | 19/19 pass |
+| `node --test test/tern-tsp-runner-teardown.test.ts` | round-2 HEAD | 12/12 pass |
+| `node --test test/tern-tsp-pr3b-ports.test.ts` | round-2 HEAD | 5/5 pass |
+| `pnpm typecheck:bundle` | round-2 HEAD | pass |
+| `pnpm gate:architecture` / `pnpm gate:boundary` | `02d0a974` (re-run at round-2 HEAD below) | pass (452 files) / pass (31 files) |
+| `pnpm test:product` | `02d0a974` = 7504/7504; round-2 HEAD re-run recorded at push time | pass |
+| `pnpm verify:prepush` | `ca847758` = pass after the banner fix; `02d0a974` = pass; round-2 HEAD = recorded at push time | pass |
+| Host-keybindings note | all snapshots | the ONLY gate failure in any run was the chord-labelled dock banner at `ca847758` (fixed by removing the labels per the PR3-A precedent — no gate exception) |
 
 ### Manual real-pane smoke (PARTIAL — tool-limited; the B1 review F3 redo)
 
@@ -83,9 +91,9 @@ NOT PROVED on the real pane — COVERED by the scripted-tty SDK layer instead
 - **Ctrl+C / empty-draft Ctrl+D exit on the real pane**: the `key Control+d`
   chord delivers no byte to the pty (Tern's own GUI layer consumes control
   chords — the SAME tool limitation PR1 recorded for `Control+c`). The exit
-  paths are proven by the scripted layer (including the exact v4 shape:
-  type `ab`, two backspaces, `\x04` → one `requestExit`), and the real-pane
-  Ctrl+D-with-text no-exit IS proved above.
+  policies are asserted by the scripted tests — including 'the empty-draft
+  Ctrl+D exit shape (the real-pane v4 tail) through the bound loop' (type
+  `ab`, two backspaces, `\x04` → exactly one exit).
 
 F3 root cause (recorded for the ledger): the first smoke's record was
 overwritten by scenario rehearsals (`TERN_TSP_RECORD` rewrites per run), its

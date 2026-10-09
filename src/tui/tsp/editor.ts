@@ -192,7 +192,11 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           // cluster's start; the cut end is the (aligned) caret itself.
           const start = previousGraphemeStart(text, cursor)
           text = text.slice(0, start) + text.slice(cursor)
-          cursor = start
+          // The deletion may MERGE the clusters on both sides of the cut
+          // (removing a separator between two regional indicators fuses them
+          // into ONE flag cluster): re-normalize the caret onto the new
+          // boundary so it can never sit inside the merged cluster.
+          cursor = boundaryCursor(text, start)
           sinks.onChanged()
           return { kind: 'edited' }
         }
@@ -200,6 +204,9 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           if (cursor >= text.length) return { kind: 'none' }
           const end = nextGraphemeEnd(text, cursor)
           text = text.slice(0, cursor) + text.slice(end)
+          // Same merge-after-cut hazard as backspace (the clusters around the
+          // removed one may fuse): keep the caret boundary-aligned.
+          cursor = boundaryCursor(text, cursor)
           sinks.onChanged()
           return { kind: 'edited' }
         }
