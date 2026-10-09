@@ -361,7 +361,9 @@ tern ctl --control /tmp/tern-pr3a12.sock run \
 ```
 
 Versions: Tern `0.6.3` (the SDK's own hello reply), `@stencil-hq/tern@0.1.0`, DSH
-`0.2.0-rc.2`, bundle `0.5.1` (this worktree), profile `~/.dsh/profiles/pi-tui-pr3a`.
+`0.2.0-rc.2`, bundle `0.5.1` — recorded on the runtime of `67ef05b6`, whose
+`src/**` is unchanged since `b0832be1`, built in this worktree and linked into the
+throwaway profile `~/.dsh/profiles/pi-tui-pr3a`.
 
 Identity + currentness: the driver resolved `ctx.agents.get('session-b2f75ed9-…')`
 with `agent.session.id === sessionId` (same identity) while the runner owned that
@@ -390,8 +392,11 @@ SDK native ops (the SDK's own wire recording, 38 ops) for that turn:
 - `main.s1-msg-23` — the *Assistant* card with the final text.
 
 Incremental consumption (not a one-shot replay): the SAME node is updated in
-place across frames. The recorded ops for `main.s1-work-msg-21.msg-21.body`, in
-frame order, are the live text deltas and their settle:
+place across frames, and the ORDER is decisive — the five appends land BEFORE the
+durable `assistant` event (seq 97) time, and the tool's `running → done` + result
+come AFTER the durable `tool/result` (seq 99). The recorded ops for
+`main.s1-work-msg-21.msg-21.body`, in frame order, are the live text deltas and
+their settle (`stream:true` at the add, then the appends, then `stream:null`):
 
 ```text
 add  main.s1-work-msg-21.msg-21            {"k":"card","p":{"key":"msg-21","head":"Thinking",…}}
@@ -405,14 +410,21 @@ set  main.s1-work-msg-21.msg-21.body {"stream": null}      ← the settle
 
 The tool row is the same shape on its own node: `add main.s1-work-msg-21.msg-22
 {"k":"tool","name":"bash","title":"Bash","status":"running","target":"Print the
-pr3a-live-marker string"}`, then `add main.s1-work-msg-21.msg-22.result
-{"k":"code","text":"pr3a-live-marker\n"}`, then the next Assistant card
-`main.s1-msg-23`. Other in-place updates in the same turn: `dock.status` 3×,
+pr3a-live-marker string"}`, then — after the official `tool/result` — `set` on that
+SAME node to `status:"done"` together with `add main.s1-work-msg-21.msg-22.result
+{"k":"code","text":"pr3a-live-marker\n"}`, and then the next Assistant card
+`main.s1-msg-23` with the final text. The `running → done` + real result on one
+node is the strongest single fact of this record. Other in-place updates in the same turn: `dock.status` 3×,
 `dock.pending-running` 2×, `main.s1-work-msg-21.msg-22` 2×.
 
 Raw records (outside any private session/storage directory, readable for audit):
 `/tmp/pr3a-live-rec.jsonl` (the SDK's own wire recording) and
 `/tmp/pr3a-live-driver.jsonl` (the driver's identity + official event sequence).
+Those `/tmp` paths are THIS run's copies, not a durable artifact; the facts above
+are the durable record. The recording ends with `x keep:true`, which is this
+fixture/serve teardown path — the normal `q` → `x keep:false` → raw restore evidence
+is the separate current-build deferred pane capture above; the two runs are not
+one scenario.
 The DSH event plane carries the turn as `assistant/message` events (plus the
 `request/header` + `delivery-accepted` pair); the per-delta text above is the
 CONSUMER-side native-op evidence that the same node was fed incrementally.
@@ -433,9 +445,9 @@ cross-process Remote live and PR3-B input stay out of scope.
   and the published-DSH compatibility lanes (`compat:dsh:npm`,
   `compat:dsh:client-family`) plus the migration smokes (`smoke:remote-*`,
   `smoke:boundary`, `smoke:startup-strictness`) are a separate stage-final step.
-- A real interactive turn (live streaming deltas through a real agent) is not
-  driven in the manual smoke; the scripted A-04 / A-05 pin the same-node delta and
-  hydration-fence contracts. This does not close the live-consumption gate stated
-  above.
+- The same-process live-consumption gate is PROVEN by the fixture-triggered run
+  above (real Agent → official events → SDK native ops: streaming appends, settle,
+  real `tool/call` → `tool/result`). What that record does NOT cover: PR3-B's
+  editor/submission input, and cross-process Remote live delivery.
 - `TERN_TSP=0` and tmux-style fallback evidence is inherited from the L6
   composition fallback test plus the SDK's own decline semantics.
