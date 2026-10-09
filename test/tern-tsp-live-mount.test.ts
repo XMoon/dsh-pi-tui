@@ -339,8 +339,15 @@ async function mountTspHarness(options: { requestExit?: () => void; onFatal?: (e
     },
     exitRequested: () => exitCount > 0,
     async dispose() {
-      surface.dispose()
-      await settle()
+      // The ONE renderer-release promise owns the disposal outcome: a failed
+      // release must surface to THIS caller (never as an unowned rejection), and
+      // it is awaited before the harness considers the surface torn down.
+      try {
+        surface.dispose()
+        await surface.whenRendererReleased()
+      } finally {
+        await settle()
+      }
     },
   }
 }
@@ -916,5 +923,35 @@ test('A-08b: the interaction owner registers fail-closed answerers on a modal-le
     assert.deepEqual(delegated, ['next', 'next'], 'the question still delegates (no fabricated answer)')
   } finally {
     interaction.dispose()
+  }
+})
+
+test('the live harness OWNS its renderer release: a failed close surfaces, never as an unhandled rejection', async () => {
+  const harness = await mountTspHarness()
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    await settle()
+    const output = harness.tern.output
+    const original = output.onWrite
+    let armed = true
+    output.onWrite = (bytes: Uint8Array): void => {
+      if (armed && DECODER.decode(bytes).includes('\u001b_tsp;x;')) {
+        armed = false
+        throw new Error('close write exploded')
+      }
+      original?.(bytes)
+    }
+    // The release outcome belongs to THIS caller: exactly one observable rejection.
+    const failure = await harness.dispose().then(() => undefined, (error: unknown) => error)
+    assert.ok(failure !== undefined,
+      'the failed renderer release surfaces to the disposing caller (the harness owns it)')
+    // Give Node a turn to report any UNOWNED rejection before asserting.
+    await new Promise(resolve => setTimeout(resolve, 60))
+    assert.deepEqual(unhandled, [],
+      'no unowned rejection: the harness consumed the release outcome it started')
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
   }
 })
