@@ -143,8 +143,28 @@ exit request (SDK quit key → lifecycle.requestExit, or /exit, or fatal)
       → surface.dispose() now also: stop the TSP input loop →
         surface.close({keep:false}) → session.close()   [SDK tty released once]
         (the PiTui branch keeps its existing app?.dispose())
-  → Direct owned-session retirement → transport disposal → appExit
+  → resume hint → appExit(0)                       [the NORMAL exit path]
 ```
+
+The owners differ per path, and only the normal exit runs in this order:
+
+- **normal** (quit key / `/exit`): the exit controller awaits the teardown
+  transaction, prints the resume hint and requests `appExit`. The full Direct
+  owned-session retirement and the transport disposal are NOT awaited in front of
+  `appExit` — they run inside the application-tree disposal that `appExit`
+  starts (under the DSH process-shutdown watchdog); `retireOwnedSession()` brings
+  only the FIRST cancel forward.
+- **fatal** (`handleStartupFailure`): the SAME `disposeSurface` authority, then a
+  BOUNDED retirement wait (cancel-first, 2 s bound) before its own exit — an
+  error outcome, never a resume hint.
+- **HMR / fiber unload** (`registerRunnerDisposal`): the teardown transaction is
+  awaited, then the memoized retirement settles, then the selected transport is
+  disposed — the unloading fiber observes the full teardown.
+
+The TSP acquisition stage is part of that transaction: a quit that lands while
+the SDK handshake is in flight is a CANCELLATION — the acquired renderer is
+released, the boot stops (no `surface.start`, no PiTui fallback) and the exit
+proceeds with the tty already restored.
 
 The resume hint prints after the SDK released the tty (it is written by the
 exit controller after `cleanup()`). Signal-path `keep:true` stays SDK-owned
@@ -199,7 +219,7 @@ replaced — the SDK `connect` call and the tty behind it.
 | A-13 | the hydrate-tail reset keeps the just-committed status facts; a partial commit preserves siblings; an explicitly-present `sessionTitle: undefined` CLEARS (PRESENCE semantics) |
 | A-14 | `surface.commitStatus` writes the shared StatusStore on the TSP branch (both renderers consume the same facts) |
 | A-08 / A-08b | the read-only renderer advertises `supportsModals: false` with an observable dock notice; the REAL interaction owner's fail-closed registration resolves an approval `'unavailable'` and delegates a question to `next()` |
-| F1 / R2-1a-c / R3-1a-b | the surface teardown transaction: it is published BEFORE the ordered batch and settled with its COMPLETE outcome (renderer release + batch failure), so the exit/fatal/fiber paths — including a SYNCHRONOUS re-entrant caller reached from an abort listener — all await the same release before hint/`appExit`, and every caller observes the same failure |
+| F1 / R2-1a-c / R3-1a-b / R4-1 / R4-1b | the surface teardown transaction: it is published BEFORE the ordered batch and settled with its COMPLETE outcome (renderer release + the ACQUISITION stage + batch failure), so the exit/fatal/fiber paths — including a SYNCHRONOUS re-entrant caller reached from an abort listener — all await the same release before hint/`appExit`, and every caller observes the same failure. A sibling that legally `throw undefined` is still a FAILURE (R4-3/R4-3b), never a silent success |
 | F8 | the PUBLIC settle-compaction surface keeps its three-setter structural contract (the aggregated seam stays internal) |
 
 Guards outside these two files own the adjacent PR3-A invariants:
@@ -208,6 +228,8 @@ Guards outside these two files own the adjacent PR3-A invariants:
 |---|---|
 | `test/tern-tsp-live-projection.test.ts` (F10, R2-2) | the PiTui transcript still scrolls only on NEW own input; one semantic commit produces exactly ONE store transaction (the child subject and its activity together) |
 | `test/a5-composition-inventory.test.ts` | the composition zone (entry + facade + every nested `app/bootstrap/**` helper, `renderer-selection.ts` included) still owns the surface teardown and keeps the documented release order |
+| `test/settings-footer-teardown.test.ts` | the settings owner releases ONLY the Pi footer runtime it actually armed: an unarmed runtime (the TSP branch, or a teardown before the boot applied the document) never reads the app; an armed one releases exactly once |
+| A-08 / A-08b | the unsupported-modal notice is re-published at EVERY unsupported request, so a refusal stays observable after the hydrate-tail reset or ordinary-notice eviction cleared the attach-time notice (the request itself is the carrier) |
 | `test/notification-wiring.test.ts` | focus reporting is enabled at mount and disabled on EVERY exit path — before the app dies |
 | `test/rules.test.ts` | every production `void <promise>` discard is in `runtime/process/tasks.ts` or carries an explicit `allowlist` marker |
 | `test/temp-hygiene-gate.test.mjs`, `scripts/check-host-keybindings.mts` | the required repo gates the renderer's fixtures and dock banner must satisfy |
@@ -251,9 +273,10 @@ this is the recorded manual proof.
 
 ### Pane re-run on the teardown/qualification delta — OPEN defect
 
-The rows above were recorded on the build of the earlier review rounds. A
-re-run on the current build does **not** reproduce the deferred start: the same
-command fails before the mount is reached, and the teardown itself throws:
+The rows above were recorded on the `748589ca` build (its `dist/`, the profile
+linked to that worktree). A re-run on the `3d2cd24d`+ build does **not**
+reproduce the deferred start: the same command fails before the mount is
+reached, and the teardown itself throws:
 
 ```text
 ERROR cleanup failed error=the surface is not mounted              (the exit controller)

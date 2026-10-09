@@ -114,16 +114,29 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       // owns them, and the dock pins an OBSERVABLE notice. No promise is
       // swallowed and no answer is fabricated.
       if (options.display().supportsModals === false) {
-        options.display().setDockNotice({
-          id: 'modals-unsupported',
-          text: 'Question/Approval dialogs are not answerable in this read-only renderer — approvals fail closed and questions time out to their continued lifecycle',
-          kind: 'info',
-        })
+        // The refusal must be observable AT THE TIME OF THE REQUEST, not only at
+        // attach: the dock notice is transient (a hydrate-tail reset clears it and
+        // enough ordinary notices evict it), and a programmatic or timed request
+        // can arrive with no other carrier — leaving the user with no visible
+        // explanation at all. Re-publishing on every unsupported request keeps the
+        // notice current without fabricating an answer.
+        const publishUnsupportedNotice = (): void => {
+          options.display().setDockNotice({
+            id: 'modals-unsupported',
+            text: 'Question/Approval dialogs are not answerable in this read-only renderer — approvals fail closed and questions time out to their continued lifecycle',
+            kind: 'info',
+          })
+        }
+        publishUnsupportedNotice()
         port.onApprovalRequest((req, next) => {
           if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
+          publishUnsupportedNotice()
           return Promise.resolve<ApprovalOutcome>('unavailable')
         })
-        port.questions.onRequest(async (_request, next) => next())
+        port.questions.onRequest(async (_request, next) => {
+          publishUnsupportedNotice()
+          return next()
+        })
         return
       }
       // The interactive answerer: every approval ask becomes a dialog. An

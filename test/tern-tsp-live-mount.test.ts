@@ -757,8 +757,9 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
   const harness = await mountTspHarness()
   try {
     // The runner was disposed while the SDK handshake was in flight: a REAL
-    // `surface.start` rejection on an already-mounted surface. The mount never
-    // transferred ownership, so bootstrap's catch releases it — this route.
+    // `surface.start` rejection on an ALREADY-MOUNTED surface (this guard pins the
+    // RELEASE accessor and its idempotence; the disposed-DURING-handshake
+    // cancellation path is the acquisition transaction's business).
     assert.throws(
       () => { harness.surface.start({ ...harness.startDeps, renderer: mount }) },
       /the surface is already mounted/,
@@ -893,12 +894,29 @@ test('A-08b: the interaction owner registers fail-closed answerers on a modal-le
     assert.ok(questionProvider !== undefined, 'the question answerer is registered (delegating)')
     const outcome = await approvalListener!({ toolName: 'bash' }, async () => 'allowed-once')
     assert.equal(outcome, 'unavailable', 'an approval at the read-only renderer resolves unavailable — never allowed')
+    assert.equal(notices.length, 2, 'the notice is published at attach AND at the approval request')
     const delegated: string[] = []
     const answer = await questionProvider!(null, async () => { delegated.push('next'); return 'host-answer' })
     assert.deepEqual(delegated, ['next'])
     assert.equal(answer, 'host-answer', 'a question delegates to the Host waterfall (its timeout/continued lifecycle owns it)')
-    assert.equal(notices.length, 1, 'the unsupported-modals dock notice was pinned exactly once')
+    assert.equal(notices.length, 3, 'a delegated question re-publishes the same explicit notice too')
     assert.ok(String((notices[0] as { text: string }).text).includes('not answerable'), 'the notice is observable')
+
+    // The notice is TRANSIENT: the hydrate-tail reset clears it and enough
+    // ordinary notices evict it. A later request must make it observable AGAIN —
+    // otherwise a programmatic/timed approval arrives with no visible
+    // explanation at all.
+    notices.length = 0
+    const lateOutcome = await approvalListener!({ toolName: 'bash' }, async () => 'allowed-once')
+    assert.equal(lateOutcome, 'unavailable')
+    assert.equal(notices.length, 1,
+      'an unsupported request AFTER the notice was cleared re-publishes it (current visibility, not history)')
+    assert.equal((notices[0] as { id: string }).id, 'modals-unsupported')
+
+    notices.length = 0
+    await questionProvider!(null, async () => { delegated.push('next'); return 'host-answer' })
+    assert.equal(notices.length, 1, 'a delegated question re-publishes the same explicit notice')
+    assert.deepEqual(delegated, ['next', 'next'], 'the question still delegates (no fabricated answer)')
   } finally {
     interaction.dispose()
   }
