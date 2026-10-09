@@ -102,3 +102,16 @@ structurally.
   ports are pure projections (no new session/queue/writer/classifier
   authority). "accepted ≠ merge authorization; B1-B4 and the PR4 display DTO
   debt remain with their owners."
+- **Round 2** (delta `86bd3bce`, docs-only ledger commit): **accepted**, zero
+  findings. Noted `pnpm test:docs` covers only `docs/tmux/*.test.mjs`; this
+  ledger's accuracy is proven by the human diff check, not that lane.
+- **Round 3** (delta `1ddf12e2`, the two external-review fixes): **accepted**,
+  zero findings. Confirmed the fail-fast semantics against the authoritative
+  `TuiApp.clearSettledLocalMessages` contract and every production caller;
+  confirmed B0 has no reachable path into the new throw (the TSP SDK loop
+  still only routes `requestExit`); confirmed the promise-race guard has no
+  unhandled-rejection path. Two non-blocking notes recorded as-is: the race's
+  losing timer is not cleared (a passed test lingers ~2 s before file exit)
+  and the guard now proves the first notice's content + zero card calls
+  (not a strict exactly-once count). B1 must implement the member against the
+  real composer state — the inert throw must not be inherited.
