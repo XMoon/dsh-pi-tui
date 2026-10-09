@@ -45,7 +45,7 @@ narrative carries the provenance).
 | `pnpm typecheck:bundle` | pass |
 | `pnpm gate:architecture` / `pnpm gate:boundary` | pass |
 | `pnpm test:product` | pass (zero failures) |
-| `pnpm verify:prepush` | pass (re-run after the B2 review fixes; the earlier failures in this stage were the reviewer's own tooling environment, not the product) |
+| `pnpm verify:prepush` | pass |
 | Host-keybindings note | — | the ONLY gate failure in any run was the chord-labelled dock banner (fixed by removing the labels per the PR3-A precedent — no gate exception) |
 
 ### Manual real-pane smoke (B1 IMPLEMENTATION DONE / MERGE QUALIFIED BY OWNER AMENDMENT A1)
