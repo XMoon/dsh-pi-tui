@@ -55,7 +55,7 @@ current.
 Method: real Tern 0.6.3, headless `tern serve --control … --out /tmp/serve` +
 `tern ctl --file` scenarios `run`ning the REAL `connectTspRenderer` +
 `bindInput` (shipped SDK connect, no scripted pane) with
-`TERN_TSP_RECORD`. Three runs; the F3 redo (`/tmp/tern-b1-rec-v4.jsonl`, 20
+`TERN_TSP_RECORD`. Three runs; the F3 redo (`/tmp/tern-b1-rec-v4.jsonl`, 31
 wire messages, 8 screenshots `b1v4-*`) is the evidence of record after the
 first two were judged non-probative (see the F3 root cause below).
 
@@ -67,14 +67,19 @@ PROVED on the real pane (from the v4 record):
   finding.
 - **Focus**: the `["focus","dock.composer"]` op is on the wire after the
   first committed frame.
-- **Typed input**: `t`,`e`,`x`,`t` each produced exactly one
-  `["set",…,{"cursor":n}]` + `["text",…,"append",ch]` pair.
+- **Typed input**: the SDK COALESCED the four ASCII keys into two editor
+  text ops (`replace "t"` for the first key, then ONE `append "xt"` for
+  the rest — frame-level coalescing is the SDK's own); a cursor `set` op
+  accompanied each key.
 - **CJK/emoji**: `你好` as single-unit edits; `👍` as ONE 2-unit surrogate
   edit (cursor 6→8) — never split.
 - **Enter refused**: the notice `the TSP composer is not wired for submission
   yet — the draft was preserved` reached the real wire; the draft survived.
-- **Ctrl+D with text**: `Control+d` with a non-empty draft produced NO exit
-  (the pane kept rendering).
+- **Ctrl+D policy — NOT PROVED on the real pane**: `Control+d` delivers
+  no byte to the pty (see below), so NO Ctrl+D policy (with-text no-exit
+  or empty-draft exit) was exercised there. Both policies are asserted by
+  the scripted tests, including the v4-tail shape (type `ab`, two
+  backspaces, `\x04` → exactly one exit).
 - **Backspace empties the draft exactly**: 7 backspaces consumed
   `text你好👍` cluster-by-cluster to `text:"" , cursor:0` (each a
   `replace` op: `text你好` → `text你` → `tex` → `te` → `t` → `""`).

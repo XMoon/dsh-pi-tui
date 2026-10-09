@@ -68,12 +68,16 @@ function clusterBoundaries(text: string): number[] {
 function boundaryCursor(text: string, cursor: number): number {
   const clamped = Math.max(0, Math.min(text.length, cursor))
   let end = 0
+  let lastClusterEnd = 0
   for (const { index, segment } of segmenter.segment(text)) {
     const clusterEnd = index + segment.length
     if (index < clamped && clusterEnd > clamped) return clusterEnd
     if (clusterEnd <= clamped) end = clusterEnd
+    lastClusterEnd = clusterEnd
   }
-  return end
+  // A candidate at/after the final cluster's end IS a boundary (the text
+  // end) — the loop's `end` only tracks clusters strictly before it.
+  return clamped >= lastClusterEnd ? text.length : end
 }
 
 /**
@@ -225,17 +229,27 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
         case 'home': {
           if (cursor === 0) return { kind: 'none' }
           // The start of the line containing the caret (multi-line draft).
-          const lineStart = text.lastIndexOf('\n', cursor - 1) + 1
-          cursor = lineStart
+          // Normalize the result: a CRLF pair is ONE grapheme cluster, and
+          // the line start must never sit between its CR and LF.
+          const rawStart = text.lastIndexOf('\n', cursor - 1) + 1
+          const next = boundaryCursor(text, rawStart)
+          if (next === cursor) return { kind: 'none' }
+          cursor = next
           sinks.onChanged()
           return { kind: 'edited' }
         }
         case 'end': {
-          // The end of the line containing the caret (before a newline).
+          // The end of the line containing the caret — BEFORE a complete
+          // CRLF pair: the pair is ONE grapheme cluster, so the line end is
+          // at the CR, never at the LF position indexOf('\n') reports
+          // (that would sit INSIDE the cluster and let a backspace split
+          // it). Normalize the computed end onto a cluster boundary.
           const nextNewline = text.indexOf('\n', cursor)
-          const lineEnd = nextNewline === -1 ? text.length : nextNewline
-          if (cursor === lineEnd) return { kind: 'none' }
-          cursor = lineEnd
+          let lineEnd = nextNewline === -1 ? text.length : nextNewline
+          if (lineEnd > 0 && text.charCodeAt(lineEnd - 1) === 0x0d) lineEnd -= 1
+          const next = boundaryCursor(text, lineEnd)
+          if (next === cursor) return { kind: 'none' }
+          cursor = next
           sinks.onChanged()
           return { kind: 'edited' }
         }

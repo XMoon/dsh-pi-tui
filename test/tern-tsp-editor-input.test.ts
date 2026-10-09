@@ -221,6 +221,48 @@ test('B1/F1: insertIntoEditor merging with a following combining cluster keeps t
   assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
 })
 
+test('B1/F1: End never lands inside a pasted CRLF cluster; backspace keeps it whole', () => {
+  // The round-3 REAL-SDK probe shape: paste 'a\r\nb' (the bracketed paste
+  // preserves the raw CRLF; Intl.Segmenter treats the pair as ONE grapheme).
+  // End on line 1 must stop at the CR (cursor 1), never at the LF position
+  // (2) — and a following backspace removes 'a' leaving the CRLF intact.
+  const { composer } = composerWithSinks()
+  composer.applyKey(key('paste', { text: 'a\r\nb' }))
+  assert.equal(composer.state().cursor, 4, 'the pasted caret sits at the text end (a boundary)')
+  composer.applyKey(key('home'))
+  assert.equal(composer.state().cursor, 3, 'Home from line 2 lands at its line start (after the whole CRLF)')
+  composer.applyKey(key('home'))
+  assert.equal(composer.state().cursor, 3, 'Home at the line start is idempotent')
+  // Walk LEFT across the CRLF as ONE cluster onto line 1, then End there.
+  composer.applyKey(key('left'))
+  assert.equal(composer.state().cursor, 1, 'left crossed the CRLF cluster as one unit')
+  composer.applyKey(key('end'))
+  assert.equal(composer.state().cursor, 1, 'End stopped BEFORE the complete CRLF cluster (at the CR)')
+  composer.applyKey(key('backspace'))
+  assert.deepEqual(composer.state(), { text: '\r\nb', cursor: 0, focused: false },
+    'backspace removed only the line content — the CRLF cluster is intact')
+  // Symmetry: right crosses the CRLF as one cluster; Home on line 2 lands
+  // AFTER the whole pair; Delete at the line-1 end consumes the WHOLE pair.
+  composer.setDraft('a\r\nb')
+  // The previous section left the caret at 0 (line 1). Walk to the text
+  // end through the CRLF so the navigation below starts from a known spot.
+  composer.applyKey(key('end'))           // line-1 end (1)
+  composer.applyKey(key('right'))         // crosses the CRLF → 3
+  composer.applyKey(key('end'))           // line-2 end (4)
+  assert.equal(composer.state().cursor, 4)
+  composer.applyKey(key('home'))          // cursor 4 → line-2 start (3)
+  composer.applyKey(key('left'))          // crosses the CRLF as one unit → 1
+  assert.equal(composer.state().cursor, 1, 'left crossed the CRLF as one cluster')
+  composer.applyKey(key('right'))         // 1 → 3, the whole pair again
+  assert.equal(composer.state().cursor, 3, 'right crossed the CRLF as one cluster')
+  composer.applyKey(key('home'))
+  assert.equal(composer.state().cursor, 3, 'Home on line 2 stays after the complete CRLF')
+  composer.applyKey(key('left'))
+  composer.applyKey(key('delete'))        // at cursor 1: consumes the CRLF whole
+  assert.deepEqual(composer.state(), { text: 'ab', cursor: 1, focused: false },
+    'delete consumed the CRLF as one unit')
+})
+
 test('B1/F1: deleting a separator that FUSES two clusters keeps the caret boundary-aligned', () => {
   // The round-2 probe shape: '🇦x🇧' (two flag halves separated by 'x').
   // Deleting the separator merges the regional indicators into ONE flag
