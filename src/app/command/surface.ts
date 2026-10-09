@@ -114,9 +114,15 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly diag: Diag
   /** The runner lifetime signal (the catalog coordinator). */
   readonly signal: AbortSignal
-  /** The mounted app, read live (the mount precedes every command path);
-   *  PiTui-only editor/panel sinks — unreachable without editor input. */
-  readonly app: () => TuiApp
+  /**
+   * The mounted PiTui app, read live. OPTIONAL: on the experimental TSP
+   * renderer branch no `TuiApp` exists, so this reads `undefined` — never a
+   * synthesized placeholder (PR3-B B2-3). The PiTui-only editor/panel sinks
+   * below are unreachable there: the post-classification builtin admission
+   * refuses every TUI-owned builtin except the exit pair, so no handler that
+   * dereferences this can run.
+   */
+  readonly app: () => TuiApp | undefined
   /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
    *  are background-reachable under a read-only TSP renderer). */
   readonly notify: (text: string, kind?: 'error' | 'info') => void
@@ -976,7 +982,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The deployment image policy, re-read dynamically so a runtime
       // reconfiguration is picked up (plan §10.1: never a cached copy).
       imageLimits: () => deps.imageLimits(),
-      insertIntoEditor: (text) => deps.app().insertIntoEditor(text),
+      // Post-admission only (an image placeholder insert): the TSP renderer
+      // never runs this path, so an absent PiTui app is a committed no-op.
+      insertIntoEditor: (text) => deps.app()?.insertIntoEditor(text),
       // The shared prepared-input pipeline (skills build their message
       // through this — review finding 4).
       prepareDraftMessage: (text) => prepareUserMessage(text, deps.drafts.images, deps.submission.prepareDeps()),

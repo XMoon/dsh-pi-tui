@@ -32,11 +32,20 @@ import type { CommandLineClassification } from '../../domain/command/policy.ts'
  */
 export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set(['exit', 'quit'])
 
-/** Why a selected TUI builtin is (un)available on the TSP renderer. */
+/**
+ * What the predicate concluded. THREE states, so a caller cannot mistake
+ * "this is not a TUI builtin at all" for "this TUI builtin is unsupported":
+ * the family is part of the RESULT, not something the caller may forget to
+ * check (the B2 review's F1 — the previous two-state shape let a consumer
+ * refuse every Host/skill/extension/ordinary slash line).
+ */
 export type TspBuiltinAvailability =
-  | { readonly available: true }
-  /** The selected TUI builtin needs PiTui UI the TSP renderer does not have. */
-  | { readonly available: false; readonly reason: 'renderer-ui-unsupported' }
+  /** The line is not a TUI-owned builtin: the caller keeps its own routing. */
+  | { readonly kind: 'not-a-tui-builtin' }
+  /** A TUI-owned builtin the TSP renderer can run (the exit pair). */
+  | { readonly kind: 'available' }
+  /** A TUI-owned builtin that needs PiTui UI the TSP renderer lacks. */
+  | { readonly kind: 'unsupported' }
 
 /**
  * Whether one ALREADY-AUTHORITATIVELY-SELECTED TUI builtin can run on the TSP
@@ -55,12 +64,12 @@ export function tspBuiltinAvailability(
   name: string,
 ): TspBuiltinAvailability {
   if (classification.kind !== 'client-command' || classification.source !== 'tui') {
-    // Not a TUI builtin at all: this predicate has no opinion, and the caller
-    // must not treat the refusal as its outcome (the authoritative admission
-    // routes Host/extension/skill/ordinary lines through their own paths).
-    return { available: false, reason: 'renderer-ui-unsupported' }
+    // Not a TUI builtin: a Host command, an extension contribution, a skill
+    // invocation or an ordinary submission keeps its OWN routing. The caller
+    // must branch on this kind — it is the family decision, made once here.
+    return { kind: 'not-a-tui-builtin' }
   }
   return TSP_SUPPORTED_TUI_BUILTINS.has(name)
-    ? { available: true }
-    : { available: false, reason: 'renderer-ui-unsupported' }
+    ? { kind: 'available' }
+    : { kind: 'unsupported' }
 }

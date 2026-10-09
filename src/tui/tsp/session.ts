@@ -262,6 +262,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * never lift the Loading state nor relabel old rows as the new subject.
    */
   let retiredSource: object | undefined
+  /**
+   * PR3-B §3.4 row 1: the session/hydration INPUT fence. Between a generation
+   * bump (`beginSessionHydration`) and the new subject's first committed frame,
+   * the composer must not accept edits and must never submit: the draft belongs
+   * to the OUTGOING subject (its session may already be replaced), so a write
+   * here would target a stale owner. Composer keys are dropped (the existing
+   * draft is preserved — not cleared); the lifecycle cancel/exit intents stay
+   * available.
+   */
+  let hydrating = false
   let lastMain: Node | undefined
   const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
@@ -374,6 +384,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (source !== undefined && source !== projectionScope) {
       projectionScope = source
       retiredSource = undefined
+      // The new subject committed: the hydration input fence lifts with it.
+      hydrating = false
       scopeEpoch += 1
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
@@ -430,7 +442,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (disposed) return
       // The generation-bump window: drop the retained transcript to the
       // EXPLICIT Loading state and FENCE the retired source until a frame
-      // with a NEW token commits.
+      // with a NEW token commits — AND fence the composer input for the same
+      // window (§3.4 row 1).
+      hydrating = true
       retiredSource = projectionScope
       lastMain = loadingMain()
       render()
@@ -563,6 +577,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // held queue is EMPTY — with held keys the draft's emptiness is not yet
     // knowable (the held edits have not applied), so the gesture must wait
     // and re-decide in arrival order at the bind.
+    // PR3-B §3.4 row 1: while the session/hydration input fence is up the
+    // composer accepts NO key — the draft (and any submit) would belong to a
+    // subject the surface is in the middle of replacing. The lifecycle intents
+    // below still work; everything else is dropped, and the existing draft is
+    // preserved rather than cleared.
+    if (hydrating) {
+      const lifecycleIntent = (key.ctrl === true && (key.name === 'c' || key.name === 'd'))
+        || key.name === 'escape'
+      if (!lifecycleIntent) return false
+    }
     if (!inputBound) {
       if (key.ctrl === true && key.name === 'd' && heldKeys.length === 0 && composer.getDraft() === '') return true
       if (heldKeys.length < HELD_KEYS_LIMIT) {

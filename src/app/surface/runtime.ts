@@ -657,6 +657,14 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   /** Mount the process TUI. Runs at most once. */
   start(deps: SurfaceMountDeps): void
   /**
+   * PR3-B §3.3: bind the renderer's input projection ONCE. Called by the
+   * composition root AFTER it has settled the renderer capability and the
+   * command catalog, so no held pre-bind key can act on stale facts, and so a
+   * key cannot submit before the application handlers are ready. A no-op on the
+   * PiTui branch (its events table is wired by the mount itself).
+   */
+  bindRendererInput(): void
+  /**
    * Early teardown: release the Plugin Manager install-event subscription at
    * its original EARLY cleanup position (a late install event must never
    * notify/repaint a dying surface).
@@ -685,6 +693,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * own composer port instead of a TuiApp.
    */
   let composerPort: SubmissionComposerPort | undefined
+  /**
+   * PR3-B §3.3: the renderer input projection constructed at `start()` and the
+   * mount that will receive it. `bindRendererInput()` performs the ONE bind
+   * once the application input facts are ready.
+   */
+  let pendingInputBinding: SurfaceInputBinding | undefined
+  let inputBindTarget: { bindInput(handlers: SurfaceInputBinding): void } | undefined
   /**
    * PR3-B §3.2: the live modal presenter projection. PiTui assigns the
    * mounted app (structurally a `SurfaceInteractionPresenter`); a renderer
@@ -1765,13 +1780,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         composerPort = mounted.composer
         interactionPresenter = mounted.interaction
         rendererDispose = mounted.dispose
-        // PR3-B §3.3: bind the application input projection at the SAME
-        // start() commit point — the renderer's held pre-bind keys are
-        // consumed exactly once, here. The projection uses the EXACT
-        // already-constructed callbacks from the runner's events table
-        // (preserving their receiver/signature); B2 widens it with the
-        // submission members.
-        mounted.bindInput({
+        // PR3-B §3.3: the input projection is constructed HERE (from the EXACT
+        // already-built callbacks, preserving their receiver/signature) but
+        // BOUND LATER, through `bindRendererInput()`. Binding at this instant
+        // would replay the renderer's held keys BEFORE the composition root has
+        // settled the renderer capability and registered the command catalog —
+        // a held `!` line would then pass the shell admission and a held
+        // `/exit` would classify against an empty catalog (the B2 review's F2).
+        pendingInputBinding = {
           exit: () => deps.events.onExit(),
           cancel: () => deps.events.onCancel?.(),
           submit: (text, request) => deps.events.onSubmit(text, request),
@@ -1780,7 +1796,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           // committed no-op rather than a fabricated submission.
           steer: (text) => deps.events.onSteer?.(text),
           noteUserInput: () => deps.events.onUserInput?.(),
-        })
+        }
+        inputBindTarget = mounted
         return
       }
       // A4-8 (plan §17): the transcript-navigation and Ctrl+R search
@@ -1818,6 +1835,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       composerPort = app
       interactionPresenter = app
     },
+    bindRendererInput() {
+      const target = inputBindTarget
+      const handlers = pendingInputBinding
+      inputBindTarget = undefined
+      pendingInputBinding = undefined
+      if (target === undefined || handlers === undefined) return
+      target.bindInput(handlers)
+    },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original
       // EARLY position. This never cancels a Host install: only the official
@@ -1838,6 +1863,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // PiTui branch keeps via the disposed-but-present TuiApp.
       const releaseRenderer = rendererDispose
       rendererDispose = undefined
+      // A disposed surface never binds its renderer input afterwards.
+      pendingInputBinding = undefined
+      inputBindTarget = undefined
       // The release promise is OWNED by this surface and awaited by the
       // exit/fatal/fiber orchestrations. It is deliberately NOT caught here:
       // a renderer cleanup failure must reach those callers' non-truncating

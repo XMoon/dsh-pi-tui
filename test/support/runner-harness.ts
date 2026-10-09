@@ -136,6 +136,10 @@ export interface RunnerHarness {
   /** An optional shell executor service (the sandbox-policy user-shell
    * path; absent models "sandbox unavailable in this composition"). */
   shell?: unknown
+  /** PR3-B B2: flip `.value` to true to make the Direct writer COMMIT a prompt
+   *  (default false keeps the historical `session/agent-busy` degradation every
+   *  existing suite was written against). */
+  readonly promptAcceptance: { value: boolean }
   /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
    * `flush:<id>` / `dispose:<id>`) in call order — the Direct
    * owned-session retirement assertions. */
@@ -150,7 +154,13 @@ export interface RunnerHarness {
   readonly disposeFailures: Set<string>
 }
 
-export function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<void>, retirementEvents?: string[]): Agent {
+export function fakeAgent(
+  session: FakeSession,
+  whenIdleGate?: () => Promise<void>,
+  retirementEvents?: string[],
+  /** The OPT-IN prompt-acceptance box (see `makeHarness`). */
+  promptAcceptance: { value: boolean } = { value: false },
+): Agent {
   // A small structural Agent context is sufficient for the Direct setup
   // callbacks.
   const agentContext = {
@@ -163,6 +173,18 @@ export function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<voi
   // stuck in its pre-commit quiesce.
   let cancelled = false
   let releaseIdle: (() => void) | undefined
+  const prompts: DeliveredPrompt[] = []
+  /**
+   * The Direct writer's prompt acceptance is OPT-IN: suites written against a
+   * non-accepting stand-in (the user-shell cards, which settle with their own
+   * output) keep the exact historical behaviour — the writer degrades to
+   * `session/agent-busy` — unless a suite explicitly enables delivery.
+   */
+  const deliver = (sink: DeliveredPrompt[], mode: 'queue' | 'steer', message: unknown): void => {
+    if (!promptAcceptance.value) throw new Error('test agent is not accepting prompts')
+    sink.push({ mode, message, sessionId: session.id })
+    session.append?.('user/message', promptEventData(session, message))
+  }
   const agent = {
     session,
     ctx: agentContext,
@@ -184,8 +206,40 @@ export function fakeAgent(session: FakeSession, whenIdleGate?: () => Promise<voi
       cancelled = true
       releaseIdle?.()
     },
+    /**
+     * PR3-B B2: the Direct SessionWriter's prompt entry (`session-writer-direct`
+     * calls `agent.followup(message)` / `agent.steer(message)`). Without these
+     * the writer's try/catch degrades EVERY prompt to `session/agent-busy`,
+     * which made the harness unable to exercise a committed write at all. The
+     * stand-in records the delivered message on the session (a `user/message`
+     * append, exactly the official shape the fold consumes) and resolves, so a
+     * test can observe the committed prompt → official event chain. Suites that
+     * do not call them are unaffected.
+     */
+    followup: (message: unknown) => { deliver(prompts, 'queue', message) },
+    steer: (message: unknown) => { deliver(prompts, 'steer', message) },
   } as unknown as Agent
   return agent
+}
+
+/** The delivered messages the Direct writer committed to this Agent. */
+export interface DeliveredPrompt {
+  readonly mode: 'queue' | 'steer'
+  readonly message: unknown
+  readonly sessionId: string
+}
+
+/** The `user/message` payload the fold consumes for a delivered prompt. */
+function promptEventData(session: FakeSession, message: unknown): unknown {
+  const content = (message as { content?: unknown } | undefined)?.content
+  return {
+    id: `prompt-${session.id}-${session.seq}`,
+    role: 'user',
+    content: Array.isArray(content) && content.length > 0
+      ? content
+      : [{ type: 'text', text: typeof message === 'string' ? message : JSON.stringify(message) }],
+    source: { kind: 'user' },
+  }
 }
 
 /** Build Direct services whose in-memory registry behaves like the real Host. */
@@ -204,6 +258,10 @@ export function makeHarness(
 ): RunnerHarness {
   const persisted = new Map<string, FakeSession>()
   const live = new Map<string, Agent>()
+  /** PR3-B B2: the OPT-IN Direct prompt acceptance (flip it in a test that
+   *  needs the writer to COMMIT; the default keeps the historical
+   *  `session/agent-busy` behaviour every existing suite was written against). */
+  const promptAcceptance = { value: false }
   const retirementEvents: string[] = []
   const createOptions: { provider?: string; model?: string }[] = []
   const createInheritedEventCounts: (number | undefined)[] = []
@@ -215,7 +273,12 @@ export function makeHarness(
   }
 
   const makeHandle = (session: FakeSession): { agent: Agent; dispose: () => Promise<void> } => {
-    const agent = fakeAgent(session, whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id), retirementEvents)
+    const agent = fakeAgent(
+      session,
+      whenIdleGate === undefined ? undefined : () => whenIdleGate(session.id),
+      retirementEvents,
+      promptAcceptance,
+    )
     live.set(session.id, agent)
     return {
       agent,
@@ -377,7 +440,7 @@ export function makeHarness(
   const subagentsService = typeof subagents === 'function'
     ? (subagents as (events: string[]) => unknown)(retirementEvents)
     : subagents
-  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents, commandSettlements, resumeSessionIds, disposeFailures }
+  return { persistence, sessionQuery, agents, sessions, defaultModel, llm, createOptions, createInheritedEventCounts, createSignals, resumeSignals, createdSessions, commands, subagents: subagentsService, retirementEvents, commandSettlements, resumeSessionIds, disposeFailures, promptAcceptance }
 }
 
 export async function settle(): Promise<void> {
