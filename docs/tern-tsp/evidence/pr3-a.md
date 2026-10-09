@@ -152,8 +152,9 @@ The owners differ per path, and only the normal exit runs in this order:
   transaction, prints the resume hint and requests `appExit`. The full Direct
   owned-session retirement and the transport disposal are NOT awaited in front of
   `appExit` — they run inside the application-tree disposal that `appExit`
-  starts (under the DSH process-shutdown watchdog); `retireOwnedSession()` brings
-  only the FIRST cancel forward.
+  starts (under the DSH process-shutdown watchdog); the exit controller brings
+  only the FIRST cancel forward through the injected `prepareRetirement`
+  (`sessionRuntime.preCancelOwnedSession`).
 - **fatal** (`handleStartupFailure`): the SAME `disposeSurface` authority, then a
   BOUNDED retirement wait (cancel-first, 2 s bound) before its own exit — an
   error outcome, never a resume hint.
@@ -274,7 +275,7 @@ this is the recorded manual proof.
 ### Pane re-run on the teardown/qualification delta — OPEN defect
 
 The rows above were recorded on the `748589ca` build (its `dist/`, the profile
-linked to that worktree). A re-run on the `3d2cd24d`+ build does **not**
+linked to that worktree). A re-run on the `3d2cd24d` build does **not**
 reproduce the deferred start: the same command fails before the mount is
 reached, and the teardown itself throws:
 
@@ -288,12 +289,23 @@ ERROR fatal error=the surface is already disposed
 An instrumented run shows an `exit` intent reaching `createExitController`
 **before** `surface.start`: the exit tears the surface down, so `start()` finds
 it already disposed and the startup root reports a FATAL, while the pre-mount
-teardown reads the not-yet-mounted surface and fails too. Latching the renderer's
-own quit key on the mount was not sufficient (the intent arrives from another
-entry), and the exit caller inside that window is **not yet identified**. The
-scripted suite cannot see this window (the deferred mount is driven by real
-startup timing). **Treat this as an open defect: the pane rows above must be
-re-established on the fixed build before the manual smoke is claimed again.**
+teardown reads the not-yet-mounted surface and fails too. The exit caller inside
+that window was **not identified by an entry stack** at that time. The scripted
+suite cannot see this window (the deferred mount is driven by real startup
+timing).
+
+Provenance of this record, kept explicit:
+
+- the three logged errors above were observed on the `3d2cd24d` build (the range
+  in which they reproduce is that build);
+- the acquisition/cancellation fixes landed after it (`012eae25`, `9f1fce73`);
+  a partial re-run there captured **no** `cleanup failed` / `surface dispose
+  failed` / `fatal … already disposed` line and returned to the shell — but the
+  capture could not be completed into a diag/wire proof (see `Known limits`), so
+  it does NOT re-establish the pane rows above;
+- the rows above therefore remain recorded on `748589ca` and must be
+  re-established with a complete capture before the manual smoke is claimed for
+  the current build.
 
 Read-only live updates: the resumed-session smoke proves the FULL chain (fold →
 canonical structure → PR1 mapper → SDK surface → real Tern render, ack loop

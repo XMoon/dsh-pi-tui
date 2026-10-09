@@ -1866,8 +1866,13 @@ export function applyRunnerWithRuntime(
     // hint and request `appExit` while the renderer still owned the terminal.
     // Settled on EVERY path: at the ownership transfer, or — when the runner was
     // disposed mid-flight — after the acquired renderer has been released.
-    let settleAcquisition!: () => void
-    const rendererAcquisition = new Promise<void>(resolve => { settleAcquisition = resolve })
+    // The stage is INERT until the attempt actually starts (immediately before
+    // the connector runs, below): an unexecuted phase must read as already
+    // settled, or a startup failure BEFORE the attempt leaves the teardown
+    // transaction waiting on a stage that no producer will ever settle.
+    let rendererAcquisition: Promise<void> = Promise.resolve()
+    let settleAcquisition: (() => void) | undefined
+    let failAcquisition: ((error: unknown) => void) | undefined
     // The ONE idempotent client-surface teardown + fiber disposer (TS2
     // §11/§12): the orchestration is owned by `app/bootstrap/lifecycle.ts`;
     // every released resource is an already-owned callback. The frozen §12
@@ -2273,6 +2278,16 @@ export function applyRunnerWithRuntime(
       if (rendererTransferred || acquired === undefined) return
       await acquired.releaseUnmounted()
     }
+    // An accepted cancellation has ALREADY completed its teardown transaction
+    // (against the inert acquisition stage): this boot must never acquire the
+    // tty afterwards — that would hand the renderer to an already-finished exit.
+    if (cleanedUp) return
+    // The attempt STARTS here: from this point the pending stage has a real
+    // producer (the ownership transfer, the cancellation release, or a failure).
+    rendererAcquisition = new Promise<void>((resolve, reject) => {
+      settleAcquisition = resolve
+      failAcquisition = reject
+    })
     try {
       rendererMount = await selectRendererMount({
         cwd,
@@ -2292,7 +2307,7 @@ export function applyRunnerWithRuntime(
       // A REAL connect failure: the runner's fatal path owns it. The acquisition
       // stage is settled so the teardown transaction cannot wait on a renderer
       // that was never acquired.
-      settleAcquisition()
+      settleAcquisition?.()
       throw error
     }
     if (cleanedUp) {
@@ -2301,19 +2316,29 @@ export function applyRunnerWithRuntime(
       // and stop this boot — the exit already owns the resume hint and
       // `appExit`. The surface was correctly disposed, so `start` is NOT
       // attempted: nothing is resurrected and no hot fallback starts a second
-      // renderer.
+      // renderer. A release failure is NOT a startup failure — but it must reach
+      // the shared teardown OUTCOME (the published transaction rejects), never a
+      // fulfilled teardown with a tty still held.
+      let releaseFailed = false
+      let releaseFailure: unknown
       try {
         await releaseAcquiredRenderer()
       } catch (releaseError) {
+        releaseFailed = true
+        releaseFailure = releaseError
+      }
+      if (releaseFailed) {
         try {
           diag.error('tsp renderer: release failed after a cancelled startup', {
-            error: safeErrorMessage(releaseError),
+            error: safeErrorMessage(releaseFailure),
           })
         } catch {
           // A throwing diagnostics channel must not block the exit.
         }
+        failAcquisition?.(releaseFailure)
+      } else {
+        settleAcquisition?.()
       }
-      settleAcquisition()
       return
     }
     // A4: mount through the surface owner. The surface builds the surface-local
@@ -2466,16 +2491,19 @@ export function applyRunnerWithRuntime(
       // failure: the exit transaction (which awaits the acquisition stage)
       // finishes with the tty restored and owns the hint/`appExit`. `start()`
       // keeps its disposed rejection: nothing is resurrected here.
-      let releaseFailure: unknown
       // R2-3: the PRIMARY startup error keeps propagating; a secondary release
       // failure is recorded (a silent `catch {}` would hide a tty that stayed in
-      // raw mode).
+      // raw mode). Its PRESENCE is tracked separately from its value: a release
+      // that legally rejects `undefined` is still a failure.
+      let releaseFailed = false
+      let releaseFailure: unknown
       try {
         await releaseAcquiredRenderer()
       } catch (error_) {
+        releaseFailed = true
         releaseFailure = error_
       }
-      if (releaseFailure !== undefined) {
+      if (releaseFailed) {
         try {
           diag.error('tsp renderer: release failed after a rejected mount', {
             error: safeErrorMessage(releaseFailure),
@@ -2484,8 +2512,12 @@ export function applyRunnerWithRuntime(
         } catch {
           // A throwing diagnostics channel must not replace the primary.
         }
+        // The acquired tty owner was NOT released: the shared teardown outcome
+        // must carry that failure too — never a fulfilled teardown.
+        failAcquisition?.(releaseFailure)
+      } else {
+        settleAcquisition?.()
       }
-      settleAcquisition()
       if (cleanedUp) return
       throw error
     }
@@ -2493,7 +2525,7 @@ export function applyRunnerWithRuntime(
     // any) now belongs to the surface's ordered teardown, and the PiTui branch
     // acquired no renderer at all. The exit/fatal/HMR transaction may proceed.
     rendererTransferred = rendererMount !== undefined
-    settleAcquisition()
+    settleAcquisition?.()
     // The mounted surface is now live. On the PiTui branch the runner borrows
     // the TuiApp reference (the surface owner keeps the lifetime); the TSP
     // renderer branch has NO TuiApp (the slot stays undefined: command

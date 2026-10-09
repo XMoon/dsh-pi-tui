@@ -756,10 +756,10 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
 
   const harness = await mountTspHarness()
   try {
-    // The runner was disposed while the SDK handshake was in flight: a REAL
-    // `surface.start` rejection on an ALREADY-MOUNTED surface (this guard pins the
-    // RELEASE accessor and its idempotence; the disposed-DURING-handshake
-    // cancellation path is the acquisition transaction's business).
+    // A REAL `surface.start` rejection on an ALREADY-MOUNTED surface (this guard
+    // pins the RELEASE accessor and its idempotence; the disposed-DURING-handshake
+    // cancellation path is the acquisition transaction's business, and this test
+    // does NOT exercise that path).
     assert.throws(
       () => { harness.surface.start({ ...harness.startDeps, renderer: mount }) },
       /the surface is already mounted/,
