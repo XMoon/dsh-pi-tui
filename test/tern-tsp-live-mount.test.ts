@@ -519,12 +519,13 @@ test('A-07: dispose closes the SDK surface (x keep:false) and the session exactl
   }
 })
 
-// ── The quit key: the ONE PR3-A input intent ────────────────────────────────
+// ── The exit intent: B1 semantics (q is text; Ctrl+D exits only empty) ──────
 
-test('A-04b: the quit key (q / Ctrl+C / Ctrl+D) routes the exit intent; other keys do not', async () => {
-  assert.equal(isQuitKey({ name: 'q' }), true)
+test('A-04b: exit routes Ctrl+C and empty-draft Ctrl+D; a typed q is editor text', async () => {
+  assert.equal(isQuitKey({ name: 'q' }), false, 'the PR3-A bare q quit retired with the composer')
   assert.equal(isQuitKey({ name: 'c', ctrl: true }), true)
-  assert.equal(isQuitKey({ name: 'd', ctrl: true }), true)
+  assert.equal(isQuitKey({ name: 'd', ctrl: true }), false,
+    'Ctrl+D is not an unconditional quit — the composer reducer decides on the empty draft')
   assert.equal(isQuitKey({ name: 'c', ctrl: false }), false, 'bare c is not quit')
   assert.equal(isQuitKey({ name: 'enter' }), false)
   assert.equal(isQuitKey({ name: 'escape' }), false)
@@ -536,7 +537,11 @@ test('A-04b: the quit key (q / Ctrl+C / Ctrl+D) routes the exit intent; other ke
     assert.equal(harness.exitRequested(), false, 'an ordinary key never requests exit')
     harness.tern.input.type('q')
     await settle()
-    assert.equal(harness.exitRequested(), true, 'the quit key routes the SAME exit orchestration')
+    assert.equal(harness.exitRequested(), false, 'a typed q is editor text now, not the quit intent')
+    // Ctrl+D with a NON-empty draft is an editor no-op, never a quit.
+    harness.tern.input.type('\x04')
+    await settle()
+    assert.equal(harness.exitRequested(), false, 'Ctrl+D with text in the composer does not exit')
   } finally {
     await harness.dispose()
     await harness.session.close()

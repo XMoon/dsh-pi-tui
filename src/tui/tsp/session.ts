@@ -1,10 +1,10 @@
 /**
- * The experimental Tern TSP renderer session (PR3-A): the ONE physical-tty
- * owner when the composition root selects the TSP renderer, and the display
- * seam implementation that turns application display facts into official SDK
- * nodes.
+ * The experimental Tern TSP renderer session (PR3-A + PR3-B B1): the ONE
+ * physical-tty owner when the composition root selects the TSP renderer, and
+ * the display seam implementation that turns application display facts into
+ * official SDK nodes.
  *
- * Ownership contract (plan PR3-A §3.1):
+ * Ownership contract (plan PR3-A §3.1, PR3-B §3.4):
  *
  * - `connectTspRenderer()` runs the official `connect()` BEFORE PiTui could
  *   take stdin. `null` means the environment has no TSP (the composition root
@@ -14,15 +14,19 @@
  *   re-raising (no leaked raw-mode stdin listener).
  * - The returned mount owns the SDK session for the whole process lifetime:
  *   ONE `inline` surface whose `main` region carries the live transcript and
- *   whose `dock` region carries the read-only banner, status facts, notices
- *   and the pending-input presentation. No `process.stdin.on`/`setRawMode`
- *   of our own — the SDK session owns the tty (its own exit hooks restore it
- *   on process exit/signals).
- * - The input loop consumes `for await (const input of session)`. Quit
- *   (Ctrl+C, Ctrl+D or `q`) routes through the injected `requestExit` — the
- *   SAME exit orchestration as `/exit`. A LOOP FAILURE (the tty owner died)
- *   routes through the injected `onFatal` — the runner's fatal lifecycle —
- *   never a normal exit code. Everything else is ignored (read-only).
+ *   whose `dock` region carries the banner, status facts, notices, the
+ *   pending-input presentation and the CONTROLLED composer (`ui.editor`,
+ *   program-owned text/cursor; native edit/undo/send are NOT advertised).
+ *   No `process.stdin.on`/`setRawMode` of our own — the SDK session owns the
+ *   tty (its own exit hooks restore it on process exit/signals).
+ * - The input loop consumes `for await (const input of session)` — the ONE
+ *   input path. Ctrl+C (and Ctrl+D on an empty draft) routes through the
+ *   injected `requestExit` — the SAME exit orchestration as `/exit`; a typed
+ *   `q` is editor text (the PR3-A read-only `q` quit retired with the
+ *   composer). Submit gestures (Enter / Ctrl+Enter) are refused with an
+ *   explicit notice until B2 binds the real application onSubmit. A LOOP
+ *   FAILURE (the tty owner died) routes through the injected `onFatal` — the
+ *   runner's fatal lifecycle — never a normal exit code.
  * - `dispose()` closes the surface (`keep: false`) and then the session,
  *   exactly once; the returned promise settles only after the SDK restored
  *   the tty (its 50 ms input drain), so the exit/fatal/HMR orchestration can
@@ -44,7 +48,9 @@ import type {
   SurfaceDisplaySeam,
 } from '../../app/surface/display-seam.ts'
 import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
+import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import type { SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
+import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -54,14 +60,18 @@ import type { StreamingToolPreview } from '../../app/surface/streaming-tool-prep
 import { TranscriptNodeKeys, transcriptView } from './transcript-view.ts'
 
 /**
- * The banner the read-only renderer pins in its dock. It names ONLY the
- * renderer's bare `q` quit key: the chord-labelled form is deliberately not
- * rendered here, because this renderer owns no keymap (so there is no
- * authority to route a chord label through) and the host-keybindings gate
- * closes its sanctioned-seam list to the keybinding authority tree. The full
- * quit contract (q / Ctrl+C / Ctrl+D, see `isQuitKey`) stays in the code.
+ * The banner the composer-active renderer pins in its dock. The PR3-A
+ * read-only banner (with its bare `q` quit key) retired together with the
+ * composer: a typed `q` is EDITOR TEXT now. Like the PR3-A banner, it names
+ * NO chord labels — the renderer owns no keymap (there is no authority to
+ * route a chord label through), and the host-keybindings gate keeps its
+ * sanctioned-seam list closed to non-keymap copy. The submit/newline
+ * gestures are the SDK editor's own affordances.
  */
-const READ_ONLY_BANNER = 'DSH TSP renderer · experimental read-only · press q to quit'
+const DOCK_BANNER = 'DSH TSP renderer · experimental composer'
+
+/** The B1 refusal notice for submit gestures (B2 binds the real onSubmit). */
+const SUBMIT_NOT_READY = 'the TSP composer is not wired for submission yet — the draft was preserved'
 
 /** The renderer-local dock state (banner + status facts + welcome + notices). */
 interface DockState {
@@ -214,8 +224,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   let retiredSource: object | undefined
   let lastMain: Node | undefined
-  const dock: DockState = { statusLine: READ_ONLY_BANNER, notices: [], welcome: [] }
+  const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
+  /** The application's pending-submit fact, surfaced as a dock line. */
+  let pendingSubmit: SubmitPendingDetail | undefined
+  /**
+   * PR3-B B1: the ONE program-owned composer. The SDK controls the editor
+   * node (`text`/`cursor` in UTF-16 units); the native edit/undo/send
+   * features are NOT advertised — every accepted edit re-renders the
+   * controlled state in the next frame.
+   */
+  const composer: TspComposer = createTspComposer({
+    setSubmitPending: (detail) => {
+      pendingSubmit = detail
+      render()
+    },
+    notify: (text, kind) => display.notify(text, kind),
+  })
   /**
    * PR3-A supports NO viewer, so this read is the explicit UNSUPPORTED capability
    * (the seam's `supportsViewer` is false and `enterView` declines at its real
@@ -226,6 +251,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let viewerGeneration = 0
 
   /** Re-render both regions in ONE frame (the SDK diffs). */
+  let composerFocused = false
   const render = (): void => {
     if (disposed) return
     const dockNode = dockView()
@@ -234,17 +260,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(mainNode === undefined ? {} : { main: mainNode }),
       ...(dockNode === undefined ? {} : { dock: dockNode }),
     })
+    // Focus the composer only AFTER its node exists in a committed frame (a
+    // focus op for an absent node is meaningless); the node id is stable, so
+    // one call after the FIRST dock render is enough for the whole lifetime
+    // (B3 re-focuses after modal close).
+    if (!composerFocused && dockNode !== undefined) {
+      composerFocused = true
+      composer.setFocused(true)
+      surface.focus('dock.composer')
+    }
   }
 
   const dockView = (): Node | undefined => {
-    const lines: ReturnType<typeof ui.text>[] = []
+    const lines: ReturnType<typeof ui.text | typeof ui.editor>[] = []
     for (const facts of dock.welcome) {
       const model = facts.model === undefined ? '' : ` · ${facts.model}`
       lines.push(ui.text({ key: `welcome-${facts.sessionId}`, text: `DSH session ${facts.sessionId}${model}` }))
     }
-    // The pending-input presentation IS visible on the read-only renderer:
-    // the queue lane (authoritative queued + local echoes) and the ordered
-    // conversation tail, exactly as the ONE join produced them.
+    // The pending-input presentation IS visible on this renderer: the queue
+    // lane (authoritative queued + local echoes) and the ordered conversation
+    // tail, exactly as the ONE join produced them.
     for (const item of pending.queued) {
       lines.push(ui.text({ key: `queue-${item.id}`, text: `queued (${item.mode}): ${item.text}` }))
     }
@@ -254,11 +289,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (pending.running && pending.queued.length === 0 && pending.tail.length === 0) {
       lines.push(ui.text({ key: 'pending-running', text: 'queued input is running…' }))
     }
+    if (pendingSubmit !== undefined) {
+      lines.push(ui.text({ key: 'pending-submit', text: pendingSubmit === 'submit' ? 'Submitting…' : 'Queued…' }))
+    }
     if (dock.statusLine !== '') lines.push(ui.text({ key: 'status', text: dock.statusLine }))
     for (const notice of dock.notices) {
       lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${notice.text}` : notice.text }))
     }
-    if (lines.length === 0) return undefined
+    // The controlled composer: SDK `ui.editor` with client-supplied
+    // text/cursor (UTF-16). The native edit/undo/send features are NOT
+    // advertised (`sendable` stays unset); the program owns every edit.
+    lines.push(ui.editor({
+      key: 'composer',
+      text: composer.state().text,
+      cursor: composer.state().cursor,
+      maxLines: 8,
+      placeholder: 'Message',
+      prompt: '> ',
+    }))
     return ui.col({ key: 'dock' }, ...lines)
   }
 
@@ -309,7 +357,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const open = todos.filter(todo => todo.status !== 'completed').length
       parts.push(`todos ${todos.length - open}/${todos.length}`)
     }
-    dock.statusLine = parts.length === 0 ? READ_ONLY_BANNER : `${READ_ONLY_BANNER} · ${parts.join(' · ')}`
+    dock.statusLine = parts.length === 0 ? DOCK_BANNER : `${DOCK_BANNER} · ${parts.join(' · ')}`
     render()
   }
 
@@ -396,10 +444,32 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     supportsModals: false,
   }
 
-  // ── Input: quit routes the exit intent; a loop failure is FATAL ──
+  // ── Input: the ONE SDK loop, the fixed §3.4 precedence ──
+  // (B1: no modal exists yet — the interaction runtime's fail-closed
+  // admission owns Question/Approval; a loop failure is FATAL.)
+  const consumeKey = (key: Parameters<TspComposer['applyKey']>[0]): boolean => {
+    // 1. The disposal fence: `disposed` is checked by the loop before this.
+    // 2. No active modal in B1 (supportsModals stays false).
+    // 3. The interrupt/cancel intent routes through the SAME exit/cancel
+    //    orchestration as PiTui's Ctrl+C (B1 keeps the quit route: there is
+    //    no live-turn cancel wiring yet — B2 binds onCancel).
+    if (key.ctrl === true && key.name === 'c') return true
+    // 4. The composer reducer owns everything else (Ctrl+D empty-exit,
+    //    Enter gestures, paste, edits). A typed `q` is TEXT now.
+    const edit = composer.applyKey(key)
+    if (edit.kind === 'edited') render()
+    if (edit.kind === 'submit') {
+      // B1: the admission is not wired yet — refuse EXPLICITLY and keep the
+      // draft (no Host mutation, no success notice).
+      display.notify(SUBMIT_NOT_READY, 'info')
+    }
+    if (edit.kind === 'exit-empty') return true
+    return false
+  }
+
   const consumeInput = (input: SessionInput): boolean => {
     if (input.type !== 'key') return false
-    return isQuitKey(input.key)
+    return consumeKey(input.key)
   }
 
   const inputLoop = (): void => {
@@ -410,7 +480,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           if (consumeInput(input)) {
             if (exitRequested) continue
             exitRequested = true
-            options.log?.('tsp renderer: quit key', { key: input.type === 'key' ? input.key.name : undefined })
+            options.log?.('tsp renderer: exit key', { key: input.type === 'key' ? input.key.name : undefined })
             options.requestExit()
           }
         }
@@ -431,25 +501,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   inputLoop()
 
   render()
-  /** The B0 INERT composer: no editor exists yet, so every member throws
-   *  (a silent no-op could fake a successful draft read; a WRONG mapping —
-   *  e.g. clearing the dock-notice channel, which is a transient notice
-   *  stream, not the settled-local-card set — would seed B1 with the wrong
-   *  semantics). */
-  const inertComposer: SubmissionComposerPort = {
-    getDraft() { throw new Error('the TSP renderer has no composer yet') },
-    setDraft() { throw new Error('the TSP renderer has no composer yet') },
-    setEditorText() { throw new Error('the TSP renderer has no composer yet') },
-    insertIntoEditor() { throw new Error('the TSP renderer has no composer yet') },
-    notify(text, kind) { display.notify(text, kind) },
-    setSubmitPending() { throw new Error('the TSP renderer has no composer yet') },
-    clearSettledLocalMessages() { throw new Error('the TSP renderer has no composer yet') },
-  }
+  // PR3-B B1: the composer PORT adapter — the application's
+  // `SubmissionComposerPort` projection backed by the renderer's ONE
+  // composer object. `getDraft()` reads the VISIBLE TSP composer, never a
+  // hidden PiTui instance; `setSubmitPending` surfaces the existing pending
+  // fact in the dock (no derived queue state).
+  const composerPort: SubmissionComposerPort = composer
   /** The B0 INERT modal presenter: no form exists yet, so every ask rejects
    *  with the flow's cancellation error (never a fabricated answer). The
    *  fail-closed admission in the interaction runtime decides BEFORE this
    *  presenter is consulted; the rejects are the belt to that suspenders for
-   *  any direct call. */
+   *  any direct call. B3 replaces this with the real TSP presenter. */
   const inertInteraction: SurfaceInteractionPresenter = {
     showApprovalPrompt() { return Promise.reject(cancellationError('approval prompt cancelled')) },
     askQuestions() { return Promise.reject(cancellationError('question flow cancelled')) },
@@ -458,7 +520,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
   return {
     display,
-    composer: inertComposer,
+    composer: composerPort,
     interaction: inertInteraction,
     dispose: async () => {
       if (disposed) return
@@ -496,8 +558,13 @@ function pendingRowText(row: PendingInputPresentation['tail'][number], index: nu
   return `[${index + 1}] you${status}: ${row.row.text}`
 }
 
-/** Whether one decoded key is the PR3-A quit intent (exported for tests). */
+/**
+ * Whether one decoded key is the EXIT intent (exported for tests): Ctrl+C
+ * always; Ctrl+D only through the composer reducer's empty-draft branch. The
+ * PR3-A read-only `q` quit retired when the composer became active — a typed
+ * `q` is editor text now.
+ */
 export function isQuitKey(key: { readonly name: string; readonly ctrl?: boolean }): boolean {
-  if (key.name === 'c' || key.name === 'd') return key.ctrl === true
-  return key.name === 'q'
+  if (key.name === 'c') return key.ctrl === true
+  return false
 }
