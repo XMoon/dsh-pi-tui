@@ -434,6 +434,22 @@ from a test-only patch row (the plan's allowed real-runner-fixture trigger); the
 pane screenshot does not capture the SDK's native surface (use the ops + the diag);
 cross-process Remote live and PR3-B input stay out of scope.
 
+### Supported / fallback combination on the current build (real terminals)
+
+- **Supported** (Tern pane): the SDK's own hello reply (`term=tern ver=0.6.3`) →
+  `tsp renderer selected` → the TSP surface renders (the captures above).
+- **Fallback** (a terminal without TSP, forced with the official `TERN_TSP=0`
+  switch, in a real `tmux` pane): the diag records
+  `tsp renderer unavailable (SDK declined); mounting PiTui` and the PiTui UI
+  renders fully (welcome card, editor seat, status line) — no TSP surface, no
+  fatal:
+
+```sh
+tmux new-session -d -s pr3afb -x 100 -y 30
+tmux send-keys -t pr3afb 'env DSH_PI_TUI_RENDERER=tsp TERN_TSP=0 dsh --profile pi-tui-pr3a' Enter
+tmux capture-pane -t pr3afb -p
+```
+
 ### Known limits (recorded, not claimed done)
 
 - **Pane history vs current build:** the three logged errors (`cleanup failed` /
