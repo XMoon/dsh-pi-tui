@@ -1,11 +1,11 @@
 # Tern TSP PR3-B evidence — interactive pane (B0..B4)
 
-> **Status: B0 merged (`next @ 2c281826`); B1 implemented on
-> `feat/tern-tsp-pr3-b1-editor` — review gates open. B2..B4 pending.**
+> **Status: B0 merged; B1 implemented on `feat/tern-tsp-pr3-b1-editor` —
+> review gates open. B2..B4 pending.**
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
-- **Base**: `next @ 2c281826` (the merged B0).
+- **Base**: the merged B0 tip of `next` (the frozen-plan baseline).
 - **Scope**: the TSP renderer becomes composer-active — controlled
   `ui.editor`, SDK key/paste through the ONE input loop, grapheme-safe
   editing, the B1 submit refusal. NO backend submission (B2), no modals (B3).
@@ -31,24 +31,22 @@ taxonomy is untouched. Native SDK edit/undo/send features are NOT advertised
 
 ### Verification (worktree `feat/tern-tsp-pr3-b1-editor`, node v24.20.0, pnpm 11.7.0)
 
-Every row below is labeled with the SNAPSHOT it actually ran on — the
-initial implementation (`ca847758`), the first fix round (`02d0a974`), or
-the second fix round (the HEAD of this branch after the round-2 findings;
-see the review ledger). Nothing green on an older snapshot is presented as
-current.
+Each row ran green on the tree it names in the review ledger; counts and
+SHAs are deliberately not restated here (they drift per round — the ledger
+narrative carries the provenance).
 
-| Command | Snapshot | Result |
-|---|---|---|
-| `node --test test/tern-tsp-editor-input.test.ts` | `aa097322` (final) | **32/32 pass** — includes the Surface.render-call observer guard (one render per accepted edit; a wire-frame count is NOT discriminating — historical: 31/31 at `c4aaaf79` carried a one-frame-per-edit guard; round-1 17/17; round-2 added the F1 probe shapes, the port render sink, the held/bind/discard guards, the ordered pre-bind Ctrl+D, the v4-tail exit shape, the flood/overflow guard; the external round added the bound cancel semantics) |
-| `node --test test/tern-tsp-live-mount.test.ts` | round-2 HEAD | 17/17 pass (A-04b updated; re-run per round) |
-| `node --test test/tern-tsp-renderer-selection.test.ts` | round-2 HEAD | 19/19 pass |
-| `node --test test/tern-tsp-runner-teardown.test.ts` | round-2 HEAD | 12/12 pass |
-| `node --test test/tern-tsp-pr3b-ports.test.ts` | round-2 HEAD | 5/5 pass |
-| `pnpm typecheck:bundle` | round-2 HEAD | pass |
-| `pnpm gate:architecture` / `pnpm gate:boundary` | `43ffa950` | pass (452 files) / pass (31 files) |
-| `pnpm test:product` | `43ffa950` = 7509/7509; `aa097322` = 7510/7510 | pass |
-| `pnpm verify:prepush` | `ca847758` pass (after the banner fix); `02d0a974` pass; `43ffa950` pass; `aa097322` pass | pass |
-| Host-keybindings note | all snapshots | the ONLY gate failure in any run was the chord-labelled dock banner at `ca847758` (fixed by removing the labels per the PR3-A precedent — no gate exception) |
+| Command | Result |
+|---|---|
+| `node --test test/tern-tsp-editor-input.test.ts` | pass. Coverage: the F1 probe shapes, the port render sink, the held/bind/discard guards, the ordered pre-bind Ctrl+D, the v4-tail exit shape, the flood/overflow guard, the bound cancel semantics, and the Surface.render-call observer guard (one render per accepted edit — a wire-frame count is NOT discriminating) |
+| `node --test test/tern-tsp-live-mount.test.ts` | pass (A-04b updated; re-run per round) |
+| `node --test test/tern-tsp-renderer-selection.test.ts` | pass |
+| `node --test test/tern-tsp-runner-teardown.test.ts` | pass |
+| `node --test test/tern-tsp-pr3b-ports.test.ts` | pass |
+| `pnpm typecheck:bundle` | pass |
+| `pnpm gate:architecture` / `pnpm gate:boundary` | pass |
+| `pnpm test:product` | pass (zero failures) |
+| `pnpm verify:prepush` | pass |
+| Host-keybindings note | — | the ONLY gate failure in any run was the chord-labelled dock banner (fixed by removing the labels per the PR3-A precedent — no gate exception) |
 
 ### Manual real-pane smoke (B1 IMPLEMENTATION DONE / MERGE QUALIFIED BY OWNER AMENDMENT A1)
 
@@ -139,7 +137,8 @@ agent's model, which cannot read images — the RECORD is the evidence).
 
 ### Review round 1 (needs-fixes → fixed)
 
-The durable reviewer's round-1 verdict on `ca847758` was **needs-fixes**
+The durable reviewer's round-1 verdict (on the initial B1 implementation
+commit) was **needs-fixes**
 (four P2s), each verified with a REAL-SDK read-only probe against the
 production mount:
 
@@ -161,7 +160,7 @@ production mount:
   final Ctrl+D never saw an empty draft, and an image was cited without
   inspection. Fixed by the PARTIAL redo above (complete record, truthful
   tool-limitation boundaries) — no claim exceeds its artifact.
-- **External review (PR #262, on `348e1870`)** — 1 P2 + 1 P3:
+- **External review (PR #262, on the amendment-recorded commit)** — 1 P2 + 1 P3:
   - P2: bound Ctrl+C violated the frozen §3.4 row-3 semantics (it routed
     exit — interrupting a live Agent would have killed the TUI) and Escape
     was inert instead of cancel. Fixed: `SurfaceInputBinding`/`TspInputHandlers` gain
@@ -207,8 +206,8 @@ production mount:
 
 ## B0 — `refactor(tern-tsp): isolate composer and interaction presenters`
 
-- **Base**: `next @ f910c2680e117a829088b11e43718e9216164607` (verified at
-  branch creation; no drift from the plan's frozen value).
+- **Base**: the plan's frozen `next` baseline (verified at branch creation;
+  no drift).
 - **Scope**: ports only — no product-visible TSP input, no behavior change on
   the PiTui path.
 
@@ -239,7 +238,7 @@ identical (the app instance IS both ports).
 | Command | Result |
 |---|---|
 | `node --test test/tern-tsp-pr3b-ports.test.ts` (new guards) | 5/5 pass — controller imports no `TuiApp`; UserShell notices are neutral; `TuiApp` structurally satisfies both ports; all seven composer members live on a real PiTui app; the interrupt failure surfaces through the neutral notify with zero local-card calls |
-| `node --test test/tern-tsp-live-mount.test.ts` | 17/17 pass (renderer mount contract incl. the new mount members) |
+| `node --test test/tern-tsp-live-mount.test.ts` | pass (renderer mount contract incl. the new mount members) |
 | `node --test test/tern-tsp-renderer-selection.test.ts` | 19/19 pass |
 | `node --test test/terminal-progress-lifecycle.test.ts` | 80/80 pass (production interaction-runtime over the presenter seam) |
 | `node --test test/question-park-reopen.test.ts test/question-remote-lifecycle.test.ts` | 29/29 pass |
@@ -280,24 +279,23 @@ structurally.
 
 ### Review
 
-- **External review** (on `33a5b7e8`): 2 P3 findings + 2 boundary rulings —
+- **External review** (on the B0 implementation commit): 2 P3 findings + 2 boundary rulings —
   P3-1 the inert `clearSettledLocalMessages` mapped to the WRONG state
   (`display.setDockNotice(undefined)` clears the transient dock-notice stream,
   not the settled-local-card set; fixed to fail-fast like every other inert
   member); P3-2 the interrupt test waited a fixed 20 ms (fixed to a
   notify-resolved promise with a 2 s timeout); rulings recorded above
   (`bindInput` → B1, attention chrome → B3).
-- **Round 1** (durable reviewer, read-only, snapshot `33a5b7e8`, tree clean at
-  start/end): **accepted** — zero P0/P1/P2. Coverage: all 14 files, every hunk;
+- **Round 1** (durable reviewer, read-only, on the implementation commit,
+  tree clean at start/end): **accepted** — zero P0/P1/P2. Coverage: all 14 files, every hunk;
   B0 zones 1-8 verified with code anchors; merge-gate items verified against
   the supplied same-state evidence; the shared-seme analysis confirmed the
   ports are pure projections (no new session/queue/writer/classifier
   authority). "accepted ≠ merge authorization; B1-B4 and the PR4 display DTO
   debt remain with their owners."
-- **Round 2** (delta `86bd3bce`, docs-only ledger commit): **accepted**, zero
-  findings. Noted `pnpm test:docs` covers only `docs/tmux/*.test.mjs`; this
+- **Round 2** (docs-only ledger commit): **accepted**, zero findings. Noted `pnpm test:docs` covers only `docs/tmux/*.test.mjs`; this
   ledger's accuracy is proven by the human diff check, not that lane.
-- **Round 3** (delta `1ddf12e2`, the two external-review fixes): **accepted**,
+- **Round 3** (the two external-review fixes): **accepted**,
   zero findings. Confirmed the fail-fast semantics against the authoritative
   `TuiApp.clearSettledLocalMessages` contract and every production caller;
   confirmed B0 has no reachable path into the new throw (the TSP SDK loop
