@@ -290,9 +290,10 @@ An instrumented run shows an `exit` intent reaching `createExitController`
 **before** `surface.start`: the exit tears the surface down, so `start()` finds
 it already disposed and the startup root reports a FATAL, while the pre-mount
 teardown reads the not-yet-mounted surface and fails too. The exit caller inside
-that window was **not identified by an entry stack** at that time. The scripted
-suite cannot see this window (the deferred mount is driven by real startup
-timing).
+that window was **not identified by an entry stack** at that time. The EXISTING
+guards do not cover this window — it is scriptable (a held handshake with a
+queued SDK key reproduces it deterministically), and a production-level guard is
+still outstanding.
 
 Provenance of this record, kept explicit:
 
@@ -309,24 +310,29 @@ Provenance of this record, kept explicit:
 
 Read-only live updates: the resumed-session smoke proves the FULL chain (fold →
 canonical structure → PR1 mapper → SDK surface → real Tern render, ack loop
-under credits:2). Streaming deltas on a live agent turn were not driven in this
-manual pass (the scripted A-04 pins the same-node delta contract); PR3-B's
-smoke will exercise a real interactive turn end-to-end.
+under credits:2). **This is an UNMET acceptance gate**, not a scope hand-off:
+the plan requires the renderer to consume a real ongoing / resumed / externally
+produced event, and read-only does NOT mean replay-only. A current-build live
+tool/delta consumption record is still missing, and PR3-B's future interactive
+turn is not a substitute for it.
 
 ### Known limits (recorded, not claimed done)
 
-- **OPEN defect (pane re-run, current build):** an exit intent inside the
-  SDK-handshake window disposes the surface before `surface.start`, which then
-  reports a FATAL and the pre-mount teardown fails against an unmounted surface
-  (details and the log above). The exit caller is not yet identified and the
-  scripted suite cannot reach the window.
+- **Pane re-run:** the three logged errors (`cleanup failed` / `surface dispose
+  failed` / `fatal … already disposed`) were observed on the `3d2cd24d` build.
+  The acquisition/cancellation and footer fixes landed after it
+  (`012eae25`, `9f1fce73`, `b0832be1`); the partial re-run there captured none of
+  them and returned to the shell, but could not be completed into a diag/wire
+  proof — so the current build is NOT claimed to reproduce them AND the pane rows
+  above are NOT re-established either. A production-level guard for this window
+  and a complete current-build pane capture both remain outstanding.
 - The lanes above are the LOCAL stage-final pass. CI has not run for this branch,
   and the published-DSH compatibility lanes (`compat:dsh:npm`,
   `compat:dsh:client-family`) plus the migration smokes (`smoke:remote-*`,
   `smoke:boundary`, `smoke:startup-strictness`) are a separate stage-final step.
 - A real interactive turn (live streaming deltas through a real agent) is not
-  driven in the manual smoke: this renderer is read-only by contract, so the
-  manual pass covers resume plus the legal failure paths, and the scripted A-04 /
-  A-05 pin the same-node delta and hydration-fence contracts.
+  driven in the manual smoke; the scripted A-04 / A-05 pin the same-node delta and
+  hydration-fence contracts. This does not close the live-consumption gate stated
+  above.
 - `TERN_TSP=0` and tmux-style fallback evidence is inherited from the L6
   composition fallback test plus the SDK's own decline semantics.
