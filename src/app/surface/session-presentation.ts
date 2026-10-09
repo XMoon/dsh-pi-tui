@@ -439,6 +439,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // projection source: a late repaint still reading the OLD fold can never
     // lift Loading nor relabel old rows as the new subject.
     deps.surface.display.beginSessionHydration()
+    // PR3-B §7.3 (the B2 external-review F1): the SAME synchronous authority
+    // boundary is the ONE draft-drop point — the old session's unsubmitted
+    // active-draft text is discarded at the genuine A→B switch (the seam's
+    // PiTui adapter keeps its own retention contract; the TSP renderer
+    // clears). A same-session rehydrate never enters this reset, so its
+    // Client-local draft stays.
+    deps.surface.display.clearActiveDraft()
     // A new session owns the surface: the whole Task Center (the Job child
     // overlay FIRST, then the browser, then the cached catalog + the
     // synchronous badge/summary/row mirrors) is reset by the surface owner

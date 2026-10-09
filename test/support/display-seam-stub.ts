@@ -26,6 +26,7 @@ export function displaySeamStub(overrides: Partial<SurfaceDisplaySeam> = {}): Su
     commitDisplaySubject: () => {},
     resetSessionFacts: () => {},
     beginSessionHydration: () => {},
+    clearActiveDraft: () => {},
     resetInputHistory: () => {},
     setSearchResult: () => {},
     notify: () => {},

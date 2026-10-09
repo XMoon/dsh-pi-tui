@@ -449,6 +449,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lastMain = loadingMain()
       render()
     },
+    clearActiveDraft() {
+      // PR3-B §7.3 (the B2 external-review F1): the session-lifecycle
+      // authority confirmed a GENUINE A→B switch (this runs only from the
+      // synchronous generation reset — a same-session rehydrate never calls
+      // it). The outgoing session's unsubmitted draft is DISCARDED so it
+      // can never be typed into, or submitted against, the incoming
+      // session once the fence lifts. No cross-session cache: the text is
+      // gone, not hidden.
+      if (disposed) return
+      composer.setDraft('')
+    },
     resetInputHistory() {
       // Editor-only; no recall surface exists on the read-only renderer.
     },
