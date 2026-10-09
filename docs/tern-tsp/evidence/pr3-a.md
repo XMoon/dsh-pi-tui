@@ -1,9 +1,14 @@
 # Tern TSP PR3-A evidence — single-tty read-only live mount
 
-> **Status: IN PROGRESS** — this file is the A0 audit deliverable first; the
-> test matrix, real-pane smoke and review ledger are appended as the stage
-> progresses. Historical PR1/PR2 evidence is never rewritten (see
-> [pr1.md](./pr1.md) / [pr2.md](./pr2.md)).
+> **Status: PR open, incrementally accepted — the STAGE GATES ARE NOT CLOSED.**
+> This file is the A0 audit deliverable first; the test matrix, the current-build
+> pane captures and the validation snapshot are appended as the stage progresses,
+> and the review-round ledger lives in the pull request. "The PR's review rounds
+> accepted the increments" is NOT "every stage gate is closed": the final
+> cumulative acceptance (external review), the CI verdict for the current head and
+> the stage-final local pass are still open, and nothing here authorizes a merge.
+> Historical PR1/PR2 evidence is never rewritten (see [pr1.md](./pr1.md) /
+> [pr2.md](./pr2.md)).
 >
 > **Plan:** `temp/tern/dsh-pi-tui-tern-tsp-pr3-two-stage-code-plan-v1-20261008.md`
 > (PR3-A section). **Overall:** `temp/tern/dsh-pi-tui-tern-tsp-overall-roadmap-v1-20261008.md`.
@@ -239,18 +244,32 @@ Guards outside these two files own the adjacent PR3-A invariants:
 
 Worktree `feat/tern-tsp-pr3-a-live-mount`, at the commit carrying this file:
 
-- `pnpm verify:prepush` — exit 0 end to end: `typecheck:fork` + `typecheck:bench`,
-  `test:fork` (1195), `test:docs`, `test:tooling` (364), the architecture /
-  boundary / keybinding / naming / session-event / installation-doc /
-  pi-divergence / pi-vendor gates, `pnpm audit`, and `pack:release`
-  (`clean` + `build` + `typecheck:bundle` + `test:product` **7452/7452** + the
-  eight public-package smokes).
+- `pnpm verify:prepush` — exit 0 end to end on `67ef05b6` (the head whose
+  `src/**` is unchanged through the current one): `typecheck:fork` +
+  `typecheck:bench`, `test:fork` (1195), `test:docs`, `test:tooling` (364), the
+  architecture / boundary / keybinding / naming / session-event /
+  installation-doc / pi-divergence / pi-vendor gates, `pnpm audit`, and
+  `pack:release` (`clean` + `build` + `typecheck:bundle` + `test:product`
+  **7468/7468** + the eight public-package smokes).
+- After the terminal-output gate (`73748b07`) and the harness-ownership fixes:
+  `pnpm test:product` **7470/7470** (gate) and **7471/7471** (fixture ownership)
+  on their heads, the affected tern-tsp files green, and the runner guard file
+  (`test/tern-tsp-runner-teardown.test.ts`) **12/12** on the current head.
+- Stage-final smoke/compat batch on `16cbbea0` — all 16 lanes exit 0
+  (`pack:release`, `smoke:boundary`, `smoke:startup-strictness`,
+  `smoke:official-presets`, `smoke:pi-tui-file-reference-built`,
+  `compat:dsh:npm`, `compat:dsh:client-family` and the nine `smoke:remote-*`).
+  A later `src/**` delta (the gate) invalidates that batch for the affected
+  inputs, so it is re-run once at stage close rather than inherited.
+- CI (GitHub, on the PR): `73748b07` **success** and `fe65800e` **success** (the
+  full pipeline, covering `73748b07`…`7d889189`); `7d889189` shows `cancelled`
+  because the newer push superseded it (the repository's concurrency rule, not a
+  failure); the current head `e46778ce` was still in progress when this snapshot
+  was written — it inherits nothing from the earlier heads.
 - `pnpm build` — exit 0; the lazy `session-*.mjs` chunk imports
   `@stencil-hq/tern` as an EXTERNAL (the default `index.mjs` contains no SDK
   reference; `DSH_PI_TUI_RENDERER` never loads it unset).
 - `tsc -p tsconfig.json --noEmit` / `tsconfig.bench.json` — exit 0.
-- `node --test` tern-tsp-renderer-selection (12) + tern-tsp-live-mount (16) =
-  **28 pass / 0 fail**.
 
 ## Real Tern pane smoke (manual, headless `tern serve` + `tern ctl`)
 
@@ -463,10 +482,12 @@ tmux capture-pane -t pr3afb -p
   build. The fixes landed after it and the CURRENT build has a complete capture
   with none of them (see "Current-build pane capture"), plus the production-level
   guards in `test/tern-tsp-runner-teardown.test.ts`.
-- The lanes above are the LOCAL stage-final pass. CI has not run for this branch,
-  and the published-DSH compatibility lanes (`compat:dsh:npm`,
-  `compat:dsh:client-family`) plus the migration smokes (`smoke:remote-*`,
-  `smoke:boundary`, `smoke:startup-strictness`) are a separate stage-final step.
+- Stage acceptance is still open. The review rounds (internal increments and the
+  external PR review) accepted what they saw, and CI was green on `73748b07` /
+  `fe65800e`, but the current head has no CI verdict yet, the post-gate
+  smoke/compat lanes must be re-run for the frozen head, and the final cumulative
+  acceptance is the external review's. Until those close, this stage is NOT done
+  and no merge is authorized.
 - The same-process live-consumption gate is PROVEN by the fixture-triggered run
   above (real Agent → official events → SDK native ops: streaming appends, settle,
   real `tool/call` → `tool/result`). What that record does NOT cover: PR3-B's
