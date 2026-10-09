@@ -112,7 +112,7 @@ import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
-import { productionTspConnector, selectRendererMount } from './bootstrap/renderer-selection.ts'
+import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
 import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
@@ -2306,8 +2306,11 @@ export function applyRunnerWithRuntime(
       failAcquisition = reject
     })
     // The TSP attempt owns the tty from the moment the connector starts; an honest
-    // decline hands it back to PiTui (the unchanged default).
-    terminalOutput.suspend()
+    // decline hands it back to PiTui (the unchanged default). A boot that never
+    // asked for TSP must NOT suspend: `selectRendererMount` returns undefined for
+    // it after an `await`, and suspending would drop PiTui's own queued output.
+    const tspAttempt = tspRequested(process.env)
+    if (tspAttempt) terminalOutput.suspend()
     try {
       rendererMount = await selectRendererMount({
         log: (message, fields) => diag.info(message, fields),
@@ -2327,7 +2330,7 @@ export function applyRunnerWithRuntime(
       settleAcquisition?.()
       throw error
     }
-    if (rendererMount === undefined && !cleanedUp) terminalOutput.resume()
+    if (tspAttempt && rendererMount === undefined && !cleanedUp) terminalOutput.resume()
     if (cleanedUp) {
       // CANCELLED while the SDK handshake was in flight: release the acquired tty
       // owner (ONE close, raw restored), skip the mount AND the PiTui fallback,

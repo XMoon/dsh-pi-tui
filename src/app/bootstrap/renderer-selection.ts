@@ -13,6 +13,14 @@
 import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
 /** What the selection needs from the composition root. */
+/** Whether this boot asked for the experimental TSP renderer. The composition
+ *  reads the SAME predicate: application-side terminal writes are suspended only
+ *  for a boot that actually attempts TSP, so the default PiTui path never loses
+ *  output in an async selection window. */
+export function tspRequested(env: { readonly DSH_PI_TUI_RENDERER?: string | undefined }): boolean {
+  return env.DSH_PI_TUI_RENDERER === 'tsp'
+}
+
 export interface RendererSelectionDeps {
   /** Diagnostics sink for the selection's own lifecycle facts. */
   readonly log: (message: string, fields?: Record<string, unknown>) => void
@@ -34,7 +42,7 @@ export interface RendererSelectionDeps {
  * `undefined` for the unchanged PiTui path.
  */
 export async function selectRendererMount(deps: RendererSelectionDeps): Promise<SurfaceRendererMount | undefined> {
-  if (deps.env.DSH_PI_TUI_RENDERER !== 'tsp') return undefined
+  if (!tspRequested(deps.env)) return undefined
   const tsp = await deps.connectTsp()
   if (tsp === undefined) {
     deps.log('tsp renderer unavailable (SDK declined); mounting PiTui', {})

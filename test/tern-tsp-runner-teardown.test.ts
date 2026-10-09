@@ -433,3 +433,53 @@ test('terminal-output gate: permissive by default, suspended only for a TSP atte
   gate.resume() // the honest SDK decline hands the tty back to PiTui
   assert.equal(gate.applicationOwnsTerminal(), true, 'the decline restores the PiTui behaviour')
 })
+
+test('notification stack: the REAL completion trigger writes OSC 9 when permitted and nothing when the gate is suspended', async () => {
+  const { createTerminalOutputGate } = await import('../src/app/bootstrap/terminal-output.ts')
+  const { createNotificationRuntime } = await import('../src/app/surface/notification-runtime.ts')
+  const { createTerminalNotificationPresentation } = await import('../src/tui/notification/runtime.ts')
+  // The real components the composition pairs: the product's gate, the real
+  // presentation/notifier and the real controller. The writer wrapper is the
+  // composition's exact wiring — the gate admits application-side terminal writes
+  // only while PiTui owns the tty.
+  const run = (suspended: boolean): string => {
+    const gate = createTerminalOutputGate()
+    if (suspended) gate.suspend()
+    let written = ''
+    const presentation = createTerminalNotificationPresentation({
+      writer: {
+        write: (sequence: string) => {
+          if (gate.applicationOwnsTerminal()) written += sequence
+        },
+      },
+    })
+    const runtime = createNotificationRuntime({
+      presentation,
+      notificationMode: 'always',
+      notificationMethod: 'osc9',
+    })
+    // The authoritative settled boundary: running -> idle on the SAME live agent.
+    runtime.setCompletionOwner('session-gate')
+    runtime.onAgentStatus('session-gate', 'running')
+    runtime.onAgentStatus('session-gate', 'idle')
+    return written
+  }
+
+  // Positive control: the trigger IS observable when the application owns the tty,
+  // so the suspended case is a real suppression rather than a silent no-op.
+  const permitted = run(false)
+  assert.ok(permitted.includes('\u001b]9;'),
+    `the permitted completion writes the OSC 9 notification (got ${JSON.stringify(permitted)})`)
+  assert.equal(run(true), '',
+    'while the SDK owns the tty the SAME trigger writes nothing (OSC/BEL suppressed by the gate)')
+})
+
+test('renderer selection: only the explicit TSP opt-in asks for the suspended output gate', async () => {
+  const { tspRequested } = await import('../src/app/bootstrap/renderer-selection.ts')
+  // The composition suspends the application-side writers ONLY for a boot that
+  // attempts TSP: a default PiTui boot must never lose output in the async
+  // selection window.
+  assert.equal(tspRequested({}), false, 'a default boot never asks for TSP')
+  assert.equal(tspRequested({ DSH_PI_TUI_RENDERER: '0' }), false, 'only the exact opt-in value counts')
+  assert.equal(tspRequested({ DSH_PI_TUI_RENDERER: 'tsp' }), true, 'the exact opt-in value asks for TSP')
+})
