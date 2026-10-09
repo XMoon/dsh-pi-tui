@@ -106,8 +106,9 @@ export function installTspPane(): TspPane {
   let probed = false
   let queued = ''
   let mode: 'reply' | 'hold' | 'decline' = 'reply'
-  let closeFailure: { readonly set: boolean; readonly value: unknown } = { set: false, value: undefined }
-  let closeFailureValue: unknown
+  // Armed by value in an OBJECT: `{ value: undefined }` is a legal armed state,
+  // so presence never depends on the payload.
+  let closeFailure: { readonly value: unknown } | undefined
   let heldReply: (() => void) | undefined
   const closeBodies: string[] = []
   let frames = 0
@@ -128,12 +129,13 @@ export function installTspPane(): TspPane {
       reply()
       return
     }
-    if (closeFailure.set && /\u001b_tsp;x;/.test(text)) {
+    if (closeFailure !== undefined && /\u001b_tsp;x;/.test(text)) {
       // Fail the FIRST close-frame write only: the SDK's own close sequence may
       // write more than once, and a second failure would aggregate instead of
-      // rejecting with the EXACT injected value (R7-1).
-      closeFailure = { set: false, value: undefined }
-      throw closeFailureValue
+      // rejecting with the EXACT injected value.
+      const value = closeFailure.value
+      closeFailure = undefined
+      throw value
     }
     for (const match of text.matchAll(/\u001b_tsp;x;([\s\S]*?)\u001b\\/g)) closeBodies.push(match[1]!)
     for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
@@ -167,7 +169,7 @@ export function installTspPane(): TspPane {
     holdHandshake: () => { mode = 'hold' },
     releaseHandshake: () => { mode = 'reply'; const run = heldReply; heldReply = undefined; run?.() },
     decline: () => { mode = 'decline' },
-    failCloseWrite: (value: unknown) => { closeFailure = { set: true, value }; closeFailureValue = value },
+    failCloseWrite: (value: unknown) => { closeFailure = { value } },
     probed: () => probed,
     closeFrames: () => closeBodies.length,
     frameCount: () => frames,

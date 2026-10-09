@@ -33,6 +33,8 @@ async function waitUntil(label: string, predicate: () => boolean, timeoutMs = 10
 
 interface Owned {
   readonly pane: TspPane
+  /** The Cordis context: the official Host event plane the runner consumes. */
+  readonly ctx: { emit(type: string, ...args: unknown[]): void }
   /**
    * Release any held gate, await the REAL context/fiber cleanup, then restore the
    * process streams/env. Idempotent: the happy path and the registered safety net
@@ -43,39 +45,32 @@ interface Owned {
   readonly beginDisposal: () => Promise<void>
 }
 
-/** Own the pane + context + fiber BEFORE the boot, then mount the REAL runner. */
+/**
+ * Own the pane + context + fiber BEFORE the boot, then mount the REAL runner.
+ * Everything is registered on the CASE's own `TestLifecycle`, so the existing
+ * "every disposer runs before the temp dirs are removed" guarantee covers it.
+ */
 async function ownTspBoot(options: {
-  readonly t: { readonly name: string }
+  readonly life: import('./support/temp-lifecycle.ts').TestLifecycle
   readonly home: string
   readonly logFile: string
-  readonly sessionId?: string
-  readonly resumeError?: Error
+  /** A standing session the runner RESUMES and owns live (the live-increment case). */
+  readonly session?: { readonly id: string }
   readonly provide?: (ctx: { provide(name: string, value: unknown): void }) => void
   /** Runs with the owned pane before the connector can probe it. */
   readonly beforeMount?: (pane: TspPane) => void
   readonly appExit: () => void
 }): Promise<Owned> {
-  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
-  const life = testLifecycle(options.t as never)
+  const life = options.life
+  const { makeHarness, mountRunner, disposeContext } = await import('./support/runner-harness.ts')
   const pane = installTspPane()
   options.beforeMount?.(pane)
   const { Context } = await import('@deepseek-ai/cordis')
-  const { makeHarness, mountRunner, disposeContext, fakeSession } = await import('./support/runner-harness.ts')
   const ctx = new Context()
   options.provide?.(ctx)
   process.env.DSH_PI_TUI_RENDERER = 'tsp'
   process.env.DSH_PI_TUI_LOG = options.logFile
-  const session = options.sessionId === undefined
-    ? undefined
-    : fakeSession({
-      id: options.sessionId,
-      header: { id: options.sessionId, cwd: options.home, createdAt: 0, version: 1 },
-      events: [],
-    })
-  const harness = makeHarness(
-    options.home, session, undefined, undefined, undefined, undefined, undefined, undefined,
-    options.resumeError,
-  )
+  const harness = makeHarness(options.home, options.session as never)
   let fiber: { dispose(): Promise<void> } | undefined
   let disposal: Promise<void> | undefined
   const beginDisposal = (): Promise<void> => {
@@ -85,22 +80,33 @@ async function ownTspBoot(options: {
     })()
     return disposal
   }
-  let settled = false
-  const settle = async (): Promise<void> => {
-    if (settled) return
-    settled = true
-    pane.releaseHandshake()
-    await beginDisposal().catch(() => {})
-    pane.restore()
+  // ONE cached settlement for every caller (concurrent and repeated callers get the
+  // SAME outcome, failures included — never an early "already done").
+  let settlement: Promise<void> | undefined
+  const settle = (): Promise<void> => {
+    settlement ??= (async () => {
+      pane.releaseHandshake()
+      try {
+        await beginDisposal()
+      } finally {
+        // Restore the process streams/env after the cleanup ATTEMPT, and never
+        // swallow a cleanup failure: the caller (and the temp lifecycle) must see it.
+        pane.restore()
+      }
+    })()
+    return settlement
   }
-  // Registered BEFORE the boot: the safety net runs the SAME ordered teardown.
-  life.defer(() => { void settle() })
+  // Registered BEFORE the boot and RETURNING the real cleanup promise, so the temp
+  // lifecycle AWAITS it (a disposer that starts an async chain and returns undefined
+  // would let the hook finish while the SDK is still live).
+  life.defer(() => settle())
   fiber = await mountRunner(
     ctx, options.home, harness,
-    options.sessionId === undefined ? {} : { sessionId: options.sessionId },
-    {}, options.appExit,
+    options.session === undefined ? {} : { sessionId: options.session.id },
+    options.session === undefined ? {} : { sessionId: options.session.id },
+    options.appExit,
   )
-  return { pane, settle, beginDisposal }
+  return { pane, ctx: ctx as unknown as Owned['ctx'], settle, beginDisposal }
 }
 
 test('TSP runner: a queued Ctrl+C in the handshake batch exits with the tty restored and no fatal', async (t) => {
@@ -114,7 +120,7 @@ test('TSP runner: a queued Ctrl+C in the handshake batch exits with the tty rest
   let rawAtExit: boolean | undefined
   let paneRef: TspPane | undefined
   const owned = await ownTspBoot({
-    t,
+    life,
     home,
     logFile,
     // The legal quit intent (Ctrl+C) is decoded from the SAME read as the hello
@@ -135,7 +141,8 @@ test('TSP runner: a queued Ctrl+C in the handshake batch exits with the tty rest
     assert.equal(owned.pane.closeFrames(), 1, 'the acquired session was closed exactly ONCE')
     assert.equal(rawAtExit, false, 'raw mode was restored BEFORE hint/appExit')
     assert.ok(!log.includes('fatal'), `no startup fatal on a legal cancellation (log: ${log.slice(0, 400)})`)
-    assert.equal(liveTuiCountForTest(), 0, 'a cancelled startup never created a PiTui TuiApp')
+    assert.equal(liveTuiCountForTest(), 0,
+      'no live PiTui TuiApp remains AT SETTLEMENT (a live-app count, not a "never created" tally)')
   } finally {
     await owned.settle()
   }
@@ -152,7 +159,7 @@ test('TSP runner: a real PRE-SELECTION failure completes the fatal teardown (no 
   // extension host attach reads the service ledger FIRST, so a service whose
   // ledger throws fails the composition before the renderer attempt.
   const owned = await ownTspBoot({
-    t,
+    life,
     home,
     logFile,
     appExit: () => { exits += 1 },
@@ -190,7 +197,7 @@ test('TSP runner: a real fiber unload during a HELD handshake waits for the acqu
   const logFile = join(home, 'diag.log')
 
   const owned = await ownTspBoot({
-    t,
+    life,
     home,
     logFile,
     beforeMount: pane => pane.holdHandshake(),
@@ -223,7 +230,7 @@ test('TSP runner: a held handshake that DECLINES after a fiber unload never star
   const logFile = join(home, 'diag.log')
 
   const owned = await ownTspBoot({
-    t,
+    life,
     home,
     logFile,
     beforeMount: pane => pane.holdHandshake(),
@@ -236,7 +243,7 @@ test('TSP runner: a held handshake that DECLINES after a fiber unload never star
     await disposal
     assert.equal(owned.pane.closeFrames(), 0, 'a declined handshake owns no session to close')
     assert.equal(liveTuiCountForTest(), 0,
-      'a cancelled startup never created a PiTui TuiApp (the selection log line is not a mount)')
+      'no live PiTui TuiApp remains at settlement (a live-app count, not a "never created" tally; the selection log line is not a mount)')
     assert.ok(!readFileSync(logFile, 'utf8').includes('fatal'), 'a cancellation is not a fatal')
   } finally {
     await owned.settle()
@@ -265,7 +272,7 @@ async function assertAcquiredReleaseFailure(t: { readonly name: string }, failur
 
   const order: string[] = []
   const owned = await ownTspBoot({
-    t: t as never,
+    life,
     home,
     logFile,
     beforeMount: pane => {
@@ -287,3 +294,91 @@ async function assertAcquiredReleaseFailure(t: { readonly name: string }, failur
     await owned.settle()
   }
 }
+
+test('TSP harness ownership: one cached settlement, no early success, streams restored after', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const home = life.tempDir('pr3a-tsp-own-')
+  const logFile = join(home, 'diag.log')
+  const owned = await ownTspBoot({
+    life,
+    home,
+    logFile,
+    beforeMount: pane => pane.holdHandshake(),
+    appExit: () => {},
+  })
+  const stdinBefore = process.stdin
+  // (1) the REAL disposal must not complete while the handshake is held (it does NOT
+  // release the gate — only `settle()` does).
+  let disposalDone = false
+  void owned.beginDisposal().then(() => { disposalDone = true })
+  await new Promise(resolve => setTimeout(resolve, 120))
+  assert.equal(disposalDone, false, 'the real disposal stays PENDING while the handshake is held')
+  assert.equal(process.stdin, stdinBefore,
+    'the process streams are NOT restored before the real cleanup ran')
+
+  // (2) every caller shares ONE settlement, which releases the gate and awaits the
+  // REAL disposal before restoring.
+  const first = owned.settle()
+  assert.equal(owned.settle(), first, 'concurrent callers share ONE settlement promise')
+  await first
+  assert.notEqual(process.stdin, stdinBefore, 'the streams are restored after the cleanup attempt')
+  assert.equal(owned.settle(), first, 'a repeated caller gets the SAME settled promise (no second teardown)')
+})
+
+test('TSP runner: the REAL composition consumes a LIVE session increment into the SDK pane', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const { fakeSession, event, sessionEvents } = await import('./support/runner-harness.ts')
+  const { MessageId } = await import('@deepseek-ai/dsh-llm')
+  const life = testLifecycle(t)
+  const home = life.tempDir('pr3a-tsp-live-')
+  const logFile = join(home, 'diag.log')
+  // A standing session with history: the composition RESUMES it (seq 5) and the
+  // increment below continues from there — the shape the other runner suites use.
+  const session = fakeSession({
+    id: 'pr3a-live',
+    header: { id: 'pr3a-live', cwd: home, createdAt: 0, version: 1 },
+    events: sessionEvents('pr3a hydrated state'),
+  })
+  const marker = 'pr3a live increment'
+  const owned = await ownTspBoot({ life, home, logFile, session, appExit: () => {} })
+  try {
+    // Wait until the composition has actually PAINTED the hydrated session: the SDK
+    // probe happens during `connect`, well before the post-mount wiring exists.
+    await waitUntil('the hydrated state on the SDK pane',
+      () => owned.pane.output.text().includes('pr3a hydrated state'), 15_000)
+    assert.ok(!owned.pane.output.text().includes(marker), 'the marker is not a replay of the initial state')
+    const framesBefore = owned.pane.frameCount()
+
+    // The OFFICIAL Host event plane, with a NEW token: a real increment on the session
+    // the composition owns live.
+    const base = 6
+    owned.ctx.emit('session/event', session, event('turn/start', { turn: 1 }, base))
+    owned.ctx.emit('session/event', session, event('step/start', { turn: 1, step: 0 }, base + 1))
+    owned.ctx.emit('session/event', session, event('assistant/message', {
+      turn: 1,
+      step: 0,
+      message: {
+        id: MessageId('pr3a-live-message'),
+        role: 'assistant',
+        content: [{ type: 'text', text: marker }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      usage: { inputTokens: 3, outputTokens: 1 },
+      stream: [],
+    }, base + 2, 'append'))
+    owned.ctx.emit('session/event', session, event('step/end', { turn: 1, step: 0 }, base + 3))
+    owned.ctx.emit('session/event', session, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, base + 4))
+
+    try {
+      await waitUntil('the live increment on the SDK pane', () => owned.pane.output.text().includes(marker), 15_000)
+    } catch {
+      throw new Error(`live increment never arrived; diag: ${readFileSync(logFile, 'utf8').slice(0, 600)}`)
+    }
+    assert.ok(owned.pane.frameCount() > framesBefore, 'the increment produced NEW frames on the wire')
+    await owned.settle()
+    assert.ok(!readFileSync(logFile, 'utf8').includes('fatal'), 'a live increment is not a fatal path')
+  } finally {
+    await owned.settle()
+  }
+})
