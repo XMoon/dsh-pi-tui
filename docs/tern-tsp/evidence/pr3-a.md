@@ -389,9 +389,33 @@ SDK native ops (the SDK's own wire recording, 38 ops) for that turn:
 - `main.s1-work-msg-21.msg-22.result` — `{"k":"code","text":"pr3a-live-marker\n"}`, the real tool result;
 - `main.s1-msg-23` — the *Assistant* card with the final text.
 
-Incremental consumption (not a one-shot replay): the SAME nodes are updated in
-place across frames — `main.s1-work-msg-21.msg-21.body` 6×, `dock.status` 3×,
+Incremental consumption (not a one-shot replay): the SAME node is updated in
+place across frames. The recorded ops for `main.s1-work-msg-21.msg-21.body`, in
+frame order, are the live text deltas and their settle:
+
+```text
+add  main.s1-work-msg-21.msg-21            {"k":"card","p":{"key":"msg-21","head":"Thinking",…}}
+text main.s1-work-msg-21.msg-21.body append " user keeps repeating the same request. I should run it once more and"
+text main.s1-work-msg-21.msg-21.body append " report. This seems like a loop, but"
+text main.s1-work-msg-21.msg-21.body append " complying is harmless. However, I could note the repetition. The request"
+text main.s1-work-msg-21.msg-21.body append " is explicit: run and report. I'll do it"
+text main.s1-work-msg-21.msg-21.body append "."
+set  main.s1-work-msg-21.msg-21.body {"stream": null}      ← the settle
+```
+
+The tool row is the same shape on its own node: `add main.s1-work-msg-21.msg-22
+{"k":"tool","name":"bash","title":"Bash","status":"running","target":"Print the
+pr3a-live-marker string"}`, then `add main.s1-work-msg-21.msg-22.result
+{"k":"code","text":"pr3a-live-marker\n"}`, then the next Assistant card
+`main.s1-msg-23`. Other in-place updates in the same turn: `dock.status` 3×,
 `dock.pending-running` 2×, `main.s1-work-msg-21.msg-22` 2×.
+
+Raw records (outside any private session/storage directory, readable for audit):
+`/tmp/pr3a-live-rec.jsonl` (the SDK's own wire recording) and
+`/tmp/pr3a-live-driver.jsonl` (the driver's identity + official event sequence).
+The DSH event plane carries the turn as `assistant/message` events (plus the
+`request/header` + `delivery-accepted` pair); the per-delta text above is the
+CONSUMER-side native-op evidence that the same node was fed incrementally.
 
 Limits of this record: the turn is triggered through the official Host event API
 from a test-only patch row (the plan's allowed real-runner-fixture trigger); the
