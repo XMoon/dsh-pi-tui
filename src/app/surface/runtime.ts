@@ -98,6 +98,7 @@
 
 import {
   startProcessTui,
+  type ComposerSubmitRequest,
   type DisplaySubjectPresentation,
   type StatusData,
   type TranscriptSearchCloseReason,
@@ -195,6 +196,15 @@ export interface SurfaceInputBinding {
    * never an unconditional exit; PR3-B §3.4 fixed keymap row 3).
    */
   cancel(): void
+  /**
+   * The submission entry (PR3-B B2): the EXISTING application submit path
+   * (`ApplicationEvents.events.onSubmit`), so a TSP Enter rides the ONE
+   * `SubmissionController` — never a renderer-owned writer. The renderer
+   * clears the composer BEFORE this call (§3.4 ordering).
+   */
+  submit(text: string, request: ComposerSubmitRequest): void
+  /** The draft-steer entry (B2): `ApplicationEvents.events.onSteer`. */
+  steer(text: string): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
 }
@@ -1764,6 +1774,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         mounted.bindInput({
           exit: () => deps.events.onExit(),
           cancel: () => deps.events.onCancel?.(),
+          submit: (text, request) => deps.events.onSubmit(text, request),
+          // `onSteer` is optional on the events table (the capability is
+          // guarded at construction): an absent one leaves the gesture a
+          // committed no-op rather than a fabricated submission.
+          steer: (text) => deps.events.onSteer?.(text),
           noteUserInput: () => deps.events.onUserInput?.(),
         })
         return

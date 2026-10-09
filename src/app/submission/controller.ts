@@ -35,6 +35,7 @@ import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExit
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
+import { tspBuiltinAvailability } from '../command/tsp-capability.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
 import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
 import { queueInboxMessageOf } from './pending-input.ts'
@@ -212,6 +213,25 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     run(text: string, ackToken: number | undefined): void
     interrupt(): void
   }
+  /**
+   * PR3-B B2 (§4 B2-5): whether this renderer presents the PiTui local-shell
+   * progress CARDS. PiTui = true; the TSP renderer = false, which refuses
+   * `!`/`!!` at the ORIGINAL shell-branch admission — BEFORE any
+   * persistHistory / ensureSession / acceptLocalSubmitAck / shell.run, so a
+   * refused shell line creates no Host process, no history row and no
+   * Session. The refusal keeps the draft, exactly like the attachment
+   * refusal beside it.
+   */
+  readonly supportsLocalShellCards: boolean
+  /**
+   * PR3-B B2-3: whether this renderer can present the PiTui UI that most
+   * TUI-owned builtins are made of (panels/pickers). PiTui = true; the TSP
+   * renderer = false, which refuses every TUI-origin builtin EXCEPT the
+   * `/exit`//`quit` pair at the post-classification admission — a single
+   * shared refusal, never a per-builtin ad-hoc message and never a naive
+   * `/name` pre-parse ahead of the genuine Host claims.
+   */
+  readonly supportsTuiBuiltinUi: boolean
   /** The live model-selection read (the outgoing message's provider/model). */
   readonly model: {
     readonly selected: { readonly current: { readonly provider: string; readonly model: string } | undefined }
@@ -1434,6 +1454,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // gesture ensures one first and executes in that Session's Host
     // workspace, persisting the history row under that Session identity.
     if (text.startsWith('!')) {
+      // PR3-B B2 (§4 B2-5): the TSP renderer presents no shell cards, so a
+      // `!`/`!!` line is refused HERE — the ORIGINAL shell-branch admission,
+      // before any persistHistory / ensureSession / acceptLocalSubmitAck /
+      // shell.run. No Host process, no history row, no Session is created;
+      // the submitted text is merged back into the live composer so the user
+      // can edit it. PiTui (supportsLocalShellCards = true) is unchanged.
+      if (!deps.supportsLocalShellCards) {
+        deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+        deps.app().notify('User-shell UI is not available in TSP yet', 'error')
+        return
+      }
       // A user-shell line is a UI control with NO attachment delivery path
       // (the shell owner neither admits nor consumes drafts): a staged
       // attachment must never become shell arguments, and the success path
@@ -1550,6 +1581,23 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       if (refusal !== undefined) {
         deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
         deps.app().notify(refusal, 'error')
+        return
+      }
+    }
+    // PR3-B B2-3: the ONE shared renderer-capability refusal for TUI-owned
+    // builtins. It sits at the POST-CLASSIFICATION admission: the winner is
+    // already the authoritative classifier's `client-command` + `source:'tui'`
+    // result, so a genuine Host-origin command of the same spelling was never
+    // captured here and a Host claim keeps its precedence. Only the exit pair
+    // is available on the TSP renderer; everything else (panels, pickers,
+    // /settings, /help, /status, /tasks, /model, /preset, /title, …) is
+    // refused with an actionable notice and the draft restored — no false
+    // success, no silent no-op, no session created for a UI that cannot run.
+    if (parsed !== undefined && !deps.supportsTuiBuiltinUi) {
+      const availability = tspBuiltinAvailability(classification, parsed.name)
+      if (!availability.available) {
+        deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+        deps.app().notify("This command's UI is not available in TSP yet", 'info')
         return
       }
     }
