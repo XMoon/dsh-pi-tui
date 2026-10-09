@@ -309,19 +309,24 @@ test('TSP harness ownership: one cached settlement, no early success, streams re
   })
   const stdinBefore = process.stdin
   // (1) the REAL disposal must not complete while the handshake is held (it does NOT
-  // release the gate — only `settle()` does).
-  let disposalDone = false
-  void owned.beginDisposal().then(() => { disposalDone = true })
-  await new Promise(resolve => setTimeout(resolve, 120))
-  assert.equal(disposalDone, false, 'the real disposal stays PENDING while the handshake is held')
+  // release the gate — only `settle()` does). The observation is OWNED: the race
+  // consumes BOTH outcomes of the disposal, so a failing cleanup cannot surface as
+  // an unowned rejection, and the same promise is awaited again below.
+  const disposalOutcome = await Promise.race([
+    owned.beginDisposal().then(() => 'settled' as const, () => 'settled' as const),
+    new Promise<'pending'>(resolve => { setTimeout(() => resolve('pending'), 150) }),
+  ])
+  assert.equal(disposalOutcome, 'pending', 'the real disposal stays PENDING while the handshake is held')
   assert.equal(process.stdin, stdinBefore,
     'the process streams are NOT restored before the real cleanup ran')
 
   // (2) every caller shares ONE settlement, which releases the gate and awaits the
-  // REAL disposal before restoring.
+  // REAL disposal before restoring. Awaiting that same disposal here also rethrows
+  // any cleanup failure INTO this case (never swallowed).
   const first = owned.settle()
   assert.equal(owned.settle(), first, 'concurrent callers share ONE settlement promise')
   await first
+  await owned.beginDisposal()
   assert.notEqual(process.stdin, stdinBefore, 'the streams are restored after the cleanup attempt')
   assert.equal(owned.settle(), first, 'a repeated caller gets the SAME settled promise (no second teardown)')
 })
@@ -333,8 +338,9 @@ test('TSP runner: the REAL composition consumes a LIVE session increment into th
   const life = testLifecycle(t)
   const home = life.tempDir('pr3a-tsp-live-')
   const logFile = join(home, 'diag.log')
-  // A standing session with history: the composition RESUMES it (seq 5) and the
-  // increment below continues from there — the shape the other runner suites use.
+  // A standing session with history (events 0..5, so `seq` is the LAST event index 5):
+  // the composition RESUMES it and the increment below continues from seq 6 — the
+  // shape the other runner suites use.
   const session = fakeSession({
     id: 'pr3a-live',
     header: { id: 'pr3a-live', cwd: home, createdAt: 0, version: 1 },
