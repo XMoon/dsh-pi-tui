@@ -183,11 +183,23 @@ and the editor/input authority behind it, are PR3 scope; building a second
 - **One fold, one window.** The observer receives an already-selected window; it
   must not fold, window, page or subscribe. A key re-scope is presentation, never
   a business re-derivation.
-- **Close semantics.** Normal quit uses `close({ keep: false })`. On
+- Close semantics. Normal quit uses `close({ keep: false })`. On
   `SIGINT`/`SIGTERM` the SDK closes with `keep: true`, leaving the last `main` in
   scrollback, then re-raises; taking that over would mean owning signal handling
   outside the SDK session, which this project does not do (see
   [PR3 handoff issues](#next-decisions)).
+- **Display-seam type debt — closure owner: PR4.** The
+  `SurfaceDisplaySeam` (`src/app/surface/display-seam.ts`) still imports the
+  PiTui-shaped presentation types (`TranscriptSearchPresentation`, `StatusData`,
+  `DisplaySubjectPresentation`) from `tui-app.ts`. They are type-only and the
+  architecture gate accepts them, but the search/viewport-shaped parameters
+  belong to the PiTui adapter side. PR3-B deliberately does NOT widen or narrow
+  them: the submit/interaction authority refactor (`SubmissionComposerPort`,
+  `SurfaceInteractionPresenter`) is independent of `TuiApp`, and moving the
+  display DTOs is a distinct follow-up owned by PR4 (UI parity), which is also
+  when the search/viewport members gain TSP meaning. PR3-B adds a rule instead:
+  no NEW `TuiApp` type import may enter `src/app/submission/**` (the composer
+  port is the only seam).
 - **Failures stay visible.** Nothing catches an observer or SDK error to report
   "unsupported": an unsupported environment is only the SDK's own `null`, and a
   throwing consumer propagates to the caller. After `dispose()` no frame is

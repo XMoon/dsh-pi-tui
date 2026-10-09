@@ -1857,6 +1857,11 @@ export function applyRunnerWithRuntime(
     const userShellPort = backend.hostUserShell
     const localShell = createUserShell<Agent>({
       app: () => app as TuiApp,
+      // PR3-B §B0-7: failure/interrupt notices are renderer-neutral. The Esc
+      // interrupt path can run under a non-PiTui renderer (the turn cancel is
+      // renderer-independent), so its error notice must never touch PiTui
+      // members; the local-card `app` above stays run()-only (PiTui).
+      notify: (message, kind) => surface.display.notify(message, kind),
       diag,
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
@@ -2017,7 +2022,10 @@ export function applyRunnerWithRuntime(
     // in SubmissionRuntime + SessionRuntime.withWriter; this owner only
     // supplies the semantic hooks.
     const submission = createSubmissionController<Agent>({
-      app: () => app as TuiApp,
+      // PR3-B §3.1: the composer projection — the live PiTui `TuiApp` on the
+      // default branch (structural compatibility), the renderer's own
+      // composer on a TSP branch. The controller never reads chrome members.
+      app: () => surface.composer,
       diag,
       signal,
       isCleanedUp: () => cleanedUp,

@@ -108,6 +108,8 @@ import {
   type TuiAppOptions,
 } from '../../tui-app.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import type { SubmissionComposerPort } from '../submission/composer-port.ts'
+import type { SurfaceInteractionPresenter } from './interaction-presenter.ts'
 import type { TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { TaskBrowserViewState } from './task-runtime.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
@@ -191,6 +193,20 @@ export interface SurfaceRendererMount {
   mount(): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
+    /**
+     * PR3-B §3.1: the renderer's composer projection. B0 mounts only an
+     * INERT implementation (the TSP renderer has no editor yet — reads throw
+     * so no code path can silently no-op); B1 replaces it with the real
+     * controlled composer.
+     */
+    readonly composer: SubmissionComposerPort
+    /**
+     * PR3-B §3.2: the renderer's modal presenter. B0 mounts only an INERT
+     * implementation (no TSP form exists; every ask rejects — fail-closed,
+     * consistent with `supportsModals === false`); B3 replaces it with the
+     * real TSP interaction presenter.
+     */
+    readonly interaction: SurfaceInteractionPresenter
     /**
      * Stop the renderer and release its terminal ONCE (the TSP branch closes
      * the SDK surface then the session). May be async; the surface disposal
@@ -366,6 +382,13 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * {@link display} instead.
    */
   readonly app: TuiApp
+  /**
+   * PR3-B §3.1: the live composer projection. On the PiTui branch this is the
+   * mounted `TuiApp` (structurally compatible); on a TSP renderer branch it
+   * is the renderer's own composer port. Throws if read before
+   * {@link SurfaceRuntime.start}.
+   */
+  readonly composer: SubmissionComposerPort
   /**
    * PR3-A: the renderer-facing display seam (PiTui adapter or the TSP
    * renderer). Throws if read before {@link SurfaceRuntime.start}.
@@ -619,6 +642,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    */
   let display: SurfaceDisplaySeam | undefined
   /**
+   * PR3-B §3.1: the live composer projection. PiTui assigns the mounted app
+   * (structurally a `SubmissionComposerPort`); a renderer mount injects its
+   * own composer port instead of a TuiApp.
+   */
+  let composerPort: SubmissionComposerPort | undefined
+  /**
+   * PR3-B §3.2: the live modal presenter projection. PiTui assigns the
+   * mounted app (structurally a `SurfaceInteractionPresenter`); a renderer
+   * mount injects its own presenter.
+   */
+  let interactionPresenter: SurfaceInteractionPresenter | undefined
+  /**
    * PR3-A: the non-PiTui renderer's disposer (assigned by `start()` on the
    * renderer branch; released once in `dispose()`).
    */
@@ -672,12 +707,31 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   /**
+   * PR3-B §3.2: the live modal presenter projection (renderer-neutral read;
+   * see {@link interactionPresenter}).
+   */
+  const presenterSeam = (): SurfaceInteractionPresenter => {
+    if (interactionPresenter === undefined) throw new Error('the surface is not mounted')
+    return interactionPresenter
+  }
+
+  /**
    * PR3-A: the live display seam. Sub-owners that only commit display facts
    * read this; PiTui-only owners keep {@link mounted}.
    */
   const displaySeam = (): SurfaceDisplaySeam => {
     if (display === undefined) throw new Error('the surface is not mounted')
     return display
+  }
+
+  /**
+   * PR3-B §3.1: the live composer projection. PiTui-only before the renderer
+   * branches exist, but the read is renderer-neutral by contract: a TSP
+   * renderer's composer is the same port shape.
+   */
+  const composerSeam = (): SubmissionComposerPort => {
+    if (composerPort === undefined) throw new Error('the surface is not mounted')
+    return composerPort
   }
 
   /**
@@ -774,9 +828,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // `QuestionSurfaceController` plus its attention subscription. The attention
   // publication stays a PRESENTATION-only refresh: the count goes to the app
   // chrome and the OPEN Task Center browser repaints through its own owner.
+  // PR3-B §3.2: the modal presentation arrives through the narrow presenter
+  // projection — the PiTui adapter over the mounted app, or a renderer's own
+  // presenter. The PiTui-only chrome reads (`setQuestionAttention`) stay
+  // input-gated on the app.
   const interaction = createInteractionRuntime({
-    mounted: () => mounted(),
-    liveApp: () => app,
+    presenter: () => presenterSeam(),
+    livePresenter: () => interactionPresenter,
     display: () => displaySeam(),
     currentSessionId: () => routingSource?.currentSessionId(),
     schedulePaint: () => schedulePaint(),
@@ -1498,6 +1556,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (app === undefined) throw new Error('the surface is not mounted')
       return app
     },
+    get composer(): SubmissionComposerPort {
+      return composerSeam()
+    },
     get display(): SurfaceDisplaySeam {
       return displaySeam()
     },
@@ -1663,6 +1724,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (deps.renderer !== undefined) {
         const mounted = deps.renderer.mount()
         display = mounted.display
+        composerPort = mounted.composer
+        interactionPresenter = mounted.interaction
         rendererDispose = mounted.dispose
         return
       }
@@ -1696,6 +1759,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
       display = pituiDisplaySeam(app)
+      // PR3-B §3.1/§3.2: the PiTui branch's projections are the ONE live app
+      // itself (structural compatibility is the contract; no wrapper needed).
+      composerPort = app
+      interactionPresenter = app
     },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original

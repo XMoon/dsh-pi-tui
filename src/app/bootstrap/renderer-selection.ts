@@ -31,6 +31,8 @@ export interface RendererSelectionDeps {
    */
   readonly connectTsp: () => Promise<{
     readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
+    readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
+    readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
@@ -53,7 +55,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
   // ordered disposal; `releaseUnmounted()` closes it when the mount was
   // rejected or never ran (idempotent, and inert after a transfer).
   return {
-    mount: () => ({ display: tsp.display, dispose: () => tsp.dispose() }),
+    mount: () => ({ display: tsp.display, composer: tsp.composer, interaction: tsp.interaction, dispose: () => tsp.dispose() }),
     releaseUnmounted: () => tsp.dispose(),
   }
 }
@@ -79,7 +81,12 @@ export interface ProductionTspConnectorDeps {
 /** The PRODUCTION connector: lazy import + the official SDK connect. */
 export function productionTspConnector(
   deps: ProductionTspConnectorDeps,
-): () => Promise<{ readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam; readonly dispose: () => Promise<void> } | undefined> {
+): () => Promise<{
+  readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
+  readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
+  readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
+  readonly dispose: () => Promise<void>
+} | undefined> {
   return async () => {
     const { connectTspRenderer } = await import('../../tui/tsp/session.ts')
     return connectTspRenderer(deps)

@@ -36,12 +36,15 @@
 
 import { connect as sdkConnect, ui } from '@stencil-hq/tern'
 import type { Node, Session, SessionInput, Surface } from '@stencil-hq/tern'
+import { cancellationError } from '../../runtime/process/tasks.ts'
 import type {
   DisplayDockNotice,
   DisplayStatusFacts,
   DisplayWelcomeFacts,
   SurfaceDisplaySeam,
 } from '../../app/surface/display-seam.ts'
+import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
+import type { SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -103,6 +106,23 @@ export interface TspRendererOptions {
 /** The mounted TSP renderer (the display seam + the one-shot disposer). */
 export interface TspRenderer {
   readonly display: SurfaceDisplaySeam
+  /**
+   * PR3-B §B0: the INERT composer projection. The TSP renderer has no editor
+   * yet (B1 mounts the real controlled composer), so every member throws —
+   * no submission code path can silently no-op against a renderer that owns
+   * no editor. The submission owner never reaches this port in B0: the TSP
+   * input path is still read-only.
+   */
+  readonly composer: SubmissionComposerPort
+  /**
+   * PR3-B §B0: the INERT modal presenter. No TSP form exists yet (B3 mounts
+   * the real interaction presenter), so every ask rejects with the flow's
+   * cancellation error and the settled-lookup/notify members are inert —
+   * consistent with `supportsModals === false` (the fail-closed admission in
+   * `app/surface/interaction-runtime.ts` keeps deciding before any presenter
+   * call).
+   */
+  readonly interaction: SurfaceInteractionPresenter
   /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
@@ -411,8 +431,32 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   inputLoop()
 
   render()
+  /** The B0 INERT composer: no editor exists yet, so every member throws
+   *  (a silent no-op could fake a successful draft read). */
+  const inertComposer: SubmissionComposerPort = {
+    getDraft() { throw new Error('the TSP renderer has no composer yet') },
+    setDraft() { throw new Error('the TSP renderer has no composer yet') },
+    setEditorText() { throw new Error('the TSP renderer has no composer yet') },
+    insertIntoEditor() { throw new Error('the TSP renderer has no composer yet') },
+    notify(text, kind) { display.notify(text, kind) },
+    setSubmitPending() { throw new Error('the TSP renderer has no composer yet') },
+    clearSettledLocalMessages() { display.setDockNotice(undefined) },
+  }
+  /** The B0 INERT modal presenter: no form exists yet, so every ask rejects
+   *  with the flow's cancellation error (never a fabricated answer). The
+   *  fail-closed admission in the interaction runtime decides BEFORE this
+   *  presenter is consulted; the rejects are the belt to that suspenders for
+   *  any direct call. */
+  const inertInteraction: SurfaceInteractionPresenter = {
+    showApprovalPrompt() { return Promise.reject(cancellationError('approval prompt cancelled')) },
+    askQuestions() { return Promise.reject(cancellationError('question flow cancelled')) },
+    setSettledQuestionAnswersLookup() {},
+    notify(text, kind) { display.notify(text, kind) },
+  }
   return {
     display,
+    composer: inertComposer,
+    interaction: inertInteraction,
     dispose: async () => {
       if (disposed) return
       disposed = true
