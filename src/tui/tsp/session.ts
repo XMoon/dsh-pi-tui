@@ -563,6 +563,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return false
   }
 
+  /**
+   * PR3-B §3.4 row 1: the session/hydration input fence. ONE predicate for
+   * BOTH the live key path and the held-key replay at the bind — a second copy
+   * would let the replay bypass the fence (the B2 review's F3 follow-up).
+   * The lifecycle cancel/exit intents are never fenced: they are not writes.
+   */
+  const fencedOut = (key: Key): boolean => {
+    if (!hydrating) return false
+    const lifecycleIntent = (key.ctrl === true && (key.name === 'c' || key.name === 'd'))
+      || key.name === 'escape'
+    return !lifecycleIntent
+  }
+
   /** Route one input: exit intents act; everything else waits for the bind. */
   const routeInput = (input: SessionInput): boolean => {
     if (input.type !== 'key') return false
@@ -577,16 +590,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // held queue is EMPTY — with held keys the draft's emptiness is not yet
     // knowable (the held edits have not applied), so the gesture must wait
     // and re-decide in arrival order at the bind.
-    // PR3-B §3.4 row 1: while the session/hydration input fence is up the
-    // composer accepts NO key — the draft (and any submit) would belong to a
-    // subject the surface is in the middle of replacing. The lifecycle intents
-    // below still work; everything else is dropped, and the existing draft is
-    // preserved rather than cleared.
-    if (hydrating) {
-      const lifecycleIntent = (key.ctrl === true && (key.name === 'c' || key.name === 'd'))
-        || key.name === 'escape'
-      if (!lifecycleIntent) return false
-    }
+    // While the fence is up the composer accepts NO key: the draft (and any
+    // submit) would belong to a subject the surface is replacing. Dropped, not
+    // held, and the existing draft is preserved.
+    if (fencedOut(key)) return false
     if (!inputBound) {
       if (key.ctrl === true && key.name === 'd' && heldKeys.length === 0 && composer.getDraft() === '') return true
       if (heldKeys.length < HELD_KEYS_LIMIT) {
@@ -663,6 +670,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       const held = heldKeys.splice(0, heldKeys.length)
       for (const key of held) {
         if (disposed) return
+        // The SAME fence as the live path: a key held across a generation bump
+        // must not be applied to a subject the surface is replacing.
+        if (fencedOut(key)) continue
         if (dispatchKey(key, handlers)) routeExit(true)
       }
     },

@@ -83,7 +83,11 @@ interface Harness {
   dispose(): Promise<void>
 }
 
-async function mountPane(onSubmit: (text: string, request: string) => void): Promise<Harness> {
+async function mountPane(
+  onSubmit: (text: string, request: string) => void,
+  /** Opt out of the commit-point bind so a test can drive the held window. */
+  options: { bind?: boolean } = {},
+): Promise<Harness> {
   const input = new FakeInput()
   const output = new FakeOutput()
   // ONE pass-through wrapper: the original write keeps capturing the wire
@@ -109,13 +113,15 @@ async function mountPane(onSubmit: (text: string, request: string) => void): Pro
   const session = await sdkConnect({ env: {}, input, output, exitHooks: false, timeout: 500 })
   assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
   const renderer = mountTspRenderer(session, { requestExit: () => {} })
-  renderer.bindInput({
-    exit: () => {},
-    cancel: () => {},
-    submit: (text, request) => onSubmit(text, request),
-    steer: () => {},
-    noteUserInput: () => {},
-  })
+  if (options.bind !== false) {
+    renderer.bindInput({
+      exit: () => {},
+      cancel: () => {},
+      submit: (text, request) => onSubmit(text, request),
+      steer: () => {},
+      noteUserInput: () => {},
+    })
+  }
   return {
     renderer,
     input,
@@ -250,6 +256,32 @@ test('B2: the fence lifts when the new subject commits, and the composer works a
     await settle()
     assert.deepEqual(submissions, ['after the switch'],
       'a submit after the fence lift reaches the application normally')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B2: a key HELD across a generation bump cannot submit when the bind replays it', async () => {
+  // The reviewer's exact shape: hold text + Enter, THEN the surface reports a
+  // generation bump, THEN the bind replays the queue. The replay must honour
+  // the SAME fence as the live path — previously it called the dispatcher
+  // directly and the held Enter submitted into the outgoing subject.
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) }, { bind: false })
+  try {
+    harness.input.type('held text\r')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), '', 'the held keys never touched the composer')
+    // The surface announces the generation bump BEFORE the bind.
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    harness.renderer.bindInput({
+      exit: () => {}, cancel: () => {},
+      submit: (text) => { submissions.push(text) },
+      steer: () => {}, noteUserInput: () => {},
+    })
+    await settle()
+    assert.deepEqual(submissions, [], 'the held Enter did NOT cross the hydration fence at the replay')
   } finally {
     await harness.dispose()
   }

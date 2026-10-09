@@ -355,8 +355,9 @@ profile, Tern SDK 0.1.0, a real Direct Agent through the profile's LLM provider.
 
 What the record shows, in order:
 
-1. **Typed into the controlled composer**: one `set`+`text` op pair per key —
-   the program-owned editor state on the real renderer.
+1. **Typed into the controlled composer**: the program-owned editor state on
+   the real renderer — COALESCED updates (the SDK merges consecutive keys into
+   one `append`, e.g. `ply with e`, so it is not literally one op per key).
 2. **The submit gesture cleared the composer BEFORE the application write**
    (§3.4 ordering): the composer `replace ""` frame lands, then the local
    `Submitting…` pending row, then the client-local echo
@@ -367,8 +368,12 @@ What the record shows, in order:
    appears — one submission, no double-send.
 4. **Assistant streaming**: for a longer answer the Assistant card is created
    with only its FIRST token, and the following frame carries a `text` APPEND
-   with the remainder, then the streaming marker clears — incremental deltas on
-   the real pane, not a single settled render.
+   with the remainder, then the turn/work streaming marker clears — incremental
+   deltas on the real pane, not a single settled render. The incremental proof
+   comes from the WIRE (the card's first-token frame followed by the append
+   frame); the `b2p-4-stream-long` screenshot's viewport shows the second You
+   card and the working row, so it is a locator for the run, not by itself
+   proof of the completed reply.
 5. **The session**: a real Session is created and its title reaches the dock.
 
 
