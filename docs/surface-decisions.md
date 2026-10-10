@@ -810,6 +810,17 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   candidates (its embedded stream's deltas or its durable message's tool-call
   blocks). Every settlement re-derives the relations it already anchors, so an
   authoritative replacement can never inherit stale order.
+  **Expressiveness limit of the anchor model (documented, not hidden):** a
+  displacement emits a whole side of one anchor contiguously (`before…, anchor,
+  after…`), so it cannot express "after the anchor, interleaved with a row that
+  stays put". A Tool displacement is therefore REFUSED when the move would cross
+  a visible row that is not itself one of the same step's proven same-side Tool
+  rows (an invisible row is never a boundary, so it can be crossed). In that case
+  every row keeps its physical order: the row order is the durable one, not the
+  full chronological one, and live vs cold are not guaranteed to agree for such a
+  log. This is the accepted conservative choice — it never lets a read jump across
+  another step's (or another lane's) visible row, and the Work/read grouping stays
+  internally consistent — rather than a claim of full convergence.
   **Still conservative — never a guess, and no universal parity:** the streamless
   settlement fallback (which exists only so an Activity can close) is NOT order
   evidence, so without an embedded stream the durable append order stands; an
