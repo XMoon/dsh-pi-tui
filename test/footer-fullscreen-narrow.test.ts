@@ -187,7 +187,11 @@ test('the armed Ctrl+D instruction never pushes the footer out of a narrow fulls
     const view = lines.join('\n')
     assert.ok(view.includes('Press Ctrl+D again to exit'), `the exit hint must stay visible:\n${view}`)
     assert.ok(view.includes('workspace-write') || view.includes('ww'), `the status row must survive beside the hint:\n${view}`)
-    assert.ok(view.includes('12.3s'), `the stats row must survive beside the hint (the latency keeps its compact form):\n${view}`)
+    // TPS plan PR-3: at 40 columns the latency placement is the first to
+    // drop, so the stats row's surviving witness is the R5 placement's
+    // compact form (and the counters beside it).
+    assert.ok(view.includes('R5 0t/s') && view.includes('t3/s7'),
+      `the stats row must survive beside the hint (the R5 placement keeps its compact form):\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the effective budget:\n${view}`)
     assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+D again'), `the hint must be the footer's last line:\n${view}`)

@@ -131,8 +131,9 @@ The Add picker searches labels, ids, and descriptions.
 
 The picker lists the whole definition catalog. Adding a definition that is
 already placed appends an independent second placement — this is how the
-default Footer shows Performance twice (once as `latency`, once as `speed`):
-each placement keeps its own Style, Tone, Prefix/Suffix, and Importance.
+default Footer shows Performance twice (once as `latency`, once as
+`speed-both`, the recent + whole-Session pair): each placement keeps its own
+Style, Tone, Prefix/Suffix, and Importance.
 
 In addition to builtin and extension items, the picker contains:
 
@@ -223,7 +224,7 @@ Common builtin Style sets include:
 | Context | `bar`, `percent`, `full` |
 | Token usage | `pi`, `io`, `total`, `compact` |
 | Cache hit | `pi`, `full`, `compact` |
-| Performance | `full`, `speed`, `latency` |
+| Performance | `full`, `speed`, `speed-all`, `speed-both`, `latency` |
 | Turns / steps | `both`, `turns`, `steps` |
 | Version | `tui`, `dsh`, `both` |
 
@@ -238,7 +239,7 @@ the main preset. The **main** preset itself is unchanged:
 MAIN default
 row 1 left   view-scope(inert) · permission-preset · model · tasks · cwd · git-branch · ext:*
 row 1 right  plan-state · display-preset
-row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed · turns-steps
+row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed-both · turns-steps
 row 2 right  context:full
 
 MAIN compact
@@ -246,7 +247,7 @@ row 1 left   view-scope(inert) · permission-preset · plan-state · model · ta
 
 CHILD viewer default
 row 1 left   permission-preset · model · agent-preset · cwd · git-branch
-row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed · turns-steps
+row 2 left   token-usage:pi · cache-hit:pi · performance:latency · performance:speed-both · turns-steps
 row 2 right  context:full
 
 CHILD viewer compact
@@ -262,12 +263,33 @@ capability (format, responsive compact/drop and `/footer` configuration).
 Items of one zone are joined with two spaces; the right zone renders flush
 right. The second row decomposes the pi-vocabulary stats line into real
 semantic placements: session cumulative usage and the cache-hit share, then
-recent model performance — the average time-to-first-token and the effective
-output throughput over the last five completed model requests (a
-model/provider switch resets that window) — plus the turn/step counters,
-while the context pressure renders in its full `used/window (percent)` form.
-The session lifetime LLM wall time is still accumulated and remains visible
-on the `/status` detail line, but it is not part of the default Footer.
+model performance plus the turn/step counters, while the context pressure
+renders in its full `used/window (percent)` form. The session lifetime LLM
+wall time is still accumulated and remains visible on the `/status` detail
+line, but it is not part of the default Footer.
+
+The Performance item owns five styles, all fed by the Host's own
+`piTuiPerformance` projection (so they are identical on the Direct and Remote
+branches and do not depend on how much history the terminal has paged):
+
+```text
+full        TTFB 7.7s · R5 116 tok/s      average time-to-first-token + recent rate
+speed       R5 116 tok/s                  the recent rate (last five eligible steps of the current route)
+speed-all   All 44 tok/s                  the whole-Session rate (every eligible step)
+speed-both  R5 116 · All 44 tok/s         the default speed placement (both scopes, ONE unit)
+latency     TTFB 7.7s                     the average time-to-first-token
+```
+
+`R5` is the weighted model-request rate over the last five eligible completed
+steps of the current provider/model route (a route change starts a clean
+window); `All` is the same rate over every eligible step of the Session. An
+unanswered fact is omitted rather than shown as a zero: with no eligible
+sample the format renders nothing and the item drops by its own importance.
+Under width pressure the stats row compacts first — `speed-both` collapses to
+its leading fact (`R5 116t/s`, or `All 44t/s` when no recent sample exists) —
+then drops the lowest-importance placements. A layout saved before these
+styles existed keeps loading unchanged: `speed` keeps meaning the recent rate
+and `full`/`stats-line` keep their TTFB + recent-rate shape.
 
 Omitting `format` keeps that item's default Style.
 

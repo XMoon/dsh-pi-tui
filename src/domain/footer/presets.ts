@@ -79,7 +79,10 @@ export const DEFAULT_FOOTER_LAYOUT: FooterLayoutV1 = {
         { id: 'token-usage', format: 'pi', importance: 55 },
         { id: 'cache-hit', format: 'pi', importance: 30 },
         { id: 'performance', format: 'latency', importance: 40 },
-        { id: 'performance', format: 'speed', importance: 45 },
+        // TPS plan PR-3: the default speed placement shows BOTH scopes
+        // (`R5 116 · All 44 tok/s`); a persisted custom `speed` stays
+        // loadable and keeps meaning the recent (R5) rate.
+        { id: 'performance', format: 'speed-both', importance: 45 },
         { id: 'turns-steps' },
       ],
       right: [
@@ -126,7 +129,10 @@ export const VIEWER_DEFAULT_FOOTER_LAYOUT: FooterLayoutV1 = {
         { id: 'token-usage', format: 'pi', importance: 55 },
         { id: 'cache-hit', format: 'pi', importance: 30 },
         { id: 'performance', format: 'latency', importance: 40 },
-        { id: 'performance', format: 'speed', importance: 45 },
+        // TPS plan PR-3: the default speed placement shows BOTH scopes
+        // (`R5 116 · All 44 tok/s`); a persisted custom `speed` stays
+        // loadable and keeps meaning the recent (R5) rate.
+        { id: 'performance', format: 'speed-both', importance: 45 },
         { id: 'turns-steps' },
       ],
       right: [

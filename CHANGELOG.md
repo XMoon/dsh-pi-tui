@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+### 变更
+
+- Footer 的性能项新增「全 Session 速率」，并在默认布局同时显示两个口径：速度位
+  默认改为 `speed-both`（`R5 116 · All 44 tok/s`），另有独立的 `speed-all`
+  （`All 44 tok/s`）。窄屏时先压成主口径（`R5 116t/s`，无近期样本时退回
+  `All 44t/s`），再按重要性丢弃；旧布局里保存的 `speed` / `full` / `latency`
+  语义不变，`/status` 详情行同时显示 TTFB、R5 与 All。
+- 性能统计改由 TUI 自有的 Host `piTuiPerformance` 投影提供：Direct 与 Remote
+  同源，重连、分页或切换查看主体都不再影响数值；某个范围没有合格样本时不再显示
+  `0 tok/s`，而是省略该数值。
+
 ## [0.5.1] - 2026-10-08
 
 ### 安装与版本对应

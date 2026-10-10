@@ -1487,11 +1487,19 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // upper bound keeps the match honest against the seeded arithmetic.
   await waitFor('the panel rendered the exact lifetime totals', () =>
     fixture.vt.getViewport().join('').includes('↑5.0k ↓1.0k'), 20_000)
+  // The RENDERED status surface of this fixture is the footer row: the
+  // /status panel keeps its formatted facts in each row's DESCRIPTION, which
+  // the overlay does not paint for an unfocused row (observed with a probe —
+  // the Stats row renders label-only while its description carries the
+  // figures). The footer and the panel read the SAME status facts, so this
+  // assertion still proves the Host-projection figures reach a rendered
+  // surface; the panel row's own formatting is covered by
+  // `test/footer-items.test.ts` / `test/status-semantics.test.ts`.
   const panelView = fixture.vt.getViewport().join('')
   assert.match(panelView, /TTFB 0\.[1-9]\d*s/u,
-    `the panel's rendered recent TTFB must be the seeded non-zero figure:\n${panelView}`)
+    `the rendered status must show the seeded non-zero TTFB:\n${panelView}`)
   assert.match(panelView, /([1-9]\d{1,3}) tok\/s/u,
-    `the panel's rendered recent throughput must be the seeded non-zero figure:\n${panelView}`)
+    `the rendered status must show a seeded non-zero rate:\n${panelView}`)
   // FOOTER consistency: the footer reads the SAME status facts, so it shows
   // the same Host-projection figures — never the no-sample zeros.
   const footerRows = (fixture.runnerApp() as unknown as {
@@ -1500,8 +1508,11 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   const footerText = footerRows.join(' ')
   assert.match(footerText, /TTFB 0\.[1-9]\d*s/u,
     `the footer's recent figures are the Host projection's:\n${footerText}`)
-  assert.match(footerText, /([1-9]\d{1,3}) tok\/s/u,
-    `the footer's recent throughput is the Host projection's:\n${footerText}`)
+  // TPS plan PR-3: the DEFAULT footer layout shows the combined pair — the
+  // real Host → Client → Footer chain must deliver BOTH scopes to the
+  // rendered footer row, with the singular `tok/s` unit.
+  assert.match(footerText, /R5 [1-9]\d* · All [1-9]\d* tok\/s/u,
+    `the footer must render the default R5 + All pair from the Host projection:\n${footerText}`)
 })
 
 /* ─────────── PR5 §12 Slice E: real-holder writer-held recovery ─────────── */

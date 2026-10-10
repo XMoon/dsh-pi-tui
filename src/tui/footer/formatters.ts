@@ -173,30 +173,49 @@ export function formatTokenUsageCompact(input: number, output: number, cacheRead
   return formatTokens(input + output + cacheRead + cacheWrite)
 }
 
-/** Performance, full form: `TTFB 2.6s · 51 tok/s` — the RECENT average
- * time-to-first-token and the RECENT observable decode throughput. The
- * lifetime `LLM` wall is no longer a footer fact (it still accumulates in
- * SessionStats.llmMs for /stats and session analysis). */
+/** Performance, full form (legacy composite): `TTFB 2.6s · R5 116 tok/s` —
+ * the average time-to-first-token beside the RECENT (R5) model-request
+ * output rate. The lifetime `LLM` wall is not a footer fact (it still
+ * accumulates in SessionStats.llmMs for /status and session analysis), and
+ * this form deliberately stays TTFB+R5: the whole-Session ("All") rate is
+ * its own format (`speed-all`) and the default pair (`speed-both`). */
 export function formatPerformanceFull(firstTokenMs: number, tokensPerSec: number): string {
-  return `${formatPerformanceLatency(firstTokenMs)} · ${formatPerformanceSpeed(tokensPerSec)}`
+  return `${formatPerformanceLatency(firstTokenMs)} · ${formatPerformanceR5(tokensPerSec)}`
 }
 
-/** Performance, compact pressure form: `2.6s 51t/s` — the full form's
- * facts with the shortened units (the composite item keeps BOTH facts; it
- * never degrades to a speed-only or latency-only style). */
+/** Performance, full compact pressure form: `2.6s R5 116t/s` — the full
+ * form's facts with the shortened unit. */
 export function formatPerformanceCompact(firstTokenMs: number, tokensPerSec: number): string {
-  return `${formatPerformanceLatencyCompact(firstTokenMs)} ${formatPerformanceSpeedCompact(tokensPerSec)}`
+  return `${formatPerformanceLatencyCompact(firstTokenMs)} ${formatPerformanceR5Compact(tokensPerSec)}`
 }
 
-/** Performance, speed-only form: `51 tok/s` — the recent observable
- * decode throughput. */
-export function formatPerformanceSpeed(tokensPerSec: number): string {
-  return `${tokensPerSec} tok/s`
+/** Performance, R5 (the last five eligible steps of the current route
+ * generation): `R5 116 tok/s`. The value already carries the domain's ONE
+ * display precision policy (`derivePerformance` → `displayRate`), so this
+ * formatter never re-rounds. */
+export function formatPerformanceR5(tokensPerSec: number): string {
+  return `R5 ${tokensPerSec} tok/s`
 }
 
-/** Performance, speed-only compact form: `51t/s`. */
-export function formatPerformanceSpeedCompact(tokensPerSec: number): string {
-  return `${tokensPerSec}t/s`
+/** Performance, R5 compact form: `R5 116t/s`. */
+export function formatPerformanceR5Compact(tokensPerSec: number): string {
+  return `R5 ${tokensPerSec}t/s`
+}
+
+/** Performance, All (every eligible step of the Session): `All 44 tok/s`. */
+export function formatPerformanceAll(tokensPerSec: number): string {
+  return `All ${tokensPerSec} tok/s`
+}
+
+/** Performance, All compact form: `All 44t/s`. */
+export function formatPerformanceAllCompact(tokensPerSec: number): string {
+  return `All ${tokensPerSec}t/s`
+}
+
+/** Performance, the DEFAULT combined speed form: `R5 116 · All 44 tok/s` —
+ * ONE unit for the pair, never an orphan separator or a doubled `tok/s`. */
+export function formatPerformanceBoth(r5PerSec: number, allPerSec: number): string {
+  return `R5 ${r5PerSec} · All ${allPerSec} tok/s`
 }
 
 /** Performance, latency-only form: `TTFB 2.6s` — the recent average
