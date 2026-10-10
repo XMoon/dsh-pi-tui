@@ -1769,6 +1769,11 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     `the rendered subject bar must show the converged activity:\n${subjectLine()}`)
   assert.equal(subjectLine().includes('● running'), false,
     `the stale running line must leave the subject bar:\n${subjectLine()}`)
+  // UX-1 (§7 E2): the SAME snapshot-only flip drives the visible working row —
+  // the committed display subject is the row's only selector, so the inactive
+  // flip clears it without any durable event or viewer reopen.
+  await waitFor('the working row follows the inactive flip', () =>
+    !viewport().includes('Working...'), 15_000)
 
   // ── (4) The reverse flip through the same isolated channel.
   const suppressedBefore = suppressedDurableEvents
@@ -1792,6 +1797,8 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   assert.equal(subjectActivity(), 'running', 'the reverse flip must converge as well')
   assert.equal(subjectLine().includes('● running'), true,
     `the rendered subject bar must show running again:\n${subjectLine()}`)
+  await waitFor('the working row re-arms on the running flip', () =>
+    viewport().includes('Working...'), 15_000)
   releaseSecond()
 })
 
