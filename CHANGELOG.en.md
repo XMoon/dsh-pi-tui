@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   importance; the legacy `speed` / `full` / `latency` styles in saved layouts
   keep their meaning, and the `/status` detail line shows TTFB, R5 and All.
 - The performance facts now come from the TUI's own Host `piTuiPerformance`
-  projection: identical on Direct and Remote, unaffected by reconnects, paging
-  or a display-subject switch, and omitted — never `0 tok/s` — when a scope has
-  no eligible sample.
+  projection: identical on Direct and Remote and unaffected by reconnects or
+  local paging, while the main session and a viewed child each show their own
+  Session's figures. A scope with no eligible sample is omitted — never
+  `0 tok/s`.
 
 ## [0.5.1] - 2026-10-08
 

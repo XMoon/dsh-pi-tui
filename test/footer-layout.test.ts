@@ -200,8 +200,8 @@ test('TPS PR-3: the performance formats and the default speed placement', () => 
     const placements = layout.rows[1]!.left.filter(ref => ref.id === 'performance')
     assert.deepEqual(placements.map(ref => ref.format), ['latency', 'speed-both'],
       `${label}: the latency placement stays and the speed placement shows the R5 + All pair`)
-    // The pair drops before the latency placement under pressure (its per-ref
-    // importance is higher), so the narrow footer keeps a performance fact.
+    // The latency placement (importance 40) drops BEFORE the pair (45), so a
+    // narrow footer keeps the pair's one-fact compact form.
     assert.ok((placements[1]!.importance ?? 0) > (placements[0]!.importance ?? 0),
       `${label}: the combined placement keeps the wider drop budget`)
   }
