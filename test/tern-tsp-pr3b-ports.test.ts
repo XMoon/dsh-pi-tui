@@ -9,8 +9,9 @@
  * - `src/app/submission/controller.ts` no longer imports `TuiApp` (the ONLY
  *   composer seam is the port; no new TuiApp import may re-enter through the
  *   back door — the display-seam DTO debt is a PR4 follow-up, not this one);
- * - the mounted PiTui `TuiApp` structurally satisfies BOTH ports (the PiTui
- *   branch is the app itself, no wrapper);
+ * - the mounted PiTui `TuiApp` is the composer port itself, while the modal
+ *   presenter is the narrow delegating adapter over it (B3: the adapter owns
+ *   `withdrawPending`, which no `TuiApp` has);
  * - every one of the seven composer methods is exercised against a real
  *   headless `TuiApp` (a silently dropped member would surface as a missing
  *   capability on the TSP branch later);
@@ -28,7 +29,7 @@ import { fileURLToPath } from 'node:url'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import type { SubmissionComposerPort } from '../src/app/submission/composer-port.ts'
-import type { SurfaceInteractionPresenter } from '../src/app/surface/interaction-presenter.ts'
+import { pituiSurfaceInteractionPresenter, type PiTuiInteractionApp, type SurfaceInteractionPresenter } from '../src/app/surface/interaction-presenter.ts'
 import { createUserShell } from '../src/app/submission/user-shell.ts'
 import type { InterruptAgentLike } from '../src/app/session/interrupt.ts'
 
@@ -63,21 +64,72 @@ test('B0: the user shell keeps only the local-card TuiApp members', () => {
   }
 })
 
-// ── Structural: TuiApp satisfies both ports without a wrapper ───────────────
+// ── Structural: the app is the composer port; the presenter is the adapter ──
 
-test('B0: the PiTui TuiApp structurally satisfies SubmissionComposerPort and SurfaceInteractionPresenter', () => {
+test('B0/B3: the PiTui composer port is the live app and the presenter is the delegating adapter', () => {
   const vt = new VirtualTerminal(100, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} })
   app.start()
   try {
-    // No wrapper, no `as`-cast: the mounted app IS the port implementation.
+    // No wrapper, no `as`-cast: the mounted app IS the composer port.
     const composer: SubmissionComposerPort = app
-    const presenter: SurfaceInteractionPresenter = app
+    // The modal presenter is the adapter: `TuiApp` itself cannot satisfy the
+    // interface any more (`withdrawPending` has no app counterpart).
+    const presenter: SurfaceInteractionPresenter = pituiSurfaceInteractionPresenter(app)
     assert.equal(typeof composer.getDraft, 'function')
     assert.equal(typeof presenter.showApprovalPrompt, 'function')
+    assert.equal(typeof presenter.setQuestionAttention, 'function')
+    assert.equal(typeof presenter.withdrawPending, 'function')
   } finally {
     app.dispose()
   }
+})
+
+test('B3: the PiTui presenter forwards every member to the app receiver and withdraws nothing itself', async () => {
+  const calls: string[] = []
+  const app: PiTuiInteractionApp = {
+    // `this` identity is the receiver witness: a spread copy (`{ ...app }`)
+    // would call these functions with the ADAPTER as receiver.
+    showApprovalPrompt(request, agentInputWait = false) {
+      assert.equal(this, app, 'the presenter must call the app as receiver')
+      calls.push(`approval:${request.toolName}:${agentInputWait}`)
+      return Promise.resolve('allowed-once')
+    },
+    askQuestions(questions, signal, status, agentInputWait = false) {
+      assert.equal(this, app, 'the presenter must call the app as receiver')
+      calls.push(`ask:${questions.length}:${signal === undefined}:${status === undefined}:${agentInputWait}`)
+      return Promise.resolve([])
+    },
+    setSettledQuestionAnswersLookup(lookup) {
+      assert.equal(this, app, 'the presenter must call the app as receiver')
+      calls.push(`lookup:${lookup === undefined ? 'clear' : 'set'}`)
+    },
+    notify(text, kind = 'info') {
+      assert.equal(this, app, 'the presenter must call the app as receiver')
+      calls.push(`notify:${text}:${kind}`)
+    },
+    setQuestionAttention(count) {
+      assert.equal(this, app, 'the presenter must call the app as receiver')
+      calls.push(`attention:${count}`)
+    },
+  }
+  const presenter = pituiSurfaceInteractionPresenter(app)
+  const outcome = await presenter.showApprovalPrompt({ toolName: 'bash', reason: 'why' }, true)
+  assert.equal(outcome, 'allowed-once')
+  assert.deepEqual(await presenter.askQuestions([], undefined, undefined, false), [])
+  presenter.setSettledQuestionAnswersLookup(undefined)
+  presenter.notify('a notice', 'error')
+  presenter.setQuestionAttention(3)
+  // The PiTui cancellation owner is the app's own disposal: the adapter must
+  // NOT invent a second withdrawal path on this branch.
+  presenter.withdrawPending()
+  assert.deepEqual(calls, [
+    'approval:bash:true',
+    'ask:0:true:true:false',
+    'lookup:clear',
+    'notify:a notice:error',
+    'attention:3',
+  ])
 })
 
 // ── Behavioral: all seven composer members work against a real TuiApp ───────

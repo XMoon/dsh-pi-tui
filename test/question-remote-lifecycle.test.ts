@@ -110,6 +110,8 @@ function harness(options: {
     notify: (message) => { notices.push(message) },
     repaint: () => {},
     currentSessionId: () => currentSession,
+    isAdmissibleSession: sessionId => sessionId === currentSession,
+    withdrawPresentation: () => {},
     diag: SILENT_DIAG,
     now: () => clock,
     tickMs: 5,
@@ -505,4 +507,88 @@ test('M3-6 PR3: a throwing projection unsubscribe cannot strand the mounted form
     assert.equal((error as { code?: string }).code, ASK_ABORTED)
     return true
   })
+})
+
+// ── PR3-B B3: the timed lifecycle driving the REAL TSP seat ──────────────────
+
+test('PR3-B B3: the timed claim, timeout and continued late answer drive the REAL TSP seat', async () => {
+  const { createTspInteractionSeat } = await import('../src/tui/tsp/interaction.ts')
+  const seat = createTspInteractionSeat({
+    render: () => {},
+    onFatal: () => {},
+    notify: () => {},
+    setSettledQuestionAnswersLookup: () => {},
+  })
+  const key = (name: string, extra: Partial<{ text: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean }> = {}) =>
+    ({ name, ctrl: false, alt: false, shift: false, meta: false, ...extra })
+  const callbacks = { listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }
+  const renderText = (): string => JSON.stringify(seat.renderLayer())
+  let snapshot: QuestionSurfaceSnapshot | undefined
+  let clock = 1_000
+  let released = 0
+  const delivered: AskUserQuestionAnswer[] = []
+  const claim: QuestionWaitClaim = {
+    remainingMs: 1_000,
+    ended: new Promise(() => {}),
+    release: () => { released += 1 },
+  }
+  let provider: UserQuestionProvider | undefined
+  const controller = new QuestionSurfaceController({
+    port: {
+      onRequest: (next) => { provider = next; return true },
+      subscribe: () => () => {},
+      snapshot: () => snapshot,
+      claimTimedWait: async () => claim,
+      answerContinued: async (_sessionId, _callId, answer) => { delivered.push(answer); return 'queued' },
+    },
+    ask: (questions, signal, status, agentInputWait) => seat.presenter.askQuestions(questions, signal, status, agentInputWait),
+    notify: () => {},
+    repaint: () => {},
+    currentSessionId: () => 'session-a',
+    isAdmissibleSession: sessionId => sessionId === 'session-a',
+    withdrawPresentation: () => {},
+    diag: SILENT_DIAG,
+    now: () => clock,
+    tickMs: 20,
+  })
+  try {
+    controller.attach()
+    assert.ok(provider !== undefined)
+    const pending = provider!(
+      { sessionId: 'session-a', callId: 'call-timed-seat', timed: true, questions: [{ id: 'q1', question: 'Pick one', options: [{ label: 'a' }] }] } as never,
+      async () => ({ answers: [] }),
+    )
+    await new Promise<void>((resolve) => { setTimeout(resolve, 30) })
+    assert.equal(seat.hasModalSeat(), true, 'the REAL seat presents the live timed form')
+    assert.match(renderText(), /Foreground wait/u, "the controller's countdown status is rendered by the seat")
+
+    // The local deadline expires: the seat's form is withdrawn and the request
+    // is classified ASK_TIMED_OUT (never a user cancel).
+    clock = 5_000
+    const timedOut = await pending.then(() => undefined, (error: unknown) => error)
+    assert.equal((timedOut as { code?: string }).code, ASK_TIMED_OUT)
+    assert.equal(released, 1, 'the claim is released exactly once')
+    assert.equal(seat.hasModalSeat(), false, 'the timed-out form left the seat')
+
+    // The Host records the call as continued: the controller re-offers it, and
+    // the REAL seat answers the late batch into the official sink.
+    snapshot = {
+      sessionId: 'session-a',
+      active: [{ callId: 'call-timed-seat', sessionId: 'session-a', questions: [{ id: 'q1', question: 'Pick one', options: [{ label: 'a' }] }], state: 'continued' }],
+      settled: [],
+      queuedReplyCallIds: new Set(),
+    } as never
+    await new Promise<void>((resolve) => { setTimeout(resolve, 400) })
+    assert.equal(seat.hasModalSeat(), true, 'the continued form is re-offered to the REAL seat')
+    // The seat's keys are the SDK's decoded Key objects, so the name is
+    // `enter` (the raw '\r' byte is what the DECODER turns into it).
+    seat.handleKey(key('enter'), callbacks)   // adopt 'a'
+    seat.handleKey(key('enter'), callbacks)   // submit from review
+    await new Promise<void>((resolve) => { setTimeout(resolve, 200) })
+    assert.deepEqual(delivered, [{ answers: [{ id: 'q1', selected: ['a'] }] }],
+      'the late answer reached the official continued sink exactly once')
+  } finally {
+    controller.dispose()
+    seat.dispose()
+  }
 })

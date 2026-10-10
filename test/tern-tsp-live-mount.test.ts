@@ -891,10 +891,10 @@ test('A-08b: the interaction owner registers fail-closed answerers on a modal-le
     livePresenter: () => undefined,
     display: () => display as never,
     currentSessionId: () => 'session-a08',
+    isAdmissibleSession: () => true,
     schedulePaint: () => {},
     diag: () => ({ debug() {}, info() {}, warn() {}, error() {}, dispose() {} }),
     isCleanedUp: () => false,
-    setQuestionAttention: () => {},
     onAttentionChanged: () => {},
   })
   interaction.attach(port as never, { lookupCallArgs: () => undefined, dangerCommand: () => false })
@@ -962,4 +962,94 @@ test('the live harness OWNS its renderer release: a failed close surfaces, never
   } finally {
     process.off('unhandledRejection', onUnhandled)
   }
+})
+
+// ── PR3-B B3: teardown order — the interaction owner retires FIRST ──────────
+
+test('B3: the surface withdraws the interaction owner BEFORE it starts the renderer release', async () => {
+  // The order of the two teardown owners in ONE synchronous batch: the modal
+  // promises are withdrawn before the terminal release begins, so a live
+  // question/approval is never classified by a terminal that vanished first.
+  const order: string[] = []
+  const presenter = {
+    showApprovalPrompt: () => Promise.resolve('cancelled' as const),
+    askQuestions: () => Promise.resolve([]),
+    setSettledQuestionAnswersLookup: () => {},
+    notify: () => {},
+    setQuestionAttention: () => {},
+    withdrawPending: () => { order.push('interaction-withdraw') },
+    withdrawPresentation: () => {},
+  }
+  const display = {
+    setTranscript: () => {},
+    commitDisplaySubject: () => {},
+    commitStatusFacts: () => {},
+    resetSessionFacts: () => {},
+    beginSessionHydration: () => {},
+    clearActiveDraft: () => {},
+    retainsStaleDraftRestore: () => false,
+    resetInputHistory: () => {},
+    setSearchResult: () => {},
+    notify: () => {},
+    setDockNotice: () => {},
+    setWelcomeCard: () => {},
+    setWelcomeIdle: () => {},
+    setTerminalCwd: () => {},
+    setPendingInputPresentation: () => {},
+    getSessionTitle: () => '',
+    getViewerGeneration: () => 0,
+    supportsTaskCenter: false,
+    supportsViewer: false,
+    supportsModals: true,
+  }
+  const composer = {
+    getDraft: () => '',
+    setDraft: () => {},
+    setEditorText: () => {},
+    insertIntoEditor: () => {},
+    notify: () => {},
+    setSubmitPending: () => {},
+    clearSettledLocalMessages: () => {},
+  }
+  const surface = createSurfaceRuntime<SessionEvent>({
+    tuiVersion: '0.0.0-test',
+    notificationPresentation: nullPresentation,
+    notificationMode: undefined,
+    notificationMethod: undefined,
+    mainProgressAuthority: 'local-events',
+    terminalProgress: undefined,
+    createPluginManagerPanel,
+  })
+  surface.start({
+    events: { onSubmit: () => {}, onExit: () => {} },
+    renderer: {
+      mount: () => ({
+        display,
+        composer,
+        interaction: presenter,
+        bindInput: () => {},
+        dispose: async () => { order.push('renderer-release') },
+      }),
+      releaseUnmounted: async () => {},
+    } as SurfaceRendererMount,
+    workspaceRoot: '/tmp',
+    iconStyle: 'emoji',
+    displayState: { preset: 'compact' },
+    historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
+    readImage: () => Promise.reject(new Error('not exercised')),
+    imageScope: () => undefined,
+    present: { call: () => undefined, result: () => undefined },
+    sessionCwd: () => '/tmp',
+    sessionId: () => 'session-b3-order',
+    onTerminalResize: () => {},
+    copySelection: async () => false,
+    openExternalUrl: () => {},
+    readClipboardText: async () => undefined,
+    imageFallbackColor: text => text,
+  })
+  surface.bindRendererInput()
+  surface.dispose()
+  await surface.whenRendererReleased()
+  assert.deepEqual(order, ['interaction-withdraw', 'renderer-release'],
+    'the interaction owner is withdrawn BEFORE the renderer release starts')
 })

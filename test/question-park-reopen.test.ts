@@ -53,6 +53,8 @@ function harness(options: {
   const subscribed: string[] = []
   const unsubscribed: string[] = []
   const asks: AskRecord[] = []
+  /** The lifetimes the controller withdrew the PRESENTATION for (B3 finding C). */
+  const withdrawals: AbortSignal[] = []
   const notices: string[] = []
   const answered: Array<{ sessionId: string; callId: string }> = []
   let pendingAsk: { resolve: (answers: TuiQuestionAnswer[]) => void; reject: (error: unknown) => void } | undefined
@@ -86,6 +88,8 @@ function harness(options: {
     notify: (message) => { notices.push(message) },
     repaint: () => {},
     currentSessionId: () => currentSession,
+    isAdmissibleSession: sessionId => sessionId === currentSession,
+    withdrawPresentation: (lifetime) => { withdrawals.push(lifetime) },
     diag: SILENT_DIAG,
     now: () => 1_000,
     tickMs: 5,
@@ -95,6 +99,7 @@ function harness(options: {
     controller,
     port,
     asks,
+    withdrawals,
     notices,
     answered,
     /** Install the authority the port serves. */
@@ -457,4 +462,210 @@ test('a direct ask on an unknown call never fabricates an entry', async () => {
   assert.equal(h.controller.reopen(SESSION, 'never-seen'), false)
   assert.deepEqual(h.attention(), [])
   assert.equal(h.asks.length, 0)
+})
+
+// ── PR3-B B3 (finding C): the presentation-only withdrawal of a replaced flow ─
+
+test('PR3-B B3: a live flow whose Session no longer owns the surface is withdrawn WITHOUT settling its request', async () => {
+  const h = harness()
+  h.attach()
+  await settleFrames()
+  const abort = new AbortController()
+  const pending = h.live({ sessionId: SESSION, callId: 'call-live', timed: false, questions: QUESTIONS, signal: abort.signal })
+  await settleFrames()
+  assert.equal(h.asks.length, 1, 'the live foreground form is presented')
+
+  // A replacement Session takes the surface: the presentation is withdrawn by
+  // the EXACT lifetime the presenter received.
+  h.setSession('session-b')
+  h.controller.reconcile()
+  assert.equal(h.withdrawals.length, 1, 'the replaced flow is withdrawn exactly once')
+  assert.equal(h.withdrawals[0], h.asks[0]?.signal, 'the withdrawal names the exact presented lifetime')
+
+  // PRESENTATION only: the official request keeps its own lifetime, so the
+  // withdrawal itself settles nothing.
+  let settledAs: string | undefined
+  void pending.then(
+    () => { settledAs = 'answered' },
+    (error: unknown) => { settledAs = String((error as { readonly code?: unknown }).code) },
+  )
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(settledAs, undefined, 'the withdrawal never settles the official request')
+
+  // Its OWN lifetime still ends it, classified exactly like any Host abort.
+  abort.abort()
+  await settleFrames()
+  assert.equal(settledAs, 'ASK_ABORTED', 'the Host end classifies the withdrawn request ASK_ABORTED')
+  assert.equal(h.notices.some(text => text.includes('cancelled')), false,
+    'a replaced session is never reported to the user as a cancellation')
+})
+
+// ── PR3-B B3: the same controller driving the REAL TSP interaction seat ──────
+
+test('PR3-B B3: the REAL TSP seat parks a continued form on Esc and reopens it with the preserved draft', async () => {
+  const { createTspInteractionSeat } = await import('../src/tui/tsp/interaction.ts')
+  const seat = createTspInteractionSeat({
+    render: () => {},
+    onFatal: () => {},
+    notify: () => {},
+    setSettledQuestionAnswersLookup: () => {},
+  })
+  const key = (name: string, extra: Partial<{ text: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean }> = {}) =>
+    ({ name, ctrl: false, alt: false, shift: false, meta: false, ...extra })
+  const callbacks = { listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }
+  let snapshot: QuestionSurfaceSnapshot | undefined = continuedSurface()
+  const delivered: AskUserQuestionAnswer[] = []
+  const controller = new QuestionSurfaceController({
+    port: {
+      onRequest: () => true,
+      subscribe: () => () => {},
+      snapshot: () => snapshot,
+      claimTimedWait: async () => undefined,
+      answerContinued: async (_sessionId, _callId, answer) => {
+        delivered.push(answer)
+        return 'queued'
+      },
+    },
+    ask: (questions, signal, status, agentInputWait) => seat.presenter.askQuestions(questions, signal, status, agentInputWait),
+    notify: () => {},
+    repaint: () => {},
+    currentSessionId: () => SESSION,
+    isAdmissibleSession: sessionId => sessionId === SESSION,
+    withdrawPresentation: lifetime => { seat.presenter.withdrawPresentation(lifetime) },
+    diag: SILENT_DIAG,
+  })
+  try {
+    controller.attach()
+    // The cold discovery PARKS the call: no form is presented yet.
+    assert.equal(seat.hasModalSeat(), false, 'a cold continued call never steals the seat')
+    assert.equal(controller.attentionRows().filter(row => row.presentation === 'parked').length, 1)
+
+    // The explicit reopen presents the REAL seat.
+    assert.equal(controller.reopen(SESSION, CONTINUED_CALL), true)
+    assert.equal(seat.hasModalSeat(), true, 'the reopened form owns the seat')
+
+    // A real edit, then Esc: the controller parks the form (never cancels the Host).
+    seat.handleKey(key('x', { text: 'x' }), callbacks)
+    // An OPTIONLESS question's first Esc leaves the free-text edit (the text
+    // survives); the second one cancels the form, which the controller parks.
+    seat.handleKey(key('escape'), callbacks)
+    seat.handleKey(key('escape'), callbacks)
+    await settleFrames()
+    assert.equal(seat.hasModalSeat(), false, 'Esc withdrew the form')
+    assert.equal(controller.attentionRows().filter(row => row.presentation === 'parked').length, 1,
+      'the parked entry is still the authority')
+
+    // Reopen: the seat must restore the DRAFT the controller kept.
+    assert.equal(controller.reopen(SESSION, CONTINUED_CALL), true)
+    assert.equal(seat.hasModalSeat(), true)
+    seat.handleKey(key('enter'), callbacks)   // confirm the restored free text
+    seat.handleKey(key('enter'), callbacks)   // submit the batch from review
+    await settleFrames()
+    assert.equal(delivered.length, 1, 'the late answer was delivered exactly once')
+    assert.deepEqual(delivered[0]?.answers, [{ id: 'q1', selected: [], custom: 'x' }],
+      'the draft preserved across park/reopen is the real answer')
+  } finally {
+    controller.dispose()
+    seat.dispose()
+  }
+})
+
+test('PR3-B B3 finding F7: a held timed claim retired by a publication never mounts its form (and is not revived)', async () => {
+  const { createTspInteractionSeat } = await import('../src/tui/tsp/interaction.ts')
+  const seat = createTspInteractionSeat({
+    render: () => {},
+    onFatal: () => {},
+    notify: () => {},
+    setSettledQuestionAnswersLookup: () => {},
+  })
+  let releaseClaim: (() => void) | undefined
+  const claimHeld = new Promise<void>(resolve => { releaseClaim = resolve })
+  const withdrawals: AbortSignal[] = []
+  // The exact lifetime the presenter receives (the controller's combined
+  // local+request signal, built BEFORE the claim): the withdrawal must name it.
+  let presentedLifetime: AbortSignal | undefined
+  let provider: UserQuestionProvider | undefined
+  // A HELD claim opening: the controller is parked inside `claimTimedWait` when
+  // the replacement Session is published — the exact F7 window.
+  const controller = new QuestionSurfaceController({
+    port: {
+      onRequest: (next) => { provider = next; return true },
+      subscribe: () => () => {},
+      snapshot: () => undefined,
+      claimTimedWait: async () => { await claimHeld; return undefined },
+      answerContinued: async () => 'queued',
+    },
+    ask: (questions, signal, status, agentInputWait) => {
+      presentedLifetime = signal
+      return seat.presenter.askQuestions(questions, signal, status, agentInputWait)
+    },
+    notify: () => {},
+    repaint: () => {},
+    currentSessionId: () => currentSession,
+    isAdmissibleSession: sessionId => sessionId === currentSession,
+    withdrawPresentation: lifetime => {
+      withdrawals.push(lifetime)
+      seat.presenter.withdrawPresentation(lifetime)
+    },
+    diag: SILENT_DIAG,
+  })
+  let currentSession: string | undefined = SESSION
+  const abort = new AbortController()
+  // The outcome is observed FROM THE START (a failure path must never leave an
+  // unobserved rejection), and the held claim always has a fallback release in
+  // the test's own cleanup.
+  let settledAs: string | undefined
+  let pending: Promise<AskUserQuestionAnswer> | undefined
+  try {
+    controller.attach()
+    pending = provider!({
+      sessionId: SESSION,
+      callId: 'call-held-claim',
+      timed: true,
+      questions: QUESTIONS,
+      signal: abort.signal,
+    }, async () => ({ answers: [] }))
+    const observed = pending
+    void observed.then(
+      () => { settledAs = 'answered' },
+      (error: unknown) => { settledAs = String((error as { readonly code?: unknown }).code) },
+    )
+    await settleFrames()
+    assert.equal(seat.hasModalSeat(), false, 'the flow is still opening its claim: nothing is presented yet')
+
+    // The replacement Session is published while the claim is still opening.
+    currentSession = 'session-b'
+    controller.reconcile()
+    assert.equal(withdrawals.length, 1, 'the opening flow IS retired by the publication (registered before the await)')
+
+    // The claim finally lands: the presenter is reached, but the form must never
+    // mount — and the retirement named exactly the lifetime it received.
+    releaseClaim!()
+    await settleFrames()
+    assert.notEqual(presentedLifetime, undefined, 'the retired flow still reached its own request')
+    assert.equal(withdrawals[0], presentedLifetime, 'the retirement names the exact lifetime the presenter received')
+    assert.equal(seat.hasModalSeat(), false, 'a retired flow never mounts after its claim resolves')
+    assert.equal(settledAs, undefined, 'the official request keeps its own lifetime (no fabricated settlement)')
+
+    // Returning to A does NOT revive the retired flow: only a fresh authority
+    // (a projection offer) may present something, and this call offers none.
+    currentSession = SESSION
+    controller.reconcile()
+    await settleFrames()
+    assert.equal(seat.hasModalSeat(), false, 'the retired flow is never revived by the return')
+    assert.equal(settledAs, undefined, 'and it is still pending after the return')
+
+    // Its OWN lifetime ends it, classified like any Host abort.
+    abort.abort()
+    await settleFrames()
+    assert.equal(settledAs, 'ASK_ABORTED', 'the Host end classifies the retired flow ASK_ABORTED')
+  } finally {
+    // A held gate always has a fallback release: a failing assertion must never
+    // leave the mock's claim opening unresolved.
+    releaseClaim?.()
+    await settleFrames()
+    controller.dispose()
+    seat.dispose()
+  }
 })

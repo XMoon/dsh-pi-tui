@@ -73,6 +73,14 @@ interface WireFrame {
   readonly ops: readonly Op[]
 }
 
+/** One recorded SDK frame (the wire is the observation point for the
+ *  `layer`/`focus` ops; PR3-B B3 extends the pane with this read only). */
+export interface TspWireFrame {
+  readonly sf: string
+  readonly s: number
+  readonly ops: readonly Op[]
+}
+
 export interface TspPane {
   readonly input: FakeInput
   readonly output: FakeOutput
@@ -96,6 +104,16 @@ export interface TspPane {
   closeFrames(): number
   /** Frame ops sent, per surface, in order. */
   frameCount(): number
+  /**
+   * PR3-B B3: every recorded frame, in order. The WIRE is the observation
+   * point for the modal `layer`/`focus` ops — no renderer-local state is read.
+   */
+  frames(): readonly TspWireFrame[]
+  /** Send one raw key byte sequence (the caller owns the encoding, exactly as a
+   *  real terminal does). */
+  key(sequence: string): void
+  /** Send one pane event through the SDK's event channel. */
+  event(value: unknown): void
   restore(): void
 }
 
@@ -111,6 +129,7 @@ export function installTspPane(): TspPane {
   let closeFailure: { readonly value: unknown } | undefined
   let heldReply: (() => void) | undefined
   const closeBodies: string[] = []
+  const frameList: TspWireFrame[] = []
   let frames = 0
 
   const reply = (): void => {
@@ -141,6 +160,7 @@ export function installTspPane(): TspPane {
     for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
       frames += 1
       const frame = JSON.parse(match[1]!) as WireFrame
+      frameList.push(frame)
       // A real pane acks every frame it drew (credit flow control).
       setTimeout(() => input.type(
         `\u001b_tsp;e;${JSON.stringify({ ev: 'ack', sf: frame.sf, s: frame.s })}\u001b\\`,
@@ -173,6 +193,9 @@ export function installTspPane(): TspPane {
     probed: () => probed,
     closeFrames: () => closeBodies.length,
     frameCount: () => frames,
+    frames: () => frameList,
+    key: sequence => { input.type(sequence) },
+    event: value => { input.type(`\u001b_tsp;e;${JSON.stringify(value)}\u001b\\`) },
     restore: () => {
       for (const [name, value] of previousEnv) {
         if (value === undefined) delete process.env[name]

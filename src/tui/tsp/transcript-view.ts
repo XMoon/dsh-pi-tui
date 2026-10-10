@@ -22,6 +22,7 @@
 
 import { ui } from '@stencil-hq/tern'
 import type { Node, Spans, Status } from '@stencil-hq/tern'
+import type { SettledQuestionAnswersLookup } from '../../app/surface/interaction-presenter.ts'
 import { contextFormOf } from '../../domain/transcript/context-semantics.ts'
 import type { TranscriptMessage } from '../../domain/transcript/types.ts'
 import { contextPresentationKind } from '../transcript/context-structure.ts'
@@ -67,6 +68,14 @@ export interface TranscriptViewOptions {
    * domain identity; the default (`''`) keeps the PR1 oracle's key shapes.
    */
   readonly scopePrefix?: string
+  /**
+   * PR3-B B3 (§3.9): the authoritative settled-answer lookup the interaction
+   * owner installs (an official `userQuestions` projection read). It is
+   * consulted ONLY for an `ask_user_question` tool row carrying an official
+   * `callId`, and only to render that row's result body — the canonical
+   * transcript message is never rewritten.
+   */
+  readonly settledQuestionAnswersLookup?: SettledQuestionAnswersLookup
 }
 
 /** `ok|error|running` -> the SDK's card/tool `status` vocabulary. */
@@ -84,16 +93,36 @@ function isUnmatchedToolRow(message: Extract<TranscriptMessage, { kind: 'tool' }
   return message.origin === 'tool-not-started' || (message.origin === undefined && message.callCount === 0)
 }
 
-function toolBodyNodes(message: Extract<TranscriptMessage, { kind: 'tool' }>): Node[] {
+function toolBodyNodes(message: Extract<TranscriptMessage, { kind: 'tool' }>, options: TranscriptViewOptions): Node[] {
   const nodes: Node[] = []
   if (message.args !== '') nodes.push(ui.code({ key: 'args', text: message.args }))
-  if (message.result !== '') nodes.push(ui.code({ key: 'result', text: message.result }))
+  // The body is decided by the SHOWN result, never by the recorded payload: a
+  // running `ask_user_question` row can carry an empty recorded result while
+  // the official projection already settled it, and the settled batch is still
+  // the authority. An absent lookup answers `''` and omits the body exactly as
+  // before, so an ordinary tool row is unchanged.
+  const result = shownToolResult(message, options)
+  if (result !== '') nodes.push(ui.code({ key: 'result', text: result }))
   return nodes
+}
+
+/**
+ * The result body of one tool row. PR3-B B3 (§3.9): an `ask_user_question`
+ * row carrying an official `callId` shows the AUTHORITATIVE settled answer
+ * batch when the projection has one. An ABSENT settled entry falls back to the
+ * call's own recorded result; an EMPTY batch is a real settled outcome (a late
+ * reply settled the question without a readable batch) and must NOT fall back
+ * to the timeout payload it replaced.
+ */
+function shownToolResult(message: Extract<TranscriptMessage, { kind: 'tool' }>, options: TranscriptViewOptions): string {
+  if (message.name !== 'ask_user_question' || message.callId === undefined) return message.result
+  const settled = options.settledQuestionAnswersLookup?.(message.callId)
+  return settled === undefined ? message.result : JSON.stringify({ answers: settled })
 }
 
 function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: string, options: TranscriptViewOptions): Node {
   const header = toolCardHeader(message.name, message.args, options.cwd)
-  const body = toolBodyNodes(message)
+  const body = toolBodyNodes(message, options)
   if (isUnmatchedToolRow(message)) {
     const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
     return ui.card(

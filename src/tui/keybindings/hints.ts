@@ -8,6 +8,18 @@
 
 import type { KeyId } from '@xmoon76/pi-tui'
 
+/**
+ * The TSP renderer's FIXED parked-Question inspection chord (PR3-B B3 §3.8).
+ *
+ * The TSP interaction seat is not a Host command and owns no keymap action —
+ * `Alt+Q` is dispatched from the raw SDK key stream — so this label can never
+ * come from `keyHint`/`keysFor`. It also cannot go stale under a remap,
+ * because no remap exists for it. It lives HERE, with the key-label
+ * vocabulary, because the host-keybindings gate only sanctions key labels
+ * owned by this tree: a renderer module must not hard-code the chord itself.
+ */
+export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'
+
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {
   enter: 'Enter',

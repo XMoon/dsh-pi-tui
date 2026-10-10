@@ -211,17 +211,20 @@ test('onApprovalRequest subscribes to the approval/request event', () => {
   assert.equal(events[0], 'approval/request')
 })
 
-test('onApprovalRequest adapts the official ApprovalRequest onto the Agent-free Like shape', () => {
-  const received: Array<{ signal?: AbortSignal; callId?: string; toolName: string; reason?: string }> = []
+test('onApprovalRequest adapts the official ApprovalRequest onto the Session-identified, Agent-free Like shape', () => {
+  const received: Array<{ signal?: AbortSignal; callId?: string; sessionId?: string; toolName: string; reason?: string }> = []
   const events: Array<string | RegisteredListener> = []
   const p = port({}, undefined, events)
   p.onApprovalRequest((req) => { received.push(req); return 'ok' })
   // events[0] is the event NAME; events[1] is the registered handler.
   const handler = events[1]! as RegisteredListener
   // The real dsh ApprovalRequest carries a same-process agent; the adapter
-  // must strip it and pass ONLY the transport-neutral subset.
+  // strips the Agent object and passes the transport-neutral subset plus the
+  // Session IDENTITY it derived (B3 findings C/F6 — a published replacement
+  // retires the presentation with it).
   handler({ agent: { session: { id: 'x' } }, toolName: 'bash', reason: 'r', callId: 'call-1', signal: undefined }, () => {})
-  assert.deepEqual(received, [{ toolName: 'bash', reason: 'r', callId: 'call-1' }])
+  assert.deepEqual(received, [{ toolName: 'bash', reason: 'r', callId: 'call-1', sessionId: 'x' }])
+  assert.equal('agent' in (received[0] as object), false, 'no same-process Agent crosses the port')
 })
 
 test('setApprovalPolicy resolves the session id to the live Agent internally and delegates', () => {

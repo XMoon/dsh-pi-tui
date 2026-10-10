@@ -1,7 +1,15 @@
 # Tern TSP PR3-B evidence — interactive pane (B0..B4)
 
-> **Status: B0 merged; B1 implemented on `feat/tern-tsp-pr3-b1-editor` —
-> review gates open. B2..B4 pending.**
+> **Status: B0, B1 and B2 merged into `next` (PRs #261, #262, #263); B3
+> implemented on `feat/tern-tsp-pr3-b3-interaction` — review gates open. F1–F5 are
+> closed, and the presentation-currentness MUST (F6/C) has its production-path
+> witnesses with the publication withdrawal implemented for Questions AND
+> Approvals (rounds 5–6). The later reviews returned F7/F8 (fixed in round 6),
+> F9/F10 (round 7), F11/F12/F13 (round 8) and F11's closed-owner window + F14
+> (round 9) — ALL CLOSED: the B3-9 review is accepted-with-followups with zero
+> open P0/P1/P2 and its only follow-up was this document's provenance wording
+> (corrected in round 10, doc/comment only). F6/C is kept PARTIAL here until the
+> reviewer closes the delivery status; B4 pending.**
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
@@ -482,4 +490,712 @@ in `test/tern-tsp-busy-parity.test.ts`):
 
 - Clipboard image/path intake, plugin semantic actions, `@` completion and the
   PiTui panels on TSP: **PR4** UI parity.
-- Question/Approval: **B3**.
+- Question/Approval: **B3** — implemented (see the B3 section below); the
+  physical IME / paste / control-key matrix and the full interactive
+  qualification stay **B4**.
+
+## B3 — `feat(tern-tsp): question and approval interaction seat`
+
+- **Base**: the merged B2 tip of `next` (PR #263 — the addendum's verified
+  baseline).
+
+### What changed (source anchors)
+
+| Zone | Change |
+|---|---|
+| `src/app/surface/interaction-presenter.ts` | The presenter contract gains `setQuestionAttention(parkedCount)` (a PRESENTATION of the ONE controller's parked count) and `withdrawPending()` (synchronously end this presenter's queued/active promises). The PiTui branch is no longer the bare `TuiApp`: it is the narrow delegating adapter `pituiSurfaceInteractionPresenter(app)`, which forwards every member with the app as receiver and keeps `withdrawPending` a documented NO-OP (that branch's cancellation owner remains the app's own `dispose()`). |
+| `src/app/surface/interaction-runtime.ts` | The parked count is published through the renderer's presenter (no PiTui-only `mounted()` chrome read), so a renderer without a `TuiApp` receives it. `dispose()` retires the controller reference and subscription FIRST, then runs independent obligations in order: release the attention subscription → `controller.dispose()` → `presenter.withdrawPending()` → clear the settled lookup. The controller's own disposal therefore classifies a Host question first (`ASK_ABORTED`/`ASK_CANCELLED`), and the presenter only withdraws what the surface still owns. |
+| `src/app/surface/runtime.ts` | `SurfaceInputBinding` carries `listContinuedQuestions()` (the FRESH authoritative rows; the renderer filters `parked`) and `reopenContinuedQuestion(sessionId, callId)` (routed to the ORIGINAL `QuestionSurfaceController.reopen`). The non-truncating teardown batch now STARTS the renderer/SDK release after `interaction.dispose()` and the PiTui app disposal, so a modal promise is settled before the terminal goes away — and the release is still started when an earlier synchronous step throws. |
+| `src/tui/tsp/interaction.ts` (new) | The renderer's ONE interaction seat: a unified FIFO of the official Approval and Question requests (no second approval policy, no second Question controller), one `layer` overlay at a time, modal-first key ownership, one abort listener per slot, `settled` latches, and promise settlement exactly once. Approval keys are exactly unmodified `y`/`n`/Esc/Ctrl+C (every other key is consumed); the question form implements single/multi-select, the free-text/Other sub-state, the Review page, skip-on-forward, `intent.approve`-anchored highlighting, `(recommended)` display stripping with the ORIGINAL label preserved in the answer, `QuestionFlowDraft` snapshots, the real-answer-mutation hook (never on focus/cursor/highlight/repaint), masked display (one bullet per grapheme, plaintext only in seat memory), and the Alt+Q parked list that re-reads the authority on every frame and closes before the controller's `reopen` recheck decides. A malformed official payload is refused at the boundary with a visible notice and the flow's cancellation error — never a fabricated answer. A frame/focus failure while a form is being PRESENTED for the first time is the renderer's FATAL path: the slot is retired (no ghost seat keeps swallowing keys), its original promise settles exactly once (approval `cancelled` — never an allow), and the failure reaches the fatal sink. The real-answer hooks compare the draft's ANSWER SEMANTICS, so re-confirming the same option, re-entering the same text or merely accepting a restored draft fires nothing; and a real single-select choice invalidates the replaced free-text buffer as well as the draft, so the replaced Other text cannot resurrect. |
+| `src/tui/tsp/session.ts` | The layer is submitted on EVERY frame (the SDK render is a full-view diff: an omitted region is deleted, so `layer` is always present, empty when no seat is active). Focus is no longer a one-shot latch: the renderer keeps the last APPLIED focus target and re-issues the op whenever the desired seat changes — `null` for a list/approval/select-only form, the real `layer.modal-<n>.answer` node id for an open free-text editor, `dock.composer` when no modal owns the seat. The input loop routes modal-first, and the modal seat now outranks the hydration fence (§3.5.4) — a form presented for the subject the surface still owns stays answerable while a later hydration starts, while `Alt+Q` stays fenced out of that window. `SessionInput.event` focus/edit/undo/send events are consumed while a modal owns the seat, so the terminal cannot hand the caret back. `supportsModals` becomes true only once `bindInput` installed the real application callbacks. |
+| `src/tui/tsp/transcript-view.ts` | `TranscriptViewOptions` gains the settled-answer lookup: an `ask_user_question` row carrying the official `callId` renders the AUTHORITATIVE settled batch (`JSON.stringify({ answers })`) instead of its recorded result. The result BODY is decided by the SHOWN value, never by the recorded payload — a running row with an empty recorded result still reads the projection. An absent settled entry falls back to the recorded result; an EMPTY batch is a real settled outcome and does NOT fall back. |
+| `src/tui/keybindings/hints.ts` + `scripts/check-host-keybindings.mts` | The key-label vocabulary owns the TSP seat's FIXED inspection chord (`TSP_CONTINUED_INSPECTION_LABEL`): the seat is not a Host command and owns no keymap action, so the label cannot come from `keyHint` — and it cannot go stale either, because no remap exists for it. The dock renders the imported label, and the host-keybindings gate sanctions that one line through its scoped seam list (owner-scoped to the keybindings tree, as its own fixture requires). |
+| `test/support/tsp-terminal-fixture.ts` | Extended with key/event injection and wire-frame observation only (`frames()`, `key()`, `event()`); no renderer-local business state is exposed. |
+
+### The L6 chain (real source → decision → sink)
+
+`test/tern-tsp-interaction-runner.test.ts` mounts the REAL
+`createSurfaceRuntime` with the REAL TSP renderer over a scripted SDK terminal
+and the REAL `DirectInteractionPort`; the official request is delivered from
+the Host event plane and answered through the ONE input loop, so the assertion
+lands on the ORIGINAL sink:
+
+| Case | What it proves |
+|---|---|
+| official `approval/request` → `y` | the exact `allowed-once` answer the official port resolves; the modal unmounts afterwards |
+| official `user-questions/request` → real `QuestionSurfaceController` → SDK keys → producer | the official producer observed the real answer batch; the form was rendered from the official question text |
+| cold `continued` projection at attach | the controller discovers it PARKED (no form steals the seat), the dock publishes the parked count, `Alt+Q` lists the fresh authoritative row, Enter reopens through the controller's own recheck, and `answerContinued` receives exactly one answer |
+| settled projection + a recorded timeout row | the tool row shows the authoritative settled batch; an EMPTY batch is authoritative too |
+| teardown with a live approval | the pending promise settles `cancelled`, exactly one SDK close frame is written, and input after retirement stays inert |
+
+FIXTURE MANIFEST: REAL = `createSurfaceRuntime`, the `InteractionRuntime`, the
+`SurfaceInteractionPresenter` wiring, `QuestionSurfaceController`,
+`mountTspRenderer`, the shipped SDK session/surface, `DirectInteractionPort`
+and the session-currentness reads. STAND-IN (the single external boundary) =
+the Host SERVICE PLANE behind the Direct adapter (`userQuestions.
+attachWait/answer`, the `sessionProjections` registry, the `approval/request` +
+`user-questions/request` emitters), the Task Center source stub, and the
+scripted tty pane. No renderer-local business state is fabricated.
+
+SCRIPTED PANE, NOT A REAL TERN PANE: every row above is a scripted-tty
+qualification; the real-pane B3 minimum is recorded separately below.
+
+### Verified coverage (scripted)
+
+| Suite | Result |
+|---|---|
+| `test/tern-tsp-interaction.test.ts` (new) | pass — one `layer` overlay per seat with real `focus(null)` / modal-input / `dock.composer` ops and a real `del layer.modal-<n>` on settle (the layer root is never deleted); approval `y`/`n`/Esc/Ctrl+C plus unknown-key consumption (no composer edit, no submit); unified FIFO with a fresh successor node id and no second focus; already-aborted / queued-abort / active-abort settlement; single/multi/free/Other/masked question forms; skip-on-forward and the Review round trip; `initialDraft` restore; Alt+Q fresh-read / refusal notice / official preemption; the modal seat outranking the hydration fence while `Alt+Q` stays fenced; the SDK focus-event shield; the real modal input node id; disposal settling an unanswered form |
+| `test/tern-tsp-interaction-runner.test.ts` (new) | pass — the L6 table above |
+| `test/tern-tsp-live-mount.test.ts` | pass — the B2 live-mount chain plus the B3 teardown-ORDER witness: with a fake renderer mount and a recording presenter, the surface withdraws the interaction owner BEFORE it starts the renderer release (`['interaction-withdraw','renderer-release']`) |
+| `test/tern-tsp-editor-input.test.ts`, `test/tern-tsp-submission.test.ts` | pass — the B2 composer/submit behaviour is unchanged; the handler literals carry the two new renderer callbacks |
+| `test/tern-tsp-pr3b-ports.test.ts` | pass — the composer port is still the live app; the modal presenter is now the narrow adapter (receiver-preserving delegation, `withdrawPending` no-ops on the PiTui branch) |
+| `test/tern-tsp-runner-interactive.test.ts`, `test/tern-tsp-runner-teardown.test.ts`, `test/tern-tsp-command-admission.test.ts` | pass — the B2 admission, the fail-closed attach path and the runner lifecycle are unchanged |
+| `test/terminal-progress-lifecycle.test.ts`, `test/question-park-reopen.test.ts`, `test/question-remote-lifecycle.test.ts` | pass — the PiTui presenter adapter and the controller's park/reopen/timed lifecycle suites still pass on their own authority |
+
+MUTATION GUARDS (each mutation applied alone, its witness re-run, the tree
+restored byte-identically): the parked count no longer reaching the presenter,
+modal keys falling through to the composer, the one-shot focus latch,
+`withdrawPending` leaving queued promises pending, the controller's reopen
+skipping its queued-reply recheck, an EMPTY settled batch treated as absent,
+and a masked value rendered in plaintext — each turned its witness RED.
+
+### Negative controls and honest boundaries
+
+- A cold continued Question is PARKED, never mounted: the dock count is a
+  presentation of the controller's read, not an answerability claim.
+- The masked plaintext is asserted absent from the WHOLE wire (every frame the
+  renderer ever wrote), not only from the visible row.
+- The refusal paths (`cannot answer this request in the TSP renderer`) never
+  fabricate an answer: an unrepresentable approval resolves the cancellation
+  rule (this presenter contract has no `unavailable` member) and an
+  unrepresentable question rejects with the flow's cancellation error.
+- No `SessionInput.event` business action (pointer/action/select) is
+  implemented in B3; only the focus/edit/undo/send shield is.
+- PiTui, the SDK-decline fallback and the default renderer are untouched: the
+  B3 delta does not reach `packages/pi-tui/**`, the public extension surface or
+  the Host coupling baseline.
+
+### Real Tern pane (B3 minimum)
+
+Environment: Tern **0.7.0**, `dsh` 0.2.0-rc.2, this bundle's B3 build linked into
+a THROWAWAY profile created and removed for this record (the real-use `pi-tui`
+profile was never touched), a headless `tern serve` pane with `TERN_TSP_RECORD`,
+a real Direct Agent. Synthetic, non-secret prompts only.
+
+QUESTION — PROVEN (real official request → TSP form → real keys → official
+settled projection → transcript row → model continuation):
+
+- the prompt asked the model to call `ask_user_question` with two options;
+- the official request rendered as `layer.modal-1`: `Question 1/1`, the header,
+  the question text, both options with their real labels/descriptions, the
+  free-text row and the key hint (screenshot `b3-question-asked`);
+- `Down` then `Enter` selected Green and advanced to the Review page
+  (screenshot `b3-question-review`: `Review your answers / 1. Green`); `Enter`
+  submitted the batch;
+- the model continued, and the tool row then showed the AUTHORITATIVE settled
+  batch `{"answers":[{"id":"color","selected":["Green"]}]}` (screenshot
+  `b3-question-answered`) — the answer reached the official Host sink;
+- the wire record holds the exact ops: frame 0 `add layer`, frame 1
+  `focus dock.composer`, frame 129 `add layer.modal-1`, frame 130 `focus null`,
+  frame 132 the Review diff (`del …row-0..2`, `add …review`, `add …answer-0`)
+  under the SAME overlay id, frame 133 `del layer.modal-1`, frame 134
+  `focus dock.composer`.
+
+QUESTION (multi-page) — PROVEN: one official request carrying three questions
+(a free-text/optionless one, a multi-select one and a single-select one)
+rendered as `layer.modal-4`, its free-text page focused the REAL
+`layer.modal-4.answer` node, `Space` toggled two options, `Enter` advanced, and
+the Review page showed `1. teal / 2. red · green / 3. yes` — the multi-select
+page listed the labels in ORIGINAL option order. Submitting made the tool row
+show the authoritative batch
+`{"answers":[{"id":"fav_colour","selected":[],"custom":"teal"},{"id":"liked_colours","selected":["red","green"]…}]}`
+and the model summarised exactly those answers (screenshots `b3a-multi-q1`,
+`b3a-multi-q2-toggled`, `b3a-multi-q3`, `b3a-multi-review`, `b3a-multi-answered`).
+
+APPROVAL — PROVEN, and the earlier BLOCKED record is CORRECTED here. The first
+attempt could not produce an approval request because the throwaway profile
+inherited DSH's default permission preset `danger-full-access`
+(`sandbox: danger-full-access` + `approval: never`) — the answerer was never
+asked, so the absence was a PROFILE CONFIGURATION defect, not an environment
+limit. With a throwaway profile whose only change is
+
+```yaml
+- id: permission
+  name: "@deepseek-ai/dsh-permission-presets"
+  config:
+    defaultPreset: workspace-write   # sandbox workspace-write + approval: ask
+```
+
+three SEPARATE genuine requests were driven end to end (each one a real Host
+escalation of a write outside the workspace):
+
+- `y` → the escalation ran and the probe directory was created (screenshot
+  `b3a-approval-y-ask` shows the modal: `Approval required`, `tool: bash`, the
+  Host's reason, the raw arguments and `y allow once · n reject · esc cancel`;
+  `b3a-approval-y-result` shows the command's `created` output);
+- `n` → the transcript recorded
+  `the user rejected escalating this command to "danger-full-access"` and the
+  probe directory was NOT created (`b3a-approval-n-ask`, `b3a-approval-n-result`);
+- `Escape` → the transcript recorded
+  `approval for escalating to "danger-full-access" was cancelled` (a distinct
+  outcome from the rejection) and nothing ran (`b3a-approval-esc-ask`,
+  `b3a-approval-esc-result`).
+
+The wire record holds the three modal lifetimes in order: `add layer.modal-1` →
+`focus null` → `del layer.modal-1` → `focus dock.composer`, then the same
+add/focus/del/refocus quartet for `layer.modal-2` and `layer.modal-3` — one seat
+at a time, the caret returned to the composer after each decision.
+
+ALT+Q CONTINUED — PROVEN, after fixing a SECOND profile defect. The first
+attempt could not produce a timed wait because the throwaway profile exposed the
+LEGACY `ask_user_question` row (`mode: legacy`, no `timeout` parameter — the
+model reported the absent parameter, screenshot `b3a-timed-ask`). The row is
+configurable: `@deepseek-ai/dsh-tool-ask-user` accepts `mode: 'timed'` plus a
+default `timeout`, and the official preset patch documents that a profile patch
+overrides `preset-standard`'s `config.plugins` by id. A throwaway profile whose
+only changes were the `workspace-write` permission preset and
+
+```yaml
+- id: preset-standard
+  name: "@deepseek-ai/dsh-agent-preset"
+  config:
+    id: standard
+    order: 1
+    plugins:
+      - id: tool-ask-user
+        name: "@deepseek-ai/dsh-tool-ask-user"
+        config:
+          mode: timed
+          timeout: 15
+```
+
+produced the whole physical chain in a real Tern 0.7.0 pane: a genuine timed
+question (the tool result recorded `{"pending":true,"callId":…}` when the Host's
+15 s wait expired), the dock then showed `Continued questions: 1 · Alt+Q`
+(screenshot `b3t-timed-countdown`), a PHYSICAL `Alt+Q` (the kitty CSI-u form
+`ESC[113;3u`, since `tern ctl key` only carries named keys) opened the list
+`sessions… · call_…` with `enter open · esc close` (`b3t-altq-list`), Enter
+reopened the form through the controller's own recheck (`b3t-altq-reopened`),
+the late answer `cat` was submitted, and the tool row then carried the official
+settled batch `{"answers":[{"id":"favourite_animal","selected":[],"custom":"cat"}]}`
+together with the official `user-question-reply` card and the controller's own
+notices (`A reply for this question is already queued…` /
+`This question is no longer awaiting an answer.`), after which the model
+continued (`Your favourite animal is the cat.`; screenshot `b3t-altq-answered`).
+The wire shows the whole sequence: `add layer.modal-1` + `focus
+layer.modal-1.answer` (the timed form) → `del layer.modal-1` + `focus
+dock.composer` (the timeout withdrawal) → `add layer.modal-2` + `focus null`
+(the LIST) → `del layer.modal-2` (the list closes BEFORE the reopen) → `add
+layer.modal-3` + `focus layer.modal-3.answer` (the reopened form) → the Review
+diff under the same overlay id → `del layer.modal-3`.
+
+NO PHYSICAL CELL REMAINS OUTSTANDING in the addendum's §6 minimum.
+
+Artifacts (outside the repository, `/tmp` only; THREE physical runs, each with
+its own pane directory and its own wire record — none of them stands in for
+another):
+
+| Run | Screenshots (pane `--out` dir) | Wire record + sha256 |
+|---|---|---|
+| 1 — Question single-select, and the three approval attempts that revealed the `danger-full-access` profile defect | `/tmp/tern-b3-shots/serve/b3-*.png` (+ `.layout.json`) | `/tmp/tern-b3-rec.jsonl` — copy `/tmp/b3-real-pane-wire.jsonl`, sha256 `878543d2b25e74c7f562…` |
+| 2 — Approval `y`/`n`/`Escape` as separate requests, the three-question form, and the legacy-schema evidence | `/tmp/tern-b3a-shots/serve/b3a-*.png` (+ `.layout.json`) | `/tmp/tern-b3a-rec.jsonl` — copy `/tmp/b3-approval-wire.jsonl`, sha256 `2c3812ca285298bf366f…` |
+| 3 — the timed question, the dock count and the physical `Alt+Q` late-answer chain | `/tmp/tern-b3t-shots/serve/b3t-*.png` (+ `.layout.json`) | `/tmp/tern-b3t-rec.jsonl` — copy `/tmp/b3-altq-wire.jsonl`, sha256 `0e6c798ca763930a2cba…` |
+
+### Plan-authority ruling on the currentness MUST (recorded, not downgraded)
+
+> A tentative Session opening is not an owner replacement. An unanswered live
+> Question may legitimately remain mounted while ordinary transition quiescence
+> prevents B from being published. Once B is actually published, A's modal must
+> no longer own the TSP presentation or input, independently of whether A's Host
+> request cancellation has completed.
+
+The MUST was therefore kept OPEN until the three production-path witnesses
+existed. They now exist (rounds 5–6 below), and they DID show the
+renderer/controller presentation hook was missing: the fix landed at that hook
+(`QuestionSurfaceController.reconcile` + the approval presentation registry in
+the interaction owner + the renderer-facing presenter member + the runner's
+published-session seam `SurfaceRuntime.reconcileInteractionPresentation`), never
+in Session ownership and never by lowering the bar.
+
+### Review round 2 — findings and how each was closed
+
+The first full B3 review returned request-changes with zero P0/P1 and six P2
+findings. F1–F5 were fixed at their root cause and locked with a witness that
+fails on the pre-fix code (the mutation runs are listed after the table); F6 is
+a QUALIFICATION-MATRIX finding, not a defect, and is reported as PARTIAL with
+its remaining gaps named rather than as closed.
+
+| Finding | Root cause and fix |
+|---|---|
+| F1 — a frame/focus failure while PRESENTING a form was swallowed | The initial presentation called the render sink inside the promise executor, so a throwing frame rejected the request while the seat stayed active and `supportsModals` stayed true (a ghost seat that kept swallowing keys). The initial mount now goes through the same fatal-guarded path as settlement: the slot is retired, its promise settles once (approval `cancelled`, question the flow's cancellation error) and the failure reaches `onFatal`. |
+| F2 — a real single-select choice left the replaced Other text alive | Choosing a real option cleared the canonical `custom` but not the LIVE editor buffer, so reopening the Other row resurrected the replaced text and re-confirming it overwrote the new choice. The selection now invalidates the buffer with the draft. |
+| F3 — re-confirming the same answer fired the real-answer hooks | The confirm path called the hook pair unconditionally; the same selection, the same text or an accepted `initialDraft` counted as mutations. The hooks now compare the draft's answer semantics and fire only on a real change (the controller's own frozen latch is idempotent, but a no-op answer is not a mutation). |
+| F4 — an empty recorded result skipped the settled lookup | The result body was gated on the RECORDED payload being non-empty, so a running `ask_user_question` row never read the authoritative batch (or its authoritative emptiness). The shown value now decides the body; an absent lookup still renders nothing. |
+| F5 — the new host-keybindings seam was registered on the wrong owner | The scoped seam list is owner-scoped to `src/tui/keybindings/**`, so a renderer file cannot own the row (the gate's own fixture enforces it). The fixed chord label now lives in the key-label vocabulary (`hints.ts`) and the renderer imports it; the seam row is registered against that file. The mandated `· Alt+Q` copy is preserved — it was NOT dropped, the fixture was NOT weakened, and no keymap action was invented for a chord the seat dispatches from the raw key stream. |
+| F6 — qualification-matrix gaps | **PARTIAL (rounds 5–6)** — the physical minimum and the scripted matrix are proven, and the REAL app/session currentness connection is now proven on the production path for BOTH official request kinds on the branch that delivers them (the named production witnesses exist and the missing presentation hook was found and fixed: the Question flow at publication, and the approval prompt at publication via the official request's OWN Agent identity). The status stays PARTIAL because the reviewer kept the umbrella open until the re-review confirms the whole currentness model; rounds 7–9 closed its remaining defects (F9 per-request presentation identity, F10 admission currentness, F11 refused-admission teardown ownership and its closed-owner window, F12 opening-target consistency, F13 renderer-owned scoping, F14 the opening-authority producer). The B3-9 review reports every B3 finding CLOSED with zero open P0/P1/P2; this row stays PARTIAL only because the reviewer keeps the umbrella open until it closes the delivery status (round 10 is the doc/comment-only provenance correction). An approval request with no derivable Session identity is recorded as N/A_WITH_REASON for the currently supported surface — the Direct `ApprovalRequest` always carries its own Agent and the Remote branch delivers no approval request at all — so no identity is invented and no scope is widened for a hypothetical provider. Recorded history of the gap as it stood at round 2: the REAL app/session currentness connection was OPEN: the consumer-side witness (a Host-ended request retires cleanly) and the seat-level retired-request guard are not a production-path proof. What is owed: a real ordinary `/new` transition showing the pre-commit quiesce preventing B's publication while A's live Question is unanswered, a real `/fork` showing A's modal withdrawn BY PRESENTATION CURRENTNESS at publication (not only after the later Agent cancel) plus the real retirement's `agent.cancel({kind:'user'})` ending the request as exactly `ASK_ABORTED`, and a real ordinary switch withdrawing a mounted CONTINUED form through the official projection reconcile. The plan authority kept this MUST (it was NOT downgraded to a boundary) and ruled that a tentative Session opening is not an owner replacement, while a PUBLISHED B must never leave A's modal owning the TSP presentation or input. Round 3 added: the same-call `timed → ASK_TIMED_OUT → continued → park → Alt+Q → late answer → queued → settled result card` closure; a claim fake that honours the CALLER's lifetime signal plus the surface-teardown release assertion; delta-based currentness assertions with the exact `ASK_ABORTED` classification and a fresh B seat identity; the symmetric Question→Approval handoff; a reentrant official request created SYNCHRONOUSLY inside a controller projection read; the §5.3 extension of `test/question-remote-lifecycle.test.ts` (the real seat driving the timed/continued lifecycle); and the real-PiTui answerer positive mapped to its existing guards (re-run in this round: `test/interaction-settlement-hardening.test.ts`, `test/terminal-progress-lifecycle.test.ts`, `test/advanced-interactive.test.ts`, `test/focus-ui.test.ts`). The physical minimum now covers Question single/multi/free-text + Review, Approval y/n/cancel AND the continued `Alt+Q` late-answer chain (both physical defects were PROFILE configuration, not Host limits). |
+
+MUTATION WITNESSES (each mutation applied alone, its witness re-run, the tree
+restored byte-identically): removing the initial-presentation fatal exit, keeping
+the replaced Other buffer, firing the hooks on a no-op re-confirmation, and
+gating the result body on the recorded payload — each turned its witness RED.
+
+QUALIFICATION ADDED (scripted, real composition) — round 2 and round 3:
+
+- a genuinely TIMED official request: the claim's deadline, the controller's own
+  countdown, the timeout rejection the official sink observes
+  (`ASK_TIMED_OUT`), the official `continued` bookkeeping, the re-offered late
+  form, and `answerContinued` exactly once;
+- a real answer mutation before the deadline FREEZING the countdown (the form
+  never times out afterwards) and the Host ENDING the wait rejecting
+  `ASK_ABORTED` — never a user cancel;
+- the official approval sink for `n`, an already-aborted request, a queued abort
+  and an active abort (never an implicit allow, and the one answerer stays
+  interactive);
+- a successor created from the ANSWERED request (the production reentry shape)
+  is not answered by the key that settled its predecessor, plus ONE mixed
+  handoff direction (an Approval owning the seat while a Question queues behind
+  it). The symmetric direction and a synchronous callback reentry are still
+  owed;
+- currentness, NARROWED TO WHAT IT PROVES: with the surface moved to another
+  session, a request that the Host ends cannot write into the new session's
+  composer, and the same `callId` in the other session carries none of the first
+  session's settled answers (it falls back to its own recorded result). The test
+  drives the Host side of that retirement; it does NOT prove that an owner
+  switch itself produces the retirement (the app's session-generation path
+  retires pending input, tasks and the viewer — not a live dialog), and the next
+  round owes either a real producer or a sharper boundary statement;
+- the REAL seat driven by the ORIGINAL `QuestionSurfaceController` in the
+  park/reopen suite: a cold continued call stays parked, the explicit reopen
+  presents the seat, Esc parks it and the reopened form delivers the preserved
+  draft exactly once.
+
+ROUND 3 CLOSED THE REMAINING SCRIPTED CELLS:
+
+- the same-call closure of the timed chain: the genuine claim deadline, the
+  timeout classification the official sink observes, the official `continued`
+  bookkeeping, the auto-offered late form, an Esc PARK, the dock count, `Alt+Q`
+  over the fresh authoritative rows, the controller's reopen recheck, the late
+  answer delivered through `answerContinued` exactly once, the queued
+  confirmation, and — after the Host settles the call — the authoritative batch
+  on the SAME tool row;
+- the claim lifetime is FAITHFUL to the real adapter: the fake's stream ends
+  either when the HOST ends it or when the CALLER's signal is released, and a
+  dedicated case proves the surface teardown releases the live claim exactly
+  once and ends the request as `ASK_ABORTED`;
+- currentness with discriminating assertions: the retirement's op DELTA adds no
+  overlay at all (never "some overlay exists"), the retired request is
+  classified exactly `ASK_ABORTED` (not merely "an error code"), the new
+  session's own form takes a FRESH seat id, and the same `callId` in the other
+  session still carries none of the first session's settled answers;
+- the symmetric handoff (a question owning the seat while an approval queues
+  behind it) and a reentrant official request created SYNCHRONOUSLY inside a
+  controller projection read — neither preempts the active form, and the same
+  key never answers both;
+- the §5.3 extension of `test/question-remote-lifecycle.test.ts`: the real TSP
+  seat driving the controller's timed lifecycle — the countdown status rendered
+  by the seat, the local deadline classified `ASK_TIMED_OUT` with the claim
+  released once, and the Host's `continued` projection re-offered to the seat
+  and answered into the official `answerContinued` sink.
+
+ROUND 4 (review-fix delta) ADDED:
+
+- the timed witness now parks the continued form with the ONE Escape its real
+  page state needs and asserts the application's CANCEL path ran ZERO times (the
+  previous double Escape left the modal seat and reached the main cancel, which
+  the harness's empty event table had hidden — the recorder now exists);
+- the same-call settlement is proven on the RETAINED row: the tool row is on
+  screen first with its recorded timeout payload, the later authoritative batch
+  arrives as an UPDATE of that same node (`text` op, no `del`, no second row),
+  and dropping the settled entry falls the same row back to its recorded result;
+- the seat-level retired-request guard OBSERVES the real detach: the abort
+  listener registered on the live slot's signal is removed by identity at
+  settlement (the unbound `addEventListener`/`removeEventListener` originals are
+  called with the signal as receiver and the listener identities are compared
+  strictly), and the retired `status` hooks do not fire again while the
+  successor form is driven;
+- the composition-time claim lifetime: the fake claim now ends on the caller's
+  release OR the Host's ending, and the surface-teardown case asserts the release
+  exactly once with `ASK_ABORTED`.
+
+REAL PiTui ANSWERER POSITIVE (the sibling that must not regress), mapped to its
+existing guards and re-run in this round because the surface interaction seam
+changed: `test/interaction-settlement-hardening.test.ts` (the real
+`TuiApp.showApprovalPrompt`/`askQuestions` settlement matrix),
+`test/terminal-progress-lifecycle.test.ts` (the real surface app plus the
+interaction runtime over the PiTui adapter), `test/advanced-interactive.test.ts`
+and `test/focus-ui.test.ts` (the real app's question/approval UI and focus).
+
+HONEST BOUNDARIES OF THE ROUNDS:
+
+- A LIVE (non-continued) question whose session switches was, before round 5,
+  withdrawn only by its OWN owner (the Host waterfall's request retirement), not
+  by the continuation model (which owns continued rows). Round 5 fixed exactly
+  that gap at the presentation hook (the publication-driven reconcile), so the
+  owner switch itself now withdraws the PRESENTATION while the request keeps its
+  Host-owned lifetime; the retirement still ends the request (witness 2). The
+  same rule now covers an APPROVAL prompt (round 6) and a flow whose claim was
+  still OPENING when the replacement was published (F7, round 6).
+- `test/question-remote-lifecycle.test.ts` WAS extended after all (round 3): the
+  real seat driving the controller's timed/continued lifecycle now lives there,
+  in the file the addendum names, instead of only in the L6 suite.
+- The physical minimum is COMPLETE for the addendum's §6 list (Question
+  single/multi/free-text + Review, Approval `y`/`n`/`Escape` as separate genuine
+  requests, and the timed → continued → park → `Alt+Q` → late-answer chain). B4
+  still owns the full physical matrix (IME, physical paste, control keys).
+- TWO boundaries remain stated rather than solved, and neither is claimed as
+  closed: (a) the retirement of a LIVE question is driven by the Host waterfall's
+  own lifetime — the app's session-generation path retires pending input, tasks
+  and the viewer, not a live dialog — so the currentness witness exercises the
+  SEAT's inertness after retirement (a retired request cannot write into the seat
+  that follows) rather than proving that an owner switch itself produces that
+  retirement; (b) the scripted timed witness drives the Host's continuation
+  bookkeeping through its fake boundary, exactly as the fixture manifest says.
+  Both are offered as boundaries for review, not as closed cells.
+
+### Round 5 — finding C (the currentness MUST): defect reproduced, hook fixed, witnesses
+
+The three production-path witnesses were written FIRST, against the unfixed tree,
+and they failed on exactly the presentation fact the finding names. Only then was
+the hook fixed.
+
+WHAT THE WITNESSES SHOWED ON THE UNFIXED TREE (the reproduction):
+
+- witness (2): at the FIRST frame that presents the replacement Session B, the
+  wire still carried A's live `layer.modal-1` form — while A's official request
+  was demonstrably STILL IN FLIGHT (the Host's cancellation was held open by the
+  fake Host plane, exactly the "independently of whether A's Host request
+  cancellation has completed" case). A's modal therefore outlived A's ownership;
+- witness (3): the same for a MOUNTED continued form (`layer.modal-2` still
+  presented in B's publication frame).
+
+WHAT WAS FIXED (presentation currentness only — no Session-ownership change):
+
+- `SurfaceRuntime.reconcileInteractionPresentation()` is a new surface member that
+  re-derives the Question presentation against the CURRENT owner. The runner
+  calls it from the published-session seam (`initLiveSession`, before the first
+  frame of the new subject) — the same seam that hydrates the new owner, so the
+  withdrawal is committed in or before that owner's first presented frame;
+- `QuestionSurfaceController` now tracks each live foreground flow by the EXACT
+  lifetime object its presenter call received, and `reconcile()` withdraws every
+  flow whose Session no longer owns the surface. The promise is DELIBERATELY NOT
+  settled: the official request keeps its Host-owned lifetime, and the Host's own
+  cancellation still classifies it (never a fabricated settlement, never a user
+  cancel). Continued entries keep their existing authority-driven drop (same
+  reconcile);
+- the renderer-facing presenter gained `withdrawQuestionPresentation(lifetime)`
+  (the TSP seat implements it; the PiTui adapter is deliberately inert, exactly
+  like `withdrawPending` — the app's own session-switch/disposal contract owns
+  that branch). The TSP seat withdraws the slot from the seat (never rendered,
+  never answered, keys no longer consumed, the input seat released) while KEEPING
+  the slot owned with its abort listener attached, so the Host's cancellation
+  settles that same promise and a surface teardown still settles it exactly once.
+
+THE WITNESSES (all real runner + real TSP pane + real Session gate/core/retirement;
+the HOST BACKEND stand-in is the suite's existing one — `fakeSession`/`fakeAgent`
+(with the `whenIdleGate` busy window) behind the fake `persistence`/
+`sessionQuery`/`agents`/`sessions`/`agentDefaultModel`/`llm`/`commands` services —
+plus the official interaction plane (`userQuestions` + `sessionProjections` + the
+`approval/request` waterfall) provided through the same Cordis path):
+
+1. ordinary `/new`: A's live Question is unanswered, the real `/new` parks in its
+   pre-commit quiesce (`idle:A` on the real retirement log), B is neither created
+   nor published, A is neither cancelled nor disposed, A still owns the presented
+   Session and the modal seat; the REAL answer on the pane resolves the ORIGINAL
+   official sink, which idles the Agent and lets the SAME transition commit B and
+   retire A. The registered command entry drives it (the modal seat legitimately
+   owns every key while the form is up — the composer cannot submit `/new` then);
+2. `/fork`: at B's own publication frame no modal is presented, and the assertion
+   runs while A's request is STILL PENDING (the test holds the Host's cancellation
+   completion, never the abort); the real post-`command/done` retirement then
+   cancels A exactly once and the completed cancellation ends the request as
+   exactly `ASK_ABORTED` (never a user cancel, never an answer); a Question
+   arriving for B takes a FRESH seat identity and answers into ITS OWN request;
+3. a real publication withdraws a MOUNTED continued form: the form is mounted
+   through the real `Alt+Q` list + reopen, the replacement Session is published by
+   `/new`, and at B's publication frame the form is gone, the replaced subject's
+   parked count has left the dock, the Host's call is untouched and no answer was
+   dispatched;
+4. switch away and BACK (the restore half): the TSP renderer has NO session picker
+   in this build (its `/sessions`/`/resume` overlay requires the PiTui app), so
+   the switch-away/return half runs on the PiTui mount, whose `/resume` picker IS
+   production-complete. A's continued entry leaves the presentation on the switch
+   to B and is RESTORED from the official projection on the return to A, with no
+   official answer dispatched in either direction.
+
+DISCRIMINATION (each mutation applied alone, its witnesses re-run, the tree
+restored byte-identically):
+
+- seat: dropping the withdrawn slots from the teardown drain turns the new
+  seat-level witness RED (`PENDING` — the promise would have been leaked);
+- controller: removing the live-flow withdrawal from `reconcile()` turns witness
+  (2) RED while (3) and (4) stay green — the split proves the two mechanisms are
+  independently witnessed;
+- runner: removing the published-session hook turns witnesses (2), (3) and (4)
+  RED while witness (1) stays green — the pre-publication half (the quiesce MUST
+  NOT change ownership) is unaffected by the withdrawal.
+
+ROUND 6 CLOSED THE REVIEW'S THREE GAPS (see the round-6 section below): the
+claim-opening remount (F7), the withdrawal's fatal exit (F8) and the approval
+prompt's presentation currentness (F6, with the Session identity derived from the
+official request's OWN Agent — never fabricated). Round 7 then closed the two
+currentness defects that re-review found in that implementation (F9 shared-scope
+identity collision, F10 late admission).
+
+### Round 6 — the B3-5 findings (F7 claim opening, F8 fatal exit, F6 approvals, corrections)
+
+The B3-5 review returned request-changes with 0 P0 / 0 P1 and three open P2. It
+accepted the round-5 Question witnesses as production-path proof and named three
+gaps; each is fixed at its root cause with a witness that fails on the pre-fix
+code.
+
+F7 — a flow whose timed CLAIM WAS STILL OPENING could still be mounted into the
+replacement. The live-presentation intent was registered only after
+`claimTimedWait` returned, so a publication landing during that await could not
+retire it, and the flow then asked and mounted in B. Fixed in two halves: the
+controller registers the presentation INTENT BEFORE any await (and the disposed
+guard moved inside the settle region, so the registry has ONE lifecycle), and the
+seat remembers a lifetime retired before its slot existed (`retiredLifetimes`) —
+the form is never mounted for it, while the promise and its abort listener stay,
+so only the request's OWN lifetime settles it. Witnesses: a held-claim
+controller + real-seat witness (the retirement happens during the await, it names
+exactly the lifetime the presenter later received, no mount after the claim
+lands, no fabricated settlement, no revival on the return to A, and the Host end
+still classified `ASK_ABORTED`) and a seat-level witness (a retired lifetime
+never mounts a question form or an approval prompt).
+
+F8 — a WITHDRAWAL whose frame/focus commit failed bypassed the renderer's fatal
+sink: the slot had already left the seat while the error escaped into the
+publication/reconcile call stack. The withdrawal now routes that failure through
+the SAME fatal path as a failing presentation or settlement (`onFatal` with the
+original error, non-truncating) and still settles nothing itself — the fatal
+lifecycle and the surface release owner own the rest. Witness: a seat witness
+that injects a throwing frame during a withdrawal and asserts the sink received
+the original error while the request stayed pending and its own lifetime ended it.
+
+F6 — an approval prompt was not withdrawn at publication because the port's
+approval shape carried no Session identity. The official request DOES carry its
+own Agent, so nothing is fabricated: `ApprovalRequestLike` gained an optional
+`sessionId` derived by the Direct adapter from that Agent, the interaction owner
+keeps the same live-presentation registry for approvals, and the SAME publication
+seam (`reconcileInteractionPresentation`) withdraws a replaced subject's approval
+presentation while the official request keeps its own lifetime. Witnesses: a
+production-path witness (a live approval for A, a real `/fork` publishing B, no
+prompt at B's publication frame while the held Host cancellation has not
+completed, then the completed cancellation settling it exactly `cancelled` —
+never an allow, and B's own approval taking a fresh seat) plus a seat witness.
+`test/interaction-port.test.ts` now asserts the adapted shape carries the Session
+IDENTITY and still no Agent object.
+
+CORRECTIONS FROM THE SAME REVIEW:
+
+- the seat suite's listener-identity recorder read `args[0]` (the event TYPE
+  `'abort'`) instead of `args[1]` (the listener), which made the identity
+  comparison vacuous; it now records and compares the real listener;
+- the PiTui presenter comment claimed the app's session-switch tears down a live
+  editor flow, which the round-5 witness does not prove; the comment now states
+  only the actual contract (PiTui keeps its long-standing behavior and this slice
+  changes nothing there);
+- the witness section now names the WHOLE existing Host backend stand-in
+  (`fakeSession`/`fakeAgent`/`whenIdleGate` behind the fake
+  persistence/sessionQuery/agents/sessions/commands services) instead of only the
+  interaction plane.
+
+DISCRIMINATION FOR ROUND 6 (each mutation applied alone, the tree restored
+byte-identically): registering the presentation after the claim await turns the
+held-claim witness RED; removing the withdrawal's fatal routing turns the F8
+witness RED (the error escapes rather than reaching the sink); disabling the
+approval withdrawal turns the production approval witness RED on exactly the
+publication-frame assertion.
+
+### Round 7 — the B3-6 findings (F9 per-request identity, F10 admission currentness)
+
+The B3-6 review re-verified F7 and F8 as closed and accepted the Agent-derived
+approval identity, then returned two more reproduced currentness defects in the
+same implementation. Both are fixed at the algorithm, not by widening the sweep.
+
+F9 — a BORROWED cancellation scope is not a per-request presentation identity.
+The registry and the seat were addressed by `req.signal`, but the official
+request only promises that the signal controls cancellation: two legal approvals
+may share one caller scope. The key then collided (only one of the two was
+withdrawn, and the seat PROMOTED the other into the replacement), and the first
+request's settlement deleted the shared key, erasing the still-pending second
+request's registration entirely. Fixed by deriving a PER-REQUEST lifetime
+(`AbortSignal.any([req.signal])`, or a fresh never-aborting signal when the Host
+gives none) — every presentation is separately addressable while the borrowed
+abort semantics are preserved exactly. Witnesses (real surface runtime + real
+seat + real Direct port): two approvals sharing one scope are BOTH withdrawn at
+publication (nothing is promoted), and answering the FIRST does not erase the
+SECOND's registration (the later publication sweep still finds it). The Question
+flow did not share the defect: the controller's combined local+request signal is
+already unique per flow.
+
+F10 — the publication sweep only covered registrations that EXISTED when it ran.
+A legal upstream waterfall middleware may await before calling `next`, so a
+request that started while A was still the owner can reach the answerer after B
+was published (A's cancellation not yet completed) and was admitted and mounted
+into B. Fixed with an ADMISSION currentness recheck at both entry points, using
+the SURFACE's own authority — the Session it currently shows OR a Session it is
+currently OPENING (a tentative opening is not an owner replacement, so its
+request is still admitted, and the pre-commit quiesce still leaves the outgoing
+owner's flow mounted). A stale admission presents nothing: the approval path
+answers the fail-closed `cancelled` only when the Host's own lifetime ends, and
+the question path waits on its own lifetime so the ordinary catch still
+classifies the Host's end (`ASK_ABORTED`). A stale timed flow never even takes a
+Host claim. Witnesses: the production-path approval race (an upstream middleware
+holds A's request across a real `/fork`, the request is released after B's
+publication, nothing is ever mounted, the held Host cancellation then settles it
+`cancelled`, and B's OWN approval is answered `allowed-once` as the positive
+control) and the question sibling on the real surface runtime.
+
+SMALL ITEMS FROM THE SAME REVIEW (also fixed): the owning contract's rule 10 now
+names the current member (`withdrawPresentation`); the held-claim unit has a
+fallback release in its cleanup and observes its outcome from creation; the F8
+unit asserts the injected error by IDENTITY and that the request was still
+pending immediately before its own abort.
+
+DISCRIMINATION FOR ROUND 7 (each mutation applied alone, the tree restored
+byte-identically, verified with `sha256 -c`): reverting to the borrowed shared
+signal turns BOTH F9 witnesses RED (the queued prompt survives the sweep / the
+settled first registration erases the second); making the admission authority
+permissive turns BOTH F10 witnesses RED (the late request mounts into the
+replacement).
+
+### Round 8 — the B3-7 findings (F11 refused-admission ownership, F12 opening consistency, F13 scoping)
+
+The B3-7 review closed F9/F10 and returned three more reproduced defects in the
+same implementation. Each is fixed where the ownership or the policy actually
+lives.
+
+F11 — a REFUSED admission was an unowned waiting promise. The stale-admission
+path returns before the seat or the live registry ever sees the request, so
+nothing in the teardown chain ended that wait: it stayed pending until the Host's
+own abort, and for the official OPTIONAL signal case (where this owner creates the
+lifetime itself) it could never end at all. The wait is now registered with its
+OWNER (the interaction runtime) and drained in its disposal batch exactly once,
+with the borrowed Host listener detached; a signal-less refusal is drained the
+same way. Witnesses: a refused admission is drained by `surface.dispose()`
+(`cancelled`, the listener count on the borrowed signal drops to ZERO — read with
+`getEventListeners`), a repeated dispose is inert, and the signal-less variant is
+drained too, while the orthogonal assertion that a refused admission does NOT
+settle early is kept.
+
+F12 — admission and retirement disagreed about an OPENING target. The admission
+authority admits a Session the surface is showing OR OPENING, but the continuous
+retirement still compared against `currentSessionId()` alone, so the next ordinary
+event-driven reconcile withdrew a legitimate opening target's flow (and an opening that was rolled
+back was only retired at the next publication). Both sweeps (the Question flows
+and the live approvals) now use the SAME authority, and the ordinary event-driven
+reconcile runs the WHOLE presentation pass, so admission and retirement can never
+disagree. Witness: an opening target's flow is admitted, survives the ordinary
+reconcile, and is retired when the opening is rolled back (the journal cleared
+without a publication) — with its own lifetime still the only thing that settles
+the request.
+
+F13 — the new policy reached the DEFAULT branch. The admission predicate was wired
+without a renderer distinction, so the default PiTui branch (and the SDK-declined
+PiTui fallback) stopped forwarding a late foreign-session request to the app — a
+behavior change this slice was never authorized for. The policy is now enabled
+ONLY for a renderer-OWNED presentation (the TSP mount, set at `start()` from
+`deps.renderer`); the PiTui branch answers `true` unconditionally and keeps its
+original delegation semantics. Witnesses: a production-path PiTui control (a
+foreign-session approval request is still forwarded to the real app presenter) and
+the renderer-owned contrast already asserted by witness (6).
+
+A WITNESS LESSON WORTH RECORDING (found while verifying round 8's own guard): the
+first version of the F12 witness asserted "the opening target still owns its form"
+IMMEDIATELY after the reconcile, so a *later* withdrawal frame satisfied both that
+assertion and the rollback assertion — the witness passed even with the sweep
+mutation applied. It now waits for any coalesced frame to land and then asserts
+the AUTHORITATIVE negative (no `del layer.modal-*` op exists at all), which is what
+makes it fail under the mutation.
+
+SMALL ITEM FROM THE SAME REVIEW: the question late-admission witness (round 7) had
+a held middleware whose release lived only on the happy path and used a fixed
+50 ms wait; it now records the REAL admission (the instrumented listener
+invocation) and asserts on that. The SAME hardening was applied to the
+production-path twin; the unit-suite holds (this witness and the two round-8
+refused-admission witnesses) kept a happy-path-only release in that round — the
+round-9 review caught exactly that, and all three now release in their cleanup
+with the hold declared where the cleanup can see it.
+
+DISCRIMINATION FOR ROUND 8 (each mutation applied alone, the tree restored
+byte-identically, `sha256 -c` verified): removing the refused-admission drain turns
+BOTH F11 witnesses RED; reverting the sweeps to `currentSessionId`-only turns the
+F12 witness RED on exactly "the ordinary reconcile committed NO withdrawal frame
+for the opening target"; applying the policy to the default branch turns the F13
+PiTui control RED.
+
+### Round 9 — the B3-8 findings (F11 closed-owner window, F14 real producer, hold hygiene)
+
+The B3-8 review closed F12's predicate root cause and F13, kept F11 open for one
+more lifecycle window, and found that the new admission policy had no PRODUCER on
+the real opening-rollback path. Both are fixed where the lifetime/authority
+actually changes.
+
+F11 (closed-owner window) — the approval answerer had no admission fence of its
+own: a request held by a legal upstream middleware could arrive only AFTER the
+surface (and the interaction owner) had ended, and it then registered a refused
+wait that nothing could drain — permanently pending for the official OPTIONAL
+signal shape. The answerer now takes the SAME fail-closed cancellation its sibling
+answerers answer in that window (`ended || isCleanedUp()`), so a post-end arrival
+never registers anything; the owner's disposal latch is also explicit and a second
+disposal is inert. Witness: the DECLARED one-sided backend stand-in — this suite's
+fake Host service plane, whose listener chain the harness invokes DIRECTLY, with no
+Cordis dispatch anywhere in the witness — holds a NON-admissible request across
+`surface.dispose()` + `whenRendererReleased()`, and both the signal-bearing and the
+signal-less shapes are settled `cancelled` with no borrowed listener attached and
+no unowned pending promise. Its qualification is therefore exactly the accepted L6
+one (stand-in boundary + real Surface runtime / Direct port / Question controller /
+TSP seat): NO real-Cordis post-dispose witness exists, and the real
+`ctx.on`/`ctx.waterfall` plane is exercised by the separate PRODUCTION-path
+witnesses of the navigation suite (C1–C3, C5/F6, F10(6), F13, F14(7)) — those are
+their own witnesses and are NOT spliced into this one's provenance.
+
+F14 (real producer for the opening authority) — the new `isAdmissibleSession`
+policy consumed `openingJournal.isOpening`, but NOTHING called the presentation
+pass when that authority actually changed: `clearOpening`/`resetOpening` only
+mutated the journal, so a rolled-back target's modal survived on the surface
+(there is no periodic reconcile — the pass runs at a publication or on an
+event-driven activity reconcile, and a rollback may produce neither). The runner's
+own opening seams now run the FULL pass after clearing/resetting the journal
+(the token identity contract is unchanged), which covers every rollback caller in
+the session runtime. Witness: a REAL `/new` whose Host create fails inside the
+opening window (the test discovers the target id from the production create call,
+delivers the target's own Question AND Approval during that window, then lets the
+create fail) — the rolled-back target's presentation leaves the surface with no
+session event, no manual reconcile and no other presentation trigger, while both
+official requests keep their own lifetimes and settle only when the Host ends them
+(`ASK_ABORTED` / `cancelled`).
+
+WITNESS-QUALITY NOTES FROM THIS ROUND (both found while verifying my own guards):
+
+- the first post-dispose F11 witness used the SHOWN session id, so the request was
+  admissible and the seat's own disposed guard answered `cancelled` — the witness
+  passed even with the owner fence removed. It now uses a NON-admissible session
+  so it exercises the refused branch, and it fails under the mutation.
+- the F14 witness's assertion needed one neutral terminal event to let the
+  already-committed frame land: the SCRIPTED pane's SDK loop advances on terminal
+  input (the same withdrawal lands unpumped in the L6 harness, and the real pane
+  paints continuously), so the pump is a harness fact, never a presentation
+  trigger — and the witness still fails when the producer is removed.
+
+SMALL ITEM FROM THE SAME REVIEW: the three unit-suite held middleware releases now
+have fallback releases in their cleanup (with the declarations hoisted so the
+cleanup can see them), and the round-8 over-claim about that hygiene was corrected
+above.
+
+DISCRIMINATION FOR ROUND 9 (`sha256 -c` verified restores): removing the
+closed-owner fence turns the post-dispose F11 witness RED; removing the two
+opening-authority passes turns the F14 rollback witness RED ("timed out waiting for
+the rolled-back target's presentation left the surface").
+
+### Round 10 (doc/comment only) — provenance correction
+
+No code changed. The round-9 F11 post-dispose witness was described as "a real
+Cordis middleware"; it is not — it wraps this suite's fake Host service plane and
+its listener chain is invoked directly, with no Cordis dispatch (the real
+`ctx.on`/`ctx.waterfall` plane belongs to the separate production-path witnesses of
+the navigation suite). The document, the owning contract's evidence pointer and the
+witness's own comment now state the accepted L6 qualification instead, and the
+owning doc's pointer was extended to the existing rounds 5–9. Nothing else in the
+delivery was touched, so no code lane needed re-running for this delta.
