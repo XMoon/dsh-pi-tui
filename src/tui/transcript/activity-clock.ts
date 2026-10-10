@@ -51,10 +51,19 @@ export interface WorkLifetime {
   readonly trailing: boolean
 }
 
-/** The finalized per-Activity clock handed to the Compact Activity card. */
+/** The finalized per-Activity clock handed to the Compact Activity card.
+ *
+ * `open`/`trailing` are part of the clock's OWN immutable identity (the same
+ * snapshot as `startedAt`/`endedAt`): `isLive` reads THESE fields, never a
+ * captured lifetime object, so a cached card can never keep a stale structural
+ * fact. The volatile environment inputs stay providers, re-read per render. */
 export interface ActivityClock {
   readonly startedAt: number
   readonly endedAt?: number
+  /** No proven close boundary. */
+  readonly open: boolean
+  /** The span is the LAST canonical structural block of the window. */
+  readonly trailing: boolean
   /** Whether the span is provably still executing. This is a RENDER-TIME
    *  predicate, never a latched boolean: plan §5.3 requires the live gating to
    *  read the CURRENT committed display subject, so a Remote snapshot-only
@@ -123,19 +132,25 @@ export function resolveWorkLifetimes(
 
 /** Finalize one Activity's clock: only an OPEN, TRAILING span of a live-tail
  * window whose displayed subject is running can be live. Everything else
- * renders from a proven end (or the conservative member fallback). The two
- * environment facts are PROVIDERS, re-read on every render — never values
- * captured once (see {@link ActivityClock.isLive}). */
+ * renders from a proven end (or the conservative member fallback).
+ *
+ * The structural fields are SNAPSHOT into the clock (and therefore into the
+ * component-cache signature); the two environment facts are PROVIDERS,
+ * re-read on every render — never values captured once (see
+ * {@link ActivityClock.isLive}). */
 export function activityClockOf(
   lifetime: WorkLifetime,
   liveTail: () => boolean,
   subjectRunning: () => boolean,
 ): ActivityClock {
-  return {
+  const clock: ActivityClock = {
     startedAt: lifetime.startedAt,
     ...(lifetime.endedAt === undefined ? {} : { endedAt: lifetime.endedAt }),
-    isLive: () => lifetime.open && lifetime.trailing && liveTail() && subjectRunning(),
+    open: lifetime.open,
+    trailing: lifetime.trailing,
+    isLive: () => clock.open && clock.trailing && liveTail() && subjectRunning(),
   }
+  return clock
 }
 
 /** The first ACTUALLY VISIBLE time of one non-Process boundary block: the

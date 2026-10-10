@@ -8815,12 +8815,22 @@ export class TuiApp {
    * the same one-line presentation the slot renders, never a raw payload
    * (post-F6 plan §20). Takes the ALREADY-SUMMARIZED span so one Activity
    * refresh walks its members exactly once. */
+  /** The owning turn's boundary epoch for the Work cache signature: a turn
+   *  completing (or gaining an end) changes what a still-open Activity can be,
+   *  so a cached card must not survive it. */
+  private workTurnEpoch(turn: number): string {
+    const activity = this.turnActivities.get(turn)
+    if (activity === undefined) return ''
+    return `${activity.completed ? '1' : '0'}\u0000${activity.endedAt ?? ''}`
+  }
+
   private compactWorkSignature(
     summary: CompactWorkSummary,
     action: CompactActionPresentation | undefined,
     preparingSummary: string | undefined,
     showPreview: boolean,
     clock: ActivityClock | undefined,
+    turnEpoch: string,
   ): string {
     const timing = summary.timing
     return [
@@ -8831,10 +8841,18 @@ export class TuiApp {
       preparingSummary ?? '',
       timing === undefined ? '' : `${timing.startedAt}\u0000${timing.endedAt ?? ''}\u0000${timing.running ? '1' : '0'}`,
       showPreview ? '1' : '0',
-      // The finalized Activity clock's STRUCTURAL facts. The live flag is a
-      // render-time predicate (never a signature input: the card re-reads the
-      // committed subject per frame), so only the start/end belong here.
-      clock === undefined ? '' : `${clock.startedAt}\u0000${clock.endedAt ?? ''}`,
+      // The finalized Activity clock's STRUCTURAL facts: the start/end, the
+      // open/closed state and the canonical-trailing fact. The live DECISION's
+      // volatile inputs (live tail / displayed-subject running) stay
+      // render-time and deliberately do not churn this signature — but every
+      // structural fact the cached clock's `isLive` reads MUST be here, or a
+      // cached card keeps a stale liveness (e.g. a boundary with no proven
+      // point sidecar appended after an open span flips `trailing` without
+      // touching start/end).
+      clock === undefined
+        ? ''
+        : `${clock.startedAt}\u0000${clock.endedAt ?? ''}\u0000${clock.open ? '1' : '0'}\u0000${clock.trailing ? '1' : '0'}`,
+      turnEpoch,
     ].join('\u0000')
   }
 
@@ -8885,7 +8903,7 @@ export class TuiApp {
       || blockPreparingSummary !== undefined
       || clock?.isLive() === true
       || isTrueLatestWork
-    const signature = this.compactWorkSignature(summary, action, preparingSummary, showPreview, clock)
+    const signature = this.compactWorkSignature(summary, action, preparingSummary, showPreview, clock, this.workTurnEpoch(span.turn))
     const entry = this.workComponents.get(span.owner)
     if (entry !== undefined && sameWorkSpanShape(entry.span, span)
       && entry.expanded === expanded && entry.themeRev === this.themeRevision

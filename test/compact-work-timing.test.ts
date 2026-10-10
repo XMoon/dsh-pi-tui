@@ -245,7 +245,7 @@ test('timing: the ActivityClock live flag makes a running span read `now` at ren
   let now = T0 + 4_000
   const component = new CompactWorkComponent({
     span, expanded: false, action: { kind: 'tool', display: 'Bash x', rootName: 'bash' }, now: () => now,
-    clock: { startedAt: T0 + 1_000, isLive: () => true },
+    clock: { startedAt: T0 + 1_000, open: true, trailing: true, isLive: () => true },
   })
   const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(line, /Activity 3s/, `the live header reads now at render:\n${line}`)
@@ -285,7 +285,7 @@ test('timing: a proven boundary freezes the duration while the member still runs
   const span = spansOf(folder.messages())[0]!
   const component = new CompactWorkComponent({
     span, expanded: false, now: () => T0 + 999_999,
-    clock: { startedAt: T0 + 1_000, endedAt: T0 + 45_000, isLive: () => false },
+    clock: { startedAt: T0 + 1_000, endedAt: T0 + 45_000, open: false, trailing: true, isLive: () => false },
   })
   const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(line, /Activity 44s/, `the proven boundary owns the duration:\n${line}`)
@@ -775,7 +775,7 @@ test('timing: a running Thinking shows a live Activity duration', () => {
   assert.equal(summary.think?.running, true)
   const component = new CompactWorkComponent({
     span, expanded: false, now: () => T0 + 4_500,
-    clock: { startedAt: T0 + 1_000, isLive: () => true },
+    clock: { startedAt: T0 + 1_000, open: true, trailing: true, isLive: () => true },
   })
   const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(line, /Activity 3s/, `the live header reads now at render:\n${line}`)
