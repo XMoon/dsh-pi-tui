@@ -127,7 +127,8 @@ function recordingSurface(overrides: Partial<SubmissionRuntimeSurface>): {
     withPromptAdmission: async (_scope, _line, task) => task(),
     isDisposed: () => false,
     isScopeCurrent: () => true,
-    mergeDraftIntoEditor: () => { calls.push('merge'); return true },
+    mergeDraftIntoEditor: () => { calls.push("merge"); return true },
+    restoreStaleDraftIntoEditor: () => { calls.push("restoreStale"); return "merged-verbatim" },
     consumeDraftAttachments: () => { calls.push('consume') },
     markDispatch: () => { calls.push('dispatch') },
     beginLocalSubmission: () => { calls.push('echo') },
@@ -172,8 +173,11 @@ test('a stale scope refused at admission takes the distinct stale path and runs 
   })
   const runtime = bindSubmissionRuntime({ surface })
   await runtime.submitPrompt(SUBMISSION)
+  // PR3-B §7.3 (F2): the stale settle routes through the STALE restore
+  // member (which a switch-dropping renderer may suppress); the recording
+  // fake keeps the PiTui contract (merged-verbatim ⇒ the retry notice).
   assert.deepEqual(calls, [
-    'merge',
+    'restoreStale',
     'settleLocal',
     'ack:submit stale',
     `notify:error:the session changed while sending — try again`,
@@ -755,6 +759,147 @@ test('P1 lock: a session/writer-held steer rejection is settled by the submissio
     'a proven refusal never tells the user to try again')
   assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
     'the helper never restores behind the owner (no double restore)')
+})
+
+test('PR3-B §7.3 (F2): a steer gone stale across a committed switch does NOT reseed a switch-dropping renderer', async () => {
+  // The B2 external review's pollution path, at the REAL submission runtime:
+  // the busy steer's prepare awaits; the session switches (the owner token
+  // the gesture captured is no longer current); the runtime settles the
+  // gesture stale. On a renderer that DROPPED the outgoing draft at the
+  // switch (`retainsStaleDraftRestore() === false`, TSP), the stale restore
+  // is SUPPRESSED — no editor write, no "preserved below" retry promise —
+  // and the dropped-draft notice is surfaced instead. (PiTui keeps its
+  // restore: the same shape with the flag true merges, pinned by the
+  // steer.test.ts restore family and the case below.)
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const agentA = { session: { id: 'session-a' }, status: 'running' }
+  let ownerCurrent = true
+  let staleRestores = 0
+  let merges = 0
+  const deps = {
+    isDisposed: () => false,
+    isViewing: () => false,
+    currentAgent: () => agentA,
+    currentGeneration: () => 1,
+    captureOwnerToken: () => 'owner-a',
+    isOwnerTokenCurrent: () => ownerCurrent,
+    readPendingInput: () => ({ running: true, items: [] }),
+    draftHasAttachments: () => false,
+    draftHasImages: () => false,
+    clearSettledLocalMessages: () => {},
+    mergeDraftIntoEditor: (text: string) => { merges += 1; calls.push(`merge:${text}`); return true },
+    restoreStaleDraftIntoEditor: (text: string) => {
+      staleRestores += 1
+      calls.push(`restoreStale:${text}`)
+      // The TSP renderer: the switch dropped the outgoing draft.
+      return 'dropped' as const
+    },
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    acceptSubmitAck: () => 11,
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    beginLocalSteerEcho: () => {},
+    takeSubmitTurn: () => ({ wait: Promise.resolve(), release: () => {} }),
+    pinDraftAttachments: () => () => {},
+    persistAfterSession: async (resolve: () => Promise<string | undefined>, persist: (id: string | undefined) => void) => {
+      const id = await resolve()
+      if (id !== undefined) persist(id)
+    },
+    ensureSession: async () => {},
+    withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task(),
+    // The PREPARE is where the switch lands: the token flips while the
+    // admission awaits, so the post-prepare owner check sees the stale state.
+    prepareMessage: async () => {
+      ownerCurrent = false
+      return {}
+    },
+    markDispatch: () => { calls.push('dispatch') },
+    restoreSubmissionDraft: (text: string) => { calls.push(`restore:${text}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    consumeDraftAttachments: () => { calls.push('consume') },
+    writerSection: async (task: () => Promise<unknown>) => task(),
+    pendingInputReader: { snapshot: () => ({ running: true, items: [] }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    },
+    diag,
+  }
+  deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'pending from A' })
+  assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
+    'the stale steer must settle its ack')
+  assert.equal(staleRestores, 1, 'the stale settle consulted the switch-dropping restore exactly once')
+  assert.equal(merges, 0, 'NO editor write happened — the old session\'s text never seeded the new composer')
+  assert.ok(calls.some(call => call.startsWith('ack:steer stale')),
+    'the gesture settled stale')
+  assert.ok(calls.some(call => call.includes('cleared by the switch')),
+    'the notice tells the user the draft was dropped by the switch (never a "preserved below" retry promise)')
+  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
+    'the enclosing flow never restores behind the owner')
+})
+
+test('PR3-B §7.3 (F2): the SAME stale shape on a retaining renderer (PiTui) still restores the draft', async () => {
+  // The PiTui half of the contract: the identical stale shape merges the
+  // text back (steer.test.ts's restore family is the PiTui editor's
+  // long-standing behavior). This pins that the F2 fence is a renderer
+  // capability decision, never an unconditional drop.
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const agentA = { session: { id: 'session-a' }, status: 'running' }
+  let ownerCurrent = true
+  const deps = {
+    isDisposed: () => false,
+    isViewing: () => false,
+    currentAgent: () => agentA,
+    currentGeneration: () => 1,
+    captureOwnerToken: () => 'owner-a',
+    isOwnerTokenCurrent: () => ownerCurrent,
+    readPendingInput: () => ({ running: true, items: [] }),
+    draftHasAttachments: () => false,
+    draftHasImages: () => false,
+    clearSettledLocalMessages: () => {},
+    mergeDraftIntoEditor: (text: string) => { calls.push(`merge:${text}`); return true },
+    restoreStaleDraftIntoEditor: (text: string) => {
+      calls.push(`restoreStale:${text}`)
+      return 'merged-verbatim' as const
+    },
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    acceptSubmitAck: () => 12,
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    beginLocalSteerEcho: () => {},
+    takeSubmitTurn: () => ({ wait: Promise.resolve(), release: () => {} }),
+    pinDraftAttachments: () => () => {},
+    persistAfterSession: async (resolve: () => Promise<string | undefined>, persist: (id: string | undefined) => void) => {
+      const id = await resolve()
+      if (id !== undefined) persist(id)
+    },
+    ensureSession: async () => {},
+    withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task(),
+    prepareMessage: async () => {
+      ownerCurrent = false
+      return {}
+    },
+    markDispatch: () => {},
+    restoreSubmissionDraft: () => {},
+    notifySubmissionFailure: () => {},
+    consumeDraftAttachments: () => {},
+    writerSection: async (task: () => Promise<unknown>) => task(),
+    pendingInputReader: { snapshot: () => ({ running: true, items: [] }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    },
+    diag,
+  }
+  deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'pending from A' })
+  assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
+    'the stale steer must settle its ack')
+  assert.ok(calls.some(call => call === 'restoreStale:pending from A'),
+    'the retaining renderer received the restore')
+  assert.ok(calls.some(call => call.includes('try again')),
+    'the PiTui stale notice still promises the restored retry')
 })
 
 /* ── PR5 (plan §3.8): stale Host-command settlement makes no visible commit ── */

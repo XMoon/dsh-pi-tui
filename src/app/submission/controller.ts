@@ -232,6 +232,14 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
    * `/name` pre-parse ahead of the genuine Host claims.
    */
   readonly supportsTuiBuiltinUi: boolean
+  /**
+   * PR3-B §7.3 (F2): whether this renderer RETAINS a stale submission's
+   * draft restore across a session switch. PiTui = true (steer.test.ts's
+   * restore family is its contract); the TSP renderer = false (its
+   * committed switch drops the outgoing active draft, so a late stale
+   * restore is suppressed instead of reseeding the new session's composer).
+   */
+  readonly retainsStaleDraftRestore: boolean
   /** The live model-selection read (the outgoing message's provider/model). */
   readonly model: {
     readonly selected: { readonly current: { readonly provider: string; readonly model: string } | undefined }
@@ -1310,6 +1318,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         const merged = mergeDraft(deps.app().getDraft(), value)
         deps.app().setEditorText(merged)
         return merged === value
+      },
+      restoreStaleDraftIntoEditor: (value) => {
+        // PR3-B §7.3 (F2): a stale restore is suppressed on a renderer whose
+        // committed switch dropped the outgoing draft (TSP) — the old text
+        // must not reseed the new session's composer. A retaining renderer
+        // (PiTui) merges exactly like the ordinary path.
+        if (!deps.retainsStaleDraftRestore) {
+          return 'dropped'
+        }
+        const merged = mergeDraft(deps.app().getDraft(), value)
+        deps.app().setEditorText(merged)
+        return merged === value ? 'merged-verbatim' : 'merged'
       },
       notify: (message, kind) => {
         if (deps.isCleanedUp()) return

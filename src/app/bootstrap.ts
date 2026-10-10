@@ -726,6 +726,15 @@ export function applyRunnerWithRuntime(
           draftImages.clearUnpinned()
           draftFiles.clearUnpinned()
         },
+        dropOutgoingActiveDraft: () => {
+          // PR3-B §7.3: the committed cross-owner switch drops the outgoing
+          // session's active editor draft through the renderer-neutral display
+          // seam. The PiTui adapter is deliberately inert (its cross-session
+          // main-draft retention is its own contract); the TSP renderer
+          // clears. Reached ONLY from the session runtime's two committed
+          // post-publication sites — never the generation reset.
+          surface.display.clearActiveDraft()
+        },
         reportSwitchFailure: (sessionId, message) => {
           ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
           diag.error('switch failed', { session: sessionId, error: message })
@@ -2135,6 +2144,10 @@ export function applyRunnerWithRuntime(
       // a TUI-origin builtin other than /exit//quit is refused at the
       // post-classification admission. Same live discriminator as above.
       get supportsTuiBuiltinUi() { return !tspRendererActive },
+      // PR3-B §7.3 (F2): PiTui retains a stale submission's draft restore
+      // across a switch (its contract); the TSP renderer's committed switch
+      // DROPPED the outgoing draft, so the stale restore is suppressed.
+      get retainsStaleDraftRestore() { return !tspRendererActive },
       model: { selected: { get current() { return model.selected.current } } },
       image: {
         // D12 (TS8-C): the Direct Host attachment/model services are injected
@@ -2938,6 +2951,16 @@ export function applyRunnerWithRuntime(
           const merged = mergeDraft(surface.composer.getDraft(), text)
           surface.composer.setEditorText(merged)
           return merged === text
+        },
+        restoreStaleDraftIntoEditor: (text) => {
+          // PR3-B §7.3 (F2): a stale restore is suppressed on the TSP
+          // renderer — its committed switch DROPPED the outgoing draft, and
+          // a late stale restore must not reseed the new session's composer.
+          // PiTui retains (the display seam's own contract flag decides).
+          if (!surface.display.retainsStaleDraftRestore()) return 'dropped'
+          const merged = mergeDraft(surface.composer.getDraft(), text)
+          surface.composer.setEditorText(merged)
+          return merged === text ? 'merged-verbatim' : 'merged'
         },
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
         markDispatch: (sessionId) => submission.markDispatch(sessionId),
