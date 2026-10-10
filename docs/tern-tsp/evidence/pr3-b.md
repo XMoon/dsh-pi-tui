@@ -1440,87 +1440,101 @@ and is not pulled into this PR.
 
 ---
 
-# B4 — end-to-end real-pane qualification (IN PROGRESS)
+# B4 — end-to-end real-pane qualification
 
 > This chapter is the B4 acceptance record. It does not re-close B0–B3 (their
-> history and evidence above are unchanged) and it does not claim `DONE` while a
-> mandatory real-pane case is unproven: a missing physical input records
-> `BLOCKED`, never a pass.
+> history and evidence above are unchanged). Every case below states its EVIDENCE
+> TIER: `real pane` (Tern GUI + real Direct Agent), `real SDK + scripted tty`
+> (the production runtime driven by a scripted terminal) or `production harness`
+> (the real application owners driven without a pane). A physical input that could
+> not be produced records `N/A_WITH_REASON` or `BLOCKED`; scripted evidence is
+> never presented as physical.
 
 ## Frozen qualification identity and environment
 
 | Item | Value |
 |---|---|
 | Baseline | `next` @ `8d5f1adc` (branch `feat/tern-tsp-pr3-b4-qualification`, rebased onto the merged B3 `next`) |
-| Packed artifact | `xmoon76-dsh-pi-tui-0.5.1.tgz`, sha256 `09a57d875c1dc1abdbfd7d6a25cf12384e63fd52af432accca5c1c68a786f8ca` — the artifact every real-pane case below ran against |
-| Test profile | throwaway `b4-qual` (never the real `pi-tui`): `workspace-write` + `approval: ask` for genuine Approval requests, `@deepseek-ai/dsh-tool-ask-user` `mode: timed, timeout: 15` for the timed → continued → `Alt+Q` chain, `busyEnter: steer` (switched to `queue` for the second busy round) |
+| Packed artifact | `xmoon76-dsh-pi-tui-0.5.1.tgz`, sha256 `09a57d875c1dc1abdbfd7d6a25cf12384e63fd52af432accca5c1c68a786f8ca` — every case below ran against this artifact |
+| Test profile | throwaway `b4-qual` (never the real `pi-tui` profile): `commandcode` / `deepseek/deepseek-v4.1-flash` / effort high (the owner's model), `workspace-write` + `approval: ask`, the OFFICIAL standard preset plugin list with only `tool-ask-user` extended to `mode: timed, timeout: 15`, `busyEnter: steer` (switched to `queue` for the second busy round) |
 | Harness | `DSH_PI_TUI_RENDERER=tsp`; `TERN_TSP_RECORD` for wire evidence (synthetic data only); `TERN_TSP=0` / no opt-in for the negative controls |
-| Real pane | Tern GUI `0.7.0` (SDK handshake records `term: tern`, `ver: 0.7.0`); SDK `@stencil-hq/tern@0.1.0` |
-| Agent environment | headless tty (`DISPLAY`/`WAYLAND_DISPLAY` unset, no input-method daemon): the three physical qualifications are physically unavailable here and are executed by the Owner, per B1 Owner Amendment A1 |
+| Real pane | Tern GUI `0.7.0` (the SDK handshake records `term: tern`, `ver: 0.7.0`); SDK `@stencil-hq/tern@0.1.0` |
+| Agent environment | headless tty (no `DISPLAY`/`WAYLAND_DISPLAY`, no input-method daemon): the physical qualifications are executed by the Owner on a real GUI, per B1 Owner Amendment A1 |
 
-## §6.4 mandatory real-pane smoke — per-case status
+## §6.4 mandatory real-pane smoke — final status
 
-| §6.4 | Case | Status | Evidence / notes |
-|---|---|---|---|
-| 1 | Real pane mount, SDK selected, one tty owner, editable focus | **DONE** | Owner run; screenshot `PixPin_2026-10-10_21-33-07.png` (dock shows `DSH TSP renderer · experimental composer`); wire handshake ok |
-| 2 | English/CJK/emoji, real IME, real multi-line paste, `Shift+Enter`, `q` | **DONE** | Owner run; wire record confirms the paste arrived as ONE atomic editor edit (`text dock.composer replace "echo a␊echo b␊/exit"`), the following `Enter` produced exactly ONE `you (sending…)` submission, and the model answer shows nothing was executed; CJK/emoji caret+deletion and `Shift+Enter` reported normal; `/exit` and `!echo hi` lines were content, not dispatches |
-| 3 | Plain prompt → real Direct backend, Assistant streaming, real tool/call → result | PENDING | Owner run outstanding (needs a real tool/call) |
-| 4 | Running-state `Enter` / `Ctrl+Enter` against the configured busy policy | PENDING | Owner run outstanding (both `steer` and `queue`) |
-| 5 | `/exit`, `/quit`, `!`/`!!`, `/settings`, Host-origin same-spelling | PENDING | Owner run outstanding (isolated launches) |
-| 6 | Genuine Question single/multi/free/masked, timed → continued → `Alt+Q` → late answer | PENDING | Owner run outstanding (profile already carries the timed `tool-ask-user` config) |
-| 7 | Genuine Approval `y`/`n`/`Esc`/`Ctrl+C`, repeat after settle | PENDING | Owner run outstanding |
-| 8 | Rebind/Session switch, exit/error, terminal restore | PARTIAL | `Ctrl+D` (single press, empty draft, no modal) and `Ctrl+C` interrupting a running turn verified by the Owner; Session-switch and restore cases outstanding |
-| 9 | Non-TSP tty / `TERN_TSP=0` / no opt-in → real PiTui mount | PARTIAL | Default-PiTui regression lanes are green headlessly; the real-pane negative run is outstanding |
+| §6.4 | Case | Status | Tier | Evidence / notes |
+|---|---|---|---|---|
+| 1 | Real pane mount, SDK selected, one tty owner, editable focus | DONE | real pane | The dock renders `DSH TSP renderer · experimental composer`; the editor accepts input; wire handshake ok |
+| 2 | English/CJK/emoji, real IME, real multi-line paste, `Shift+Enter`, `q` | DONE | real pane | Real IME candidate/commit; grapheme move/delete across CJK and emoji; the physical paste arrived as ONE atomic editor update (newlines preserved, `/exit`-looking lines were CONTENT) and the following `Enter` produced exactly ONE submission with nothing executed; `Shift+Enter` newlines; `q` inserts text |
+| 3 | Plain prompt → real Direct backend, Assistant streaming, real tool/call → result | DONE | real pane | Real `bash` calls with authoritative results (`touch` + `ls` visible with `exit=0`; a missing path with `exit=2`); streaming in the same session |
+| 4 | Running-state `Enter` / `Ctrl+Enter` against the configured busy policy | DONE | real pane | Under `busyEnter: steer`: `Enter` steered (`[1] you (steering…)`) and `Ctrl+Enter` queued (`queued (followup)`); under `busyEnter: queue` the two gestures swap exactly as the contract states; the pending echo was visible and no submission appeared twice |
+| 5 | `/exit`, `/quit`, `!`/`!!`, `/settings`, Host-origin same-spelling | DONE (Host-origin N/A_WITH_REASON) | real pane (+ automated origin coverage) | `/exit` and `/quit` exited normally with no prompt submission and a normal close; `!echo hi` / `!!echo hi` produced the existing shell refusal (`User-shell UI is not available in TSP yet`) with the draft restored and NO shell execution; `/settings` produced `This command's UI is not available in TSP yet` with the draft kept; no Host declaring a same-spelling command exists here, and the origin precedence is covered by the production-path admission witnesses |
+| 6 | Genuine Question single/multi/free-text/masked, timed → continued → `Alt+Q` → late answer | DONE (masked N/A_WITH_REASON) | real pane (+ automated masked witnesses) | Multi-select with the Review page, free-text, and the full timed chain: a genuine 15 s claim → dock `Continued questions: 1 · Alt+Q` → the official `{"pending":true,…}` continuation → physical `Alt+Q` opened the transient list → `Enter` reopened the same question → the late answer was settled by the official controller (notices `A reply for this question is already queued…` / `This question is no longer awaiting an answer.`) → the official `user-question-reply` carried the same `callId`. **masked**: the agent tool's schema has no `masked` field (an extra `masked: true` was ignored and rendered plain) and the only producer, the builtin masked prompt (`/auth`), is not a TSP-reachable command — the renderer's masked behaviour is covered by two witnesses instead (edit page and Review page; plaintext never reaches the wire) |
+| 7 | Genuine Approval `y`/`n`/`Esc`/`Ctrl+C`, repeat after settle | DONE | real pane | Four `Approval required` modals: allowed (the command really ran), cancelled and rejected (the tool results carry `cancelled` / `the user rejected … it stays denied`), plus a Question cancel; no second settlement or replay after a decision; a non-empty composer draft survived an approval unchanged |
+| 8 | Rebind/Session switch, exit/error, terminal restore | DONE (publication via production harness) | real pane (exit/restore) + production harness (publication) | `/new` and `/fork` are NOT TSP-reachable (`This command's UI is not available in TSP yet`), so the whole owner-publication family — a live Question blocking B's publication, the publication-frame withdrawal, the old request settled by its own lifetime, old keys unable to answer — is proven by the production-harness witnesses listed below; the real pane itself proved exit and terminal restore |
+| 9 | Non-TSP tty / `TERN_TSP=0` / no opt-in → real PiTui mount | DONE | real pane + automated | Both negatives (`TERN_TSP=0` with the opt-in present, and no opt-in at all) fell back to a fully normal PiTui; the SDK-decline, no-probe and no-output-gate-suspension assertions are covered by the automated lanes |
 
-## B-01..B-09 gates (current status; final statuses are written at stage closure)
+## B-01..B-09 gates
 
 | Gate | Status | Basis |
 |---|---|---|
-| B-01 Editor | **DONE** | Real IME candidate/commit, grapheme move/delete, physical paste as one atomic edit (no dispatch) — closes the two B1 Owner-Amendment items for real IME and physical paste |
-| B-02 Submit | PENDING | Requires §6.4-3 (real writer admission + streaming + tool/result); the C2 submission already showed exactly one admission/one submission |
-| B-03 Busy | PENDING | Requires §6.4-4 under both busy policies |
-| B-04 Commands | PENDING | Requires §6.4-5 `origin` positive/negative runs |
-| B-05 Questions | PENDING | Requires §6.4-6 |
-| B-06 Approval | PENDING | Requires §6.4-7 |
-| B-07 Generation | PENDING | Requires §6.4-8 plus the B3-review regressions (same-session ordinary event keeps `Alt+Q`; publication-frame withdrawal; no intermediate replaced modal) |
-| B-08 Lifecycle | PARTIAL | `Ctrl+D` / `Ctrl+C` physical semantics verified; exit/error/HMR/restore cases outstanding |
-| B-09 PiTui | PARTIAL | Headless default-PiTui regression lanes green; the real fallback run (C9) outstanding |
+| B-01 Editor | DONE | Real IME candidate/commit, grapheme editing, physical paste as one atomic edit — the two B1 Owner-Amendment items for real IME and physical paste are closed |
+| B-02 Submit | DONE | Real writer admission, streaming, tool/call→result, one submission per gesture |
+| B-03 Busy | DONE | Both busy policies with the exact gesture mapping, the pending echo and no double send |
+| B-04 Commands | DONE | `/exit`/`/quit` positive, shell and Client-UI refusals with the draft restored, no Host writes; the Host-origin precedence is covered by the admission witnesses |
+| B-05 Questions | DONE (masked N/A_WITH_REASON) | The full official Question lifecycle in a real pane, plus the Review/free-text/multi/cancel variants |
+| B-06 Approval | DONE | All four physical decisions, single settlement, no replay, draft untouched |
+| B-07 Generation | DONE | The production-harness publication/fork/settle witnesses below, plus the real-pane R1 result |
+| B-08 Lifecycle | DONE | Physical `Ctrl+C` interrupt and `Ctrl+D` empty-draft exit in a real pane, exit/restore, plus the automated fatal/HMR/teardown lanes |
+| B-09 PiTui | DONE | Both real negative launches plus the automated default-PiTui regression lanes |
 
-## Automated evidence on the frozen artifact (B4 Step B)
+## B3-review regressions (extra scenarios, not a substitute for §6.4)
 
-All of the following ran on the frozen identity above and are green; the volatile
-per-lane counts are recorded in the PR conversation, not here:
+| ID | Scenario | Status | Tier |
+|---|---|---|---|
+| R1 | An ordinary same-session event must NOT close the `Alt+Q` list | DONE | real pane (a 9-frame list lifetime carried four ordinary streaming events and closed only on the explicit reopen) + the automated `model/selection` witness |
+| R2 | A real owner publication MUST drop the replaced subject's list | DONE | production harness |
+| R3 | Several replaced modals together must not paint an intermediate old modal | DONE | production harness (per-request identity, atomic batch withdrawal, settle-after-batch, no Host read inside the commit section) |
+| R4 | Physical `Ctrl+C` = the existing interrupt/cancel (never an exit); `Ctrl+D` exits only with an empty draft and no modal | DONE | real pane (the interrupted tool kept running the TUI; further input and frames followed before a normal close) |
+| R5 | A paste containing command-looking lines stays ONE draft and is never dispatched line by line | DONE | real pane (inside §6.4-2) |
 
-- `pnpm verify:prepush` (its prepack runs `clean` + `build` + `typecheck:bundle` +
-  the full product suite, its postpack runs the eight public-package smokes) plus
-  the repository audit;
-- `pnpm compat:dsh:npm` and `pnpm compat:dsh:client-family` (published-DSH
-  compatibility);
-- the nine `pnpm smoke:remote-*` migration probes;
-- the artifact-dependent `pnpm smoke:boundary`, `pnpm smoke:startup-strictness`
-  and `pnpm smoke:official-presets`;
-- `git diff --check` (unstaged and staged).
+## Automated evidence on the frozen artifact
 
-The B3-review regression increments (per-request presentation identity, atomic
+Green on the frozen identity above (the volatile per-lane counts live in the PR
+conversation, not here): `pnpm verify:prepush` (its prepack runs `clean` + `build` +
+`typecheck:bundle` + the full product suite; its postpack runs the eight
+public-package smokes) and the repository audit, `pnpm compat:dsh:npm`,
+`pnpm compat:dsh:client-family`, the nine `pnpm smoke:remote-*` migration probes,
+the artifact-dependent `pnpm smoke:boundary` / `smoke:startup-strictness` /
+`smoke:official-presets`, and `git diff --check` (unstaged and staged). The B3
+review rounds' discriminating witnesses (per-request presentation identity, atomic
 multi-modal withdrawal, settle-after-batch, no Host projection read inside the
-synchronous commit, the transient list's scope) are covered by the suites listed
-in the rounds above; B4 re-ran them on this artifact as part of the product suite.
+synchronous commit section, the transient list's scope, masked rendering) all run
+inside that product suite.
+
+## Reachability limitations (recorded, not defects)
+
+1. TSP accepts only the TUI-origin builtins `/exit` and `/quit`; `/settings`,
+   `/new` and `/fork` are refused with the existing command-UI notice, and an
+   unreachable `/name` line (for example `/auth`) is submitted as an ordinary
+   prompt. The Session-publication qualifications therefore use the
+   production-harness witnesses instead of the pane, exactly as the frozen plan's
+   accessibility note requires.
+2. The masked question type cannot be produced through the agent tool at all (its
+   schema has no `masked` field), so §6.4-6's masked sub-item is
+   `N/A_WITH_REASON` with the renderer behaviour covered by two witnesses.
 
 ## Known differences and remaining deferrals (owner-decided)
 
-1. **Exit confirmation (`Ctrl+D`)** — the TSP renderer exits on a single press when
-   the draft is empty and no modal is up; it does not implement the PiTui
-   `Press <key> again to exit` window (and its footer hint). The frozen PR3-B key
-   contract defines the TSP semantics, so this is recorded as a **PR4 UI-parity
-   item**, not a defect.
-2. **`Ctrl+C` is not an exit key in TSP** — it is the existing cancel/interrupt
-   intent (modal cancel, turn interrupt, otherwise a no-op). This is a
-   deliberate, frozen contract difference from PiTui and must not be turned into
-   an exit later.
-3. Native editor chords (`Ctrl+A`, `Ctrl+V`, undo/selection/clipboard) are
-   ignored by the controlled composer, exactly as the PR3-B contract states:
-   they belong to the post-PR3-B editor/UX milestone (PR4).
-4. Still open for stage closure: §6.4-3…7 and 9, the B-02…B-07 gates, the
-   Session-switch/restore half of §6.4-8, and the independent review plus the
-   owner's explicit merge approval.
-
+1. The PiTui `Press <key> again to exit` confirmation window is NOT implemented in
+   the TSP renderer: TSP exits on a single `Ctrl+D` while the draft is empty and no
+   modal is up. Frozen key contract, recorded as a **PR4 UI-parity item**.
+2. `Ctrl+C` is not an exit key in TSP: it is the existing cancel/interrupt intent.
+   This is a deliberate, frozen contract difference from PiTui and must not be
+   turned into an exit later.
+3. Native editor chords (`Ctrl+A`, `Ctrl+V`, undo/selection/clipboard) are ignored
+   by the controlled composer and belong to the post-PR3-B editor/UX milestone
+   (PR4), exactly as the PR3-B contract states.
+4. Stage closure still requires the independent review and the owner's explicit
+   merge approval; this chapter does not grant either.
