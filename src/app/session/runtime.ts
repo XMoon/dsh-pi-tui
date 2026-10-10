@@ -265,13 +265,6 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // The OLD owner is captured at ADMISSION: the post-commit retirement must
     // retire exactly the owner this transition replaced.
     const oldOwner = core.owner()
-    // PR3-B §7.3 (F1): the OLD session id, captured at the SAME admission
-    // instant — the genuine-cross-owner discriminator the synchronous
-    // publication drop reads. `undefined` means no outgoing session (the
-    // first-session creation publishes without one); a same id is a
-    // re-publication, not a switch. Captured via the CORE (never the owners
-    // access, which can throw inside the commit).
-    const oldSessionIdForDrop = core.currentSessionId()
     // The NEW owner this transaction commits, mapped ONCE in the synchronous
     // commit section: the post-commit phases reuse it instead of re-wrapping
     // the handle (each `fromHandle` of a Remote reference wrapper is an
@@ -338,12 +331,15 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 // hydration, catalog) and therefore before any new-source
                 // frame can lift the input fence: the outgoing text is gone
                 // before the new session is editable, and no post-hydration
-                // keystroke can be wiped by a late clear. Only a GENUINE
-                // cross-owner switch drops: an outgoing owner existed and
-                // its session differs (the first-session creation publishes
-                // without one; a same-id re-publication is not a switch; a
-                // pre-publication failure never reaches the seam).
-                if (oldOwner !== undefined && oldSessionIdForDrop !== undefined && oldSessionIdForDrop !== sessionId) {
+                // keystroke can be wiped by a late clear. The discriminator
+                // is the OPAQUE OWNER REF (the same axis the stale-restore
+                // policy reads): only a genuinely REPLACED owner drops —
+                // aligned with `SessionSubjectAuthority.ownerReplaced`, so
+                // a same-id re-publication and a same-owner generation bump
+                // answer consistently on both surfaces. The first-session
+                // creation publishes without an outgoing owner; a
+                // pre-publication failure never reaches this seam.
+                if (oldOwner !== undefined && oldOwner !== nextOwner) {
                   deps.surface.dropOutgoingActiveDraft()
                 }
                 core.setCurrentOwner(nextOwner, sessionId)
@@ -783,10 +779,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // before any post-commit await (source retirement, quiesce,
               // hydration, catalog), so the adopted child's first editable
               // frame never shows the source session's text and no
-              // post-hydration keystroke is wiped. Only a genuine
-              // cross-owner adoption drops (the pre-published id pair was
-              // snapshotted above).
-              if (oldOwner !== undefined && oldSessionId !== undefined && oldSessionId !== nextSessionId) {
+              // post-hydration keystroke is wiped. The discriminator is the
+              // OPAQUE OWNER REF (the same axis as the ordinary seam and the
+              // stale-restore policy): only a genuinely replaced owner drops.
+              if (oldOwner !== undefined && oldOwner !== nextOwner) {
                 deps.surface.dropOutgoingActiveDraft()
               }
               core.setCurrentOwner(nextOwner, nextSessionId)

@@ -104,7 +104,10 @@ export function createSessionSubjectAuthority(
       const record = subject === undefined ? undefined : pinned.get(subject)
       if (record === undefined) return false
       const live = peek()
-      return live !== undefined && live.owner !== record.owner
+      // An owner-bearing live slot with a DIFFERENT owner ref is the only
+      // replacement shape: a slot that went sessionless (or carries no
+      // owner) replaced nothing — the captures are merely invalid.
+      return live !== undefined && live.owner !== undefined && live.owner !== record.owner
     },
   }
 }

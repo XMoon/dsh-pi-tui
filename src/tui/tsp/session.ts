@@ -450,15 +450,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       render()
     },
     clearActiveDraft() {
-      // PR3-B §7.3 (the B2 external-review F1): the session-lifecycle
-      // authority confirmed a GENUINE A→B switch (this runs only from the
-      // committed post-publication sites — never the generation reset, so a
-      // first-session creation and a failed switch never drop). The
-      // outgoing session's unsubmitted draft is DISCARDED so it can never
-      // be typed into, or submitted against, the incoming session once the
-      // fence lifts. No cross-session cache: the text is gone, not hidden.
+      // PR3-B §7.3 (B2 external-review F1, publication atomicity): the
+      // session-lifecycle authority calls this INSIDE the synchronous
+      // publication block — pre-`setCurrentOwner`, where a THROW would be
+      // classified as a pre-publication failure with the draft already
+      // lost. This path is therefore PURE STATE (no render IO): the emptied
+      // editor rides the next frame the renderer commits (B's hydration
+      // repaint), and the hydration input fence keeps the window
+      // un-editable, so the outgoing text is never submittable meanwhile.
       if (disposed) return
-      composer.setDraft('')
+      composer.clearDraftStateOnly()
     },
     retainsStaleDraftRestore() {
       // PR3-B §7.3 (F2): the switch authority DROPPED the old draft, so a

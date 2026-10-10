@@ -507,3 +507,34 @@ test('B2 §7.3 (F2): the TSP renderer declares the switch-dropping stale-restore
     await harness.dispose()
   }
 })
+
+test('B2 §7.3 (F1 atomicity): clearActiveDraft is PURE STATE — no render IO, no throw surface', async () => {
+  // The external review's publication-atomicity finding: the drop runs
+  // inside the synchronous publication block, where a throwing render would
+  // turn the clear into a pre-publication failure with the draft already
+  // lost. The TSP primitive is therefore PURE STATE: it commits the emptied
+  // editor without rendering (the next committed frame carries it), so the
+  // seam cannot throw renderer IO. Witnessed on the real pane: the clear
+  // emits NO new wire frame, and the editor STATE is emptied — the very
+  // next render (the hydration repaint) draws the empty composer.
+  const harness = await mountPane(() => {})
+  try {
+    harness.input.type('draft to drop')
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'draft to drop')
+    const framesBefore = harness.output.chunks.length
+    harness.renderer.display.clearActiveDraft()
+    // NO render IO happened synchronously (the publication-safe property).
+    assert.equal(harness.output.chunks.length, framesBefore,
+      'the clear emitted no frame — pure state, no renderer IO, no throw surface')
+    assert.equal(harness.renderer.composer.getDraft(), '',
+      'the editor STATE is emptied (the next committed frame draws it)')
+    // The next render (B's own commit) carries the empty composer.
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'B' })
+    await settle()
+    assert.ok(harness.output.chunks.length > framesBefore, 'the next frame committed')
+    assert.equal(harness.renderer.composer.getDraft(), '', 'the editor stays empty through B\'s first frame')
+  } finally {
+    await harness.dispose()
+  }
+})

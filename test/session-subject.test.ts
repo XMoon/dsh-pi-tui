@@ -94,3 +94,41 @@ test('a foreign object that was never minted is never current', () => {
   assert.equal(authority.isCurrent({} as SessionSubject), false)
   assert.equal(authority.isCurrent(Object.create(null) as SessionSubject), false)
 })
+
+// ── PR3-B §7.3 (B2 F2 P3): the ownerReplaced axis — the ONE discriminator ──
+
+test('ownerReplaced answers on the OWNER axis: a same-ID new owner ref IS replaced, a same-owner bump is NOT', () => {
+  // The ownership-contract alignment the external review asked for: the
+  // active-draft drop (session runtime) and the stale-restore suppression
+  // (submission runtime) must read the SAME axis. ownerReplaced compares
+  // opaque owner refs — so a same-session-id re-publication (a NEW owner
+  // ref under the same id) answers TRUE (genuinely replaced: the old owner
+  // object is retired) and a same-owner generation bump answers FALSE (the
+  // owner stands; only its captures were invalidated).
+  const ownerA = {} as SessionOwnerRef
+  const ownerA2 = {} as SessionOwnerRef // a DIFFERENT ref, same session id
+  const state = slot({ owner: ownerA, generation: 1 })
+  const authority = createSessionSubjectAuthority(state.peek)
+  const captured = authority.capture()
+  // Same-owner generation bump: NOT replaced.
+  state.set({ owner: ownerA, generation: 2 })
+  assert.equal(authority.ownerReplaced(captured), false,
+    'a same-owner generation invalidation is not a replacement')
+  // A different owner ref under the SAME session id: replaced.
+  state.set({ owner: ownerA2, generation: 3 })
+  assert.equal(authority.ownerReplaced(captured), true,
+    'a new owner ref is a replacement even under the same session id (the drop and the stale restore agree)')
+  // Sessionless/absent shapes: never "replaced".
+  assert.equal(authority.ownerReplaced(undefined), false, 'an absent subject is never replaced')
+  assert.equal(authority.ownerReplaced({} as SessionSubject), false, 'a foreign token is never replaced')
+})
+
+test('ownerReplaced is false when the live slot is empty (nothing replaced the captures)', () => {
+  const ownerA = {} as SessionOwnerRef
+  const state = slot({ owner: ownerA, generation: 1 })
+  const authority = createSessionSubjectAuthority(state.peek)
+  const captured = authority.capture()
+  state.set(undefined)
+  assert.equal(authority.ownerReplaced(captured), false,
+    'an emptied slot is not a replacement (never a drop on the sessionless shape)')
+})
