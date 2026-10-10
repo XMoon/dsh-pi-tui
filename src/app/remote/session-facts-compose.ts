@@ -4,24 +4,24 @@
  * the exact retained binding's bounded event window, paged only as far as
  * the recent-sample contract requires.
  *
- * Ownership rules (frozen):
+ * Ownership rules (frozen, TPS plan PR-2):
  * - lifetime turns/steps/llmMs come from the `sessionStats` projection —
  *   NEVER computed from the bounded window;
  * - token totals come from the `tokenUsage` projection; the context window
  *   from the context projection; cache-hit percentage derives from those
  *   totals with the same formula as the fold;
- * - recent TTFT/TPS derive from the binding's durable+transient window via
- *   the shared `recentPerformanceOf` helper (the same
- *   RECENT_PERFORMANCE_SAMPLE_LIMIT window and formula the Direct fold
- *   uses), paging `loadOlder()` only while the window may still be missing
- *   the latest completed steps;
+ * - the measured performance values (R5 rate + recent first-token + All
+ *   rate) come from the Session's OWN Host `piTuiPerformance` projection,
+ *   which the caller passes in as `facts.performance`. The bounded event
+ *   window is NOT folded and `loadOlder()` is NOT paged for performance: the
+ *   Host projection is complete by construction, so no amount of local
+ *   history proves it better;
  * - lastAssistantText scans the window newest-first and pages `loadOlder()`
  *   until the newest durable assistant/message is inside the window (or the
  *   history start is reached): `undefined` = no assistant message yet, `''`
  *   = the message carries no text;
- * - every await re-checks the SAME Connection generation and the caller's
- *   scope currency; a superseded operation settles as stale/undefined and
- *   NEVER retargets to a replacement binding.
+ * - the currentness fence is re-checked; a superseded operation settles as
+ *   stale/undefined and NEVER retargets to a replacement binding.
  *
  * @module @xmoon76/dsh-pi-tui/app/remote/session-facts-compose
  */
@@ -29,7 +29,7 @@
 import type { PresentationDurableEvent, PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
 import type { SessionStatusProjection } from '../../runtime/session-reader-port.ts'
 import type { SessionStatsFacts } from '../../domain/status/stats.ts'
-import { hasEnoughRecentPerformanceSamples, recentPerformanceOf } from '../../domain/status/stats.ts'
+import { derivePerformance } from '../../domain/status/performance-view.ts'
 
 /** The whole-log projection facts the composition consumes (detached). */
 export interface RemoteStatsProjectionFacts {
@@ -40,6 +40,9 @@ export interface RemoteStatsProjectionFacts {
   readonly usage: SessionStatusProjection['usage']
   /** The official context-window capacity of the status facts. */
   readonly contextWindow: number | undefined
+  /** THIS Session's own Host `piTuiPerformance` projection (the status facts'
+   *  own field) — the ONE performance authority on this branch. */
+  readonly performance: SessionStatusProjection['performance']
 }
 
 /** The reader face the composition pages through (the shared adapter). */
@@ -84,17 +87,6 @@ function lastAssistantTextOfWindow(events: readonly PresentationDurableEvent[]):
   return undefined
 }
 
-/** Whether the recent-sample window may still be missing the latest steps.
- * The fold's OWN admission rules answer (§3.4's "whether enough valid
- * samples are present"): a step/end COUNT is only an upper bound — steps
- * with no first token, burst-delivered steps, and failed steps contribute
- * no valid sample, so the window must keep paging until the fold itself
- * proves both sample windows retained full (or the history start is
- * reached). */
-function recentSamplesIncomplete(events: readonly PresentationDurableEvent[]): boolean {
-  return !hasEnoughRecentPerformanceSamples(events as never[])
-}
-
 /**
  * Compose the Remote whole-log + recent stats for one session (§3.3) as
  * AUTHORITY-GROUPED facts (PR5 v2 §1B-2): the `sessionStats` projection owns
@@ -106,47 +98,23 @@ function recentSamplesIncomplete(events: readonly PresentationDurableEvent[]): b
  */
 export async function composeRemoteSessionStats(input: {
   readonly sessionId: string
-  readonly reader: RemoteFactsReader
   readonly fence: RemoteFactsFence
   readonly facts: RemoteStatsProjectionFacts
   readonly signal?: AbortSignal
 }): Promise<SessionStatsFacts | undefined> {
-  const { sessionId, reader, fence, facts, signal } = input
+  const { fence, facts, signal } = input
   signal?.throwIfAborted()
-  // 1. The whole-log projection facts (turns/steps/llmMs + usage + window).
-  const totals = numericTotalsOf(facts.sessionStats)
-  // 2. The recent-window figures off the EXACT binding, paged only while the
-  //    latest completed steps may still be missing.
-  let snapshot = await reader.read(sessionId, signal)
-  if (snapshot === undefined || !fence.isCurrent()) return undefined
-  // Page while the fold itself cannot prove the recent sample windows full
-  // (§3.4's valid-sample contract) and older history remains. There is NO
-  // page-count cap: an all-invalid-sample session pages to the history
-  // start and then reports the same figures the whole-log fold would — a
-  // silent cap would present a partial window as a complete one (the
-  // review's §3 finding). The official loadOlder pages are bounded by the
-  // Host's own paging contract; a superseded transport drops out below.
-  while (
-    snapshot.coverage === 'bounded'
-    && snapshot.hasMore
-    && !snapshot.loadingOlder
-    && recentSamplesIncomplete(snapshot.durableEvents)
-  ) {
-    signal?.throwIfAborted()
-    const next = await reader.loadOlder(sessionId, signal)
-    if (next === undefined || !fence.isCurrent()) return undefined
-    snapshot = next
-  }
+  // The composition is synchronous over facts the caller already read from the
+  // exact retained binding; the fence is still checked so a superseded
+  // transport/scope settles `undefined` instead of a stale figure. There is
+  // deliberately NO reader capability on this input: the bounded event window
+  // cannot influence a performance fact at all.
   if (!fence.isCurrent()) return undefined
-  const recent = recentPerformanceOf(snapshot.durableEvents as never[])
-  // PR5 v2 §1B-2: authority groups stay ABSENT when their source cannot
-  // answer — never a `?? 0` fabrication. The paging loop above ran until
-  // the recent-sample contract was proven OR the history start was reached;
-  // the `recent` group therefore rides the same availability rule
-  // (`hasMore === false` makes even a zero-sample fold authoritative).
-  const recentAuthoritative = !snapshot.hasMore
-    || hasEnoughRecentPerformanceSamples(snapshot.durableEvents as never[])
+  const totals = numericTotalsOf(facts.sessionStats)
   const usage = facts.usage
+  // ONE derivation, straight off THIS Session's Host projection: no bounded
+  // window fold, no `loadOlder()`, no local sample ring.
+  const performance = derivePerformance(facts.performance)
   return {
     ...(Object.keys(totals).length > 0 ? { lifetime: { ...totals } } : {}),
     ...(usage === undefined ? {} : {
@@ -160,9 +128,17 @@ export async function composeRemoteSessionStats(input: {
           : 0,
       },
     }),
-    ...(recentAuthoritative
-      ? { recent: { firstTokenMsAvg: recent.firstTokenMsAvg, tokensPerSec: recent.tokensPerSec } }
-      : {}),
+    ...(performance.firstTokenMs === undefined && performance.tokensPerSec === undefined
+      ? {}
+      : {
+          recent: {
+            ...(performance.firstTokenMs === undefined ? {} : { firstTokenMsAvg: performance.firstTokenMs }),
+            ...(performance.tokensPerSec === undefined ? {} : { tokensPerSec: performance.tokensPerSec }),
+          },
+        }),
+    ...(performance.sessionTokensPerSec === undefined
+      ? {}
+      : { sessionPerformance: { tokensPerSec: performance.sessionTokensPerSec } }),
     ...(facts.contextWindow === undefined ? {} : { contextWindow: facts.contextWindow }),
   }
 }

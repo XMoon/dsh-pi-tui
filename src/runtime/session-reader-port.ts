@@ -11,6 +11,7 @@
  */
 
 import type { TurnOutlineEntryDto } from './presentation-read-port.ts'
+import type { PiTuiPerformanceProjection } from '../domain/status/performance-view.ts'
 
 /** One persisted session summary (the picker's row shape, minus the
  * enriched title). */
@@ -187,6 +188,13 @@ export interface SessionStatusProjection {
    *  render the null state (the official Web shows an empty panel). */
   readonly todos?: readonly SessionStatusTodoItem[] | null
   readonly usage?: SessionStatusUsageProjection
+  /** THIS Session's own Host performance projection (the bundle's
+   *  `piTuiPerformance` unit): the R5 (last eligible completed steps of the
+   *  current route generation) and All (whole Session) model-request rate
+   *  counters plus the recent first-token evidence. ABSENT means the Host
+   *  cannot serve the key — the Client never estimates it from local history
+   *  or a bounded page window. */
+  readonly performance?: PiTuiPerformanceProjection
 }
 
 /** A detached provider/model/effort selection value (the official

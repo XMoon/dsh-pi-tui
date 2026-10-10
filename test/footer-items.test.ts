@@ -488,8 +488,6 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
     turns: 12,
     steps: 38,
     llmMs: 120_000,
-    firstTokenMsAvg: 2_000,
-    tokensPerSec: 40,
     cacheHitPct: 91.9,
     inputTokens: 2_579,
     outputTokens: 5_507,
@@ -497,12 +495,18 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
     cacheReadTokens: 20_000,
     cacheWriteTokens: 0,
   }
-  const footerLine = formatStatsLine(usageFromStats(stats as never))
-  const detailLine = formatStatsFacts(sessionStatsFactsOf(stats as never))
+  // PR-2: the measured performance values are the Host projection's, injected
+  // into the usage section (the fold no longer carries them).
+  const hostPerformance = { firstTokenMs: 2_000, tokensPerSec: 40, sessionTokensPerSec: 12 }
+  const baseUsage = usageFromStats(stats)
+  const usage = { ...baseUsage, performance: { ...baseUsage.performance, ...hostPerformance } }
+  const footerLine = formatStatsLine(usage)
+  const detailLine = formatStatsFacts(sessionStatsFactsOf(stats, hostPerformance))
   assert.ok(!footerLine.includes('LLM'), `the footer line carries no lifetime wall:\n${footerLine}`)
   assert.ok(footerLine.includes('TTFB 2s') && footerLine.includes('40 tok/s'), `recent metrics on the footer line:\n${footerLine}`)
   assert.ok(detailLine.includes('LLM 2m00s'), `the detail line keeps the lifetime wall:\n${detailLine}`)
-  assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('40 tok/s'), `recent metrics on the detail line:\n${detailLine}`)
+  assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('R5 40 tok/s') && detailLine.includes('All 12 tok/s'),
+    `the Host facts on the detail line:\n${detailLine}`)
   // The token/cache prefix stays IDENTICAL between the two surfaces.
   const tokenSegment = '↑2.6k ↓5.5k R20k CH91.9%'
   assert.equal(footerLine.split(' | ')[0], tokenSegment, `shared pi vocabulary:\n${footerLine}`)
@@ -516,8 +520,6 @@ test('an unavailable token projection renders the performance segment alone (no 
     turns: 12,
     steps: 38,
     llmMs: 120_000,
-    firstTokenMsAvg: 2_000,
-    tokensPerSec: 40,
     cacheHitPct: 91.9,
     inputTokens: 2_579,
     outputTokens: 5_507,
@@ -527,8 +529,9 @@ test('an unavailable token projection renders the performance segment alone (no 
   }
   // The Remote branch with an unavailable `tokenUsage`/context: the official
   // override is present but empty, so the token facts are UNKNOWN (omitted)
-  // while the recent-window performance metrics still come from the fold.
-  const usage = usageFromStats(stats as never, undefined, {})
+  // while the Host-projection performance metrics still render.
+  const base = usageFromStats(stats, undefined, {})
+  const usage = { ...base, performance: { ...base.performance, firstTokenMs: 2_000, tokensPerSec: 40 } }
   assert.equal(usage.tokens, undefined, 'no owned token facts')
   const line = formatStatsLine(usage)
   const compact = formatStatsLineCompact(usage)

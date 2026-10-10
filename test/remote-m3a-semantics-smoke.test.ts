@@ -513,6 +513,13 @@ test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (
       context: { breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 } },
       todos: null,
       usage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      // TPS plan PR-2: the bundle's own Host performance projection is one of
+      // this Session's official facts; an empty log truthfully reads two zero
+      // counters (the VIEW is always present; absence is the missing key).
+      performance: {
+        recent: { outputTokens: 0, modelMs: 0, samples: 0, firstTokenMs: 0, firstTokenSamples: 0 },
+        all: { outputTokens: 0, modelMs: 0, samples: 0 },
+      },
     }, 'the bare session reads its own cwd fact and its official zero-valued folds (todos legally null)')
     assert.equal(semantics.sessionReader.sessionStatus('never-created'), undefined,
       'an unretained session has no facts')

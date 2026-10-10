@@ -1470,48 +1470,38 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // bounded-window read could not produce them — the projections must.
   await waitFor('the projection-backed lifetime totals rendered', () =>
     /↑[0-9.]+k/u.test(fixture.vt.getViewport().join('')), 20_000)
-  // RECENT evidence: the MOUNTED window (the exact one the Remote status
-  // composition folds) carries admitted throughput samples.
-  const snapshot = await fixture.aggregate.presentation.presentationReader.read(mainId)
-  assert.ok(snapshot !== undefined, 'the mounted Remote window is readable')
-  const statsMod = await import('../src/domain/status/stats.ts')
-  const recent = statsMod.recentPerformanceOf(snapshot!.durableEvents as never[])
-  assert.ok(recent.tokensPerSec > 0,
-    'the mounted window admits recent throughput samples (the composed /status recent figure is fold-backed, never a window-only zero)')
-  // ROUND-4 hardening — the RENDERED panel row is the authority, not the
-  // source-level fold above: the Stats row carries the EXACT projection-
-  // backed lifetime totals (5 sampled turns × 1000/200 + 40 newer × 1/1 =
-  // ↑5.0k ↓1.0k) AND non-zero rendered recent figures (TTFB ≠ 0s,
-  // tok/s ≠ 0), so a future /status wiring break cannot hide behind a
-  // green source-level assertion. The samples live ONLY in the oldest
-  // turns (outside the initial bounded window), so non-zero rendered
-  // figures also prove the composition's loadOlder paging actually ran.
+  // RECENT evidence (TPS plan PR-2): the measured performance values come
+  // from the SESSION's own Host `piTuiPerformance` projection, which folds
+  // the SAME committed turns regardless of how much history the Client's
+  // bounded window happens to hold — no `loadOlder()` and no window fold can
+  // influence them. The seeded turns are REAL committed events, so the Host
+  // projection carries their samples.
+  await waitFor('the projection-backed lifetime totals rendered', () =>
+    /↑[0-9.]+k/u.test(fixture.vt.getViewport().join('')), 20_000)
+  // ROUND-5 hardening — REQUIRED MATCHES on the RENDERED row (assert.match
+  // throws when the pattern does not match; the round-4 `exec() !== undefined`
+  // guards were vacuously true — exec returns null). The seeded first chunk
+  // lands ~100ms after `step/start` → a `0.1s`-class TTFB rendering (a broken
+  // wiring that renders 0 fails: `0.0s`/`0s` does not match); the rate is
+  // 200 tokens over the ~400ms request wall → a non-zero tok/s figure. The
+  // upper bound keeps the match honest against the seeded arithmetic.
   await waitFor('the panel rendered the exact lifetime totals', () =>
     fixture.vt.getViewport().join('').includes('↑5.0k ↓1.0k'), 20_000)
-  // ROUND-5 hardening — REQUIRED MATCHES on the RENDERED row (assert.match
-  // throws when the pattern does not match; the round-4 `exec() !==
-  // undefined` guards were vacuously true — exec returns null). The TTFT
-  // window is seeded at ~100ms per sampled turn → a `0.1s`-class rendering
-  // (a broken wiring that renders 0 fails: `0.0s`/`0s` does not match);
-  // the throughput window is 200 tokens over a ~300ms decode span → a
-  // three-digit tok/s figure (a broken wiring that renders 0 fails). The
-  // upper bound keeps the match honest against the seeded arithmetic.
   const panelView = fixture.vt.getViewport().join('')
   assert.match(panelView, /TTFB 0\.[1-9]\d*s/u,
     `the panel's rendered recent TTFB must be the seeded non-zero figure:\n${panelView}`)
   assert.match(panelView, /([1-9]\d{1,3}) tok\/s/u,
     `the panel's rendered recent throughput must be the seeded non-zero figure:\n${panelView}`)
-  // FOOTER consistency after the /status paging (F10): the footer's own
-  // stats row re-derived from the WIDENED fold — it must no longer show the
-  // no-sample zeros the initial bounded window produced.
+  // FOOTER consistency: the footer reads the SAME status facts, so it shows
+  // the same Host-projection figures — never the no-sample zeros.
   const footerRows = (fixture.runnerApp() as unknown as {
     footerRenderRowsForTest(): readonly string[]
   }).footerRenderRowsForTest()
   const footerText = footerRows.join(' ')
   assert.match(footerText, /TTFB 0\.[1-9]\d*s/u,
-    `the footer re-derived its recent figures from the widened fold after the /status paging:\n${footerText}`)
+    `the footer's recent figures are the Host projection's:\n${footerText}`)
   assert.match(footerText, /([1-9]\d{1,3}) tok\/s/u,
-    `the footer's recent throughput re-derived from the widened fold:\n${footerText}`)
+    `the footer's recent throughput is the Host projection's:\n${footerText}`)
 })
 
 /* ─────────── PR5 §12 Slice E: real-holder writer-held recovery ─────────── */

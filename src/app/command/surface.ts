@@ -202,12 +202,6 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The resolved CLIENT working directory (the standing read scope). */
   readonly clientCwd: string
-  /**
-   * PR5 (plan §3.2): the presentation-owned recent-performance availability
-   * of the current main window (one bit beside the stats fold). Provided on
-   * the Remote branch; absent on Direct (the complete log is authoritative).
-   */
-  readonly recentPerformanceAvailable?: () => boolean
   /** The mounted-surface seams the runner facade delegates to. */
   readonly surface: {
     setNotificationMode(mode: string): void
@@ -954,13 +948,6 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // send-time canonicalization against the Host filesystem.
       hostFile: deps.backend.hostFile,
       hostShellCompletion: deps.backend.hostShellCompletion,
-      // PR5 (plan §3.2): the presentation-owned recent-performance
-      // availability of the CURRENT main window — the /status panel reads
-      // it beside the composed stats. Absent on Direct-shaped compositions
-      // (the full log is authoritative by construction).
-      ...(deps.recentPerformanceAvailable === undefined ? {} : {
-        recentPerformanceAvailable: deps.recentPerformanceAvailable,
-      }),
       // The readable-transcript business capability (round 5): explicitly
       // backend-owned, NEVER derived from the commandRegistry mirror below
       // (that mirror retires with M8).

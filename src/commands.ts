@@ -569,12 +569,6 @@ export interface TuiCommandRunner {
    */
   currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
   /**
-   * PR5 (plan §3.2): whether the CURRENT main window's recent-performance
-   * figures are presentation-authoritative (Direct full log, or a Remote
-   * window that proved its samples / reached the history start). Absent on
-   * stub compositions = `true` (the fold's own complete-log semantics).
-   */
-  readonly recentPerformanceAvailable?: () => boolean
   /**
    * The pinned Session's last assistant-message text ('' when the message
    * carries no text block), or `undefined` when there is none. Async since

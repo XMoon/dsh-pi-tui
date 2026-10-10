@@ -174,8 +174,6 @@ const STATS: SessionStats = {
   turns: 12,
   steps: 38,
   llmMs: 120000,
-  firstTokenMsAvg: 2000,
-  tokensPerSec: 40,
   cacheHitPct: 91.9,
   inputTokens: 2579,
   outputTokens: 5507,
@@ -189,7 +187,9 @@ test('usage: structured projection matches the stats source', () => {
   assert.deepEqual(usage.context, { usedTokens: 22579, windowTokens: 1_000_000, percent: 2 })
   assert.deepEqual(usage.tokens, { input: 2579, output: 5507, cacheRead: 20000, cacheWrite: 0 })
   assert.equal(usage.cacheHitPct, 91.9)
-  assert.deepEqual(usage.performance, { llmMs: 120000, firstTokenMs: 2000, tokensPerSec: 40 })
+  // PR-2: the measured performance values are the Host projection's; this
+  // projection contributes only the lifetime llmMs.
+  assert.deepEqual(usage.performance, { llmMs: 120000 })
   assert.equal(usage.turns, 12)
   assert.equal(usage.steps, 38)
 })
@@ -243,25 +243,14 @@ test('access: alpha.4 drops the event-log fold inputs entirely (service-only rea
   assert.deepEqual(without, {})
 })
 
-// ── PR5: recent-performance availability (plan §3.2) ───────────────────────
+// ── PR-2: the measured performance values are the Host projection's ────────
 
-test('usage PR5: an unproven recent window OMITS the recent metrics (never a zero stand-in)', () => {
-  const usage = usageFromStats(STATS, undefined, undefined, { recentPerformanceAvailable: false })
-  assert.deepEqual(usage.performance, { llmMs: 120000 },
-    'llmMs stays (lifetime); the two recent metrics are absent, not zero')
-  // The default (absent options) keeps the figures: the fold's own
-  // complete-log semantics are authoritative.
-  const direct = usageFromStats(STATS)
-  assert.deepEqual(direct.performance, { llmMs: 120000, firstTokenMs: 2000, tokensPerSec: 40 })
-  // A numeric zero with availability proven stays a legitimate measured 0.
-  const zeroMeasured = usageFromStats({ ...STATS, firstTokenMsAvg: 0, tokensPerSec: 0 })
-  assert.deepEqual(zeroMeasured.performance, { llmMs: 120000, firstTokenMs: 0, tokensPerSec: 0 })
-})
-
-test('usage PR5: the Remote override branch honors the same availability rule', () => {
+test('usage PR-2: usageFromStats contributes ONLY the lifetime llmMs, never a fold-derived rate', () => {
+  // The measured performance facts are the bundle's Host `piTuiPerformance`
+  // projection's; StatusRuntime injects the derived figures. The fold must
+  // not be a second source — not even as a zero.
+  assert.deepEqual(usageFromStats(STATS).performance, { llmMs: 120000 })
   const official = { tokens: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 } }
-  const usage = usageFromStats(STATS, undefined, official, { recentPerformanceAvailable: false })
-  assert.deepEqual(usage.performance, { llmMs: 120000 })
-  const proven = usageFromStats(STATS, undefined, official, { recentPerformanceAvailable: true })
-  assert.deepEqual(proven.performance, { llmMs: 120000, firstTokenMs: 2000, tokensPerSec: 40 })
+  assert.deepEqual(usageFromStats(STATS, undefined, official).performance, { llmMs: 120000 },
+    'the Remote projection-override branch keeps the same rule')
 })

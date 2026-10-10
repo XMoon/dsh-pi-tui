@@ -261,28 +261,6 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
    * (the honest model for a bounded window; the fold stays cheap).
    */
   rehydrateFromWindow(sessionId: string): Promise<void>
-  /**
-   * PR5 truthfulness (plan §3.2): whether the main stats fold's
-   * RECENT-performance figures are AUTHORITATIVE for presentation. `true`
-   * on Direct (the fold reads the COMPLETE in-process session log) and on a
-   * Remote window that proved its recent-sample evidence (the window
-   * reached the history start, or the fold retained enough valid samples —
-   * the SAME fold's retained evidence). `false` while a bounded Remote
-   * window cannot prove either: the footer/status must OMIT the recent
-   * metrics (never a numeric `0s · 0 tok/s` stand-in). This is the ONE
-   * presentation-owned availability authority beside the stats fold; it is
-   * committed in the SAME fenced hydrate that commits the fold itself, so
-   * a stale hydrate can never flip the replacement subject's bit.
-   */
-  mainRecentPerformanceAvailable(): boolean
-  /**
-   * F1 (PR5 §3.2): re-answer the availability bit off the SAME fold the live
-   * ingress just mutated, so a bounded window that committed `false` can flip
-   * on ordinary appended evidence without a `loadOlder`/rehydrate. It answers in
-   * BOTH directions (the fold's evidence is not monotonic), and it re-derives the
-   * status whenever the answered value changes.
-   */
-  refreshRecentPerformanceAvailability(): void
   /** The synchronous surface reset that follows a generation bump (A2 seam). */
   resetForGeneration(): void
 }
@@ -348,30 +326,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
 
   let statsFolder = new StatsFolder()
 
-  /**
-   * PR5 (plan §3.2): the presentation-owned recent-performance availability of
-   * the CURRENT main stats fold (see `mainRecentPerformanceAvailable`). Starts
-   * `false` (no authoritative window is committed yet), is answered inside every
-   * fenced hydrate commit that replaces `statsFolder`, and is re-answered in
-   * BOTH directions by the live refresh as the SAME fold's evidence moves.
-   */
-  let recentPerformanceAvailable = false
-  /**
-   * F1 (PR5 §3.2): the LAST COMMITTED fold's COVERAGE-completeness fact — the
-   * ONE second authority beside the fold's own evidence. It is `true` where the
-   * committed event set provably covers the whole session (Direct's complete
-   * log; a Remote window that reached the history start), in which case
-   * availability is authoritative even with ZERO valid recent samples, and
-   * `false` for a truncated Remote window that must be judged by the SAME
-   * fold's retained evidence alone.
-   *
-   * It is committed inside the SAME fenced hydrate block that replaces the fold
-   * (never pre-computed by the caller, so a merge that adds opening-journal
-   * events cannot drift it), and it is cleared by the generation reset exactly
-   * like the fold.
-   */
-  let recentCoverageComplete = false
-
   // Coalesced repaint is surface-owned (A4-8): the runner no longer owns
   // the flush timer; the surface routing schedules its own repaint.
   // Ephemeral previews are isolated per presentation owner: the main live
@@ -399,9 +353,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     get window() { return windowController },
     get previews() { return mainStreamingToolPreviews },
     applyToolPreview: (event: Event) => applyStreamingToolPreviewEvent(mainStreamingToolPreviews, event),
-    // Forwarded to the owner's own live refresh (declared below the fold state
-    // it reads); a live accessor so a session commit cannot capture a stale one.
-    refreshRecentPerformanceAvailability: () => refreshRecentPerformanceAvailability(),
   }
 
   // Tool-call arguments by callId, for the approval-preview dialog.
@@ -418,12 +369,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const resetForGeneration = (): void => {
     callArgs.clear()
     mainStreamingToolPreviews.clear()
-    // PR5 (plan §3.2): the replacement subject has NO authoritative window
-    // yet — the recent-performance availability bit returns to `false` until
-    // the new subject's own fenced hydrate proves otherwise (the old
-    // subject's `true` must not leak into the hydrate-pending window).
-    recentPerformanceAvailable = false
-    recentCoverageComplete = false
     // The new session's subagent delegations are a fresh namespace: stale
     // pending calls from the old session would consume viewer match slots,
     // and dead callId→child maps would silently disable the auto-pop.
@@ -502,14 +447,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     readonly planActive: boolean
     readonly working: boolean
     /**
-     * F1 (PR5 §3.2): whether the event set being committed provably COVERS the
-     * whole session — Direct's complete log, or a Remote window that reached
-     * the history start (`!snapshot.hasMore`). Committed with the fold so the
-     * availability answer below is always taken from the SAME committed fold,
-     * never from a caller pre-computation over a pre-merge snapshot.
-     */
-    readonly recentCoverageComplete?: boolean
-    /**
      * The official CURRENT-VALUE facts (M3-4 PR2). Present on the Remote
      * branch, where `events` is only a BOUNDED window: the title/goal/todos of
      * a long session may have been written before the window and must come
@@ -527,18 +464,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
     statsFolder = hydrated.statsFolder
-    // PR5: the availability bit commits with the SAME fold it describes —
-    // one fenced commit, one subject (a stale hydrate cannot flip the
-    // replacement subject's bit because the §6.5 fences above already
-    // dropped it before reaching this line).
-    // F1: the ONE availability formula, answered from the fold THIS commit just
-    // installed (`statsFolder` is already `hydrated.statsFolder` above) plus the
-    // coverage fact. A merge that added opening-journal events therefore cannot
-    // drift the answer, and Direct's unconditional `true` cannot be revoked by a
-    // fold-local shrink.
-    recentCoverageComplete = input.recentCoverageComplete ?? false
-    recentPerformanceAvailable = recentCoverageComplete
-      || statsFolder.hasEnoughRecentEvidence()
     for (const liveInput of input.liveBaseline) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
@@ -645,11 +570,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       liveBaseline: deps.direct.assistantStreamBaselineFor(agent),
       planActive: deps.direct.planActive(agent),
       working: workingFromLog(events),
-      // F1 (v4 §3.2, Direct): the Direct `events` IS the complete log, so its
-      // coverage is COMPLETE by construction — the availability formula then
-      // answers `true` unconditionally and a fold-local shrink (a route change
-      // clears the retained windows) can never revoke it.
-      recentCoverageComplete: true,
     })
   }
 
@@ -708,7 +628,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // the fold retained enough valid samples for both recent windows. A
     // truncated window short of both keeps the footer's recent metrics
     // OMITTED (unknown), never a numeric zero stand-in.
-    const recentCoverageComplete = foldProven
     // The official CURRENT-VALUE facts (title/goal/todos/cwd) — their source
     // events may precede this bounded window, so the projection owns them.
     const facts = deps.remote.facts?.(sessionId)
@@ -724,9 +643,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       // which hydratePresentation expresses through the injected value.
       planActive: planActiveRemote(sessionId),
       working,
-      // PR5 (F1): only the COVERAGE fact travels with the fold; the availability
-      // answer itself is taken inside the commit, from the fold it installs.
-      recentCoverageComplete,
     })
     // The committed window revision: the caller feeds it to the live ingress
     // so the hydrate→subscribe gap is detected and recovered (never lost).
@@ -775,9 +691,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // evidence in the SAME fenced commit that replaced the fold — a
     // `loadOlder` that reaches enough samples (or the history start) flips
     // the footer's omitted metrics on with the new fold, never after it.
-    recentCoverageComplete = !snapshot.hasMore
-    recentPerformanceAvailable = recentCoverageComplete
-      || statsFolder.hasEnoughRecentEvidence()
     for (const liveInput of snapshot.liveInputs) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
@@ -792,31 +705,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
 
   const mainFolder = (): TranscriptFolder => folder
   const mainStats = (): StatsFolder => statsFolder
-  const mainRecentPerformanceAvailable = (): boolean => recentPerformanceAvailable
-  /**
-   * F1 (PR5 §3.2): the availability bit must follow the SAME fold's LIVE
-   * evidence. A bounded Remote window that committed `false` (truncated, not
-   * enough valid samples yet) can cross the completeness threshold through
-   * ordinary appended events — with no `loadOlder` and no rehydrate. Re-answer
-   * the predicate off the fold the append already updated (never a second scan
-   * or a second fold) and, when it flips, re-derive the status in the same step
-   * so the footer and `/status` stop omitting the recent figures immediately.
-   *
-   * A replacement subject returns to `false` in `resetForGeneration`, and the
-   * next fenced hydrate re-proves it (or disproves it) as before.
-   */
-  const refreshRecentPerformanceAvailability = (): void => {
-    // The fold's evidence is NOT monotonic: a route change clears BOTH recent
-    // windows, and a late authoritative message replacement can drop a
-    // throughput candidate. So the answer is re-answered in BOTH directions off
-    // the SAME fold (`recentCoverageComplete` still keeps a fully-covered window
-    // available, as v4 requires), and the status is re-derived whenever the bit
-    // actually changes — never only on the way up.
-    const next = recentCoverageComplete || statsFolder.hasEnoughRecentEvidence()
-    if (next === recentPerformanceAvailable) return
-    recentPerformanceAvailable = next
-    deps.refreshStatusCheap()
-  }
   const mainWindow = (): TranscriptWindowController => windowController
   const restoreMainTranscriptAnchor = (): void => {
     windowController.isLatest()
@@ -834,8 +722,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     main: mainPresentation,
     mainFolder,
     mainStats,
-    mainRecentPerformanceAvailable,
-    refreshRecentPerformanceAvailability,
     mainWindow,
     applyAssistantInput,
     setToolArgs,
