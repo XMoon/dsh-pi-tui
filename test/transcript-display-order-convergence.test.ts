@@ -889,3 +889,152 @@ test('T9: one anchor owns several Tool relations and re-derives them on a replac
     'every settlement re-derives the relations it anchors')
   assert.deepEqual(structureKinds(folder), ['work', 'message'])
 })
+
+// ── N1: a re-sorted side must re-order the derived read-group members ───────
+
+test('N1: re-sorting one side rebuilds the merged group member order, representative and result', () => {
+  const settlement = (bStart: number, seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-n1', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(T0 + 2_000, 0, 'reply'),
+      toolCallDeltaChunk(T0 + 3_000, 1, 'read-a', 'read'),
+      toolCallDeltaChunk(bStart, 2, 'read-b', 'read'),
+    ],
+  }, T0 + 9_000, seq)
+
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('read-a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('read-a', 1, 0, T0 + 3_500, 2, 'alpha result'),
+    readCall('read-b', 1, 0, T0 + 4_000, 3, 'b.ts'), toolResult('read-b', 1, 0, T0 + 4_500, 4, 'bravo result'),
+  ])
+  // Reply visible at +2s: BOTH reads follow it, A(+3s) before B(+4s).
+  folder.apply([settlement(T0 + 4_000, 5)])
+  let merged = toolRows(folder)
+  assert.equal(merged.length, 1, 'the two displaced reads share one merged card')
+  assert.equal(merged[0]!.callId, 'read-a')
+  assert.equal(merged[0]!.result, 'alpha result\n\nbravo result')
+  // A same-step replacement proves B materialized EARLIER than A (+2.5s): the
+  // side re-sorts, so the group itself must follow the new display order.
+  folder.apply([settlement(T0 + 2_500, 6)])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:read-b'],
+    'the merged card is now emitted at its first DISPLAY member')
+  merged = toolRows(folder)
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0]!.callId, 'read-b', 'the representative follows the display order')
+  assert.equal(merged[0]!.result, 'bravo result\n\nalpha result',
+    'the aggregated result follows the display order')
+  assert.match(merged[0]!.args, /2 files/u)
+  assert.equal(transcriptTimingOf(merged[0]!)?.startedAt, T0 + 2_500)
+})
+
+// ── N2: the regroup envelope closes over its own interior ───────────────────
+
+test('N2: a settlement whose envelope contains an earlier anchor never orphans that anchor’s group', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 1_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 1_500, 2, 'alpha'),
+    readCall('b', 1, 0, T0 + 2_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 2_500, 4, 'bravo'),
+    toolCall({ callId: 'd', name: 'read', turn: 1, step: 1, time: T0 + 3_000, seq: 5 }),
+    toolCall({ callId: 'e', name: 'read', turn: 1, step: 2, time: T0 + 4_000, seq: 6 }),
+    // Step 0's reply was visible at +0.5s: A and B follow it and merge.
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 9_000, seq: 7, text: 'reply zero',
+      stream: [
+        textChunk(T0 + 500, 0, 'reply zero'),
+        toolCallDeltaChunk(T0 + 1_000, 1, 'a', 'read'),
+        toolCallDeltaChunk(T0 + 2_000, 2, 'b', 'read'),
+      ],
+    }),
+    toolCall({ callId: 'c', name: 'bash', turn: 1, step: 3, time: T0 + 6_000, seq: 8 }),
+    // Step 2's reply was visible at +3.5s: E follows it. The regroup envelope now
+    // CONTAINS step 0's anchor while A/B sit outside the raw range.
+    assistantSettlement({
+      turn: 1, step: 2, time: T0 + 9_100, seq: 9, text: 'reply two',
+      stream: [textChunk(T0 + 3_500, 0, 'reply two'), toolCallDeltaChunk(T0 + 4_000, 1, 'e', 'read')],
+    }),
+  ])
+  const rows = toolRows(folder)
+  assert.equal(rows.length, 4, 'D, the merged A+B card, C and E are four output cards')
+  const mergedCard = rows.filter(row => row.args === '2 files')
+  assert.equal(mergedCard.length, 1, 'exactly ONE merged card exists (no orphaned duplicate group)')
+  // The window summary counts the same output cards the projection emits.
+  folder.apply([
+    turnStart(2, T0 + 20_000, 10),
+    eventAt('user/message', {
+      id: 'u2', role: 'user', content: [{ type: 'text', text: 'later turn' }], source: { kind: 'user' },
+    }, T0 + 20_100, 11),
+  ])
+  const summary = folder.window({ maxTurns: 1 }).messages[0]
+  assert.ok(summary !== undefined && summary.kind === 'summary')
+  assert.match(summary.text, /4 tool calls/u,
+    `the earlier turn's summary must count the four emitted cards:\n${summary.text}`)
+})
+
+// ── N3: a replacement drops the call's eligibility for a LATER durable call ──
+
+test('N3: a replacement that stops naming a call removes its eligibility for a later durable call', () => {
+  const settlement = (stream: readonly Record<string, unknown>[], seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-n3', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream,
+  }, T0 + 6_000, seq)
+  const folder = new TranscriptFolder()
+  folder.apply([turnStart(1, T0, 0)])
+  // The first settlement names A (reply visible at +2s, A preparing at +1s).
+  folder.apply([settlement([textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 1_000, 1, 'a', 'bash')], 1)])
+  // The authoritative replacement drops A entirely.
+  folder.apply([settlement([textChunk(T0 + 2_000, 0, 'reply')], 2)])
+  // A's durable call now arrives: with no current candidate it must NOT be
+  // displaced before the Conversation.
+  folder.apply([
+    toolCall({ callId: 'a', name: 'bash', turn: 1, step: 0, time: T0 + 3_000, seq: 3 }),
+    toolResult('a', 1, 0, T0 + 3_500, 4, 'ok'),
+  ])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:a'],
+    'the replacement removed the call from this step’s candidates')
+})
+
+test('N3b: two steps that request the same call id each keep their own eligibility', () => {
+  const folder = new TranscriptFolder()
+  const blockSettlement = (
+    step: number,
+    visibleAt: number,
+    seq: number,
+    args: string,
+  ): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step,
+    message: {
+      id: `m-shared-${step}`, role: 'assistant',
+      content: [
+        { type: 'text', text: `reply ${step}` },
+        { type: 'tool-call', id: 'shared', name: 'bash', arguments: args },
+      ],
+      source: { kind: 'assistant' },
+    },
+    stream: [textChunk(visibleAt, 0, `reply ${step}`)],
+  }, T0 + 9_000 + step, seq)
+  folder.apply([turnStart(1, T0, 0)])
+  folder.apply([blockSettlement(0, T0 + 2_000, 1, '{"step":0}')])
+  folder.apply([blockSettlement(1, T0 + 4_000, 2, '{"step":1}')])
+  // Both durable calls arrive after BOTH settlements: each is owned by its own
+  // step's block and must converge before its own Conversation.
+  folder.apply([
+    toolCall({ callId: 'shared', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 3, args: '{"step":0}' }),
+    toolResult('shared', 1, 0, T0 + 1_500, 4, 'zero'),
+    toolCall({ callId: 'shared', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 5, args: '{"step":1}' }),
+    toolResult('shared', 1, 1, T0 + 3_500, 6, 'one'),
+  ])
+  assert.deepEqual(folder.messages().map(message => message.kind),
+    ['tool', 'assistant', 'tool', 'assistant'],
+    'each step’s own call sits before its own Conversation')
+  assert.deepEqual(toolRows(folder).map(row => row.args), ['{"step":0}', '{"step":1}'])
+})
