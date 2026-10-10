@@ -303,41 +303,28 @@ test('an interleaved step derives the SAME Activity lifetime live and cold (revi
   assert.match(headerAt(coldSpan, coldClock, T0 + 60_000), /Activity 58s/u)
 })
 
-test('pinned divergence (F6): a same-step text-before-tool settlement still splits the LIVE run and not the cold one', () => {
-  // The canonical Work MEMBERSHIP is owned by the fold's row order, not by this
-  // clock. Live materializes the assistant row at its first visible text (+2s,
-  // before the step's tool row at +3s); cold appends the durable settlement
-  // after that tool row, so the two tools become ONE contiguous Process run.
-  // Read grouping merges raw-adjacent reads, so a display-only displacement
-  // cannot repair this: it needs the fold's display-order unit (tracked
-  // separately). This differential test is that unit's red-to-green witness.
+test('F6 parity: a same-step text-before-tool settlement derives the SAME Work partition live and cold', () => {
+  // This test used to be the RED witness of the F6 divergence: the durable
+  // settlement was appended at its own event index, so cold showed
+  // `[Work c1+c2, assistant]` (ONE Activity, ending at the member floor) while
+  // live showed `[Work c1, assistant, Work c2]` (TWO). The fold's display-order
+  // convergence now displaces the step's Tool row around the Assistant anchor
+  // from the durable stream's own evidence, so the canonical MEMBERSHIP (and
+  // therefore the lifetime) is identical in both folds. The original divergence
+  // is preserved in the commit history and in
+  // `test/transcript-display-order-convergence.test.ts` (T1), never by deleting
+  // this witness.
   const events = (): SessionEvent[] => [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     // Different tool names on purpose: two consecutive settled READS would be
-    // merged into ONE read-group card by the fold's raw-adjacency grouping,
-    // which is an even stronger form of the same ownership divergence.
+    // merged into ONE read-group card by the fold's read grouping.
     eventAt('tool/call', { turn: 1, step: 0, callId: 'c1', name: 'bash', arguments: '{}' }, T0 + 1_000, 1),
-    eventAt('tool/result', {
-      turn: 1, step: 0,
-      message: {
-        id: 'r1', role: 'tool', toolCallId: 'c1',
-        content: [{ type: 'text', text: 'a' }], source: { kind: 'tool', callId: 'c1' },
-      },
-    }, T0 + 1_500, 2),
+    toolResult('c1', T0 + 1_500, 2),
     eventAt('tool/call', { turn: 1, step: 1, callId: 'c2', name: 'read', arguments: '{"file_path":"b"}' }, T0 + 3_000, 3),
-    eventAt('tool/result', {
-      turn: 1, step: 1,
-      message: {
-        id: 'r2', role: 'tool', toolCallId: 'c2',
-        content: [{ type: 'text', text: 'b' }], source: { kind: 'tool', callId: 'c2' },
-      },
-    }, T0 + 4_000, 4),
+    toolResult('c2', T0 + 4_000, 4),
     eventAt('assistant/message', {
       turn: 1, step: 1,
-      message: {
-        id: 'm1', role: 'assistant',
-        content: [{ type: 'text', text: 'let me check' }], source: { kind: 'assistant' },
-      },
+      message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'let me check' }], source: { kind: 'assistant' } },
       stream: [
         { type: 'chunk', time: T0 + 2_000, chunk: { type: 'text-delta', index: 0, text: 'let me check' } },
         { type: 'chunk', time: T0 + 3_000, chunk: { type: 'tool-call-delta', index: 1, id: 'c2', name: 'read', argumentsDelta: '{}' } },
@@ -353,27 +340,24 @@ test('pinned divergence (F6): a same-step text-before-tool settlement still spli
   })
   live.apply([events()[3]!, events()[4]!, events()[5]!])
 
-  const coldStructure = projectTranscriptStructure(cold.messages())
-  const liveStructure = projectTranscriptStructure(live.messages())
   const coldAnalysis = analyze(cold)
   const liveAnalysis = analyze(live)
-  // VISIBLE ROW ORDER: the live fold shows the Conversation BEFORE the second
-  // tool row; cold shows it after both.
-  assert.deepEqual(live.messages().map(message => message.kind), ['tool', 'assistant', 'tool'])
-  assert.deepEqual(cold.messages().map(message => message.kind), ['tool', 'tool', 'assistant'])
-  // CANONICAL STRUCTURE: two Work spans live, one cold.
-  assert.deepEqual(coldStructure.map(block => block.kind), ['work', 'message'])
-  assert.deepEqual(liveStructure.map(block => block.kind), ['work', 'message', 'work'])
+  assert.deepEqual(cold.messages().map(message => message.kind), live.messages().map(message => message.kind),
+    'the visible row order converges')
+  assert.deepEqual(cold.messages().map(message => message.kind), ['tool', 'assistant', 'tool'])
+  assert.deepEqual(projectTranscriptStructure(cold.messages()).map(block => block.kind),
+    projectTranscriptStructure(live.messages()).map(block => block.kind))
+  assert.equal(coldAnalysis.spans.length, 2, 'cold now shows the two Activities the live fold shows')
   assert.equal(liveAnalysis.spans.length, 2)
-  assert.equal(coldAnalysis.spans.length, 1)
-  // LIFETIMES: each fold is internally consistent, but they describe different
-  // Activities for the same event sequence.
-  assert.deepEqual(liveAnalysis.lifetimes.get(liveAnalysis.spans[0]!.owner),
-    { startedAt: T0 + 1_000, endedAt: T0 + 2_000, open: false, trailing: false })
-  assert.deepEqual(liveAnalysis.lifetimes.get(liveAnalysis.spans[1]!.owner),
-    { startedAt: T0 + 3_000, open: true, trailing: true })
   assert.deepEqual(coldAnalysis.lifetimes.get(coldAnalysis.spans[0]!.owner),
-    { startedAt: T0 + 1_000, endedAt: T0 + 4_000, open: false, trailing: true })
+    liveAnalysis.lifetimes.get(liveAnalysis.spans[0]!.owner),
+    'Work A closes at the Conversation in both folds')
+  assert.deepEqual(coldAnalysis.lifetimes.get(coldAnalysis.spans[0]!.owner),
+    { startedAt: T0 + 1_000, endedAt: T0 + 2_000, open: false, trailing: false })
+  assert.deepEqual(coldAnalysis.lifetimes.get(coldAnalysis.spans[1]!.owner),
+    liveAnalysis.lifetimes.get(liveAnalysis.spans[1]!.owner))
+  assert.deepEqual(coldAnalysis.lifetimes.get(coldAnalysis.spans[1]!.owner),
+    { startedAt: T0 + 3_000, open: true, trailing: true })
 })
 
 test('a settled surfaced interaction closes the preceding Activity at the tool start, not the human wait', () => {

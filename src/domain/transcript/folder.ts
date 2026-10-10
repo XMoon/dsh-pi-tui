@@ -703,13 +703,24 @@ export class TranscriptFolder {
    * are pure presentation order — every raw-index-keyed structure (search
    * ids, turn boundaries, read groups, compaction/workflow cards) keeps its
    * physical meaning and needs no remap. Mutate ONLY through
-   * `setLaneDisplay`/`dropLaneDisplayFor` (they keep the two inverse maps
+   * `setLaneDisplay`/`dropLaneDisplacement`/`dropLaneAnchor` (they keep the two inverse maps
    * in sync and bump the search revision). */
   private readonly laneDisplayByDisplaced = new Map<number, { anchor: number; position: 'before' | 'after' }>()
-  /** Inverse of {@link laneDisplayByDisplaced}: anchor Assistant row → the
-   * displaced Thinking row emitted at the anchor during
-   * `displayOrderedRawIds`. */
-  private readonly laneDisplayByAnchor = new Map<number, number>()
+  /** Inverse of {@link laneDisplayByDisplaced}: one anchor row (the settled
+   * Assistant row of a step) → the rows emitted around it during
+   * `displayOrderedRawIds`. `before`/`after` keep the displaced raw indexes in
+   * RAW order, so the emitted sequence is deterministic and evidence-backed
+   * rather than dependent on the order relations were recorded in. One anchor
+   * owns at most one Thinking lane row (the existing lane authority) plus the
+   * step's Tool rows whose own materialization time proves they belong on the
+   * other side of the Conversation. */
+  private readonly laneDisplayByAnchor = new Map<number, { before: number[]; after: number[] }>()
+  /** Raw item index of each GENUINE `tool/call` card, by call id. The index is
+   * recorded once at append and the card's object identity is re-verified
+   * before use, so a stale index can never displace another row. This is NOT a
+   * replacement for `pendingCalls` (that one is deleted when the call settles
+   * and never owns a long-lived identity). */
+  private readonly toolCardIndexOf = new Map<string, number>()
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
    * completed block replaces the entire indexed state without duplication. */
@@ -860,7 +871,7 @@ export class TranscriptFolder {
   private readonly dirtySearchEntries = new Set<number>()
   /** Bumped on EVERY search-projection change — entry mutation (append,
    * settlement, group reflow) AND display-order change (lane displacement
-   * via `setLaneDisplay`/`dropLaneDisplayFor`): the projection's content
+   * via `setLaneDisplay`/`dropLaneDisplacement`/`dropLaneAnchor`): the projection's content
    * and its ORDER are both part of the revision, so query refinement must
    * not reuse previous candidates across one. */
   private searchRevisionCounter = 0
@@ -2144,7 +2155,7 @@ export class TranscriptFolder {
     // A tombstoned anchor Assistant row can no longer honor a display
     // displacement — drop the mapping so the Thinking lane falls back to
     // its physical slot (the raw index stays the stable TranscriptItemId).
-    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`assistant:${key}`) ?? -1)
+    this.dropLaneAnchor(this.searchIndexByStepKey.get(`assistant:${key}`) ?? -1)
     const activity = this.activityByTurn.get(turn)
     const clearLatestVisibility = activity !== undefined
       && activity.lastAssistantStep === step
@@ -2651,6 +2662,54 @@ export class TranscriptFolder {
     return projection?.firstLane ?? contentLaneOrder(blocks)
   }
 
+  /** Converge the step's TOOL rows around its Assistant anchor from each row's
+   *  own materialization evidence.
+   *
+   * The durable settlement is appended at its own event index, while a Tool row
+   * materializes when its earliest evidence arrived (a Preparing delta or the
+   * durable `tool/call`). For a step whose first VISIBLE assistant text preceded
+   * a later Tool call, the cold fold therefore showed `Work[c1, c2] → Assistant`
+   * where the live fold showed `Work[c1] → Assistant → Work[c2]`.
+   *
+   * The evidence is per-step and identity-based: only the call ids the step's
+   * OWN durable stream requested (`toolCallStarts`) are considered, resolved
+   * through the recorded raw index and re-verified against the live card object.
+   * A Tool whose own start is unknown, or equal to the first visible text, gets
+   * NO displacement — an unprovable order is never guessed. Re-application is
+   * idempotent (the relation is only recorded when it actually changes). */
+  private convergeStepToolOrder(turn: number, step: number, projection: AssistantStreamProjection | undefined): void {
+    const toolCallStarts = projection?.toolCallStarts
+    if (toolCallStarts === undefined || toolCallStarts.size === 0) return
+    const key = stepKey(turn, step)
+    const assistantRow = this.assistantEntries.get(key)
+    const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
+    if (assistantRow === undefined || assistantIndex === undefined) return
+    const visibleAt = transcriptTimingOf(assistantRow)?.startedAt
+    // No proven first-visible time: the durable append order is the only
+    // evidence — leave every Tool where it is.
+    if (visibleAt === undefined) return
+    for (const callId of toolCallStarts.keys()) {
+      const index = this.toolCardIndexOf.get(callId)
+      const card = index === undefined ? undefined : this.items[index]
+      if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) continue
+      // A call id reused by another turn is never THIS step's evidence.
+      if (card.turn !== turn) continue
+      const startedAt = transcriptTimingOf(card)?.startedAt
+      if (startedAt === undefined || startedAt === visibleAt) {
+        // Unknown or equal evidence cannot prove which side came first.
+        this.dropLaneDisplacement(index)
+        continue
+      }
+      const shouldFollow = startedAt > visibleAt
+      if (shouldFollow === (index > assistantIndex)) {
+        // Already in the physical position the evidence asks for.
+        this.dropLaneDisplacement(index)
+        continue
+      }
+      this.setLaneDisplay(index, assistantIndex, shouldFollow ? 'after' : 'before')
+    }
+  }
+
   /** Converge one step's Thinking/Assistant rows to its stored lane
    * authority. When the physical append order contradicts the authority (a
    * lane materialized after the step already owned the other row — same-step
@@ -2671,34 +2730,15 @@ export class TranscriptFolder {
     const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
     if (thinkingIndex === undefined || assistantIndex === undefined) return
     if ((thinkingIndex < assistantIndex) === (authority === 'thinking')) {
-      // Conformant: drop stale mappings from an earlier flipped authority.
-      this.dropLaneDisplayFor(thinkingIndex)
-      this.dropLaneDisplayFor(assistantIndex)
+      // Conformant: drop a stale mapping from an earlier flipped authority —
+      // ONLY the Thinking relation, never the step's Tool displacements that
+      // share this Assistant anchor.
+      this.dropLaneDisplacement(thinkingIndex)
       return
     }
     // The Assistant row anchors the step; the Thinking row is displayed
     // immediately before (thinking-first) or after (assistant-first) it.
     this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after')
-  }
-
-  /** Drop any lane display mapping that references one raw item index (as
-   * displaced row or as anchor). Called when a lane row is tombstoned so a
-   * stale mapping can never strand the surviving row's display slot. Bumps
-   * the search revision only when a mapping was actually removed. */
-  private dropLaneDisplayFor(index: number): void {
-    const entry = this.laneDisplayByDisplaced.get(index)
-    if (entry !== undefined) {
-      this.laneDisplayByDisplaced.delete(index)
-      this.laneDisplayByAnchor.delete(entry.anchor)
-      this.searchRevisionCounter += 1
-      return
-    }
-    const displaced = this.laneDisplayByAnchor.get(index)
-    if (displaced !== undefined) {
-      this.laneDisplayByAnchor.delete(index)
-      this.laneDisplayByDisplaced.delete(displaced)
-      this.searchRevisionCounter += 1
-    }
   }
 
   /** THE single display-order traversal of the raw items: raw physical
@@ -2714,18 +2754,17 @@ export class TranscriptFolder {
    * pair together; an arbitrary raw slice could split one. */
   private *displayOrderedRawIds(start = 0, end: number = this.items.length - 1): Iterable<number> {
     for (let index = start; index <= end; index += 1) {
-      // A displaced lane row is emitted at its anchor below, never at its
-      // physical slot.
+      // A displaced row is emitted at its anchor below, never at its physical
+      // slot (so every visible raw index is yielded exactly once).
       if (this.laneDisplayByDisplaced.has(index)) continue
-      const displaced = this.laneDisplayByAnchor.get(index)
-      if (displaced === undefined) {
+      const owned = this.laneDisplayByAnchor.get(index)
+      if (owned === undefined) {
         yield index
         continue
       }
-      const placement = this.laneDisplayByDisplaced.get(displaced)
-      if (placement?.position === 'before') yield displaced
+      for (const displaced of owned.before) yield displaced
       yield index
-      if (placement?.position === 'after') yield displaced
+      for (const displaced of owned.after) yield displaced
     }
   }
 
@@ -2739,8 +2778,47 @@ export class TranscriptFolder {
   private setLaneDisplay(displaced: number, anchor: number, position: 'before' | 'after'): void {
     const current = this.laneDisplayByDisplaced.get(displaced)
     if (current?.anchor === anchor && current.position === position) return
+    if (current !== undefined) this.removeDisplacedRelation(displaced, current)
     this.laneDisplayByDisplaced.set(displaced, { anchor, position })
-    this.laneDisplayByAnchor.set(anchor, displaced)
+    const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
+    this.laneDisplayByAnchor.set(anchor, owned)
+    const list = position === 'before' ? owned.before : owned.after
+    list.push(displaced)
+    list.sort((left, right) => left - right)
+    this.searchRevisionCounter += 1
+  }
+
+  /** Remove ONE displaced row's relation, leaving the anchor's OTHER displaced
+   *  rows (its Thinking lane row, the step's other Tool rows) untouched. */
+  private dropLaneDisplacement(displaced: number): void {
+    const current = this.laneDisplayByDisplaced.get(displaced)
+    if (current === undefined) return
+    this.removeDisplacedRelation(displaced, current)
+  }
+
+  /** Remove EVERY relation anchored at `anchor` — its displaced rows fall back
+   *  to their physical slots. Used when the anchor row itself is tombstoned. */
+  private dropLaneAnchor(anchor: number): void {
+    const owned = this.laneDisplayByAnchor.get(anchor)
+    if (owned === undefined) return
+    for (const displaced of [...owned.before, ...owned.after]) {
+      this.laneDisplayByDisplaced.delete(displaced)
+    }
+    this.laneDisplayByAnchor.delete(anchor)
+    this.searchRevisionCounter += 1
+  }
+
+  /** The shared inverse-map removal: drop the forward record, the anchor's list
+   *  entry and (when it was the last one) the anchor record itself. */
+  private removeDisplacedRelation(displaced: number, current: { anchor: number; position: 'before' | 'after' }): void {
+    this.laneDisplayByDisplaced.delete(displaced)
+    const owned = this.laneDisplayByAnchor.get(current.anchor)
+    if (owned !== undefined) {
+      const list = current.position === 'before' ? owned.before : owned.after
+      const at = list.indexOf(displaced)
+      if (at !== -1) list.splice(at, 1)
+      if (owned.before.length === 0 && owned.after.length === 0) this.laneDisplayByAnchor.delete(current.anchor)
+    }
     this.searchRevisionCounter += 1
   }
 
@@ -3198,7 +3276,7 @@ export class TranscriptFolder {
 
   /** The search-projection revision: bumped on EVERY projection change —
    * entry mutations (append, settlement, group reflow) and lane
-   * display-order mutations (`setLaneDisplay`/`dropLaneDisplayFor`). The
+   * display-order mutations (`setLaneDisplay`/`dropLaneDisplacement`/`dropLaneAnchor`). The
    * runner's query refinement must never reuse previous candidates across
    * a revision — the projection may hold new matches OR a new match order
    * the old candidate list cannot see. */
@@ -3360,7 +3438,7 @@ export class TranscriptFolder {
     // A tombstoned lane row can no longer honor a display displacement —
     // drop the mapping so the surviving lane falls back to its physical
     // slot (the raw index stays the stable TranscriptItemId).
-    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`thinking:${key}`) ?? -1)
+    this.dropLaneDisplacement(this.searchIndexByStepKey.get(`thinking:${key}`) ?? -1)
     entry.text = ''
     this.closeThinking(entry)
     this.thinkingEntries.delete(key)
@@ -4072,6 +4150,9 @@ export class TranscriptFolder {
         if (alreadySettled || !thinkingRowPreExisting) {
           this.convergeStepLaneOrder(event.data.turn, event.data.step)
         }
+        // Converge this step's Tool rows around the Assistant anchor from the
+        // SAME durable stream evidence (idempotent on repeated settlements).
+        this.convergeStepToolOrder(event.data.turn, event.data.step, projection)
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
@@ -4194,6 +4275,11 @@ export class TranscriptFolder {
         // non-completed activity for the turn).
         if (this.activityByTurn.get(callTurn)?.completed === true) markPostTurnReplayEvidence(card)
         this.appendItem(card)
+        // Long-lived identity for the display-order convergence: the card's raw
+        // index by call id (its object identity is re-verified before use).
+        // `pendingCalls` cannot serve here — it is deleted once the call
+        // settles.
+        this.toolCardIndexOf.set(key, this.items.length - 1)
         this.pendingCalls.set(key, {
           name: event.data.name,
           args: event.data.arguments,
