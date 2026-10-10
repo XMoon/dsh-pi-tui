@@ -252,19 +252,22 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * opening target are retired by ONE rule. The official request is untouched: its
    * own abort still settles it `cancelled`.
    */
-  const withdrawReplacedApprovals = (): AbortSignal[] => {
-    if (options.isCleanedUp()) return []
+  const withdrawReplacedApprovals = (): { lifetimes: AbortSignal[]; settle: Array<() => void> } => {
+    if (options.isCleanedUp()) return { lifetimes: [], settle: [] }
     const lifetimes: AbortSignal[] = []
+    const settle: Array<() => void> = []
     for (const [lifetime, live] of [...liveApprovals]) {
       if (isAdmissible(live.sessionId)) continue
       liveApprovals.delete(lifetime)
       lifetimes.push(lifetime)
-      // P2-2: a request with no Host lifetime has no other owner that could ever
-      // settle it, so the replacement does — and only that KIND of request: a
-      // request carrying a Host signal keeps the Host's own settlement right.
-      live.retire?.()
+      // P2-2/P2-E: a request with no Host lifetime has no other owner that could
+      // ever settle it, so the replacement will — but only AFTER the presentation
+      // batch below (its synchronous abort would otherwise settle its slot before
+      // the batch and promote another replaced slot). A request carrying a Host
+      // signal keeps the Host's own settlement right.
+      if (live.retire !== undefined) settle.push(live.retire)
     }
-    return lifetimes
+    return { lifetimes, settle }
   }
 
   /**
@@ -284,14 +287,22 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    */
   const withdrawReplacedPresentation = (): void => {
     if (options.isCleanedUp()) return
-    const questions = questionController?.withdrawReplacedPresentation() ?? { dropped: false, lifetimes: [] }
+    // The three SYNCHRONOUS steps of one publication (external reviews P2-D/P2-E):
+    // 1. COLLECT — the model parts with every replaced presentation and hands back
+    //    the lifetimes plus the deferred local settlement; nothing is aborted yet.
+    const questions = questionController?.withdrawReplacedPresentation()
+      ?? { dropped: false, lifetimes: [], settle: () => {} }
     const approvals = withdrawReplacedApprovals()
-    // ONE atomic withdrawal for the whole publication (external review P2-D):
-    // every replaced presentation leaves the seat before the successor is picked,
-    // so no member of this batch is ever promoted (or painted) in between.
-    options.livePresenter()?.withdrawPresentations([...questions.lifetimes, ...approvals])
+    // 2. WITHDRAW — ONE atomic batch: every replaced presentation leaves the seat
+    //    before the successor is picked, so no member of it is ever promoted (or
+    //    painted) in between, and the successor takes the seat in that same frame.
+    options.livePresenter()?.withdrawPresentations([...questions.lifetimes, ...approvals.lifetimes])
     options.livePresenter()?.closeTransientList()
-    const dropped = questions.dropped || approvals.length > 0
+    // 3. SETTLE — only now do the local aborts run; the slots they settle have
+    //    already left the seat, so no settlement can promote a replaced slot.
+    questions.settle()
+    for (const run of approvals.settle) run()
+    const dropped = questions.dropped || approvals.lifetimes.length > 0
     // The replaced subject's parked count must not remain on screen, and this
     // commit-time half must NOT read the Host to re-derive it: the stale count is
     // cleared locally here and the full reconcile (hydration / activity)

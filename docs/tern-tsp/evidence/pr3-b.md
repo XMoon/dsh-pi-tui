@@ -16,8 +16,9 @@
 > initialization window), both fixed in round 12, one more on the next round
 > (the commit-section half must perform no Host read) — fixed in round 13 — and a
 > final one (several replaced modals must leave as ONE atomic batch) — fixed in
-> round 14. F6/C is kept PARTIAL here until the external review closes the delivery
-> status; B4 pending.**
+> round 14 — and its ordering twin (the local settlements must run AFTER that
+> batch) — fixed in round 15. F6/C is kept PARTIAL here until the external review
+> closes the delivery status; B4 pending.**
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
@@ -1369,3 +1370,40 @@ one presenter call per lifetime turns the production witness RED on exactly "the
 publication handed the renderer ONE batch with both replaced prompts" (and the
 seat-level witness stays green, because it guards the seat's own batch semantics —
 the two witnesses cover the two halves).
+
+### Round 15 — the external review's fifth round (P2-E: settle AFTER the batch)
+
+The fifth round confirmed round 14 and found the ordering twin of the same defect:
+the batch API itself was correct, but the callers ran their local settlements
+BEFORE calling it. An active signal-less approval's `retire()` aborts its lifetime,
+whose abort listener settles that slot SYNCHRONOUSLY — and the seat's settlement
+promotes the next queued slot and renders it (a replaced modal painted under the
+already-published replacement) before the batch ever runs. The same held for the
+mounted continued forms, whose `removeEntry` aborted their mount controller while
+other replaced slots were still in the seat.
+
+FIX: the publication pass is now three SYNCHRONOUS steps with no await anywhere:
+(1) COLLECT — the controller and the interaction owner take every replaced
+presentation out of their models and return the lifetimes to withdraw plus the
+DEFERRED local settlement (the signal-less flows' retirement and the mounted
+continued forms' mount aborts), aborting nothing; (2) WITHDRAW — one batched
+`withdrawPresentations(lifetimes)` call takes every replaced slot out of the seat
+and commits ONE layer/focus frame; (3) SETTLE — only then do the deferred aborts
+run, and because their slots already left the seat, a settlement can no longer
+promote (or paint) a replaced slot. Host-owned requests are untouched throughout:
+the batch never settles them, and their `ASK_ABORTED` / `cancelled` classification
+is unchanged.
+
+WITNESSES (both on the real surface runtime, with the SESSION's own rendered `layer`
+regions recorded — the deterministic observation the wire cannot give, since SDK
+flow control may coalesce an intermediate frame away): (a) a signal-less ACTIVE
+approval plus a signal-bearing QUEUED one; (b) a MOUNTED continued form plus a
+queued approval. Each asserts that NO frame of the publication presents a replaced
+modal, that the publication handed the renderer ONE batch of two, that the
+signal-less request is settled by its owner while the Host-owned one is untouched
+until the Host ends it (and that the dropped continued form sent no late answer),
+and that the replacement's own input still works.
+
+DISCRIMINATION (`sha256 -c` verified restore): running the settle step BEFORE the
+batch turns BOTH witnesses RED on exactly "no frame of the publication presents a
+replaced modal" / "…the mounted continued form or the queued replaced approval".

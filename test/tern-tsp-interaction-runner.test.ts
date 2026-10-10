@@ -274,6 +274,8 @@ interface RunnerHarness {
    * replaced modal (which would promote and paint a member of the batch).
    */
   readonly withdrawalBatches: number[]
+  /** Every rendered `layer` region, in order (P2-E: no replaced modal may appear). */
+  readonly layerRenders: string[]
 }
 
 async function mountRunnerHarness(options: {
@@ -370,6 +372,24 @@ async function mountRunnerHarness(options: {
   })
   surface.attachEventRouting(source)
   const withdrawalBatches: number[] = []
+  /**
+   * Every `layer` region the TSP session actually RENDERED, in order (external
+   * review P2-E): an intermediate frame that promotes a replaced modal is
+   * deterministic here even when SDK flow control coalesces it away from the wire.
+   */
+  const layerRenders: string[] = []
+  const originalOpen = session.open
+  ;(session as unknown as { open: (...args: unknown[]) => unknown }).open = (...args: unknown[]) => {
+    const opened = (originalOpen as (...callArgs: unknown[]) => unknown).call(session, ...args) as {
+      render(view: { readonly layer?: unknown }): unknown
+    }
+    const originalRender = opened.render
+    opened.render = (view: { readonly layer?: unknown }) => {
+      layerRenders.push(JSON.stringify(view.layer ?? null))
+      return originalRender.call(opened, view)
+    }
+    return opened
+  }
   const renderer: SurfaceRendererMount = {
     mount: () => {
       mountedRenderer = mountTspRenderer(session, { requestExit: () => { exitCount += 1 } })
@@ -439,6 +459,7 @@ async function mountRunnerHarness(options: {
     setSession: (sessionId: string) => { currentSessionId = sessionId; plane.currentSessionId = sessionId },
     cancelCalls: () => cancelCalls,
     withdrawalBatches,
+    layerRenders,
     route: event => { surface.routeSessionEvent({ id: currentSessionId } as never, event as never) },
     async dispose() {
       surface.dispose()
@@ -1532,6 +1553,107 @@ test('B3 P2-D: a publication withdraws several replaced approvals atomically and
     assert.equal(first, 'cancelled')
     assert.equal(second, 'cancelled')
     assert.equal(successor, 'cancelled')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── External review P2-E: the SETTLE step must not run before the batch ──────
+
+test('B3 P2-E: a signal-less ACTIVE approval plus a signal-bearing QUEUED one leave in ONE batch', async () => {
+  const harness = await mountRunnerHarness()
+  try {
+    const aRef = { session: { id: SESSION_ID } }
+    const secondAbort = new AbortController()
+    let firstOutcome: string | undefined
+    let secondOutcome: string | undefined
+    // A1 is ACTIVE and carries NO Host lifetime (its settlement is ours to defer);
+    // A2 is QUEUED behind it and carries one.
+    void harness.approvalRequest({ agent: aRef, toolName: 'bash', reason: 'A first' })
+      .then(value => { firstOutcome = String(value) })
+    void harness.approvalRequest({ agent: aRef, toolName: 'bash', reason: 'A second', signal: secondAbort.signal })
+      .then(value => { secondOutcome = String(value) })
+    await waitFor(() => overlayAdds(harness.tern.ops()).length === 1, 'the first prompt is presented')
+    const rendersBefore = harness.layerRenders.length
+
+    harness.setSession('session-b')
+    harness.surface.reconcileInteractionPresentation()
+    const pass = harness.layerRenders.slice(rendersBefore)
+    assert.equal(pass.some(layer => layer.includes('A first') || layer.includes('A second')), false,
+      'no frame of the publication presents a replaced modal (the deferred settlement cannot promote one)')
+    assert.deepEqual(harness.withdrawalBatches, [2], 'both replaced prompts left in ONE batch')
+
+    // The signal-less request is settled by THIS owner at the publication...
+    await waitFor(() => firstOutcome !== undefined, 'the signal-less request settled at the publication')
+    assert.equal(firstOutcome, 'cancelled', 'fail-closed, never an allow')
+    // ...while the Host-owned one keeps its own lifetime.
+    assert.equal(secondOutcome, undefined, 'the Host-owned request is untouched by the publication')
+    secondAbort.abort()
+    await waitFor(() => secondOutcome !== undefined, 'the Host-owned request settled by the Host')
+    assert.equal(secondOutcome, 'cancelled')
+
+    // The replacement's own input still works.
+    const bAbort = new AbortController()
+    let bOutcome: string | undefined
+    void harness.approvalRequest({ agent: { session: { id: 'session-b' } }, toolName: 'bash', reason: 'B request', signal: bAbort.signal })
+      .then(value => { bOutcome = String(value) })
+    await waitFor(() => overlayAdds(harness.tern.ops()).length === 2, 'the replacement presents its own request')
+    harness.tern.key('y')
+    await waitFor(() => bOutcome === 'allowed-once', 'the replacement request is answered normally')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B3 P2-E: a MOUNTED continued form plus a QUEUED approval leave in ONE batch', async () => {
+  const harness = await mountRunnerHarness({
+    projection: {
+      active: [{
+        callId: 'call-p2e-continued',
+        questions: [{ id: 'q-p2e', question: 'Continued?', options: [{ label: 'yes' }] }],
+        state: 'continued',
+      }],
+      settled: [],
+    },
+  })
+  try {
+    await waitFor(() => harness.tern.output.text().includes('Continued questions: 1'), 'the parked count')
+    harness.tern.key('\x1bq')
+    await waitFor(() => harness.tern.output.text().includes('call-p2e-continued'), 'the list shows the parked call')
+    harness.tern.key('\r')
+    await waitFor(() => harness.tern.output.text().includes('Continued?'), 'the continued form is MOUNTED')
+
+    const aRef = { session: { id: SESSION_ID } }
+    const approvalAbort = new AbortController()
+    let approvalOutcome: string | undefined
+    void harness.approvalRequest({ agent: aRef, toolName: 'bash', reason: 'A queued approval', signal: approvalAbort.signal })
+      .then(value => { approvalOutcome = String(value) })
+    await waitFor(() => overlayAdds(harness.tern.ops()).length >= 1, 'the queued approval is registered')
+    const rendersBefore = harness.layerRenders.length
+
+    harness.setSession('session-b')
+    harness.surface.reconcileInteractionPresentation()
+    const pass = harness.layerRenders.slice(rendersBefore)
+    assert.equal(pass.some(layer => layer.includes('Continued?') || layer.includes('A queued approval')), false,
+      'no frame of the publication presents the mounted continued form or the queued replaced approval')
+    assert.deepEqual(harness.withdrawalBatches, [2],
+      'the mounted form\'s lifetime joined the queued approval in ONE batch')
+
+    approvalAbort.abort()
+    await waitFor(() => approvalOutcome !== undefined, 'the queued approval settled through its own lifetime')
+    assert.equal(approvalOutcome, 'cancelled')
+    assert.deepEqual(harness.plane.continuedAnswers, [], 'the dropped continued form sent no late answer')
+
+    // The replacement's own input still works (its own Question is answered).
+    const current = harness.questionRequest({
+      agent: { session: { id: 'session-b' } },
+      wait: { callId: 'call-p2e-b' },
+      questions: [{ id: 'q-p2e-b', question: 'B request?', options: [{ label: 'yes' }] }],
+    })
+    await waitFor(() => overlayAdds(harness.tern.ops()).length >= 2, 'the replacement presents its own Question')
+    harness.tern.key('\r')
+    harness.tern.key('\r')
+    assert.deepEqual(await current, { answers: [{ id: 'q-p2e-b', selected: ['yes'] }] })
   } finally {
     await harness.dispose()
   }
