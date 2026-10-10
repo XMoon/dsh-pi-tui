@@ -1453,7 +1453,7 @@ control-key matrix is recorded in the chapter at the end of this document.
 > attestation-only physical sub-items were reviewed by the owner, who recorded
 > attestation as the accepted closing evidence for them (see "Owner QA
 > confirmation" below); every §6.4 case and every B-01..B-09 gate is `DONE`, with
-> `N/A_WITH_REASON` only where a producer does not exist on this surface. Stage
+> The one scope exception is an OWNER-APPROVED qualification-scope amendment (the physical masked Question → PR4), never a silent pass. Stage
 > closure additionally needs the reviewer's acceptance of this revision and the
 > owner's explicit merge approval.
 >
@@ -1490,8 +1490,8 @@ control-key matrix is recorded in the chapter at the end of this document.
 | 2 | English/CJK/emoji, real IME, real multi-line paste, `Shift+Enter`, `q` | DONE | real pane | real IME-typed CJK text in the composer, and the physical paste arrived as ONE atomic editor update (newlines preserved, `/exit`-looking lines were CONTENT) followed by exactly ONE submission with nothing executed (record `b4-c2.rec`; screenshot `PixPin_2026-10-10_21-33-07.png`). Emoji caret/deletion, the `Shift+Enter` newline and `q` as plain text are **owner QA-confirmed** — see the provenance note above: the physical tier's evidence channel is the owner's real-GUI attestation, not the wire |
 | 3 | Plain prompt → real Direct backend, Assistant streaming, real tool/call → result | DONE | real pane | real `bash` calls with authoritative results (`touch` + `ls` visible, `exit=0`; a missing path, `exit=2`); streaming in the same session (record `b4-c3-c7.rec`) |
 | 4 | Running-state `Enter` / `Ctrl+Enter` against the configured busy policy | DONE | real pane | under `busyEnter: steer` the plain `Enter` steered (`[1] you (steering…)`) and `Ctrl+Enter` queued (`queued (followup)`); under `busyEnter: queue` the two gestures swap exactly as the contract states; the pending echo was visible and no submission appeared twice (records `b4-c4-steer.rec`, `b4-c4-queue.rec`) |
-| 5 | `/exit`, `/quit`, `!`/`!!`, `/settings`, Host-origin same-spelling | DONE (Host-origin `N/A_WITH_REASON`) | real pane + automated | `/exit` and `/quit` exited normally with no prompt submission and a normal close (records `b4-c5.rec`, `b4-c5-2.rec`); `!echo hi` / `!!echo hi` produced the existing shell refusal `! User-shell UI is not available in TSP yet` with the draft restored and NO shell execution (record `b4-c5-3.rec`); `/settings` produced `This command's UI is not available in TSP yet` with the draft kept (**owner QA-confirmed**; the archived record types only `/sett`). No Host declaring a same-spelling command exists here, so that sub-item is `N/A_WITH_REASON`; the origin precedence is covered by the production-path admission witnesses |
-| 6 | Genuine Question single/multi/free-text/masked, timed → continued → `Alt+Q` → late answer | DONE (masked `N/A_WITH_REASON`) | real pane (+ automated masked witnesses) | multi-select with the Review page and free-text (record `b4-c6-types.rec`); the full timed chain: a genuine 15 s claim (`Foreground wait 0:15`, the frame-time delta measures 15003 ms) → dock `Continued questions: 1 · Alt+Q` → the physical `Alt+Q` list showing `session-… · call_00_ndv7w92v8i3nbof25sn7bt23` → `Enter` reopened the same question → the late answer was settled by the official controller (the notices `A reply for this question is already queued…` / `This question is no longer awaiting an answer.`) → the official `user-question-reply` and the tool-row settled batch carried the SAME `callId`, alongside the official `{"pending":true,…}` continuation (record `b4-c6-c7draft.rec`) |
+| 5 | `/exit`, `/quit`, `!`/`!!`, `/settings`, Host-origin same-spelling | DONE | real pane + automated + a temporary test Host | `/exit` and `/quit` exited normally with no prompt submission and a normal close (records `b4-c5.rec`, `b4-c5-2.rec`); `!echo hi` / `!!echo hi` produced the existing shell refusal `! User-shell UI is not available in TSP yet` with the draft restored and NO shell execution (record `b4-c5-3.rec`); `/settings` produced `This command's UI is not available in TSP yet` with the draft kept (owner QA-confirmed; the archived record types only `/sett`). **Host-origin precedence verified for real**: a throwaway test Host command (a local plugin registering `settings` on the Host command registry — no production code) was mounted in the qualification profile, and in a real Tern pane (`tern serve` plus the SDK's own input surface, `tern ctl type`) the `/settings` submission produced a **Host command card** — `head: /settings`, `status: done`, body `B4-HOST-SETTINGS-OK` — instead of the TSP refusal (record `b4-hostcmd-origin.rec`). Observation kept for the owner: in that same session an earlier `/settings` submit, seconds after launch and before the command catalog resolved, still produced the TSP notice; the steady state is the Host's |
+| 6 | Genuine Question single/multi/free-text/masked, timed → continued → `Alt+Q` → late answer | DONE (masked deferred to PR4 by an owner-approved scope amendment) | real pane (+ automated masked witnesses) | multi-select with the Review page and free-text (record `b4-c6-types.rec`); the full timed chain: a genuine 15 s claim (`Foreground wait 0:15`, the frame-time delta measures 15003 ms) → dock `Continued questions: 1 · Alt+Q` → the physical `Alt+Q` list showing `session-… · call_00_ndv7w92v8i3nbof25sn7bt23` → `Enter` reopened the same question → the late answer was settled by the official controller (the notices `A reply for this question is already queued…` / `This question is no longer awaiting an answer.`) → the official `user-question-reply` and the tool-row settled batch carried the SAME `callId`, alongside the official continuation `{"pending":true,…}` (record `b4-c6-c7draft.rec`). **masked**: deferred by the owner-approved scope amendment below |
 | 7 | Genuine Approval `y`/`n`/`Esc`/`Ctrl+C`, repeat after settle | DONE | real pane | four `Approval required` modals settled allowed (the command really ran), cancelled and rejected (the tool results carry `cancelled` / `the user rejected … it stays denied`) plus a cancelled Question; a non-empty composer draft survived an approval unchanged (records `b4-c3-c7.rec`, `b4-c6-c7draft.rec`); the post-settlement repeat press is **owner QA-confirmed** to produce no second settlement. The wire cannot distinguish `Esc` from `Ctrl+C` for the modal cancellation (the non-modal `Ctrl+C` interrupt is separately evidenced under R4) |
 | 8 | Rebind/Session switch, exit/error, terminal restore | DONE | real pane (exit/restore) + production harness (publication) | exit + terminal restore in the real pane; the whole owner-publication family (a live Question blocking B's publication, the publication-frame withdrawal, the old request settled by its own lifetime, old keys unable to answer) by the production-harness witnesses; `/new` and `/fork` are **owner QA-confirmed** to be refused with `This command's UI is not available in TSP yet` (the frozen capability contract admits only the TUI-origin `/exit` and `/quit`), which is the reachability limit recorded below |
 | 9 | Non-TSP tty / `TERN_TSP=0` / no opt-in → real PiTui mount | DONE | real pane + automated | both negatives (`TERN_TSP=0` with the opt-in present, and no opt-in at all) fell back to a fully normal PiTui (**owner QA-confirmed**); the SDK-decline, no-probe and no-output-gate-suspension assertions are covered by the automated lanes |
@@ -1504,7 +1504,7 @@ control-key matrix is recorded in the chapter at the end of this document.
 | B-02 Submit | DONE | real writer admission, streaming and tool/call→result, one submission per gesture (records `b4-c2.rec`, `b4-c3-c7.rec`) |
 | B-03 Busy | DONE | both busy policies with the exact gesture mapping, the pending echo and no double send (records `b4-c4-steer.rec`, `b4-c4-queue.rec`) |
 | B-04 Commands | DONE | `/exit`/`/quit` positive, the shell refusal with the draft restored, no Host writes (records `b4-c5.rec`, `b4-c5-2.rec`, `b4-c5-3.rec`); `/settings` and the Host-origin precedence as noted in §6.4-5 |
-| B-05 Questions | DONE (masked `N/A_WITH_REASON`) | the full official Question lifecycle in a real pane plus the Review/free-text/multi/cancel variants (records `b4-c6-types.rec`, `b4-c6-c7draft.rec`) |
+| B-05 Questions | DONE (masked physical item deferred to PR4 by an owner-approved scope amendment) | the full official Question lifecycle in a real pane plus the Review/free-text/multi/cancel variants (records `b4-c6-types.rec`, `b4-c6-c7draft.rec`); the renderer's masked behaviour is covered by two witnesses (edit page and Review page) |
 | B-06 Approval | DONE | allowed / rejected / cancelled decisions with the draft untouched (records `b4-c3-c7.rec`, `b4-c6-c7draft.rec`); the post-settlement repeat press is owner QA-confirmed, and `Esc` vs `Ctrl+C` is not distinguishable on the wire |
 | B-07 Generation | DONE | the production-harness publication/fork/settle witnesses below, plus the real-pane R1 result |
 | B-08 Lifecycle | DONE | the physical `Ctrl+C` interrupt (a running tool went `interrupted` while the TUI kept running and closed later on the owner's own exit — record `b4-c4-queue.rec`), the owner QA-confirmed `Ctrl+D` empty-draft exit, exit/restore in the real pane, plus the automated fatal/HMR/teardown lanes |
@@ -1545,9 +1545,12 @@ inside that product suite.
 2. The masked question type cannot be produced through the agent tool at all (its
    schema has no `masked` field; an extra `masked: true` is ignored and renders
    plain) and the only producer, the builtin masked prompt (`/auth`), is not a
-   TSP-reachable command — so §6.4-6's masked sub-item is `N/A_WITH_REASON`, with
-   the renderer behaviour covered by two witnesses (edit page and Review page;
-   plaintext never reaches the wire).
+   TSP-reachable command — so no producer exists on this surface. **Owner-approved
+   qualification-scope amendment (2026-10-10):** the physical masked Question is
+   deferred to PR4 (the editor/UX milestone that owns such a producer); until then
+   the renderer's masked behaviour is covered by two witnesses (edit page and
+   Review page; plaintext never reaches the wire), and §6.4-6 / B-05 record the
+   amendment rather than an unqualified pass.
 
 ## Known differences and remaining deferrals (owner-decided)
 
@@ -1568,7 +1571,7 @@ remaining items and **QA-confirmed all of them as correct with no problem**: the
 §6.4-2 emoji caret/deletion, `Shift+Enter` and `q`-as-text behaviour, the §6.4-5
 `/settings` refusal, the §6.4-8 `/new` and `/fork` refusals, the §6.4-7
 post-settlement repeat press, the §6.4-9 PiTui fallback and the R4 physical
-`Ctrl+D` exit. Per the owner's decision no additional per-item records were
+`Ctrl+D` exit. The owner also decided that the masked question's physical qualification is deferred to PR4 instead of being collected here, and that no additional per-item records were
 collected for these; their evidence is the owner's attestation, which is the
 physical tier's evidence channel here (the wire carries frames plus ack/resize
 events only and no key or preedit events — see the provenance note at the top of
@@ -1625,6 +1628,18 @@ the code/test delta — the one added masked witness — is clean, discriminatin
 green. With the qualification record accepted, stage closure awaits only the owner's
 explicit merge approval.
 
+### External review of the qualification scope (2026-10-10)
+
+A repository-owner review of this record raised two scope questions and one doc fix,
+all closed here: (1) the Host-origin same-name command could not be waived on the
+grounds that no such Host existed — a temporary test Host command was built and the
+precedence was verified in a real Tern pane (record `b4-hostcmd-origin.rec`, see
+§6.4-5); (2) the masked physical item may not be turned into `N/A` inside the result
+document without an explicit owner decision — the owner approved the qualification-
+scope amendment recorded above (deferred to PR4, the renderer behaviour covered by
+the two witnesses); (3) the stale `devDependencies only` description of the SDK in
+`docs/tern-tsp.md` was corrected to a runtime `dependencies` entry.
+
 ## Case evidence digests (one-off; the durable record is this table)
 
 | Case | Record / artifact | sha256 |
@@ -1639,6 +1654,7 @@ explicit merge approval.
 | C5 `!`/`!!` refusals | `b4-c5-3.rec` | `e0eef20e2eb841d62fd258fe8fe4b56dbe72b2ef5667c6ef458ca68c2b0819ea` |
 | C8 reachability probe + R1 first pass | `b4-c8.rec` | `ad901fd5ca9f3a02af77fb2369d7431f5ba0bee86a1b4ae3ff4befd2339421e2` |
 | R1 hardened (sustained streaming) | `b4-r1.rec` | `f4d4e63451a966c04acc03cd16af759050472c7d513c092c3483be73ce1503e1` |
+| §6.4-5 Host-origin precedence (temporary test Host command, real Tern pane) | `b4-hostcmd-origin.rec` | `e7feaaaa375b14557b54475ff5d0eb1e886a8fe9385acd65c6011b884909b9f9` |
 
 The recordings themselves stay outside the repository (they contain full
 transcripts); this table plus the PR conversation carry their identities.

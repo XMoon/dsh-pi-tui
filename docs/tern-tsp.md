@@ -29,8 +29,8 @@ evidence ledger. Per-PR measurements live under
   admission, and the unified Question/Approval modal seat with its official
   lifecycle). All are experimental; **PR3-B B4** is the end-to-end real-pane
   qualification of the interactive surface and is not closed yet.
-- **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm,
-  `devDependencies` only) against real Tern `0.6.2` (PR1) and `0.7.0` (PR3-B
+- **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm, a
+  runtime `dependencies` entry) against real Tern `0.6.2` (PR1) and `0.7.0` (PR3-B
   real-pane runs). A future SDK or pane version may change any field below.
 - **Last verified:** 2026-10-10 (UTC+8) for the interactive (PR3-B) surface;
   2026-10-08 for the read-only PR3-A surface.
