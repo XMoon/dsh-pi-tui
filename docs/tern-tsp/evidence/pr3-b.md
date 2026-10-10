@@ -1651,6 +1651,12 @@ scope amendment recorded above (deferred to PR4, the renderer behaviour covered 
 the two witnesses); (3) the stale `devDependencies only` description of the SDK in
 `docs/tern-tsp.md` was corrected to a runtime `dependencies` entry.
 
+The reviewer re-checked this revision and closed the review at **ACCEPT**, with zero
+P0/P1/P2 and no remaining P3: the fixed status sentence, the explicit exclusion of
+the deferred masked item from the stage-closure text, the recorded catalog-readiness
+observation and the untouched test delta were all confirmed. The B4 review chain is
+therefore closed; stage closure remains the owner's explicit merge approval.
+
 ## Case evidence digests (one-off; the durable record is this table)
 
 | Case | Record / artifact | sha256 |
