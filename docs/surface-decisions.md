@@ -791,7 +791,14 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   is likewise merged by the fold's read grouping before any display rule can act).
   Converging that needs the fold's display-order authority (the same mechanism
   `convergeStepLaneOrder` uses) plus display-aware read grouping; it is tracked
-  as a separate fold unit and is NOT claimed here. Only an open, non-blocked
+  as a SEPARATE fold unit (`fix/transcript-display-order-convergence`, branched
+  from the merged `next`) and is explicitly NOT claimed here. That unit must
+  start from two red tests on `next`: the live/cold Work-grouping differential
+  and a read-grouping case (`Read A → Assistant text → Read B` collapsing into
+  one `2 files` card in cold while live keeps two reads), and it is accepted on
+  message order + complete Work membership + grouping + `window()`/`search()`
+  order + cleanup/idempotence + performance, comparing provable LOGICAL identity
+  and order (raw object references only need to be stable within one fold). Only an open, non-blocked
   trailing span of a live-tail window
   whose committed display subject is running is live; the live predicate is
   re-read per render (never a latched boolean) and re-reads `now()` on the
