@@ -483,7 +483,9 @@ test('B3: a refused Alt+Q reopen only notifies, and a new official request preem
     await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the list opened')
     harness.pane.key('\r')
     await waitFor(() => harness.reopenCalls.length === 1, 'the refused reopen was attempted')
-    assert.ok(wireText(harness.pane).includes('That question is no longer answerable'), 'a refusal is visible')
+    // The refusal notice rides a frame, so it is awaited like every other
+    // presentation fact (a bare read here raced the frame flush under load).
+    await waitFor(() => wireText(harness.pane).includes('That question is no longer answerable'), 'a refusal is visible')
     await waitFor(() => harness.deletions().includes('layer.modal-1'), 'the list is gone')
 
     harness.pane.key('\x1bq')
