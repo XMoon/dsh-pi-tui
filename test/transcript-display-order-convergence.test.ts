@@ -609,7 +609,19 @@ test('F3: a call id reused by another step never moves the newer card', () => {
 
 // ── F4: late rows of an earlier turn are not outside their own run ────────
 
-test('F4: late reads of an earlier turn still group with each other', () => {
+test('F4: late reads of an earlier turn still group with each other (live incremental regroup)', () => {
+  // INCREMENTAL (never hydrated): the late turn-1 rows settle through the live
+  // regroup path, which is where the positional turn range used to be wrong.
+  const live = new TranscriptFolder()
+  live.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 100, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 150, 2, 'a'),
+    turnStart(2, T0 + 200, 3),
+    readCall('b', 2, 0, T0 + 300, 4, 'b.ts'), toolResult('b', 2, 0, T0 + 350, 5, 'b'),
+    // A late replay appends turn 1's rows AFTER turn 2 already materialized.
+    readCall('c', 1, 1, T0 + 3_000, 6, 'c.ts'),
+    readCall('d', 1, 2, T0 + 3_100, 7, 'd.ts'),
+  ])
   const cold = foldEvents([
     turnStart(1, T0, 0),
     readCall('a', 1, 0, T0 + 100, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 150, 2, 'a'),
@@ -625,9 +637,20 @@ test('F4: late reads of an earlier turn still group with each other', () => {
     toolResult('c', 1, 1, T0 + 3_200, 9, 'c'),
     toolResult('d', 1, 2, T0 + 3_300, 10, 'd'),
   ])
-  assert.deepEqual(toolRows(cold).map(row => row.args),
-    ['{"file_path":"a.ts"}', '{"file_path":"b.ts"}', '2 files'],
+  live.apply([
+    assistantSettlement({
+      turn: 2, step: 0, time: T0 + 9_000, seq: 8, text: 'turn two answer',
+      stream: [textChunk(T0 + 8_000, 0, 'turn two answer')],
+    }),
+    toolResult('c', 1, 1, T0 + 3_200, 9, 'c'),
+    toolResult('d', 1, 2, T0 + 3_300, 10, 'd'),
+  ])
+  const expected = ['{"file_path":"a.ts"}', '{"file_path":"b.ts"}', '2 files']
+  assert.deepEqual(toolRows(live).map(row => row.args), expected,
     'the late turn-1 reads merge with EACH OTHER (turn 2 separates them from a)')
+  assert.deepEqual(toolRows(cold).map(row => row.args), expected,
+    'and the cold fold derives the same partition')
+  assert.deepEqual(logicalRows(live), logicalRows(cold))
 })
 
 // ── F5: visibility is display adjacency ───────────────────────────────────
@@ -696,10 +719,12 @@ test('T4d: an assistant-first lane with a later Tool converges in both folds', (
 // ── T5f/T5g: one symmetric evidence rule ─────────────────────────────────
 
 test('T5f: a same-step call known only from the durable message block is still converged', () => {
+  // The settlement arrives FIRST (creating the Conversation row) and the durable
+  // call lands LATER with an EARLIER time: the correct order (Tool before the
+  // Conversation) therefore REQUIRES a displacement, and the call is named only
+  // by the durable message block — never by a streamed delta.
   const cold = foldEvents([
     turnStart(1, T0, 0),
-    toolCall({ callId: 'a1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
-    toolResult('a1', 1, 0, T0 + 1_500, 2, 'ok'),
     eventAt('assistant/message', {
       turn: 1, step: 0,
       message: {
@@ -713,7 +738,9 @@ test('T5f: a same-step call known only from the durable message block is still c
       // The stream carries ONLY the visible text: the call is proven by the
       // durable block, which must still be a convergence candidate.
       stream: [textChunk(T0 + 2_000, 0, 'text at two')],
-    }, T0 + 6_000, 3),
+    }, T0 + 6_000, 1),
+    toolCall({ callId: 'a1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 2 }),
+    toolResult('a1', 1, 0, T0 + 1_500, 3, 'ok'),
   ])
   assert.deepEqual(logicalRows(cold), ['tool:a1', 'assistant:text at two'])
 })
@@ -753,18 +780,26 @@ test('T5c: an equal-time same-step Conversation never reorders the Tool', () => 
 })
 
 test('T5h: a call id reused in another turn is never this step’s candidate', () => {
+  // The foreign (turn 2) card exists BEFORE turn 1's settlement runs, so a
+  // call-id-keyed lookup would find it and displace it around turn 1's
+  // Conversation; the durable (turn, step, callId) identity cannot.
   const cold = foldEvents([
     turnStart(1, T0, 0),
-    // The reply only became visible at +5s, while turn 2's call carries +1s.
+    turnStart(2, T0 + 900, 1),
+    toolCall({ callId: 'shared', name: 'bash', turn: 2, step: 0, time: T0 + 4_000, seq: 2 }),
+    toolResult('shared', 2, 0, T0 + 4_500, 3, 'ok'),
+    // Turn 1's reply only became visible at +2s, i.e. BEFORE turn 2's call time:
+    // a bare-call-id lookup would move turn 2's card around it.
     assistantSettlement({
-      turn: 1, step: 0, time: T0 + 6_000, seq: 1, text: 'turn one',
-      stream: [textChunk(T0 + 5_000, 0, 'turn one'), toolCallDeltaChunk(T0 + 5_500, 1, 'shared', 'bash')],
+      turn: 1, step: 0, time: T0 + 6_000, seq: 4, text: 'turn one',
+      stream: [textChunk(T0 + 2_000, 0, 'turn one'), toolCallDeltaChunk(T0 + 2_500, 1, 'shared', 'bash')],
     }),
-    turnStart(2, T0 + 900, 2),
-    toolCall({ callId: 'shared', name: 'bash', turn: 2, step: 0, time: T0 + 1_000, seq: 3 }),
-    toolResult('shared', 2, 0, T0 + 1_500, 4, 'ok'),
   ])
-  assert.deepEqual(logicalRows(cold), ['assistant:turn one', 'tool:shared'],
+  // The turn-2 card was appended BEFORE turn 1's Conversation, so the durable
+  // order is [Tool, Conversation]. A call-id-keyed lookup would resolve THIS
+  // card (start +4s > the visible +2s) and displace it AFTER the Conversation;
+  // the durable identity finds no candidate for turn 1 at all.
+  assert.deepEqual(logicalRows(cold), ['tool:shared', 'assistant:turn one'],
     'the turn-2 card is not this step’s evidence and keeps the durable order')
 })
 
