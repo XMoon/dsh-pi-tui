@@ -2136,7 +2136,7 @@ test('INT17: a still-declared Tool converges the same from LIVE and COLD raw pla
     textChunk(T0 + 2_000, 0, 'reply'),
     toolCallDeltaChunk(T0 + 3_000, 1, 'c', 'read'),
   ]
-  const run = (live: boolean): string[] => {
+  const run = (live: boolean, closeStep = false): string[] => {
     const folder = new TranscriptFolder()
     if (live) {
       // The REAL live hook: the streamed Preparing frames arrive before the call,
@@ -2155,6 +2155,9 @@ test('INT17: a still-declared Tool converges the same from LIVE and COLD raw pla
       assistantSettlement({ turn: 1, step: 0, time: T0 + 9_000, seq: 2, text: 'reply', stream: settlementStream() }),
     ])
     assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:c'], `live=${live}: the frozen baseline agrees`)
+    // A normal step CLOSURE must not end the successful owner's declaration: the
+    // step merely completed, it did not stop owning its membership.
+    if (closeStep) folder.apply([eventAt('step/end', { turn: 1, step: 0 }, T0 + 10_000, 2)])
     // The SAME late attempt (an earlier Preparing for the STILL-DECLARED C) must
     // converge identically regardless of the raw placement an existing
     // displacement is not membership, and neither is its absence.
@@ -2168,4 +2171,10 @@ test('INT17: a still-declared Tool converges the same from LIVE and COLD raw pla
   const live = run(true)
   assert.deepEqual(live, ['tool:c', 'assistant:reply'], 'the LIVE placement converges to the proven side')
   assert.deepEqual(cold, live, 'the same durable facts must not depend on the raw placement')
+  // Same route with the step CLOSED before the late fact: closing a step resets a
+  // dead attempt's TIMERS, never the successful owner's declaration.
+  const coldClosed = run(false, true)
+  const liveClosed = run(true, true)
+  assert.deepEqual(liveClosed, ['tool:c', 'assistant:reply'], 'closure keeps the declaration')
+  assert.deepEqual(coldClosed, liveClosed, 'closure must not reintroduce the placement divergence')
 })

@@ -3129,7 +3129,12 @@ export class TranscriptFolder {
     for (const [key, start] of this.toolCallPreparingStarts) {
       if (start.owner === owner) this.toolCallPreparingStarts.delete(key)
     }
-    this.declaredToolCallsByStep.delete(stepKey(turn, step))
+    // NOTE: the DECLARED membership (see `declaredToolCallsByStep`) is deliberately
+    // NOT cleared here. This helper resets a dead ATTEMPT's Preparing timers, while
+    // the declaration answers what the current PERMANENT successful settlement
+    // names — a step that merely COMPLETED (`step/end`, a retry) still owns its
+    // membership, and clearing it there made a later factual update converge
+    // differently between the live and cold placements.
   }
 
   /** Drop every preparing-start evidence of one turn (its `turn/end`). */
@@ -3138,6 +3143,8 @@ export class TranscriptFolder {
     for (const [key, start] of this.toolCallPreparingStarts) {
       if (start.owner.startsWith(ownerPrefix)) this.toolCallPreparingStarts.delete(key)
     }
+    // The TURN boundary ends the successful owner's declaration: a later turn owns
+    // its own membership, and a completed turn's facts are never re-derived.
     const stepPrefix = `${turn}/`
     for (const key of [...this.declaredToolCallsByStep.keys()]) {
       if (key.startsWith(stepPrefix)) this.declaredToolCallsByStep.delete(key)
