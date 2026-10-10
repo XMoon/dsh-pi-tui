@@ -1793,7 +1793,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       interaction.attach(port, deps)
     },
     reconcileInteractionPresentation() {
-      interaction.reconcilePresentation()
+      interaction.reconcilePublishedPresentation()
     },
     withdrawReplacedPresentation() {
       interaction.withdrawReplacedPresentation()

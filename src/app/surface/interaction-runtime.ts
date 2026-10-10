@@ -117,6 +117,12 @@ export interface InteractionRuntime {
    */
   reconcilePresentation(): void
   /**
+   * The publication/authority-change pass: like `reconcilePresentation()` but it
+   * ALSO drops the replaced subject's transient list (a newly committed owner's
+   * hydration, or an opening that ended).
+   */
+  reconcilePublishedPresentation(): void
+  /**
    * The SYNCHRONOUS publication-commit half of the same policy (external review
    * P2-B): withdraw the replaced subject's live presentation (its foreground
    * flows, a live approval prompt, its mounted continued forms) and close the
@@ -277,7 +283,19 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * calls it on activity, so admission and retirement can never disagree.
    */
   const reconcilePresentation = (): void => {
-    withdrawReplacedPresentation()
+    // ORDINARY activity reconcile: it may withdraw replaced requests, but it must
+    // never touch the transient Alt+Q list — nothing was published, so the list the
+    // user opened on the CURRENT subject stays open (external review P2-F).
+    runReplacedWithdrawal(false)
+    questionController?.reconcile()
+  }
+
+  /**
+   * The publication/authority-change pass (a newly committed owner's hydration, or
+   * the opening journal ending): the same withdrawal, plus the transient list.
+   */
+  const reconcilePublishedPresentation = (): void => {
+    runReplacedWithdrawal(true)
     questionController?.reconcile()
   }
 
@@ -285,7 +303,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * The commit-section half: state-only, non-throwing (the renderer's own frame
    * failure routes to its fatal sink), no Host read.
    */
-  const withdrawReplacedPresentation = (): void => {
+  const runReplacedWithdrawal = (closeTransient: boolean): void => {
     if (options.isCleanedUp()) return
     // The three SYNCHRONOUS steps of one publication (external reviews P2-D/P2-E):
     // 1. COLLECT — the model parts with every replaced presentation and hands back
@@ -297,7 +315,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     //    before the successor is picked, so no member of it is ever promoted (or
     //    painted) in between, and the successor takes the seat in that same frame.
     options.livePresenter()?.withdrawPresentations([...questions.lifetimes, ...approvals.lifetimes])
-    options.livePresenter()?.closeTransientList()
+    if (closeTransient) options.livePresenter()?.closeTransientList()
     // 3. SETTLE — only now do the local aborts run; the slots they settle have
     //    already left the seat, so no settlement can promote a replaced slot.
     questions.settle()
@@ -310,6 +328,15 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     // ever true for a session-scoped replacement, so the default PiTui branch
     // (whose authority answers `true` unconditionally) stays untouched.
     if (dropped) options.livePresenter()?.setQuestionAttention(0)
+  }
+
+  /**
+   * The commit-section half (a REAL owner publication): withdraws the replaced
+   * presentations AND drops the replaced subject's transient Alt+Q list, because
+   * that list belongs to the subject that opened it.
+   */
+  const withdrawReplacedPresentation = (): void => {
+    runReplacedWithdrawal(true)
   }
 
   return {
@@ -427,6 +454,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     publishAttention,
     withdrawReplacedApprovals,
     reconcilePresentation,
+    reconcilePublishedPresentation,
     withdrawReplacedPresentation,
     dispose() {
       if (ended) return
