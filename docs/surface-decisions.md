@@ -761,21 +761,31 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   timing), and `summarizeWorkSpan` still aggregates
   earliest-start/latest-end/any-running in its existing single walk. On top of
   that member evidence the lifetime starts at the earliest member start and
-  closes at the first PROVEN boundary — the following canonical block's first
-  actually-visible time (the fold now also records a point sidecar on the
-  actually-visible Conversation/Context rows: assistant first-visible reply
-  text, user/injected-context messages, workflow runs, compaction cards), or
-  the owning turn's `turn/end`. A close is only accepted when that boundary
-  lies after the Activity started: cold hydration may order a Conversation row
-  after Process rows it chronologically preceded, and such an early successor
-  proves no close (the span then stays OPEN but, because a canonical block
-  still follows it, is NOT live and renders the conservative member end —
-  live/cold can differ for that reordered shape until the fold row order
-  converges). Only an open, canonical-trailing span of a live-tail window whose
-  committed display subject is running is live; the live predicate is re-read
-  per render (never a latched boolean) and re-reads `now()` on the shared
-  repaint heartbeat (no per-card timers). Missing evidence omits the duration
-  (never `0s`), and read grouping never crosses
+  closes at the EARLIEST real boundary, which is either (a) the start of a
+  human-interaction tool inside the run — a RUNNING `ask_user_question` /
+  `exit_plan_mode` is still a Process member while its active panel owns the UI,
+  and it is matched by NAME exactly like the fold's work accounting, so the
+  waiting time is never counted and the value is identical once the tool settles
+  and the card leaves the span — or (b) the first FOLLOWING canonical block that
+  provably became visible after the Activity started (the fold records a point
+  sidecar on the actually-visible Conversation/Context rows: assistant
+  first-visible reply text, user/injected-context messages, workflow runs,
+  compaction cards), and finally the owning turn's `turn/end`. The forward scan
+  makes the derivation ORDER-INDEPENDENT: a following row that provably became
+  visible BEFORE the Activity started (cold hydration can order a Conversation
+  row after the Process rows it chronologically preceded) neither closes the
+  Activity nor disqualifies it as the live tail, so live and cold hydration
+  derive the SAME lifetime for the same event sequence. A following block with
+  no proven first-visible time keeps the span out of the live tail without
+  closing it. Only an open, non-blocked trailing span of a live-tail window
+  whose committed display subject is running is live; the live predicate is
+  re-read per render (never a latched boolean) and re-reads `now()` on the
+  shared repaint heartbeat (no per-card timers). An Activity with no proven end
+  and no provable liveness renders NO duration at all — the last member's own
+  end is never presented as the Activity's end, and no value can regress a
+  duration the user was already watching (a Remote snapshot-only
+  `running: false` flip, a history window, an inactive subject); a point-only
+  span omits it too (never `0s`). Read grouping never crosses
   a turn boundary so no Activity span ever inherits another turn's count or
   timing (a group's action cardinality and wall span stay on the turn that
   renders the card). The shared Think/Action/Preparing slot geometry lives

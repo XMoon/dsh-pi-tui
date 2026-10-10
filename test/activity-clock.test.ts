@@ -87,6 +87,17 @@ function durationSeconds(view: string): number {
   return Number(match[1])
 }
 
+/** Commit the child's activity flip directly — the official Remote snapshot
+ *  channel shape: no `setViewerMode`, so the viewer's entry-time activity keeps
+ *  its stale value and only the committed display subject moves. */
+function commitChildActivity(app: TuiApp, activity: 'running' | 'inactive'): void {
+  app.commitDisplaySubject(
+    { view: { subject: { kind: 'subagent', id: 'child-a', label: 'child A', mode: 'continuable', activity } } },
+    {},
+    { sessionId: 'child-a', workspaceRoot: '/ws/a', title: '', todos: [], goal: undefined },
+  )
+}
+
 /** The Activity header line of one span at a fixed `now` with `clock`. */
 function headerAt(span: TranscriptWorkSpan, clock: ActivityClock | undefined, now: number): string {
   const component = new CompactWorkComponent({
@@ -202,7 +213,7 @@ test('turn/end freezes the turn\u2019s last open Activity, and a proven structur
     'the first actually-visible boundary closes the Activity, not the later turn end')
 })
 
-test('a history window renders the conservative member end, never a Date.now() extension', () => {
+test('an unprovable end renders NO duration (unknown), never the member end or a Date.now() extension', () => {
   const folder = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall('c1', 'bash', T0 + 1_000, 1),
@@ -213,8 +224,12 @@ test('a history window renders the conservative member end, never a Date.now() e
   const historical = activityClockOf(lifetimes.get(span.owner)!, () => false, () => true)
   assert.equal(historical.isLive(), false)
   const line = headerAt(span, historical, T0 + 999_999)
-  assert.match(line, /Activity 4s/, `an unprovable close falls back to the member end:\n${line}`)
+  assert.ok(!/Activity \d/u.test(line),
+    `an unprovable Activity end must hide the duration, never show the member end:\n${line}`)
   assert.ok(!line.includes('998s'), `a historical Activity must never read now:\n${line}`)
+  assert.match(line, /Activity · 1 action/u, `the identity and the action stats stay:\n${line}`)
+  // The member end is still a MEMBER fact — it is simply not the Activity end.
+  assert.equal(summarizeWorkSpan(span).timing?.endedAt, T0 + 5_000)
 })
 
 test('the canonical trailing structure decides live: a Work followed by a Context row is not the tail', () => {
@@ -234,49 +249,58 @@ test('the canonical trailing structure decides live: a Work followed by a Contex
   assert.equal(lifetime.trailing, false, 'a following canonical block means the span is not the tail')
   assert.equal(activityClockOf(lifetime, () => true, () => true).isLive(), false,
     'a non-trailing open Activity is never live')
+  assert.ok(!/Activity \d/u.test(headerAt(spans[0]!, activityClockOf(lifetime, () => true, () => true), T0 + 999_999)),
+    'an open non-tail Activity has no provable end: no duration renders')
 })
 
-test('a reordered early Conversation row proves no close (and never fabricates a 0s)', () => {
-  // Cold hydration can order the assistant row AFTER the Process rows it
-  // chronologically preceded (the live lane materializes it on its first
-  // visible chunk; the durable settlement appends at its own event index). The
-  // early first-visible time must not be read as an end of the LATER Work.
-  const folder = foldEvents([
+test('an interleaved step derives the SAME Activity lifetime live and cold (review blocker: convergence)', () => {
+  // The live lane materializes the assistant row on its FIRST VISIBLE text
+  // chunk (so it precedes the tool card of the same step); the durable
+  // settlement appends the assistant row at its own event index (after the
+  // tool). The row provably became visible BEFORE the Work started, so it can
+  // neither close the Work nor disqualify it as the live tail — the SAME
+  // lifetime must come out of both folds, and the same duration must render.
+  const events = (): SessionEvent[] => [
     eventAt('turn/start', { turn: 1 }, T0, 0),
-    toolCall('c1', 'bash', T0 + 5_000, 1),
-    toolResult('c1', T0 + 9_000, 2),
+    toolCall('c1', 'bash', T0 + 2_000, 1),
+    toolResult('c1', T0 + 3_000, 2),
     eventAt('assistant/message', {
       turn: 1, step: 0,
       message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'let me check' }], source: { kind: 'assistant' } },
       stream: [
         { type: 'chunk', time: T0 + 1_000, chunk: { type: 'text-delta', index: 0, text: 'let me check' } },
-        { type: 'chunk', time: T0 + 5_000, chunk: { type: 'tool-call-delta', index: 1, id: 'c1', name: 'bash', argumentsDelta: '{}' } },
+        { type: 'chunk', time: T0 + 2_000, chunk: { type: 'tool-call-delta', index: 1, id: 'c1', name: 'bash', argumentsDelta: '{}' } },
       ],
-    }, T0 + 10_000, 3),
-  ])
-  const { lifetimes, spans } = analyze(folder)
-  assert.equal(spans.length, 1, 'the settled interaction/tooling shape keeps ONE Work span')
-  const lifetime = lifetimes.get(spans[0]!.owner)!
-  assert.deepEqual(lifetime, { startedAt: T0 + 5_000, open: true, trailing: false })
-  assert.equal(activityClockOf(lifetime, () => true, () => true).isLive(), false,
-    'a following canonical block always prevents live, even with no valid close')
-  const line = headerAt(spans[0]!, activityClockOf(lifetime, () => true, () => true), T0 + 999_999)
-  assert.match(line, /Activity 4s/, `the conservative member end renders instead:\n${line}`)
+    }, T0 + 4_000, 3),
+  ]
+  const cold = foldEvents(events())
+  const live = new TranscriptFolder()
+  live.hydrate([events()[0]!])
+  live.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 1_000,
+    chunk: { type: 'text-delta', index: 0, text: 'let me check' },
+  })
+  live.apply([events()[1]!, events()[2]!, events()[3]!])
 
-  // The same shape with a STILL-RUNNING member has no proven end at all: the
-  // duration is omitted (unknown), never a fabricated `0s`.
-  const running = foldEvents([
-    eventAt('turn/start', { turn: 1 }, T0, 0),
-    toolCall('c1', 'bash', T0 + 5_000, 1),
-    eventAt('assistant/message', {
-      turn: 1, step: 0,
-      message: { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'let me check' }], source: { kind: 'assistant' } },
-      stream: [{ type: 'chunk', time: T0 + 1_000, chunk: { type: 'text-delta', index: 0, text: 'let me check' } }],
-    }, T0 + 10_000, 2),
-  ])
-  const runningSpan = analyze(running).spans[0]!
-  const runningLine = headerAt(runningSpan, activityClockOf(analyze(running).lifetimes.get(runningSpan.owner)!, () => true, () => true), T0 + 999_999)
-  assert.ok(!/Activity \d/u.test(runningLine), `an unprovable live span omits the duration:\n${runningLine}`)
+  const coldAnalysis = analyze(cold)
+  const liveAnalysis = analyze(live)
+  const coldSpan = coldAnalysis.spans[0]!
+  const liveSpan = liveAnalysis.spans[0]!
+  assert.equal(coldAnalysis.spans.length, 1)
+  assert.equal(liveAnalysis.spans.length, 1)
+  // The MEMBER fact is unchanged in both folds…
+  assert.equal(summarizeWorkSpan(coldSpan).timing?.endedAt, T0 + 3_000)
+  assert.equal(summarizeWorkSpan(liveSpan).timing?.endedAt, T0 + 3_000)
+  // …and the LIFETIME is identical: open + trailing (the early assistant row
+  // belongs to the same step's lane order, not after this Activity).
+  assert.deepEqual(coldAnalysis.lifetimes.get(coldSpan.owner), liveAnalysis.lifetimes.get(liveSpan.owner))
+  assert.deepEqual(coldAnalysis.lifetimes.get(coldSpan.owner), { startedAt: T0 + 2_000, open: true, trailing: true })
+  const coldClock = activityClockOf(coldAnalysis.lifetimes.get(coldSpan.owner)!, () => true, () => true)
+  const liveClock = activityClockOf(liveAnalysis.lifetimes.get(liveSpan.owner)!, () => true, () => true)
+  assert.equal(coldClock.isLive(), true, 'the cold fold is just as live as the live fold')
+  assert.equal(headerAt(coldSpan, coldClock, T0 + 60_000), headerAt(liveSpan, liveClock, T0 + 60_000),
+    'the same event sequence must render the same duration after a cold re-open')
+  assert.match(headerAt(coldSpan, coldClock, T0 + 60_000), /Activity 58s/u)
 })
 
 test('a settled surfaced interaction closes the preceding Activity at the tool start, not the human wait', () => {
@@ -298,6 +322,102 @@ test('a settled surfaced interaction closes the preceding Activity at the tool s
   assert.match(line, /Activity 2s/, `the human wait is not counted into the old Activity:\n${line}`)
 })
 
+test('a RUNNING human interaction freezes the Activity at the hand-over instant, identical after it settles (review blocker)', () => {
+  // While `ask_user_question` / `exit_plan_mode` is RUNNING it is still a
+  // Process member (its active panel owns the UI), so the span keeps growing —
+  // unless the lifetime reads the interaction start, which is exactly the
+  // moment the agent handed control to the human. The waiting time is never
+  // counted, and the value must NOT jump when the tool settles and the card
+  // leaves the span for a standalone successor boundary.
+  const running = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'read', T0 + 1_000, 1),
+    toolResult('c1', T0 + 2_000, 2),
+    toolCall('c2', 'ask_user_question', T0 + 3_000, 3),
+  ])
+  const runningAnalysis = analyze(running)
+  const runningSpan = runningAnalysis.spans[0]!
+  const runningLifetime = runningAnalysis.lifetimes.get(runningSpan.owner)!
+  assert.deepEqual(runningLifetime, { startedAt: T0 + 1_000, endedAt: T0 + 3_000, open: false, trailing: true },
+    'the running interaction start is the boundary')
+  const runningClock = activityClockOf(runningLifetime, () => true, () => true)
+  assert.equal(runningClock.isLive(), false, 'the human wait is not Activity liveness')
+  const runningLine = headerAt(runningSpan, runningClock, T0 + 999_999)
+  assert.match(runningLine, /Activity 2s/u,
+    `the waiting time is never counted, and no now() extension happens:\n${runningLine}`)
+
+  // The user answers at +30s: the tool settles and becomes a standalone
+  // surfaced-interaction card — the SAME +3s boundary, so the display does not
+  // regress (the old per-successor rule would have frozen it back to +3s only
+  // AFTER showing ~29s).
+  const settled = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'read', T0 + 1_000, 1),
+    toolResult('c1', T0 + 2_000, 2),
+    toolCall('c2', 'ask_user_question', T0 + 3_000, 3),
+    toolResult('c2', T0 + 30_000, 4),
+  ])
+  const settledAnalysis = analyze(settled)
+  const settledSpan = settledAnalysis.spans[0]!
+  const settledLifetime = settledAnalysis.lifetimes.get(settledSpan.owner)!
+  assert.equal(settledLifetime.endedAt, runningLifetime.endedAt,
+    'the settled interaction keeps the SAME boundary (the settled card is now a following block, which only clears the tail bit)')
+  assert.equal(settledLifetime.open, runningLifetime.open)
+  assert.equal(headerAt(settledSpan, activityClockOf(settledLifetime, () => true, () => true), T0 + 999_999),
+    runningLine, 'the displayed value is identical before and after the answer')
+})
+
+test('a Remote snapshot-only inactive flip never regresses a running Activity (review blocker)', async (t) => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'compact' },
+    workingIntervalMs: 10_000,
+  })
+  app.start()
+  startedApps.add(app)
+  t.after(() => app.dispose())
+
+  let transcriptCommits = 0
+  const setTranscript = app.setTranscript.bind(app)
+  app.setTranscript = (...args: Parameters<typeof setTranscript>): void => {
+    transcriptCommits += 1
+    setTranscript(...args)
+  }
+  const now = Date.now()
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 1 }, now - 12_000, 0),
+    toolCall('c1', 'bash', now - 11_500, 1),
+    toolResult('c1', now - 11_000, 2),
+  ])
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  enterChildDisplaySubject(app, {
+    id: 'child-a', label: 'child A', mode: 'continuable', activity: 'running',
+    cwd: '/ws/a', turns: 1, steps: 1,
+  })
+  await vt.waitForRender()
+  const running = durationSeconds(strip(vt.getViewport().join('\n')))
+  assert.ok(running >= 11, `the running child counts from its own start:\n${strip(vt.getViewport().join('\n'))}`)
+
+  // The official snapshot channel flips the child inactive with NO durable
+  // event and NO `setTranscript`. The last member ended 11s ago, but that is
+  // NOT the Activity's end: the card must not regress to it.
+  commitChildActivity(app, 'inactive')
+  await vt.waitForRender()
+  const inactiveView = strip(vt.getViewport().join('\n'))
+  assert.ok(inactiveView.includes('Activity'), `the Activity card stays:\n${inactiveView}`)
+  assert.ok(!/Activity \d+[sm]/u.test(inactiveView),
+    `an unprovable end must hide the duration instead of regressing to the member span:\n${inactiveView}`)
+
+  // Running again: the count resumes from the SAME start (no state was lost).
+  commitChildActivity(app, 'running')
+  await vt.waitForRender()
+  const resumed = durationSeconds(strip(vt.getViewport().join('\n')))
+  assert.ok(resumed >= running,
+    `resuming must not show less than the value the user already saw (${running}s -> ${resumed}s)`)
+  assert.equal(transcriptCommits, 1, 'the snapshot flip must not re-commit the transcript')
+})
+
 test('a trailing retry point can keep counting while the Activity is live', () => {
   // `llm/retry` is point evidence: as the still-open trailing Work it may count
   // from that point (a historical retry-only span must not fabricate a span).
@@ -315,54 +435,6 @@ test('a trailing retry point can keep counting while the Activity is live', () =
 })
 
 // ── the committed display subject gates a cached card (plan §5.3) ───────────
-
-test('a snapshot-only child activity flip re-gates a CACHED Activity card without re-committing the transcript', async (t) => {
-  const vt = new VirtualTerminal(100, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset: 'compact' }, workingIntervalMs: 10_000 })
-  app.start()
-  startedApps.add(app)
-  t.after(() => app.dispose())
-  let transcriptCommits = 0
-  const setTranscript = app.setTranscript.bind(app)
-  app.setTranscript = (...args: Parameters<typeof setTranscript>): void => {
-    transcriptCommits += 1
-    setTranscript(...args)
-  }
-  // A settled tool at now-6s inside an unclosed turn: the member span is 4s
-  // while the OPEN Activity has been running for ~10s.
-  const now = Date.now()
-  const folder = new TranscriptFolder()
-  folder.hydrate([
-    eventAt('turn/start', { turn: 1 }, now - 10_500, 0),
-    toolCall('c1', 'bash', now - 10_500, 1),
-    toolResult('c1', now - 6_500, 2),
-  ])
-  app.setTranscript(folder.messages(), folder.turnActivities())
-  enterChildDisplaySubject(app, {
-    id: 'child-a', label: 'child A', mode: 'continuable', activity: 'running',
-    cwd: '/ws/a', turns: 1, steps: 1,
-  })
-  await vt.waitForRender()
-  const running = /Activity (\d+)s/u.exec(strip(vt.getViewport().join('\n')))
-  assert.ok(running !== null, `the running child must render a live Activity:\n${strip(vt.getViewport().join('\n'))}`)
-  assert.ok(Number(running[1]) >= 9, `the open Activity counts from its own start, not the member end:\n${running[0]}`)
-
-  // The official snapshot channel flips the child inactive with NO durable
-  // event and NO `setTranscript`: the cached card must re-gate and render the
-  // conservative member end (4s), never keep extending with now().
-  app.commitDisplaySubject(
-    { view: { subject: { kind: 'subagent', id: 'child-a', label: 'child A', mode: 'continuable', activity: 'inactive' } } },
-    {},
-    { sessionId: 'child-a', workspaceRoot: '/ws/a', title: '', todos: [], goal: undefined },
-  )
-  await vt.waitForRender()
-  const frozen = /Activity (\d+)s/u.exec(strip(vt.getViewport().join('\n')))
-  assert.ok(frozen !== null, `the inactive child must still render the frozen Activity:\n${strip(vt.getViewport().join('\n'))}`)
-  assert.equal(frozen[1], '4', `the inactive child must freeze at the member evidence:\n${frozen[0]}`)
-  assert.equal(transcriptCommits, 1, 'the flip must not re-commit the transcript')
-})
-
-// ── the REAL repaint tick (plan §10) ────────────────────────────────────────
 
 test('E4 (production pipeline): the settled Tool keeps counting through a real silent wait, then the assistant boundary freezes it without a jump', async (t) => {
   const vt = new VirtualTerminal(100, 30)
@@ -550,7 +622,7 @@ test('F1: a VISIBLE streamless settlement is the proven boundary; turn/end never
   // A settlement with NO visible Conversation content materializes no row at
   // all: nothing closed the Activity, so it stays the OPEN trailing candidate
   // (live while the subject runs) and no boundary is fabricated from the
-  // settlement. A history window then renders the conservative member span.
+  // settlement. Without liveness there is no provable end: no duration.
   const invisible = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall('c1', 'bash', T0 + 1_000, 1),
@@ -566,8 +638,8 @@ test('F1: a VISIBLE streamless settlement is the proven boundary; turn/end never
   assert.equal(invisibleLive.isLive(), true, 'no row means no close: the tail stays live')
   const invisibleHistorical = activityClockOf(invisibleLifetime, () => false, () => true)
   assert.equal(invisibleHistorical.isLive(), false)
-  assert.match(headerAt(invisibleSpan, invisibleHistorical, T0 + 999_999), /Activity 4s/u,
-    'a history window renders the conservative member evidence')
+  assert.ok(!/Activity \d/u.test(headerAt(invisibleSpan, invisibleHistorical, T0 + 999_999)),
+    'without a provable end and without liveness the duration is hidden')
 
   // An EXISTING live row's earlier first-visible evidence survives a later
   // streamless settlement (never regressed to the settlement time).
@@ -619,9 +691,9 @@ test('F2: a CACHED Activity card re-gates when a following structure block appea
   folder.apply([eventAt('command/run', { commandId: 'cmd1', name: 'theme' }, now - 1_000, 3)])
   app.setTranscript(folder.messages(), folder.turnActivities())
   await vt.waitForRender()
-  const second = /Activity (\d+)s/u.exec(strip(vt.getViewport().join('\n')))
-  assert.ok(second !== null, `the Activity must still render:\n${strip(vt.getViewport().join('\n'))}`)
-  assert.equal(second[1], '5',
-    `the cached card must fall back to the conservative member span, never keep the stale live value:\n${strip(vt.getViewport().join('\n'))}`)
+  const secondView = strip(vt.getViewport().join('\n'))
+  assert.ok(secondView.includes('Activity'), `the Activity must still render:\n${secondView}`)
+  assert.ok(!/Activity \d/u.test(secondView),
+    `the cached card must drop the stale live value and show no unprovable end:\n${secondView}`)
   app.stop()
 })

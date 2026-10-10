@@ -32,9 +32,10 @@
  */
 
 import { transcriptTimingOf } from '../../domain/transcript/folder.ts'
+import { isSurfacedInteractionToolName } from '../../domain/transcript/semantics.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { summarizeWorkSpan } from './work-summary.ts'
-import type { TranscriptStructureBlock } from './structure.ts'
+import type { TranscriptStructureBlock, TranscriptWorkSpan } from './structure.ts'
 
 /** One Activity's structural lifetime: its proven start, a PROVEN close
  *  boundary (absent while the Activity is still open) and whether the span is
@@ -47,7 +48,10 @@ export interface WorkLifetime {
   readonly endedAt?: number
   /** No proven close boundary yet. */
   readonly open: boolean
-  /** This span is the LAST canonical structural block of the window. */
+  /** No following canonical block prevents liveness: every following block
+   *  either provably became visible BEFORE this Activity started (a reordered
+   *  row) or does not exist. A following block with no proven first-visible
+   *  time DOES prevent it (it cannot be shown to precede the Activity). */
   readonly trailing: boolean
 }
 
@@ -77,12 +81,27 @@ export interface ActivityClock {
  * Derive every Work span's lifetime from the canonical structure. Spans with
  * no reliable member start produce NO entry (unknown is omitted, never `0s`).
  *
- * Close precedence: the successor block's first-actually-visible time first
- * (the plan's §5.2 rule: a late durable settlement time must never be mistaken
- * for the boundary, and an EARLIER one — a reordered row — proves no close at
- * all), then the owning turn's `turn/end`. A proven member end is kept as the
+ * Close precedence: the EARLIEST real boundary, which is either
+ *   (a) the start of a human-interaction tool INSIDE the run (a RUNNING
+ *       `ask_user_question` / `exit_plan_mode` is still a Process member — its
+ *       active panel owns the UI — but the agent handed control to the human
+ *       there, so the waiting time is never part of the Activity), or
+ *   (b) the first FOLLOWING canonical block that provably became visible after
+ *       this Activity started,
+ * and finally the owning turn's `turn/end`. A proven member end is kept as the
  * consistency floor, so a boundary earlier than proven member evidence can
  * never make the duration shrink.
+ *
+ * The forward scan (instead of only the immediate successor) is what makes the
+ * derivation ORDER-INDEPENDENT: cold hydration can order a Conversation row
+ * after Process rows it chronologically preceded (the live lane materializes
+ * the assistant row on its first visible chunk, the durable settlement appends
+ * at its own event index). Such a row provably appeared BEFORE the Activity, so
+ * it neither closes it nor disqualifies it as the live tail — live and cold
+ * therefore derive the SAME lifetime for the same event sequence. A following
+ * block with NO proven time (a local command card, a synthetic window summary)
+ * cannot be shown to precede the Activity, so it keeps the span out of the live
+ * tail without closing it.
  * @param structure - the canonical structural blocks for one window.
  * @param turnActivities - the folded turn boundary facts of the SAME snapshot.
  */
@@ -97,23 +116,24 @@ export function resolveWorkLifetimes(
     const timing = summarizeWorkSpan(block.span).timing
     if (timing === undefined) continue
     const memberEnd = timing.endedAt
-    const successor = structure[index + 1]
-    const boundary = successor === undefined ? undefined : boundaryTimeOf(successor)
-    // A successor proves that THIS Activity closed only when its own
-    // first-visible evidence lies AFTER the Activity started. Cold hydration
-    // can order a Conversation row after Process rows it chronologically
-    // preceded (the live lane materializes the assistant row on its first
-    // visible chunk, the durable settlement appends at its own event index), so
-    // an early time proves nothing about this span — reading it as an end
-    // could even fabricate a `0s` for a still-running member. Such a span is
-    // left OPEN but, because a canonical block still follows it, it is NOT
-    // live: it renders the conservative member evidence (documented
-    // limitation: live/cold can differ for that reordered shape until the fold
-    // row order converges).
-    const provenBoundary = boundary !== undefined && boundary > timing.startedAt ? boundary : undefined
+    const startedAt = timing.startedAt
+    let boundary = interactionBoundaryOf(block.span, startedAt)
+    let tailBlocked = false
+    for (let next = index + 1; next < structure.length; next += 1) {
+      const at = boundaryTimeOf(structure[next]!)
+      if (at === undefined) {
+        // No proven first-visible time: it cannot be shown to precede this
+        // Activity, so it disqualifies the live tail (and proves no close).
+        tailBlocked = true
+        continue
+      }
+      if (at <= startedAt) continue // provably earlier: a reordered row
+      tailBlocked = true
+      if (boundary === undefined || at < boundary) boundary = at
+    }
     let endedAt: number | undefined
-    if (provenBoundary !== undefined) {
-      endedAt = memberEnd === undefined ? provenBoundary : Math.max(provenBoundary, memberEnd)
+    if (boundary !== undefined) {
+      endedAt = memberEnd === undefined ? boundary : Math.max(boundary, memberEnd)
     } else {
       const turn = turnActivities.get(block.span.turn)
       if (turn?.completed === true && turn.endedAt !== undefined) {
@@ -121,10 +141,10 @@ export function resolveWorkLifetimes(
       }
     }
     lifetimes.set(block.span.owner, {
-      startedAt: timing.startedAt,
+      startedAt,
       ...(endedAt === undefined ? {} : { endedAt }),
       open: endedAt === undefined,
-      trailing: index === structure.length - 1,
+      trailing: !tailBlocked,
     })
   }
   return lifetimes
@@ -151,6 +171,23 @@ export function activityClockOf(
     isLive: () => clock.open && clock.trailing && liveTail() && subjectRunning(),
   }
   return clock
+}
+
+/** The earliest start of a human-interaction tool INSIDE the run: the agent
+ *  handed control to the human there, so the waiting time is never part of the
+ *  Activity. The row is matched by NAME while running exactly like the fold's
+ *  work accounting (`compactActionSourceOf` excludes it regardless of status),
+ *  so the Activity freezes at the same instant whether the tool is still
+ *  waiting (a Process member) or has settled (a following interaction card). */
+function interactionBoundaryOf(span: TranscriptWorkSpan, startedAt: number): number | undefined {
+  let earliest: number | undefined
+  for (const member of span.members) {
+    if (member.kind !== 'tool' || !isSurfacedInteractionToolName(member.name)) continue
+    const at = transcriptTimingOf(member)?.startedAt
+    if (at === undefined || at <= startedAt) continue
+    if (earliest === undefined || at < earliest) earliest = at
+  }
+  return earliest
 }
 
 /** The first ACTUALLY VISIBLE time of one non-Process boundary block: the
