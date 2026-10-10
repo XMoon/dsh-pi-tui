@@ -935,6 +935,11 @@ test('N1: re-sorting one side rebuilds the merged group member order, representa
 // ── N2: the regroup envelope closes over its own interior ───────────────────
 
 test('N2: a settlement whose envelope contains an earlier anchor never orphans that anchor’s group', () => {
+  // COVERAGE NOTE (internal round 6): the visible foreign rows in this fixture make
+  // the conservative reachability guard DENY the displacements the original bug
+  // needed, so this test pins the counters/identity-uniqueness/live-cold agreement
+  // that the orphan-group defect violated, not the move itself. Displacement-
+  // activating witnesses: `EXT4`, `EXT5`, `EXT7`, `EXT9`, `EXT10`, `INT1`-`INT4`.
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(1, T0, 0),
@@ -1026,10 +1031,11 @@ test('N3b: two steps that request the same call id each keep their own eligibili
     toolCall({ callId: 'shared', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 5, args: '{"step":1}' }),
     toolResult('shared', 1, 1, T0 + 3_500, 6, 'one'),
   ])
-  // Both cards exist with their own identity and text: the per-step request kept
-  // each call independent (the pre-fix bug made one consume the other's request).
-  // The conservative guard refuses a move that would cross the sibling step's
-  // Conversation, so the durable order stands (documented expressiveness limit).
+  // NARROWED CLAIM (internal round 6): this test pins the CONSERVATIVE outcome —
+  // both cards exist with their own identity/text and keep the durable order,
+  // because the guard refuses a move across the sibling step's Conversation. It
+  // does NOT by itself discriminate a bare request key (the guard masks that);
+  // the per-step request identity and its pruning are covered by `N3c`.
   assert.deepEqual(toolRows(folder).map(row => row.args), ['{"step":0}', '{"step":1}'])
   assert.equal(toolRows(folder).length, 2)
   assert.equal(folder.search('{"step":0}').length, 1)
@@ -1060,6 +1066,11 @@ test('N3c: a replacement drops a durable BLOCK request too, not just a streamed 
 })
 
 test('N3d: dropping a displaced relation reunites the rows it separated (live/cold parity)', () => {
+  // COVERAGE NOTE (internal round 6): the visible foreign rows in this fixture make
+  // the conservative reachability guard DENY the displacements the original bug
+  // needed, so this test pins the counters/identity-uniqueness/live-cold agreement
+  // that the orphan-group defect violated, not the move itself. Displacement-
+  // activating witnesses: `EXT4`, `EXT5`, `EXT7`, `EXT9`, `EXT10`, `INT1`-`INT4`.
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
     readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
@@ -1146,6 +1157,11 @@ test('R4-1b: a late read with NO visible boundary between them still merges', ()
   assert.deepEqual(logicalRows(live), logicalRows(cold))
 })
 test('R4-2: a departure whose union envelope contains another anchor never orphans that anchor’s group', () => {
+  // COVERAGE NOTE (internal round 6): the visible foreign rows in this fixture make
+  // the conservative reachability guard DENY the displacements the original bug
+  // needed, so this test pins the counters/identity-uniqueness/live-cold agreement
+  // that the orphan-group defect violated, not the move itself. Displacement-
+  // activating witnesses: `EXT4`, `EXT5`, `EXT7`, `EXT9`, `EXT10`, `INT1`-`INT4`.
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
     readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
@@ -1230,40 +1246,46 @@ test('R4-3: a late result over a large merged run stays linear (deterministic wo
 
 // ── R4-4: multi-sibling relations survive a Thinking tombstone ─────────────
 
-test('R4-4: a Thinking tombstone keeps every sibling Tool relation on the anchor', () => {
+test('R4-4: a Thinking tombstone keeps every sibling Tool relation, in order', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(1, T0, 0),
     readCall('t1', 1, 0, T0 + 4_000, 1, 't1.ts'), toolResult('t1', 1, 0, T0 + 4_500, 2, 'one'),
     readCall('t2', 1, 0, T0 + 5_000, 3, 't2.ts'), toolResult('t2', 1, 0, T0 + 5_500, 4, 'two'),
-    // Reply visible at +2s: both Tool rows follow it.
+    // Reply visible at +2s (both Tool rows follow it) AND a reasoning-first
+    // stream, so the Thinking row — created after the Assistant row — carries a
+    // REAL lane relation ('before' its own Assistant).
     assistantSettlement({
       turn: 1, step: 0, time: T0 + 9_000, seq: 5, text: 'reply',
       stream: [
-        textChunk(T0 + 2_000, 0, 'reply'),
-        toolCallDeltaChunk(T0 + 4_000, 1, 't1', 'read'),
-        toolCallDeltaChunk(T0 + 5_000, 2, 't2', 'read'),
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'a thought' } },
+        { type: 'chunk', time: T0 + 1_500, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'a thought' } } },
+        textChunk(T0 + 2_000, 1, 'reply'),
+        toolCallDeltaChunk(T0 + 4_000, 2, 't1', 'read'),
+        toolCallDeltaChunk(T0 + 5_000, 3, 't2', 'read'),
       ],
     }),
   ])
-  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:t1'],
-    'both displaced reads share one merged card')
-  // A retry tombstone hides the step's Thinking lane row: the Tool relations must
-  // survive, and the output must stay exactly once.
-  folder.applyLiveInput({
-    kind: 'chunk', sessionId: 's', attemptId: 't', turn: 1, step: 0, time: T0 + 6_000,
-    chunk: { type: 'reasoning-delta', index: 0, text: 'a thought' },
-  })
+  // The Thinking row really is displaced before its Assistant (thinking-first).
+  assert.deepEqual(logicalRows(folder), ['thinking:a thought', 'assistant:reply', 'tool:t1'],
+    'the lanes and the merged read side are both placed')
   const before = toolRows(folder)
+  assert.equal(before.length, 1, 'the two sibling reads share one merged card')
+  assert.equal(before[0]!.result, 'one\n\ntwo', 'the side is ordered by materialization evidence')
+  // A retry tombstone hides the Thinking lane row: both sibling Tool relations
+  // and the side's ORDER must survive.
   folder.apply([eventAt('llm/retry', {
     turn: 1, step: 0, retry: 1, delayMs: 1_000, failure: { code: 'X', message: 'x' },
-  }, T0 + 6_100, 6)])
+  }, T0 + 9_100, 6)])
   const after = toolRows(folder)
-  assert.equal(after.length, before.length, 'no output card is lost or duplicated')
-  assert.equal(new Set(logicalRows(folder)).size, logicalRows(folder).length)
-  assert.equal(after.filter(row => row.args === '2 files').length, 1, 'the merged card survives')
-  assert.equal(after.filter(row => row.args === '2 files')[0]!.callCount, 2)
+  assert.equal(after.length, 1, 'no output card is lost or duplicated')
+  assert.equal(after[0]!.callCount, 2)
+  assert.equal(after[0]!.result, 'one\n\ntwo', 'the sibling order survives the tombstone')
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:t1', 'system:llm retry 1 in 1s — X: x'],
+    'the lane row is gone and nothing else moved')
 })
+
 
 // ── external review: a hidden anchor may not order Tool rows ────────────────
 
@@ -1655,4 +1677,112 @@ test('EXT10: a recreated Lane row revokes the Tool displacement it now blocks', 
   const rows = logicalRows(folder)
   assert.deepEqual(rows, ['tool:a', 'thinking:x thought again', 'assistant:reply'],
     `the read may not cross the recreated Lane row:\n${JSON.stringify(rows)}`)
+})
+
+// ── internal round 6: the four confirmed P2s ────────────────────────────────
+
+test('INT1: a replacement proving an EARLIER Preparing time updates the cache for a late card', () => {
+  const prepMessage = (prep: number, seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: { id: `m-int1-${seq}`, role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' } },
+    stream: [textChunk(T0 + 2_750, 0, 'reply'), toolCallDeltaChunk(T0 + prep, 1, 'a', 'read')],
+  }, T0 + 6_000 + seq * 1_000, seq)
+  // Card arrives LAST: it must consume the replacement's earlier 2500, not the
+  // superseded 3000 (the cache used to be first-wins across settlements).
+  const late = new TranscriptFolder()
+  late.apply([prepMessage(3_000, 0), prepMessage(2_500, 1), readCall('a', 1, 0, T0 + 5_000, 2, 'a.ts')])
+  assert.equal(transcriptTimingOf(toolRows(late)[0]!)?.startedAt, T0 + 2_500)
+  assert.deepEqual(logicalRows(late), ['tool:a', 'assistant:reply'], 'the earlier proof reorders it too')
+  // Card-FIRST control derives the same facts.
+  const control = new TranscriptFolder()
+  control.apply([readCall('a', 1, 0, T0 + 5_000, 0, 'a.ts'), prepMessage(3_000, 1), prepMessage(2_500, 2)])
+  assert.equal(transcriptTimingOf(toolRows(control)[0]!)?.startedAt, T0 + 2_500)
+  assert.deepEqual(logicalRows(control), logicalRows(late))
+})
+
+test('INT2: refreshing many Preparing times sorts and regroups a constant number of times', () => {
+  for (const count of [20, 50, 100]) {
+    const events: SessionEvent[] = [turnStart(1, T0, 0)]
+    let seq = 1
+    for (let index = 0; index < count; index += 1) {
+      events.push(readCall(`t${index}`, 1, 0, T0 + 5_000 + index, seq++, `t${index}.ts`))
+      events.push(toolResult(`t${index}`, 1, 0, T0 + 6_000 + index, seq++, `row ${index}`))
+    }
+    const preps = (base: number, step: number): SessionEvent => eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: 'm-int2', role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' } },
+      stream: [
+        textChunk(T0 + 2_000, 0, 'reply'),
+        ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + base + step * index, index + 1, `t${index}`, 'read')),
+      ],
+    }, T0 + 90_000 + step, seq++)
+    events.push(preps(4_000, 1))
+    const folder = new TranscriptFolder()
+    folder.hydrate(events)
+    const before = folder.searchDiagnosticsForTest()
+    // The replacement REVERSES every Preparing time: every card's materialization
+    // key changes at once and all of it must ride ONE batch.
+    folder.apply([eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: 'm-int2', role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' } },
+      stream: [
+        textChunk(T0 + 2_000, 0, 'reply'),
+        ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + 3_000 + (count - index), index + 1, `t${index}`, 'read')),
+      ],
+    }, T0 + 100_000, seq + 1)])
+    const after = folder.searchDiagnosticsForTest()
+    assert.ok(after.sideSortOperations - before.sideSortOperations <= 4,
+      `N=${count}: refreshed timestamps must not sort per card (sorted ${after.sideSortOperations - before.sideSortOperations})`)
+    assert.ok(after.regroupOperations - before.regroupOperations <= 2,
+      `N=${count}: refreshed timestamps must regroup once (ran ${after.regroupOperations - before.regroupOperations})`)
+  }
+})
+
+test('INT3: a displaced-run late result does linear closure work', () => {
+  for (const count of [100, 200]) {
+    const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts')]
+    let seq = 2
+    for (let index = 0; index < count; index += 1) {
+      events.push(readCall(`b${index}`, 1, 0, T0 + 4_000 + index, seq++, `b${index}.ts`))
+      events.push(toolResult(`b${index}`, 1, 0, T0 + 5_000 + index, seq++, `row ${index}`))
+    }
+    events.push(eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: 'm-int3', role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' } },
+      stream: [
+        textChunk(T0 + 2_000, 0, 'reply'),
+        toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read'),
+        ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + 4_000 + index, index + 2, `b${index}`, 'read')),
+      ],
+    }, T0 + 90_000, seq))
+    const folder = new TranscriptFolder()
+    folder.hydrate(events)
+    const before = folder.searchDiagnosticsForTest()
+    // The late result re-groups the whole displaced side.
+    folder.apply([toolResult('a', 1, 0, T0 + 91_000, seq + 1, 'late')])
+    const after = folder.searchDiagnosticsForTest()
+    const visits = after.emittedRowVisits - before.emittedRowVisits
+    assert.ok(visits <= 8 * count,
+      `N=${count}: closure work must stay linear (visited ${visits} emitted rows)`)
+    assert.ok(after.lastRegroupMemberVisits <= 4 * count,
+      `N=${count}: member visits must stay linear (visited ${after.lastRegroupMemberVisits})`)
+  }
+})
+
+test('INT4: normal serial tail settlements never walk the displacement map', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([turnStart(1, T0, 0)])
+  const before = folder.searchDiagnosticsForTest().displacementScans
+  let seq = 1
+  for (let step = 0; step < 100; step += 1) {
+    folder.apply([readCall(`t${step}`, 1, step, T0 + step * 10_000 + 3_000, seq++, `t${step}.ts`)])
+    folder.apply([toolResult(`t${step}`, 1, step, T0 + step * 10_000 + 3_500, seq++, `row ${step}`)])
+    folder.apply([assistantSettlement({
+      turn: 1, step, time: T0 + step * 10_000 + 9_000, seq: seq++, text: 'reply',
+      stream: [textChunk(T0 + step * 10_000 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + step * 10_000 + 3_000, 1, `t${step}`, 'read')],
+    })])
+  }
+  const after = folder.searchDiagnosticsForTest().displacementScans
+  assert.equal(after - before, 0,
+    `a fresh tail anchor cannot sit inside a recorded interval (walked the map ${after - before} times)`)
 })
