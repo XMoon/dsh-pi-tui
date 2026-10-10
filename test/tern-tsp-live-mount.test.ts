@@ -670,10 +670,12 @@ test('PR4-0: non-key SDK events reach no business action while no modal seat is 
       reopenContinuedQuestion: () => false,
     })
     await settle()
-    // The event kinds a REAL Tern pane emits for pointer/native gestures (the
-    // PR4-0 real-Tern probe): a pointer action, a list selection/activation, a
-    // control change and a caret claim. The renderer declares no node handler
-    // and no modal seat is up, so the SDK yields them and NOTHING may become an
+    // INJECTED protocol events, not events this UI emits: the current TSP view
+    // declares no `actions` on any node, so its only natural pointer target is
+    // the composer (`ui.editor` -> a `focus` claim); `action`/`select`/
+    // `activate`/`change` are the official wire shapes a real Tern pane emits
+    // for nodes that DO declare them (the PR4-0 real-Tern probe), injected here
+    // to lock the ROUTER fact: with no modal seat up, none of them becomes an
     // application action — this is the "rendered is not actionable" boundary.
     for (const event of [
       { ev: 'action', sf: 's1', id: 'dock.composer', act: 'click', mods: [] },
