@@ -114,22 +114,28 @@ export function compactWorkBody(
   return lines
 }
 
-/** The span's duration text at `now`. The LIVE decision is the ActivityClock's
- * (the Work span's structural lifetime — never a member's own `running`): a
- * live span reads the wall clock at RENDER time (the shared WorkingIndicator
- * repaint heartbeat refreshes it — no per-card timer, post-F6 plan §12.13) and
- * therefore keeps growing through the model's silent wait. A closed span uses
- * its PROVEN boundary end; a span whose boundary is not provable (history, an
- * inactive subject, an unsettled snapshot) falls back to the last trustworthy
- * member end. Missing evidence omits the duration (never `0s`, §12.16) — a
- * POINT-only span (one instant of evidence, start === end) is not a span and
- * omits it too. */
+/** The span's duration text at `now`.
+ *
+ * With an ActivityClock the displayed value is PROVEN evidence only:
+ *   - live → `now - startedAt` (the shared repaint heartbeat refreshes it), and
+ *   - a proven close boundary → `endedAt - startedAt`.
+ * A span with NO proven end and no provable liveness renders NO duration
+ * (unknown): the last member's own end is never presented as the Activity's
+ * end, and no value can regress a duration the user was already watching (a
+ * Remote snapshot-only `running: false` flip, a history window, an inactive
+ * subject). A POINT-only span (start === end) is not a span and omits it too.
+ *
+ * Without a clock (unit/non-TuiApp callers with no canonical structure) only
+ * the members' own PROVEN end is renderable — never a live extension. */
 function activityDurationText(timing: TranscriptTiming | undefined, clock: ActivityClock | undefined, now: () => number): string | undefined {
   if (timing === undefined) return undefined
-  if (clock?.isLive() === true) return formatCompactDuration(Math.max(0, now() - timing.startedAt))
-  const endedAt = clock?.endedAt ?? timing.endedAt
-  if (endedAt === undefined || endedAt === timing.startedAt) return undefined
-  return formatCompactDuration(Math.max(0, endedAt - timing.startedAt))
+  if (clock === undefined) {
+    if (timing.endedAt === undefined || timing.endedAt === timing.startedAt) return undefined
+    return formatCompactDuration(Math.max(0, timing.endedAt - timing.startedAt))
+  }
+  if (clock.isLive()) return formatCompactDuration(Math.max(0, now() - timing.startedAt))
+  if (clock.endedAt === undefined || clock.endedAt === timing.startedAt) return undefined
+  return formatCompactDuration(Math.max(0, clock.endedAt - timing.startedAt))
 }
 
 /**
