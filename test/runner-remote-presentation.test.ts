@@ -1419,14 +1419,18 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // Session's OWN Host `piTuiPerformance` projection (TPS plan PR-2: the Client
   // no longer folds its bounded window, and the recent figures no longer
   // depend on how much history that window holds). CLOCK CONTRACT (round-5
-  // hardening, review F8.2, updated by the TPS model-wall formula): the
-  // projection's TTFB is `assistant/attempt` − `step/start` and its per-step
-  // span is `assistant/message` − `step/start` — BOTH event times are the
-  // official Session's real wall clock (append assigns Date.now()), while the
-  // STREAM chunk times are fixture-controlled. So a legal non-zero sample
-  // needs a real wait between the step's `step/start` append and the
+  // hardening, review F8.2; wording corrected by TPS plan PR-3): the
+  // projection's TTFB takes its first-token evidence from the FIRST visible
+  // STREAM CHUNK time minus the `step/start` EVENT time (an earlier
+  // `assistant/attempt` stream may supply that chunk time; this fixture
+  // appends no attempt, so the `assistant/message` stream does), and its
+  // per-step model span is the `assistant/message` EVENT time minus the
+  // `step/start` EVENT time — both event times are the official Session's real
+  // wall clock (append assigns Date.now()), while the stream chunk times are
+  // fixture-controlled. So a legal non-zero sample needs the chunk times
+  // anchored slightly after the step start AND a real wait before the
   // `assistant/message` append. The seeded span is ~100ms TTFB and ~300ms
-  // decode per sampled turn (settlement lands ≈anchor+400 after the real
+  // model wall per sampled turn (settlement lands ≈anchor+400 after the real
   // wait), i.e. 200 tokens over ~0.4s ≈ 500 tok/s: a `TTFB 0.1s`-class and
   // bounded three-digit `tok/s` rendering — asserted as a REQUIRED MATCH
   // (assert.match throws on failure; the previous `exec() !== undefined` form
@@ -1438,10 +1442,10 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
     session.append('user/message', {
       id: `u-paged-${turn}`, role: 'user', content: [{ type: 'text', text: `paged prompt ${turn}` }], source: { kind: 'user' },
     }, { surfaceOp: 'append' })
-    // The assistant/message must land at a WALL time after the first chunk
-    // time for the decode span to be observable: wait past the whole seeded
-    // chunk window BEFORE appending the settlement (the event time is the
-    // Session's real Date.now(), the chunk times are the fixture's).
+    // The assistant/message must land at a WALL time after the step start for
+    // the model span to be observable: wait past the whole seeded chunk window
+    // BEFORE appending the settlement (the event time is the Session's real
+    // Date.now(), the chunk times are the fixture's).
     await new Promise(resolve => setTimeout(resolve, 400))
     session.append('assistant/message', {
       turn, step: 1,
