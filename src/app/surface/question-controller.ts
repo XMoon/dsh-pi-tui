@@ -205,7 +205,18 @@ export class QuestionSurfaceController {
    * the ONE identity both owners share, so a presentation withdrawal never
    * needs a session id of its own to cross the presenter seam.
    */
-  private readonly livePresentations = new Map<AbortSignal, { readonly sessionId: string }>()
+  private readonly livePresentations = new Map<AbortSignal, {
+    readonly sessionId: string
+    /**
+     * Whether the OFFICIAL request carries its own cancellation lifetime. When it
+     * does, only the Host may end it (P2-2): the presentation retirement never
+     * settles it. When it does NOT, this controller is the only possible owner of
+     * its end, so a real subject replacement must settle it (`retire`).
+     */
+    readonly hasHostLifetime: boolean
+    /** The owner-retirement settlement for a request with no Host lifetime. */
+    readonly retire: () => void
+  }>()
   private disposal: (() => void) | undefined
   private disposed = false
 
@@ -310,6 +321,11 @@ export class QuestionSurfaceController {
       if (this.deps.isAdmissibleSession(live.sessionId)) continue
       this.livePresentations.delete(lifetime)
       this.deps.withdrawPresentation(lifetime)
+      // P2-2: a request with NO official cancellation lifetime has no other owner
+      // that could ever end it, so the replacement settles it HERE (classified
+      // `ASK_ABORTED` below — a session-driven end, never a user cancel). A
+      // request that HAS one keeps it: only the Host ends that request.
+      if (!live.hasHostLifetime) live.retire()
     }
   }
 
@@ -612,7 +628,17 @@ export class QuestionSurfaceController {
     // The presentation INTENT is registered BEFORE any await (B3 finding F7): a
     // Session replacement that lands while this flow is still opening its timed
     // claim must be able to retire it, so the form can never mount afterwards.
-    this.livePresentations.set(signal, { sessionId: request.sessionId })
+    // `retiredByAdmission` (P2-2) records a retirement THIS controller initiated
+    // because the official request has no lifetime of its own to end it.
+    let retiredByAdmission = false
+    this.livePresentations.set(signal, {
+      sessionId: request.sessionId,
+      hasHostLifetime: request.signal !== undefined,
+      retire: () => {
+        retiredByAdmission = true
+        local.abort()
+      },
+    })
     // ADMISSION currentness (B3 finding F10): a request whose Session the surface
     // no longer shows never presents — and never takes a Host claim either.
     const admissible = this.deps.isAdmissibleSession(request.sessionId)
@@ -682,6 +708,9 @@ export class QuestionSurfaceController {
       // (Esc / Ctrl+C). Reporting a Host-driven end as a user cancel would
       // record a cancellation the human never made.
       if (hostEnded || this.disposed || request.signal?.aborted === true) throw questionRejection(ASK_ABORTED)
+      // This controller ended it because the official request had no lifetime of
+      // its own and its Session stopped being admissible (P2-2): a Host-side end.
+      if (retiredByAdmission) throw questionRejection(ASK_ABORTED)
       throw questionRejection(ASK_CANCELLED)
     } finally {
       settled = true
@@ -716,6 +745,11 @@ export class QuestionSurfaceController {
     // the Host records the timed result, which is what we wait for.
     const attempts = Math.max(1, Math.ceil(this.continuedDeadlineMs / 100))
     for (let attempt = 0; attempt < attempts && !this.disposed; attempt += 1) {
+      // P2-1: EVERY async resume re-checks the same admission authority the
+      // reconcile uses. An offer that only becomes available AFTER a replacement
+      // was published must never mount into it; stopping the local offer leaves
+      // the official `continued` call exactly as answerable as it already is.
+      if (!this.deps.isAdmissibleSession(sessionId)) return
       const snapshot = this.deps.port.snapshot(sessionId)
       if (snapshot !== undefined) {
         const call = snapshot.active.find(entry => entry.callId === callId)

@@ -114,6 +114,13 @@ export interface TspInteractionSeat {
   desiredFocusId(): string | null
   /** The parked-Question count projected into the dock (`0` hides the line). */
   attentionCount(): number
+  /**
+   * Close the transient Alt+Q list if it is open. Called when a newly committed
+   * Session takes the presentation (P3): the list belongs to the subject that
+   * opened it, so it must not survive a replacement and keep consuming keys (its
+   * rows are re-read FRESH from the authority the next time it opens).
+   */
+  closeTransientList(): void
   /** Retire every owner slot and settle every pending promise (idempotent). */
   dispose(): void
   /**
@@ -802,6 +809,12 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     return true
   }
 
+  const closeTransientList = (): void => {
+    if (disposed || !listOpen) return
+    closeList()
+    options.render()
+  }
+
   /** Enter on the list: capture the candidate, close the list and commit the
    *  empty seat FIRST, then let the ORIGINAL controller decide. A refusal is
    *  only notified — the seat never mounts a form of its own. */
@@ -1220,6 +1233,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     renderLayer,
     desiredFocusId,
     attentionCount: () => attention,
+    closeTransientList,
     withdrawPresentation,
     dispose: retireAll,
   }
