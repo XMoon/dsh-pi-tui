@@ -1429,7 +1429,7 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // wall clock (append assigns Date.now()), while the stream chunk times are
   // fixture-controlled. So a legal non-zero sample needs the chunk times
   // anchored slightly after the step start AND a real wait before the
-  // `assistant/message` append. The seeded span is ~100ms TTFB and ~300ms
+  // `assistant/message` append. The seeded span is ~100ms TTFB and ~400ms
   // model wall per sampled turn (settlement lands ≈anchor+400 after the real
   // wait), i.e. 200 tokens over ~0.4s ≈ 500 tok/s: a `TTFB 0.1s`-class and
   // bounded three-digit `tok/s` rendering — asserted as a REQUIRED MATCH
