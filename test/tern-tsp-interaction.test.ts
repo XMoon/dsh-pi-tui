@@ -868,3 +868,27 @@ test('B3 F6.3: a retired request detaches its real listener and cannot write int
     seat.dispose()
   }
 })
+
+test('B3 P3: closeTransientList releases the seat and the input (a replacement never inherits the list)', async () => {
+  const { createTspInteractionSeat } = await import('../src/tui/tsp/interaction.ts')
+  const renders: number[] = []
+  const seat = createTspInteractionSeat({
+    render: () => { renders.push(1) },
+    onFatal: error => { throw new Error(`unexpected fatal: ${String(error)}`) },
+    notify: () => {},
+    setSettledQuestionAnswersLookup: () => {},
+  })
+  const callbacks = {
+    listContinuedQuestions: () => [{ sessionId: 'session-a', callId: 'call-1', presentation: 'parked' as const }],
+    reopenContinuedQuestion: () => true,
+  }
+  const key = (name: string) => ({ name, ctrl: false, alt: false, shift: false, meta: false })
+  assert.equal(seat.openContinuedList(callbacks), true, 'the transient list opens over the parked row')
+  assert.equal(seat.hasModalSeat(), true, 'the list owns the seat while open')
+  seat.closeTransientList()
+  assert.equal(seat.hasModalSeat(), false, 'a replacement closes the list')
+  assert.equal(seat.handleKey(key('enter'), callbacks), false, 'the closed list consumes no keys')
+  seat.closeTransientList()
+  assert.equal(seat.hasModalSeat(), false, 'a repeated close is inert')
+  seat.dispose()
+})

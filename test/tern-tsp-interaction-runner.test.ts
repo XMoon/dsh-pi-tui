@@ -1326,3 +1326,91 @@ test('B3 F11: a request admitted only AFTER the surface ended takes the fail-clo
     await harness.dispose()
   }
 })
+
+// ── External review P2-1/P2-2: late continued offers and signal-less waits ──
+
+test('B3 P2-1: a late continued offer never mounts into the replacement published while it waited', async () => {
+  const harness = await mountRunnerHarness({ remainingMs: 60 })
+  try {
+    let outcome: string | undefined
+    const delivered = harness.questionRequest({
+      agent: { session: { id: SESSION_ID } },
+      wait: { callId: 'call-late-offer', timed: true },
+      questions: [{ id: 'q-late-offer', question: 'Late offer?', options: [{ label: 'yes' }] }],
+      signal: new AbortController().signal,
+    })
+    void delivered.then(
+      () => { outcome = 'answered' },
+      (error: unknown) => { outcome = String((error as { readonly code?: unknown }).code) },
+    )
+    // The foreground wait times out: the controller now waits (bounded) for the
+    // official `continued` projection, which is still absent.
+    await waitFor(() => outcome === 'ASK_TIMED_OUT', 'the foreground wait timed out')
+    const addsBefore = overlayAdds(harness.tern.ops()).length
+    await waitFor(() => liveOverlays(harness.tern.ops()).length === 0, 'the timed-out form left the seat')
+
+    // The replacement is published while the offer is still waiting...
+    harness.setSession('session-b')
+    harness.surface.reconcileInteractionPresentation()
+    // ...and A's projection NOW exposes the call as `continued`.
+    const state = harness.plane.states.get(SESSION_ID) ?? { questions: { active: [] as unknown[], settled: [] as unknown[] } }
+    harness.plane.states.set(SESSION_ID, state)
+    state.questions.active.push({
+      callId: 'call-late-offer',
+      questions: [{ id: 'q-late-offer', question: 'Late offer?', options: [{ label: 'yes' }] }],
+      state: 'continued',
+    })
+
+    // Give the bounded offer loop several of its polling cycles.
+    await new Promise<void>(resolve => { setTimeout(resolve, 400) })
+    assert.equal(overlayAdds(harness.tern.ops()).length, addsBefore,
+      'the late offer never mounted into the replacement')
+    assert.deepEqual(liveOverlays(harness.tern.ops()), [], 'the replacement still owns the seat')
+    assert.equal(state.questions.active.length, 1,
+      'the official continued call stays exactly as answerable as the Host made it')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B3 P2-2: signal-less live requests are settled by the replacement (fail-closed, never left hanging)', async () => {
+  const harness = await mountRunnerHarness()
+  try {
+    // The official signal is OPTIONAL for both kinds: these requests have no
+    // lifetime of their own, so only this owner can ever end them.
+    let questionOutcome: string | undefined
+    let approvalOutcome: string | undefined
+    const question = harness.questionRequest({
+      agent: { session: { id: SESSION_ID } },
+      wait: { callId: 'call-nosignal-question' },
+      questions: [{ id: 'q-nosignal', question: 'No signal?', options: [{ label: 'yes' }] }],
+    })
+    const approval = harness.approvalRequest({
+      agent: { session: { id: SESSION_ID } },
+      toolName: 'bash',
+      reason: 'no signal',
+    })
+    void question.then(
+      () => { questionOutcome = 'answered' },
+      (error: unknown) => { questionOutcome = String((error as { readonly code?: unknown }).code) },
+    )
+    void approval.then(
+      value => { approvalOutcome = String(value) },
+      (error: unknown) => { approvalOutcome = `rejected:${String(error)}` },
+    )
+    await waitFor(() => overlayAdds(harness.tern.ops()).length === 1, 'the first request is presented')
+    assert.equal(questionOutcome, undefined, 'nothing is settled while its Session is still admissible')
+
+    // The replacement: the presentation leaves AND the signal-less requests are
+    // settled by their owner (only the Host's own lifetime could do it otherwise).
+    harness.setSession('session-b')
+    harness.surface.reconcileInteractionPresentation()
+    await waitFor(() => questionOutcome !== undefined && approvalOutcome !== undefined,
+      'the replacement settled both signal-less requests')
+    assert.equal(questionOutcome, 'ASK_ABORTED', 'a session-driven end, never a user cancel')
+    assert.equal(approvalOutcome, 'cancelled', 'the approval stays fail-closed, never an allow')
+    assert.deepEqual(liveOverlays(harness.tern.ops()), [], 'no stale slot is left behind')
+  } finally {
+    await harness.dispose()
+  }
+})

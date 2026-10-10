@@ -1835,7 +1835,16 @@ Decisions (all terminal-native; none of them copies a Web button):
     rollback need not publish anything and there is no periodic reconcile), and an
     ended owner refuses admission outright — a request that only arrives during or
     after exit teardown takes the fail-closed cancellation instead of registering a
-    presentation nothing can drain.
+    presentation nothing can drain. Two further rules complete the contract: EVERY
+    async presentation producer re-checks that same authority before it mounts (the
+    bounded late-answer offer included, so a `continued` projection that only
+    becomes visible after a replacement can never remount the replaced subject's
+    form); and a request with NO Host-owned cancellation lifetime (the official
+    signal is optional) is settled by this owner at a real replacement — the
+    Question as `ASK_ABORTED`, the approval `cancelled` — because nothing else could
+    ever end it, while a request carrying a Host signal keeps the Host's own
+    settlement right. The transient Alt+Q list is closed at a real replacement too
+    (it belongs to the subject that opened it).
 
     The withdrawal is PRESENTATION ONLY: the official
     request keeps its own Host-owned lifetime, so the Host's own cancellation

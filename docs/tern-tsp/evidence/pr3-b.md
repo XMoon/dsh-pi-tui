@@ -6,10 +6,14 @@
 > witnesses with the publication withdrawal implemented for Questions AND
 > Approvals (rounds 5–6). The later reviews returned F7/F8 (fixed in round 6),
 > F9/F10 (round 7), F11/F12/F13 (round 8) and F11's closed-owner window + F14
-> (round 9) — ALL CLOSED: the B3-9 review is accepted-with-followups with zero
-> open P0/P1/P2 and its only follow-up was this document's provenance wording
-> (corrected in round 10, doc/comment only). F6/C is kept PARTIAL here until the
-> reviewer closes the delivery status; B4 pending.**
+> (round 9) — ALL CLOSED internally: the B3-9 review is accepted-with-followups
+> with zero open P0/P1/P2 and its only follow-up was this document's provenance
+> wording (corrected in round 10, doc/comment only). The external review of PR #265
+> then returned request-changes with two P2 lifecycle gaps (a late continued offer,
+> signal-less request settlement) and one P3 (the transient list across a
+> replacement); all three are fixed in round 11 below with discriminating
+> witnesses. F6/C is kept PARTIAL here until the external review closes the
+> delivery status; B4 pending.**
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
@@ -1199,3 +1203,53 @@ the navigation suite). The document, the owning contract's evidence pointer and 
 witness's own comment now state the accepted L6 qualification instead, and the
 owning doc's pointer was extended to the existing rounds 5–9. Nothing else in the
 delivery was touched, so no code lane needed re-running for this delta.
+
+### Round 11 — the external review of PR #265 (P2-1, P2-2, P3)
+
+The first independent review of PR #265 confirmed the architecture (single modal
+seat, real currentness producers, presentation-only withdrawal, input/focus
+ownership, the Question form semantics and the test coverage) and returned
+request-changes with two uncovered P2 lifecycle gaps plus one P3. All three are
+fixed at the root cause with a witness that fails on the pre-fix code.
+
+P2-1 — a LATE continued offer could remount the replaced subject's Question. The
+  `awaitContinued` poll only checked `disposed`, so a timed call whose official
+  `continued` projection became visible AFTER a replacement was published would
+  `ensureEntry` + `mountEntry` into the replacement's seat. Every async resume of
+  that offer now re-checks the SAME admission authority the reconcile uses and
+  stops the local offer when the Session is no longer admissible — the official
+  `continued` call stays exactly as answerable as the Host made it (no fabricated
+  settlement, no Host write).
+P2-2 — a request with NO official cancellation lifetime could stay pending until
+  the whole TUI exited. Both official request shapes have an OPTIONAL signal; when
+  it is absent, this owner creates the lifetime, so the replacement is the only
+  owner that can end such a request. The presentation retirement now settles
+  exactly that KIND of request — the Question flow as `ASK_ABORTED` (a
+  session-driven end, never a user cancel) and the approval as `cancelled`
+  (fail-closed, never an allow) — while a request that DOES carry a Host signal
+  keeps the Host's own settlement right (the retirement never settles it). The
+  owner also detaches its derived lifetime/listener on the way out.
+P3 — the transient Alt+Q list could cross a Session hydration. A newly committed
+  owner now closes it (`TspInteractionSeat.closeTransientList`, called from the
+  renderer's hydration seam), so the replacement inherits neither the list nor its
+  keys; its rows are re-read fresh from the authority the next time it opens.
+
+WITNESSES (each fails under the matching mutation): the P2-1 L6 witness (a timed
+foreground wait times out, the replacement is published, A's projection THEN
+becomes `continued`, several offer cycles pass) asserts no overlay appears and the
+official call is untouched; the P2-2 L6 witness presents a signal-less Question AND
+a signal-less Approval, replaces the Session and asserts both settle
+(`ASK_ABORTED`/`cancelled`) with no stale slot; the P2-2 PRODUCTION witness does the
+same through a real `/fork` (no Host signal at all) and asserts the replacement's
+own publication frame presents nothing of the replaced subject; the P3 production
+witness opens the real Alt+Q list, drives a real `/new` and asserts the list did
+not cross the replacement and the caret went back to the composer; a seat unit
+witness asserts the closed list consumes no keys.
+
+DISCRIMINATION FOR ROUND 11 (`sha256 -c` verified restores): removing the
+continued-offer admission check → the P2-1 witness RED ("the late offer never
+mounted into the replacement"); removing the Question's signal-less retirement →
+the P2-2 L6 witness RED; removing the approval's → the P2-2 production witness RED
+("timed out waiting for both signal-less requests settled"); removing the hydration
+close → the P3 production witness RED ("the transient list must not cross the
+replacement").

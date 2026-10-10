@@ -525,6 +525,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      // P3: the transient Alt+Q list belongs to the subject that opened it — a
+      // newly committed owner must not inherit it (and its keys).
+      seat.closeTransientList()
       // The generation-bump window: drop the retained transcript to the
       // EXPLICIT Loading state and FENCE the retired source until a frame
       // with a NEW token commits — AND fence the composer input for the same

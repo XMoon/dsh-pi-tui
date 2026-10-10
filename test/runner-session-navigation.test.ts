@@ -2236,3 +2236,99 @@ test('B3 finding F14 (7): a REAL opening rollback retires the opening target\'s 
     await owned.settle()
   }
 })
+
+test('B3 P2-2 (8): signal-less live requests are settled by the REAL retirement, not by TUI exit', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-nosig-')
+  const sessionA = fakeSession({
+    id: 'b3-nosig-a',
+    header: { id: 'b3-nosig-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    const aAgent = liveAgentOf(harness, sessionA.id)
+    // The official signal is OPTIONAL for both kinds — these requests have no
+    // lifetime of their own, so a real subject replacement is their only owner.
+    let questionOutcome: string | undefined
+    let approvalOutcome: string | undefined
+    void ctx.waterfall(
+      aAgent,
+      'user-questions/request',
+      {
+        agent: aAgent,
+        wait: { callId: 'call-nosig' },
+        questions: [{ id: 'q-nosig', question: 'No signal?', options: [{ label: 'yes' }] }],
+      },
+      () => Promise.reject(new Error('no answerer')),
+    ).then(
+      () => { questionOutcome = 'answered' },
+      (error: unknown) => { questionOutcome = String((error as { readonly code?: unknown }).code) },
+    )
+    void ctx.waterfall(
+      aAgent,
+      'approval/request',
+      { agent: aAgent, callId: 'call-nosig-approval', toolName: 'bash', reason: 'no signal' },
+      () => Promise.resolve('unavailable'),
+    ).then(value => { approvalOutcome = String(value) })
+    await waitUntil('A\'s signal-less presentation', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+
+    const fork = commandOf(owned, 'fork')()
+    await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+      'B\'s publication frame must not present the replaced subject\'s signal-less request')
+
+    await fork
+    await waitUntil('both signal-less requests settled',
+      () => questionOutcome !== undefined && approvalOutcome !== undefined, 15_000)
+    assert.equal(questionOutcome, 'ASK_ABORTED', 'a session-driven end, never a user cancel')
+    assert.equal(approvalOutcome, 'cancelled', 'the approval stays fail-closed, never an allow')
+    assert.deepEqual(liveLayerModals(owned.pane.frames()), [], 'no stale slot survives the replacement')
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('B3 P3 (9): an open Alt+Q list does not survive a real Session replacement', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-altq-switch-')
+  const sessionA = fakeSession({
+    id: 'b3-altq-switch-a',
+    header: { id: 'b3-altq-switch-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness, ctx, plane } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // One parked continued call, then the transient list opens over it.
+    plane.seedContinued(sessionA.id, 'call-altq-switch',
+      [{ id: 'q-altq', question: 'Parked?', options: [{ label: 'yes' }] }])
+    ctx.emit('session/event', sessionA, event('model/selection', { provider: 'p', model: 'm' }, sessionA.snapshotEvents().length))
+    await waitUntil('the parked count', () => attentionLineLive(owned.pane.frames()), 15_000)
+    owned.pane.key('\u001b[113;3u')
+    await waitUntil('the transient list', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+
+    // A REAL replacement (the composer is fenced by the modal seat, so the
+    // registered command entry is the production path).
+    const transition = commandOf(owned, 'new')()
+    await waitUntil('the replacement Session', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await transition
+    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+      'the transient list must not cross the replacement')
+    assert.deepEqual(liveLayerModals(owned.pane.frames()), [], 'no overlay left the replacement seat')
+    // The replacement owns the INPUT again: the last caret request the renderer
+    // committed is the composer (never the vanished list).
+    owned.pane.event({ ev: 'focus' })
+    await waitUntil('the composer owns the caret again', () => {
+      const focuses = owned.pane.frames().flatMap(frame => frame.ops).filter(op => op[0] === 'focus')
+      return focuses.length > 0 && focuses[focuses.length - 1]?.[1] === 'dock.composer'
+    }, 15_000)
+  } finally {
+    await owned.settle()
+  }
+})

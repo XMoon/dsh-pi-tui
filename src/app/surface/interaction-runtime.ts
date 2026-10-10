@@ -133,7 +133,17 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * continuation model, so this registry is what lets a published replacement
    * retire its presentation (B3 findings C/F6).
    */
-  const liveApprovals = new Map<AbortSignal, { readonly sessionId: string }>()
+  const liveApprovals = new Map<AbortSignal, {
+    readonly sessionId: string
+    /**
+     * P2-2: the settlement for a request with NO official cancellation lifetime.
+     * This owner created the lifetime, so it is the only possible owner of its
+     * end; a real subject replacement settles it `cancelled` (fail-closed).
+     * `undefined` for a request that carries a Host signal — only the Host may
+     * end that one, and the presentation retirement never does.
+     */
+    readonly retire: (() => void) | undefined
+  }>()
   /**
    * Whether THIS owner is ended. Combined with the surface's own cleanup latch it
    * fences ADMISSION (B3 finding F11): a request that only arrives during/after
@@ -174,16 +184,28 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * never the presentation address itself; the derivation keeps the borrowed
    * abort semantics exactly and gives this owner an explicit handle to detach.
    */
-  const presentationLifetime = (host: AbortSignal | undefined): { lifetime: AbortSignal; release: () => void } => {
+  const presentationLifetime = (host: AbortSignal | undefined): {
+    lifetime: AbortSignal
+    release: () => void
+    retire: (() => void) | undefined
+  } => {
     const own = new AbortController()
-    if (host === undefined) return { lifetime: own.signal, release: () => {} }
+    if (host === undefined) {
+      // No Host lifetime at all: THIS owner's controller is the request's only
+      // possible end, so it hands out the retirement (P2-2).
+      return { lifetime: own.signal, release: () => {}, retire: () => { own.abort() } }
+    }
     if (host.aborted) {
       own.abort()
-      return { lifetime: own.signal, release: () => {} }
+      return { lifetime: own.signal, release: () => {}, retire: undefined }
     }
     const forward = (): void => { own.abort() }
     host.addEventListener('abort', forward, { once: true })
-    return { lifetime: own.signal, release: () => { host.removeEventListener('abort', forward) } }
+    return {
+      lifetime: own.signal,
+      release: () => { host.removeEventListener('abort', forward) },
+      retire: undefined,
+    }
   }
 
   /**
@@ -226,6 +248,10 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       if (isAdmissible(live.sessionId)) continue
       liveApprovals.delete(lifetime)
       options.livePresenter()?.withdrawPresentation(lifetime)
+      // P2-2: a request with no Host lifetime has no other owner that could ever
+      // settle it, so the replacement does — and only that KIND of request: a
+      // request carrying a Host signal keeps the Host's own settlement right.
+      live.retire?.()
     }
   }
 
@@ -288,7 +314,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         const args = req.callId === undefined ? undefined : deps.lookupCallArgs(req.callId)
         // This request's OWN presentation lifetime (F9) and its borrowed-abort
         // release (F11).
-        const { lifetime, release } = presentationLifetime(req.signal)
+        const { lifetime, release, retire } = presentationLifetime(req.signal)
         const sessionId = req.sessionId
         if (sessionId !== undefined && !isAdmissible(sessionId)) {
           // A request whose Session the surface no longer shows (B3 finding F10):
@@ -297,7 +323,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
           // outcome this presenter already answers for an ended wait.
           return waitForLifetime(lifetime, release)
         }
-        if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId })
+        if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId, retire })
         return options.presenter().showApprovalPrompt({
           toolName: req.toolName,
           reason: req.reason,
