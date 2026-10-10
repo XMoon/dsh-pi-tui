@@ -3231,6 +3231,12 @@ export class TranscriptFolder {
       if (row <= relation.lo || row >= relation.hi) continue
       const owner = relation.owner
       if (owner === undefined) continue
+      // ONLY Tool displacements are re-validated here: a Thinking/Assistant LANE
+      // relation is owned by the lane authority, and the Tool reachability guard
+      // (invisible rows plus same-step proven Tools) has no authority over it —
+      // applying it could push a Thinking row in front of its own Assistant.
+      const item = this.items[displaced]
+      if (item === undefined || item.kind !== 'tool') continue
       if (this.sideMoveIsReachable(displaced, relation.anchor, relation.position, owner.turn, owner.step)) continue
       this.dropLaneDisplacement(displaced)
     }

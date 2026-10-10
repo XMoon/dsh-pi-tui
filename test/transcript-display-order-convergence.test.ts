@@ -1563,3 +1563,53 @@ test('EXT8: establishing many relations in ONE settlement sorts a constant numbe
     `establishing ${count} relations must coalesce into one regroup (ran ${after.regroupOperations - before.regroupOperations})`)
   assert.equal(toolRows(folder).length, 1, 'the whole displaced side merged into one read card')
 })
+
+// ── external round 6: the Tool guard never rules on a Lane relation ──────────
+
+test('EXT9: a Lane displacement survives the re-validation of a visible Assistant', () => {
+  const xSettlement = (visible: boolean, seq: number, time: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 1,
+    message: {
+      id: 'm-x9', role: 'assistant',
+      content: visible ? [{ type: 'text', text: 'x reply' }] : [],
+      source: { kind: 'assistant' },
+    },
+    stream: [textChunk(T0 + 1_000, 0, 'x reply')],
+  }, time, seq)
+  const laneStream = (): Record<string, unknown>[] => [
+    textChunk(T0 + 500, 0, 'reply'),
+    { type: 'chunk', time: T0 + 2_000, chunk: { type: 'block-start', index: 1, blockType: 'reasoning' } },
+    { type: 'chunk', time: T0 + 2_000, chunk: { type: 'reasoning-delta', index: 1, text: 'a thought' } },
+    { type: 'chunk', time: T0 + 2_500, chunk: { type: 'block-end', index: 1, block: { type: 'reasoning', text: 'a thought' } } },
+  ]
+  const step0 = (seq: number, time: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-y9', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: laneStream(),
+  }, time, seq)
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(1, T0, 0)])
+  // Raw order: Thinking Y (live, raw 0) → hidden Assistant X (raw 1) → Assistant Y.
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 't', turn: 1, step: 0, time: T0 + 2_000,
+    chunk: { type: 'reasoning-delta', index: 1, text: 'a thought' },
+  })
+  folder.apply([xSettlement(false, 1, T0 + 8_000)])
+  folder.apply([step0(2, T0 + 9_000)])
+  // A SAME-STEP replacement re-runs the lane convergence (the step is settled by
+  // now), and the authority is ASSISTANT-FIRST: the Thinking row must move AFTER
+  // its own Assistant, crossing the hidden X slot.
+  folder.apply([step0(3, T0 + 9_050)])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'thinking:a thought'],
+    'the lane authority keeps the Thinking row after its own Assistant')
+  // X becomes visible again: the re-validation must NOT touch the Lane relation.
+  folder.apply([xSettlement(true, 4, T0 + 9_100)])
+  // X renders again at its own slot; the Thinking row STILL follows its own
+  // Assistant (a revoke would have thrown it back in front of Y).
+  assert.deepEqual(logicalRows(folder), ['assistant:x reply', 'assistant:reply', 'thinking:a thought'],
+    'a visible intervening row never lets the Tool guard reorder the lane')
+})
+
