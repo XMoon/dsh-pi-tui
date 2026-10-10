@@ -609,6 +609,57 @@ test('F5b: the final Activity end is capped by its turn even when a member settl
     'the rendered duration is unchanged by the late settlement')
 })
 
+test('F9: an EQUAL-time following Conversation closes the Activity (a coarse clock never leaves it live)', () => {
+  // A legitimate coarse clock stamps the whole step — the reasoning delta, its
+  // block-end AND the first visible text — with the same millisecond. The
+  // following Conversation is already visible at the Activity's own start, so it
+  // closes the Activity from that instant (a point span, duration hidden); only
+  // a PROVABLY STRICTLY EARLIER row may be ignored.
+  const at = T0 + 1_000
+  const settlement = (): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm1', role: 'assistant',
+      content: [{ type: 'reasoning', text: 'same-ms thought' }, { type: 'text', text: 'same-ms answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [
+      { type: 'chunk', time: at, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+      { type: 'chunk', time: at, chunk: { type: 'reasoning-delta', index: 0, text: 'same-ms thought' } },
+      { type: 'chunk', time: at, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'same-ms thought' } } },
+      { type: 'chunk', time: at, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+      { type: 'chunk', time: at, chunk: { type: 'text-delta', index: 1, text: 'same-ms answer' } },
+    ],
+  }, at, 1)
+
+  const cold = foldEvents([eventAt('turn/start', { turn: 1 }, T0, 0), settlement()])
+  const live = new TranscriptFolder()
+  live.hydrate([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  for (const chunk of [
+    { type: 'reasoning-delta', index: 0, text: 'same-ms thought' },
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'same-ms thought' } },
+  ] as const) {
+    live.applyLiveInput({ kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: at, chunk })
+  }
+  live.apply([settlement()])
+
+  const coldAnalysis = analyze(cold)
+  const liveAnalysis = analyze(live)
+  const coldSpan = coldAnalysis.spans[0]!
+  const liveSpan = liveAnalysis.spans[0]!
+  assert.equal(summarizeWorkSpan(coldSpan).timing?.startedAt, at)
+  assert.deepEqual(coldAnalysis.lifetimes.get(coldSpan.owner),
+    { startedAt: at, endedAt: at, open: false, trailing: true },
+    'the equal-time following Conversation closes the point Activity')
+  assert.deepEqual(liveAnalysis.lifetimes.get(liveSpan.owner), coldAnalysis.lifetimes.get(coldSpan.owner),
+    'the same equal-time sequence derives the same lifetime live and cold')
+  const clock = activityClockOf(coldAnalysis.lifetimes.get(coldSpan.owner)!, () => true, () => true)
+  assert.equal(clock.isLive(), false,
+    'an already-visible Conversation at the SAME instant never leaves the Activity counting')
+  const line = headerAt(coldSpan, clock, T0 + 999_999)
+  assert.ok(!/Activity \d/u.test(line), `a point Activity hides its duration:\n${line}`)
+})
+
 test('F7: the lifetime derivation reads the structure in bounded linear order', () => {
   const events: SessionEvent[] = []
   let seq = 0
