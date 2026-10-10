@@ -388,6 +388,35 @@ test('B3: a masked free-text answer never reaches the wire and is returned throu
   }
 })
 
+test('B4: a masked answer stays masked on the Review page and the official answer keeps the real value', async () => {
+  // §6.4-6's masked question type is unreachable through the agent tool (its schema
+  // has no `masked` field) and the builtin masked prompt (`/auth`) is not a
+  // TSP-reachable command, so the renderer's masked behaviour is covered here: the
+  // DISPLAY masks one bullet per grapheme (edit + Review) while the authoritative
+  // answer returned to the official controller carries the real value.
+  const harness = await mountHarness()
+  const recorder = statusOf()
+  try {
+    const questions = [question({ id: 'q5r', question: 'Token?', masked: true })]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the form opened')
+    const secret = 'sentinel-secret-42'
+    harness.pane.key(secret)
+    await waitFor(() => wireText(harness.pane).includes('•'), 'the masked display')
+    assert.equal(wireText(harness.pane).includes(secret), false, 'the plaintext never reaches the wire')
+    harness.pane.key('\r')
+    await waitFor(() => wireText(harness.pane).includes('Review'), 'the review page')
+    const review = wireText(harness.pane)
+    assert.equal(review.includes(secret), false, 'the Review page keeps the masked value masked')
+    assert.ok(review.includes('•'.repeat([...secret].length)), 'one bullet per grapheme on the Review page')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'q5r', selected: [], custom: secret }],
+      'the official answer carries the real value, never the masked display')
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('B3: an optionless question edits free text, Esc→Enter round trip keeps it, and Enter confirms through Review', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
