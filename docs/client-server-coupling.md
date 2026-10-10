@@ -125,7 +125,7 @@ lands.
 | TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority; the Remote Task composition resolves no Host `ctx.jobs`/`ctx.subagents` (Direct-only gate, M3-5 PR6) | `test/runner-viewer-task-integration.test.ts` + `test/runner-remote-task-center.test.ts` + the Remote Task locality source lock in `test/application-runtime-selection.test.ts` |
 | Application runtime selection (`SelectedApplicationRuntime`) | Client-local composition | composition spine (M3-4 PR1) | `src/app/remote/application-runtime.ts` (Remote aggregate) + `selectApplicationRuntime` in `src/app/bootstrap/runtime-selection.ts` (the seam) | `bindSessionRuntime` common inputs (`owners`/`retirement`/`lifecycle`) and the runner's `backend` | Remote aggregate reuses the M3-1 wire + M3-3B backend + M3-2 owner services; reached ONLY through `runtime/backend-loader.ts` (the ONE frozen dynamic edge into `app/remote/runtime.ts`, which statically re-exports the aggregate) | exactly ONE Remote Host/Client graph, ONE semantic assembly, ONE owner registry per selected runtime; no second construction site; no public/config/env selector — normal `apply()` stays Direct | `test/remote-application-runtime.test.ts` + `test/application-runtime-selection.test.ts` + the dynamic-boundary rules in `test/application-architecture-gate.test.mjs` |
 | PiTui Client UI subtree (`RemoteClientUiRuntime`) | CLIENT_LOCAL | `CLIENT_LOCAL` | `src/app/remote/client-ui-runtime.ts`, composed by the Remote application runtime (M3-6 PR1) on the EXISTING official Client Context (`wire.client.context` — `client-runtime.ts` stays the official transport/data core and creates that Context exactly once) | SurfaceRuntime / extension-facing TUI owners (through `RemoteApplicationOverride.extensionService` — the narrow service object; it does not expose the Client Context or plugin fibers, only the selected PiTuiExtensionService capability crosses the in-process composition seam) | none for extension callbacks (TUI-local `src/extensions.ts`/`src/builtins.ts` plugin fibers); plugins may separately consume public Client/Remote facts | one subtree per Remote application aggregate: exactly three fibers (Client-local tuiStartup facts provider → extension host → builtins), no second Client Context, no generic Loader/profile/bundle discovery | `test/remote-client-ui-runtime.test.ts` (component) + `test/remote-application-runtime.test.ts` (aggregate) + `test/runner-remote-command-plane.test.ts` (L6 locality) |
-| Host performance projection (`piTuiPerformance`) | Host-owned | `HOST_OWNED` (bundle row; NOT a base prerequisite) | `@xmoon76/dsh-pi-tui/performance-host` (`src/app/host/performance-host.ts`): the Direct profile row `pi-tui-performance-host` in `cordis.patch.yml`, and the experimental `RemoteHostRuntime` mount right after the official `sessionStats` unit | Client carriers (PR-2: the Session's `SessionStatusProjection.performance` → `derivePerformance`) and the Footer / `/status` formats (PR-3) | the bundle's OWN `ctx.sessionProjections.register('piTuiPerformance')`; snapshot / change feed / control-frame projection and checkpoint replay stay the official seam's (no new RPC, no Client-side sample ring) | exactly ONE registration per Host Context — the Direct row registers on the base Host Context, `RemoteHostRuntime` on its own; the TUI runner injects `piTuiPerformanceReady`, so a composition without the row fails loud instead of estimating | `test/performance-host-projection.test.ts` (fold, route epoch, checkpoint/restore replay, registration lifetime) + the shipped-row lock; the existing `createRemoteHostRuntime` fixture suites exercise the Remote mount |
+| Host performance projection (`piTuiPerformance`) | Host-owned | `HOST_OWNED` (bundle row; NOT a base prerequisite) | `@xmoon76/dsh-pi-tui/performance-host` (`src/app/host/performance-host.ts`): the Direct profile row `pi-tui-performance-host` in `cordis.patch.yml`, and the experimental `RemoteHostRuntime` mount right after the official `sessionStats` unit | Client carriers (PR-2: the Session's `SessionStatusProjection.performance` → `derivePerformance`) and the Footer / `/status` formats (PR-3) | the bundle's OWN `sessionProjections.register('piTuiPerformance')` unit (see "Permanent Host-plane plugin boundary" below for the sanctioned reflect read); snapshot / change feed / control-frame projection and checkpoint replay stay the official seam's (no new RPC, no Client-side sample ring) | exactly ONE registration per Host Context — the Direct row registers on the base Host Context, `RemoteHostRuntime` on its own; the TUI runner injects `piTuiPerformanceReady`, so a composition without the row fails loud instead of estimating | `test/performance-host-projection.test.ts` (fold, route epoch, checkpoint/restore replay, registration lifetime), `test/performance-host-remote-wire.test.ts` (real Host→Client projection face) + the shipped-row lock |
 
 The exact package/row names may evolve; the ownership rule must remain explicit.
 
@@ -561,7 +561,6 @@ clipboard semantic port or Remote RPC exists for this.
 | `src/index.ts` (`loader`, `appExit`) | `ctx.get('loader')`, `ctx.get('appExit')` | Cordis/dsh process services with no Host business state; excluded from the gate patterns. |
 | `src/app/remote/host-runtime.ts` | (none — `ctx.reflect.get(...)` is not a tracked pattern) | M3-1 experimental Remote Host composition owner (the retired M3-0 entry contract §2.4.1). The earlier `import:dsh-session` baseline entry was removed when the gate matcher was narrowed to exact package matching; the module imports `dsh-session-stats` / `dsh-session-turn-outline` / `dsh-session-log-export` projection plugins, not the Host `dsh-session` type package. |
 | `src/app/remote/client-runtime.ts` | (none) | M3-1 experimental Client composition owner (the retired M3-0 entry contract §2.4.2/§2.4.3). The earlier `import:dsh-agent` baseline entry was removed when the gate matcher was narrowed to exact package matching; the import is `dsh-agent-preset-registry/remote` — a Remote contribution, not the Host `dsh-agent` type package. |
-| `src/app/host/performance-host.ts` | (none — `ctx.reflect.get('sessionProjections')` is not a tracked pattern) | The bundle's own HOST-plane projection row (`pi-tui-performance-host`). It registers the `piTuiPerformance` unit on the official seam, so it IS the Host plane, not Client-side coupling: the registry is resolved through the same reflect read the Remote composition owner above uses, and the `inject: ['sessionProjections']` declaration carries the lifecycle dependency. The boundary baseline stays unchanged. |
 
 The M3-1 composition owners also introduce the first scanned `src/app/remote/**`
 coupling of a new kind: they mount official Host plugin rows by plugin object
@@ -570,6 +569,38 @@ service presence through `ctx.reflect.get(...)` for fail-fast diagnostics. This
 is Host-side composition sanctioned by the frozen M3-0 contract, not Client-side
 business coupling; the M3-4 bootstrap integration owns any future inventory
 relocation.
+
+### Permanent Host-plane plugin boundary (2026-10-10)
+
+`src/app/host/**` is the bundle's own HOST plane: a Cordis row that computes a
+Host-owned projection over committed Session events and publishes it on the
+official seam. Registering a projection there is Host-owned work, NOT a
+Client/application surface reaching into a Host service, and it is NOT a
+Direct→Remote migration debt item — this boundary is permanent, so it is
+deliberately NOT listed under `TEMPORARY_EXCEPTION` above.
+
+`src/app/host/performance-host.ts` registers the bundle's `piTuiPerformance`
+unit. It resolves the registry with `ctx.reflect.get('sessionProjections')`
+(the same Host-plane reflect read the Remote composition owner above uses)
+because a Loader row has no composition owner to hand the service in, and it
+declares `inject: ['sessionProjections']` so Cordis, not a lookup, owns the
+ordering. The consumer-side rules are what keep this from becoming a second
+authority:
+
+| Item | Rule |
+|---|---|
+| Registration inside `src/app/host/**` | allowed |
+| `ctx.reflect.get('sessionProjections')` inside `src/app/host/**` | allowed, only with the two rows below |
+| `inject = ['sessionProjections']` on the row | REQUIRED (replaces any lazy lookup) |
+| Host ownership row in this file | REQUIRED |
+| `src/app/surface/**` or `src/tui/**` reading `sessionProjections` directly | FORBIDDEN |
+| Editing `scripts/client-boundary-baseline.json` to absorb new coupling | FORBIDDEN |
+
+The `reflect.get` read is an access-mechanics exception, not an absence of
+coupling: the row IS the Host plane, and every Client/application consumer must
+still read the resulting values through the semantic DTO / port boundary
+(`src/domain/status/performance-view.ts` and, from PR-2 on,
+`SessionStatusProjection.performance`).
 
 ## Locality rules for new features
 
