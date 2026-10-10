@@ -1786,3 +1786,123 @@ test('INT4: normal serial tail settlements never walk the displacement map', () 
   assert.equal(after - before, 0,
     `a fresh tail anchor cannot sit inside a recorded interval (walked the map ${after - before} times)`)
 })
+
+// ── internal round 7: the five confirmed P2s ────────────────────────────────
+
+test('INT5: an OPPOSITE-side own Tool is a boundary, never a crossing licence', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
+    readCall('b', 1, 0, T0 + 4_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 4_500, 4, 'bravo'),
+    // Reply at +2s, with B's delta BEFORE it (+1s) and A's AFTER (+3s): the two
+    // siblings are proven on OPPOSITE sides, so neither may cross the other.
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 8_000, seq: 5, text: 'reply',
+      stream: [toolCallDeltaChunk(T0 + 1_000, 0, 'b', 'read'), textChunk(T0 + 2_000, 1, 'reply'), toolCallDeltaChunk(T0 + 3_000, 2, 'a', 'read')],
+    }),
+  ])
+  assert.deepEqual(logicalRows(folder), ['tool:a', 'assistant:reply'],
+    'the physical order stands and the opposite-side sibling is not crossed')
+  assert.equal(toolRows(folder).length, 1, 'the two reads stay merged')
+  assert.equal(toolRows(folder)[0]!.callCount, 2)
+})
+
+test('INT6: a restored Thinking slot re-validates the Tool displacement it now blocks', () => {
+  const folder = new TranscriptFolder()
+  const thought = [
+    { type: 'chunk', time: T0 + 6_000, chunk: { type: 'reasoning-delta', index: 2, text: 'thought x' } },
+    { type: 'chunk', time: T0 + 6_500, chunk: { type: 'block-end', index: 2, block: { type: 'reasoning', text: 'thought x' } } },
+  ]
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 4_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 4_500, 2, 'alpha'),
+    assistantSettlement({ turn: 1, step: 0, time: T0 + 9_000, seq: 3, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 4_000, 1, 'a', 'read')] }),
+    readCall('b', 1, 1, T0 + 5_000, 4, 'b.ts'), toolResult('b', 1, 1, T0 + 5_500, 5, 'bravo'),
+  ])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'x', turn: 1, step: 0, time: T0 + 6_000,
+    chunk: { type: 'reasoning-delta', index: 2, text: 'thought x' },
+  })
+  folder.apply([
+    assistantSettlement({ turn: 1, step: 0, time: T0 + 10_000, seq: 6, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 4_000, 1, 'a', 'read'), ...thought] }),
+    assistantSettlement({ turn: 1, step: 1, time: T0 + 11_000, seq: 7, text: 'reply', stream: [textChunk(T0 + 3_000, 0, 'reply'), toolCallDeltaChunk(T0 + 5_000, 1, 'b', 'read')] }),
+  ])
+  // The replacement keeps the reply and the Thinking but DROPS A: the Thinking
+  // relation is dropped, its physical slot emits again, and B's move — which
+  // crossed that slot — must be revoked.
+  folder.apply([assistantSettlement({ turn: 1, step: 0, time: T0 + 12_000, seq: 8, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply'), ...thought] })])
+  assert.deepEqual(logicalRows(folder), ['tool:a', 'assistant:reply', 'tool:b', 'thinking:thought x', 'assistant:reply'],
+    'B returns to its physical slot while the Thinking lane keeps its own place')
+})
+
+test('INT7: a displaced-run late result performs no per-row position search', () => {
+  const count = 200
+  const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts')]
+  let seq = 2
+  const stream: Record<string, unknown>[] = [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')]
+  for (let index = 0; index < count; index += 1) {
+    events.push(readCall(`b${index}`, 1, 0, T0 + 4_000 + index, seq++, `b${index}.ts`))
+    events.push(toolResult(`b${index}`, 1, 0, T0 + 5_000 + index, seq++, `row ${index}`))
+    stream.push(toolCallDeltaChunk(T0 + 4_000 + index, index + 2, `b${index}`, 'read'))
+  }
+  events.push(assistantSettlement({ turn: 1, step: 0, time: T0 + 90_000, seq, text: 'reply', stream }))
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  const before = folder.searchDiagnosticsForTest()
+  folder.apply([toolResult('a', 1, 0, T0 + 91_000, seq + 1, 'late')])
+  const after = folder.searchDiagnosticsForTest()
+  assert.ok(after.positionRebuilds - before.positionRebuilds <= 2,
+    `positions must be looked up in O(1) (rebuilt ${after.positionRebuilds - before.positionRebuilds} times)`)
+  assert.ok(after.emittedRowVisits - before.emittedRowVisits <= 8 * count,
+    `closure work must stay linear (visited ${after.emittedRowVisits - before.emittedRowVisits})`)
+})
+
+test('INT8: the Preparing refresh batch reuses ONE side-specific reach', () => {
+  for (const count of [20, 50, 100]) {
+    const events: SessionEvent[] = [turnStart(1, T0, 0)]
+    let seq = 1
+    const ids = Array.from({ length: count }, (_, index) => `t${index}`)
+    for (let index = 0; index < count; index += 1) {
+      events.push(readCall(ids[index]!, 1, 0, T0 + 5_000 + index, seq++, `${ids[index]}.ts`))
+      events.push(toolResult(ids[index]!, 1, 0, T0 + 6_000 + index, seq++, `row ${index}`))
+    }
+    const settle = (base: number, time: number): SessionEvent => assistantSettlement({
+      turn: 1, step: 0, time, seq: seq++, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply'), ...ids.map((id, index) => toolCallDeltaChunk(T0 + base + index, index + 1, id, 'read'))],
+    })
+    events.push(settle(4_000, T0 + 90_000))
+    const folder = new TranscriptFolder()
+    folder.hydrate(events)
+    const before = folder.searchDiagnosticsForTest()
+    // Reversing every Preparing time changes every card's materialization key.
+    folder.apply([settle(3_000 + count, T0 + 100_000)])
+    const after = folder.searchDiagnosticsForTest()
+    assert.ok(after.slotChecks - before.slotChecks <= 4 * count,
+      `N=${count}: the refresh pass must share one reach (inspected ${after.slotChecks - before.slotChecks} slots)`)
+    assert.ok(after.sideSortOperations - before.sideSortOperations <= 4)
+    assert.ok(after.regroupOperations - before.regroupOperations <= 2)
+  }
+})
+
+test('INT9: expiring many relations rebuilds the interval maximum once', () => {
+  const count = 200
+  const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts')]
+  let seq = 2
+  const stream: Record<string, unknown>[] = [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')]
+  for (let index = 0; index < count; index += 1) {
+    events.push(readCall(`b${index}`, 1, 0, T0 + 4_000 + index, seq++, `b${index}.ts`))
+    events.push(toolResult(`b${index}`, 1, 0, T0 + 5_000 + index, seq++, `row ${index}`))
+    stream.push(toolCallDeltaChunk(T0 + 4_000 + index, index + 2, `b${index}`, 'read'))
+  }
+  events.push(assistantSettlement({ turn: 1, step: 0, time: T0 + 90_000, seq, text: 'reply', stream }))
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  const before = folder.searchDiagnosticsForTest()
+  // A reply-only replacement expires every sibling relation at once.
+  folder.apply([assistantSettlement({ turn: 1, step: 0, time: T0 + 92_000, seq: seq + 1, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply')] })])
+  const after = folder.searchDiagnosticsForTest()
+  assert.ok(after.maxHiScans - before.maxHiScans <= 2 * (count + 1),
+    `the maximum must be rebuilt once, not per removal (scanned ${after.maxHiScans - before.maxHiScans})`)
+  assert.ok(after.regroupOperations - before.regroupOperations <= 2)
+})
