@@ -864,7 +864,11 @@ export class TranscriptFolder {
    * (turn, step, index) fallback identity, and each entry carries its
    * OWNING step so a retry/boundary clears BOTH key shapes — a reused call
    * id in a later attempt must never inherit a dead attempt's timer. */
-  private readonly toolCallPreparingStarts = new Map<string, { at: number; owner: string }>()
+  /** `authorized` separates TIMING evidence from membership AUTHORIZATION: only a
+   *  record the current successful owner (or the live stream) established may
+   *  serve as ownership proof for a later durable `tool/call`; a lower-authority
+   *  late attempt still contributes its time but never qualifies a call. */
+  private readonly toolCallPreparingStarts = new Map<string, { at: number; owner: string; authorized: boolean }>()
   /** Active Workflow runs: the shared semantic projection (owner tracking,
    * interruption projection, member/run settlement) plus the raw item index
    * of each active run's card for search dirty marking. */
@@ -3099,14 +3103,14 @@ export class TranscriptFolder {
       const fallbackKey = preparingFallbackKey(turn, step, index)
       const fallback = this.toolCallPreparingStarts.get(fallbackKey)
       if (!this.toolCallPreparingStarts.has(key)) {
-        this.toolCallPreparingStarts.set(key, { at: fallback?.at ?? time, owner })
+        this.toolCallPreparingStarts.set(key, { at: fallback?.at ?? time, owner, authorized: true })
       }
       if (fallback !== undefined) this.toolCallPreparingStarts.delete(fallbackKey)
       return
     }
     const fallbackKey = preparingFallbackKey(turn, step, index)
     if (!this.toolCallPreparingStarts.has(fallbackKey)) {
-      this.toolCallPreparingStarts.set(fallbackKey, { at: time, owner })
+      this.toolCallPreparingStarts.set(fallbackKey, { at: time, owner, authorized: true })
     }
   }
 
@@ -3147,10 +3151,15 @@ export class TranscriptFolder {
       // FIRST-WINS is wrong across settlements: a later settlement that proves an
       // EARLIER Preparing time must replace the recorded one, otherwise a durable
       // card materializing afterwards starts at the stale, later timestamp.
-      if (cached === undefined) this.toolCallPreparingStarts.set(key, { at, owner })
+      if (cached === undefined) this.toolCallPreparingStarts.set(key, { at, owner, authorized: allowNewRelations })
       else if (at < cached.at) {
         cached.at = at
         cached.owner = owner
+        // A lower-authority refresh never WITHDRAWS an authorization the current
+        // owner already gave this id.
+        cached.authorized = cached.authorized || allowNewRelations
+      } else if (allowNewRelations && !cached.authorized) {
+        cached.authorized = true
       }
       // The card may have materialized BEFORE its Preparing evidence became
       // visible (a durable `tool/call` whose streamed arguments delta only
@@ -5236,8 +5245,12 @@ export class TranscriptFolder {
         // reused by another step or turn can neither supply nor block this card's
         // Preparing evidence.
         const preparingKey = toolCallKey(callTurn, event.data.step, key)
-        const provedByStream = this.toolCallPreparingStarts.has(preparingKey)
         const preparingStart = this.toolCallPreparingStarts.get(preparingKey)
+        // ONLY an AUTHORIZED record proves the stream declared this call: a late
+        // lower-authority attempt may still contribute its timing below, but mere
+        // cache presence must never resurrect ownership the current successful
+        // message expired.
+        const provedByStream = preparingStart?.authorized === true
         if (preparingStart !== undefined) this.toolCallPreparingStarts.delete(preparingKey)
         setTranscriptTiming(card, {
           startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart.at, event.time),
