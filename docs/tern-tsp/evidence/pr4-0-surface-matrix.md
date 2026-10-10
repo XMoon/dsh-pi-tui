@@ -208,9 +208,16 @@ PiTui-only and `NOT_REACHABLE` on TSP (`grep` for any of them in
 
 ### 4.5 Component-local and panel-local key maps (PiTui-only)
 
-These are handled inside the component's own `handleInput`, not by
-`APP_KEYBINDINGS`. All are `NOT_REACHABLE` on TSP because the panel itself has no
-TSP entry; the caller column names the panel that owns the key.
+These are handled inside the component's own `handleInput` (or its
+`onSubmit`/`onEscape` field callbacks), not by `APP_KEYBINDINGS`. All are
+`NOT_REACHABLE` on TSP because the panel itself has no TSP entry; the caller
+column names the panel that owns the key. Completeness was established by
+reading each panel's input handler that the audit could reach from the real
+`src/tui/**` surfaces (`footer/configurator.ts`, `plugin-manager/panel.ts`,
+`interaction/save-location.ts`, `interaction/history-panel.ts`,
+`panels/task-panel.ts`, `interaction/approval-runtime.ts`,
+`pickers/model-picker.ts`, `keybindings/ui/{list,recorder,action-editor}.ts`,
+`keybindings/leader.ts`) — 11 callers.
 
 | Panel / caller (source:line) | Keys | Effect | TSP |
 |---|---|---|---|
@@ -227,17 +234,23 @@ TSP entry; the caller column names the panel that owns the key.
 | ″ | `i` / `I` | start install | `NOT_REACHABLE` |
 | ″ install mode (`:126-190`) | `tab` | switch spec/registry focus | `NOT_REACHABLE` |
 | ″ install mode | `enter`, `up`, `down` | inspect / choose a registry entry | `NOT_REACHABLE` |
+| ″ install mode (`:173-175`) | `c` / `C` | cancel the install | `NOT_REACHABLE` |
 | Save-location prompt (`src/tui/interaction/save-location.ts:328-352`) | `y` or `question.confirm` | overwrite/accept | `NOT_REACHABLE` |
+| ″ path field (`:137-140`, hint `:418`) | `enter` / `escape` | submit the typed path / cancel (the shared `Input` callbacks) | `NOT_REACHABLE` |
 | ″ | `n` or `question.cancel` | return | `NOT_REACHABLE` |
 | ″ | `tab`, `question.cursorUp`, `question.cursorDown` | move between fields | `NOT_REACHABLE` |
 | Keybinding list (`src/tui/keybindings/ui/list.ts:271-306`) | `escape`, `up`, `down`, `pageUp`, `pageDown`, `enter` | navigate / open the action editor | `NOT_REACHABLE` |
+| ″ leader editor (`:530-547`) | `escape` cancel, `r` reset the leader, `enter` start the recorder | edit the leader key | `NOT_REACHABLE` |
 | Key recorder (`src/tui/keybindings/ui/recorder.ts:176`) | `escape` | cancel the recording | `NOT_REACHABLE` |
 | Keybinding action editor (`src/tui/keybindings/ui/action-editor.ts:288-492`) | `escape`, `up`/`k`, `down`/`j`, `delete`/`backspace`, `enter` | navigate / edit / bind / accept | `NOT_REACHABLE` |
+| ″ row mode (`:326-345`) | `a` add a binding, `r` reset the action, `d` disable the action | mutate the action | `NOT_REACHABLE` |
+| ″ choose-binding mode (`:488-492`) | `d` / `l` (or enter) | pick the binding in the list | `NOT_REACHABLE` |
 | History search panel (`src/tui/panels/history-panel.ts:267-283`) | `tab` | cycle scope | `NOT_REACHABLE` |
 | ″ | `up`, `down`, `pageUp`, `pageDown` | move | `NOT_REACHABLE` |
 | ″ | `enter` / `ctrl+j` | accept | `NOT_REACHABLE` |
 | ″ | `escape` / `ctrl+c` | cancel | `NOT_REACHABLE` |
-| Task Center stop confirmation (`src/tui/panels/task-panel.ts:602-607`) | `escape` cancel; `y`/`Y` confirm the stop | confirm dialog | `NOT_REACHABLE` (Task Center itself is PANEL-006) |
+| Task Center stop confirmation (`src/tui/panels/task-panel.ts:602-616`) | `escape` cancel; `y`/`Y` confirm the stop | confirm dialog | `NOT_REACHABLE` (Task Center itself is PANEL-006) |
+| ″ while confirming (`:611-616`) | `tasks.cursorUp`/`cursorDown`/`pageUp`/`pageDown` | move and thereby INVALIDATE the pending stop confirmation | `NOT_REACHABLE` |
 | Approval input (`src/tui/interaction/approval-runtime.ts:111-128`) | `y` allow-once; `n` reject; `escape`/`ctrl+c` cancel; every other key consumed | PiTui approval seat | TSP has its **own** seat for the same authority (PANEL-014), so the PiTui keys are `NOT_REACHABLE` while the TSP equivalents are `SUPPORTED` |
 | Model picker (`src/tui/pickers/model-picker.ts:528-549`) | `right`, `left`, `enter`, `escape` | effort / cancel / apply | `NOT_REACHABLE` |
 | Leader sequences (`src/tui/keybindings/leader.ts:98-117`) | `leaderKey` + binding, `escape` | user-configured chords | `NOT_REACHABLE` |
