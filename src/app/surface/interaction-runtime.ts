@@ -282,9 +282,16 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    */
   const withdrawReplacedPresentation = (): void => {
     if (options.isCleanedUp()) return
-    questionController?.withdrawReplacedPresentation()
+    const dropped = questionController?.withdrawReplacedPresentation() ?? false
     withdrawReplacedApprovals()
     options.livePresenter()?.closeTransientList()
+    // The replaced subject's parked count must not remain on screen, and this
+    // commit-time half must NOT read the Host to re-derive it: the stale count is
+    // cleared locally here and the full reconcile (hydration / activity)
+    // republishes the authoritative count for the new owner. `dropped` is only
+    // ever true for a session-scoped replacement, so the default PiTui branch
+    // (whose authority answers `true` unconditionally) stays untouched.
+    if (dropped) options.livePresenter()?.setQuestionAttention(0)
   }
 
   return {
