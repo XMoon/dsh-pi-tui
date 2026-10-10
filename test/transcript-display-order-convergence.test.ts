@@ -26,7 +26,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, transcriptTimingOf, type TranscriptMessage } from '../src/transcript.ts'
 import { projectTranscriptStructure, type TranscriptWorkSpan } from '../src/tui/transcript/structure.ts'
 import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
-import { formatWorkHeaderLine } from '../src/tui/components/transcript/compact-work.ts'
+import { CompactWorkComponent, formatWorkHeaderLine } from '../src/tui/components/transcript/compact-work.ts'
+import { activityClockOf } from '../src/tui/transcript/activity-clock.ts'
 import { resolveWorkLifetimes, type WorkLifetime } from '../src/tui/transcript/activity-clock.ts'
 
 const T0 = 1_700_000_000_000
@@ -221,6 +222,12 @@ test('T2: a Conversation visible between two reads keeps them as two reads in th
   assert.deepEqual(cold.messages().map(message => message.kind === 'tool' ? message.args : '').filter(Boolean),
     ['{"file_path":"a.ts"}', '{"file_path":"b.ts"}'],
     'no `2 files` merged card may survive')
+  // Each split read keeps its OWN wall span: a split must never leave an
+  // aggregate over members that no longer share a card.
+  assert.equal(transcriptTimingOf(reads[0]!)?.startedAt, T0 + 1_000)
+  assert.equal(transcriptTimingOf(reads[0]!)?.endedAt, T0 + 1_500)
+  assert.equal(transcriptTimingOf(reads[1]!)?.startedAt, T0 + 3_000)
+  assert.equal(transcriptTimingOf(reads[1]!)?.endedAt, T0 + 4_000)
 })
 
 // ── T3: genuinely adjacent reads still merge (no over-splitting) ───────────
@@ -784,4 +791,66 @@ test('PERF: a long turn settles each read in bounded local work', () => {
   assert.equal(toolRows(folder).length, steps, 'each read is separated by its own Conversation here')
   assert.ok(maxSpan <= 32,
     `a display-order change must re-group a LOCAL span, never the whole turn (max span rows: ${maxSpan})`)
+})
+
+// ── the resolved Activity lifetime threads into the Compact presentation ────
+
+test('T8b: the resolved Activity lifetime renders the Compact duration (full consumer chain)', async () => {
+  const cold = foldEvents(interleavedEvents())
+  const structure = projectTranscriptStructure(cold.messages())
+  const spans: TranscriptWorkSpan[] = []
+  for (const block of structure) {
+    if (block.kind === 'work') spans.push(block.span)
+  }
+  const lifetimes = resolveWorkLifetimes(structure, cold.turnActivities())
+  const span = spans[0]!
+  const lifetime = lifetimes.get(span.owner)
+  assert.deepEqual(lifetime, { startedAt: T0 + 1_000, endedAt: T0 + 2_000, open: false, trailing: false })
+  const clock = activityClockOf(lifetime!, () => false, () => false)
+  const component = new CompactWorkComponent({
+    span,
+    expanded: false,
+    action: { kind: 'tool', display: 'Bash x', rootName: 'bash' },
+    now: () => T0 + 999_999,
+    clock,
+  })
+  const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(line, /Activity 1s/u, `the frozen lifetime reaches the rendered header:\n${line}`)
+  assert.ok(!/Activity 997s/u.test(line), 'the old open-ended member span must not survive the convergence')
+})
+
+// ── several Tool relations on ONE anchor, re-derived on replacement ─────────
+
+test('T9: one anchor owns several Tool relations and re-derives them on a replacement', () => {
+  const replacement = (visibleAt: number, seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm9', role: 'assistant',
+      content: [{ type: 'text', text: 'step answer' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(visibleAt, 0, 'step answer'),
+      toolCallDeltaChunk(T0 + 1_000, 1, 't1', 'bash'),
+      toolCallDeltaChunk(T0 + 4_000, 2, 't2', 'read'),
+    ],
+  }, T0 + 9_000, seq)
+
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    toolCall({ callId: 't1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
+    toolResult('t1', 1, 0, T0 + 1_500, 2, 't1 ok'),
+    toolCall({ callId: 't2', name: 'read', turn: 1, step: 0, time: T0 + 4_000, seq: 3, args: '{"file_path":"t2.ts"}' }),
+    toolResult('t2', 1, 0, T0 + 4_500, 4, 't2 ok'),
+  ])
+  // The reply became visible at +2s: t1 (started +1s) stays before it, t2
+  // (started +4s) follows it.
+  folder.apply([replacement(T0 + 2_000, 5)])
+  assert.deepEqual(logicalRows(folder), ['tool:t1', 'assistant:step answer', 'tool:t2'])
+  // A same-step replacement proves the reply was only visible at +5s: BOTH tools
+  // started before it, so the stale t2 relation must be DROPPED (not inherited).
+  folder.apply([replacement(T0 + 5_000, 6)])
+  assert.deepEqual(logicalRows(folder), ['tool:t1', 'tool:t2', 'assistant:step answer'],
+    'every settlement re-derives the relations it anchors')
+  assert.deepEqual(structureKinds(folder), ['work', 'message'])
 })
