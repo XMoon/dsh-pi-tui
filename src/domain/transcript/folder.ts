@@ -904,6 +904,10 @@ export class TranscriptFolder {
    * neighborhood); a late/distant settlement may legitimately require a wide
    * envelope spanning the rows between the displaced row and its anchor. */
   private lastRegroupSpanRows = 0
+  /** Test-only: how many group members the LAST envelope closure visited. A
+   *  deterministic guard that a late-result regroup is linear in the affected
+   *  run, never quadratic. */
+  private lastRegroupMemberVisits = 0
   private searchRefineCount = 0
   /** Test-only: the number of CANDIDATE CARDS re-scanned by refinement
    * (proves refinement is O(candidate cards), never O(previous occurrences)). */
@@ -1950,10 +1954,16 @@ export class TranscriptFolder {
    *  group that contains one of them. Deliberately NOT derived from a turn's
    *  positional range: late/non-monotonic replay can append a turn's rows outside
    *  its `turnStarts` span, so the affected rows — not the turn — define the work. */
-  private affectedSpanAround(index: number): { start: number; end: number } {
-    let low = index
-    let high = index
-    const rows = new Set<number>([index])
+  private affectedSpanAround(seeds: number | readonly number[]): { start: number; end: number } {
+    const list = typeof seeds === 'number' ? [seeds] : seeds
+    const rows = new Set<number>(list)
+    let low = Math.min(...list)
+    let high = Math.max(...list)
+    // Each involved GROUP is expanded once per operation: re-enumerating a big
+    // read group's members for every covered row made a late-result regroup
+    // quadratic in the run size.
+    const expandedGroups = new Set<unknown>()
+    let memberVisits = 0
     const extendTo = (candidate: number | undefined): boolean => {
       if (candidate === undefined) return false
       let changed = !rows.has(candidate)
@@ -1968,10 +1978,25 @@ export class TranscriptFolder {
       }
       return changed
     }
-    // One hop of display adjacency for the SEED only (the run boundary it moves
+    const expandGroup = (row: number): boolean => {
+      const group = this.groupOf.get(row)
+      if (group === undefined || expandedGroups.has(group)) return false
+      expandedGroups.add(group)
+      const members = this.groupMembers.get(group)
+      if (members === undefined) return false
+      let changed = false
+      for (const member of members) {
+        memberVisits += 1
+        changed = extendTo(member) || changed
+      }
+      return changed
+    }
+    // One hop of display adjacency for every SEED (the run boundary each moves
     // across); chaining adjacency transitively would swallow the whole turn.
-    extendTo(this.displayPredecessorOf(index))
-    extendTo(this.displaySuccessorOf(index))
+    for (const seed of list) {
+      extendTo(this.displayPredecessorOf(seed))
+      extendTo(this.displaySuccessorOf(seed))
+    }
     let grew = true
     while (grew) {
       grew = false
@@ -1985,26 +2010,20 @@ export class TranscriptFolder {
           for (const peer of owned.before) grew = extendTo(peer) || grew
           for (const peer of owned.after) grew = extendTo(peer) || grew
         }
-        const group = this.groupOf.get(row)
-        const members = group === undefined ? undefined : this.groupMembers.get(group)
-        if (members === undefined) continue
-        for (const member of members) grew = extendTo(member) || grew
+        grew = expandGroup(row) || grew
       }
-      // EVERY row INSIDE the envelope closes it too: an anchor emits its lists
-      // there (they can sit outside the raw range), and a grouped row brings its
-      // group — without this the traversal would emit rows the detach never saw.
+      // EVERY row INSIDE the (possibly unioned) envelope closes it too: an anchor
+      // emits its lists there even when they sit outside the raw range, and a
+      // grouped row brings its group.
       for (let row = low; row <= high; row += 1) {
         const owned = this.laneDisplayByAnchor.get(row)
         if (owned !== undefined) {
           for (const peer of owned.before) grew = extendTo(peer) || grew
           for (const peer of owned.after) grew = extendTo(peer) || grew
         }
-        const group = this.groupOf.get(row)
-        const members = group === undefined ? undefined : this.groupMembers.get(group)
-        if (members === undefined) continue
-        for (const member of members) grew = extendTo(member) || grew
+        grew = expandGroup(row) || grew
       }
-      // Every groupable read the envelope covers pulls in its DISPLAY run—the
+      // Every groupable read the envelope covers pulls in its DISPLAY run — the
       // next row the user actually SEES decides it, so an invisible row is not a
       // boundary and a departing non-read row does not stop the expansion.
       for (let row = low; row <= high; row += 1) {
@@ -2014,6 +2033,7 @@ export class TranscriptFolder {
         grew = this.extendDisplayRun(row, 1, extendTo) || grew
       }
     }
+    this.lastRegroupMemberVisits = memberVisits
     return { start: low, end: high }
   }
 
@@ -2086,35 +2106,6 @@ export class TranscriptFolder {
     return [...owned.before, index, ...owned.after]
   }
 
-  /** The raw index displayed immediately BEFORE `index` (visible rows only). */
-  private displayPredecessorOf(index: number): number | undefined {
-    // The row may itself be an anchor: its own emission precedes its successor.
-    const own = this.laneDisplayByAnchor.get(index)
-    if (own !== undefined && own.before.length > 0) return this.lastVisibleOf(own.before)
-    let candidate = index - 1
-    while (candidate >= 0) {
-      const emitted = this.emittedAt(candidate)
-      const visible = this.lastVisibleOf(emitted)
-      if (visible !== undefined) return visible
-      candidate -= 1
-    }
-    return undefined
-  }
-
-  /** The raw index displayed immediately AFTER `index` (visible rows only). */
-  private displaySuccessorOf(index: number): number | undefined {
-    const own = this.laneDisplayByAnchor.get(index)
-    if (own !== undefined && own.after.length > 0) return this.firstVisibleOf(own.after)
-    let candidate = index + 1
-    while (candidate < this.items.length) {
-      const emitted = this.emittedAt(candidate)
-      const visible = this.firstVisibleOf(emitted)
-      if (visible !== undefined) return visible
-      candidate += 1
-    }
-    return undefined
-  }
-
   /** The last VISIBLE row of one emission sequence, when it has any. */
   private lastVisibleOf(rows: readonly number[]): number | undefined {
     for (let at = rows.length - 1; at >= 0; at -= 1) {
@@ -2128,6 +2119,73 @@ export class TranscriptFolder {
   private firstVisibleOf(rows: readonly number[]): number | undefined {
     for (const row of rows) {
       if (this.isVisible(this.items[row]!)) return row
+    }
+    return undefined
+  }
+
+  /** The raw index displayed immediately BEFORE `index` in the FINAL display
+   *  order. A DISPLACED row is emitted inside its anchor's slot, so its
+   *  predecessor is the previous visible row of that emission (its sibling in the
+   *  before/after list) or, at the start of the emission, the slot before the
+   *  anchor. */
+  private displayPredecessorOf(index: number): number | undefined {
+    const displaced = this.laneDisplayByDisplaced.get(index)
+    if (displaced !== undefined) {
+      const emission = this.emittedAt(displaced.anchor)
+      const at = emission.indexOf(index)
+      if (at > 0) {
+        const sibling = this.lastVisibleOf(emission.slice(0, at))
+        if (sibling !== undefined) return sibling
+      }
+      return this.slotPredecessorOf(displaced.anchor)
+    }
+    const own = this.laneDisplayByAnchor.get(index)
+    if (own !== undefined && own.before.length > 0) {
+      const visible = this.lastVisibleOf(own.before)
+      if (visible !== undefined) return visible
+    }
+    return this.slotPredecessorOf(index)
+  }
+
+  /** The raw index displayed immediately AFTER `index` in the FINAL display
+   *  order (see {@link displayPredecessorOf} for the displaced-row rule). */
+  private displaySuccessorOf(index: number): number | undefined {
+    const displaced = this.laneDisplayByDisplaced.get(index)
+    if (displaced !== undefined) {
+      const emission = this.emittedAt(displaced.anchor)
+      const at = emission.indexOf(index)
+      if (at >= 0 && at + 1 < emission.length) {
+        const sibling = this.firstVisibleOf(emission.slice(at + 1))
+        if (sibling !== undefined) return sibling
+      }
+      return this.slotSuccessorOf(displaced.anchor)
+    }
+    const own = this.laneDisplayByAnchor.get(index)
+    if (own !== undefined && own.after.length > 0) {
+      const visible = this.firstVisibleOf(own.after)
+      if (visible !== undefined) return visible
+    }
+    return this.slotSuccessorOf(index)
+  }
+
+  /** The last VISIBLE row emitted by the raw slots before `index`. */
+  private slotPredecessorOf(index: number): number | undefined {
+    let candidate = index - 1
+    while (candidate >= 0) {
+      const visible = this.lastVisibleOf(this.emittedAt(candidate))
+      if (visible !== undefined) return visible
+      candidate -= 1
+    }
+    return undefined
+  }
+
+  /** The first VISIBLE row emitted by the raw slots after `index`. */
+  private slotSuccessorOf(index: number): number | undefined {
+    let candidate = index + 1
+    while (candidate < this.items.length) {
+      const visible = this.firstVisibleOf(this.emittedAt(candidate))
+      if (visible !== undefined) return visible
+      candidate += 1
     }
     return undefined
   }
@@ -2173,13 +2231,10 @@ export class TranscriptFolder {
       this.groupingDirty = true
       return
     }
-    let span = this.affectedSpanAround(rawIndex)
-    const seeds = typeof alsoSeeds === 'number' ? [alsoSeeds] : alsoSeeds
-    for (const seed of seeds) {
-      const other = this.affectedSpanAround(seed)
-      span = { start: Math.min(span.start, other.start), end: Math.max(span.end, other.end) }
-    }
-    this.regroupDisplaySpan(span)
+    const extra = typeof alsoSeeds === 'number' ? [alsoSeeds] : alsoSeeds
+    // ONE joint closure over every seed and the resulting envelope: the union of
+    // separately closed spans is not closed by itself.
+    this.regroupDisplaySpan(this.affectedSpanAround([rawIndex, ...extra]))
   }
 
   private appendTailGrouping(index: number, previousIndex: number | undefined): boolean {
@@ -3767,6 +3822,7 @@ export class TranscriptFolder {
     refinedScans: number
     refinedCandidates: number
     lastRegroupSpanRows: number
+    lastRegroupMemberVisits: number
   } {
     return {
       entries: this.searchEntries.length,
@@ -3777,6 +3833,7 @@ export class TranscriptFolder {
       refinedScans: this.searchRefineCount,
       refinedCandidates: this.searchRefineCandidates,
       lastRegroupSpanRows: this.lastRegroupSpanRows,
+      lastRegroupMemberVisits: this.lastRegroupMemberVisits,
     }
   }
 
