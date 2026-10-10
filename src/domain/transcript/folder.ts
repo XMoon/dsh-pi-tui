@@ -3132,7 +3132,12 @@ export class TranscriptFolder {
   /** First-wins merge of one durable stream's tool-call preparing starts
    * into the folder-wide map, owned by the stream's own (turn, step)
    * (post-F6 plan §12.14). */
-  private absorbPreparingStarts(starts: ReadonlyMap<string, number>, turn: number, step: number): void {
+  private absorbPreparingStarts(
+    starts: ReadonlyMap<string, number>,
+    turn: number,
+    step: number,
+    allowNewRelations = true,
+  ): void {
     const owner = `${turn}:${step}`
     const refreshed: string[] = []
     const touchedGroups = new Set<unknown>()
@@ -3174,12 +3179,16 @@ export class TranscriptFolder {
         this.mergedReadGroupTiming(group as never, members, this.crossTurn(members))
       }
       const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
-      // The refresh producer shares the settlement's batch: restore the slots of
-      // the refreshed rows this pass will not move BEFORE the one reach snapshot,
-      // then apply. (The earlier single-pass version could leave a Tool relation
-      // crossing a sibling this very refresh restored, and a settled step has no
-      // later settlement to repair it.)
-      const touched = this.applyToolConvergenceBatch(turn, step, refreshed, anchorIndex)
+      // The cohort is the refreshed ids PLUS every own-step Tool row the anchor
+      // already relates: restoring a slot can invalidate a SIBLING whose own
+      // timestamp did not change, and that sibling is not in `refreshed`.
+      const cohort = new Set<string>(refreshed)
+      const owned = anchorIndex === undefined ? undefined : this.laneDisplayByAnchor.get(anchorIndex)
+      for (const row of [...(owned?.before ?? []), ...(owned?.after ?? [])]) {
+        const item = this.items[row]
+        if (item !== undefined && item.kind === 'tool' && item.callId !== undefined) cohort.add(item.callId)
+      }
+      const touched = this.applyToolConvergenceBatch(turn, step, [...cohort], anchorIndex, allowNewRelations)
       if (anchorIndex === undefined) return
       for (const position of touched) this.resortAnchorSide(anchorIndex, position)
     })
@@ -3320,6 +3329,7 @@ export class TranscriptFolder {
     step: number,
     candidates: readonly string[],
     anchorIndex: number | undefined,
+    allowNewRelations = true,
   ): Set<'before' | 'after'> {
     const touched = new Set<'before' | 'after'>()
     const restoreSlots = (): boolean => {
@@ -3341,6 +3351,12 @@ export class TranscriptFolder {
       for (const callId of candidates) {
         const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
         const hadRelation = index !== undefined && this.laneDisplayByDisplaced.has(index)
+        if (!hadRelation && !allowNewRelations) {
+          // A lower-authority refresh may REVOKE an invalid relation but never
+          // create one: the current successful settlement owns membership, and a
+          // card merely existing in the scoped index does not authorize a move.
+          continue
+        }
         const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
         if (outcome !== undefined) touched.add(outcome.position)
         if (hadRelation && (index === undefined || !this.laneDisplayByDisplaced.has(index))) dropped = true
@@ -4763,7 +4779,10 @@ export class TranscriptFolder {
       // One durable stream projection per settlement: lane order, restored
       // reasoning and usage come from the same pass (plan §4.4/§12.5).
       const projection = this.assistantStreamProjection(stream, data.turn, data.step)
-      this.absorbPreparingStarts(projection.toolCallStarts, data.turn, data.step)
+      // A late attempt on an ALREADY-SETTLED step keeps its independent timing
+      // facts but has no authority over display membership: it may revoke an
+      // invalid relation, never resurrect an id the current message expired.
+      this.absorbPreparingStarts(projection.toolCallStarts, data.turn, data.step, !alreadySettled)
       if (!alreadySettled) {
         // Store/refresh the step's lane authority from the attempt; a later
         // message settlement (higher authority) overwrites it.
@@ -4993,7 +5012,11 @@ export class TranscriptFolder {
         const projection = event.data.stream !== undefined && event.data.stream.length > 0
           ? this.assistantStreamProjection(event.data.stream, event.data.turn, event.data.step)
           : undefined
-        if (projection !== undefined) this.absorbPreparingStarts(projection.toolCallStarts, event.data.turn, event.data.step)
+        if (projection !== undefined) {
+          // A durable assistant/message IS the step's membership authority, so it
+          // may (re)establish relations regardless of an earlier settlement.
+          this.absorbPreparingStarts(projection.toolCallStarts, event.data.turn, event.data.step, true)
+        }
         const messageUsage = event.data.usage ?? projection?.usage
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
