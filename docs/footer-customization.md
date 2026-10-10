@@ -285,8 +285,14 @@ one pinned row directly under the global header:
 ‹ back  reviewer · Audit ownership     ● running   deepseek/v4 @high
 ```
 
-- `‹ back` is a navigation affordance (Esc exits the viewer); it is not a
-  clickable control.
+- `‹ back` is a navigation affordance: Esc exits the viewer, and in FULLSCREEN
+  the painted glyph cells are themselves clickable — a press/release on the
+  `‹ back` (narrow `‹`) cells runs the SAME viewer Esc exit, so the whole
+  lifecycle (main draft, child ingress release, display-subject commit,
+  scroll/focus) is the existing one. Exactly the painted glyph cells are
+  navigable (the label, model and padding stay inert); a child switch, viewer
+  exit, resize or a capturing modal between press and release drops the
+  gesture, and regular mode enables no mouse capture at all.
 - The child label, its `● running` / `○ inactive` activity and its real
   `provider/model @effort` come from the child's own committed SessionStatus
   (the same atomic `StatusSnapshot` the Footer composes from). An unavailable

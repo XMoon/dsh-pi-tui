@@ -753,15 +753,29 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   directly beside the identity, never `· 18s`), the `· thinking` marker is
   gone (thinking presence is not a lifecycle state; the Think slot owns the
   content), and the degradation ladder drops the LAST stat first and keeps
-  duration with the identity to the end. The header duration is the span's
-  OWN wall clock: the fold records a presentation-only `TranscriptTiming`
+  duration with the identity to the end. The header duration is the Activity's
+  structural LIFETIME (`src/tui/transcript/activity-clock.ts`), not the member
+  settle: the fold still records a presentation-only `TranscriptTiming`
   sidecar (`SessionEvent.time` only) on thinking/tool/retry rows (a command row
   and a subagent descriptor are never span members, so they carry no Activity
-  timing);
-  `summarizeWorkSpan` aggregates earliest-start/latest-end/any-running in its
-  existing single walk, running spans re-read `now()` per
-  render (the shared repaint heartbeat — no per-card timers), missing
-  evidence omits the duration (never `0s`), and read grouping never crosses
+  timing), and `summarizeWorkSpan` still aggregates
+  earliest-start/latest-end/any-running in its existing single walk. On top of
+  that member evidence the lifetime starts at the earliest member start and
+  closes at the first PROVEN boundary — the following canonical block's first
+  actually-visible time (the fold now also records a point sidecar on the
+  actually-visible Conversation/Context rows: assistant first-visible reply
+  text, user/injected-context messages, workflow runs, compaction cards), or
+  the owning turn's `turn/end`. A close is only accepted when that boundary
+  lies after the Activity started: cold hydration may order a Conversation row
+  after Process rows it chronologically preceded, and such an early successor
+  proves no close (the span then stays OPEN but, because a canonical block
+  still follows it, is NOT live and renders the conservative member end —
+  live/cold can differ for that reordered shape until the fold row order
+  converges). Only an open, canonical-trailing span of a live-tail window whose
+  committed display subject is running is live; the live predicate is re-read
+  per render (never a latched boolean) and re-reads `now()` on the shared
+  repaint heartbeat (no per-card timers). Missing evidence omits the duration
+  (never `0s`), and read grouping never crosses
   a turn boundary so no Activity span ever inherits another turn's count or
   timing (a group's action cardinality and wall span stay on the turn that
   renders the card). The shared Think/Action/Preparing slot geometry lives

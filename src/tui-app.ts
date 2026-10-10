@@ -8848,7 +8848,9 @@ export class TuiApp {
    *
    * The latest/live preview policy (the 2026-09-29 compact historical
    * compaction plan §4) is derived HERE, from the existing facts only: a
-   * live Preparing, a still-running span, or the TRUE latest Work of the
+   * live Preparing, an ActivityClock-live span (its structural lifetime is
+   * open, it is the trailing canonical block and the displayed subject is
+   * running — see `activity-clock.ts`), or the TRUE latest Work of the
    * current window (`hasNewer !== true` — a history page's tail is not the
    * global latest, §4.1/§4.2). Every other settled span hides its collapsed
    * preview; a historical think-only span renders `Thought` instead. */
@@ -8871,9 +8873,9 @@ export class TuiApp {
     const windowHasNewer = this.transcriptWindow?.hasNewer === true
     const isTrueLatestWork = !windowHasNewer && latestWorkSpan?.owner === span.owner
     // The Activity's LIFETIME (structure + the owning turn's boundary facts)
-    // finalized with the CURRENT display subject: the live flag is re-derived
-    // on EVERY component creation, so a Remote snapshot-only activity flip can
-    // never keep an earlier `running` boolean latched in a cached card.
+    // finalized with the CURRENT display subject: the finalized clock's live
+    // predicate is re-read on EVERY RENDER, so neither a Remote snapshot-only
+    // activity flip nor a cached card can latch an earlier `running` state.
     const lifetime = this.canonicalStructureIndex().workLifetimes.get(span.owner)
     const clock = lifetime === undefined
       ? undefined
