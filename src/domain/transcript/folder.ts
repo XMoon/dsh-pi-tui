@@ -733,10 +733,13 @@ export class TranscriptFolder {
    * step's Tool rows whose own materialization time proves they belong on the
    * other side of the Conversation. */
   private readonly laneDisplayByAnchor = new Map<number, { before: number[]; after: number[] }>()
-  /** Highest recorded displacement interval end (see `mayCoverExistingDisplacement`). */
-  private maxDisplacementHi = 0
-  /** Set when a removal may have lowered the recorded maximum (lazy rebuild). */
-  private maxDisplacementHiDirty = false
+  /** Highest recorded TOOL displacement interval end. Lane (Thinking/Assistant)
+   *  intervals are never the subject of the Tool guard, so they must not raise
+   *  this bound: an ordinary thinking-first cold history has zero Tool relations
+   *  and therefore answers every coverage query in O(1). */
+  private maxToolDisplacementHi = 0
+  /** Set when a TOOL removal may have lowered the recorded maximum. */
+  private maxToolDisplacementHiDirty = false
   /** Test-only: entries visited while rebuilding the maximum. */
   private maxHiScanCount = 0
   /** Test-only: how many times a stale side position had to be rebuilt (the
@@ -3245,9 +3248,20 @@ export class TranscriptFolder {
       // of the side, Thinking included.
       const touched = new Set<'before' | 'after'>()
       const laneEmissionBefore = this.laneEmissionChanges
-      // ONE outward scan for the whole batch instead of a per-row distance walk.
-      const reach = anchorIndex === undefined ? undefined : this.sideReachFrom(turn, step, anchorIndex)
+      // PASS 1: restore every CONFORMANT candidate's own slot FIRST. The shared
+      // reach must be computed on that final emission snapshot, otherwise it can
+      // approve a move across a sibling that this very batch just restored (and
+      // repeating the same authority would then flip the result).
+      const candidates: string[] = []
       for (const callId of callIds) {
+        candidates.push(callId)
+        const evidence = this.toolRowEvidence(turn, step, callId)
+        if (evidence === undefined) continue
+        if (this.toolRowIsConformant(evidence, anchorIndex)) this.dropLaneDisplacement(evidence.index)
+      }
+      // PASS 2: ONE outward scan on the restored snapshot, then apply the moves.
+      const reach = anchorIndex === undefined ? undefined : this.sideReachFrom(turn, step, anchorIndex)
+      for (const callId of candidates) {
         const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
         if (outcome !== undefined) touched.add(outcome.position)
       }
@@ -3304,6 +3318,16 @@ export class TranscriptFolder {
     const startedAt = transcriptTimingOf(card)?.startedAt
     if (startedAt === undefined || startedAt === visibleAt) return undefined
     return { index, position: startedAt > visibleAt ? 'after' : 'before' }
+  }
+
+  /** Whether a proven Tool row already sits on the physical side its evidence
+   *  asks for (so it keeps its own slot and needs no relation). */
+  private toolRowIsConformant(
+    evidence: { index: number; position: 'before' | 'after' },
+    anchorIndex: number | undefined,
+  ): boolean {
+    if (anchorIndex === undefined) return false
+    return evidence.position === 'after' ? evidence.index > anchorIndex : evidence.index < anchorIndex
   }
 
   private convergeToolRowAgainstAnchor(
@@ -3401,26 +3425,32 @@ export class TranscriptFolder {
     // O(1) exclusion: an interval needs hi > row, so a row at or past the highest
     // recorded end cannot be inside ANY interval — the normal serial tail case,
     // which used to walk the whole map on every settlement.
-    if (this.maxDisplacementHiDirty) {
-      this.maxDisplacementHiDirty = false
-      this.refreshMaxDisplacementHi()
+    if (this.maxToolDisplacementHiDirty) {
+      this.maxToolDisplacementHiDirty = false
+      this.refreshMaxToolDisplacementHi()
     }
-    if (row >= this.maxDisplacementHi) return false
+    if (row >= this.maxToolDisplacementHi) return false
     this.displacementScanCount += 1
-    for (const relation of this.laneDisplayByDisplaced.values()) {
+    for (const [displaced, relation] of this.laneDisplayByDisplaced) {
+      // Only Tool displacements are ever revoked by this guard, so a Lane
+      // relation's interval is not part of the coverage question.
+      const item = this.items[displaced]
+      if (item === undefined || item.kind !== 'tool') continue
       if (row > relation.lo && row < relation.hi) return true
     }
     return false
   }
 
-  /** Recompute the running highest interval end after a relation was removed. */
-  private refreshMaxDisplacementHi(): void {
+  /** Recompute the running highest TOOL interval end after a removal. */
+  private refreshMaxToolDisplacementHi(): void {
     let max = 0
-    for (const relation of this.laneDisplayByDisplaced.values()) {
+    for (const [displaced, relation] of this.laneDisplayByDisplaced) {
       this.maxHiScanCount += 1
+      const item = this.items[displaced]
+      if (item === undefined || item.kind !== 'tool') continue
       if (relation.hi > max) max = relation.hi
     }
-    this.maxDisplacementHi = max
+    this.maxToolDisplacementHi = max
   }
 
   /** Re-validate every existing displacement whose interval covers `row`: a row
@@ -3599,7 +3629,7 @@ export class TranscriptFolder {
       hi,
       at: -1,
     })
-    if (hi > this.maxDisplacementHi) this.maxDisplacementHi = hi
+    if (this.items[displaced]?.kind === 'tool' && hi > this.maxToolDisplacementHi) this.maxToolDisplacementHi = hi
     const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
     this.laneDisplayByAnchor.set(anchor, owned)
     const list = position === 'before' ? owned.before : owned.after
@@ -3637,7 +3667,16 @@ export class TranscriptFolder {
     if (owned === undefined) return
     const departing = [...owned.before, ...owned.after]
     for (const displaced of departing) {
+      const relation = this.laneDisplayByDisplaced.get(displaced)
       this.laneDisplayByDisplaced.delete(displaced)
+      // Route the departure through the same TOOL bound maintenance as a single
+      // drop: a stale-high maximum stays safe, but the bound must never be left
+      // too LOW for a surviving Tool relation.
+      const item = this.items[displaced]
+      if (relation !== undefined && item !== undefined && item.kind === 'tool'
+        && relation.hi >= this.maxToolDisplacementHi) {
+        this.maxToolDisplacementHiDirty = true
+      }
     }
     this.laneDisplayByAnchor.delete(anchor)
     this.searchRevisionCounter += 1
@@ -3651,7 +3690,10 @@ export class TranscriptFolder {
     this.laneDisplayByDisplaced.delete(displaced)
     // Do NOT recompute per removal (a bulk expiry would scan the map M times):
     // mark it dirty and let the next coverage query rebuild it ONCE.
-    if (current.hi >= this.maxDisplacementHi) this.maxDisplacementHiDirty = true
+    const removed = this.items[displaced]
+    if (removed !== undefined && removed.kind === 'tool' && current.hi >= this.maxToolDisplacementHi) {
+      this.maxToolDisplacementHiDirty = true
+    }
     const owned = this.laneDisplayByAnchor.get(current.anchor)
     if (owned !== undefined) {
       const list = current.position === 'before' ? owned.before : owned.after
