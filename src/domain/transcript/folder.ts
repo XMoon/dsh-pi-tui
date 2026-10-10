@@ -2004,18 +2004,42 @@ export class TranscriptFolder {
         if (members === undefined) continue
         for (const member of members) grew = extendTo(member) || grew
       }
-      // The raw read runs touching either endpoint belong to the same regroup.
-      const lowTurn = this.turnOfRaw(low)
-      while (low > 0 && lowTurn !== undefined && TranscriptFolder.continuesReadRun(this.items[low - 1]!, lowTurn)) {
-        grew = extendTo(low - 1) || grew
-      }
-      const highTurn = this.turnOfRaw(high)
-      while (high + 1 < this.items.length && highTurn !== undefined
-        && TranscriptFolder.continuesReadRun(this.items[high + 1]!, highTurn)) {
-        grew = extendTo(high + 1) || grew
+      // Every groupable read the envelope covers pulls in its DISPLAY run—the
+      // next row the user actually SEES decides it, so an invisible row is not a
+      // boundary and a departing non-read row does not stop the expansion.
+      for (let row = low; row <= high; row += 1) {
+        const item = this.items[row]
+        if (item === undefined || !TranscriptFolder.groupable(item)) continue
+        grew = this.extendDisplayRun(row, -1, extendTo) || grew
+        grew = this.extendDisplayRun(row, 1, extendTo) || grew
       }
     }
     return { start: low, end: high }
+  }
+
+  /** Extend the envelope over the DISPLAY run of groupable reads leaving `from`
+   *  in one direction: the next row the user actually SEES decides the run, so an
+   *  invisible row never stops it. `extend` reports whether it added a row. */
+  private extendDisplayRun(
+    from: number,
+    direction: -1 | 1,
+    extend: (candidate: number | undefined) => boolean,
+  ): boolean {
+    const start = this.items[from]
+    if (start === undefined || !TranscriptFolder.groupable(start) || !('turn' in start)) return false
+    const turn = start.turn
+    let grew = false
+    let cursor = from
+    for (;;) {
+      const next = direction < 0 ? this.displayPredecessorOf(cursor) : this.displaySuccessorOf(cursor)
+      if (next === undefined) return grew
+      const item = this.items[next]
+      if (item === undefined || !TranscriptFolder.groupable(item) || !('turn' in item) || item.turn !== turn) return grew
+      // Also includes any relations/groups the newly added row brings in.
+      if (!extend(next)) return grew
+      grew = true
+      cursor = next
+    }
   }
 
   /** The turn value of one raw row, when it carries one. */
