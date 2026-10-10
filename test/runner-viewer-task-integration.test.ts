@@ -549,7 +549,7 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   assert.deepEqual(rolloverActivity?.usage, { inputTokens: 11, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 })
   const viewerUsage = probe.capturedViewerUsage as {
     tokens?: { input: number; output: number }
-    performance?: { firstTokenMs: number }
+    performance?: { firstTokenMs?: number; tokensPerSec?: number; sessionTokensPerSec?: number }
   } | undefined
   // M3-5 PR1 §9.5: the child's CUMULATIVE tokens are a SessionStatus fact.
   // This fixture has no `sessionProjections` service, so the child's official
@@ -557,9 +557,16 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   // never be presented as a session total.
   assert.equal(viewerUsage?.tokens, undefined,
     'the bounded child fold token sum must not masquerade as the child cumulative usage')
-  // The recent-performance figures stay presentation-local and still reach the
-  // child stats footer.
-  assert.ok((viewerUsage?.performance?.firstTokenMs ?? 0) > 0, 'B first-token timing must reach the child stats footer')
+  // TPS plan PR-2: the measured performance values are the child's OWN Host
+  // `piTuiPerformance` projection — this fixture mounts no `sessionProjections`
+  // service, so they are UNAVAILABLE and must stay absent. The bounded child
+  // transcript fold may not stand in (the same rule as `tokens` above); the
+  // positive main/child routing path is covered by
+  // `test/status-display-subject.test.ts` and the PR-1 real-wire test.
+  assert.equal(viewerUsage?.performance?.firstTokenMs, undefined,
+    'without a child Host projection the child footer shows no first-token timing (never a fold stand-in)')
+  assert.equal(viewerUsage?.performance?.tokensPerSec, undefined,
+    'without a child Host projection the child footer shows no rate')
 
   // Parent events continue through the runner while the child owns the
   // visible transcript. Updating A and adding B must both survive the visit.

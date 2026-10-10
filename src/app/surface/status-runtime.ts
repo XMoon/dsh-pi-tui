@@ -38,6 +38,7 @@ import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { derivePlanStatus, deriveRemotePlanStatus, type PlanModeLike, type PlanProjectionLike } from '../../domain/status/derive-plan.ts'
 import { deriveRunnerPermission } from '../../domain/status/derive-permission.ts'
 import { usageFromStats } from '../../domain/status/derive-usage.ts'
+import { derivePerformance } from '../../domain/status/performance-view.ts'
 import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { resolveDisplaySubject } from '../../domain/status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, StatusPatch, StatusSnapshot, ViewStatus, WorkspaceStatus } from '../../domain/status/types.ts'
@@ -147,11 +148,6 @@ export interface StatusRuntimeDeps {
   /** The live-session presentation owner (the legacy stats facts). */
   readonly presentation: {
     readonly mainStats: () => StatsFolder
-    /** PR5 (plan §3.2): whether the main fold's RECENT-performance figures
-     *  are authoritative (Direct full log, or a proven Remote window). When
-     *  `false` the usage section OMITS the two recent metrics — never a
-     *  numeric `0s · 0 tok/s` stand-in for unknown evidence. */
-    readonly mainRecentPerformanceAvailable?: () => boolean
   }
   /** The viewer owner: the viewed child's IDENTITY + presentation facts, or
    *  `undefined` when no child viewer is mounted. Only the display-subject
@@ -732,18 +728,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const childContextTokens = childStatus?.context === undefined
       ? undefined
       : contextPressureOccupancy(childStatus.context)
-    const usage = viewed === undefined
+    const baseUsage = viewed === undefined
       ? usageFromStats(
           subjectStats,
           contextTokens,
           remoteUsageFacts,
-          // PR5 (plan §3.2): an unproven recent window omits the recent
-          // metrics. A viewer CHILD keeps the numeric figures (its own fold is
-          // its whole subject; the availability authority is the MAIN
-          // presentation's).
-          deps.presentation.mainRecentPerformanceAvailable?.() === false
-            ? { recentPerformanceAvailable: false }
-            : undefined,
         )
       : usageFromStats(
           subjectStats,
@@ -755,6 +744,19 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
               : { contextWindow: childStatus.context.contextWindow },
           },
         )
+    // TPS plan PR-2: the DISPLAY SUBJECT's own Host `piTuiPerformance`
+    // projection is the single authority for the measured performance values
+    // (R5 + All + recent first-token). The child subject reads the child
+    // Session's own Host facts; the main subject its own — never the other's,
+    // never a bounded page window's re-fold, and an absent projection omits
+    // the values instead of painting zeros.
+    const derivedPerformance = derivePerformance(
+      viewed === undefined ? mainSessionStatus()?.performance : childStatus?.performance,
+    )
+    const usage = {
+      ...baseUsage,
+      performance: { ...baseUsage.performance, ...derivedPerformance },
+    }
     const host = deriveHostStatus()
     const patch: {
       view?: ViewStatus

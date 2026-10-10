@@ -72,6 +72,7 @@ import { resolveDisplayPreset, type DisplayState } from '../domain/display/prese
 import { guardedStreamWriter } from '../tui/notification/terminal-notifier.ts'
 import { createTerminalNotificationPresentation } from '../tui/notification/runtime.ts'
 import { sessionStatsFactsOf } from '../domain/status/stats.ts'
+import { derivePerformance } from '../domain/status/performance-view.ts'
 import { isAssistantTokenDelta } from '../domain/transcript/usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/derive-plan.ts'
 import { migrateLegacySettings } from './bootstrap/legacy-settings-migration.ts'
@@ -1478,12 +1479,6 @@ export function applyRunnerWithRuntime(
         blank: () => sessionBlank(),
       },
       clientCwd: cwd,
-      // PR5 (plan §3.2): the /status panel reads the presentation-owned
-      // recent-performance availability beside the composed stats (Remote
-      // only — Direct's complete-log fold is authoritative by construction).
-      ...(remoteSources === undefined ? {} : {
-        recentPerformanceAvailable: () => presentation.mainRecentPerformanceAvailable(),
-      }),
       surface: {
         setNotificationMode: (mode) => surface.setNotificationMode(mode),
         setNotificationMethod: (method) => surface.setNotificationMethod(method),
@@ -1583,19 +1578,28 @@ export function applyRunnerWithRuntime(
           if (commands === undefined) throw new Error('commands service unavailable')
           return commands.list(agentNow()).map(commandSummaryOf)
         },
+        // TPS plan PR-2: the measured performance values come from the SAME
+        // Session's own Host `piTuiPerformance` projection on BOTH branches —
+        // the /status subject is the session id this seam was asked about.
         sessionStats: (sessionId, signal) => remoteSources === undefined
-          ? Promise.resolve(sessionStatsFactsOf(presentationBridge.directSessionStats(sessionId)))
-          : composeRemoteSessionStats({
-            sessionId,
-            reader: remoteSources.presentationReader,
-            fence: presentationBridge.remoteTransportFenceOf(sessionId),
-            facts: {
-              sessionStats: presentationBridge.sessionStatsProjectionOf(sessionId),
-              usage: remoteSources.sessionFacts.sessionStatus(sessionId)?.usage,
-              contextWindow: remoteSources.sessionFacts.sessionStatus(sessionId)?.context?.contextWindow,
-            },
-            signal,
-          }),
+          ? Promise.resolve(sessionStatsFactsOf(
+              presentationBridge.directSessionStats(sessionId),
+              derivePerformance(backend.sessionReader.sessionStatus(sessionId)?.performance),
+            ))
+          : (() => {
+              const status = remoteSources.sessionFacts.sessionStatus(sessionId)
+              return composeRemoteSessionStats({
+                sessionId,
+                fence: presentationBridge.remoteTransportFenceOf(sessionId),
+                facts: {
+                  sessionStats: presentationBridge.sessionStatsProjectionOf(sessionId),
+                  usage: status?.usage,
+                  contextWindow: status?.context?.contextWindow,
+                  performance: status?.performance,
+                },
+                signal,
+              })
+            })(),
         lastAssistantText: (sessionId, signal) => remoteSources === undefined
           ? Promise.resolve(presentationBridge.directLastAssistantText(sessionId))
           : composeRemoteLastAssistantText({
@@ -1713,10 +1717,6 @@ export function applyRunnerWithRuntime(
       }),
       presentation: {
         mainStats: () => presentation.mainStats(),
-        // PR5 (plan §3.2): the presentation-owned recent-performance
-        // availability authority (one bit beside the fold, committed in the
-        // same fenced hydrate).
-        mainRecentPerformanceAvailable: () => presentation.mainRecentPerformanceAvailable(),
       },
       viewer: { read: () => viewerRef?.read() },
       clientCwd: cwd,

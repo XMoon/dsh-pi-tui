@@ -162,6 +162,11 @@ const STATUS_PROJECTION_KEYS = [
   // projection (the footer's preset row repaints from it, never an
   // optimistic local install).
   'permissions',
+  // TPS plan PR-2: the bundle's OWN Host performance projection (R5/All/TTFB)
+  // rides the SAME live channel and the SAME exact retained binding read, so
+  // a pushed frame refreshes the performance facts with every other status
+  // key — never a bounded-page re-fold and never `loadOlder()`.
+  'piTuiPerformance',
 ] as const
 
 /** The projection keys the Remote STATUS/WELCOME current facts are read from:

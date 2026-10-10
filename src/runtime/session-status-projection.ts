@@ -8,6 +8,7 @@
  */
 
 import type { SessionStatusProjection } from './session-reader-port.ts'
+import type { PiTuiPerformanceProjection } from '../domain/status/performance-view.ts'
 
 /**
  * Detach the official projection values into the status DTO. Fields are
@@ -30,6 +31,7 @@ export function detachedSessionStatus(
     context?: SessionStatusProjection['context']
     todos?: SessionStatusProjection['todos']
     usage?: SessionStatusProjection['usage']
+    performance?: SessionStatusProjection['performance']
   } = { sessionId }
   if (typeof cwd === 'string' && cwd !== '') record.cwd = cwd
   const model = modelSelectionFact(values.modelSelection)
@@ -86,7 +88,69 @@ export function detachedSessionStatus(
       cacheWriteTokens: usageValue.cacheWriteTokens,
     }
   }
+  const performance = performanceProjection(values.piTuiPerformance)
+  if (performance !== undefined) record.performance = performance
   return record
+}
+
+/** A finite non-negative projection number, or `undefined` (never coerced,
+ *  never defaulted). */
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** Whether every entry of a candidate tuple is present (the shape gate). */
+function allDefined<T extends readonly unknown[]>(values: T): values is { [K in keyof T]: Exclude<T[K], undefined> } {
+  return values.every(entry => entry !== undefined)
+}
+
+/**
+ * Detach the bundle's own `piTuiPerformance` wire value: BOTH scopes with all
+ * of their finite non-negative counters, or `undefined` — a malformed,
+ * foreign or partial value reads absent (the capability cannot answer), never
+ * a partially copied or coerced projection.
+ */
+function performanceProjection(value: unknown): PiTuiPerformanceProjection | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const source = value as { readonly recent?: unknown; readonly all?: unknown }
+  const recent = typeof source.recent === 'object' && source.recent !== null
+    ? source.recent as Readonly<Record<string, unknown>>
+    : undefined
+  const all = typeof source.all === 'object' && source.all !== null
+    ? source.all as Readonly<Record<string, unknown>>
+    : undefined
+  if (recent === undefined || all === undefined) return undefined
+  const fields = [
+    finiteNumber(recent.outputTokens),
+    finiteNumber(recent.modelMs),
+    finiteNumber(recent.samples),
+    finiteNumber(recent.firstTokenMs),
+    finiteNumber(recent.firstTokenSamples),
+    finiteNumber(all.outputTokens),
+    finiteNumber(all.modelMs),
+    finiteNumber(all.samples),
+  ] as const
+  if (!allDefined(fields)) return undefined
+  const [
+    recentOutputTokens,
+    recentModelMs,
+    recentSamples,
+    firstTokenMs,
+    firstTokenSamples,
+    allOutputTokens,
+    allModelMs,
+    allSamples,
+  ] = fields
+  return {
+    recent: {
+      outputTokens: recentOutputTokens,
+      modelMs: recentModelMs,
+      samples: recentSamples,
+      firstTokenMs,
+      firstTokenSamples,
+    },
+    all: { outputTokens: allOutputTokens, modelMs: allModelMs, samples: allSamples },
+  }
 }
 
 /** Narrow the official `goal` projection view: `null` (no goal) is a LEGAL

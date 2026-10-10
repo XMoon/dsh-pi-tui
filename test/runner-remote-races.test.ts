@@ -294,9 +294,11 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ — release after th
   }
   const fixture = await mountRaceRunner(life, { presetId, resumeSessionId: mainId, host })
   await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
-  // PENDING READ: park the FIRST reader.read that begins AFTER the /status
-  // submit (the stats composition's first await). Failure-path fallback so
-  // a failed assertion cannot strand the drain.
+  // PENDING READ: park the FIRST reader.read that begins AFTER the command
+  // submit. TPS plan PR-2 retired the stats composition's window read, so the
+  // remaining main-path window reader is the `/copy` seam
+  // (`composeRemoteLastAssistantText`). Failure-path fallback so a failed
+  // assertion cannot strand the drain.
   const presentation = fixture.aggregate.presentation as unknown as {
     presentationReader: { read(id: string, signal?: AbortSignal): Promise<unknown> }
   }
@@ -314,7 +316,7 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ — release after th
   life.defer(() => releaseRead?.(undefined))
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void; stop(): void }
   armParking = true
-  app.setDraft('/status')
+  app.setDraft('/copy')
   app.submitDraft()
   await waitFor('the parked main-path read began', () => readParked, 10_000)
   // SURFACE-STOP OBSERVER: wrap the mounted TuiApp's REAL stop (the

@@ -407,6 +407,10 @@ export class DirectSessionReader implements SessionReader {
         // semantic (Direct reads the identical projection the Remote
         // binding carries).
         'permissions',
+        // The bundle's OWN Host performance projection (TPS plan PR-2): the
+        // single authority for the R5/All/TTFB facts, read off the same
+        // exact-session cut as every other status key.
+        'piTuiPerformance',
       ])?.values
       if (values === undefined) return undefined
       // The official `modelSelection` unit is registered by the API

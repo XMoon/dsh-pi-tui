@@ -580,7 +580,10 @@ test('the live status projection list is EXACTLY what the status reads (no stati
     // projection-authoritative, and a successful permission write is
     // COMMITTED by the pushed projection — the live channel must carry it or
     // the row would render statically after a cycle.
-    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
+    // 'piTuiPerformance' joined in TPS plan PR-2: the bundled Host projection
+    // is the performance authority, and a pushed frame must refresh the R5/All
+    // figures with every other status key (never a static render).
+    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'piTuiPerformance', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
   )
   // Projections whose change the status does not consume stay OUT: their own
   // consumer establishes the subscription it needs.

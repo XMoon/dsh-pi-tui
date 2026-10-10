@@ -63,10 +63,17 @@ export function formatStatsFacts(facts: SessionStatsFacts): string {
     ].filter(part => part !== '')
     parts.push([`↑${formatTokens(tokens.input)} ↓${formatTokens(tokens.output)}`, ...cacheParts].join(' '))
   }
+  // TPS plan PR-2 §5.3: the measured performance facts come from the Host
+  // `piTuiPerformance` projection. Each value prints only when its own
+  // authoritative source answered — an absent field is unknown, never a
+  // fabricated `0`, and TTFB stays independent of the two rates.
   const recent = facts.recent
-  if (recent !== undefined) {
-    parts.push(`TTFB ${formatSeconds(recent.firstTokenMsAvg)} · ${recent.tokensPerSec} tok/s`)
-  }
+  const sessionPerformance = facts.sessionPerformance
+  const performanceParts: string[] = []
+  if (recent?.firstTokenMsAvg !== undefined) performanceParts.push(`TTFB ${formatSeconds(recent.firstTokenMsAvg)}`)
+  if (recent?.tokensPerSec !== undefined) performanceParts.push(`R5 ${recent.tokensPerSec} tok/s`)
+  if (sessionPerformance !== undefined) performanceParts.push(`All ${sessionPerformance.tokensPerSec} tok/s`)
+  if (performanceParts.length > 0) parts.push(performanceParts.join(' · '))
   if (parts.length === 0) return 'unmeasured'
   return parts.join(' | ')
 }

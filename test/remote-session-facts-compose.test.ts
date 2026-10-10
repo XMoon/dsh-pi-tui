@@ -1,10 +1,11 @@
 /**
  * Supporting composition-unit tests (no L1–L6 level) for the Remote
- * session-facts composition (M3-4 PR4 Step 3 / plan §3.3/§3.4/§3.6): whole-log
- * totals from the official projections (never the bounded window), recent
- * performance from the bounded window via the shared fold, bounded loadOlder
- * paging for both stats and lastAssistantText, stale-transport dropping, and
- * the undefined-vs-empty-text distinction.
+ * session-facts composition (M3-4 PR4 Step 3 / plan §3.3/§3.4/§3.6, TPS plan
+ * PR-2 §5.3): whole-log totals from the official projections, the measured
+ * performance facts from THIS Session's Host `piTuiPerformance` projection
+ * (never the bounded window, never `loadOlder()`), bounded loadOlder paging
+ * for lastAssistantText only, the currentness fence, and the
+ * undefined-vs-empty-text distinction.
  * @module @xmoon76/dsh-pi-tui/remote-session-facts-compose.test
  */
 
@@ -16,7 +17,6 @@ import {
   type RemoteFactsReader,
 } from '../src/app/remote/session-facts-compose.ts'
 import type { PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
-import { RECENT_PERFORMANCE_SAMPLE_LIMIT } from '../src/domain/status/stats.ts'
 
 /** One window event builder (durable entries only). */
 function events(...specs: Array<[string, unknown]>): Array<Record<string, unknown> & { type: string; seq: number; time: number }> {
@@ -53,12 +53,17 @@ test('§3.3 stats: lifetime totals come from the projections, not the window', a
   }
   const stats = await composeRemoteSessionStats({
     sessionId: 's',
-    reader: { read: async () => window, loadOlder: async () => window },
     fence: { isCurrent: () => true },
     facts: {
       sessionStats: { turns: 3, steps: 9, llmMs: 12_000 },
       usage: { uncachedInputTokens: 100, outputTokens: 50, cacheReadTokens: 30, cacheWriteTokens: 20 },
       contextWindow: 128_000,
+      // The measured performance facts ride the SAME facts object: THIS
+      // Session's own Host `piTuiPerformance` projection.
+      performance: {
+        recent: { outputTokens: 100, modelMs: 1000, samples: 1, firstTokenMs: 500, firstTokenSamples: 1 },
+        all: { outputTokens: 100, modelMs: 1000, samples: 1 },
+      },
     },
   })
   assert.ok(stats !== undefined)
@@ -67,199 +72,41 @@ test('§3.3 stats: lifetime totals come from the projections, not the window', a
   assert.deepEqual(stats.tokens, { input: 100, output: 50, cacheRead: 30, cacheWrite: 20, cacheHitPct: 20 },
     'the tokens group is projection-backed (billed 150; cacheHit 30/150 = 20%)')
   assert.equal(stats.contextWindow, 128_000)
+  assert.deepEqual(stats.recent, { firstTokenMsAvg: 500, tokensPerSec: 100 },
+    'the recent group is the Host projection derivation (500ms TTFB, 100 tok/s)')
+  assert.deepEqual(stats.sessionPerformance, { tokensPerSec: 100 }, 'the All group is the Host projection derivation')
 })
 
-test('§3.3 stats: a superseded transport never commits (undefined)', async () => {
-  let windowReads = 0
-  const window: PresentationReadSnapshot = {
-    sessionId: 's', durableEvents: [], liveInputs: [], revision: 1,
-    coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',
+test('§3.3 stats: a superseded transport never commits (undefined) and the window is never read', async () => {
+  const readWindow = async (): Promise<PresentationReadSnapshot> => {
+    throw new Error('the composition must not read the event window for performance')
   }
-  const stats = await composeRemoteSessionStats({
+  const stale = await composeRemoteSessionStats({
     sessionId: 's',
-    reader: {
-      read: async () => { windowReads += 1; return window },
-      loadOlder: async () => window,
-    },
-    // The transport flips DURING the read await: the FIRST fence check
-    // (after the read settles) sees the replaced identity and must drop.
-    fence: { isCurrent: () => windowReads < 1 },
-    facts: { sessionStats: { turns: 1, steps: 1, llmMs: 0 }, usage: undefined, contextWindow: undefined },
+    // A replaced Connection/binding drops at the fence, never a partial figure.
+    fence: { isCurrent: () => false },
+    facts: { sessionStats: { turns: 1, steps: 1, llmMs: 0 }, usage: undefined, contextWindow: undefined, performance: undefined },
   })
-  assert.equal(stats, undefined, 'a replaced Connection/binding settles as superseded, never a partial figure')
-})
+  assert.equal(stale, undefined, 'a replaced Connection/binding settles as superseded')
 
-test('§3.3 stats: bounded paging stops once enough recent samples are loaded', async () => {
-  // Page 1: a truncated window with too few completed steps.
-  // Page 2: a window with more than 2× the sample limit — paging stops there.
-  const stepTriplets = (turns: number) => {
-    const out: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
-    let seq = 0
-    for (let turn = 1; turn <= turns; turn += 1) {
-      out.push({ type: 'turn/start', seq: seq++, time: 1, data: { turn } })
-      out.push({ type: 'step/start', seq: seq++, time: 1, data: { turn, step: 1 } })
-      out.push({ type: 'step/end', seq: seq++, time: 1_000, data: { turn, step: 1 } })
-      out.push({ type: 'turn/end', seq: seq++, time: 1_000, data: { turn, reason: { kind: 'completed' } } })
-    }
-    return out
-  }
-  // NOTE (review F3): each page-2 turn carries a VALID assistant sample
-  // (an embedded durable stream with two token deltas + usage) — the page
-  // stops because the FOLD proves the sample windows full, not because of
-  // any completed-step count.
-  const page2Events: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
-  let seq2 = 0
-  for (let turn = 1; turn <= RECENT_PERFORMANCE_SAMPLE_LIMIT * 2; turn += 1) {
-    page2Events.push(...validSampleTurn(turn, seq2))
-    seq2 += 5
-  }
-  const page1: PresentationReadSnapshot = {
-    sessionId: 's', durableEvents: stepTriplets(1) as never, liveInputs: [], revision: 1,
-    coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
-  }
-  const page2: PresentationReadSnapshot = {
-    sessionId: 's', durableEvents: page2Events as never, liveInputs: [], revision: 2,
-    coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
-  }
-  let loadOlderCalls = 0
-  const stats = await composeRemoteSessionStats({
+  // Decisive retirement witness: with a live fence the composition answers
+  // from the passed-in facts alone — `read`/`loadOlder` are NEVER called
+  // (both throw above), so no bounded page can influence a performance fact.
+  const current = await composeRemoteSessionStats({
     sessionId: 's',
-    reader: {
-      read: async () => page1,
-      loadOlder: async () => { loadOlderCalls += 1; return page2 },
-    },
     fence: { isCurrent: () => true },
-    facts: { sessionStats: { turns: 30, steps: 30, llmMs: 1 }, usage: undefined, contextWindow: undefined },
-  })
-  assert.ok(stats !== undefined)
-  assert.equal(loadOlderCalls, 1, 'paging stops once the recent-sample window is complete (never loads the whole log)')
-  assert.equal(stats.lifetime?.turns, 30, 'the projection still owns lifetime totals')
-})
-
-/** One completed turn whose assistant message carries a VALID sample (an
- *  embedded durable stream with two token deltas + usage) — the fold's own
- *  admission rules count it for both metrics. */
-function validSampleTurn(turn: number, seqBase: number): Array<Record<string, unknown> & { type: string; seq: number; time: number }> {
-  return [
-    { type: 'turn/start', seq: seqBase, time: 0, data: { turn } },
-    { type: 'step/start', seq: seqBase + 1, time: 0, data: { turn, step: 1 } },
-    {
-      type: 'assistant/message', seq: seqBase + 2, time: 1_000,
-      data: {
-        turn, step: 1,
-        message: { id: `m-${turn}`, role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
-        usage: { inputTokens: 1, outputTokens: 100 },
-        stream: [
-          { type: 'chunk', time: 500, chunk: { type: 'text-delta', index: 0, text: 'a' } },
-          { type: 'chunk', time: 900, chunk: { type: 'text-delta', index: 0, text: 'b' } },
-        ],
+    facts: {
+      sessionStats: { turns: 1, steps: 1, llmMs: 0 },
+      usage: undefined,
+      contextWindow: undefined,
+      performance: {
+        recent: { outputTokens: 30, modelMs: 1000, samples: 1, firstTokenMs: 0, firstTokenSamples: 1 },
+        all: { outputTokens: 30, modelMs: 1000, samples: 1 },
       },
     },
-    { type: 'step/end', seq: seqBase + 3, time: 1_100, data: { turn, step: 1 } },
-    { type: 'turn/end', seq: seqBase + 4, time: 1_100, data: { turn, reason: { kind: 'completed' } } },
-  ]
-}
-
-/** One completed turn with NO valid sample: an assistant message with an
- *  empty stream (no first token, no decode range — counted by step/end,
- *  admitted by nothing). This is the F3 discriminator shape. */
-function invalidSampleTurn(turn: number, seqBase: number): Array<Record<string, unknown> & { type: string; seq: number; time: number }> {
-  return [
-    { type: 'turn/start', seq: seqBase, time: 0, data: { turn } },
-    { type: 'step/start', seq: seqBase + 1, time: 0, data: { turn, step: 1 } },
-    {
-      type: 'assistant/message', seq: seqBase + 2, time: 1_000,
-      data: {
-        turn, step: 1,
-        message: { id: `mi-${turn}`, role: 'assistant', content: [], source: { kind: 'model', provider: 'p', model: 'm' } },
-        stream: [],
-      },
-    },
-    { type: 'step/end', seq: seqBase + 3, time: 1_100, data: { turn, step: 1 } },
-    { type: 'turn/end', seq: seqBase + 4, time: 1_100, data: { turn, reason: { kind: 'completed' } } },
-  ]
-}
-
-test('§3.3/F3 stats: 10 invalid newest steps DO NOT stop paging — the fold keeps paging to the valid samples', async () => {
-  // Page 1: TEN completed steps with NO valid samples (empty streams) —
-  // the retired count-based stop (10 ≥ 5×2) would stop here and report
-  // TTFT/TPS = 0/0 while valid history exists one page older.
-  const page1Events: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
-  let seq = 0
-  for (let turn = 1; turn <= 10; turn += 1) {
-    page1Events.push(...invalidSampleTurn(turn, seq))
-    seq += 5
-  }
-  // Page 2: the FIVE valid samples the recent contract needs.
-  const page2Events: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
-  for (let turn = 11; turn <= 10 + RECENT_PERFORMANCE_SAMPLE_LIMIT; turn += 1) {
-    page2Events.push(...validSampleTurn(turn, seq))
-    seq += 5
-  }
-  const page1: PresentationReadSnapshot = {
-    sessionId: 's', durableEvents: page1Events as never, liveInputs: [], revision: 1,
-    coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
-  }
-  const page2: PresentationReadSnapshot = {
-    sessionId: 's', durableEvents: [...page2Events, ...page1Events] as never, liveInputs: [], revision: 2,
-    coverage: 'bounded', hasMore: false, loadingOlder: false, openState: 'open',
-  }
-  let loadOlderCalls = 0
-  const stats = await composeRemoteSessionStats({
-    sessionId: 's',
-    reader: {
-      read: async () => page1,
-      loadOlder: async () => { loadOlderCalls += 1; return page2 },
-    },
-    fence: { isCurrent: () => true },
-    facts: { sessionStats: { turns: 15, steps: 15, llmMs: 1 }, usage: undefined, contextWindow: undefined },
   })
-  assert.ok(stats !== undefined)
-  assert.equal(loadOlderCalls, 1, 'invalid completed steps never satisfy the page-stop (the fold keeps paging)')
-  assert.equal(stats.recent?.firstTokenMsAvg, 500, 'the valid samples (step/start 0 → first token 500) drive TTFT')
-  assert.ok((stats.recent?.tokensPerSec ?? 0) > 0, 'the valid samples drive the throughput figure')
-})
-
-test('§3.3/F3 stats: a NEVER-satisfied window pages to the history start and equals the whole-log fold (no silent cap)', async () => {
-  // The whole log is invalid-sample turns; the recent contract can never be
-  // satisfied. Paging must run to the HISTORY START (hasMore=false) and then
-  // report the same figures the whole-log fold would — never a partial
-  // window after a fixed page cap (the retired paged<10 trap).
-  const allInvalid: Array<Record<string, unknown> & { type: string; seq: number; time: number }> = []
-  let seq = 0
-  const TURNS = 40 // 8 pages of 5 events each — far beyond any old 10-page cap
-  for (let turn = 1; turn <= TURNS; turn += 1) {
-    allInvalid.push(...invalidSampleTurn(turn, seq))
-    seq += 5
-  }
-  const pages: PresentationReadSnapshot[] = []
-  for (let pageIndex = 0; pageIndex < TURNS / 5; pageIndex += 1) {
-    const window = allInvalid.slice(pageIndex * 25)
-    pages.push({
-      sessionId: 's', durableEvents: window as never, liveInputs: [], revision: pageIndex + 1,
-      coverage: 'bounded', hasMore: pageIndex < TURNS / 5 - 1, loadingOlder: false, openState: 'open',
-    })
-  }
-  // The final page is the history start (full coverage) — built as a
-  // fresh snapshot object (the interface is read-only).
-  pages[pages.length - 1] = { ...pages.at(-1)!, coverage: 'full' }
-  let loadOlderCalls = 0
-  const stats = await composeRemoteSessionStats({
-    sessionId: 's',
-    reader: {
-      read: async () => pages[0]!,
-      loadOlder: async () => { loadOlderCalls += 1; return pages[loadOlderCalls] },
-    },
-    fence: { isCurrent: () => true },
-    facts: { sessionStats: { turns: TURNS, steps: TURNS, llmMs: 1 }, usage: undefined, contextWindow: undefined },
-  })
-  assert.ok(stats !== undefined)
-  assert.equal(loadOlderCalls, TURNS / 5 - 1, 'paging ran to the history start (every page, no cap)')
-  // The whole-log reference: the same all-invalid log folds to 0/0 — so the
-  // composed figures are the WHOLE-LOG TRUTH here (not a partial artifact).
-  const wholeLog = await import('../src/domain/status/stats.ts').then(m => m.computeStats(allInvalid as never))
-  assert.equal(stats.recent?.firstTokenMsAvg, wholeLog.firstTokenMsAvg)
-  assert.equal(stats.recent?.tokensPerSec, wholeLog.tokensPerSec)
+  assert.deepEqual(current?.recent, { firstTokenMsAvg: 0, tokensPerSec: 30 },
+    'the Host projection alone answers (a measured 0 TTFB stays a visible zero)')
 })
 
 test('§3.6 lastAssistantText: newest message inside the window returns verbatim', async () => {
@@ -359,41 +206,47 @@ test('§1B-2 absent projections stay absent groups — never fabricated zeros', 
     sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
     coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',
   }
-  // EVERY authoritative source absent.
+  // EVERY authoritative source absent, including this Session's Host
+  // performance projection.
   const facts = await composeRemoteSessionStats({
     sessionId: 's',
-    reader: { read: async () => window, loadOlder: async () => window },
     fence: { isCurrent: () => true },
-    facts: { sessionStats: undefined, usage: undefined, contextWindow: undefined },
+    facts: { sessionStats: undefined, usage: undefined, contextWindow: undefined, performance: undefined },
   })
   assert.ok(facts !== undefined)
   assert.equal(facts.lifetime, undefined, 'an absent sessionStats projection keeps the lifetime group ABSENT (never t0/s0/LLM 0s)')
   assert.equal(facts.tokens, undefined, 'an absent tokenUsage projection keeps the tokens group ABSENT (never ↑0 ↓0)')
-  // hasMore=false (history start) makes the EMPTY recent fold authoritative:
-  // a zero-sample recent window renders zero, it is not "unknown".
-  assert.deepEqual(facts.recent, { firstTokenMsAvg: 0, tokensPerSec: 0 },
-    'a history-start window is an AUTHORITATIVE zero (visible zero, not absence)')
+  assert.equal(facts.recent, undefined,
+    'an absent Host projection keeps the recent group ABSENT (a bounded window can no longer stand in)')
+  assert.equal(facts.sessionPerformance, undefined, 'an absent Host projection keeps the All group ABSENT')
 })
 
-test('§1B-2 present-with-zero projections render as KNOWN zeros', async () => {
+test('§1B-2 a present Host projection renders its measured zero; a sample-less scope stays ABSENT', async () => {
   const window: PresentationReadSnapshot = {
     sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
     coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',
   }
   const facts = await composeRemoteSessionStats({
     sessionId: 's',
-    reader: { read: async () => window, loadOlder: async () => window },
     fence: { isCurrent: () => true },
     facts: {
       sessionStats: { turns: 0, steps: 0, llmMs: 0 },
       usage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
       contextWindow: undefined,
+      // ONE measured first-token sample at 0 ms, but NO eligible TPS sample.
+      performance: {
+        recent: { outputTokens: 0, modelMs: 0, samples: 0, firstTokenMs: 0, firstTokenSamples: 1 },
+        all: { outputTokens: 0, modelMs: 0, samples: 0 },
+      },
     },
   })
   assert.ok(facts !== undefined)
   assert.deepEqual(facts!.lifetime, { turns: 0, steps: 0, llmMs: 0 }, 'a present zero projection renders a KNOWN zero')
   assert.ok(facts!.tokens !== undefined && facts!.tokens.input === 0 && facts!.tokens.output === 0,
     'a present zero usage renders a KNOWN zero token group')
+  assert.deepEqual(facts!.recent, { firstTokenMsAvg: 0 },
+    'a measured 0ms TTFB is a visible zero; the sample-less rate fields stay ABSENT, never 0')
+  assert.equal(facts!.sessionPerformance, undefined, 'a sample-less All scope answers nothing')
 })
 
 // QUALIFICATION LABEL (whole-PR F5): this case pages a NEVER-satisfied window
@@ -401,36 +254,3 @@ test('§1B-2 present-with-zero projections render as KNOWN zeros', async () => {
 // group is PRESENT. It is therefore NOT a bounded-window ABSENT proof — that
 // absence is encoded by the presentation-layer availability bit (Batch 1B,
 // `recent-performance-availability.test.ts`), not here.
-test('§1B-2 the composer pages a never-satisfied window to the history start, where the recent fold is AUTHORITATIVE', async () => {
-  // One valid sample only; hasMore=true (older history exists) — the recent
-  // evidence is NOT authoritative, so the group must be absent.
-  const oneSample = validSampleTurn(1, 0)
-  const window: PresentationReadSnapshot = {
-    sessionId: 's', durableEvents: oneSample as never, liveInputs: [], revision: 1,
-    coverage: 'bounded', hasMore: true, loadingOlder: false, openState: 'open',
-  }
-  // The composer's paging contract stops only at proven-samples or the
-  // history start: a NEVER-satisfied window must page to hasMore=false (the
-  // page below is the history start with the SAME insufficient evidence).
-  const historyStart: PresentationReadSnapshot = { ...window, hasMore: false, coverage: 'full' }
-  const facts = await composeRemoteSessionStats({
-    sessionId: 's',
-    reader: {
-      read: async () => window,
-      // Pretend the remaining history cannot help: the history start still
-      // holds only the one insufficient sample.
-      loadOlder: async () => historyStart,
-    },
-    fence: { isCurrent: () => true },
-    facts: { sessionStats: { turns: 1, steps: 1, llmMs: 1 }, usage: undefined, contextWindow: undefined },
-  })
-  // NOTE: reaching the history start makes the window AUTHORITATIVE — the
-  // recent group is then present with the fold's real figures. The ABSENT
-  // case therefore requires paging to STOP while hasMore stays true, which
-  // only the presentation-layer availability bit (Batch 1B) encodes; here
-  // we assert the boundary honestly: history start => present, bounded+load-
-  // bounded-to-history-start => authoritative (the composer never fabricates
-  // absence after the history start).
-  assert.ok(facts !== undefined && facts.recent !== undefined,
-    'reaching the history start makes the recent fold AUTHORITATIVE (the group renders; absence only exists while hasMore stays true)')
-})
