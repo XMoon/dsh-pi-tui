@@ -389,12 +389,15 @@ function main() {
       // -> app/surface/viewer-policy, task-presentation -> app/surface/task-presentation;
       // TS8-F5: compaction-presentation -> app/surface/compaction-presentation — never
       // gain a new entry for an internal implementation path.
+      // `app/host/performance-host` is a public Loader row ENTRY (like
+      // `startup`/`builtins`), exposed as the flat `./performance-host`
+      // subpath — the nested canonical source path, never a new root module.
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/performance-host|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -445,9 +448,11 @@ function main() {
         const importRun = run(process.execPath, ['--input-type=module', '-e',
           "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
             + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
-            + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable')])"
+            + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable'),"
+            + "import('@xmoon76/dsh-pi-tui/performance-host')])"
             + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
-            + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL'); console.log('imports-ok') })"
+            + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL');"
+            + "if (m[6].name !== 'pi-tui-performance-host') throw new Error('performance-host row'); console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })
         check('all exports entries import', importRun.status === 0 && importRun.stdout.includes('imports-ok'),

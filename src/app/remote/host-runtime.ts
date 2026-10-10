@@ -31,6 +31,7 @@ import * as sessionStats from '@deepseek-ai/dsh-session-stats'
 import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
 import { PiTuiFileReferenceHostService, type FileReferencesServiceLike, type LiveAgentLike } from './pi-tui-file-reference-host.ts'
 import { PiTuiTerminalProgressHostService, type LiveAgentLike as TerminalProgressLiveAgentLike } from './terminal-progress-host.ts'
+import * as performanceHost from '../host/performance-host.ts'
 import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 
 /**
@@ -273,6 +274,15 @@ export async function createRemoteHostRuntime(
     const statsFiber = hostContext.plugin(sessionStats)
     fibers.push(statsFiber)
     await statsFiber
+    // 4b. The bundle's OWN Host performance projection (plan PR-1 §4): the one
+    //     authority for the R5/All model-request rate and the recent TTFB.
+    //     Mounted right after the official `sessionStats` unit it mirrors and
+    //     before the Session controller / Client carrier, on THIS Host Context
+    //     (the Direct profile registers its own row on the base Host Context —
+    //     one registration per context is the contract).
+    const performanceFiber = hostContext.plugin(performanceHost)
+    fibers.push(performanceFiber)
+    await performanceFiber
     const outlineFiber = hostContext.plugin(sessionTurnOutline)
     fibers.push(outlineFiber)
     await outlineFiber

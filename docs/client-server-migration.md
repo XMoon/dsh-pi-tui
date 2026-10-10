@@ -2454,7 +2454,8 @@ unchanged; no production bootstrap call site exists.
   sessionProjections, sessionQuery, workspaceRegistry, jobController`),
   then the exact §2.4.1 additive rows as tracked fibers
   (client-connection → real client-file-upload → sessionStats →
-  turnOutline → api-session-controller `{nativeOpen: false}` →
+  the bundle's own `performanceHost` projection row → turnOutline →
+  api-session-controller `{nativeOpen: false}` →
   api-settings-controller → api-remotes → session-log-export), the existing
   `jobController` asserted (same Typert binding, never duplicated), the
   in-process carrier (`createSharedFetchHandler('/api')` +

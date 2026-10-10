@@ -24,6 +24,18 @@
       name: '@xmoon76/dsh-pi-tui/builtins'
       inject: [tuiStartup, piTuiExtensions]
 
+    # The bundle's OWN Host performance projection (plan PR-1): the single
+    # authority for the R5 / All model-request output rate and the recent TTFB.
+    # It registers the `piTuiPerformance` unit on the official
+    # `sessionProjections` seam — the same seam the official `sessionStats` row
+    # uses — and then publishes the `piTuiPerformanceReady` gate. Gating on
+    # `tuiStartup` keeps `--help` from mounting it; the `sessionProjections`
+    # inject makes the row wait for the Host registry instead of registering
+    # into a missing seam.
+    - id: pi-tui-performance-host
+      name: '@xmoon76/dsh-pi-tui/performance-host'
+      inject: [tuiStartup, sessionProjections]
+
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
       # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork
@@ -36,7 +48,11 @@
       # dsh-base layer already mounts it (disabled only without a profile),
       # so this is an explicit lifecycle ordering dependency, never a second
       # package-manager row.
-      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController]
+      # `piTuiPerformanceReady` is the bundle's own Host projection gate: the
+      # surface must not mount without its performance authority, so a profile
+      # that disables the `pi-tui-performance-host` row fails loudly here
+      # instead of silently falling back to a Client-side estimate.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady]
       config:
         sessionId: ''
 
