@@ -1093,111 +1093,151 @@ test('N3d: dropping a displaced relation reunites the rows it separated (live/co
   assert.equal(merged[0]!.callCount, 2)
 })
 
-test('N3c: a replacement drops a durable BLOCK request too, not just a streamed delta', () => {
-  const settled = (withBlock: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
-    turn: 1, step: 0,
-    message: {
-      id: 'm-n3c', role: 'assistant',
-      content: withBlock
-        ? [{ type: 'text', text: 'reply' }, { type: 'tool-call', id: 'a', name: 'bash', arguments: '{}' }]
-        : [{ type: 'text', text: 'reply' }],
-      source: { kind: 'assistant' },
-    },
-    stream: [textChunk(T0 + 2_000, 0, 'reply')],
-  }, T0 + 6_000, seq)
-  const folder = new TranscriptFolder()
-  folder.apply([turnStart(1, T0, 0)])
-  folder.apply([settled(true, 1)])
-  // The authoritative replacement stops naming A.
-  folder.apply([settled(false, 2)])
-  folder.apply([
-    toolCall({ callId: 'a', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 3 }),
-    toolResult('a', 1, 0, T0 + 1_500, 4, 'ok'),
-  ])
-  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:a'],
-    'the superseded durable block no longer qualifies the later call')
+
+// ── R4-1: an out-of-order result re-groups from the emitted positions ───────
+
+test('R4-1: a running read settling after a later read still merges with it', () => {
+  const events = (): SessionEvent[] => [
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'),
+    toolCall({ callId: 'x', name: 'bash', turn: 1, step: 1, time: T0 + 4_000, seq: 2 }),
+    // Reply visible at +2s with A's delta at +3s: A is displaced AFTER its anchor.
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 8_000, seq: 3, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+    }),
+    readCall('b', 1, 2, T0 + 9_000, 4, 'b.ts'), toolResult('b', 1, 2, T0 + 9_500, 5, 'bravo'),
+    // A's result lands LAST: A settles out of order and must join B.
+    toolResult('a', 1, 0, T0 + 10_000, 6, 'alpha'),
+  ]
+  const live = new TranscriptFolder()
+  for (const event of events()) live.apply([event])
+  const cold = foldEvents(events())
+  const merged = toolRows(live).filter(row => row.args === '2 files')
+  assert.equal(merged.length, 1,
+    `the out-of-order settled pair merges:\\n${JSON.stringify(toolRows(live).map(row => row.args))}`)
+  assert.equal(merged[0]!.callCount, 2)
+  assert.deepEqual(logicalRows(live), logicalRows(cold), 'live and cold agree on the out-of-order pair')
 })
 
-test('N3d: dropping a displaced relation reunites the rows it separated (live/cold parity)', () => {
+// ── R4-2: the union of two seeds is closed as ONE envelope ─────────────────
+
+test('R4-2: a departure whose union envelope contains another anchor never orphans that anchor’s group', () => {
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
     readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
     readCall('b', 1, 1, T0 + 4_000, 3, 'b.ts'), toolResult('b', 1, 1, T0 + 4_500, 4, 'bravo'),
     toolCall({ callId: 'x', name: 'bash', turn: 1, step: 2, time: T0 + 5_000, seq: 5 }),
-    readCall('c', 1, 3, T0 + 6_000, 6, 'c.ts'), toolResult('c', 1, 3, T0 + 6_500, 7, 'charlie'),
+    // AssistantY (step 3) proves E/F materialized BEFORE its reply, so they are
+    // displaced before Y and merge with each other.
     assistantSettlement({
-      turn: 1, step: 0, time: T0 + 9_000, seq: 8, text: 'reply',
-      stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+      turn: 1, step: 3, time: T0 + 9_000, seq: 6, text: 'reply Y',
+      stream: [
+        textChunk(T0 + 5_000, 0, 'reply Y'),
+        toolCallDeltaChunk(T0 + 1_000, 1, 'e', 'read'),
+        toolCallDeltaChunk(T0 + 1_500, 2, 'f', 'read'),
+      ],
     }),
-    // A reply-only replacement: A's relation departs, so A returns to its
-    // physical slot and the rows it had separated must be re-evaluated.
+    toolCall({ callId: 'z', name: 'bash', turn: 1, step: 6, time: T0 + 11_000, seq: 7 }),
+    readCall('e', 1, 3, T0 + 6_000, 8, 'e.ts'), toolResult('e', 1, 3, T0 + 6_500, 9, 'echo'),
+    readCall('f', 1, 3, T0 + 7_000, 10, 'f.ts'), toolResult('f', 1, 3, T0 + 7_500, 11, 'foxtrot'),
+    // Assistant0 (step 0) with A displaced AFTER it.
     assistantSettlement({
-      turn: 1, step: 0, time: T0 + 9_100, seq: 9, text: 'reply',
-      stream: [textChunk(T0 + 2_000, 0, 'reply')],
+      turn: 1, step: 0, time: T0 + 10_000, seq: 12, text: 'reply zero',
+      stream: [textChunk(T0 + 2_000, 0, 'reply zero'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+    }),
+    // The replacement drops A: its departure envelope spans the rows that CONTAIN
+    // AssistantY, whose displaced E/F sit outside the raw union.
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 12_000, seq: 13, text: 'reply zero',
+      stream: [textChunk(T0 + 2_000, 0, 'reply zero')],
     }),
   ]
   const live = new TranscriptFolder()
   for (const event of events()) live.apply([event])
   const cold = foldEvents(events())
-  assert.equal(toolRows(live).length, 3, 'A+B merge again once A departs; X and C stay separate')
-  assert.deepEqual(logicalRows(live), logicalRows(cold),
-    'the live departure reflow agrees with the cold fold')
-  const merged = toolRows(live).filter(row => row.args === '2 files')
-  assert.equal(merged.length, 1)
-  assert.equal(merged[0]!.callCount, 2)
-})
-
-test('N3c: a replacement drops a durable BLOCK request too, not just a streamed delta', () => {
-  const settled = (withBlock: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
-    turn: 1, step: 0,
-    message: {
-      id: 'm-n3c', role: 'assistant',
-      content: withBlock
-        ? [{ type: 'text', text: 'reply' }, { type: 'tool-call', id: 'a', name: 'bash', arguments: '{}' }]
-        : [{ type: 'text', text: 'reply' }],
-      source: { kind: 'assistant' },
-    },
-    stream: [textChunk(T0 + 2_000, 0, 'reply')],
-  }, T0 + 6_000, seq)
-  const folder = new TranscriptFolder()
-  folder.apply([turnStart(1, T0, 0)])
-  folder.apply([settled(true, 1)])
-  // The authoritative replacement stops naming A.
-  folder.apply([settled(false, 2)])
-  folder.apply([
-    toolCall({ callId: 'a', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 3 }),
-    toolResult('a', 1, 0, T0 + 1_500, 4, 'ok'),
+  const liveRows = toolRows(live)
+  const coldRows = toolRows(cold)
+  assert.equal(liveRows.length, coldRows.length, 'live and cold emit the same number of cards')
+  assert.deepEqual(logicalRows(live), logicalRows(cold))
+  // The orphaned-group bug registered the SAME merged group twice: each merged
+  // card's content must appear exactly once.
+  // Identity, not content: two distinct bash cards may carry identical text.
+  const identities = liveRows.map(row => `${row.callId}|${row.args}`)
+  assert.equal(new Set(identities).size, identities.length,
+    `no output card may be emitted twice:\n${JSON.stringify(identities)}`)
+  const echoFoxtrot = liveRows.filter(row => row.args === '2 files'
+    && row.result.includes('echo') && row.result.includes('foxtrot'))
+  assert.equal(echoFoxtrot.length, 1, 'the E+F run is one card, registered once')
+  assert.equal(echoFoxtrot[0]!.callCount, 2)
+  // The window summary counts the same output cards the projection emits.
+  live.apply([
+    turnStart(2, T0 + 30_000, 14),
+    eventAt('user/message', {
+      id: 'u-r42', role: 'user', content: [{ type: 'text', text: 'later' }], source: { kind: 'user' },
+    }, T0 + 30_100, 15),
   ])
-  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:a'],
-    'the superseded durable block no longer qualifies the later call')
+  const summary = live.window({ maxTurns: 1 }).messages[0]
+  assert.ok(summary !== undefined && summary.kind === 'summary')
+  const cardsInTurnOne = toolRows(cold).length
+  assert.match(summary.text, new RegExp(`${cardsInTurnOne} tool calls`, 'u'),
+    `the summary must count the emitted cards:\n${summary.text}`)
 })
 
-test('N3d: dropping a displaced relation reunites the rows it separated (live/cold parity)', () => {
-  const events = (): SessionEvent[] => [
+// ── R4-3: the late-result regroup is linear in the affected run ─────────────
+
+test('R4-3: a late result over a large merged run stays linear (deterministic work guard)', () => {
+  const count = 200
+  const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('running', 1, 0, T0 + 1_000, 1, 'r.ts')]
+  let seq = 2
+  for (let index = 0; index < count; index += 1) {
+    events.push(readCall(`r${index}`, 1, 1, T0 + 2_000 + index * 10, seq++, `r${index}.ts`))
+    events.push(toolResult(`r${index}`, 1, 1, T0 + 2_000 + index * 10 + 5, seq++, `row ${index}`))
+  }
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  assert.equal(toolRows(folder).length, 2, 'the settled run merged into one card next to the running read')
+  // A's result arrives late: the regroup must visit the merged run's members ONCE.
+  folder.apply([toolResult('running', 1, 0, T0 + 9_000, seq, 'running done')])
+  const visits = folder.searchDiagnosticsForTest().lastRegroupMemberVisits
+  assert.ok(visits <= 4 * count,
+    `a late-result regroup must be linear in the run (visited ${visits} members for ${count} reads)`)
+  assert.equal(toolRows(folder).length, 1, 'the running read joins the merged run')
+})
+
+// ── R4-4: multi-sibling relations survive a Thinking tombstone ─────────────
+
+test('R4-4: a Thinking tombstone keeps every sibling Tool relation on the anchor', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
     turnStart(1, T0, 0),
-    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
-    readCall('b', 1, 1, T0 + 4_000, 3, 'b.ts'), toolResult('b', 1, 1, T0 + 4_500, 4, 'bravo'),
-    toolCall({ callId: 'x', name: 'bash', turn: 1, step: 2, time: T0 + 5_000, seq: 5 }),
-    readCall('c', 1, 3, T0 + 6_000, 6, 'c.ts'), toolResult('c', 1, 3, T0 + 6_500, 7, 'charlie'),
+    readCall('t1', 1, 0, T0 + 4_000, 1, 't1.ts'), toolResult('t1', 1, 0, T0 + 4_500, 2, 'one'),
+    readCall('t2', 1, 0, T0 + 5_000, 3, 't2.ts'), toolResult('t2', 1, 0, T0 + 5_500, 4, 'two'),
+    // Reply visible at +2s: both Tool rows follow it.
     assistantSettlement({
-      turn: 1, step: 0, time: T0 + 9_000, seq: 8, text: 'reply',
-      stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+      turn: 1, step: 0, time: T0 + 9_000, seq: 5, text: 'reply',
+      stream: [
+        textChunk(T0 + 2_000, 0, 'reply'),
+        toolCallDeltaChunk(T0 + 4_000, 1, 't1', 'read'),
+        toolCallDeltaChunk(T0 + 5_000, 2, 't2', 'read'),
+      ],
     }),
-    // A reply-only replacement: A's relation departs, so A returns to its
-    // physical slot and the rows it had separated must be re-evaluated.
-    assistantSettlement({
-      turn: 1, step: 0, time: T0 + 9_100, seq: 9, text: 'reply',
-      stream: [textChunk(T0 + 2_000, 0, 'reply')],
-    }),
-  ]
-  const live = new TranscriptFolder()
-  for (const event of events()) live.apply([event])
-  const cold = foldEvents(events())
-  assert.equal(toolRows(live).length, 3, 'A+B merge again once A departs; X and C stay separate')
-  assert.deepEqual(logicalRows(live), logicalRows(cold),
-    'the live departure reflow agrees with the cold fold')
-  const merged = toolRows(live).filter(row => row.args === '2 files')
-  assert.equal(merged.length, 1)
-  assert.equal(merged[0]!.callCount, 2)
+  ])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:t1'],
+    'both displaced reads share one merged card')
+  // A retry tombstone hides the step's Thinking lane row: the Tool relations must
+  // survive, and the output must stay exactly once.
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 't', turn: 1, step: 0, time: T0 + 6_000,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'a thought' },
+  })
+  const before = toolRows(folder)
+  folder.apply([eventAt('llm/retry', {
+    turn: 1, step: 0, retry: 1, delayMs: 1_000, failure: { code: 'X', message: 'x' },
+  }, T0 + 6_100, 6)])
+  const after = toolRows(folder)
+  assert.equal(after.length, before.length, 'no output card is lost or duplicated')
+  assert.equal(new Set(logicalRows(folder)).size, logicalRows(folder).length)
+  assert.equal(after.filter(row => row.args === '2 files').length, 1, 'the merged card survives')
+  assert.equal(after.filter(row => row.args === '2 files')[0]!.callCount, 2)
 })
-

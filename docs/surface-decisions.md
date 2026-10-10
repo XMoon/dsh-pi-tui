@@ -820,8 +820,7 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   `tool/result` that is the display tail settles through the local fast path with
   no regroup at all, and a real display-order change re-groups only its affected
   envelope (the changed row, its anchor and that anchor's other displaced rows,
-  their display neighbours, every group containing them, and the raw read runs
-  touching either end). That envelope is bounded by the affected RELATION, not by
+  their display neighbours, every group containing them, and the DISPLAY runs of every groupable read the envelope covers). That envelope is bounded by the affected RELATION, not by
   a constant: a LATE or DISTANT settlement — a delayed replay whose displaced row
   sits far from its anchor — can legitimately span the intervening rows, including
   rows of other turns, so no universal "well below a turn" cap is claimed. Only an open, non-blocked
