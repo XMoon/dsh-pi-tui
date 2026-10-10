@@ -816,10 +816,15 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   equal timestamp proves nothing; a call id the step never named, or one reused
   by another step or turn, is not this step's evidence. Those logs keep the
   durable append order, so an evidence-poor replay can still differ from the live
-  run. Read grouping is bounded work by construction: a normal `tool/result` on
-  the display tail settles through the local fast path, and a real display-order
-  change re-groups only the LOCAL affected span (its own regression guard caps
-  the span well below a turn), never the whole history. Only an open, non-blocked
+  run. Read grouping is bounded work by construction for the NORMAL serial tail: a
+  `tool/result` that is the display tail settles through the local fast path with
+  no regroup at all, and a real display-order change re-groups only its affected
+  envelope (the changed row, its anchor and that anchor's other displaced rows,
+  their display neighbours, every group containing them, and the raw read runs
+  touching either end). That envelope is bounded by the affected RELATION, not by
+  a constant: a LATE or DISTANT settlement — a delayed replay whose displaced row
+  sits far from its anchor — can legitimately span the intervening rows, including
+  rows of other turns, so no universal "well below a turn" cap is claimed. Only an open, non-blocked
   trailing span of a live-tail window
   whose committed display subject is running is live; the live predicate is
   re-read per render (never a latched boolean) and re-reads `now()` on the

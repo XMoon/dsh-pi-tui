@@ -785,6 +785,10 @@ export class TranscriptFolder {
    * consumes its entry (the request started); any `tool/result` for the id
    * consumes it too (the request settled). Never a transcript row — only
    * identity evidence for a not-started recovery diagnostic. */
+  /** Durable tool-call REQUESTS (TOOL_NOT_STARTED compat), keyed by the same
+   *  `(turn, step, callId)` identity as the tool index: two steps that request
+   *  the same call id own separate entries, and one step can never consume or
+   *  overwrite another's request. */
   private readonly requestedToolCalls = new Map<string, { turn: number; step: number; name: string }>()
   /** The real command lifecycle index (post-PR166 plan §5): commandId → the
    * ONE `kind: 'command'` row plus its raw item index. Entries survive
@@ -895,8 +899,10 @@ export class TranscriptFolder {
    * (proves the query path is O(#dirty), never O(history)). */
   private searchDirtyScanCount = 0
   private searchFullScanCount = 0
-  /** Test-only: the row count of the LAST local regroup span. Proves a live
-   * settlement re-groups the affected neighborhood, never the whole turn. */
+  /** Test-only: the row count of the LAST regroup envelope. It bounds the
+   * normal serial case (a display-order change re-groups its affected relation
+   * neighborhood); a late/distant settlement may legitimately require a wide
+   * envelope spanning the rows between the displaced row and its anchor. */
   private lastRegroupSpanRows = 0
   private searchRefineCount = 0
   /** Test-only: the number of CANDIDATE CARDS re-scanned by refinement
@@ -1945,51 +1951,70 @@ export class TranscriptFolder {
    *  positional range: late/non-monotonic replay can append a turn's rows outside
    *  its `turnStarts` span, so the affected rows — not the turn — define the work. */
   private affectedSpanAround(index: number): { start: number; end: number } {
+    let low = index
+    let high = index
     const rows = new Set<number>([index])
-    // CLOSE the set over every relation that can move a row in or out of the
-    // display neighborhood: a displaced row's anchor and all of that anchor's
-    // displaced rows, an anchor's own lists, the group each row belongs to, and
-    // the rows displayed immediately around it. One pass is not enough — adding
-    // a group member can bring in ANOTHER anchor or group.
+    const extendTo = (candidate: number | undefined): boolean => {
+      if (candidate === undefined) return false
+      let changed = !rows.has(candidate)
+      rows.add(candidate)
+      if (candidate < low) {
+        low = candidate
+        changed = true
+      }
+      if (candidate > high) {
+        high = candidate
+        changed = true
+      }
+      return changed
+    }
     // One hop of display adjacency for the SEED only (the run boundary it moves
     // across); chaining adjacency transitively would swallow the whole turn.
-    const seedBefore = this.displayPredecessorOf(index)
-    if (seedBefore !== undefined) rows.add(seedBefore)
-    const seedAfter = this.displaySuccessorOf(index)
-    if (seedAfter !== undefined) rows.add(seedAfter)
+    extendTo(this.displayPredecessorOf(index))
+    extendTo(this.displaySuccessorOf(index))
     let grew = true
     while (grew) {
       grew = false
+      // Every involved row pulls in its relations and its whole group.
       for (const row of [...rows]) {
-        const add = (candidate: number | undefined): void => {
-          if (candidate === undefined || rows.has(candidate)) return
-          rows.add(candidate)
-          grew = true
-        }
-        const displaced = this.laneDisplayByDisplaced.get(row)
-        const anchor = displaced?.anchor
-        if (anchor !== undefined) add(anchor)
-        const owners = anchor === undefined ? [row] : [row, anchor]
-        for (const owner of owners) {
+        const anchor = this.laneDisplayByDisplaced.get(row)?.anchor
+        if (anchor !== undefined) grew = extendTo(anchor) || grew
+        for (const owner of anchor === undefined ? [row] : [row, anchor]) {
           const owned = this.laneDisplayByAnchor.get(owner)
           if (owned === undefined) continue
-          for (const peer of owned.before) add(peer)
-          for (const peer of owned.after) add(peer)
+          for (const peer of owned.before) grew = extendTo(peer) || grew
+          for (const peer of owned.after) grew = extendTo(peer) || grew
         }
         const group = this.groupOf.get(row)
         const members = group === undefined ? undefined : this.groupMembers.get(group)
-        if (members !== undefined) {
-          for (const member of members) add(member)
+        if (members === undefined) continue
+        for (const member of members) grew = extendTo(member) || grew
+      }
+      // EVERY row INSIDE the envelope closes it too: an anchor emits its lists
+      // there (they can sit outside the raw range), and a grouped row brings its
+      // group — without this the traversal would emit rows the detach never saw.
+      for (let row = low; row <= high; row += 1) {
+        const owned = this.laneDisplayByAnchor.get(row)
+        if (owned !== undefined) {
+          for (const peer of owned.before) grew = extendTo(peer) || grew
+          for (const peer of owned.after) grew = extendTo(peer) || grew
         }
+        const group = this.groupOf.get(row)
+        const members = group === undefined ? undefined : this.groupMembers.get(group)
+        if (members === undefined) continue
+        for (const member of members) grew = extendTo(member) || grew
+      }
+      // The raw read runs touching either endpoint belong to the same regroup.
+      const lowTurn = this.turnOfRaw(low)
+      while (low > 0 && lowTurn !== undefined && TranscriptFolder.continuesReadRun(this.items[low - 1]!, lowTurn)) {
+        grew = extendTo(low - 1) || grew
+      }
+      const highTurn = this.turnOfRaw(high)
+      while (high + 1 < this.items.length && highTurn !== undefined
+        && TranscriptFolder.continuesReadRun(this.items[high + 1]!, highTurn)) {
+        grew = extendTo(high + 1) || grew
       }
     }
-    let low = Math.min(...rows)
-    let high = Math.max(...rows)
-    const lowTurn = this.turnOfRaw(low)
-    while (low > 0 && lowTurn !== undefined && TranscriptFolder.continuesReadRun(this.items[low - 1]!, lowTurn)) low -= 1
-    const highTurn = this.turnOfRaw(high)
-    while (high + 1 < this.items.length && highTurn !== undefined
-      && TranscriptFolder.continuesReadRun(this.items[high + 1]!, highTurn)) high += 1
     return { start: low, end: high }
   }
 
@@ -2104,7 +2129,13 @@ export class TranscriptFolder {
       if (a.evidenced !== b.evidenced) return a.evidenced ? -1 : 1
       return a.key - b.key || left - right
     })
-    if (list.some((row, at) => row !== before[at])) this.searchRevisionCounter += 1
+    if (!list.some((row, at) => row !== before[at])) return
+    this.searchRevisionCounter += 1
+    // The visible order of this side changed, and every derived read-group fact
+    // follows the DISPLAY order: member order, representative, aggregated result
+    // and search corpus must be rebuilt (a bare revision bump would leave the
+    // group describing the OLD order).
+    this.scheduleDisplayRegroup(anchor)
   }
 
   /** Route a display-relation or visibility change into the grouping: while
@@ -2917,6 +2948,14 @@ export class TranscriptFolder {
       if (!callIds.has(row.callId)) this.dropLaneDisplacement(displaced)
     }
     for (const callId of callIds) this.convergeToolRowAgainstAnchor(turn, step, callId)
+    // The latest settlement is the step's authority: Preparing evidence for a
+    // call it no longer names must not survive to qualify a LATER durable call
+    // (a replacement that drops the call also drops its eligibility).
+    const prefix = `${stepKey(turn, step)}\u0000`
+    for (const cacheKey of [...this.toolCallPreparingStarts.keys()]) {
+      if (!cacheKey.startsWith(prefix)) continue
+      if (!callIds.has(cacheKey.slice(prefix.length))) this.toolCallPreparingStarts.delete(cacheKey)
+    }
   }
 
   /** Converge ONE Tool row against its step's Assistant anchor from the row's
@@ -4357,7 +4396,7 @@ export class TranscriptFolder {
         // display text, never the embedded stream.
         for (const block of messageBlocks) {
           if (block.type !== 'tool-call') continue
-          this.requestedToolCalls.set(block.id, {
+          this.requestedToolCalls.set(toolCallKey(event.data.turn, event.data.step, block.id), {
             turn: event.data.turn,
             step: event.data.step,
             name: block.name,
@@ -4533,14 +4572,13 @@ export class TranscriptFolder {
         const key = event.data.callId
         // Read the durable request identity BEFORE this branch consumes it: it is
         // this call's ownership proof for the reverse convergence direction.
-        const requested = this.requestedToolCalls.get(key)
-        const requestedForStep = requested !== undefined && requested.turn === event.data.turn && requested.step === event.data.step
-          ? requested : undefined
+        const requestKey = toolCallKey(event.data.turn, event.data.step, key)
+        const requestedForStep = this.requestedToolCalls.get(requestKey)
         this.callNames.set(key, event.data.name)
         // The request started: its identity is no longer unresolved. A
         // later TOOL_NOT_STARTED-coded result for this id would be a
         // malformed contradiction, not a not-started request.
-        this.requestedToolCalls.delete(key)
+        this.requestedToolCalls.delete(requestKey)
         // The call's OWN turn (event.data.turn) — never this.currentTurn:
         // a turn-start-less replay fragment must still attribute the call
         // to the right turn (review finding).
@@ -4651,7 +4689,11 @@ export class TranscriptFolder {
         // tool/call can be a not-started recovery (the `pending ===
         // undefined` guard keeps a malformed contradictory log from
         // rewriting an actually observed call as not started).
-        const notStartedRequest = pending === undefined ? this.requestedToolCalls.get(key) : undefined
+        // The result's OWN step keys the request: a request another step made for
+        // the same call id is never this result's authority.
+        const notStartedRequest = pending === undefined
+          ? this.requestedToolCalls.get(toolCallKey(event.data.turn, event.data.step, key))
+          : undefined
         const name = this.callNames.get(key) ?? 'tool'
         const text = textOf(message.content)
         const status = message.isError === true ? 'error' : 'ok'
@@ -4662,7 +4704,7 @@ export class TranscriptFolder {
         const turn = pending?.turn ?? event.data.turn
         this.pendingCalls.delete(key)
         this.callNames.delete(key)
-        this.requestedToolCalls.delete(key)
+        this.requestedToolCalls.delete(toolCallKey(event.data.turn, event.data.step, key))
         if (pending !== undefined) {
           // The call's own running card: parallel same-name calls pair
           // correctly because the card is keyed by callId, not by name.
