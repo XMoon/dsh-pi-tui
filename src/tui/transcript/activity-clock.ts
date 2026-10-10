@@ -70,9 +70,10 @@ export interface ActivityClock {
  *
  * Close precedence: the successor block's first-actually-visible time first
  * (the plan's §5.2 rule: a late durable settlement time must never be mistaken
- * for the boundary), then the owning turn's `turn/end`. A proven member end is
- * kept as the consistency floor, so a boundary earlier than proven member
- * evidence can never make the duration shrink.
+ * for the boundary, and an EARLIER one — a reordered row — proves no close at
+ * all), then the owning turn's `turn/end`. A proven member end is kept as the
+ * consistency floor, so a boundary earlier than proven member evidence can
+ * never make the duration shrink.
  * @param structure - the canonical structural blocks for one window.
  * @param turnActivities - the folded turn boundary facts of the SAME snapshot.
  */
@@ -89,9 +90,21 @@ export function resolveWorkLifetimes(
     const memberEnd = timing.endedAt
     const successor = structure[index + 1]
     const boundary = successor === undefined ? undefined : boundaryTimeOf(successor)
+    // A successor proves that THIS Activity closed only when its own
+    // first-visible evidence lies AFTER the Activity started. Cold hydration
+    // can order a Conversation row after Process rows it chronologically
+    // preceded (the live lane materializes the assistant row on its first
+    // visible chunk, the durable settlement appends at its own event index), so
+    // an early time proves nothing about this span — reading it as an end
+    // could even fabricate a `0s` for a still-running member. Such a span is
+    // left OPEN but, because a canonical block still follows it, it is NOT
+    // live: it renders the conservative member evidence (documented
+    // limitation: live/cold can differ for that reordered shape until the fold
+    // row order converges).
+    const provenBoundary = boundary !== undefined && boundary > timing.startedAt ? boundary : undefined
     let endedAt: number | undefined
-    if (boundary !== undefined) {
-      endedAt = memberEnd === undefined ? boundary : Math.max(boundary, memberEnd)
+    if (provenBoundary !== undefined) {
+      endedAt = memberEnd === undefined ? provenBoundary : Math.max(provenBoundary, memberEnd)
     } else {
       const turn = turnActivities.get(block.span.turn)
       if (turn?.completed === true && turn.endedAt !== undefined) {

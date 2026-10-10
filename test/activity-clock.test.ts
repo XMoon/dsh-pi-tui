@@ -229,6 +229,84 @@ test('the canonical trailing structure decides live: a Work followed by a Contex
     'a non-trailing open Activity is never live')
 })
 
+test('a reordered early Conversation row proves no close (and never fabricates a 0s)', () => {
+  // Cold hydration can order the assistant row AFTER the Process rows it
+  // chronologically preceded (the live lane materializes it on its first
+  // visible chunk; the durable settlement appends at its own event index). The
+  // early first-visible time must not be read as an end of the LATER Work.
+  const folder = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'bash', T0 + 5_000, 1),
+    toolResult('c1', T0 + 9_000, 2),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'let me check' }], source: { kind: 'assistant' } },
+      stream: [
+        { type: 'chunk', time: T0 + 1_000, chunk: { type: 'text-delta', index: 0, text: 'let me check' } },
+        { type: 'chunk', time: T0 + 5_000, chunk: { type: 'tool-call-delta', index: 1, id: 'c1', name: 'bash', argumentsDelta: '{}' } },
+      ],
+    }, T0 + 10_000, 3),
+  ])
+  const { lifetimes, spans } = analyze(folder)
+  assert.equal(spans.length, 1, 'the settled interaction/tooling shape keeps ONE Work span')
+  const lifetime = lifetimes.get(spans[0]!.owner)!
+  assert.deepEqual(lifetime, { startedAt: T0 + 5_000, open: true, trailing: false })
+  assert.equal(activityClockOf(lifetime, () => true, () => true).isLive(), false,
+    'a following canonical block always prevents live, even with no valid close')
+  const line = headerAt(spans[0]!, activityClockOf(lifetime, () => true, () => true), T0 + 999_999)
+  assert.match(line, /Activity 4s/, `the conservative member end renders instead:\n${line}`)
+
+  // The same shape with a STILL-RUNNING member has no proven end at all: the
+  // duration is omitted (unknown), never a fabricated `0s`.
+  const running = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'bash', T0 + 5_000, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'let me check' }], source: { kind: 'assistant' } },
+      stream: [{ type: 'chunk', time: T0 + 1_000, chunk: { type: 'text-delta', index: 0, text: 'let me check' } }],
+    }, T0 + 10_000, 2),
+  ])
+  const runningSpan = analyze(running).spans[0]!
+  const runningLine = headerAt(runningSpan, activityClockOf(analyze(running).lifetimes.get(runningSpan.owner)!, () => true, () => true), T0 + 999_999)
+  assert.ok(!/Activity \d/u.test(runningLine), `an unprovable live span omits the duration:\n${runningLine}`)
+})
+
+test('a settled surfaced interaction closes the preceding Activity at the tool start, not the human wait', () => {
+  const folder = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'bash', T0 + 1_000, 1),
+    toolResult('c1', T0 + 2_000, 2),
+    // The agent hands control to the human at +3s and the answer arrives at
+    // +30s: the waiting time is NOT part of the old Activity.
+    toolCall('c2', 'ask_user_question', T0 + 3_000, 3),
+    toolResult('c2', T0 + 30_000, 4),
+  ])
+  const { lifetimes, spans } = analyze(folder)
+  assert.ok(spans.length >= 1, 'the pre-interaction tooling forms an Activity')
+  const lifetime = lifetimes.get(spans[0]!.owner)!
+  assert.equal(lifetime.endedAt, T0 + 3_000,
+    'the interaction tool start is the boundary, never the human answer arrival')
+  const line = headerAt(spans[0]!, activityClockOf(lifetime, () => true, () => true), T0 + 999_999)
+  assert.match(line, /Activity 2s/, `the human wait is not counted into the old Activity:\n${line}`)
+})
+
+test('a trailing retry point can keep counting while the Activity is live', () => {
+  // `llm/retry` is point evidence: as the still-open trailing Work it may count
+  // from that point (a historical retry-only span must not fabricate a span).
+  const folder = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('llm/retry', { turn: 1, step: 0, retry: 1, delayMs: 2_000, failure: { code: 'X', message: 'x' } }, T0 + 1_000, 1),
+  ])
+  const { lifetimes, spans } = analyze(folder)
+  const lifetime = lifetimes.get(spans[0]!.owner)!
+  assert.deepEqual(lifetime, { startedAt: T0 + 1_000, open: true, trailing: true })
+  const line = headerAt(spans[0]!, activityClockOf(lifetime, () => true, () => true), T0 + 6_000)
+  assert.match(line, /Activity 5s/, `the open trailing retry point keeps counting:\n${line}`)
+  const historical = headerAt(spans[0]!, activityClockOf(lifetime, () => false, () => true), T0 + 999_999)
+  assert.ok(!historical.includes('998s'), `a historical retry point fabricates no span:\n${historical}`)
+})
+
 // ── the committed display subject gates a cached card (plan §5.3) ───────────
 
 test('a snapshot-only child activity flip re-gates a CACHED Activity card without re-committing the transcript', async (t) => {
