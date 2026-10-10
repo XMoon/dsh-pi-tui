@@ -627,6 +627,14 @@ export function applyRunnerWithRuntime(
     const captureMatches = (subject: SessionSubject | undefined): boolean =>
       subject === undefined ? ownership.owner() === undefined : ownership.isSubjectCurrent(subject)
     /**
+     * PR3-B §7.3 (B2 F2): whether the OWNER a captured subject pinned has
+     * been REPLACED by a different one (opaque owner-ref comparison through
+     * the ownership core's subject authority — never a session-id
+     * comparison, which A→B→A and a same-id re-publication would defeat).
+     */
+    const ownerWasReplaced = (subject: SessionSubject | undefined): boolean =>
+      ownership.subjectAuthority.ownerReplaced(subject)
+    /**
      * Whether one exact Direct Agent object IS the current owner: the ownership
      * core is the identity authority, the registry resolves its attachment.
      */
@@ -2163,6 +2171,7 @@ export function applyRunnerWithRuntime(
       },
       tuiSettings,
       captureMatches,
+      ownerWasReplaced,
       direct: {
         withPromptAdmission: (agent, hasImages, task) => {
           const runtime = directRuntime()
@@ -2952,12 +2961,18 @@ export function applyRunnerWithRuntime(
           surface.composer.setEditorText(merged)
           return merged === text
         },
-        restoreStaleDraftIntoEditor: (text) => {
-          // PR3-B §7.3 (F2): a stale restore is suppressed on the TSP
-          // renderer — its committed switch DROPPED the outgoing draft, and
-          // a late stale restore must not reseed the new session's composer.
-          // PiTui retains (the display seam's own contract flag decides).
-          if (!surface.display.retainsStaleDraftRestore()) return 'dropped'
+        restoreStaleDraftIntoEditor: (text, capturedSubject) => {
+          // PR3-B §7.3 (F2): suppress ONLY when BOTH facts hold — the OWNER
+          // the submission's subject pinned was genuinely REPLACED (the
+          // ownership core's opaque-ref authority; a same-owner generation
+          // invalidation — e.g. a failed switch kept the old owner — is NOT
+          // a replacement) AND this renderer drops drafts at committed
+          // switches (TSP; its publication already cleared the text). Every
+          // other stale shape merges exactly like the ordinary restore.
+          if (!surface.display.retainsStaleDraftRestore()
+            && ownership.subjectAuthority.ownerReplaced(capturedSubject as SessionSubject | undefined)) {
+            return 'dropped'
+          }
           const merged = mergeDraft(surface.composer.getDraft(), text)
           surface.composer.setEditorText(merged)
           return merged === text ? 'merged-verbatim' : 'merged'
