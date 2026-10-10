@@ -2717,34 +2717,43 @@ export class TranscriptFolder {
   private convergeStepToolOrder(turn: number, step: number, projection: AssistantStreamProjection | undefined): void {
     const toolCallStarts = projection?.toolCallStarts
     if (toolCallStarts === undefined || toolCallStarts.size === 0) return
+    for (const callId of toolCallStarts.keys()) {
+      this.convergeToolRowAgainstAnchor(turn, step, callId)
+    }
+  }
+
+  /** Converge ONE Tool row against its step's Assistant anchor from the row's
+   *  own materialization evidence. Called from BOTH directions, because either
+   *  side can arrive last: the settlement converges the calls its own durable
+   *  stream named, and a `tool/call` whose durable event carries the step
+   *  converges itself against an Assistant row that already settled. */
+  private convergeToolRowAgainstAnchor(turn: number, step: number, callId: string): void {
     const key = stepKey(turn, step)
     const assistantRow = this.assistantEntries.get(key)
     const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
     if (assistantRow === undefined || assistantIndex === undefined) return
     const visibleAt = transcriptTimingOf(assistantRow)?.startedAt
     // No proven first-visible time: the durable append order is the only
-    // evidence — leave every Tool where it is.
+    // evidence — leave the Tool where it is.
     if (visibleAt === undefined) return
-    for (const callId of toolCallStarts.keys()) {
-      const index = this.toolCardIndexOf.get(callId)
-      const card = index === undefined ? undefined : this.items[index]
-      if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) continue
-      // A call id reused by another turn is never THIS step's evidence.
-      if (card.turn !== turn) continue
-      const startedAt = transcriptTimingOf(card)?.startedAt
-      if (startedAt === undefined || startedAt === visibleAt) {
-        // Unknown or equal evidence cannot prove which side came first.
-        this.dropLaneDisplacement(index)
-        continue
-      }
-      const shouldFollow = startedAt > visibleAt
-      if (shouldFollow === (index > assistantIndex)) {
-        // Already in the physical position the evidence asks for.
-        this.dropLaneDisplacement(index)
-        continue
-      }
-      this.setLaneDisplay(index, assistantIndex, shouldFollow ? 'after' : 'before')
+    const index = this.toolCardIndexOf.get(callId)
+    const card = index === undefined ? undefined : this.items[index]
+    if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) return
+    // A call id reused by another turn is never THIS step's evidence.
+    if (card.turn !== turn) return
+    const startedAt = transcriptTimingOf(card)?.startedAt
+    if (startedAt === undefined || startedAt === visibleAt) {
+      // Unknown or equal evidence cannot prove which side came first.
+      this.dropLaneDisplacement(index)
+      return
     }
+    const shouldFollow = startedAt > visibleAt
+    if (shouldFollow === (index > assistantIndex)) {
+      // Already in the physical position the evidence asks for.
+      this.dropLaneDisplacement(index)
+      return
+    }
+    this.setLaneDisplay(index, assistantIndex, shouldFollow ? 'after' : 'before')
   }
 
   /** Converge one step's Thinking/Assistant rows to its stored lane
@@ -4322,6 +4331,11 @@ export class TranscriptFolder {
         // `pendingCalls` cannot serve here — it is deleted once the call
         // settles.
         this.toolCardIndexOf.set(key, this.items.length - 1)
+        // The durable payload carries this call's OWN step: converge the row
+        // against a step Assistant row that settled BEFORE this call arrived —
+        // the mirror direction of the settlement-side convergence (either side
+        // can be the one that arrives last).
+        this.convergeToolRowAgainstAnchor(callTurn, event.data.step, key)
         this.pendingCalls.set(key, {
           name: event.data.name,
           args: event.data.arguments,
