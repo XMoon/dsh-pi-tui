@@ -919,6 +919,9 @@ export class TranscriptFolder {
   private regroupOperationCount = 0
   /** Test-only: how many anchor-side re-sorts actually ran. */
   private sideSortOperationCount = 0
+  /** Bumped whenever a Lane relation changes what an anchor slot EMITS, so the
+   *  Tool batch only re-validates when the emission really changed. */
+  private laneEmissionChanges = 0
   /** Test-only: how many group members the LAST envelope closure visited. A
    *  deterministic guard that a late-result regroup is linear in the affected
    *  run, never quadratic. */
@@ -2163,20 +2166,33 @@ export class TranscriptFolder {
    *  before/after list) or, at the start of the emission, the slot before the
    *  anchor. */
   private displayPredecessorOf(index: number): number | undefined {
-    const displaced = this.laneDisplayByDisplaced.get(index)
-    if (displaced !== undefined) {
-      const emission = this.emittedAt(displaced.anchor)
-      const at = emission.indexOf(index)
-      if (at > 0) {
-        const sibling = this.lastVisibleOf(emission.slice(0, at))
-        if (sibling !== undefined) return sibling
+    const relation = this.laneDisplayByDisplaced.get(index)
+    if (relation !== undefined) {
+      const owned = this.laneDisplayByAnchor.get(relation.anchor)
+      if (owned !== undefined) {
+        const side = relation.position === 'before' ? owned.before : owned.after
+        // Scan the live list backwards — no emission copy, no slice.
+        for (let at = side.indexOf(index) - 1; at >= 0; at -= 1) {
+          const row = side[at]!
+          if (this.isVisible(this.items[row]!)) return row
+        }
+        if (relation.position === 'after') {
+          // The anchor itself (and its before list) precede an after-list row.
+          if (this.isVisible(this.items[relation.anchor]!)) return relation.anchor
+          for (let at = owned.before.length - 1; at >= 0; at -= 1) {
+            const row = owned.before[at]!
+            if (this.isVisible(this.items[row]!)) return row
+          }
+        }
       }
-      return this.slotPredecessorOf(displaced.anchor)
+      return this.slotPredecessorOf(relation.anchor)
     }
     const own = this.laneDisplayByAnchor.get(index)
-    if (own !== undefined && own.before.length > 0) {
-      const visible = this.lastVisibleOf(own.before)
-      if (visible !== undefined) return visible
+    if (own !== undefined) {
+      for (let at = own.before.length - 1; at >= 0; at -= 1) {
+        const row = own.before[at]!
+        if (this.isVisible(this.items[row]!)) return row
+      }
     }
     return this.slotPredecessorOf(index)
   }
@@ -2184,20 +2200,30 @@ export class TranscriptFolder {
   /** The raw index displayed immediately AFTER `index` in the FINAL display
    *  order (see {@link displayPredecessorOf} for the displaced-row rule). */
   private displaySuccessorOf(index: number): number | undefined {
-    const displaced = this.laneDisplayByDisplaced.get(index)
-    if (displaced !== undefined) {
-      const emission = this.emittedAt(displaced.anchor)
-      const at = emission.indexOf(index)
-      if (at >= 0 && at + 1 < emission.length) {
-        const sibling = this.firstVisibleOf(emission.slice(at + 1))
-        if (sibling !== undefined) return sibling
+    const relation = this.laneDisplayByDisplaced.get(index)
+    if (relation !== undefined) {
+      const owned = this.laneDisplayByAnchor.get(relation.anchor)
+      if (owned !== undefined) {
+        const side = relation.position === 'before' ? owned.before : owned.after
+        for (let at = side.indexOf(index) + 1; at < side.length; at += 1) {
+          const row = side[at]
+          if (row !== undefined && this.isVisible(this.items[row]!)) return row
+        }
+        if (relation.position === 'before') {
+          // A before-list row is followed by the anchor and its after list.
+          if (this.isVisible(this.items[relation.anchor]!)) return relation.anchor
+          for (const row of owned.after) {
+            if (this.isVisible(this.items[row]!)) return row
+          }
+        }
       }
-      return this.slotSuccessorOf(displaced.anchor)
+      return this.slotSuccessorOf(relation.anchor)
     }
     const own = this.laneDisplayByAnchor.get(index)
-    if (own !== undefined && own.after.length > 0) {
-      const visible = this.firstVisibleOf(own.after)
-      if (visible !== undefined) return visible
+    if (own !== undefined) {
+      for (const row of own.after) {
+        if (this.isVisible(this.items[row]!)) return row
+      }
     }
     return this.slotSuccessorOf(index)
   }
@@ -3096,14 +3122,21 @@ export class TranscriptFolder {
       // growing with the Tool count — and the final sort still sees every member
       // of the side, Thinking included.
       const touched = new Set<'before' | 'after'>()
+      const laneEmissionBefore = this.laneEmissionChanges
+      // ONE outward scan for the whole batch instead of a per-row distance walk.
+      const reach = anchorIndex === undefined ? undefined : this.sideReachFrom(turn, step, anchorIndex)
       for (const callId of callIds) {
-        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false)
+        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
         if (outcome !== undefined) touched.add(outcome.position)
       }
       if (anchorIndex !== undefined) {
         for (const position of touched) this.resortAnchorSide(anchorIndex, position)
-        // An adopted Lane row changes what this anchor's slot emits.
-        this.revalidateToolDisplacementsAt(anchorIndex)
+        // ONLY when this batch actually adopted/relocated a Lane row (which
+        // changes what the anchor's slot emits) is a re-validation warranted: a
+        // plain Tool settlement must not scan the displacement map.
+        if (this.laneEmissionChanges !== laneEmissionBefore) {
+          this.revalidateToolDisplacementsAt(anchorIndex)
+        }
       }
     })
     // The latest settlement is the step's authority: Preparing evidence for a
@@ -3156,6 +3189,7 @@ export class TranscriptFolder {
     step: number,
     callId: string,
     resort = true,
+    reach?: { backward: number; forward: number },
   ): { index: number; position: 'before' | 'after' } | undefined {
     const key = stepKey(turn, step)
     const assistantRow = this.assistantEntries.get(key)
@@ -3186,7 +3220,10 @@ export class TranscriptFolder {
     }
     const shouldFollow = startedAt > visibleAt
     const position: 'before' | 'after' = shouldFollow ? 'after' : 'before'
-    if (!this.sideMoveIsReachable(index, assistantIndex, position, turn, step)) {
+    const reachable = reach === undefined
+      ? this.sideMoveIsReachable(index, assistantIndex, position, turn, step)
+      : (index < assistantIndex ? assistantIndex - index <= reach.backward : index - assistantIndex <= reach.forward)
+    if (!reachable) {
       // Moving the row to the anchor's slot would cross a visible row of another
       // step or lane: the conservative choice keeps every row where it is.
       this.dropLaneDisplacement(index)
@@ -3209,8 +3246,14 @@ export class TranscriptFolder {
     // already placed (thinking-first) must keep that side.
     if (thinkingIndex !== undefined && this.thinkingEntries.get(key) !== undefined
       && !this.laneDisplayByDisplaced.has(thinkingIndex)) {
-      if (shouldFollow && thinkingIndex > assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'after')
-      if (!shouldFollow && thinkingIndex < assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'before')
+      if (shouldFollow && thinkingIndex > assistantIndex) {
+        this.setLaneDisplay(thinkingIndex, assistantIndex, 'after')
+        this.laneEmissionChanges += 1
+      }
+      if (!shouldFollow && thinkingIndex < assistantIndex) {
+        this.setLaneDisplay(thinkingIndex, assistantIndex, 'before')
+        this.laneEmissionChanges += 1
+      }
     }
     this.setLaneDisplay(index, assistantIndex, position, resort, { turn, step })
     return { index, position }
@@ -3253,6 +3296,34 @@ export class TranscriptFolder {
       if (this.sideMoveIsReachable(displaced, relation.anchor, relation.position, owner.turn, owner.step)) continue
       this.dropLaneDisplacement(displaced)
     }
+  }
+
+  /** How far a displacement may travel from the anchor's slot in each direction
+   *  before it would cross a visible row that is not a same-side proven Tool:
+   *  `backward`/`forward` are the counts of consecutive passable slots. Computed
+   *  ONCE per settlement batch (the per-row walk made a batch of N rows O(N²)). */
+  private sideReachFrom(turn: number, step: number, anchorIndex: number): { backward: number; forward: number } {
+    const passable = (candidate: number): boolean => {
+      for (const visibleRow of this.emittedAt(candidate)) {
+        if (!this.isVisible(this.items[visibleRow]!)) continue
+        const item = this.items[visibleRow]
+        if (item === undefined || item.kind !== 'tool' || item.callId === undefined || item.turn !== turn) return false
+        const sibling = this.toolRowEvidence(turn, step, item.callId)
+        if (sibling === undefined || sibling.index !== visibleRow) return false
+      }
+      return true
+    }
+    let backward = 0
+    for (let candidate = anchorIndex - 1; candidate >= 0; candidate -= 1) {
+      if (!passable(candidate)) break
+      backward += 1
+    }
+    let forward = 0
+    for (let candidate = anchorIndex + 1; candidate < this.items.length; candidate += 1) {
+      if (!passable(candidate)) break
+      forward += 1
+    }
+    return { backward, forward }
   }
 
   /** Whether the anchor's slot and `row` are connected through rows that may be
