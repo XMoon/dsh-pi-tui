@@ -2019,3 +2019,34 @@ test('INT12: an expiring Tool relation never turns a fresh tail into a history r
     assert.equal(diagnostics.displacementScans, 0)
   }
 })
+
+test('INT13: a late assistant/attempt never leaves a Tool relation crossing a restored sibling', () => {
+  const laneStream = (visibleAt: number, bAt = 3_000, aAt = 5_000): Record<string, unknown>[] =>
+    [{ at: visibleAt, kind: 'text' }, { at: bAt, kind: 'b' }, { at: aAt, kind: 'a' }]
+      .sort((left, right) => left.at - right.at)
+      .map((frame, index) => ({
+        type: 'chunk',
+        time: T0 + frame.at,
+        chunk: frame.kind === 'text'
+          ? { type: 'text-delta', index, text: 'reply' }
+          : { type: 'tool-call-delta', index, id: frame.kind, name: 'read', argumentsDelta: '{}' },
+      }))
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 5_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 5_500, 2, 'alpha'),
+    readCall('b', 1, 0, T0 + 6_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 6_500, 4, 'bravo'),
+    assistantSettlement({ turn: 1, step: 0, time: T0 + 9_000, seq: 5, text: 'reply', stream: laneStream(2_000) }),
+  ])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:b'],
+    'both Tool rows follow the Conversation and merge')
+  // A LATE attempt on the already-settled step refreshes both start times (an
+  // earlier B, a later A). Its refresh producer must restore the sibling slot it
+  // will not move BEFORE measuring the shared reach — otherwise A keeps a move
+  // across the now-visible opposite-side B and no later settlement repairs it.
+  folder.apply([eventAt('assistant/attempt', { turn: 1, step: 0, stream: laneStream(2_000, 1_000, 4_000) }, T0 + 12_000, 6)])
+  assert.deepEqual(logicalRows(folder), ['tool:a', 'assistant:reply'],
+    'the physical order stands and both reads stay merged')
+  assert.equal(toolRows(folder).length, 1)
+  assert.equal(toolRows(folder)[0]!.callCount, 2)
+})
