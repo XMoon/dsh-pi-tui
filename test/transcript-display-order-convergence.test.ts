@@ -1906,3 +1906,71 @@ test('INT9: expiring many relations rebuilds the interval maximum once', () => {
     `the maximum must be rebuilt once, not per removal (scanned ${after.maxHiScans - before.maxHiScans})`)
   assert.ok(after.regroupOperations - before.regroupOperations <= 2)
 })
+
+// ── internal round 8: the two confirmed P2s ─────────────────────────────────
+
+test('INT10: replacing the authority is idempotent and never crosses a restored opposite-side sibling', () => {
+  const frameChunk = (frame: { at: number; kind: string }, index: number): Record<string, unknown> => ({
+    type: 'chunk',
+    time: T0 + frame.at,
+    chunk: frame.kind === 'text'
+      ? { type: 'text-delta', index, text: 'reply' }
+      : { type: 'tool-call-delta', index, id: frame.kind, name: 'read', argumentsDelta: '{}' },
+  })
+  const settlement = (visibleAt: number, seq: number): SessionEvent => {
+    const frames = [{ at: visibleAt, kind: 'text' }, { at: 3_000, kind: 'b' }, { at: 5_000, kind: 'a' }].sort((left, right) => left.at - right.at)
+    return eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: 'm-int10', role: 'assistant',
+        content: frames.map(frame => frame.kind === 'text' ? { type: 'text', text: 'reply' } : { type: 'tool-call', id: frame.kind, name: 'read', arguments: '{}' }),
+        source: { kind: 'assistant' },
+      },
+      stream: frames.map((frame, index) => frameChunk(frame, index)),
+    }, T0 + seq * 1_000, seq)
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 5_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 5_500, 2, 'alpha'),
+    readCall('b', 1, 0, T0 + 6_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 6_500, 4, 'bravo'),
+    settlement(2_000, 5),
+  ])
+  const first = logicalRows(folder)
+  // The identical authority applied again must change nothing (the cached reach
+  // used to be computed before a conformant sibling restored its own slot).
+  folder.apply([settlement(4_000, 6)])
+  const replaced = logicalRows(folder)
+  folder.apply([settlement(4_000, 7)])
+  assert.deepEqual(logicalRows(folder), replaced, 'an identical authority is idempotent')
+  assert.equal(toolRows(folder).length, 1, 'the two reads stay merged')
+  assert.equal(toolRows(folder)[0]!.callCount, 2)
+  assert.notEqual(first.length, 0)
+})
+
+test('INT11: an ordinary thinking-first cold history never walks the relation map', () => {
+  for (const turns of [50, 100]) {
+    const events: SessionEvent[] = []
+    let seq = 1
+    for (let turn = 1; turn <= turns; turn += 1) {
+      const at = T0 + turn * 10_000
+      events.push(turnStart(turn, at, seq++))
+      events.push(assistantSettlement({
+        turn, step: 0, time: at + 9_000, seq: seq++, text: `reply ${turn}`,
+        stream: [
+          { type: 'chunk', time: at + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+          { type: 'chunk', time: at + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: `thought ${turn}` } },
+          { type: 'chunk', time: at + 1_500, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: `thought ${turn}` } } },
+          textChunk(at + 3_000, 1, `reply ${turn}`),
+        ],
+      }))
+      events.push(eventAt('turn/end', { turn, reason: { kind: 'completed' } }, at + 9_500, seq++))
+    }
+    const folder = new TranscriptFolder()
+    folder.hydrate(events)
+    const diagnostics = folder.searchDiagnosticsForTest()
+    assert.equal(diagnostics.displacementScans, 0,
+      `${turns} thinking-first turns have zero Tool relations, so no coverage scan is warranted`)
+    assert.equal(folder.messages().length, turns * 2, 'every turn still renders its Conversation and Thinking rows')
+  }
+})
