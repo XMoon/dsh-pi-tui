@@ -348,10 +348,23 @@ function defaultRow2Left(snap: StatusSnapshot): RefItem[] {
       order: items.length,
     })
   }
-  if (p.tokensPerSec !== undefined) {
+  // TPS plan PR-3: the default speed placement is `speed-both` — the labelled
+  // pair sharing ONE unit in the preferred form, collapsing to its leading
+  // fact (the recent rate, or All when the Session has no recent sample)
+  // under compact pressure; an answered fact is never replaced by a zero.
+  const r5 = p.tokensPerSec
+  const all = p.sessionTokensPerSec
+  if (r5 !== undefined || all !== undefined) {
+    const preferred = r5 !== undefined && all !== undefined
+      ? `R5 ${r5} · All ${all} tok/s`
+      : r5 !== undefined
+        ? `R5 ${r5} tok/s`
+        : `All ${all} tok/s`
     items.push({
-      text: toneText(`${p.tokensPerSec} tok/s`, 'textMuted'),
-      compact: toneText(`${p.tokensPerSec}t/s`, 'textMuted'),
+      text: toneText(preferred, 'textMuted'),
+      compact: r5 !== undefined
+        ? toneText(`R5 ${r5}t/s`, 'textMuted')
+        : toneText(`All ${all}t/s`, 'textMuted'),
       importance: 45,
       order: items.length,
     })
@@ -610,16 +623,18 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
     // and the stats row: the stats-line facts as semantic
     // placements plus the counters on the left, the full context pressure
     // flush right (no cache activity → the cache-hit placement is absent).
-    '[workspace-write]  [deepseek/flash]  x/proj  main                                               full\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
+    '[workspace-write]  [deepseek/flash]  x/proj  main                                               full\n↑1.2k ↓3.4k  TTFB 0s  R5 0 tok/s  t2/s5                                               25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 40, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
     // 40 columns: the status row fills its 2-line allowance (50 cells → 2
     // rows); the stats row is a RIGHT-ZONE row (its single-line fit
-    // contract), so the left zone compacts then drops the latency
-    // placement against the context's reserved width.
-    'ww  flash  proj  main               full\n↑1.2k ↓3.4k  0t/s  t2/s5  25k/100k (25%)',
+    // contract), so the left zone compacts then drops the lowest-importance
+    // placements against the context's reserved width — the latency
+    // placement goes first, and TPS plan PR-3's `R5 …t/s` label is wide
+    // enough that the turn/step counters no longer fit either.
+    'ww  flash  proj  main               full\n↑1.2k ↓3.4k  R5 0t/s      25k/100k (25%)',
   )
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 20, context: CONTEXT })
@@ -642,13 +657,13 @@ test('independent golden vectors lock the composed output (wide/narrow/compact)'
   assert.equal(
     composer.render({ snapshot: focusSnap as StatusSnapshot, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: CONTEXT })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    '[workspace-write]  [deepseek/flash]  x/proj  main                                              focus\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
+    '[workspace-write]  [deepseek/flash]  x/proj  main                                              focus\n↑1.2k ↓3.4k  TTFB 0s  R5 0 tok/s  t2/s5                                               25k/100k (25%)',
   )
   // The extension bridge keeps its position at the status row's tail.
   assert.equal(
     composer.render({ snapshot: snap, layout: DEFAULT_FOOTER_LAYOUT, width: 100, context: { ...CONTEXT, extensionFooterText: '[EXT-SEG]' } })
       .replace(/\x1b\[[0-9;]*m/g, ''),
-    '[workspace-write]  [deepseek/flash]  x/proj  main  [EXT-SEG]                                    full\n↑1.2k ↓3.4k  TTFB 0s  0 tok/s  t2/s5                                                  25k/100k (25%)',
+    '[workspace-write]  [deepseek/flash]  x/proj  main  [EXT-SEG]                                    full\n↑1.2k ↓3.4k  TTFB 0s  R5 0 tok/s  t2/s5                                               25k/100k (25%)',
   )
   // The dim pass wraps EVERY physical row in the textDim SGR pair.
   const ansi = composer.render({ snapshot: snap, layout: COMPACT_FOOTER_LAYOUT, width: 100, context: CONTEXT })

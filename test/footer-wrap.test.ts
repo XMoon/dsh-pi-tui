@@ -109,10 +109,12 @@ test('a narrow terminal wraps the footer to multiple rows, high-importance info 
   // badge (110) and model (100) outrank branch (70) / counters (45). The
   // canonical display preset reserves the right zone; the permission badge
   // may therefore use its compact `ww` form, and the stats row keeps its own
-  // 1-line allowance (12.3s lives there).
+  // 1-line allowance. TPS plan PR-3: at 40 columns the latency placement is
+  // the first to drop, so the surviving stats-row witness is the R5
+  // placement's compact form (`R5 0t/s`) plus the turn/step counters.
   assert.ok(view.includes('[workspace-write]') || view.includes('ww'), `permission badge lost:\n${view}`)
   assert.ok(view.includes('deepseek/flash') || view.includes('flash'), `model lost:\n${view}`)
-  assert.ok(view.includes('12.3s'), `stats line lost:\n${view}`)
+  assert.ok(view.includes('R5 0t/s') && view.includes('t3/s7'), `stats line lost:\n${view}`)
   const rows = footerRows(app)
   // The canonical display preset keeps the status row's compact form on one
   // line at 40 columns; the stats row also fits one line, so the footer has

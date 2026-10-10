@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Footer's Performance item gains the whole-Session rate and shows both
+  scopes in the default layout: the speed placement now defaults to
+  `speed-both` (`R5 116 · All 44 tok/s`), with `speed-all` (`All 44 tok/s`)
+  available on its own. Under width pressure it collapses to its leading fact
+  (`R5 116t/s`, or `All 44t/s` when no recent sample exists) and then drops by
+  importance; the legacy `speed` / `full` / `latency` styles in saved layouts
+  keep their meaning, and the `/status` detail line shows TTFB, R5 and All.
+- The performance facts now come from the TUI's own Host `piTuiPerformance`
+  projection: identical on Direct and Remote, unaffected by reconnects, paging
+  or a display-subject switch, and omitted — never `0 tok/s` — when a scope has
+  no eligible sample.
+
 ## [0.5.1] - 2026-10-08
 
 ### Installation and version pairing

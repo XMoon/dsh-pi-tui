@@ -6135,6 +6135,50 @@ tool/shell/terminal/completion, F7 final closure.
 
 Root ledger: `stable = 7`, `legacy = 0`.
 
+## TPS unified Host projection status (DONE, 2026-10-10) — one performance authority
+
+**Contract.** The session's model performance facts — the average time-to-first-token and the
+model-request output rate — are computed ONCE by the bundle's own Host projection
+(`piTuiPerformance`, registered on the official session-projection seam by
+`src/app/host/performance-host.ts`) and consumed by every Client surface as structured values:
+
+- `R5` — the weighted rate over the last five eligible completed steps of the current
+  provider/model route generation (a route change starts a clean window);
+- `All` — the same rate over every eligible step of the Session;
+- TTFB — the average observable first-token latency of the recent window.
+
+The two scopes are independent, an unanswered fact is ABSENT rather than a fabricated zero, and
+the Direct and Remote carriers read the same key off the same exact-session cut
+(`SessionStatusProjection.performance`). The display subject decides which session's facts are
+shown — a child without its own projection renders nothing, never the parent's figures.
+
+**Retired.** The Client-side recent-performance authority is gone: the `StatsFolder` recent
+window (route epochs, candidate buffers, completeness judgement), `recentPerformanceOf` /
+`hasEnoughRecentPerformanceSamples`, the presentation availability state machine and the Remote
+`loadOlder()` recent-performance paging no longer exist. No second R5/TTFB sampling or
+recent-completeness authority remains; `/status` renders TTFB, R5 and All from the same
+authority, and the Footer keeps its existing shape in PR-2 while PR-3 adds the formats:
+
+```text
+full        TTFB 7.7s · R5 116 tok/s
+speed       R5 116 tok/s
+speed-all   All 44 tok/s
+speed-both  R5 116 · All 44 tok/s     (the default speed placement)
+latency     TTFB 7.7s
+```
+
+Under width pressure the pair collapses to its leading fact and the lowest-importance placement
+drops by importance; a layout saved before these styles existed keeps loading unchanged.
+
+**Qualification.** `pnpm verify:prepush` (typechecks, the fork/tooling/docs suites, the
+architecture / boundary / keybinding / naming / session-event / installation-doc /
+pi-divergence / pi-vendor gates, the production-dependency audit and `pack:release` with its
+eight packed smokes), the migration smokes (`smoke:remote-*`), `smoke:startup-strictness`,
+`smoke:boundary` and `compat:dsh:client-family`; the L6 `runner-remote-presentation` suite
+proves the real Host → Client → rendered-status chain, including the default footer pair.
+Direct remains the production default, no Host/Client ownership or wire semantic changed, and
+the Host/Client coupling inventory is unchanged (the boundary baseline stays at its 31 files).
+
 ## Open gap (NOT CLOSED) — terminal status on the Remote branch
 
 **Facts.** The terminal-status presentation (the OSC 7501 semantic state and the

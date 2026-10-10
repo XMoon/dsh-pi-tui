@@ -8,7 +8,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../src/domain/footer/layout.ts'
-import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../src/domain/footer/presets.ts'
+import {
+  COMPACT_FOOTER_LAYOUT,
+  DEFAULT_FOOTER_LAYOUT,
+  VIEWER_DEFAULT_FOOTER_LAYOUT,
+} from '../src/domain/footer/presets.ts'
+import { createBuiltinFooterRegistry } from '../src/tui/footer/builtin-items.ts'
 
 test('the builtin default layout parses as valid', () => {
   const parsed = parseFooterLayout(DEFAULT_FOOTER_LAYOUT)
@@ -181,4 +186,41 @@ test('stripControlChars removes EVERY control character, not just the first (the
     rows: [{ left: [{ id: 'ok\u0007id' }] }],
   })
   assert.ok(!isFooterLayout(parsed), 'a control AFTER the first char must still be rejected')
+})
+
+test('TPS PR-3: the performance formats and the default speed placement', () => {
+  // The definition declares the finite style vocabulary in the order the
+  // `/footer` picker cycles it.
+  const def = createBuiltinFooterRegistry().get('performance')!
+  assert.deepEqual(def.formats, ['full', 'speed', 'speed-all', 'speed-both', 'latency'])
+  // BOTH builtin default layouts keep the latency placement and switch the
+  // speed placement to the combined pair (the plan's default:
+  // `TTFB … · R5 … · All … tok/s`).
+  for (const [label, layout] of [['default', DEFAULT_FOOTER_LAYOUT], ['viewer', VIEWER_DEFAULT_FOOTER_LAYOUT]] as const) {
+    const placements = layout.rows[1]!.left.filter(ref => ref.id === 'performance')
+    assert.deepEqual(placements.map(ref => ref.format), ['latency', 'speed-both'],
+      `${label}: the latency placement stays and the speed placement shows the R5 + All pair`)
+    // The pair drops before the latency placement under pressure (its per-ref
+    // importance is higher), so the narrow footer keeps a performance fact.
+    assert.ok((placements[1]!.importance ?? 0) > (placements[0]!.importance ?? 0),
+      `${label}: the combined placement keeps the wider drop budget`)
+  }
+})
+
+test('TPS PR-3: a persisted legacy performance style survives parsing unchanged', () => {
+  // A saved document from before this change uses `format: 'speed'` (and the
+  // pre-PR-3 vocabulary); it must load verbatim and keep meaning the recent
+  // (R5) rate — never rewritten in place.
+  const parsed = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'performance', format: 'speed', importance: 45 },
+        { id: 'performance', format: 'latency', importance: 40 },
+      ],
+      right: [],
+    }],
+  })
+  assert.ok(isFooterLayout(parsed))
+  assert.deepEqual(parsed.rows[0]!.left.map(ref => ref.format), ['speed', 'latency'])
 })
