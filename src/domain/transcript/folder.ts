@@ -904,6 +904,10 @@ export class TranscriptFolder {
    * neighborhood); a late/distant settlement may legitimately require a wide
    * envelope spanning the rows between the displaced row and its anchor. */
   private lastRegroupSpanRows = 0
+  /** Seeds accumulated while a convergence coalesces its relation changes. */
+  private pendingRegroupSeeds: number[] | undefined = undefined
+  /** Test-only: how many regroup operations actually ran. */
+  private regroupOperationCount = 0
   /** Test-only: how many group members the LAST envelope closure visited. A
    *  deterministic guard that a late-result regroup is linear in the affected
    *  run, never quadratic. */
@@ -1737,7 +1741,12 @@ export class TranscriptFolder {
     // merge. Re-group the neighborhood from the FINAL visibility state (this is
     // deliberately before the dirty-index early return below).
     const index = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
-    if (index !== undefined) this.scheduleDisplayRegroup(index)
+    if (index !== undefined) {
+      // A hidden anchor may not order anything: revoke the Tool relations it
+      // owned, then re-derive the neighborhood from the FINAL visibility state.
+      if (!visible) this.dropLaneAnchor(index)
+      this.scheduleDisplayRegroup(index)
+    }
     if (this.groupedTurnIndexDirty) return
     if (visible) this.addGroupedTurn(turn)
     else this.removeGroupedTurn(turn)
@@ -2071,6 +2080,7 @@ export class TranscriptFolder {
   /** Re-group one LOCAL span from the display order: detach its existing groups,
    *  then rebuild the runs over the final display order (bounded by the span). */
   private regroupDisplaySpan(span: { start: number; end: number }): void {
+    this.regroupOperationCount += 1
     this.lastRegroupSpanRows = span.end - span.start + 1
     this.groupedTurnIndexDirty = true
     this.detachGroupsInRange(span.start, span.end)
@@ -2232,9 +2242,29 @@ export class TranscriptFolder {
       return
     }
     const extra = typeof alsoSeeds === 'number' ? [alsoSeeds] : alsoSeeds
+    // Inside a coalesced convergence the seeds accumulate and ONE joint closure
+    // runs at the end, so a step with many Tool rows does not regroup N times.
+    if (this.pendingRegroupSeeds !== undefined) {
+      this.pendingRegroupSeeds.push(rawIndex, ...extra)
+      return
+    }
     // ONE joint closure over every seed and the resulting envelope: the union of
     // separately closed spans is not closed by itself.
     this.regroupDisplaySpan(this.affectedSpanAround([rawIndex, ...extra]))
+  }
+
+  /** Run `body` while coalescing every display regroup it triggers into ONE
+   *  joint closure over all of the seeds. Nested calls keep the outer batch. */
+  private coalescingRegroups<T>(body: () => T): T {
+    if (this.pendingRegroupSeeds !== undefined) return body()
+    const seeds: number[] = []
+    this.pendingRegroupSeeds = seeds
+    try {
+      return body()
+    } finally {
+      this.pendingRegroupSeeds = undefined
+      if (seeds.length > 0) this.regroupDisplaySpan(this.affectedSpanAround(seeds))
+    }
   }
 
   private appendTailGrouping(index: number, previousIndex: number | undefined): boolean {
@@ -3032,7 +3062,24 @@ export class TranscriptFolder {
       if (row === undefined || row.kind !== 'tool' || row.callId === undefined) continue
       if (!callIds.has(row.callId)) this.dropLaneDisplacement(displaced)
     }
-    for (const callId of callIds) this.convergeToolRowAgainstAnchor(turn, step, callId)
+    this.coalescingRegroups(() => {
+      const sides: { before: number[]; after: number[] } = { before: [], after: [] }
+      for (const callId of callIds) {
+        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId)
+        if (outcome !== undefined) sides[outcome.position].push(outcome.index)
+      }
+      // A side that owns TWO or more proven rows is ordered by evidence as a
+      // WHOLE: a row already sitting on that side physically joins the relation
+      // too, so live and cold cannot disagree when the durable arrival order
+      // differs from the evidence order. A lone row keeps its physical slot, so
+      // it never jumps across unrelated rows (see regression `F3`).
+      const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
+      if (anchorIndex === undefined) return
+      for (const position of ['before', 'after'] as const) {
+        if (sides[position].length < 2) continue
+        for (const row of sides[position]) this.setLaneDisplay(row, anchorIndex, position)
+      }
+    })
     // The latest settlement is the step's authority: Preparing evidence for a
     // call it no longer names must not survive to qualify a LATER durable call
     // (a replacement that drops the call also drops its eligibility).
@@ -3055,7 +3102,11 @@ export class TranscriptFolder {
    *  side can arrive last: the settlement converges the calls its own durable
    *  stream named, and a `tool/call` whose durable event carries the step
    *  converges itself against an Assistant row that already settled. */
-  private convergeToolRowAgainstAnchor(turn: number, step: number, callId: string): void {
+  private convergeToolRowAgainstAnchor(
+    turn: number,
+    step: number,
+    callId: string,
+  ): { index: number; position: 'before' | 'after' } | undefined {
     const key = stepKey(turn, step)
     const assistantRow = this.assistantEntries.get(key)
     const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
@@ -3067,7 +3118,12 @@ export class TranscriptFolder {
     // deliberately NOT: without a stream there is no order authority, so no
     // relation may be created — and an inherited one is dropped here.
     const visibleAt = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step)
-    if (assistantRow === undefined || assistantIndex === undefined || visibleAt === undefined) {
+    // The anchor must be the CURRENTLY visible Conversation: a stream that once
+    // carried visible text does not make the settled row visible (an empty
+    // authoritative replacement hides it), and a hidden anchor may not order
+    // anything.
+    if (assistantRow === undefined || assistantIndex === undefined || visibleAt === undefined
+      || !this.isVisible(assistantRow)) {
       if (stale) this.dropLaneDisplacement(index!)
       return
     }
@@ -3076,13 +3132,16 @@ export class TranscriptFolder {
     if (startedAt === undefined || startedAt === visibleAt) {
       // Unknown or equal evidence cannot prove which side came first.
       this.dropLaneDisplacement(index)
-      return
+      return undefined
     }
     const shouldFollow = startedAt > visibleAt
+    const position: 'before' | 'after' = shouldFollow ? 'after' : 'before'
     if (shouldFollow === (index > assistantIndex)) {
-      // Already in the physical position the evidence asks for.
+      // Already in the physical position the evidence asks for: it keeps its own
+      // slot (and any relation is dropped). The CALLER decides whether the whole
+      // side must be evidence-ordered instead (two or more proven siblings).
       this.dropLaneDisplacement(index)
-      return
+      return { index, position }
     }
     // A lane row the lane authority already finds physically conformant keeps its
     // physical slot and is therefore emitted AFTER the whole displaced list —
@@ -3097,7 +3156,8 @@ export class TranscriptFolder {
       if (shouldFollow && thinkingIndex > assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'after')
       if (!shouldFollow && thinkingIndex < assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'before')
     }
-    this.setLaneDisplay(index, assistantIndex, shouldFollow ? 'after' : 'before')
+    this.setLaneDisplay(index, assistantIndex, position)
+    return { index, position }
   }
 
   /** Converge one step's Thinking/Assistant rows to its stored lane
@@ -3823,6 +3883,7 @@ export class TranscriptFolder {
     refinedCandidates: number
     lastRegroupSpanRows: number
     lastRegroupMemberVisits: number
+    regroupOperations: number
   } {
     return {
       entries: this.searchEntries.length,
@@ -3834,6 +3895,7 @@ export class TranscriptFolder {
       refinedCandidates: this.searchRefineCandidates,
       lastRegroupSpanRows: this.lastRegroupSpanRows,
       lastRegroupMemberVisits: this.lastRegroupMemberVisits,
+      regroupOperations: this.regroupOperationCount,
     }
   }
 
