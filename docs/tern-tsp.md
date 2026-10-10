@@ -12,30 +12,36 @@ evidence ledger. Per-PR measurements live under
   semantic node tree plus incremental ops, and Tern owns the native layout,
   styling and rendering. The program keeps its own state and input loop.
 - **Production default is PiTui.** `dsh --profile pi-tui` renders through the
-  vendored PiTui surface. PR3-A adds ONE experimental internal opt-in
+  vendored PiTui surface. TSP adds ONE experimental internal opt-in
   (`DSH_PI_TUI_RENDERER=tsp`, no profile/setting/command/public CLI): when it
-  is set and the official SDK `connect()` succeeds, the Tern TSP renderer
-  owns the terminal as a read-only live transcript; `connect() === null`
-  mounts PiTui unchanged and a connect throw is a startup failure. Default
+  is set and the official SDK `connect()` succeeds, the Tern TSP renderer owns
+  the terminal and, since PR3-B, the interactive editor, submission and the
+  official Question/Approval modal seat; `connect() === null` mounts PiTui
+  unchanged and a connect throw is a startup failure. Unsupported terminals
+  (SSH, tmux, screen, zellij, `TERN_TSP=0`) are declined by the SDK. Default
   environments never load the SDK (lazy import) and `src/startup.ts` stays
   dependency-free.
 - **What exists:** PR1 (a standalone opt-in replay spike with a real Tern pane
   smoke), PR2 (an optional read-only projection observer that lets an isolated
-  TSP consumer render the live application projection), and PR3-A (the
-  single-tty read-only TSP renderer mount behind the internal experimental
-  opt-in). All are experimental; only PR3-A can own the product terminal, and
-  it is read-only.
+  TSP consumer render the live application projection), PR3-A (the single-tty
+  read-only TSP renderer mount behind the internal experimental opt-in) and
+  PR3-B B0–B3 (the display seam, the shared composer/submission and command
+  admission, and the unified Question/Approval modal seat with its official
+  lifecycle). All are experimental; **PR3-B B4** is the end-to-end real-pane
+  qualification of the interactive surface and is not closed yet.
 - **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm,
-  `devDependencies` only) against real Tern `0.6.2 (4b3ed42)`, on
-  `next @ a4473563`. A future SDK or pane version may change any field below.
-- **Last verified:** 2026-10-08 (UTC+8).
+  `devDependencies` only) against real Tern `0.6.2` (PR1) and `0.7.0` (PR3-B
+  real-pane runs). A future SDK or pane version may change any field below.
+- **Last verified:** 2026-10-10 (UTC+8) for the interactive (PR3-B) surface;
+  2026-10-08 for the read-only PR3-A surface.
 
 | Item | State |
 |---|---|
-| PR1 replay spike → real Tern pane | DONE (manual, opt-in script) |
+| PR1 replay spike → real Tern pane | DONE (merged, [#256](https://github.com/XMoon/dsh-pi-tui/pull/256)) |
 | PR2 live application projection (routed events, production cold hydration, Remote re-window) → isolated TSP surface | DONE (merged, [#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) |
-| PR3-A single-tty read-only TSP live mount (experimental opt-in `DSH_PI_TUI_RENDERER=tsp`) | IN PROGRESS (this PR) |
-| Editor/submit/Question/Approval inside TSP | PLANNED (PR3-B) |
+| PR3-A single-tty read-only TSP live mount (experimental opt-in `DSH_PI_TUI_RENDERER=tsp`) | DONE (merged, [#260](https://github.com/XMoon/dsh-pi-tui/pull/260)) |
+| B0 display seam / B1 editor+input / B2 submit+command admission / B3 Question+Approval seat | DONE (merged: [#261](https://github.com/XMoon/dsh-pi-tui/pull/261), [#262](https://github.com/XMoon/dsh-pi-tui/pull/262), [#263](https://github.com/XMoon/dsh-pi-tui/pull/263), [#265](https://github.com/XMoon/dsh-pi-tui/pull/265)) |
+| B4 end-to-end real-pane qualification (incl. real IME, physical paste, physical control keys) | **IN PROGRESS (qualification pending)** — see [PR3-B evidence](./tern-tsp/evidence/pr3-b.md) |
 
 ## Upstream protocol and SDK
 
@@ -209,18 +215,40 @@ and the editor/input authority behind it, are PR3 scope; building a second
 
 | Capability | State |
 |---|---|
-| PiTui full application (`dsh --profile pi-tui`) | Production, unchanged by PR1/PR2/PR3-A |
+| PiTui full application (`dsh --profile pi-tui`) | Production default, unchanged by TSP work |
 | Canonical projection → native TSP nodes (mapper) | DONE (pure, unit-covered; the production copy lives in `src/tui/tsp/transcript-view.ts`) |
 | Replay spike in a real Tern pane | DONE (PR1; real Tern 0.6.2, 7 acked frames) |
 | Live application projection → isolated TSP surface | DONE in tests (PR2) |
 | Single-tty read-only TSP renderer (PR3-A, opt-in env) | IMPLEMENTED (scripted-tty tests; real-pane smoke in the PR3-A evidence) |
 | Live application projection → real Tern pane (product) | PR3-A manual smoke (see evidence); still experimental |
-| Editor/submit input inside TSP | PLANNED (PR3-B) |
-| Question/Approval modals inside TSP | LEGALLY FAIL-CLOSED in PR3-A (unavailable / Host-continued + dock notice); interactive in PR3-B+ |
+| Editor/submit input inside TSP | IMPLEMENTED (B1/B2); real-GUI IME / physical paste / physical control keys are B4 qualification items |
+| Question/Approval modals inside TSP | IMPLEMENTED (B3): one official FIFO seat over the real lifecycle (timed → continued → `Alt+Q` → late answer); fail-closed in PR3-A only |
 | Search/Reveal/Focus parity inside TSP | PLANNED (PR4–PR5) |
 | ExtensionView / custom renderers over TSP | PLANNED (policy undefined) |
 | SSH, tmux, screen, zellij, `TERN_TSP=0` | Unsupported by the SDK (`connect()` declines) |
 | Remote generated wire (L5) / full product (L6) over TSP | NOT CLAIMED |
+
+### TSP key semantics and deliberate PiTui differences
+
+The interactive TSP composer is a CLIENT-CONTROLLED `ui.editor` (the SDK's native
+`edit`/`undo`/`send` are not advertised), so TSP implements an explicit key
+contract instead of the vendored PiTui editor:
+
+| Chord | TSP behavior | PiTui behavior |
+|---|---|---|
+| `Enter` / `Shift+Enter` / `Ctrl+Enter` | submit / newline / accelerated submit (existing busy policy decides queue vs steer) | same business intent through its own editor |
+| `Ctrl+C` | the EXISTING cancel/interrupt intent — modal cancel while a form owns the seat, interrupt while a turn runs, otherwise a no-op; **never an exit** | an exit key: clears a non-empty draft, then a second press within the confirmation window exits |
+| `Ctrl+D` | exits ONLY when the composer is empty and no modal is up | same condition, but armed by the `Press <key> again to exit` confirmation window |
+| `Escape` | modal cancel, otherwise the existing cancel intent | same intent |
+| `Alt+Q` | reopens current-session continued Questions | n/a (PiTui shows them inline) |
+| printable keys / bracketed paste | text; a paste is ONE atomic edit whose newlines and `/name`-looking lines are CONTENT, never separate dispatches | its own editor |
+| other control chords (e.g. `Ctrl+A`, `Ctrl+V`) | ignored (unknown editing chords may no-op) | editor-native selection/clipboard |
+
+**Known differences, owner-decided (B4):** the PiTui exit-confirmation window
+(and its footer hint) is NOT implemented in the TSP renderer — TSP exits on a
+single `Ctrl+D` while the draft is empty and no modal is up. This is recorded as
+a **PR4 UI-parity item**, not a defect; the deliberate `Ctrl+C` difference above
+is part of the frozen PR3-B key contract and must not be "fixed" into an exit.
 
 ## Verification and reproducibility
 
@@ -256,9 +284,11 @@ Evidence levels — do not merge these into a stronger claim:
 | PR | State | Proved | Not proved | Evidence |
 |---|---|---|---|---|
 | PR1 ([#256](https://github.com/XMoon/dsh-pi-tui/pull/256)) | DONE (merged) | Canonical transcript → native TSP nodes; real Tern 0.6.2 render, incremental ops, clean/signal close | Live application wiring; editor/input; durable identity | [./tern-tsp/evidence/pr1.md](./tern-tsp/evidence/pr1.md) |
-| PR2 ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) | IMPLEMENTED (this PR) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty, including the production cold hydration and the Remote re-window (`rehydrateFromWindow`) | Real Tern pane; product renderer selection; editor/input; Remote wire rollover (deferred with owner) | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
-| PR3-A | IN PROGRESS (this PR) | One renderer selection at the composition root (SDK connect before PiTui; null→PiTui, throw→fatal); single SDK tty owner; read-only live transcript + status/notices through the display seam; Loading policy; fail-closed modals | Editor/input (PR3-B); real-pane parity of every capability | [./tern-tsp/evidence/pr3-a.md](./tern-tsp/evidence/pr3-a.md) |
-| PR3-B+ | PLANNED | Editor/input authority; interactive Question/Approval | — | — |
+| PR2 ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) | DONE (merged) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty, including the production cold hydration and the Remote re-window (`rehydrateFromWindow`) | Real Tern pane; product renderer selection; editor/input; Remote wire rollover (deferred with owner) | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
+| PR3-A ([#260](https://github.com/XMoon/dsh-pi-tui/pull/260)) | DONE (merged) | One renderer selection at the composition root (SDK connect before PiTui; null→PiTui, throw→fatal); single SDK tty owner; read-only live transcript + status/notices through the display seam; Loading policy; fail-closed modals | Editor/input (PR3-B); real-pane parity of every capability | [./tern-tsp/evidence/pr3-a.md](./tern-tsp/evidence/pr3-a.md) |
+| PR3-B B0–B3 ([#261](https://github.com/XMoon/dsh-pi-tui/pull/261), [#262](https://github.com/XMoon/dsh-pi-tui/pull/262), [#263](https://github.com/XMoon/dsh-pi-tui/pull/263), [#265](https://github.com/XMoon/dsh-pi-tui/pull/265)) | DONE (merged) | Display seam; shared composer + submission/command admission; the unified official Question/Approval modal seat with its lifecycle (timed/continued/`Alt+Q`/late answer), currentness and settlement rules | Real-GUI IME / physical paste / physical control keys (B4) | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
+| PR3-B B4 | **IN PROGRESS (qualification pending)** | Headless lane evidence on the frozen artifact; real-pane cases as recorded in the evidence chapter | The three physical qualifications and the §6.4 real-pane matrix until the owner's GUI runs close them | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
+| PR4+ | PLANNED | UI/panel/clipboard parity, exit-confirmation window, native editor chords | — | — |
 
 ## Next decisions
 
