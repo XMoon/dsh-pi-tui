@@ -894,3 +894,43 @@ test('B3 P3: closeTransientList releases the seat and the input (a replacement n
   assert.equal(seat.hasModalSeat(), false, 'a repeated close is inert')
   seat.dispose()
 })
+
+test('B3 P2-D: a batched withdrawal commits ONE frame and never promotes a member of the batch', async () => {
+  const { createTspInteractionSeat } = await import('../src/tui/tsp/interaction.ts')
+  const frames: string[] = []
+  const seat = createTspInteractionSeat({
+    render: () => { frames.push(JSON.stringify(seat.renderLayer())) },
+    onFatal: error => { throw new Error(`unexpected fatal: ${String(error)}`) },
+    notify: () => {},
+    setSettledQuestionAnswersLookup: () => {},
+  })
+  const first = new AbortController()
+  const second = new AbortController()
+  const successor = new AbortController()
+  const settled: string[] = []
+  void seat.presenter.showApprovalPrompt({ toolName: 'bash', reason: 'A first', signal: first.signal }, true)
+  void seat.presenter.showApprovalPrompt({ toolName: 'bash', reason: 'A second', signal: second.signal }, true)
+  assert.match(frames.at(-1) ?? '', /A first/, 'the first request owns the seat')
+  assert.doesNotMatch(frames.at(-1) ?? '', /A second/, 'the second request is queued, not painted')
+  // A request for the SUCCESSOR subject is already queued behind them.
+  void seat.presenter.showApprovalPrompt({ toolName: 'bash', reason: 'B request', signal: successor.signal }, true)
+    .then(value => { settled.push(`B:${String(value)}`) }, error => { settled.push(`B:${String(error)}`) })
+  const framesBefore = frames.length
+
+  // The replacement withdraws BOTH replaced requests in ONE batch.
+  seat.withdrawPresentations([first.signal, second.signal])
+  assert.equal(frames.length, framesBefore + 1, 'the batch commits exactly ONE frame')
+  assert.doesNotMatch(frames.at(-1) ?? '', /A first|A second/,
+    'no member of the batch is promoted (or painted) in that frame')
+  assert.match(frames.at(-1) ?? '', /B request/, 'the queued successor takes the seat in the SAME frame')
+  assert.equal(seat.hasModalSeat(), true, 'the successor owns the seat afterwards')
+
+  // The replaced requests keep their own lifetimes.
+  first.abort()
+  second.abort()
+  successor.abort()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(settled, ['B:cancelled'], 'the successor settles for its own lifetime')
+  seat.dispose()
+})

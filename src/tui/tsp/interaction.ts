@@ -131,6 +131,8 @@ export interface TspInteractionSeat {
    * still settles that same promise through the ordinary classified path. A
    * replaced Session's form must never keep the modal seat or the input.
    */
+  withdrawPresentations(lifetimes: readonly AbortSignal[]): void
+  /** One lifetime's presentation (the batch above with a single member). */
   withdrawPresentation(lifetime: AbortSignal): void
 }
 
@@ -338,32 +340,51 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
    * OPENING (the controller's timed claim) has no slot yet: it is remembered as
    * retired, so the form is never mounted once the claim lands.
    */
-  const withdrawPresentation = (lifetime: AbortSignal): void => {
-    if (disposed) return
-    const slot = (active !== undefined && active.signal === lifetime ? active : undefined)
-      ?? fifo.find(candidate => candidate.signal === lifetime)
-      ?? withdrawn.find(candidate => candidate.signal === lifetime)
-    if (slot === undefined) {
-      retiredLifetimes.add(lifetime)
-      return
+  const withdrawPresentations = (lifetimes: readonly AbortSignal[]): void => {
+    if (disposed || lifetimes.length === 0) return
+    // ONE atomic batch (external review round 4): every listed lifetime leaves the
+    // seat FIRST, and only then is the successor picked and ONE frame committed.
+    // A request that is about to be withdrawn can therefore never be promoted —
+    // and never painted — in between, which is the contract a publication owes
+    // once the new owner is current.
+    const selected = new Set<Slot>()
+    for (const lifetime of lifetimes) {
+      const slot = (active !== undefined && active.signal === lifetime ? active : undefined)
+        ?? fifo.find(candidate => candidate.signal === lifetime)
+        ?? withdrawn.find(candidate => candidate.signal === lifetime)
+      if (slot === undefined) {
+        // A lifetime whose presentation is still OPENING has no slot yet: it is
+        // remembered as retired, so the form is never mounted once the claim lands.
+        retiredLifetimes.add(lifetime)
+        continue
+      }
+      if (slot.settled) continue
+      selected.add(slot)
     }
-    if (slot.settled) return
-    if (active === slot) active = undefined
-    const index = fifo.indexOf(slot)
-    if (index >= 0) fifo.splice(index, 1)
-    withdrawn.push(slot)
+    if (selected.size === 0) return
+    for (const slot of selected) {
+      if (active === slot) active = undefined
+      const index = fifo.indexOf(slot)
+      if (index >= 0) fifo.splice(index, 1)
+      withdrawn.push(slot)
+    }
     promote()
     try {
       options.render()
     } catch (error) {
       // The renderer's OWN frame/focus commit failed while withdrawing a
       // replaced presentation: the terminal is broken, so this is the SAME
-      // fatal path as a failing presentation or settlement (the slot already
-      // left the seat and its promise is deliberately NOT settled here — the
+      // fatal path as a failing presentation or settlement (the slots already
+      // left the seat and their promises are deliberately NOT settled here — the
       // fatal lifecycle and the surface release owner own the rest). The
       // original error reaches the sink unchanged.
       options.onFatal(error)
     }
+  }
+
+  /** One lifetime's presentation (the batch above with a single member). */
+  const withdrawPresentation = (lifetime: AbortSignal): void => {
+    withdrawPresentations([lifetime])
   }
 
   /** Hand the seat to the next queued request (only when it is free). */
@@ -1218,8 +1239,8 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     withdrawPending() {
       retireAll()
     },
-    withdrawPresentation(lifetime) {
-      withdrawPresentation(lifetime)
+    withdrawPresentations(lifetimes) {
+      withdrawPresentations(lifetimes)
     },
     closeTransientList() {
       closeTransientList()
@@ -1252,6 +1273,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     desiredFocusId,
     attentionCount: () => attention,
     closeTransientList,
+    withdrawPresentations,
     withdrawPresentation,
     dispose: retireAll,
   }

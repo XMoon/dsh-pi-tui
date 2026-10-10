@@ -268,6 +268,12 @@ interface RunnerHarness {
   cancelCalls(): number
   route(event: { type: string; seq?: number; data?: unknown }): void
   dispose(): Promise<void>
+  /**
+   * The SIZES of every batched presenter withdrawal, in order (external review
+   * P2-D): a publication must hand the renderer ONE batch, never one call per
+   * replaced modal (which would promote and paint a member of the batch).
+   */
+  readonly withdrawalBatches: number[]
 }
 
 async function mountRunnerHarness(options: {
@@ -363,9 +369,18 @@ async function mountRunnerHarness(options: {
     createPluginManagerPanel,
   })
   surface.attachEventRouting(source)
+  const withdrawalBatches: number[] = []
   const renderer: SurfaceRendererMount = {
     mount: () => {
       mountedRenderer = mountTspRenderer(session, { requestExit: () => { exitCount += 1 } })
+      // Observe the REAL presenter call sizes (the unbound original is called with
+      // the presenter as receiver, never `.bind`).
+      const interaction = mountedRenderer.interaction
+      const originalWithdraw = interaction.withdrawPresentations
+      interaction.withdrawPresentations = lifetimes => {
+        withdrawalBatches.push(lifetimes.length)
+        return originalWithdraw.call(interaction, lifetimes)
+      }
       return mountedRenderer
     },
     releaseUnmounted: async () => { await mountedRenderer?.dispose() },
@@ -423,6 +438,7 @@ async function mountRunnerHarness(options: {
     questionRequest: request => deliver('user-questions/request', request),
     setSession: (sessionId: string) => { currentSessionId = sessionId; plane.currentSessionId = sessionId },
     cancelCalls: () => cancelCalls,
+    withdrawalBatches,
     route: event => { surface.routeSessionEvent({ id: currentSessionId } as never, event as never) },
     async dispose() {
       surface.dispose()
@@ -1473,6 +1489,50 @@ test('B3 P2-A: an inadmissible request with NO Host lifetime settles at admissio
     assert.deepEqual(await current, { answers: [{ id: 'q-alive', selected: ['yes'] }] })
   } finally {
     release?.()
+    await harness.dispose()
+  }
+})
+
+test('B3 P2-D: a publication withdraws several replaced approvals atomically and the successor takes over', async () => {
+  const harness = await mountRunnerHarness()
+  try {
+    const aRef = { session: { id: SESSION_ID } }
+    const firstAbort = new AbortController()
+    const secondAbort = new AbortController()
+    let first: string | undefined
+    let second: string | undefined
+    void harness.approvalRequest({ agent: aRef, toolName: 'bash', reason: 'A first', signal: firstAbort.signal })
+      .then(value => { first = String(value) })
+    void harness.approvalRequest({ agent: aRef, toolName: 'bash', reason: 'A second', signal: secondAbort.signal })
+      .then(value => { second = String(value) })
+    await waitFor(() => overlayAdds(harness.tern.ops()).length === 1, 'the first prompt is presented')
+    const addsBefore = overlayAdds(harness.tern.ops()).length
+
+    harness.setSession('session-b')
+    harness.surface.reconcileInteractionPresentation()
+    await waitFor(() => liveOverlays(harness.tern.ops()).length === 0, 'both replaced prompts left the seat')
+    assert.deepEqual(harness.withdrawalBatches, [2],
+      'the publication handed the renderer ONE batch with both replaced prompts (no per-modal call, so nothing is promoted or painted in between)')
+    assert.equal(overlayAdds(harness.tern.ops()).length, addsBefore,
+      'the sweep added no intermediate overlay for the queued replaced prompt')
+
+    // A SUCCESSOR request queued behind the replaced pair takes the seat.
+    const bAbort = new AbortController()
+    let successor: string | undefined
+    void harness.approvalRequest({ agent: { session: { id: 'session-b' } }, toolName: 'bash', reason: 'B request', signal: bAbort.signal })
+      .then(value => { successor = String(value) })
+    await waitFor(() => liveOverlays(harness.tern.ops()).length === 1, 'the successor is presented')
+    assert.ok(harness.tern.output.text().includes('B request'), 'the successor owns the seat')
+
+    firstAbort.abort()
+    secondAbort.abort()
+    bAbort.abort()
+    await waitFor(() => first !== undefined && second !== undefined && successor !== undefined,
+      'every request settled through its own lifetime')
+    assert.equal(first, 'cancelled')
+    assert.equal(second, 'cancelled')
+    assert.equal(successor, 'cancelled')
+  } finally {
     await harness.dispose()
   }
 })
