@@ -1,24 +1,14 @@
 # Tern TSP PR3-B evidence — interactive pane (B0..B4)
 
 > **Status: B0, B1 and B2 merged into `next` (PRs #261, #262, #263); B3
-> implemented on `feat/tern-tsp-pr3-b3-interaction` — review gates open. F1–F5 are
-> closed, and the presentation-currentness MUST (F6/C) has its production-path
-> witnesses with the publication withdrawal implemented for Questions AND
-> Approvals (rounds 5–6). The later reviews returned F7/F8 (fixed in round 6),
-> F9/F10 (round 7), F11/F12/F13 (round 8) and F11's closed-owner window + F14
-> (round 9) — ALL CLOSED internally: the B3-9 review is accepted-with-followups
-> with zero open P0/P1/P2 and its only follow-up was this document's provenance
-> wording (corrected in round 10, doc/comment only). The external review of PR #265
-> then returned request-changes with two P2 lifecycle gaps (a late continued offer,
-> signal-less request settlement) and one P3 (the transient list across a
-> replacement) — all fixed in round 11 — and, on the next round, two more P2
-> boundaries (a signal-less LATE admission and the owner-publication →
-> initialization window), both fixed in round 12, one more on the next round
-> (the commit-section half must perform no Host read) — fixed in round 13 — and a
-> final one (several replaced modals must leave as ONE atomic batch) — fixed in
-> round 14 — and its ordering twin (the local settlements must run AFTER that
-> batch) — fixed in round 15. F6/C is kept PARTIAL here until the external review
-> closes the delivery status; B4 pending.**
+> implemented on `feat/tern-tsp-pr3-b3-interaction` and based on `next` @
+> `d08e666c` after a clean rebase. Every finding of the internal rounds and of the
+> six external rounds is CLOSED — the external review's final verdict is
+> **code-level accepted, zero open P0/P1/P2** — and the presentation-currentness
+> MUST (F6/C) is CLOSED with production-path witnesses for Questions AND Approvals.
+> The only remaining step is the merge itself (CI green + this document's closing
+> update). B4 keeps the IME / physical-paste / control-key matrix.**
+
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
@@ -741,7 +731,7 @@ its remaining gaps named rather than as closed.
 | F3 — re-confirming the same answer fired the real-answer hooks | The confirm path called the hook pair unconditionally; the same selection, the same text or an accepted `initialDraft` counted as mutations. The hooks now compare the draft's answer semantics and fire only on a real change (the controller's own frozen latch is idempotent, but a no-op answer is not a mutation). |
 | F4 — an empty recorded result skipped the settled lookup | The result body was gated on the RECORDED payload being non-empty, so a running `ask_user_question` row never read the authoritative batch (or its authoritative emptiness). The shown value now decides the body; an absent lookup still renders nothing. |
 | F5 — the new host-keybindings seam was registered on the wrong owner | The scoped seam list is owner-scoped to `src/tui/keybindings/**`, so a renderer file cannot own the row (the gate's own fixture enforces it). The fixed chord label now lives in the key-label vocabulary (`hints.ts`) and the renderer imports it; the seam row is registered against that file. The mandated `· Alt+Q` copy is preserved — it was NOT dropped, the fixture was NOT weakened, and no keymap action was invented for a chord the seat dispatches from the raw key stream. |
-| F6 — qualification-matrix gaps | **PARTIAL (rounds 5–6)** — the physical minimum and the scripted matrix are proven, and the REAL app/session currentness connection is now proven on the production path for BOTH official request kinds on the branch that delivers them (the named production witnesses exist and the missing presentation hook was found and fixed: the Question flow at publication, and the approval prompt at publication via the official request's OWN Agent identity). The status stays PARTIAL because the reviewer kept the umbrella open until the re-review confirms the whole currentness model; rounds 7–9 closed its remaining defects (F9 per-request presentation identity, F10 admission currentness, F11 refused-admission teardown ownership and its closed-owner window, F12 opening-target consistency, F13 renderer-owned scoping, F14 the opening-authority producer). The B3-9 review reports every B3 finding CLOSED with zero open P0/P1/P2; this row stays PARTIAL only because the reviewer keeps the umbrella open until it closes the delivery status (round 10 is the doc/comment-only provenance correction). An approval request with no derivable Session identity is recorded as N/A_WITH_REASON for the currently supported surface — the Direct `ApprovalRequest` always carries its own Agent and the Remote branch delivers no approval request at all — so no identity is invented and no scope is widened for a hypothetical provider. Recorded history of the gap as it stood at round 2: the REAL app/session currentness connection was OPEN: the consumer-side witness (a Host-ended request retires cleanly) and the seat-level retired-request guard are not a production-path proof. What is owed: a real ordinary `/new` transition showing the pre-commit quiesce preventing B's publication while A's live Question is unanswered, a real `/fork` showing A's modal withdrawn BY PRESENTATION CURRENTNESS at publication (not only after the later Agent cancel) plus the real retirement's `agent.cancel({kind:'user'})` ending the request as exactly `ASK_ABORTED`, and a real ordinary switch withdrawing a mounted CONTINUED form through the official projection reconcile. The plan authority kept this MUST (it was NOT downgraded to a boundary) and ruled that a tentative Session opening is not an owner replacement, while a PUBLISHED B must never leave A's modal owning the TSP presentation or input. Round 3 added: the same-call `timed → ASK_TIMED_OUT → continued → park → Alt+Q → late answer → queued → settled result card` closure; a claim fake that honours the CALLER's lifetime signal plus the surface-teardown release assertion; delta-based currentness assertions with the exact `ASK_ABORTED` classification and a fresh B seat identity; the symmetric Question→Approval handoff; a reentrant official request created SYNCHRONOUSLY inside a controller projection read; the §5.3 extension of `test/question-remote-lifecycle.test.ts` (the real seat driving the timed/continued lifecycle); and the real-PiTui answerer positive mapped to its existing guards (re-run in this round: `test/interaction-settlement-hardening.test.ts`, `test/terminal-progress-lifecycle.test.ts`, `test/advanced-interactive.test.ts`, `test/focus-ui.test.ts`). The physical minimum now covers Question single/multi/free-text + Review, Approval y/n/cancel AND the continued `Alt+Q` late-answer chain (both physical defects were PROFILE configuration, not Host limits). |
+| F6 — qualification-matrix gaps | **CLOSED — the external review of PR #265 accepted the code with zero open P0/P1/P2 (rounds 5–6, confirmed after the six external rounds below)** — the physical minimum and the scripted matrix are proven, and the REAL app/session currentness connection is now proven on the production path for BOTH official request kinds on the branch that delivers them (the named production witnesses exist and the missing presentation hook was found and fixed: the Question flow at publication, and the approval prompt at publication via the official request's OWN Agent identity). The status stays PARTIAL because the reviewer kept the umbrella open until the re-review confirms the whole currentness model; rounds 7–9 closed its remaining defects (F9 per-request presentation identity, F10 admission currentness, F11 refused-admission teardown ownership and its closed-owner window, F12 opening-target consistency, F13 renderer-owned scoping, F14 the opening-authority producer). The B3-9 review reports every B3 finding CLOSED with zero open P0/P1/P2; round 10 was the doc/comment-only provenance correction, and the external review of PR #265 then took the same currentness model through six more rounds (a late continued offer, signal-less settlement, the owner-publication window, the commit-section Host read, multi-modal atomicity, settle-after-batch and the transient-list scope) before accepting the code with zero open P0/P1/P2 — so this row is CLOSED. An approval request with no derivable Session identity is recorded as N/A_WITH_REASON for the currently supported surface — the Direct `ApprovalRequest` always carries its own Agent and the Remote branch delivers no approval request at all — so no identity is invented and no scope is widened for a hypothetical provider. Recorded history of the gap as it stood at round 2: the REAL app/session currentness connection was OPEN: the consumer-side witness (a Host-ended request retires cleanly) and the seat-level retired-request guard are not a production-path proof. What is owed: a real ordinary `/new` transition showing the pre-commit quiesce preventing B's publication while A's live Question is unanswered, a real `/fork` showing A's modal withdrawn BY PRESENTATION CURRENTNESS at publication (not only after the later Agent cancel) plus the real retirement's `agent.cancel({kind:'user'})` ending the request as exactly `ASK_ABORTED`, and a real ordinary switch withdrawing a mounted CONTINUED form through the official projection reconcile. The plan authority kept this MUST (it was NOT downgraded to a boundary) and ruled that a tentative Session opening is not an owner replacement, while a PUBLISHED B must never leave A's modal owning the TSP presentation or input. Round 3 added: the same-call `timed → ASK_TIMED_OUT → continued → park → Alt+Q → late answer → queued → settled result card` closure; a claim fake that honours the CALLER's lifetime signal plus the surface-teardown release assertion; delta-based currentness assertions with the exact `ASK_ABORTED` classification and a fresh B seat identity; the symmetric Question→Approval handoff; a reentrant official request created SYNCHRONOUSLY inside a controller projection read; the §5.3 extension of `test/question-remote-lifecycle.test.ts` (the real seat driving the timed/continued lifecycle); and the real-PiTui answerer positive mapped to its existing guards (re-run in this round: `test/interaction-settlement-hardening.test.ts`, `test/terminal-progress-lifecycle.test.ts`, `test/advanced-interactive.test.ts`, `test/focus-ui.test.ts`). The physical minimum now covers Question single/multi/free-text + Review, Approval y/n/cancel AND the continued `Alt+Q` late-answer chain (both physical defects were PROFILE configuration, not Host limits). |
 
 MUTATION WITNESSES (each mutation applied alone, its witness re-run, the tree
 restored byte-identically): removing the initial-presentation fatal exit, keeping
@@ -1407,3 +1397,43 @@ and that the replacement's own input still works.
 DISCRIMINATION (`sha256 -c` verified restore): running the settle step BEFORE the
 batch turns BOTH witnesses RED on exactly "no frame of the publication presents a
 replaced modal" / "…the mounted continued form or the queued replaced approval".
+
+### Round 16 — the external review's sixth round and its acceptance
+
+The sixth external round fixed the last presentation regression and then reviewed
+the rebase:
+
+P2-F — the ORDINARY activity reconcile closed the renderer's transient Alt+Q list.
+  Reusing the publication withdrawal there meant any ordinary `model/selection`,
+  tool or message event of the SAME session closed the list the user had just
+  opened (no publication, nothing replaced). The transient-list policy is now
+  explicit: the ordinary activity pass may withdraw replaced requests but never
+  touches the list; a real owner publication (the synchronous commit section) and
+  the publication/authority-change hydration seam still drop it, because the list
+  belongs to the subject that opened it. Witnesses: the same session opens Alt+Q
+  and then receives an ordinary `model/selection` event — the list stays open and
+  Enter still reopens the parked question; the negative control is the existing
+  production witness (a real `/new` must close it). Making the ordinary pass close
+  the list turns the new witness RED.
+
+REBASE: the branch is based on `next` @ `d08e666c` (17 upstream commits: the
+TPS/TTFB Host-projection ownership change, the transcript Activity-lifetime fixes,
+the viewer/UX fixes). The rebase applied without conflicts; because `next` added a
+runtime dependency, the worktree was re-bootstrapped (`pnpm dev:bootstrap` →
+`dev:doctor` READY) and rebuilt.
+
+THE "DOUBLE SEND" SEMANTICS, confirmed on the rebased tree (22 suites, 679 pass /
+0 fail) — three independent guards, not one test counted twice: the TSP
+committed-prompt witness (exactly ONE prompt occurrence reaches the writer through
+the real `SubmissionController` + Direct writer), `B2: an accepted submit leaves an
+empty composer, so a second Enter cannot double-send`, and `B1/L2/P3: one accepted
+edit calls Surface.render exactly ONCE` — plus `test/submit-hot-path.test.ts`,
+`test/tern-tsp-submission.test.ts` and `test/tern-tsp-editor-input.test.ts`, with
+the upstream draft-safety guard and `session-presentation-lifecycle` covered by the
+full product suite.
+
+ACCEPTANCE: the sixth round's verdict is **code-level accepted with zero open
+P0/P1/P2**; its only remaining item was documentation (the stale refused-admission
+contract in the owning rule, this document's F6 status and the missing rounds 5–6
+history), corrected here. B4 keeps the IME / physical-paste / control-key matrix
+and is not pulled into this PR.

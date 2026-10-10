@@ -1822,9 +1822,12 @@ Decisions (all terminal-native; none of them copies a Web button):
     the replacement was published is refused at ADMISSION against the surface's
     own currentness authority — the Session it shows or is currently OPENING (a
     tentative opening is not an owner replacement). A refused admission presents
-    nothing and settles nothing itself: the request keeps its own lifetime — and
-    because the seat never received it, THIS owner registers that wait and drains
-    it on teardown, detaching the borrowed Host listener. Admission, retirement and
+    nothing. With a Host-owned cancellation lifetime only the Host ends it — and
+    because the seat never received it, THIS owner registers that wait and drains it
+    on teardown, detaching the borrowed listener. With NO Host lifetime nothing else
+    could ever end it, so the refusal settles it AT ADMISSION instead of waiting for
+    the TUI to exit: the approval answers `cancelled` (fail-closed) and the Question
+    `ASK_ABORTED` (a Host-side end, never a user cancel). Admission, retirement and
     the ordinary activity reconcile all consult the SAME authority, so a Session
     being OPENED keeps its flow while a replaced subject (or a rolled-back opening)
     loses it; that authority is enabled ONLY for a renderer-owned presentation (the
