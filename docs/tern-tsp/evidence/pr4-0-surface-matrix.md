@@ -214,7 +214,7 @@ These are handled inside the component's own `handleInput` (or its
 column names the panel that owns the key. Completeness was established by
 reading each panel's input handler that the audit could reach from the real
 `src/tui/**` surfaces (`footer/configurator.ts`, `plugin-manager/panel.ts`,
-`interaction/save-location.ts`, `interaction/history-panel.ts`,
+`interaction/save-location.ts`, `panels/history-panel.ts`,
 `panels/task-panel.ts`, `interaction/approval-runtime.ts`,
 `pickers/model-picker.ts`, `keybindings/ui/{list,recorder,action-editor}.ts`,
 `keybindings/leader.ts`) — 11 callers.
@@ -238,10 +238,13 @@ reading each panel's input handler that the audit could reach from the real
 | Save-location prompt (`src/tui/interaction/save-location.ts:328-352`) | `y` or `question.confirm` | overwrite/accept | `NOT_REACHABLE` |
 | ″ path field (`:137-140`, hint `:418`) | `enter` / `escape` | submit the typed path / cancel (the shared `Input` callbacks) | `NOT_REACHABLE` |
 | ″ | `n` or `question.cancel` | return | `NOT_REACHABLE` |
-| ″ | `tab`, `question.cursorUp`, `question.cursorDown` | move between fields | `NOT_REACHABLE` |
+| ″ | `tab` | ACCEPT the highlighted path suggestion (`:341-344`) | `NOT_REACHABLE` |
+| ″ | `question.cursorUp`, `question.cursorDown` | move the SUGGESTION selection (`:345-354`), not between fields | `NOT_REACHABLE` |
 | Keybinding list (`src/tui/keybindings/ui/list.ts:271-306`) | `escape`, `up`, `down`, `pageUp`, `pageDown`, `enter` | navigate / open the action editor | `NOT_REACHABLE` |
 | ″ leader editor (`:530-547`) | `escape` cancel, `r` reset the leader, `enter` start the recorder | edit the leader key | `NOT_REACHABLE` |
-| Key recorder (`src/tui/keybindings/ui/recorder.ts:176`) | `escape` | cancel the recording | `NOT_REACHABLE` |
+| Key recorder (`src/tui/keybindings/ui/recorder.ts:176-223`) | any recognizable key | **capture it as the new binding** (the mode's central action; `parseKey`+`validateRecordedKey`, `:206-223`) | `NOT_REACHABLE` |
+| ″ | `escape` | cancel the recording (`:176`) | `NOT_REACHABLE` |
+| ″ | text/unparseable input | refused with an inline error (`:210-213`) | `NOT_REACHABLE` |
 | Keybinding action editor (`src/tui/keybindings/ui/action-editor.ts:288-492`) | `escape`, `up`/`k`, `down`/`j`, `delete`/`backspace`, `enter` | navigate / edit / bind / accept | `NOT_REACHABLE` |
 | ″ row mode (`:326-345`) | `a` add a binding, `r` reset the action, `d` disable the action | mutate the action | `NOT_REACHABLE` |
 | ″ choose-binding mode (`:488-492`) | `d` / `l` (or enter) | pick the binding in the list | `NOT_REACHABLE` |
@@ -252,7 +255,9 @@ reading each panel's input handler that the audit could reach from the real
 | Task Center stop confirmation (`src/tui/panels/task-panel.ts:602-616`) | `escape` cancel; `y`/`Y` confirm the stop | confirm dialog | `NOT_REACHABLE` (Task Center itself is PANEL-006) |
 | ″ while confirming (`:611-616`) | `tasks.cursorUp`/`cursorDown`/`pageUp`/`pageDown` | move and thereby INVALIDATE the pending stop confirmation | `NOT_REACHABLE` |
 | Approval input (`src/tui/interaction/approval-runtime.ts:111-128`) | `y` allow-once; `n` reject; `escape`/`ctrl+c` cancel; every other key consumed | PiTui approval seat | TSP has its **own** seat for the same authority (PANEL-014), so the PiTui keys are `NOT_REACHABLE` while the TSP equivalents are `SUPPORTED` |
-| Model picker (`src/tui/pickers/model-picker.ts:528-549`) | `right`, `left`, `enter`, `escape` | effort / cancel / apply | `NOT_REACHABLE` |
+| Model picker — effort mode (`src/tui/pickers/model-picker.ts:528-544`) | `enter` confirm, `right`/`left` effort, `escape` leave effort mode | choose the reasoning effort | `NOT_REACHABLE` |
+| Model picker — model mode (`:546-554`) | `enter` activate the selected model | commit the model | `NOT_REACHABLE` |
+| ″ model mode | `up`/`down`/`pageUp`/`pageDown`/`escape` and printable typing | delegated to the picker's **list** and **search input** (`:554`) | `NOT_REACHABLE` |
 | Leader sequences (`src/tui/keybindings/leader.ts:98-117`) | `leaderKey` + binding, `escape` | user-configured chords | `NOT_REACHABLE` |
 
 The one authority overlap worth naming: the PiTui approval dialog and the TSP
@@ -371,7 +376,7 @@ confirmation"). It stays `DEFERRED_WITH_OWNER` here.
 
 | ID | Capability | TSP status | `evidence_state` | Rationale |
 |---|---|---|---|---|
-| EXT-001 | Plugin registration / registry / Fiber lifetime | `SUPPORTED` (service-lifetime, renderer-independent) | `VERIFIED` | `extension-runtime.ts:118`; the service is provided on both renderers |
+| EXT-001 | Plugin registration / registry / Fiber lifetime | `SUPPORTED` (service-lifetime, renderer-independent) | `VERIFIED` | **Provider:** `src/extensions.ts:140-143` (`apply` constructs the `piTuiExtensions` service on `ctx` and unregisters it when the provider fiber unloads). **Positive:** `test/extension-cordis-lifecycle.test.ts:692-763` asserts the command/theme/setting registrations become LIVE and observable (`:737` command local, theme named, settings rows present, autocomplete/keybindings non-empty). **Distinct boundary negative:** the SAME test then unloads the owner fiber and asserts every registration is GONE (`:748` command not local, theme list empty, rows 0) — so the positive is not merely that the object exists. **Locality:** service-lifetime and renderer-independent; the TSP branch does not skip registration, only the UI seams (`bootstrap.ts:2663-2664`). |
 | EXT-002 | Plugin UI chrome / overlay / input seams | `NOT_REACHABLE` | `VERIFIED` | `bootstrap.ts:2663-2664` skips `bindPluginKeybinds`+`attachSurfaceSeams` on TSP; there is no TSP entry and no refusal gate |
 | EXT-003 | Advanced editor/UI (`advanced.ui`) | `NOT_REACHABLE` | `VERIFIED` | same skip; no Advanced TSP adapter exists |
 | EXT-004 | Unstable raw input / raw-line mount | `NOT_REACHABLE` | `VERIFIED` for the skip; `UNKNOWN` for what a plugin observes | the roadmap's "TSP-unsupported" is a **policy recommendation**, not an evidenced runtime refusal; no TSP input route exists at all, so the accurate state is "no entry", not "explicitly refused" |

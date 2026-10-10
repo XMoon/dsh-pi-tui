@@ -152,7 +152,7 @@ handler and a Host handler take five different paths, and claiming one common
 | Classifier invocation + currentness | `classifyCommandLine` (`src/domain/command/policy.ts:158-169`) with live facts built at `src/app/submission/controller.ts:1626-1646`; ownership subject/generation captured at `:743-749` before any await. **Note:** the *outcome* differs per row (`host-command`, `client-command(extension)`, `ordinary-submission`, or a pre-classification refusal such as the shell branch). |
 | Input entry | the TSP composer submit gesture (`src/tui/tsp/session.ts:675-687`) → `ApplicationEvents.onSubmit` → `SubmissionController` — except CMD-SHELL-001, which is decided at the `!`-prefix branch (`controller.ts:1543`) inside the same entry |
 | Reachability class | `SURFACE_REACHABLE` for every row below |
-| SDK/GUI tier | `n/a` — no SDK node is involved in any of these rows |
+| SDK/GUI tier | The entry is the TSP composer key path (`src/tui/tsp/session.ts:675-687`) — an SDK `ui.editor` surface driven by `SessionInput{type:'key'}` — so the applicable tiers are `SDK_SCRIPTED` (the router/refusal locks in the shared suites) and `REAL_TERN_HEADLESS` (the SDK input path). What is NOT involved is any SDK **node event** (`action`/`select`/`activate`/`change`/`edit`/`send`); those belong to [sdk-events](./pr4-0-sdk-events.md). The earlier `n/a` rested on the narrower rationale that no SDK *node* is involved, which understated the composer's own SDK surface. |
 
 Per-row overrides are called out in the **classifier → route**, **observable
 sink** and **owner / gap** columns; locality is stated per row in the owner
