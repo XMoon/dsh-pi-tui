@@ -24,11 +24,13 @@ evidence ledger. Per-PR measurements live under
 - **What exists:** PR1 (a standalone opt-in replay spike with a real Tern pane
   smoke), PR2 (an optional read-only projection observer that lets an isolated
   TSP consumer render the live application projection), PR3-A (the single-tty
-  read-only TSP renderer mount behind the internal experimental opt-in) and
-  PR3-B B0–B3 (the display seam, the shared composer/submission and command
-  admission, and the unified Question/Approval modal seat with its official
-  lifecycle). All are experimental; **PR3-B B4** is the end-to-end real-pane
-  qualification of the interactive surface and is not closed yet.
+  read-only TSP renderer mount behind the internal experimental opt-in), PR3-B
+  B0–B3 (the display seam, the shared composer/submission and command admission,
+  and the unified Question/Approval modal seat with its official lifecycle) and
+  **PR3-B B4**, whose end-to-end real-pane qualification is recorded and
+  owner-QA-confirmed (see the ledger below). All remain experimental. The one
+  B4 item the owner explicitly deferred to PR4 — the masked Question's physical
+  qualification — is recorded as deferred below and must not be read as done.
 - **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm, a
   runtime `dependencies` entry) against real Tern `0.6.2` (PR1) and `0.7.0` (PR3-B
   real-pane runs). A future SDK or pane version may change any field below.
@@ -259,6 +261,10 @@ node --test test/tern-tsp-live-projection.test.ts
 # PR1 mapper/spike oracles
 node --test test/tern-tsp-transcript-spike.test.ts
 
+# PR4-0 audit locks (command-origin admission, the non-modal event sink)
+node --test test/tern-tsp-command-admission.test.ts
+node --test test/tern-tsp-live-mount.test.ts
+
 # types and the architecture/coupling gates that cover src/app/surface
 pnpm typecheck:bundle
 pnpm gate:architecture
@@ -287,10 +293,18 @@ Evidence levels — do not merge these into a stronger claim:
 | PR2 ([#257](https://github.com/XMoon/dsh-pi-tui/pull/257)) | DONE (merged) | Real application routing/fold/window/commit → read-only frame → real SDK surface on an isolated tty, including the production cold hydration and the Remote re-window (`rehydrateFromWindow`) | Real Tern pane; product renderer selection; editor/input; Remote wire rollover (deferred with owner) | [./tern-tsp/evidence/pr2.md](./tern-tsp/evidence/pr2.md) |
 | PR3-A ([#260](https://github.com/XMoon/dsh-pi-tui/pull/260)) | DONE (merged) | One renderer selection at the composition root (SDK connect before PiTui; null→PiTui, throw→fatal); single SDK tty owner; read-only live transcript + status/notices through the display seam; Loading policy; fail-closed modals | Editor/input (PR3-B); real-pane parity of every capability | [./tern-tsp/evidence/pr3-a.md](./tern-tsp/evidence/pr3-a.md) |
 | PR3-B B0–B3 ([#261](https://github.com/XMoon/dsh-pi-tui/pull/261), [#262](https://github.com/XMoon/dsh-pi-tui/pull/262), [#263](https://github.com/XMoon/dsh-pi-tui/pull/263), [#265](https://github.com/XMoon/dsh-pi-tui/pull/265)) | DONE (merged) | Display seam; shared composer + submission/command admission; the unified official Question/Approval modal seat with its lifecycle (timed/continued/`Alt+Q`/late answer), currentness and settlement rules | Real-GUI IME / physical paste / physical control keys (B4) | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
-| PR3-B B4 | Qualification COMPLETE (owner QA-confirmed) | The §6.4 mandatory cases and the B-01..B-09 gates with evidence tiers (real pane / real SDK+scripted tty / production harness), the fixture manifest, the per-case record digests, the owner's QA confirmation and the independent review record; the automated lanes are green on the frozen artifact | The explicit merge approval (and the reviewer's re-check of this revision) | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
-| PR4+ | PLANNED | UI/panel/clipboard parity, exit-confirmation window, native editor chords | — | — |
+| PR3-B B4 | Qualification COMPLETE (owner QA-confirmed) | The §6.4 mandatory cases and the B-01..B-09 gates with evidence tiers (real pane / real SDK+scripted tty / production harness), the fixture manifest, the per-case record digests, the owner's QA confirmation and the independent review record; the automated lanes are green on the frozen artifact | The explicit merge approval (and the reviewer's re-check of this revision). The masked Question's **physical** qualification was deferred by the owner to PR4 and is NOT part of this closure | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
+| PR4-0 capability audit | DONE (`AUDIT_DONE / SPLIT_PROPOSED_NOT_FROZEN`) | The actual reachability ledger: every registered command with its origin/refusal/handler, the panel/keybinding/session/task/viewer/media/extension consumers, the pinned SDK 0.1.0 vs real Tern 0.7.0 event proof, and a proposed (unfrozen) PR4A/B/C split with the owner decision sheet | The PR4A/B/C split and the first command batch are **owner decisions**, not accepted here; the physical/GUI tier is `GUI_BLOCKED`; the early-catalog `/settings` cause is `UNKNOWN` | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
+| PR4+ (feature work) | PLANNED | UI/panel/clipboard parity, exit-confirmation window, native editor chords — scoped by the PR4-0 proposal once the owner freezes the split | — | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
 
 ## Next decisions
+
+The PR4-0 audit
+([./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md)) answers several
+of the questions below with current source→sink evidence (the `TuiApp` coupling
+per owner, the input/event gap, the display-seam reuse) and carries the owner
+decision sheet for the PR4A/B/C split. The list is kept as the original
+open-question record:
 
 Open questions the next TSP PR must answer (recorded, not implemented):
 

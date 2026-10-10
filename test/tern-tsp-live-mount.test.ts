@@ -652,6 +652,47 @@ test('A-11: a real SDK iterator failure routes the SAME error to the FATAL inten
   }
 })
 
+// ── PR4-0 audit: a non-modal native event has NO business sink ──────────────
+
+test('PR4-0: non-key SDK events reach no business action while no modal seat is up', async () => {
+  const tern = new ScriptedTern()
+  const session = await openSession(tern)
+  const calls = { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 }
+  const renderer = mountTspRenderer(session, { requestExit: () => { calls.exits += 1 } })
+  try {
+    renderer.bindInput({
+      exit: () => { calls.exits += 1 },
+      cancel: () => { calls.cancel += 1 },
+      submit: () => { calls.submit += 1 },
+      steer: () => { calls.steer += 1 },
+      noteUserInput: () => { calls.noteUserInput += 1 },
+      listContinuedQuestions: () => [],
+      reopenContinuedQuestion: () => false,
+    })
+    await settle()
+    // The event kinds a REAL Tern pane emits for pointer/native gestures (the
+    // PR4-0 real-Tern probe): a pointer action, a list selection/activation, a
+    // control change and a caret claim. The renderer declares no node handler
+    // and no modal seat is up, so the SDK yields them and NOTHING may become an
+    // application action — this is the "rendered is not actionable" boundary.
+    for (const event of [
+      { ev: 'action', sf: 's1', id: 'dock.composer', act: 'click', mods: [] },
+      { ev: 'select', sf: 's1', id: 'main.some-list', item: 'main.some-list.0' },
+      { ev: 'activate', sf: 's1', id: 'main.some-list', item: 'main.some-list.0' },
+      { ev: 'change', sf: 's1', id: 'main.some-check', value: 'on', checked: true, name: 'x' },
+      { ev: 'focus', sf: 's1', id: 'dock.composer' },
+    ]) {
+      harnessFreeInput(tern, event)
+      await settle()
+    }
+    assert.deepEqual(calls, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 },
+      'a non-modal native event never reaches submit/steer/cancel/exit/user-input')
+    assert.equal(renderer.composer.getDraft(), '', 'the draft is untouched by the events')
+  } finally {
+    await renderer.dispose()
+  }
+})
+
 // ── A-12 (F7): a failed mount closes the already-connected SDK session ─────
 
 test('A-12: a rejected mount closes the connected SDK session once (no leaked tty owner)', async () => {
