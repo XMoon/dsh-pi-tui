@@ -721,6 +721,8 @@ export class TranscriptFolder {
     /** The raw interval this move spans (its own slot to its anchor's slot). */
     lo: number
     hi: number
+    /** Its position inside the anchor's side list (rebuilt lazily after splices). */
+    at: number
   }>()
   /** Inverse of {@link laneDisplayByDisplaced}: one anchor row (the settled
    * Assistant row of a step) → the rows emitted around it during
@@ -733,6 +735,15 @@ export class TranscriptFolder {
   private readonly laneDisplayByAnchor = new Map<number, { before: number[]; after: number[] }>()
   /** Highest recorded displacement interval end (see `mayCoverExistingDisplacement`). */
   private maxDisplacementHi = 0
+  /** Set when a removal may have lowered the recorded maximum (lazy rebuild). */
+  private maxDisplacementHiDirty = false
+  /** Test-only: entries visited while rebuilding the maximum. */
+  private maxHiScanCount = 0
+  /** Test-only: how many times a stale side position had to be rebuilt (the
+   *  O(1) substitute for the quadratic `indexOf` scans). */
+  private positionRebuildCount = 0
+  /** Test-only: native slot inspections performed by the reachability guard. */
+  private slotCheckCount = 0
   /** Raw item index of each GENUINE `tool/call` card, keyed by its durable
    * `(turn, step, callId)` identity (never the tool name). The index is recorded
    * once at append and the card's object identity is re-verified before use, so
@@ -2172,6 +2183,24 @@ export class TranscriptFolder {
     return false
   }
 
+  /** The position of one displaced row inside its anchor's side list. A splice
+   *  can make the recorded position stale, so the side is re-indexed once here
+   *  (bulk removals stay linear: one rebuild per side, not one per lookup). */
+  private positionOf(displaced: number, relation: { anchor: number; position: 'before' | 'after'; at: number }): number {
+    const owned = this.laneDisplayByAnchor.get(relation.anchor)
+    if (owned === undefined) return -1
+    const side = relation.position === 'before' ? owned.before : owned.after
+    if (side[relation.at] === displaced) return relation.at
+    this.positionRebuildCount += 1
+    for (let at = 0; at < side.length; at += 1) {
+      const row = side[at]!
+      const entry = this.laneDisplayByDisplaced.get(row)
+      if (entry !== undefined) entry.at = at
+    }
+    const repaired = this.laneDisplayByDisplaced.get(displaced)
+    return repaired === undefined ? side.indexOf(displaced) : repaired.at
+  }
+
   /** The last VISIBLE row emitted by one raw slot, when it has any. */
   private lastVisibleEmittedAt(index: number): number | undefined {
     let found: number | undefined
@@ -2194,8 +2223,14 @@ export class TranscriptFolder {
 
   /** Whether one raw slot blocks a displacement of this step's Tool rows: any
    *  visible row that is not itself a same-side proven Tool of `(turn, step)`. */
-  private slotBlocksMove(candidate: number, turn: number, step: number): boolean {
+  private slotBlocksMove(
+    candidate: number,
+    turn: number,
+    step: number,
+    side: 'before' | 'after',
+  ): boolean {
     let blocked = false
+    this.slotCheckCount += 1
     this.emitSlot(candidate, row => {
       if (!this.isVisible(this.items[row]!)) return false
       const item = this.items[row]
@@ -2203,8 +2238,10 @@ export class TranscriptFolder {
         blocked = true
         return true
       }
+      // ONLY a Tool proven on the SAME side may be crossed: a sibling proven on
+      // the opposite side is a visible boundary like any foreign row.
       const sibling = this.toolRowEvidence(turn, step, item.callId)
-      if (sibling === undefined || sibling.index !== row) {
+      if (sibling === undefined || sibling.index !== row || sibling.position !== side) {
         blocked = true
         return true
       }
@@ -2224,8 +2261,8 @@ export class TranscriptFolder {
       const owned = this.laneDisplayByAnchor.get(relation.anchor)
       if (owned !== undefined) {
         const side = relation.position === 'before' ? owned.before : owned.after
-        // Scan the live list backwards — no emission copy, no slice.
-        for (let at = side.indexOf(index) - 1; at >= 0; at -= 1) {
+        // Scan the live list backwards from the O(1) position — no copy, no indexOf.
+        for (let at = this.positionOf(index, relation) - 1; at >= 0; at -= 1) {
           const row = side[at]!
           if (this.isVisible(this.items[row]!)) return row
         }
@@ -2258,7 +2295,7 @@ export class TranscriptFolder {
       const owned = this.laneDisplayByAnchor.get(relation.anchor)
       if (owned !== undefined) {
         const side = relation.position === 'before' ? owned.before : owned.after
-        for (let at = side.indexOf(index) + 1; at < side.length; at += 1) {
+        for (let at = this.positionOf(index, relation) + 1; at < side.length; at += 1) {
           const row = side[at]
           if (row !== undefined && this.isVisible(this.items[row]!)) return row
         }
@@ -2325,6 +2362,13 @@ export class TranscriptFolder {
       if (a.evidenced !== b.evidenced) return a.evidenced ? -1 : 1
       return a.key - b.key || left - right
     })
+    // Re-index the side: the neighbours need O(1) positions, and a stale
+    // `indexOf` per row was quadratic over a large displaced run.
+    for (let at = 0; at < list.length; at += 1) {
+      const row = list[at]!
+      const entry = this.laneDisplayByDisplaced.get(row)
+      if (entry !== undefined) entry.at = at
+    }
     if (!list.some((row, at) => row !== before[at])) return
     this.searchRevisionCounter += 1
     // The visible order of this side changed, and every derived read-group fact
@@ -3127,11 +3171,14 @@ export class TranscriptFolder {
         this.mergedReadGroupTiming(group as never, members, this.crossTurn(members))
       }
       const touched = new Set<'before' | 'after'>()
+      const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
+      // ONE side-specific reach for the whole refresh pass, exactly like the
+      // settlement batch: the per-card distance walk was N(N+1)/2 slot checks.
+      const reach = anchorIndex === undefined ? undefined : this.sideReachFrom(turn, step, anchorIndex)
       for (const callId of refreshed) {
-        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false)
+        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
         if (outcome !== undefined) touched.add(outcome.position)
       }
-      const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
       if (anchorIndex === undefined) return
       for (const position of touched) this.resortAnchorSide(anchorIndex, position)
     })
@@ -3264,7 +3311,7 @@ export class TranscriptFolder {
     step: number,
     callId: string,
     resort = true,
-    reach?: { backward: number; forward: number },
+    reach?: Record<'before' | 'after', { backward: number; forward: number }>,
   ): { index: number; position: 'before' | 'after' } | undefined {
     const key = stepKey(turn, step)
     const assistantRow = this.assistantEntries.get(key)
@@ -3295,9 +3342,12 @@ export class TranscriptFolder {
     }
     const shouldFollow = startedAt > visibleAt
     const position: 'before' | 'after' = shouldFollow ? 'after' : 'before'
-    const reachable = reach === undefined
+    const sideReach = reach?.[position]
+    const reachable = sideReach === undefined
       ? this.sideMoveIsReachable(index, assistantIndex, position, turn, step)
-      : (index < assistantIndex ? assistantIndex - index <= reach.backward : index - assistantIndex <= reach.forward)
+      : (index < assistantIndex
+        ? assistantIndex - index <= sideReach.backward
+        : index - assistantIndex <= sideReach.forward)
     if (!reachable) {
       // Moving the row to the anchor's slot would cross a visible row of another
       // step or lane: the conservative choice keeps every row where it is.
@@ -3351,6 +3401,10 @@ export class TranscriptFolder {
     // O(1) exclusion: an interval needs hi > row, so a row at or past the highest
     // recorded end cannot be inside ANY interval — the normal serial tail case,
     // which used to walk the whole map on every settlement.
+    if (this.maxDisplacementHiDirty) {
+      this.maxDisplacementHiDirty = false
+      this.refreshMaxDisplacementHi()
+    }
     if (row >= this.maxDisplacementHi) return false
     this.displacementScanCount += 1
     for (const relation of this.laneDisplayByDisplaced.values()) {
@@ -3363,6 +3417,7 @@ export class TranscriptFolder {
   private refreshMaxDisplacementHi(): void {
     let max = 0
     for (const relation of this.laneDisplayByDisplaced.values()) {
+      this.maxHiScanCount += 1
       if (relation.hi > max) max = relation.hi
     }
     this.maxDisplacementHi = max
@@ -3391,19 +3446,25 @@ export class TranscriptFolder {
    *  before it would cross a visible row that is not a same-side proven Tool:
    *  `backward`/`forward` are the counts of consecutive passable slots. Computed
    *  ONCE per settlement batch (the per-row walk made a batch of N rows O(N²)). */
-  private sideReachFrom(turn: number, step: number, anchorIndex: number): { backward: number; forward: number } {
-    const passable = (candidate: number): boolean => !this.slotBlocksMove(candidate, turn, step)
-    let backward = 0
-    for (let candidate = anchorIndex - 1; candidate >= 0; candidate -= 1) {
-      if (!passable(candidate)) break
-      backward += 1
+  private sideReachFrom(
+    turn: number,
+    step: number,
+    anchorIndex: number,
+  ): Record<'before' | 'after', { backward: number; forward: number }> {
+    const reachFor = (side: 'before' | 'after'): { backward: number; forward: number } => {
+      let backward = 0
+      for (let candidate = anchorIndex - 1; candidate >= 0; candidate -= 1) {
+        if (this.slotBlocksMove(candidate, turn, step, side)) break
+        backward += 1
+      }
+      let forward = 0
+      for (let candidate = anchorIndex + 1; candidate < this.items.length; candidate += 1) {
+        if (this.slotBlocksMove(candidate, turn, step, side)) break
+        forward += 1
+      }
+      return { backward, forward }
     }
-    let forward = 0
-    for (let candidate = anchorIndex + 1; candidate < this.items.length; candidate += 1) {
-      if (!passable(candidate)) break
-      forward += 1
-    }
-    return { backward, forward }
+    return { before: reachFor('before'), after: reachFor('after') }
   }
 
   /** Whether the anchor's slot and `row` are connected through rows that may be
@@ -3423,7 +3484,7 @@ export class TranscriptFolder {
     const from = Math.min(row, anchorIndex) + 1
     const to = Math.max(row, anchorIndex) - 1
     for (let candidate = from; candidate <= to; candidate += 1) {
-      if (this.slotBlocksMove(candidate, turn, step)) return false
+      if (this.slotBlocksMove(candidate, turn, step, position)) return false
     }
     return true
   }
@@ -3452,13 +3513,20 @@ export class TranscriptFolder {
       // ONLY the Thinking relation, never the step's Tool displacements that
       // share this Assistant anchor.
       this.dropLaneDisplacement(thinkingIndex)
+      // Dropping the relation restores the Thinking row's OWN physical slot as a
+      // visible emitter, so that slot has to be re-validated too — not only the
+      // anchor (a Tool displacement crossing the restored slot stays invalid).
       this.revalidateToolDisplacementsAt(assistantIndex)
+      this.revalidateToolDisplacementsAt(thinkingIndex)
       return
     }
     // The Assistant row anchors the step; the Thinking row is displayed
     // immediately before (thinking-first) or after (assistant-first) it.
     this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after', true, { turn, step })
+    // Displacing the row EMPTIES its own physical slot and fills the anchor's:
+    // both ends can invalidate a covering Tool displacement.
     this.revalidateToolDisplacementsAt(assistantIndex)
+    this.revalidateToolDisplacementsAt(thinkingIndex)
   }
 
   /** THE single display-order traversal of the raw items: raw physical
@@ -3529,12 +3597,15 @@ export class TranscriptFolder {
       ...(owner === undefined ? {} : { owner }),
       lo,
       hi,
+      at: -1,
     })
     if (hi > this.maxDisplacementHi) this.maxDisplacementHi = hi
     const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
     this.laneDisplayByAnchor.set(anchor, owned)
     const list = position === 'before' ? owned.before : owned.after
     list.push(displaced)
+    const entry = this.laneDisplayByDisplaced.get(displaced)
+    if (entry !== undefined) entry.at = list.length - 1
     // Ordering goes through `resortAnchorSide` (which the diagnostic counts):
     // the immediate path sorts now, a bulk caller passes `resort = false` and
     // orders each touched side ONCE after its batch.
@@ -3578,7 +3649,9 @@ export class TranscriptFolder {
    *  entry and (when it was the last one) the anchor record itself. */
   private removeDisplacedRelation(displaced: number, current: { anchor: number; position: 'before' | 'after'; lo: number; hi: number }): void {
     this.laneDisplayByDisplaced.delete(displaced)
-    if (current.hi >= this.maxDisplacementHi) this.refreshMaxDisplacementHi()
+    // Do NOT recompute per removal (a bulk expiry would scan the map M times):
+    // mark it dirty and let the next coverage query rebuild it ONCE.
+    if (current.hi >= this.maxDisplacementHi) this.maxDisplacementHiDirty = true
     const owned = this.laneDisplayByAnchor.get(current.anchor)
     if (owned !== undefined) {
       const list = current.position === 'before' ? owned.before : owned.after
@@ -4166,6 +4239,9 @@ export class TranscriptFolder {
     lastRegroupMemberVisits: number
     emittedRowVisits: number
     displacementScans: number
+    maxHiScans: number
+    positionRebuilds: number
+    slotChecks: number
     regroupOperations: number
     sideSortOperations: number
   } {
@@ -4181,6 +4257,9 @@ export class TranscriptFolder {
       lastRegroupMemberVisits: this.lastRegroupMemberVisits,
       emittedRowVisits: this.emittedRowVisits,
       displacementScans: this.displacementScanCount,
+      maxHiScans: this.maxHiScanCount,
+      positionRebuilds: this.positionRebuildCount,
+      slotChecks: this.slotCheckCount,
       regroupOperations: this.regroupOperationCount,
       sideSortOperations: this.sideSortOperationCount,
     }
