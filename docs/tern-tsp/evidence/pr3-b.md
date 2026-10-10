@@ -1449,11 +1449,13 @@ control-key matrix is recorded in the chapter at the end of this document.
 > production runtime driven by a scripted terminal) or `production harness` (the
 > real application owners driven without a pane).
 >
-> **Status: qualification evidence collected; the open items below are named and
-> owned. Stage `DONE` is NOT claimed** — per the frozen plan's §7 rules a missing
-> mandatory evidence item records `PARTIAL`/`N/A_WITH_REASON`/`BLOCKED`, never a
-> pass, and stage closure additionally needs the independent review's acceptance
-> and the owner's explicit merge approval.
+> **Status: qualification COMPLETE — no qualification item is open.** The
+> attestation-only physical sub-items were reviewed by the owner, who recorded
+> attestation as the accepted closing evidence for them (see "Owner QA
+> confirmation" below); every §6.4 case and every B-01..B-09 gate is `DONE`, with
+> `N/A_WITH_REASON` only where a producer does not exist on this surface. Stage
+> closure additionally needs the reviewer's acceptance of this revision and the
+> owner's explicit merge approval.
 >
 > **Physical provenance limit:** the TSP wire carries frames plus ack/resize
 > events only — it carries NO key or preedit events. Every physical input below
@@ -1486,11 +1488,11 @@ control-key matrix is recorded in the chapter at the end of this document.
 |---|---|---|---|---|
 | 1 | Real pane mount, SDK selected, one tty owner, editable focus | DONE | real pane | the dock renders `DSH TSP renderer · experimental composer`; the editor accepts input; the wire handshake is normal (record `b4-c2.rec`) |
 | 2 | English/CJK/emoji, real IME, real multi-line paste, `Shift+Enter`, `q` | DONE | real pane | real IME-typed CJK text in the composer, and the physical paste arrived as ONE atomic editor update (newlines preserved, `/exit`-looking lines were CONTENT) followed by exactly ONE submission with nothing executed (record `b4-c2.rec`; screenshot `PixPin_2026-10-10_21-33-07.png`). Emoji caret/deletion, the `Shift+Enter` newline and `q` as plain text are **owner QA-confirmed** — see the provenance note above: the physical tier's evidence channel is the owner's real-GUI attestation, not the wire |
-| 3 | Plain prompt → real Direct backend, Assistant streaming, real tool/call → result | DONE | real pane | real `bash` calls with authoritative results (`touch` + `ls` visible, `exit=0`; a missing path, `exit=2`); streaming in the same session (record `b4-c3.rec`) |
+| 3 | Plain prompt → real Direct backend, Assistant streaming, real tool/call → result | DONE | real pane | real `bash` calls with authoritative results (`touch` + `ls` visible, `exit=0`; a missing path, `exit=2`); streaming in the same session (record `b4-c3-c7.rec`) |
 | 4 | Running-state `Enter` / `Ctrl+Enter` against the configured busy policy | DONE | real pane | under `busyEnter: steer` the plain `Enter` steered (`[1] you (steering…)`) and `Ctrl+Enter` queued (`queued (followup)`); under `busyEnter: queue` the two gestures swap exactly as the contract states; the pending echo was visible and no submission appeared twice (records `b4-c4-steer.rec`, `b4-c4-queue.rec`) |
 | 5 | `/exit`, `/quit`, `!`/`!!`, `/settings`, Host-origin same-spelling | DONE (Host-origin `N/A_WITH_REASON`) | real pane + automated | `/exit` and `/quit` exited normally with no prompt submission and a normal close (records `b4-c5.rec`, `b4-c5-2.rec`); `!echo hi` / `!!echo hi` produced the existing shell refusal `! User-shell UI is not available in TSP yet` with the draft restored and NO shell execution (record `b4-c5-3.rec`); `/settings` produced `This command's UI is not available in TSP yet` with the draft kept (**owner QA-confirmed**; the archived record types only `/sett`). No Host declaring a same-spelling command exists here, so that sub-item is `N/A_WITH_REASON`; the origin precedence is covered by the production-path admission witnesses |
-| 6 | Genuine Question single/multi/free-text/masked, timed → continued → `Alt+Q` → late answer | DONE (masked `N/A_WITH_REASON`) | real pane (+ automated masked witnesses) | multi-select with the Review page and free-text (record `b4-c6.rec`); the full timed chain: a genuine 15 s claim (`Foreground wait 0:15`, the frame-time delta measures 15003 ms) → dock `Continued questions: 1 · Alt+Q` → the physical `Alt+Q` list showing `session-… · call_00_ndv7w92v8i3nbof25sn7bt23` → `Enter` reopened the same question → the late answer was settled by the official controller (the notices `A reply for this question is already queued…` / `This question is no longer awaiting an answer.`) → the official `user-question-reply` and the tool-row settled batch carried the SAME `callId`, alongside the official `{"pending":true,…}` continuation (record `b4-c6.rec`) |
-| 7 | Genuine Approval `y`/`n`/`Esc`/`Ctrl+C`, repeat after settle | DONE | real pane | four `Approval required` modals settled allowed (the command really ran), cancelled and rejected (the tool results carry `cancelled` / `the user rejected … it stays denied`) plus a cancelled Question; a non-empty composer draft survived an approval unchanged (records `b4-c3.rec`, `b4-c6.rec`); the post-settlement repeat press is **owner QA-confirmed** to produce no second settlement. The wire cannot distinguish `Esc` from `Ctrl+C` for the modal cancellation (the non-modal `Ctrl+C` interrupt is separately evidenced under R4) |
+| 6 | Genuine Question single/multi/free-text/masked, timed → continued → `Alt+Q` → late answer | DONE (masked `N/A_WITH_REASON`) | real pane (+ automated masked witnesses) | multi-select with the Review page and free-text (record `b4-c6-types.rec`); the full timed chain: a genuine 15 s claim (`Foreground wait 0:15`, the frame-time delta measures 15003 ms) → dock `Continued questions: 1 · Alt+Q` → the physical `Alt+Q` list showing `session-… · call_00_ndv7w92v8i3nbof25sn7bt23` → `Enter` reopened the same question → the late answer was settled by the official controller (the notices `A reply for this question is already queued…` / `This question is no longer awaiting an answer.`) → the official `user-question-reply` and the tool-row settled batch carried the SAME `callId`, alongside the official `{"pending":true,…}` continuation (record `b4-c6-c7draft.rec`) |
+| 7 | Genuine Approval `y`/`n`/`Esc`/`Ctrl+C`, repeat after settle | DONE | real pane | four `Approval required` modals settled allowed (the command really ran), cancelled and rejected (the tool results carry `cancelled` / `the user rejected … it stays denied`) plus a cancelled Question; a non-empty composer draft survived an approval unchanged (records `b4-c3-c7.rec`, `b4-c6-c7draft.rec`); the post-settlement repeat press is **owner QA-confirmed** to produce no second settlement. The wire cannot distinguish `Esc` from `Ctrl+C` for the modal cancellation (the non-modal `Ctrl+C` interrupt is separately evidenced under R4) |
 | 8 | Rebind/Session switch, exit/error, terminal restore | DONE | real pane (exit/restore) + production harness (publication) | exit + terminal restore in the real pane; the whole owner-publication family (a live Question blocking B's publication, the publication-frame withdrawal, the old request settled by its own lifetime, old keys unable to answer) by the production-harness witnesses; `/new` and `/fork` are **owner QA-confirmed** to be refused with `This command's UI is not available in TSP yet` (the frozen capability contract admits only the TUI-origin `/exit` and `/quit`), which is the reachability limit recorded below |
 | 9 | Non-TSP tty / `TERN_TSP=0` / no opt-in → real PiTui mount | DONE | real pane + automated | both negatives (`TERN_TSP=0` with the opt-in present, and no opt-in at all) fell back to a fully normal PiTui (**owner QA-confirmed**); the SDK-decline, no-probe and no-output-gate-suspension assertions are covered by the automated lanes |
 
@@ -1499,11 +1501,11 @@ control-key matrix is recorded in the chapter at the end of this document.
 | Gate | Status | Basis |
 |---|---|---|
 | B-01 Editor | DONE | real IME-typed CJK + grapheme-level editing in the composer and a physical paste as one atomic edit (record `b4-c2.rec`); the B1 Owner-Amendment items for real IME and physical paste are closed; the emoji/`Shift+Enter`/`q` sub-items are owner QA-confirmed (see §6.4-2) |
-| B-02 Submit | DONE | real writer admission, streaming and tool/call→result, one submission per gesture (records `b4-c2.rec`, `b4-c3.rec`) |
+| B-02 Submit | DONE | real writer admission, streaming and tool/call→result, one submission per gesture (records `b4-c2.rec`, `b4-c3-c7.rec`) |
 | B-03 Busy | DONE | both busy policies with the exact gesture mapping, the pending echo and no double send (records `b4-c4-steer.rec`, `b4-c4-queue.rec`) |
 | B-04 Commands | DONE | `/exit`/`/quit` positive, the shell refusal with the draft restored, no Host writes (records `b4-c5.rec`, `b4-c5-2.rec`, `b4-c5-3.rec`); `/settings` and the Host-origin precedence as noted in §6.4-5 |
-| B-05 Questions | DONE (masked `N/A_WITH_REASON`) | the full official Question lifecycle in a real pane plus the Review/free-text/multi/cancel variants (records `b4-c6.rec`, `b4-c6-c7draft.rec`) |
-| B-06 Approval | DONE | allowed / rejected / cancelled decisions with the draft untouched (records `b4-c3.rec`, `b4-c6.rec`); the post-settlement repeat press is owner QA-confirmed, and `Esc` vs `Ctrl+C` is not distinguishable on the wire |
+| B-05 Questions | DONE (masked `N/A_WITH_REASON`) | the full official Question lifecycle in a real pane plus the Review/free-text/multi/cancel variants (records `b4-c6-types.rec`, `b4-c6-c7draft.rec`) |
+| B-06 Approval | DONE | allowed / rejected / cancelled decisions with the draft untouched (records `b4-c3-c7.rec`, `b4-c6-c7draft.rec`); the post-settlement repeat press is owner QA-confirmed, and `Esc` vs `Ctrl+C` is not distinguishable on the wire |
 | B-07 Generation | DONE | the production-harness publication/fork/settle witnesses below, plus the real-pane R1 result |
 | B-08 Lifecycle | DONE | the physical `Ctrl+C` interrupt (a running tool went `interrupted` while the TUI kept running and closed later on the owner's own exit — record `b4-c4-queue.rec`), the owner QA-confirmed `Ctrl+D` empty-draft exit, exit/restore in the real pane, plus the automated fatal/HMR/teardown lanes |
 | B-09 PiTui | DONE | both real negative launches (owner QA-confirmed) plus the automated default-PiTui regression lanes |
@@ -1592,22 +1594,40 @@ it raised are addressed in this revision:
    completeness finding);
 4. the stale merged-B3 status lines and the "B4 keeps the matrix" wording were
    corrected (its P2);
-5. the status wording is now "qualification evidence collected; open items named;
-   stage `DONE` not claimed" in both documents (its P2);
+5. both documents now use ONE consistent status vocabulary — qualification
+   COMPLETE with no open item, the owner's attestation recorded as the closing
+   evidence — and the earlier "evidence collected / open items" wording is gone
+   (its P2);
 6. the `Esc`-vs-`Ctrl+C` ambiguity, the C9/`Ctrl+D` missing artifacts, the R5
    paste variant and the forbidden commit SHA were corrected (its P3s).
+
+### Incremental re-review of this revision
+
+The same reviewer re-checked this revision (a documentation-only delta) and returned
+**accept-with-followups**: it verified the earlier findings were resolved (the narrowed
+§6.4-2/B-01 claims with the provenance note, the owner QA-confirmed labels with the
+`/sett`-only record stated, the corrected merged-B3 header, the removed commit SHA, the
+stated provenance for `Esc`/`Ctrl+C`, C9/`Ctrl+D` and the R5 paste variant, plus the added
+tester/machine, fixture manifest and review record — every digest below matching the
+archived files). Its remaining items were documentation-only and are fixed here: the record
+references name the ARCHIVED files, the status vocabulary is single and consistent, the C5
+digests are recorded, and this section carries the re-review verdict. It also answered the
+evidence question explicitly: where the wire cannot carry a physical input, owner
+attestation is the only available channel and is legitimate as a recorded tier, provided the
+owner records it as the accepted closing evidence — which the "Owner QA confirmation"
+section does.
 
 ## Case evidence digests (one-off; the durable record is this table)
 
 | Case | Record / artifact | sha256 |
 |---|---|---|
 | C1+C2 (mount, IME text, physical paste, one submission) | `b4-c2.rec` + `PixPin_2026-10-10_21-33-07.png` | `5a5b85794260564cf48f079e684ab8fde6e6fdac432f9f0ad5dbb9e847a5e10c` / `9adf144a087dfb629f6a5ad980d77cc36900f2327038f1d7ab29492ed14c8dc0` |
-| C3 + C7 (tool/result, four approvals, draft kept) | `b4-c3.rec` | `9a6c759a59ceba1f5c0dd75b0f0c46f4c97b83e1b6f1ee6e3db7997ee9dcc86d` |
+| C3 + C7 (tool/result, four approvals, draft kept) | `b4-c3-c7.rec` | `9a6c759a59ceba1f5c0dd75b0f0c46f4c97b83e1b6f1ee6e3db7997ee9dcc86d` |
 | C6 chain + C7 draft (timed → continued → `Alt+Q` → late answer) | `b4-c6-c7draft.rec` | `d527fa00330373bc201e1c3ffeee9c45cce7ed4cdd1d6da5378d1d6f81e69ca7` |
 | C6 free-text + masked probe | `b4-c6-types.rec` | `c62c92e4caf97fc76fbe7d57fa02a814f5c1c1ef5b0bbf2c6d0c694331240e8c` |
 | C4 steer | `b4-c4-steer.rec` | `c387a05500429c27cb752d1fd45e610fd2586cdca70397667393c52f6e51fd38` |
 | C4 queue (+ R4 `Ctrl+C` interrupt) | `b4-c4-queue.rec` | `c5be7b22db6e788665ab6680e1013f210fa5702b1c4fa37501def5087a248a3d` |
-| C5 `/exit`, `/quit` | `b4-c5.rec`, `b4-c5-2.rec` | (short single-launch sessions) |
+| C5 `/exit`, `/quit` | `b4-c5.rec`, `b4-c5-2.rec` | `e23179579d03fa3f74d79426bf78204e9acee5963f9bb23039e70ce34bd0805e` / `90c3a74315d02d993a84bf2d2d7c7cbb63869805a0fdd2d76f0d12b3970d6837` |
 | C5 `!`/`!!` refusals | `b4-c5-3.rec` | `e0eef20e2eb841d62fd258fe8fe4b56dbe72b2ef5667c6ef458ca68c2b0819ea` |
 | C8 reachability probe + R1 first pass | `b4-c8.rec` | `ad901fd5ca9f3a02af77fb2369d7431f5ba0bee86a1b4ae3ff4befd2339421e2` |
 | R1 hardened (sustained streaming) | `b4-r1.rec` | `f4d4e63451a966c04acc03cd16af759050472c7d513c092c3483be73ce1503e1` |
