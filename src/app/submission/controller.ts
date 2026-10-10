@@ -699,6 +699,24 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    *   this submission; bound for the command execution so a TUI-owned
    *   skill handler accepts it instead of re-deriving it. */
   
+  /**
+   * PR3-B §7.3 (B2 F2, round 10): the ONE stale-restore policy the
+   * controller's own async exits share with the submission runtime's —
+   * suppress ONLY when the OWNER the gesture's captured subject pinned was
+   * genuinely REPLACED (the ownership core's opaque-ref authority) AND the
+   * renderer drops drafts at committed switches (TSP). A same-owner
+   * invalidation and every retaining renderer merge exactly like the
+   * ordinary restore. Returns the REAL outcome so the notice follows it.
+   */
+  const restoreStaleDraft = (value: string, capturedSubject: SessionSubject | undefined): 'merged-verbatim' | 'merged' | 'dropped' => {
+    if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {
+      return 'dropped'
+    }
+    const merged = mergeDraft(deps.app().getDraft(), value)
+    deps.app().setEditorText(merged)
+    return merged === value ? 'merged-verbatim' : 'merged'
+  }
+
   const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
     // Admission identity is captured synchronously, before this gesture
     // waits behind an earlier submit. A later session must never inherit
@@ -940,13 +958,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // projection).
         const directAgent = 'inbox' in (agent as object) ? (agent as ExactAgent) : undefined
         if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) {
-          const merged = mergeDraft(deps.app().getDraft(), text)
-          deps.app().setEditorText(merged)
+          // PR3-B §7.3 (round 10 F1): the controller's own async stale exit
+          // takes the SAME two-fact policy as the submission runtime — the
+          // captured subject's owner must have been genuinely REPLACED on a
+          // switch-dropping renderer before the restore is suppressed.
+          const restored = restoreStaleDraft(text, submittedSubject)
           settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-          deps.app().notify(merged === text
+          deps.app().notify(restored === 'merged-verbatim'
             ? 'the session changed while waiting for submission — try again'
-            : 'the draft changed while waiting for submission — review it before submitting again (the earlier text was preserved below)', 'error')
+            : restored === 'merged'
+              ? 'the draft changed while waiting for submission — review it before submitting again (the earlier text was preserved below)'
+              : 'the session changed while waiting for submission — the draft was cleared by the switch', 'error')
           return
         }
       // Capture THIS agent's session identity so the write below can
@@ -960,13 +983,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // identity was captured from, or the submission is aborted for a
       // retry against the new session.
       if (!deps.scope.isCurrent(scope)) {
-        const merged = mergeDraft(deps.app().getDraft(), text)
-        deps.app().setEditorText(merged)
+        // PR3-B §7.3 (round 10 F1): the scope-recheck stale exit takes the
+        // SAME two-fact policy (the scope superseded because the OWNER was
+        // replaced — the submission runtime's own `settleStaleSubmission`
+        // behaves identically for the plain-prompt flow).
+        const restored = restoreStaleDraft(text, submittedSubject)
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-        deps.app().notify(merged === text
+        deps.app().notify(restored === 'merged-verbatim'
           ? 'the session changed while sending — try again'
-          : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+          : restored === 'merged'
+            ? 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)'
+            : 'the session changed while sending — the draft was cleared by the switch', 'error')
         return
       }
       // From here on the CAPTURED agent is used — never the mutable
@@ -1163,7 +1191,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         return
       }
       },
-      restore: (t) => restoreSubmissionDraft(t),
+      // PR3-B §7.3 (round 10 F1): this restore fires on a THROW after the
+      // flow's awaits, so the owner may have been replaced meanwhile — the
+      // same two-fact policy decides (a same-owner invalidation and every
+      // retaining renderer still merge).
+      restore: (t) => { restoreStaleDraft(t, submittedSubject) },
     }, text), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
@@ -1331,23 +1363,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.app().setEditorText(merged)
         return merged === value
       },
-      restoreStaleDraftIntoEditor: (value, capturedSubject) => {
-        // PR3-B §7.3 (F2): suppress ONLY when BOTH facts hold — the OWNER a
-        // captured subject pinned was genuinely REPLACED (the ownership
-        // core's opaque-ref authority: a same-owner generation invalidation
-        // — a failed switch kept the old owner — answers false) AND the
-        // renderer drops drafts at committed switches (TSP; its publication
-        // already cleared the outgoing text). Either failing means the
-        // draft still belongs to a live session: merge it back exactly like
-        // the ordinary restore (PiTui always merges).
-        if (!deps.retainsStaleDraftRestore
-          && deps.ownerWasReplaced(capturedSubject as SessionSubject | undefined)) {
-          return 'dropped'
-        }
-        const merged = mergeDraft(deps.app().getDraft(), value)
-        deps.app().setEditorText(merged)
-        return merged === value ? 'merged-verbatim' : 'merged'
-      },
+      restoreStaleDraftIntoEditor: (value, capturedSubject) =>
+        // PR3-B §7.3 (round 10 F1): ONE policy — the steer deps hook, the
+        // controller's async stale exits and the submission runtime all
+        // route through the same two-fact decision (see
+        // `restoreStaleDraft` above).
+        restoreStaleDraft(value, capturedSubject as SessionSubject | undefined),
       notify: (message, kind) => {
         if (deps.isCleanedUp()) return
         deps.app().notify(message, kind)
@@ -1731,6 +1752,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // here so the post-await resolution can never run a generation the
       // user did not submit (see the fence inside).
       const submitted = contribution
+      // PR3-B §7.3 (round 10 F1): the ownership subject pinned at THIS
+      // gesture's admission — the async restores below run after
+      // `ensureSession`, so they share the two-fact stale-restore policy.
+      const contributionSubject = deps.ownership.captureSubject()
       runOwned('client command session', () => runReservedSubmit({
         // The submit-flow core's ordering contract. A contribution is only
         // ever invoked by its BARE token, so the line references no drafts
@@ -1762,12 +1787,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // the new generation's handler or deliver the line to the MODEL).
           if (deps.extensions.findContribution(parsed.name) !== submitted) {
             deps.app().notify(`/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
-            restoreSubmissionDraft(text)
+            // Reached AFTER `await ensureSession`: the owner may have been
+            // replaced meanwhile (round 10 F1) — same policy.
+            restoreStaleDraft(text, contributionSubject)
             return
           }
           runLocalCommand(parsed, text, persistHistory, delivery, deps.liveAgent()?.session.id)
         },
-        restore: (draft) => restoreSubmissionDraft(draft),
+        // PR3-B §7.3 (round 10 F1): same async-restore class as the Host
+        // command flow above.
+        restore: (draft) => { restoreStaleDraft(draft, contributionSubject) },
       }, text), {
         diag: deps.diag,
         sessionId: () => deps.liveAgent()?.session.id,

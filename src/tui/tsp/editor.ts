@@ -157,6 +157,12 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
     setDraft: replaceText,
     setEditorText: replaceText,
     insertIntoEditor: insert,
+    clearDraftStateOnly: () => {
+      // PR3-B §7.3 (B2 F1): PURE STATE — no `onChanged`, no render. See the
+      // interface doc; the next committed frame carries the emptied editor.
+      text = ''
+      cursor = 0
+    },
     notify: (message, kind) => sinks.notify(message, kind),
     setSubmitPending: detail => sinks.setSubmitPending(detail),
     clearSettledLocalMessages() {
@@ -289,6 +295,17 @@ export interface TspComposer {
   notify(message: string, kind?: 'info' | 'error'): void
   setSubmitPending(detail: SubmitPendingDetail | undefined): void
   clearSettledLocalMessages(): void
+  /**
+   * PR3-B §7.3 (B2 F1, publication atomicity): clear the draft's STATE
+   * without rendering. The session-lifecycle authority calls this INSIDE
+   * the synchronous publication block, where a throwing render IO would
+   * turn a committed-adjacent clear into a pre-publication failure with the
+   * draft already lost — so this path must be pure state assignment. The
+   * emptied editor rides the NEXT frame the renderer commits anyway (B's
+   * hydration repaint); the hydration input fence keeps the window
+   * un-editable, so the outgoing text is never submittable meanwhile.
+   */
+  clearDraftStateOnly(): void
   /** Apply ONE decoded SDK key through the fixed editor-local reducer. */
   applyKey(key: Key): TspComposerEdit
 }

@@ -258,6 +258,24 @@ function harness() {
     }
   }
 
+  /**
+   * PR3-B §7.3 (B2 F1, publication atomicity): make the NEXT
+   * `dropOutgoingActiveDraft` seam throw SYNCHRONOUSLY — the shape a
+   * throwing renderer render inside the drop would produce. The recorded
+   * `droppedBeforeThrow` fact lets a test prove the OLD draft's clear
+   * was attempted before the publication (the exact hazard under test).
+   */
+  const failNextDropWithSideEffect = (): { droppedBeforeThrow(): boolean } => {
+    let dropped = false
+    const original = surface.dropOutgoingActiveDraft
+    surface.dropOutgoingActiveDraft = (): void => {
+      surface.dropOutgoingActiveDraft = original
+      dropped = true
+      throw new Error('drop seam exploded (render IO) before publication')
+    }
+    return { droppedBeforeThrow: () => dropped }
+  }
+
   return {
     events,
     calls,
@@ -276,6 +294,7 @@ function harness() {
     failNextGenerationReset: (): void => { explodeNextGenerationReset = true },
     failNextCommitBeforePublication,
     failNextCompletionOwnerAfterPublication,
+    failNextDropWithSideEffect,
     failNextCompletionIdentity: (): void => { failCompletionIdentity = true },
     failNextSessionId: (): void => { failNextSessionId = true },
     sessionIdCallCount: (): number => sessionIdCalls,
@@ -324,6 +343,43 @@ test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE 
     `the drop precedes the new session's init (drop@${dropIndex}, init@${initIndex})`)
   assert.ok(catalogIndex !== -1 && dropIndex < catalogIndex,
     `the drop precedes the new session's catalog refresh (drop@${dropIndex}, catalog@${catalogIndex})`)
+})
+
+test('PR3-B §7.3 (F1 atomicity): a THROWING drop seam is a pre-publication failure — OLD owner/draft stand, NEW is released', async () => {
+  // The external review's publication-atomicity probe: the drop used to
+  // carry renderer render IO, so a synchronous throw left the OLD draft
+  // already cleared while the publication was rolled back to a
+  // pre-publication failure (the user stayed on A with a lost draft). The
+  // production fix makes the drop PURE STATE at the seam, but the CONTRACT
+  // this pins is the runtime's: even if the drop seam THROWS (any future
+  // implementation), the transaction is a PRE-publication failure —
+  // OLD stays current, the NEW owner is released exactly once, the queued
+  // recalls settle ABORTED (restorable) — and the TSP-side pure-state clear
+  // means the real renderer never throws here (the tern-tsp-submission
+  // suite pins the pure-state primitive itself).
+  const h = harness()
+  h.publishRetained('session-a')
+  const probe = h.failNextDropWithSideEffect()
+  const outcome = await h.runtime.switchSession('session-b')
+  // The switch FAILED (a pre-publication seam throw propagates as the
+  // switch's error string).
+  assert.ok(typeof outcome === 'string' && outcome.includes('switch failed'),
+    `the throwing drop surfaced as a failed switch: ${outcome}`)
+  assert.ok(probe.droppedBeforeThrow(), 'the probe really injected the throw at the drop seam')
+  // OLD stands current; NEW is fully released.
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the OLD session stayed current')
+  assert.equal(h.countRefs('session-b'), 0, 'the NEW reference is released exactly once')
+  // The queued recalls settled ABORTED (a pre-publication failure keeps
+  // them restorable).
+  assert.ok(h.events.includes('recalls:false'),
+    'the pre-publication failure settled the queued recalls as aborted')
+  // A RETRY after the failure succeeds and drops exactly once (the seam
+  // self-restored on first call).
+  const retry = await h.runtime.switchSession('session-c')
+  assert.equal(retry, undefined, 'the retry switch succeeded')
+  assert.equal(h.core.currentSessionId(), 'session-c')
+  assert.equal(h.events.filter(event => event === 'dropDraft').length, 1,
+    'the successful retry dropped exactly once')
 })
 
 test('PR3-B §7.3 (F1 wiring): the active-draft drop fires ONLY at the committed cross-owner switch', async () => {
@@ -426,6 +482,27 @@ test('H5: a Remote fork adopts the published child through exactly one open and 
     'the source owner is released only after the child was committed')
   assert.equal(h.countRefs(h.core.currentSessionId()!), 1, 'the child holds exactly its retained reference')
   assert.ok(h.events.includes(`init:${h.core.currentSessionId()!}`), 'the child surface init ran')
+})
+
+test('PR3-B §7.3 (F1 atomicity, fork): a THROWING drop seam fails the adoption pre-publication — source/draft stand', async () => {
+  // The fork-adoption sibling of the ordinary-switch atomicity probe: the
+  // drop rides the adoption's publication seam too, so a synchronous throw
+  // there must classify as a PRE-publication failure — the source owner
+  // stays current, the acquired child owner is released exactly once, and
+  // the recalls settle aborted — never a half-committed child with the
+  // source draft already cleared.
+  const h = harness()
+  h.publishRetained('session-a')
+  const probe = h.failNextDropWithSideEffect()
+  const outcome = await h.runtime.forkSession('session-a')
+  assert.ok(outcome.kind === 'error', `the throwing drop failed the adoption: ${JSON.stringify(outcome)}`)
+  assert.ok(probe.droppedBeforeThrow(), 'the probe injected the throw at the drop seam')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the SOURCE session stayed current')
+  assert.ok(h.events.includes('recalls:false'),
+    'the pre-publication failure settled the queued recalls as aborted')
+  // The child owner the Host published was released by the adoption cleanup
+  // (never parked, never current).
+  assert.equal(h.core.currentSessionId(), 'session-a', 'no child became current')
 })
 
 test('H6: a fork stale before adoption never opens the child', async () => {
