@@ -1241,3 +1241,108 @@ test('R4-4: a Thinking tombstone keeps every sibling Tool relation on the anchor
   assert.equal(after.filter(row => row.args === '2 files').length, 1, 'the merged card survives')
   assert.equal(after.filter(row => row.args === '2 files')[0]!.callCount, 2)
 })
+
+// ── external review: a hidden anchor may not order Tool rows ────────────────
+
+test('EXT1: an invisible authoritative Conversation never displaces a Tool row', () => {
+  const settlement = (empty: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext1', role: 'assistant',
+      content: empty ? [] : [{ type: 'text', text: 'reply' }],
+      source: { kind: 'assistant' },
+    },
+    stream: [textChunk(T0 + 2_000, 0, 'reply')],
+  }, T0 + 6_000, seq)
+  const events = (): SessionEvent[] => [
+    turnStart(1, T0, 0),
+    // The stream proves a reply was once visible, but the settled row is EMPTY.
+    settlement(true, 1),
+    readCall('a', 1, 0, T0 + 3_000, 2, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 3, 'alpha'),
+    readCall('b', 1, 0, T0 + 4_000, 4, 'b.ts'), toolResult('b', 1, 0, T0 + 4_500, 5, 'bravo'),
+  ]
+  const cold = foldEvents(events())
+  // The invisible row is not a Conversation: the two reads stay adjacent and merge.
+  assert.equal(toolRows(cold).length, 1, 'a hidden anchor separates nothing')
+  assert.deepEqual(structureKinds(cold), ['work'])
+  const live = new TranscriptFolder()
+  for (const event of events()) live.apply([event])
+  assert.deepEqual(logicalRows(live), logicalRows(cold), 'live and cold agree with the hidden anchor')
+})
+
+// ── external review: same-side order is evidence order in BOTH folds ────────
+
+test('EXT2: same-step Tools with out-of-order durable arrivals order by evidence in both folds', () => {
+  const settlement = (): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext2', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(T0 + 2_000, 0, 'reply'),
+      toolCallDeltaChunk(T0 + 5_000, 1, 'later', 'read'),
+      toolCallDeltaChunk(T0 + 3_000, 2, 'earlier', 'read'),
+    ],
+  }, T0 + 9_000, 5)
+  const events = (): SessionEvent[] => [
+    turnStart(1, T0, 0),
+    // Durable arrival order: 'later' first, 'earlier' second.
+    readCall('later', 1, 0, T0 + 5_000, 1, 'later.ts'), toolResult('later', 1, 0, T0 + 5_500, 2, 'later result'),
+    readCall('earlier', 1, 0, T0 + 3_000, 3, 'earlier.ts'), toolResult('earlier', 1, 0, T0 + 3_500, 4, 'earlier result'),
+    settlement(),
+  ]
+  const cold = foldEvents(events())
+  const live = new TranscriptFolder()
+  for (const event of events()) live.apply([event])
+  const expected = ['assistant:reply', 'tool:earlier']
+  assert.deepEqual(logicalRows(cold), expected,
+    'the earlier materialization leads the merged card in the cold fold')
+  assert.deepEqual(logicalRows(live), expected,
+    'and the live fold derives the same side order from the same evidence')
+  const merged = toolRows(live)[0]!
+  assert.equal(merged.callId, 'earlier')
+  assert.equal(merged.result, 'earlier result\n\nlater result')
+})
+
+// ── external review: one settlement regroups ONCE, however many Tools ───────
+
+test('EXT3: one settlement with many same-step Tools regroups exactly once', () => {
+  const count = 200
+  const events: SessionEvent[] = [turnStart(1, T0, 0)]
+  let seq = 1
+  for (let index = 0; index < count; index += 1) {
+    events.push(readCall(`t${index}`, 1, 0, T0 + 3_000 + index, seq++, `t${index}.ts`))
+    events.push(toolResult(`t${index}`, 1, 0, T0 + 3_500 + index, seq++, `row ${index}`))
+  }
+  events.push(eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext3', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(T0 + 2_000, 0, 'reply'),
+      ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + 3_000 + index, index + 1, `t${index}`, 'read')),
+    ],
+  }, T0 + 90_000, seq))
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  const before = folder.searchDiagnosticsForTest().regroupOperations
+  // A same-step replacement re-converges every Tool relation: the batch must run
+  // ONE joint closure, not one per Tool.
+  folder.apply([eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext3', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(T0 + 2_000, 0, 'reply'),
+      ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + 3_000 + index, index + 1, `t${index}`, 'read')),
+    ],
+  }, T0 + 91_000, seq + 1)])
+  const operations = folder.searchDiagnosticsForTest().regroupOperations - before
+  assert.ok(operations <= 2,
+    `one settlement must coalesce its relation changes (ran ${operations} regroups for ${count} Tools)`)
+})
