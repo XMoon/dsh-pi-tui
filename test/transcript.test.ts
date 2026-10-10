@@ -4353,8 +4353,8 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file_path":"r2.ts"}' }, 6),
     toolResult(7, 'r2', 'r2 ok', 'read'),
   ])
-  // [Assistant, read r1, Thinking, read r2] — the two reads are separated
-  // by the Thinking row's physical slot and stay individual cards.
+  // [Assistant, read r1, Thinking, read r2] — the visible Thinking row sits
+  // between the two reads, so they stay individual cards.
   assert.deepEqual(kinds(folder.messages()), ['assistant', 'tool', 'thinking', 'tool'])
   // Hold the pre-displacement search identities: the displacement must not
   // renumber ANY raw item (the overlay recovers the open hit by id). The
@@ -4368,8 +4368,14 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
   folder.apply([messageSettlement(8, laneOrderedStep('thinking'))])
   // The replacement displaces the Thinking row BEFORE the Assistant row in
   // DISPLAY order only — physical ids are untouched, so the same id still
-  // resolves to the same logical row even though its text was replaced.
-  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool', 'tool'])
+  // resolves to the same logical row even though its text was replaced. The
+  // two reads are now display-ADJACENT (nothing visible between them), which is
+  // the fold's one adjacency definition, so they merge into one card.
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool'])
+  const mergedRead = folder.messages().find(message => message.kind === 'tool')
+  assert.ok(mergedRead !== undefined && mergedRead.kind === 'tool')
+  assert.equal(mergedRead.callCount, 2, 'a display-merged read pair keeps both genuine calls')
+  assert.match(mergedRead.args, /2 files/u)
   assert.equal(folder.search('late diagnostic').length, 0, 'the authoritative replacement replaced the diagnostic text in place')
   const thinkingAfter = folder.search('thought')
   const readAfter = folder.search('r1 ok')
@@ -4385,10 +4391,10 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
     [thinkingAfter[0]?.id, folder.search('ordered answer')[0]?.id],
     'search emits hits in display order — the displaced Thinking row first',
   )
-  // Window and grouped-turn projections stay consistent; the reads stay
-  // separate cards (grouping follows PHYSICAL adjacency — conservative).
+  // Window and grouped-turn projections stay consistent: the merged card is
+  // emitted once, in display order, by the shared traversal.
   const windowed = folder.window({ maxTurns: 1 })
-  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool', 'tool'])
+  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
   assert.deepEqual([...folder.groupedTurns()], [0])
 })
 
@@ -4411,8 +4417,8 @@ test('a displaced lane pair stays unique and ordered inside a bounded window', (
   }
   folder.apply([messageSettlement(9, laneOrderedStep('thinking'))])
   // Physical: [Assistant, r1, r2, r3, Thinking(displaced before Assistant)].
-  // Grouping follows PHYSICAL adjacency: the three consecutive reads merge
-  // into one card regardless of the display displacement.
+  // Display:  [Thinking, Assistant, r1, r2, r3] — the three reads are adjacent
+  // in the ONE display adjacency, so they merge into one card exactly once.
   const full = folder.messages()
   assert.deepEqual(full.map(message => message.kind), ['thinking', 'assistant', 'tool'])
   const windowed = folder.window({ maxTurns: 1 })

@@ -902,6 +902,10 @@ export class TranscriptFolder {
    * (corrupt data) disables the fast path and falls back to the full scan.
    */
   private readonly turnStarts: number[] = []
+  /** Turns that have carried at least one display displacement. A read settling
+   *  in such a turn cannot use the raw-tail fast path (its raw neighbours may no
+   *  longer be its display neighbours), so it re-groups that turn instead. */
+  private readonly displayDisplacementTurns = new Set<number>()
   /** The turn value at each corresponding {@link turnStarts} entry. Kept as
    * a separate scalar index so window navigation never reads an old item just
    * to discover its turn. The array itself is exposed read-only to the
@@ -1535,13 +1539,14 @@ export class TranscriptFolder {
    * Runs are TURN-BOUND by the walks above (`continuesReadRun`), so all
    * members share one turn; the cross-turn drop paths downstream stay as
    * defensive guards for that invariant. */
-  private makeReadGroup(start: number, end: number): {
+  private makeReadGroup(memberIndexes: readonly number[]): {
     group: ReadGroupCard
     members: number[]
     firstTurn: number
     spansTurns: boolean
   } | undefined {
-    const first = this.items[start]
+    const firstIndex = memberIndexes[0]
+    const first = firstIndex === undefined ? undefined : this.items[firstIndex]
     if (first === undefined || !TranscriptFolder.groupable(first)) return undefined
     const members: number[] = []
     const results: string[] = []
@@ -1549,7 +1554,9 @@ export class TranscriptFolder {
     let firstResult: string | undefined
     let maxTurn = first.turn
     let callCount = 0
-    for (let index = start; index <= end; index += 1) {
+    // The members arrive in FINAL DISPLAY order (plan §7.2): the caller owns the
+    // adjacency decision, this builder owns only the aggregate facts.
+    for (const index of memberIndexes) {
       const member = this.items[index]
       if (member === undefined || !TranscriptFolder.groupable(member)) continue
       members.push(index)
@@ -1792,55 +1799,16 @@ export class TranscriptFolder {
      this.groupedTurnValues = []
      this.groupedToolCount = 0
     this.crossTurnGroups = 0
-    for (let start = 0; start < this.items.length;) {
-      const item = this.items[start]!
-      // Tombstoned failed-attempt text is never visible output and never
-      // separates an adjacent read run.
-      if (!this.isVisible(item)) {
-        start += 1
-        continue
-      }
-      if (item.kind !== 'tool' || item.name !== 'read' || item.status !== 'ok') {
-        if (item.kind === 'tool') this.groupedToolCount += 1
-         if ('turn' in item) this.addGroupedTurn(item.turn)
-        start += 1
-        continue
-      }
-      let end = start + 1
-      while (end < this.items.length && TranscriptFolder.continuesReadRun(this.items[end]!, item.turn)) end += 1
-      if (end - start === 1) {
-         this.addGroupedTurn(item.turn)
-         // The single read has no merged card yet.
-        this.groupedToolCount += 1
-        start = end
-        continue
-      }
-      const built = this.makeReadGroup(start, end - 1)
-      if (built === undefined) {
-        for (let memberIndex = start; memberIndex < end; memberIndex += 1) {
-          const member = this.items[memberIndex]
-          if (member !== undefined && 'turn' in member) this.addGroupedTurn(member.turn)
-        }
-        // The run was checked above; keep a defensive fallback that preserves
-        // the output count if a future item shape invalidates that invariant.
-        this.groupedToolCount += 1
-        start = end
-        continue
-      }
-      for (const member of built.members) this.groupOf.set(member, built.group)
-      this.groupMembers.set(built.group, built.members)
-      this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
-       this.addGroupedTurn(built.group.turn)
-      this.groupedToolCount += 1
-      if (built.spansTurns) this.crossTurnGroups += 1
-      start = end
-    }
-    // The cold finalize rebuilds every group: eagerly normalize each
-    // merged card's REPRESENTATIVE entry to the shared group text (one
-    // normalize per group — the allowed one-time O(history) cost).
-    // Non-representative members keep their own raw entries and are
-    // skipped at scan time.
     this.groupingRebuildCount += 1
+    // The ONE adjacency definition: the FINAL display order, visible rows only
+    // (plan §7.1/§7.3). A displaced Tool or lane row therefore separates — or
+    // joins — a read run exactly as the user sees it, and a hidden row never
+    // fabricates a boundary.
+    this.buildDisplayGroups(0, this.items.length - 1, true)
+    // The cold finalize rebuilds every group: eagerly normalize each merged
+    // card's REPRESENTATIVE entry to the shared group text (one normalize per
+    // group — the allowed one-time O(history) cost). Non-representative members
+    // keep their own raw entries and are skipped at scan time.
     for (const [group, members] of this.groupMembers) {
       const first = members[0]
       if (first === undefined) continue
@@ -1855,14 +1823,148 @@ export class TranscriptFolder {
     }
   }
 
+  /** The VISIBLE raw ids of one raw range, in FINAL display order (plan §7.1:
+   *  a hidden row is neither an output row nor a boundary). */
+  private *visibleDisplayIds(start: number, end: number): Iterable<number> {
+    for (const index of this.displayOrderedRawIds(start, end)) {
+      const item = this.items[index]
+      if (item === undefined || !this.isVisible(item)) continue
+      yield index
+    }
+  }
 
+  /** Build the read groups of one raw range from the FINAL display order: a run
+   *  is a maximal sequence of groupable reads of the SAME turn with no VISIBLE
+   *  non-read row between them. The caller owns detaching the range's previous
+   *  groups and the search-dirty marking. */
+  private buildDisplayGroups(start: number, end: number, absoluteCounts: boolean): void {
+    let run: number[] = []
+    let runTurn: number | undefined
+    // `groupedToolCount` counts OUTPUT TOOL CARDS. The cold rebuild starts from
+    // zero and therefore counts every card absolutely; a live re-group already
+    // holds the per-row counts (appended with each tool item and split back by
+    // `detachGroupsInRange`), so it applies only the MERGE delta.
+    const flush = (): void => {
+      if (run.length === 0) return
+      const members = run
+      run = []
+      if (members.length === 1) {
+        this.addGroupedTurn(runTurn!)
+        if (absoluteCounts) this.groupedToolCount += 1
+        return
+      }
+      const built = this.makeReadGroup(members)
+      if (built === undefined) {
+        // Defensive: every member was checked groupable above.
+        if (absoluteCounts) this.groupedToolCount += 1
+        return
+      }
+      for (const member of built.members) this.groupOf.set(member, built.group)
+      this.groupMembers.set(built.group, built.members)
+      this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
+      this.addGroupedTurn(built.group.turn)
+      this.groupedToolCount += absoluteCounts ? 1 : -(built.members.length - 1)
+      if (built.spansTurns) this.crossTurnGroups += 1
+    }
+    for (const index of this.visibleDisplayIds(start, end)) {
+      const item = this.items[index]!
+      if (TranscriptFolder.groupable(item) && (runTurn === undefined || item.turn === runTurn)) {
+        run.push(index)
+        runTurn = item.turn
+        continue
+      }
+      flush()
+      runTurn = undefined
+      if (item.kind === 'tool' && absoluteCounts) this.groupedToolCount += 1
+      if ('turn' in item) this.addGroupedTurn(item.turn)
+    }
+    flush()
+  }
 
-   /**
-    * Extend a groupable card that was just settled at the item-list tail.
-   * Normal live delivery follows this path, so an adjacent read run does not
-   * scan its history on every result. A non-tail settlement still falls back
-   * to the defensive reflow path below because it may bridge two runs.
-   */
+  /** Detach every existing group whose members lie inside one raw range: the
+   *  shared bookkeeping of a bounded re-group (counters, meta, member runs).
+   *  A group partially inside keeps its surviving members' evidence only. */
+  private detachGroupsInRange(start: number, end: number): void {
+    for (let index = start; index <= end; index += 1) {
+      const group = this.groupOf.get(index)
+      if (group === undefined) continue
+      const members = this.groupMembers.get(group)
+      if (members !== undefined) {
+        const remaining = members.filter(member => member < start || member > end)
+        if (remaining.length === 0) {
+          // The whole group lives inside the range: its merged card splits back
+          // into `members.length` independent output rows, which the rebuild may
+          // merge again — `groupedToolCount` counts OUTPUT CARDS, so the split is
+          // exactly `members.length - 1` extra cards. The superseded card's
+          // merged timing is dropped with it: a split must never keep an
+          // aggregate spanning members that no longer share a card.
+          transcriptTimings.delete(group)
+          this.groupMembers.delete(group)
+          const spansTurns = this.groupMeta.get(group)?.spansTurns ?? this.crossTurn(members)
+          this.groupMeta.delete(group)
+          this.groupedToolCount += members.length - 1
+          if (spansTurns) this.crossTurnGroups -= 1
+        } else {
+          this.groupMembers.set(group, remaining)
+          const first = this.items[remaining[0]!]
+          if (first !== undefined && TranscriptFolder.groupable(first)) {
+            const spansTurns = this.crossTurn(remaining)
+            this.groupMeta.set(group, { firstTurn: first.turn, spansTurns })
+            this.mergedReadGroupTiming(group, remaining, spansTurns)
+          }
+        }
+      }
+      this.groupOf.delete(index)
+    }
+  }
+
+  /** Re-group ONE turn from the display order, bounded by that turn's raw range
+   *  (a displacement never leaves its own turn: a step belongs to one turn and
+   *  read runs never cross turns). Called after a display-relation change. */
+  private regroupDisplayTurn(turn: number): void {
+    const range = this.rawTurnRange(turn)
+    if (range === undefined) return
+    this.groupedTurnIndexDirty = true
+    this.detachGroupsInRange(range.start, range.end)
+    this.markSearchRangeDirty(range.start, range.end)
+    this.buildDisplayGroups(range.start, range.end, false)
+    // The rebuilt group's representative may have moved: the lazy normalization
+    // re-derives every entry from its current card.
+    this.markSearchRangeDirty(range.start, range.end)
+  }
+
+  /** The raw [start, end] range of one turn VALUE. `turnStarts`/`turnValues`
+   *  are keyed by the SEQUENTIAL turn ordinal, not by the turn value (turn
+   *  numbers may skip after a compaction or a partial replay). */
+  private rawTurnRange(turn: number): { start: number; end: number } | undefined {
+    let low = 0
+    let high = this.turnValues.length
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (this.turnValues[middle]! < turn) low = middle + 1
+      else high = middle
+    }
+    if (this.turnValues[low] !== turn) return undefined
+    const start = this.turnStarts[low]
+    if (start === undefined) return undefined
+    const next = this.turnStarts[low + 1]
+    return { start, end: next === undefined ? this.items.length - 1 : next - 1 }
+  }
+
+  /** Route a display-relation change into the grouping: while hydrating the
+   *  final rebuild covers it; live, only the affected turn is re-grouped. */
+  private scheduleDisplayRegroup(rawIndex: number): void {
+    const item = this.items[rawIndex]
+    if (item === undefined || !('turn' in item)) return
+    this.displayDisplacementTurns.add(item.turn)
+    if (this.hydrating) {
+      // The final cold rebuild must run even when no read settled.
+      this.groupingDirty = true
+      return
+    }
+    this.regroupDisplayTurn(item.turn)
+  }
+
   private appendTailGrouping(index: number): boolean {
     if (index !== this.items.length - 1) return false
     const item = this.items[index]
@@ -1948,84 +2050,19 @@ export class TranscriptFolder {
       this.groupingDirty = true
       return
     }
-    if (this.appendTailGrouping(index)) return
-    this.reflowGrouping(index)
-  }
-
-  /**
-   * Rebuild the grouping of the groupable run containing `index` (bounded
-   * by non-groupable items). Called when an item BECOMES groupable (a read
-   * settles ok) or a groupable item is appended; the run is re-flowed into
-   * one merged card and any superseded group card is dropped.
-   */
-  private reflowGrouping(index: number): void {
-    const item = this.items[index]
-    if (item === undefined || !TranscriptFolder.groupable(item)) return
-    this.groupedTurnIndexDirty = true
-    // The re-flown run stays within the settled read's OWN turn: a group
-    // never crosses turns (post-F6 plan §10.2/§12.11).
-    const runTurn = item.turn
-     let start = index
-    while (start > 0 && TranscriptFolder.continuesReadRun(this.items[start - 1]!, runTurn)) start -= 1
-    let end = index
-    while (end + 1 < this.items.length && TranscriptFolder.continuesReadRun(this.items[end + 1]!, runTurn)) end += 1
-    // Detach the run's items from any existing groups (a settle can splice
-    // a previously-running item into the middle of the run).
-    for (let i = start; i <= end; i += 1) {
-      const group = this.groupOf.get(i)
-      if (group !== undefined) {
-        const members = this.groupMembers.get(group)
-        if (members !== undefined) {
-          const remaining = members.filter(member => member < start || member > end)
-          if (remaining.length === 0) {
-            // The whole group lives inside the run: its output card becomes
-            // `members.length` independent read cards, then the rebuild
-            // merges them into one card again — keep the counters in sync.
-            this.groupMembers.delete(group)
-            const spansTurns = this.groupMeta.get(group)?.spansTurns ?? this.crossTurn(members)
-            this.groupMeta.delete(group)
-            this.groupedToolCount += members.length - 1
-            if (spansTurns) this.crossTurnGroups -= 1
-          } else {
-            this.groupMembers.set(group, remaining)
-            const first = this.items[remaining[0]!]
-            if (first !== undefined && TranscriptFolder.groupable(first)) {
-              // The surviving group keeps only ITS remaining members'
-              // evidence: recompute the timing from `remaining` (or drop
-              // it) — never keep a span aggregated over members that left.
-              const spansTurns = this.crossTurn(remaining)
-              this.groupMeta.set(group, { firstTurn: first.turn, spansTurns })
-              this.mergedReadGroupTiming(group, remaining, spansTurns)
-            }
-          }
-        }
-        this.groupOf.delete(i)
-      }
+    // The cheap tail fast path is valid only when the raw tail IS the display
+    // tail: the settled read must be the last raw row, its raw predecessor must
+    // be visible and its turn must carry no display displacement. Every other
+    // settlement re-groups its own turn from the ONE display adjacency (bounded
+    // by the turn) instead of guessing from raw neighbours.
+    const previous = this.items[index - 1]
+    if (index === this.items.length - 1 && previous !== undefined && this.isVisible(previous)
+      && !this.displayDisplacementTurns.has(item.turn)) {
+      if (this.appendTailGrouping(index)) return
     }
-    // After the detach, the run's items stand alone: mark their search
-    // entries dirty (the rebuilt group below re-marks the representative
-    // when the run still merges). The defensive reflow path is O(run) —
-    // rare, correctness-first.
-    this.markSearchRangeDirty(start, end)
-    if (start === end) return
-    // Rebuild the whole run as one group. The result is assembled with one
-    // final join so a long adjacent-read run stays linear in the cold path.
-    const built = this.makeReadGroup(start, end)
-    if (built === undefined) return
-    for (const member of built.members) this.groupOf.set(member, built.group)
-    this.groupMembers.set(built.group, built.members)
-    this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
-       this.addGroupedTurn(built.group.turn)
-    // The whole run collapsed into one output card.
-    this.groupedToolCount -= built.members.length - 1
-    if (built.spansTurns) this.crossTurnGroups += 1
-    // The rebuilt group's representative may have MOVED (a late settle can
-    // extend the run backwards): mark the whole run dirty so the lazy
-    // normalization re-derives every entry from its current card.
-    this.markSearchRangeDirty(start, end)
+    this.regroupDisplayTurn(item.turn)
   }
 
-  /** Whether the members at these indices span more than one turn. */
   private crossTurn(members: readonly number[]): boolean {
     if (members.length <= 1) return false
     const first = this.items[members[0]!]!
@@ -2786,6 +2823,9 @@ export class TranscriptFolder {
     list.push(displaced)
     list.sort((left, right) => left - right)
     this.searchRevisionCounter += 1
+    // A real display-relation change can split or join a read run: the ONE
+    // adjacency definition must follow it.
+    this.scheduleDisplayRegroup(anchor)
   }
 
   /** Remove ONE displaced row's relation, leaving the anchor's OTHER displaced
@@ -2806,6 +2846,7 @@ export class TranscriptFolder {
     }
     this.laneDisplayByAnchor.delete(anchor)
     this.searchRevisionCounter += 1
+    this.scheduleDisplayRegroup(anchor)
   }
 
   /** The shared inverse-map removal: drop the forward record, the anchor's list
@@ -2820,6 +2861,7 @@ export class TranscriptFolder {
       if (owned.before.length === 0 && owned.after.length === 0) this.laneDisplayByAnchor.delete(current.anchor)
     }
     this.searchRevisionCounter += 1
+    this.scheduleDisplayRegroup(current.anchor)
   }
 
 
