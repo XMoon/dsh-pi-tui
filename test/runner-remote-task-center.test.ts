@@ -1726,6 +1726,18 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   const subjectLine = (): string => app.viewerSubjectBarRenderRowsForTest().join('\n')
   const subjectActivity = (): string | undefined => app.statusStore.snapshot().view?.subject?.activity
   const clientRunning = (): boolean | undefined => sessions.list.getSnapshot().byId[CHILD_A_ID]?.running
+  // The PUBLISHED extension surface facts of the mounted app (the real
+  // SurfaceHost the runner attached): `activity.working` and `session.busy` are
+  // the LIVE/Main session's, so a CHILD activity flip must not move either.
+  const extensionState = (): { readonly working: boolean; readonly busy: boolean } => {
+    const host = (app as unknown as {
+      extensionHost?: { state(): { activity: { working: boolean }; session: { busy: boolean } } }
+    }).extensionHost
+    assert.ok(host !== undefined, 'the mounted Remote app must carry the real extension SurfaceHost')
+    const state = host.state()
+    return { working: state.activity.working, busy: state.session.busy }
+  }
+  const extensionBefore = extensionState()
 
   // ── (1) The child is RUNNING through the official Client fact before the
   // viewer opens, so the initial committed state is not vacuous.
@@ -1774,6 +1786,13 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   // flip clears it without any durable event or viewer reopen.
   await waitFor('the working row follows the inactive flip', () =>
     !viewport().includes('Working...'), 15_000)
+  // The PUBLIC extension facts stay the LIVE/Main session's: the child's
+  // activity flip (and the visible child row) must not move them.
+  const extensionAfterFlip = extensionState()
+  assert.equal(extensionAfterFlip.working, extensionBefore.working,
+    'the extension activity.working is the LIVE/Main fact, never the displayed child activity')
+  assert.equal(extensionAfterFlip.busy, extensionBefore.busy,
+    'the extension session.busy is the Main machine fact, never the displayed child activity')
 
   // ── (4) The reverse flip through the same isolated channel.
   const suppressedBefore = suppressedDurableEvents
@@ -1799,6 +1818,11 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     `the rendered subject bar must show running again:\n${subjectLine()}`)
   await waitFor('the working row re-arms on the running flip', () =>
     viewport().includes('Working...'), 15_000)
+  const extensionAfterReverse = extensionState()
+  assert.equal(extensionAfterReverse.working, extensionBefore.working,
+    'the reverse child flip must not move the LIVE/Main activity.working either')
+  assert.equal(extensionAfterReverse.busy, extensionBefore.busy,
+    'the reverse child flip must not move the Main session.busy either')
   releaseSecond()
 })
 

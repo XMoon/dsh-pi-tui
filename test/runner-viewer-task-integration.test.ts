@@ -2212,6 +2212,81 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(vt.getViewport().join('\n').includes('Working...'),
     `the displayed child's own turn/start must re-arm the row:\n${vt.getViewport().join('\n')}`)
 
+  // ── UX-2 (§7 E4/E5, L6): the DISPLAYED child's Activity LIFETIME through the
+  // production Session-event route (`context.emit('session/event')` → the
+  // event routing → the mounted viewer's own folder → canonical structure →
+  // the compact card → the painted viewport). The Compact preset is required
+  // for the collapsed Activity header; it is restored right after.
+  const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const activitySeconds = (text: string): number | undefined => {
+    const match = /(?:Activity|Thought) (\d+)s/u.exec(plain(text))
+    return match === null ? undefined : Number(match[1])
+  }
+  app.setDisplayPreset('compact')
+  await settle()
+  await vt.waitForRender()
+  // A bounded wait for the coalesced runner commit + paint (a raw `settle()`
+  // does not guarantee the transcript commit has been flushed).
+  const waitForView = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (plain(vt.getViewport().join('\n')).includes(needle)) return
+      await new Promise(resolve => setTimeout(resolve, 50))
+      await vt.waitForRender()
+    }
+    assert.fail(`the viewport never rendered ${JSON.stringify(needle)}:\n${plain(vt.getViewport().join('\n'))}`)
+  }
+  // Growth driven ONLY by the shared working repaint (this loop flushes the
+  // terminal; it feeds no event and re-commits no transcript).
+  const waitForGrowth = async (previous: number): Promise<number> => {
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 300))
+      await vt.waitForRender()
+      const current = activitySeconds(vt.getViewport().join('\n'))
+      if (current !== undefined && current > previous) return current
+    }
+    assert.fail(`the Activity duration never grew past ${previous}s with no new event:\n${plain(vt.getViewport().join('\n'))}`)
+  }
+  context.emit('session/event', childA as never, childA.append!('tool/call', {
+    turn: 3, step: 0, callId: 'ux2-child-call' as ToolCallId, name: 'bash', arguments: '{"command":"echo hi"}',
+  }) as SessionEvent)
+  context.emit('session/event', childA as never, childA.append!('tool/result', {
+    turn: 3, step: 0,
+    message: {
+      id: MessageId('ux2-child-result'), role: 'tool',
+      toolCallId: 'ux2-child-call' as ToolCallId,
+      content: [{ type: 'text', text: 'hi' }],
+      source: { kind: 'tool', callId: 'ux2-child-call' as ToolCallId },
+    },
+  }) as SessionEvent)
+  await waitForView('Bash echo hi')
+  // The tool has SETTLED: from here the only driver is the working repaint.
+  const childStill = activitySeconds(vt.getViewport().join('\n'))
+  assert.ok(childStill !== undefined,
+    `the displayed child's settled Activity must render:\n${vt.getViewport().join('\n')}`)
+  const childSilent = await waitForGrowth(childStill)
+  // The child's first visible assistant text is the proven boundary: the frozen
+  // value must be what the user was just seeing (a streamless durable message
+  // still proves its settlement time — plan §5.2), and it must then STOP.
+  context.emit('session/event', childA as never, childA.append!('assistant/message', {
+    turn: 3, step: 0,
+    message: {
+      id: MessageId('ux2-child-answer'), role: 'assistant',
+      content: [{ type: 'text', text: 'child answer ux2' }], source: { kind: 'assistant' },
+    },
+  }) as SessionEvent)
+  await waitForView('child answer ux2')
+  const childFrozenView = plain(vt.getViewport().join('\n'))
+  const childFrozen = activitySeconds(vt.getViewport().join('\n'))
+  assert.ok(childFrozen !== undefined && childFrozen >= childSilent && childFrozen <= childSilent + 2,
+    `the child's boundary must freeze the value the user saw (${childSilent}s -> ${childFrozen}s):\n${childFrozenView}`)
+  await new Promise(resolve => setTimeout(resolve, 1_200))
+  await vt.waitForRender()
+  assert.equal(activitySeconds(vt.getViewport().join('\n')), childFrozen,
+    `a closed child Activity must stop counting:\n${plain(vt.getViewport().join('\n'))}`)
+  app.setDisplayPreset('full')
+  await settle()
+  await vt.waitForRender()
+
   // Child A → child B through the SAME real Task Center entry: no A residue.
   input('\x1b')
   await settle()
@@ -2303,6 +2378,13 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   app.setFullscreen(true)
   await settle()
   await vt.waitForRender()
+  // A real interactive child draft: typing reaches the child's OWN seat slot,
+  // so the exit's draft lifecycle is observable (the child draft is parked and
+  // the preserved MAIN draft is written back to the seat).
+  input('ux3 child draft')
+  await settle()
+  assert.ok(app.seatTextForTest().includes('ux3 child draft'),
+    `the child draft must reach the seat before the exit:\n${app.seatTextForTest()}`)
   const fullscreenRows = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
   const barRow = fullscreenRows.findIndex(row => row.includes('‹ back'))
   assert.ok(barRow >= 0, `the subject bar must be painted in fullscreen:\n${fullscreenRows.join('\n')}`)
@@ -2319,6 +2401,39 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     `the subject bar must clear after the glyph exit:\n${backToMain}`)
   assert.ok(backToMain.includes('display-subject-parent'),
     `the MAIN session must be restored after the glyph exit:\n${backToMain}`)
+  // The draft lifecycle ran through the REAL exit: the child draft left the
+  // seat and the preserved MAIN draft (empty in this fixture) was written back
+  // — the child's text must never leak into the main draft. (The child ingress
+  // release / focus / scroll restoration are the SAME `exitView()` route the
+  // Esc suites exercise; this click proves the route is reached and completes.)
+  assert.equal(app.seatTextForTest(), '',
+    `the exit must restore the MAIN draft, never keep the child draft:\n${app.seatTextForTest()}`)
+
+  // ── UX-2 Main (L6): the MAIN subject's Activity lifetime through the same
+  // production Session-event route, after the exit restored the main surface.
+  app.setDisplayPreset('compact')
+  await settle()
+  await vt.waitForRender()
+  context.emit('session/event', parent as never, parent.append!('tool/call', {
+    turn: 1, step: 0, callId: 'ux2-main-call' as ToolCallId, name: 'bash', arguments: '{"command":"echo main"}',
+  }) as SessionEvent)
+  context.emit('session/event', parent as never, parent.append!('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('ux2-main-result'), role: 'tool',
+      toolCallId: 'ux2-main-call' as ToolCallId,
+      content: [{ type: 'text', text: 'main' }],
+      source: { kind: 'tool', callId: 'ux2-main-call' as ToolCallId },
+    },
+  }) as SessionEvent)
+  await waitForView('Bash echo main')
+  const mainStill = activitySeconds(vt.getViewport().join('\n'))
+  assert.ok(mainStill !== undefined,
+    `the MAIN settled Activity must render:\n${vt.getViewport().join('\n')}`)
+  const mainSilent = await waitForGrowth(mainStill)
+  assert.ok(mainSilent > mainStill,
+    `the MAIN settled Activity must keep counting (${mainStill}s -> ${mainSilent}s):\n${vt.getViewport().join('\n')}`)
+  app.setDisplayPreset('full')
 })
 
 test('F4-R1: a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {

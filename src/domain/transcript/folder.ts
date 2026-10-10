@@ -2377,12 +2377,19 @@ export class TranscriptFolder {
    * durable settlement can never move that boundary later. `firstVisibleAt` is
    * reply-text evidence (reasoning/tool-call chunks are excluded by
    * `assistantChunkHasVisibleReply`), so no Thinking evidence is mistaken for
-   * the Conversation lane. */
-  private recordAssistantVisibleTime(turn: number, step: number): void {
-    const at = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step)
-    if (at === undefined) return
+   * the Conversation lane.
+   *
+   * A settlement whose embedded stream proves no reply-text time (streamless,
+   * or a stream without the Conversation lane) still proves ONE thing: a
+   * VISIBLE durable message became visible by its own settlement — the caller
+   * passes that `settlementTime` and it is used only when no earlier
+   * first-visible evidence exists (plan §5.2: "streamless 只能使用实际可证明的
+   * settlement 时间"). */
+  private recordAssistantVisibleTime(turn: number, step: number, settlementTime?: number): void {
     const row = this.assistantEntries.get(stepKey(turn, step))
     if (row === undefined) return
+    const at = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step) ?? settlementTime
+    if (at === undefined) return
     const known = transcriptTimingOf(row)
     if (known === undefined || at < known.startedAt) setTranscriptTiming(row, pointTiming(at))
   }
@@ -4040,8 +4047,15 @@ export class TranscriptFolder {
         if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
         // The durable settlement re-affirms the SAME boundary the live lane
         // recorded (a cold hydration has only this evidence); the earliest
-        // proven time wins, so a replacement settlement never regresses it.
-        this.recordAssistantVisibleTime(event.data.turn, event.data.step)
+        // proven time wins, so a replacement settlement never regresses it. A
+        // VISIBLE streamless settlement contributes its own settlement time as
+        // the last provable boundary — an invisible one proves no Conversation
+        // row and contributes nothing.
+        this.recordAssistantVisibleTime(
+          event.data.turn,
+          event.data.step,
+          settledEntry !== undefined && this.isVisible(settledEntry) ? event.time : undefined,
+        )
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
