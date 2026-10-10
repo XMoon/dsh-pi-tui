@@ -786,22 +786,28 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   bounded structure passes, two sorts and one indexed query per Activity —
   O(n log n), never a per-Activity re-walk of the window (the structure reads are
   locked by a Proxy-count regression). A following block with no proven
-  first-visible time keeps the span out of the live tail without closing it. **Scope limit (pinned by `test/activity-clock.test.ts`):** the
-  canonical Work MEMBERSHIP — which Process rows share one Activity — is decided
-  by the fold's display order. When cold hydration appends a step's settlement
-  AFTER that step's tool rows while its first visible text preceded them, cold
-  shows ONE Activity where live showed TWO (and a raw-adjacent settled-read pair
-  is likewise merged by the fold's read grouping before any display rule can act).
-  Converging that needs the fold's display-order authority (the same mechanism
-  `convergeStepLaneOrder` uses) plus display-aware read grouping; it is tracked
-  as a SEPARATE fold unit (`fix/transcript-display-order-convergence`, branched
-  from the merged `next`) and is explicitly NOT claimed here. That unit must
-  start from two red tests on `next`: the live/cold Work-grouping differential
-  and a read-grouping case (`Read A → Assistant text → Read B` collapsing into
-  one `2 files` card in cold while live keeps two reads), and it is accepted on
-  message order + complete Work membership + grouping + `window()`/`search()`
-  order + cleanup/idempotence + performance, comparing provable LOGICAL identity
-  and order (raw object references only need to be stable within one fold). Only an open, non-blocked
+  first-visible time keeps the span out of the live tail without closing it. **Display-order convergence (fold unit):** the
+  canonical Work MEMBERSHIP — which Process rows share one Activity — follows the
+  fold's ONE display order, and the fold now CONVERGES that order from durable
+  evidence instead of the accidental append order:
+  a step's Tool row is displaced around its Assistant anchor from the row's OWN
+  materialization evidence (the earliest of its Preparing delta and its durable
+  `tool/call`) compared with the Assistant row's proven first-visible reply time,
+  from EITHER arrival direction (`assistant/message` converges the calls its own
+  durable stream named; a durable `tool/call` carries its own step and converges
+  itself against an Assistant row that already settled). Read grouping asks ONE
+  adjacency question — the final display order, visible rows only — so a
+  Conversation visible between two reads keeps them apart (each with its own
+  `callCount`, timing, search corpus and window slot) while reads the display
+  order genuinely brings together still merge; cold builds the groups once after
+  `hydrate`, a live settlement re-groups only its own turn, and the cheap
+  raw-tail fast path is kept whenever the raw tail IS the display tail.
+  **Still conservative — never a guess, and no universal parity:** nothing is
+  reordered without evidence, i.e. no embedded stream / no proven first-visible
+  reply time, equal timestamps, a tool-call id the step's stream never named, a
+  call id reused by another turn, or tools of another turn/step. Those logs keep
+  the durable append order, so an evidence-poor replay can still differ from the
+  live run. Only an open, non-blocked
   trailing span of a live-tail window
   whose committed display subject is running is live; the live predicate is
   re-read per render (never a latched boolean) and re-reads `now()` on the
