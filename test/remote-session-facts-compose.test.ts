@@ -77,10 +77,7 @@ test('§3.3 stats: lifetime totals come from the projections, not the window', a
   assert.deepEqual(stats.sessionPerformance, { tokensPerSec: 100 }, 'the All group is the Host projection derivation')
 })
 
-test('§3.3 stats: a superseded transport never commits (undefined) and the window is never read', async () => {
-  const readWindow = async (): Promise<PresentationReadSnapshot> => {
-    throw new Error('the composition must not read the event window for performance')
-  }
+test('§3.3 stats: a superseded transport never commits (undefined)', async () => {
   const stale = await composeRemoteSessionStats({
     sessionId: 's',
     // A replaced Connection/binding drops at the fence, never a partial figure.
@@ -89,9 +86,10 @@ test('§3.3 stats: a superseded transport never commits (undefined) and the wind
   })
   assert.equal(stale, undefined, 'a replaced Connection/binding settles as superseded')
 
-  // Decisive retirement witness: with a live fence the composition answers
-  // from the passed-in facts alone — `read`/`loadOlder` are NEVER called
-  // (both throw above), so no bounded page can influence a performance fact.
+  // Retirement is structural, not a counter: the input carries NO reader
+  // capability at all, so a bounded page cannot influence a performance fact
+  // even by accident — the composition answers from the passed-in Host facts
+  // alone (there is no reader to call, and the retired source path is gone).
   const current = await composeRemoteSessionStats({
     sessionId: 's',
     fence: { isCurrent: () => true },
