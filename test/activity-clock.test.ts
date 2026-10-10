@@ -553,6 +553,62 @@ test('F5: the owning turn/end caps the Activity — a later turn never rewrites 
     beforeLine, 'the rendered duration is unchanged before and after the next prompt')
 })
 
+test('F8: a PRECEDING boundary never closes a later Activity (position-qualified lookup)', () => {
+  // Live fold: a Preparing tool-call delta at +1s creates the call's earliest
+  // start, an injected Context row lands at +2s, and the durable tool/call at
+  // +3s reuses the +1s Preparing start. The canonical structure is therefore
+  // [Context, Work] — the Work has NO successor — so the Activity must stay
+  // OPEN even though the preceding Context's sidecar time is newer.
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, T0, 0)])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: T0 + 1_000,
+    chunk: { type: 'tool-call-delta', index: 0, id: 'c1', name: 'bash', argumentsDelta: '{}' },
+  })
+  folder.apply([eventAt('user/message', {
+    id: 'ctx-after-start', content: [{ type: 'text', text: 'context after the preparing start' }],
+    source: { kind: 'skill-invocation', name: 'demo' },
+  }, T0 + 2_000, 1)])
+  folder.apply([eventAt('tool/call', { turn: 1, step: 0, callId: 'c1', name: 'bash', arguments: '{}' }, T0 + 3_000, 2)])
+  const analysis = analyze(folder)
+  assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind), ['message', 'work'],
+    'the Context precedes the Work: the Work has no successor')
+  const span = analysis.spans[0]!
+  assert.equal(span.members[0]!.kind, 'tool')
+  assert.deepEqual(analysis.lifetimes.get(span.owner), { startedAt: T0 + 1_000, open: true, trailing: true },
+    'a preceding boundary can never close a later Activity')
+  assert.equal(summarizeWorkSpan(span).timing?.startedAt, T0 + 1_000, 'the Preparing start is reused')
+})
+
+test('F5b: the final Activity end is capped by its turn even when a member settles late', () => {
+  const folder = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall('c1', 'bash', T0 + 1_000, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 6_000, 2),
+  ])
+  const before = analyze(folder)
+  const span = before.spans[0]!
+  assert.deepEqual(before.lifetimes.get(span.owner),
+    { startedAt: T0 + 1_000, endedAt: T0 + 6_000, open: false, trailing: true },
+    'the running member leaves the turn/end as the close')
+
+  // The disclosure contract explicitly allows this EXISTING pending tool card to
+  // settle after its own turn ended. The member's own timing follows the real
+  // result, but the Activity's lifetime stays frozen at its turn.
+  folder.apply([toolResult('c1', T0 + 100_000, 3)])
+  const after = analyze(folder)
+  const afterSpan = after.spans.find(candidate => candidate.owner === span.owner)
+  assert.ok(afterSpan !== undefined, 'the Activity span survives the late settlement')
+  assert.equal(summarizeWorkSpan(afterSpan).timing?.endedAt, T0 + 100_000,
+    'the Tool member keeps its own real end (never rewritten by the clock)')
+  assert.deepEqual(after.lifetimes.get(afterSpan.owner),
+    { startedAt: T0 + 1_000, endedAt: T0 + 6_000, open: false, trailing: true },
+    'a late member settlement can never lengthen the Activity beyond its turn')
+  assert.equal(headerAt(afterSpan, activityClockOf(after.lifetimes.get(afterSpan.owner)!, () => false, () => true), T0 + 9_999_999),
+    headerAt(span, activityClockOf(before.lifetimes.get(span.owner)!, () => false, () => true), T0 + 9_999_999),
+    'the rendered duration is unchanged by the late settlement')
+})
+
 test('F7: the lifetime derivation reads the structure in bounded linear order', () => {
   const events: SessionEvent[] = []
   let seq = 0
