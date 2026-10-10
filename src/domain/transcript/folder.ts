@@ -3102,6 +3102,8 @@ export class TranscriptFolder {
       }
       if (anchorIndex !== undefined) {
         for (const position of touched) this.resortAnchorSide(anchorIndex, position)
+        // An adopted Lane row changes what this anchor's slot emits.
+        this.revalidateToolDisplacementsAt(anchorIndex)
       }
     })
     // The latest settlement is the step's authority: Preparing evidence for a
@@ -3214,6 +3216,17 @@ export class TranscriptFolder {
     return { index, position }
   }
 
+  /** A change to what a raw slot EMITS — a Lane relation created, relocated or
+   *  tombstoned — can invalidate an existing Tool displacement that crosses that
+   *  slot, exactly like a visibility change does. Never applies the Tool guard to
+   *  the Lane relation itself. */
+  private revalidateToolDisplacementsAt(index: number | undefined): void {
+    if (index === undefined) return
+    this.coalescingRegroups(() => {
+      if (this.mayCoverExistingDisplacement(index)) this.revalidateRelationsCovering(index)
+    })
+  }
+
   /** Fast exclusion for the visibility re-validation: does any recorded
    *  displacement interval strictly contain `row`? */
   private mayCoverExistingDisplacement(row: number): boolean {
@@ -3300,11 +3313,13 @@ export class TranscriptFolder {
       // ONLY the Thinking relation, never the step's Tool displacements that
       // share this Assistant anchor.
       this.dropLaneDisplacement(thinkingIndex)
+      this.revalidateToolDisplacementsAt(assistantIndex)
       return
     }
     // The Assistant row anchors the step; the Thinking row is displayed
     // immediately before (thinking-first) or after (assistant-first) it.
     this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after', true, { turn, step })
+    this.revalidateToolDisplacementsAt(assistantIndex)
   }
 
   /** THE single display-order traversal of the raw items: raw physical
@@ -4053,6 +4068,7 @@ export class TranscriptFolder {
     const entry = this.thinkingEntries.get(key)
     if (entry === undefined) return
     const index = this.searchIndexByStepKey.get(`thinking:${key}`)
+    const formerAnchor = index === undefined ? undefined : this.laneDisplayByDisplaced.get(index)?.anchor
     // The row becomes invisible FIRST: visibility is display adjacency, so the
     // grouping must be re-derived from the FINAL state — a hidden row is not a
     // boundary, and the two reads it separated may merge.
@@ -4069,6 +4085,8 @@ export class TranscriptFolder {
     this.closeThinking(entry)
     this.thinkingEntries.delete(key)
     if (index !== undefined) this.scheduleDisplayRegroup(index)
+    this.revalidateToolDisplacementsAt(index)
+    this.revalidateToolDisplacementsAt(formerAnchor)
   }
 
   /** Reset same-step presentation and first-visible boundary at the scheduled
