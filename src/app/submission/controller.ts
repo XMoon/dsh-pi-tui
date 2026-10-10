@@ -707,6 +707,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * renderer drops drafts at committed switches (TSP). A same-owner
    * invalidation and every retaining renderer merge exactly like the
    * ordinary restore. Returns the REAL outcome so the notice follows it.
+   *
+   * This policy answers WHICH draft may land in the CURRENT editor; it never
+   * answers whether this controller still owns one — that is the LIFETIME
+   * fence below, and every async-reachable caller applies it first.
    */
   const restoreStaleDraft = (value: string, capturedSubject: SessionSubject | undefined): 'merged-verbatim' | 'merged' | 'dropped' => {
     if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {
@@ -716,6 +720,25 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     deps.app().setEditorText(merged)
     return merged === value ? 'merged-verbatim' : 'merged'
   }
+
+  /**
+   * PR3-B §7.3 (B2 round 11): the LIFETIME fence the controller's own
+   * async-reachable restores apply before the shared stale policy — the
+   * `signal.aborted` guard the ordinary `restoreSubmissionDraft` primitive
+   * has always carried, restated for the async-reachable stale restores
+   * (plus the equivalent cleaned-up read). A cancelled or disposed gesture
+   * owns neither the editor nor a notice: `runOwned` routes that cancellation
+   * to onCancel precisely so nothing is written or announced after the user
+   * left the surface, and a retaining renderer (PiTui) never suppresses the
+   * merge by itself — without the fence the old draft lands in a dead
+   * composer.
+   *
+   * The submission runtime keeps its OWN lifetime authority (its
+   * `isDisposed`, checked before each of its restores), so the policy hook it
+   * borrows through the steer deps is not re-gated here; every restore the
+   * CONTROLLER reaches after an await is.
+   */
+  const lifetimeOwnsSurface = (): boolean => !deps.signal.aborted && !deps.isCleanedUp()
 
   const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
     // Admission identity is captured synchronously, before this gesture
@@ -961,7 +984,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // PR3-B §7.3 (round 10 F1): the controller's own async stale exit
           // takes the SAME two-fact policy as the submission runtime — the
           // captured subject's owner must have been genuinely REPLACED on a
-          // switch-dropping renderer before the restore is suppressed.
+          // switch-dropping renderer before the restore is suppressed. The
+          // lifetime fence precedes it (round 11): a cancelled gesture writes
+          // nothing at all.
+          if (!lifetimeOwnsSurface()) return
           const restored = restoreStaleDraft(text, submittedSubject)
           settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
@@ -986,7 +1012,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // PR3-B §7.3 (round 10 F1): the scope-recheck stale exit takes the
         // SAME two-fact policy (the scope superseded because the OWNER was
         // replaced — the submission runtime's own `settleStaleSubmission`
-        // behaves identically for the plain-prompt flow).
+        // behaves identically for the plain-prompt flow). Lifetime fence
+        // first (round 11).
+        if (!lifetimeOwnsSurface()) return
         const restored = restoreStaleDraft(text, submittedSubject)
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
@@ -1194,8 +1222,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // PR3-B §7.3 (round 10 F1): this restore fires on a THROW after the
       // flow's awaits, so the owner may have been replaced meanwhile — the
       // same two-fact policy decides (a same-owner invalidation and every
-      // retaining renderer still merge).
-      restore: (t) => { restoreStaleDraft(t, submittedSubject) },
+      // retaining renderer still merge). The lifetime fence precedes it
+      // (round 11): a cancelled or disposed gesture restores nothing.
+      restore: (t) => { if (lifetimeOwnsSurface()) restoreStaleDraft(t, submittedSubject) },
     }, text), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
@@ -1786,17 +1815,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // `runLocalCommand`'s name-only lookup (which would either run
           // the new generation's handler or deliver the line to the MODEL).
           if (deps.extensions.findContribution(parsed.name) !== submitted) {
-            deps.app().notify(`/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
             // Reached AFTER `await ensureSession`: the owner may have been
-            // replaced meanwhile (round 10 F1) — same policy.
-            restoreStaleDraft(text, contributionSubject)
+            // replaced AND the lifetime may have ended meanwhile — the
+            // lifetime fence precedes the shared policy (round 11), and the
+            // restore comes FIRST so the notice follows its REAL outcome.
+            if (!lifetimeOwnsSurface()) return
+            const restored = restoreStaleDraft(text, contributionSubject)
+            deps.app().notify(restored === 'dropped'
+              ? `/${parsed.name} is no longer available — the draft was cleared by the switch`
+              : `/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
             return
           }
           runLocalCommand(parsed, text, persistHistory, delivery, deps.liveAgent()?.session.id)
         },
         // PR3-B §7.3 (round 10 F1): same async-restore class as the Host
-        // command flow above.
-        restore: (draft) => { restoreStaleDraft(draft, contributionSubject) },
+        // command flow above; the lifetime fence precedes it (round 11).
+        restore: (draft) => { if (lifetimeOwnsSurface()) restoreStaleDraft(draft, contributionSubject) },
       }, text), {
         diag: deps.diag,
         sessionId: () => deps.liveAgent()?.session.id,
