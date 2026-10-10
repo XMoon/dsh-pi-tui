@@ -242,7 +242,7 @@ reading each panel's input handler that the audit could reach from the real
 | ″ | `question.cursorUp`, `question.cursorDown` | move the SUGGESTION selection (`:345-354`), not between fields | `NOT_REACHABLE` |
 | Keybinding list (`src/tui/keybindings/ui/list.ts:271-306`) | `escape`, `up`, `down`, `pageUp`, `pageDown`, `enter` | navigate / open the action editor | `NOT_REACHABLE` |
 | ″ leader editor (`:530-547`) | `escape` cancel, `r` reset the leader, `enter` start the recorder | edit the leader key | `NOT_REACHABLE` |
-| Key recorder (`src/tui/keybindings/ui/recorder.ts:176-223`) | any recognizable key | **capture it as the new binding** (the mode's central action; `parseKey`+`validateRecordedKey`, `:206-223`) | `NOT_REACHABLE` |
+| Key recorder (`src/tui/keybindings/ui/recorder.ts:176-223`) | any recognizable, valid key press | **capture it as the new binding** (the mode's central action; `parseKey`+`validateRecordedKey`, `:206-223`) | `NOT_REACHABLE` |
 | ″ | `escape` | cancel the recording (`:176`) | `NOT_REACHABLE` |
 | ″ | text/unparseable input | refused with an inline error (`:210-213`) | `NOT_REACHABLE` |
 | Keybinding action editor (`src/tui/keybindings/ui/action-editor.ts:288-492`) | `escape`, `up`/`k`, `down`/`j`, `delete`/`backspace`, `enter` | navigate / edit / bind / accept | `NOT_REACHABLE` |
@@ -257,7 +257,7 @@ reading each panel's input handler that the audit could reach from the real
 | Approval input (`src/tui/interaction/approval-runtime.ts:111-128`) | `y` allow-once; `n` reject; `escape`/`ctrl+c` cancel; every other key consumed | PiTui approval seat | TSP has its **own** seat for the same authority (PANEL-014), so the PiTui keys are `NOT_REACHABLE` while the TSP equivalents are `SUPPORTED` |
 | Model picker — effort mode (`src/tui/pickers/model-picker.ts:528-544`) | `enter` confirm, `right`/`left` effort, `escape` leave effort mode | choose the reasoning effort | `NOT_REACHABLE` |
 | Model picker — model mode (`:546-554`) | `enter` activate the selected model | commit the model | `NOT_REACHABLE` |
-| ″ model mode | `up`/`down`/`pageUp`/`pageDown`/`escape` and printable typing | delegated to the picker's **list** and **search input** (`:554`) | `NOT_REACHABLE` |
+| ″ model mode | `up`/`down`/`pageUp`/`pageDown`/`escape` and plain `left`/`right` plus printable typing | delegated to the picker's **list** (`:554`) and **SearchInput** (the source comment at `:545-547` names both) | `NOT_REACHABLE` |
 | Leader sequences (`src/tui/keybindings/leader.ts:98-117`) | `leaderKey` + binding, `escape` | user-configured chords | `NOT_REACHABLE` |
 
 The one authority overlap worth naming: the PiTui approval dialog and the TSP
