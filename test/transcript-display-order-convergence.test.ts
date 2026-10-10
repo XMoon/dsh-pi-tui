@@ -1,0 +1,377 @@
+/**
+ * F6 — Transcript display-order & read-grouping convergence (plan
+ * `temp/20261010/f6-transcript-display-order-convergence.md` §5).
+ *
+ * The fold appends rows in DURABLE EVENT ORDER, while the live lane
+ * materializes a row when its content first becomes visible. For a step whose
+ * first visible assistant text precedes a later tool call of the same step the
+ * two folds therefore disagree: live shows `Work[c1] → Assistant → Work[c2]`
+ * (two Activities), cold shows `Work[c1, c2] → Assistant` (one), and
+ * raw-adjacent settled reads are merged into one `N files` card before any
+ * display rule can split them.
+ *
+ * Stage 1 of the plan is these tests: T1/T2 must FAIL on the current baseline
+ * (they are the red witnesses), while T3/T5 pin the conservative behavior that
+ * must survive the fix (no over-splitting, no guessing without evidence).
+ *
+ * Logical identity is compared across the two folds (kind + stable logical key
+ * such as the tool callId or the assistant text) — never raw object references,
+ * which are only guaranteed stable within one fold.
+ * @module @xmoon76/dsh-pi-tui/transcript-display-order-convergence.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { projectTranscriptStructure, type TranscriptWorkSpan } from '../src/tui/transcript/structure.ts'
+import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
+import { resolveWorkLifetimes, type WorkLifetime } from '../src/tui/transcript/activity-clock.ts'
+
+const T0 = 1_700_000_000_000
+
+function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
+  return { type, seq, time, data } as unknown as SessionEvent
+}
+
+interface ToolCallInput {
+  readonly callId: string
+  readonly name: string
+  readonly turn: number
+  readonly step: number
+  readonly time: number
+  readonly seq: number
+  readonly args?: string
+}
+
+function toolCall(input: ToolCallInput): SessionEvent {
+  return eventAt('tool/call', {
+    turn: input.turn, step: input.step, callId: input.callId, name: input.name,
+    arguments: input.args ?? '{}',
+  }, input.time, input.seq)
+}
+
+function toolResult(callId: string, turn: number, step: number, time: number, seq: number, text: string): SessionEvent {
+  return eventAt('tool/result', {
+    turn, step,
+    message: {
+      id: `r-${callId}`, role: 'tool', toolCallId: callId,
+      content: [{ type: 'text', text }], source: { kind: 'tool', callId },
+    },
+  }, time, seq)
+}
+
+/** One durable assistant settlement whose embedded stream carries the visible
+ *  reply text (and optionally a later tool-call delta) at explicit times. */
+function assistantSettlement(input: {
+  readonly turn: number
+  readonly step: number
+  readonly time: number
+  readonly seq: number
+  readonly text: string
+  readonly stream: readonly Record<string, unknown>[]
+}): SessionEvent {
+  return eventAt('assistant/message', {
+    turn: input.turn, step: input.step,
+    message: {
+      id: `m-${input.turn}-${input.step}`, role: 'assistant',
+      content: [{ type: 'text', text: input.text }], source: { kind: 'assistant' },
+    },
+    stream: input.stream,
+  }, input.time, input.seq)
+}
+
+function textChunk(time: number, index: number, text: string): Record<string, unknown> {
+  return { type: 'chunk', time, chunk: { type: 'text-delta', index, text } }
+}
+
+function toolCallDeltaChunk(time: number, index: number, id: string, name: string): Record<string, unknown> {
+  return { type: 'chunk', time, chunk: { type: 'tool-call-delta', index, id, name, argumentsDelta: '{}' } }
+}
+
+function foldEvents(events: readonly SessionEvent[]): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  return folder
+}
+
+/** The stable logical identity of one visible row (never an object reference). */
+function logicalId(message: TranscriptMessage): string {
+  if (message.kind === 'tool') return `tool:${message.callId ?? message.name}`
+  if (message.kind === 'assistant') return `assistant:${message.text}`
+  if (message.kind === 'thinking') return `thinking:${message.text}`
+  if ('text' in message) return `${message.kind}:${message.text}`
+  return message.kind
+}
+
+function logicalRows(folder: TranscriptFolder): string[] {
+  return folder.messages().map(logicalId)
+}
+
+function structureKinds(folder: TranscriptFolder): string[] {
+  return projectTranscriptStructure(folder.messages()).map(block => block.kind)
+}
+
+interface SpanFacts {
+  readonly owner: string
+  readonly members: readonly string[]
+  readonly actions: number
+  readonly lifetime: WorkLifetime
+}
+
+function spanFacts(folder: TranscriptFolder): SpanFacts[] {
+  const structure = projectTranscriptStructure(folder.messages())
+  const lifetimes = resolveWorkLifetimes(structure, folder.turnActivities())
+  const spans: TranscriptWorkSpan[] = []
+  for (const block of structure) {
+    if (block.kind === 'work') spans.push(block.span)
+  }
+  return spans.map(span => ({
+    owner: logicalId(span.owner),
+    members: span.members.map(logicalId),
+    actions: summarizeWorkSpan(span).actionStats.total,
+    // Compare the LIFETIME structurally: the span's own members/order drive it,
+    // so equal Work partitions must derive equal lifetimes.
+    lifetime: lifetimes.get(span.owner)!,
+  }))
+}
+
+// ── shared fixtures ────────────────────────────────────────────────────────
+
+/** `Tool c1 (step 0) → Assistant text visible at +2s → Tool c2 (step 1) at +3s`. */
+function interleavedEvents(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
+    toolResult('c1', 1, 0, T0 + 1_500, 2, 'a'),
+    toolCall({ callId: 'c2', name: 'read', turn: 1, step: 1, time: T0 + 3_000, seq: 3, args: '{"file_path":"b"}' }),
+    toolResult('c2', 1, 1, T0 + 4_000, 4, 'b'),
+    assistantSettlement({
+      turn: 1, step: 1, time: T0 + 5_000, seq: 5, text: 'let me check',
+      stream: [
+        textChunk(T0 + 2_000, 0, 'let me check'),
+        toolCallDeltaChunk(T0 + 3_000, 1, 'c2', 'read'),
+      ],
+    }),
+  ]
+}
+
+/** The LIVE equivalent of {@link interleavedEvents}: the assistant row appears
+ *  with its first visible text chunk before the step's tool events are folded. */
+function interleavedLive(): TranscriptFolder {
+  const events = interleavedEvents()
+  const folder = new TranscriptFolder()
+  folder.hydrate([events[0]!, events[1]!, events[2]!])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 1, time: T0 + 2_000,
+    chunk: { type: 'text-delta', index: 0, text: 'let me check' },
+  })
+  folder.apply([events[3]!, events[4]!, events[5]!])
+  return folder
+}
+
+/** `Read A (step 0) → Assistant text visible at +2s → Read B (step 1) at +3s`. */
+function readsAcrossConversationEvents(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'read-a', name: 'read', turn: 1, step: 0, time: T0 + 1_000, seq: 1, args: '{"file_path":"a.ts"}' }),
+    toolResult('read-a', 1, 0, T0 + 1_500, 2, 'a'),
+    toolCall({ callId: 'read-b', name: 'read', turn: 1, step: 1, time: T0 + 3_000, seq: 3, args: '{"file_path":"b.ts"}' }),
+    toolResult('read-b', 1, 1, T0 + 4_000, 4, 'b'),
+    assistantSettlement({
+      turn: 1, step: 1, time: T0 + 5_000, seq: 5, text: 'between the reads',
+      stream: [
+        textChunk(T0 + 2_000, 0, 'between the reads'),
+        toolCallDeltaChunk(T0 + 3_000, 1, 'read-b', 'read'),
+      ],
+    }),
+  ]
+}
+
+// ── T1: the core Work-partition parity ─────────────────────────────────────
+
+test('T1: Tool → Assistant text → Tool derives the SAME live and cold Work partition', () => {
+  const cold = foldEvents(interleavedEvents())
+  const live = interleavedLive()
+  // VISIBLE ROW ORDER (logical identity, never object references).
+  assert.deepEqual(logicalRows(cold), logicalRows(live),
+    'the visible row order must converge')
+  assert.deepEqual(logicalRows(cold), ['tool:c1', 'assistant:let me check', 'tool:c2'],
+    'the Conversation sits between the two tools')
+  // CANONICAL STRUCTURE: two Work spans separated by the Conversation.
+  assert.deepEqual(structureKinds(cold), structureKinds(live),
+    'the canonical structure must converge')
+  assert.deepEqual(structureKinds(cold), ['work', 'message', 'work'])
+  assert.deepEqual(spanFacts(cold), spanFacts(live),
+    'owners, members, action counts and lifetimes must converge')
+  assert.deepEqual(spanFacts(cold).map(facts => facts.members), [['tool:c1'], ['tool:c2']])
+})
+
+// ── T2: reads separated by a Conversation must not merge ───────────────────
+
+test('T2: a Conversation visible between two reads keeps them as two reads in the cold fold too', () => {
+  const cold = foldEvents(readsAcrossConversationEvents())
+  const reads = cold.messages().filter(message => message.kind === 'tool')
+  assert.equal(reads.length, 2, 'cold must not collapse the two reads into one card')
+  assert.deepEqual(reads.map(read => read.callCount ?? 1), [1, 1],
+    'each read keeps its own genuine call cardinality')
+  assert.deepEqual(logicalRows(cold),
+    ['tool:read-a', 'assistant:between the reads', 'tool:read-b'])
+  assert.deepEqual(cold.messages().map(message => message.kind === 'tool' ? message.args : '').filter(Boolean),
+    ['{"file_path":"a.ts"}', '{"file_path":"b.ts"}'],
+    'no `2 files` merged card may survive')
+})
+
+// ── T3: genuinely adjacent reads still merge (no over-splitting) ───────────
+
+test('T3: reads with no Conversation between them still merge', () => {
+  // The assistant text is first visible AFTER both reads, so no record proves it
+  // belongs between them: the conservative (and correct) result is one group.
+  const cold = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'read-a', name: 'read', turn: 1, step: 0, time: T0 + 1_000, seq: 1, args: '{"file_path":"a.ts"}' }),
+    toolResult('read-a', 1, 0, T0 + 1_200, 2, 'a'),
+    toolCall({ callId: 'read-b', name: 'read', turn: 1, step: 1, time: T0 + 2_000, seq: 3, args: '{"file_path":"b.ts"}' }),
+    toolResult('read-b', 1, 1, T0 + 2_200, 4, 'b'),
+    assistantSettlement({
+      turn: 1, step: 1, time: T0 + 5_000, seq: 5, text: 'after both reads',
+      stream: [textChunk(T0 + 4_000, 0, 'after both reads')],
+    }),
+  ])
+  const reads = cold.messages().filter(message => message.kind === 'tool')
+  assert.equal(reads.length, 1, 'the two reads stay one group')
+  assert.equal(reads[0]!.callCount, 2, 'both genuine calls count')
+  assert.match(reads[0]!.args, /2 files/u)
+  assert.deepEqual(logicalRows(cold), ['tool:read-a', 'assistant:after both reads'])
+})
+
+// ── T4: mixed Thinking / Assistant / Tool lanes ────────────────────────────
+
+test('T4a: Thinking → Assistant → tools keeps the reasoning lane before the Conversation and the tools after it', () => {
+  const stream = [
+    { type: 'chunk', time: T0 + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+    { type: 'chunk', time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'brief thought' } },
+    { type: 'chunk', time: T0 + 1_500, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'brief thought' } } },
+    textChunk(T0 + 2_000, 1, 'answer one'),
+    toolCallDeltaChunk(T0 + 3_000, 2, 'c9', 'bash'),
+  ]
+  const events = [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c9', name: 'bash', turn: 1, step: 0, time: T0 + 3_000, seq: 1 }),
+    toolResult('c9', 1, 0, T0 + 3_500, 2, 'ok'),
+    assistantSettlement({ turn: 1, step: 0, time: T0 + 5_000, seq: 3, text: 'answer one', stream }),
+  ]
+  const cold = foldEvents(events)
+  assert.deepEqual(logicalRows(cold), ['thinking:brief thought', 'assistant:answer one', 'tool:c9'],
+    'the reasoning lane precedes the Conversation and the tool follows both')
+  assert.deepEqual(structureKinds(cold), ['work', 'message', 'work'])
+})
+
+test('T4b: an assistant-first lane order keeps the Conversation before its reasoning row', () => {
+  const stream = [
+    textChunk(T0 + 1_000, 0, 'answer first'),
+    { type: 'chunk', time: T0 + 1_500, chunk: { type: 'block-start', index: 1, blockType: 'reasoning' } },
+    { type: 'chunk', time: T0 + 1_500, chunk: { type: 'reasoning-delta', index: 1, text: 'later thought' } },
+    { type: 'chunk', time: T0 + 2_000, chunk: { type: 'block-end', index: 1, block: { type: 'reasoning', text: 'later thought' } } },
+  ]
+  const cold = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    assistantSettlement({ turn: 1, step: 0, time: T0 + 5_000, seq: 1, text: 'answer first', stream }),
+  ])
+  assert.deepEqual(logicalRows(cold), ['assistant:answer first', 'thinking:later thought'],
+    'the durable lane authority keeps the assistant row first')
+})
+
+// ── T5: negative cases — no guessing without evidence ─────────────────────
+
+test('T5a: tools of a DIFFERENT turn are never displaced by another turn’s Conversation', () => {
+  const cold = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
+    toolResult('c1', 1, 0, T0 + 1_500, 2, 'a'),
+    eventAt('turn/start', { turn: 2 }, T0 + 2_000, 3),
+    assistantSettlement({
+      turn: 2, step: 0, time: T0 + 5_000, seq: 4, text: 'turn two answer',
+      stream: [textChunk(T0 + 2_500, 0, 'turn two answer')],
+    }),
+    toolCall({ callId: 'c2', name: 'bash', turn: 2, step: 0, time: T0 + 6_000, seq: 5 }),
+    toolResult('c2', 2, 0, T0 + 6_500, 6, 'b'),
+  ])
+  assert.deepEqual(logicalRows(cold),
+    ['tool:c1', 'assistant:turn two answer', 'tool:c2'],
+    'a cross-turn Conversation never reaches back into the earlier turn')
+})
+
+test('T5b: a streamless settlement provides no order evidence, so no tool is displaced', () => {
+  const cold = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
+    toolResult('c1', 1, 0, T0 + 1_500, 2, 'a'),
+    toolCall({ callId: 'c2', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 3 }),
+    toolResult('c2', 1, 1, T0 + 3_500, 4, 'b'),
+    // No embedded stream: nothing proves when the reply text became visible.
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: 'm-streamless', role: 'assistant',
+        content: [{ type: 'text', text: 'no stream' }], source: { kind: 'assistant' },
+      },
+    }, T0 + 5_000, 5),
+  ])
+  assert.deepEqual(logicalRows(cold), ['tool:c1', 'tool:c2', 'assistant:no stream'],
+    'without evidence the durable append order is preserved')
+})
+
+test('T5c: an equal-time Conversation provides no provable ORDER, so no tool is displaced', () => {
+  const cold = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 1 }),
+    toolResult('c1', 1, 1, T0 + 3_500, 2, 'a'),
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 5_000, seq: 3, text: 'same instant',
+      // The first visible text carries exactly the tool's call time: equal
+      // timestamps cannot prove either side came first.
+      stream: [textChunk(T0 + 3_000, 0, 'same instant')],
+    }),
+  ])
+  assert.deepEqual(logicalRows(cold), ['tool:c1', 'assistant:same instant'],
+    'equal times stay in the durable order instead of guessing')
+})
+
+test('T5d: a stream tool-call delta whose callId matches no recorded call displaces nothing', () => {
+  const cold = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 1 }),
+    toolResult('c1', 1, 1, T0 + 3_500, 2, 'a'),
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 5_000, seq: 3, text: 'before the tool',
+      stream: [
+        textChunk(T0 + 1_000, 0, 'before the tool'),
+        // Identity mismatch: this delta names a call the fold never saw.
+        toolCallDeltaChunk(T0 + 1_500, 1, 'unknown-call', 'bash'),
+      ],
+    }),
+  ])
+  assert.deepEqual(logicalRows(cold), ['tool:c1', 'assistant:before the tool'],
+    'only an identified, recorded call may be reordered')
+})
+
+test('T5e: duplicate tool names never cross-talk — displacement follows the callId', () => {
+  const cold = foldEvents([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall({ callId: 'bash-a', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
+    toolResult('bash-a', 1, 0, T0 + 1_200, 2, 'a'),
+    toolCall({ callId: 'bash-b', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 3 }),
+    toolResult('bash-b', 1, 1, T0 + 3_200, 4, 'b'),
+    assistantSettlement({
+      turn: 1, step: 1, time: T0 + 5_000, seq: 5, text: 'between same-named tools',
+      stream: [
+        textChunk(T0 + 2_000, 0, 'between same-named tools'),
+        toolCallDeltaChunk(T0 + 3_000, 1, 'bash-b', 'bash'),
+      ],
+    }),
+  ])
+  assert.deepEqual(logicalRows(cold),
+    ['tool:bash-a', 'assistant:between same-named tools', 'tool:bash-b'],
+    'only the call named by the evidence moves')
+})
