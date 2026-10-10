@@ -24,7 +24,14 @@ import test from 'node:test'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MessageId } from '@deepseek-ai/dsh-llm'
-import { SessionLogOffset, SessionSeq, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import SessionStore, {
+  SessionId,
+  SessionLogOffset,
+  SessionSeq,
+  type Session,
+  type SessionEvent,
+  type SessionHeader,
+} from '@deepseek-ai/dsh-session'
 import * as performanceHost from '../src/app/host/performance-host.ts'
 import {
   piTuiPerformanceDefinition,
@@ -441,9 +448,91 @@ test('checkpoint plus tail replay equals the full recompute, and a version misma
 
 // ── the shipped composition rows ──────────────────────────────────────────
 
-test('the shipped Direct row registers the Host and the runner waits for its gate', () => {
+test('the shipped Direct row registers the Host exactly once and the runner waits for its gate', () => {
   const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
   assert.match(patch, /- id: pi-tui-performance-host\r?\n\s+name: '@xmoon76\/dsh-pi-tui\/performance-host'\r?\n\s+inject: \[tuiStartup, sessionProjections\]/)
+  // One Host Context registers the key once: no second Direct row.
+  assert.equal((patch.match(/- id: pi-tui-performance-host\b/g) ?? []).length, 1)
   // The runner must not mount without its performance authority.
   assert.match(patch, /inject: \[tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady\]/)
+})
+
+// ── the real Host plane: committed events drive the real seam ─────────────
+
+/** Append one REAL completed durable turn through the official Session API
+ *  (invariants enforced, `session/event` published, the registry driving). */
+async function appendRealTurn(session: Session, turn: number, outputTokens: number): Promise<void> {
+  session.append('turn/start', { turn })
+  session.append('step/start', { turn, step: 0 })
+  // A real model request takes real wall time; wait so the paired wall time is
+  // positive (a zero-duration step is legitimately not a TPS sample).
+  await new Promise(resolve => setTimeout(resolve, 5))
+  session.append('assistant/message', {
+    turn,
+    step: 0,
+    message: {
+      id: MessageId(`real-${turn}`),
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [{ type: 'chunk', time: Date.now() - 1, chunk: { type: 'text-delta', index: 0, text: 'x' } }],
+    usage: { inputTokens: 3, outputTokens },
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn, step: 0 })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
+}
+
+test('real committed Session events drive the unit through the official snapshot and change feed', async (t) => {
+  const ctx = new Context()
+  t.after(async () => { await ctx.fiber.dispose() })
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(performanceHost)
+  const registry = ctx.get('sessionProjections') as SessionProjectionRegistry
+  const session = ctx.sessions.create(SessionId('perf-real-session'))
+
+  const changes: Array<{ readonly value: unknown; readonly seq: number }> = []
+  const off = registry.onChanged((_session, key, value, seq) => {
+    if (key === PI_TUI_PERFORMANCE_KEY) changes.push({ value, seq })
+  })
+  t.after(() => off())
+
+  // The empty log already carries the authoritative zero view (not undefined).
+  assert.deepEqual(registry.snapshot(session, [PI_TUI_PERFORMANCE_KEY]).values[PI_TUI_PERFORMANCE_KEY], emptyPerformanceView())
+
+  await appendRealTurn(session, 0, 120)
+  await appendRealTurn(session, 1, 30)
+
+  const view = registry.snapshot(session, [PI_TUI_PERFORMANCE_KEY]).values[PI_TUI_PERFORMANCE_KEY] as PiTuiPerformanceProjection
+  assert.equal(view.all.samples, 2)
+  assert.equal(view.all.outputTokens, 150)
+  assert.ok(view.all.modelMs > 0, 'the real committed wall time is positive')
+  assert.equal(view.recent.samples, 2)
+  assert.equal(view.recent.outputTokens, 150)
+  assert.equal(view.recent.modelMs, view.all.modelMs)
+  assert.equal(view.recent.firstTokenSamples, 2)
+
+  // The change feed published every real advance (the subscriber path).
+  assert.ok(changes.length >= 2, `the change feed must publish each completion: ${changes.length}`)
+  assert.equal((changes.at(-1)?.value as PiTuiPerformanceProjection).all.outputTokens, 150)
+})
+
+test('the readiness gate is published only after the unit registers', async (t) => {
+  const ctx = new Context()
+  t.after(async () => { await ctx.fiber.dispose() })
+  // A refusing registry: the row must fail BEFORE publishing readiness, so a
+  // composition that cannot register the projection never reports itself ready.
+  ctx.provide('sessionProjections', {
+    register: () => { throw new Error('registration refused') },
+  })
+  const fiber = ctx.plugin(performanceHost)
+  try {
+    await fiber
+  } catch {
+    // the refusing registry is exactly the scenario under test
+  }
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(ctx.get(performanceHost.PI_TUI_PERFORMANCE_READY_SERVICE), undefined,
+    'a failed registration must not publish the readiness gate')
 })
