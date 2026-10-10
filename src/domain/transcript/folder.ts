@@ -869,6 +869,12 @@ export class TranscriptFolder {
    *  serve as ownership proof for a later durable `tool/call`; a lower-authority
    *  late attempt still contributes its time but never qualifies a call. */
   private readonly toolCallPreparingStarts = new Map<string, { at: number; owner: string; authorized: boolean }>()
+  /** The current successful owner's DECLARED Tool ids per step: the stream's
+   *  Preparing records plus the durable tool-call blocks. REPLACED by each
+   *  settlement, so an id the current message no longer names is not a member —
+   *  membership must never be inferred from a layout artifact such as an existing
+   *  displacement, which differs between the live and cold raw placements. */
+  private readonly declaredToolCallsByStep = new Map<string, ReadonlySet<string>>()
   /** Active Workflow runs: the shared semantic projection (owner tracking,
    * interruption projection, member/run settlement) plus the raw item index
    * of each active run's card for search dirty marking. */
@@ -3123,6 +3129,7 @@ export class TranscriptFolder {
     for (const [key, start] of this.toolCallPreparingStarts) {
       if (start.owner === owner) this.toolCallPreparingStarts.delete(key)
     }
+    this.declaredToolCallsByStep.delete(stepKey(turn, step))
   }
 
   /** Drop every preparing-start evidence of one turn (its `turn/end`). */
@@ -3130,6 +3137,10 @@ export class TranscriptFolder {
     const ownerPrefix = `${turn}:`
     for (const [key, start] of this.toolCallPreparingStarts) {
       if (start.owner.startsWith(ownerPrefix)) this.toolCallPreparingStarts.delete(key)
+    }
+    const stepPrefix = `${turn}/`
+    for (const key of [...this.declaredToolCallsByStep.keys()]) {
+      if (key.startsWith(stepPrefix)) this.declaredToolCallsByStep.delete(key)
     }
   }
 
@@ -3360,10 +3371,12 @@ export class TranscriptFolder {
       for (const callId of candidates) {
         const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
         const hadRelation = index !== undefined && this.laneDisplayByDisplaced.has(index)
-        if (!hadRelation && !allowNewRelations) {
-          // A lower-authority refresh may REVOKE an invalid relation but never
-          // create one: the current successful settlement owns membership, and a
-          // card merely existing in the scoped index does not authorize a move.
+        if (!allowNewRelations && !hadRelation && !this.isDeclaredToolCall(turn, step, callId)) {
+          // A lower-authority refresh re-derives facts ONLY for ids the CURRENT
+          // successful owner still declares: an expired id stays expired, while a
+          // still-declared one converges even when its raw placement differs
+          // between live and cold (an existing displacement is not authorization,
+          // and neither is the absence of one).
           continue
         }
         const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
@@ -3373,6 +3386,12 @@ export class TranscriptFolder {
       if (!dropped || !restoreSlots()) break
     }
     return touched
+  }
+
+  /** Whether the current successful settlement still declares this Tool id for
+   *  the step (see `declaredToolCallsByStep`). */
+  private isDeclaredToolCall(turn: number, step: number, callId: string): boolean {
+    return this.declaredToolCallsByStep.get(stepKey(turn, step))?.has(callId) === true
   }
 
   /** Whether a proven Tool row already sits on the physical side its evidence
@@ -5043,6 +5062,13 @@ export class TranscriptFolder {
             name: block.name,
           })
         }
+        // The settlement REPLACES this step's declared membership: a late
+        // lower-authority refresh may only re-derive facts for ids the current
+        // successful owner still names.
+        this.declaredToolCallsByStep.set(key, new Set([
+          ...(projection?.toolCallStarts.keys() ?? []),
+          ...messageBlocks.flatMap(block => block.type === 'tool-call' ? [block.id] : []),
+        ]))
         const firstVisible = projection?.firstVisibleAt
         if (firstVisible === undefined) activity.firstVisibleAssistantTimes.delete(event.data.step)
         else activity.firstVisibleAssistantTimes.set(event.data.step, firstVisible)

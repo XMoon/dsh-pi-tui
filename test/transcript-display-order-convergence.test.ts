@@ -2131,4 +2131,41 @@ test('INT16: an expired id stays unowned for a LATER first tool/call after a lat
   }
 })
 
-
+test('INT17: a still-declared Tool converges the same from LIVE and COLD raw placements', () => {
+  const settlementStream = (): Record<string, unknown>[] => [
+    textChunk(T0 + 2_000, 0, 'reply'),
+    toolCallDeltaChunk(T0 + 3_000, 1, 'c', 'read'),
+  ]
+  const run = (live: boolean): string[] => {
+    const folder = new TranscriptFolder()
+    if (live) {
+      // The REAL live hook: the streamed Preparing frames arrive before the call,
+      // so the Assistant row is created first (raw 0) and C lands after it (raw 1).
+      for (const time of [T0 + 2_000, T0 + 3_000]) {
+        folder.applyLiveInput({
+          kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time,
+          chunk: time === T0 + 2_000
+            ? { type: 'text-delta', index: 0, text: 'reply' }
+            : { type: 'tool-call-delta', index: 1, id: 'c', name: 'read', argumentsDelta: '{}' },
+        })
+      }
+    }
+    folder.apply([
+      readCall('c', 1, 0, T0 + 5_000, 1, 'c.ts'),
+      assistantSettlement({ turn: 1, step: 0, time: T0 + 9_000, seq: 2, text: 'reply', stream: settlementStream() }),
+    ])
+    assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:c'], `live=${live}: the frozen baseline agrees`)
+    // The SAME late attempt (an earlier Preparing for the STILL-DECLARED C) must
+    // converge identically regardless of the raw placement an existing
+    // displacement is not membership, and neither is its absence.
+    folder.apply([eventAt('assistant/attempt', {
+      turn: 1, step: 0,
+      stream: [toolCallDeltaChunk(T0 + 1_000, 0, 'c', 'read'), textChunk(T0 + 2_000, 1, 'reply')],
+    }, T0 + 12_000, 3)])
+    return logicalRows(folder)
+  }
+  const cold = run(false)
+  const live = run(true)
+  assert.deepEqual(live, ['tool:c', 'assistant:reply'], 'the LIVE placement converges to the proven side')
+  assert.deepEqual(cold, live, 'the same durable facts must not depend on the raw placement')
+})
