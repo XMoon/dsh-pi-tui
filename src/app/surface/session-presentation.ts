@@ -623,11 +623,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // Only a TRUNCATED window (hasMore) defers to the official running bit.
     const foldProven = !snapshot.hasMore
     const working = foldProven ? workingFromLog(events) : (deps.remote.running(sessionId) ?? false)
-    // PR5 (plan §3.2): the bounded window's recent-performance authority —
-    // the window reaches the history start (its zero is a measured zero) OR
-    // the fold retained enough valid samples for both recent windows. A
-    // truncated window short of both keeps the footer's recent metrics
-    // OMITTED (unknown), never a numeric zero stand-in.
+    // The measured performance values are NOT this fold's business (TPS plan
+    // PR-2): they come from the Session's own Host `piTuiPerformance`
+    // projection, so a truncated window can no longer make the footer's
+    // recent figures unknown.
     // The official CURRENT-VALUE facts (title/goal/todos/cwd) — their source
     // events may precede this bounded window, so the projection owns them.
     const facts = deps.remote.facts?.(sessionId)
@@ -687,18 +686,15 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
     statsFolder = hydrated.statsFolder
-    // PR5: the widened window re-proves (or disproves) its recent-sample
-    // evidence in the SAME fenced commit that replaced the fold — a
-    // `loadOlder` that reaches enough samples (or the history start) flips
-    // the footer's omitted metrics on with the new fold, never after it.
     for (const liveInput of snapshot.liveInputs) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
     // F10 (round 4): the stats fold was just REPLACED by the wider window —
-    // the footer's status derivation still reads the pre-hydrate snapshot,
-    // so a repaint alone would keep rendering the stale (often all-zero)
-    // recent figures. Re-derive the status from the NEW fold in the same
-    // step; the cheap refresh's own fences own the session/binding rules.
+    // the lifetime turns/steps/llmMs the status derives from it are otherwise
+    // stale, so a repaint alone would keep rendering the pre-hydrate figures.
+    // Re-derive the status from the NEW fold in the same step; the cheap
+    // refresh's own fences own the session/binding rules. (The measured
+    // performance values are the Host projection's and are unaffected.)
     deps.refreshStatusCheap()
     deps.surface.repaint()
   }

@@ -1,8 +1,9 @@
 /**
  * The Remote branch's session-facts composition (M3-4 PR4 §3.3/§3.6/§12.4):
- * whole-log truth from the OFFICIAL projections, recent-window truth from
- * the exact retained binding's bounded event window, paged only as far as
- * the recent-sample contract requires.
+ * whole-log truth from the OFFICIAL projections and the measured performance
+ * truth from the Session's own Host `piTuiPerformance` projection. The
+ * bounded event window is folded ONLY for `lastAssistantText`, which keeps
+ * its own `loadOlder()` paging.
  *
  * Ownership rules (frozen, TPS plan PR-2):
  * - lifetime turns/steps/llmMs come from the `sessionStats` projection —
@@ -88,13 +89,15 @@ function lastAssistantTextOfWindow(events: readonly PresentationDurableEvent[]):
 }
 
 /**
- * Compose the Remote whole-log + recent stats for one session (§3.3) as
- * AUTHORITY-GROUPED facts (PR5 v2 §1B-2): the `sessionStats` projection owns
- * `lifetime`, the `tokenUsage` projection owns `tokens`, the bounded window
- * owns `recent` (present only when its evidence is authoritative), and an
- * absent group means the source cannot answer — never a zero stand-in.
- * Superseded (generation/binding/scope replaced) settles `undefined`, never
- * a partial or stale figure.
+ * Compose the Remote whole-log + performance stats for one session (§3.3) as
+ * AUTHORITY-GROUPED facts (PR5 v2 §1B-2, TPS plan PR-2): the `sessionStats`
+ * projection owns `lifetime`, the `tokenUsage` projection owns `tokens`, and
+ * THIS Session's Host `piTuiPerformance` projection owns `recent` +
+ * `sessionPerformance` (each field present only when its own scope can
+ * answer). An absent group means the source cannot answer — never a zero
+ * stand-in, and never a bounded-window fold. A superseded
+ * (generation/binding/scope replaced) operation settles `undefined`, never a
+ * partial or stale figure.
  */
 export async function composeRemoteSessionStats(input: {
   readonly sessionId: string
