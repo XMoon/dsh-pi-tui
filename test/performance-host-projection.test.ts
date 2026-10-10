@@ -22,7 +22,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SessionProjectionRegistry, { type ProjectionCheckpoint } from '@deepseek-ai/dsh-session-projection'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import SessionStore, {
   SessionId,
@@ -252,9 +252,11 @@ test('a single-delta burst, hidden reasoning, and a whole-step retry all sample 
 
 test('invalid or incomplete steps never pollute TPS, while valid TTFB still joins', () => {
   const raw = [
-    // No usage at all.
-    ...completingStep(0, 0, T0, 1000, 0),
-    // Zero output tokens.
+    // No usage record at all (neither top-level nor in the stream).
+    stepStart(0, 0, T0),
+    assistantMessage({ turn: 0, step: 0, time: T0 + 1000, provider: 'p' }),
+    stepEnd(0, 0, T0 + 1001),
+    // Top-level usage present but zero output tokens.
     ...completingStep(0, 1, T0 + 10_000, 1000, 0),
     // Non-positive wall time (message at step/start).
     stepStart(0, 2, T0 + 20_000),
@@ -380,6 +382,19 @@ test('derivePerformance reports absent facts, never a zero stand-in', () => {
     all: { outputTokens: 0, modelMs: 0, samples: 0 },
   }
   assert.deepEqual(derivePerformance(projection), { firstTokenMs: 150, tokensPerSec: 87.5 })
+
+  // A ZERO-SAMPLE scope is unknown even when stray paired counters are present
+  // (plan §3.2): the sample count is part of scope eligibility, so the recent
+  // scope answers nothing while All still answers.
+  assert.deepEqual(derivePerformance({
+    recent: { outputTokens: 100, modelMs: 1000, samples: 0, firstTokenMs: 0, firstTokenSamples: 0 },
+    all: { outputTokens: 200, modelMs: 1000, samples: 2 },
+  }), { sessionTokensPerSec: 200 })
+  // …and the mirror: a sampled recent scope with a zero-sample All scope.
+  assert.deepEqual(derivePerformance({
+    recent: { outputTokens: 50, modelMs: 1000, samples: 1, firstTokenMs: 0, firstTokenSamples: 0 },
+    all: { outputTokens: 500, modelMs: 1000, samples: 0 },
+  }), { tokensPerSec: 50 })
 })
 
 // ── the official seam: registration, checkpoint and replay ────────────────
@@ -429,9 +444,41 @@ test('checkpoint plus tail replay equals the full recompute, and a version misma
   assert.deepEqual(full.snapshot.values[PI_TUI_PERFORMANCE_KEY], foldView(raw))
   assert.equal(full.snapshot.asOfSeq, events.length - 1)
 
-  // Cache replay: the same cut from the checkpoint plus the remaining tail.
-  const tail = seam.registry.restore(full.checkpoint, events.slice(splitIndex), SessionLogOffset(splitIndex), HEADER, SessionLogOffset(0))
+  // Cache replay from a real PREFIX cut: `splitIndex` stops inside step 1
+  // (right after its `step/start`), so the persisted state carries an OPEN
+  // step and the tail must still settle it. A checkpoint taken at the log END
+  // would make the official `restore` start its replay at `row.seq + 1`, i.e.
+  // past the supplied events, and the equality below would hold vacuously.
+  const cached = JSON.parse(JSON.stringify(
+    seam.registry.restore({}, events.slice(0, splitIndex), SessionLogOffset(0), HEADER, SessionLogOffset(0)).checkpoint,
+  )) as ProjectionCheckpoint
+  const cachedState = (cached[PI_TUI_PERFORMANCE_KEY] as { val: { openStep: unknown } }).val
+  assert.notEqual(cachedState.openStep, null, 'the cached cut must stop inside an OPEN step')
+  const cachedView = seam.registry.viewCheckpoint(cached, [PI_TUI_PERFORMANCE_KEY])[PI_TUI_PERFORMANCE_KEY] as PiTuiPerformanceProjection
+  assert.equal(cachedView.recent.samples, 1, 'the prefix cut holds only step 0')
+  assert.notEqual(cachedView.recent.samples, foldView(raw).recent.samples,
+    'the tail must add evidence the prefix cut cannot already hold')
+
+  // Decisive replay witness: the registered unit is the SAME definition object,
+  // so a forwarding wrapper observes every `apply` the official `restore`
+  // performs. Equality alone cannot prove a replay happened (a checkpoint taken
+  // at the log end already holds the final state); this count can.
+  const originalApply = piTuiPerformanceDefinition.apply
+  let tailApplies = 0
+  piTuiPerformanceDefinition.apply = (state, event) => {
+    tailApplies += 1
+    return originalApply(state, event)
+  }
+  const tail = seam.registry.restore(cached, events.slice(splitIndex), SessionLogOffset(splitIndex), HEADER, SessionLogOffset(0))
+  piTuiPerformanceDefinition.apply = originalApply
+  t.after(() => { piTuiPerformanceDefinition.apply = originalApply })
+  assert.equal(tailApplies, events.length - splitIndex,
+    'every tail event must be replayed through the unit from the prefix checkpoint')
+
   assert.deepEqual(tail.snapshot, full.snapshot)
+  const replayed = tail.snapshot.values[PI_TUI_PERFORMANCE_KEY] as PiTuiPerformanceProjection
+  assert.equal(replayed.recent.samples, 3, 'the replay settled the open step and the remaining one')
+  assert.equal(replayed.recent.firstTokenSamples, 3)
 
   // A row from another fold version is discarded; with baseSeq 0 the unit
   // refolds the whole log, never forward-applies stale state.
