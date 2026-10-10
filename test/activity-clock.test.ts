@@ -660,6 +660,58 @@ test('F9: an EQUAL-time following Conversation closes the Activity (a coarse clo
   assert.ok(!/Activity \d/u.test(line), `a point Activity hides its duration:\n${line}`)
 })
 
+test('F9b (production): an equal-time Conversation switches the LIVE card to a closed point (viewport + cache state)', async (t) => {
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'compact' },
+    workingIntervalMs: 60,
+  })
+  app.start()
+  startedApps.add(app)
+  t.after(() => app.dispose())
+
+  const at = Date.now() - 1_000
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 1 }, at - 500, 0)])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: at,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'same-ms thought' },
+  })
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.setWorking(true)
+  await vt.waitForRender()
+  const liveView = strip(vt.getViewport().join('\n'))
+  const liveSeconds = durationSeconds(liveView)
+  assert.ok(liveSeconds >= 0, `the open trailing span is live first:\n${liveView}`)
+
+  // The coarse clock stamps the block-end AND the first visible text with the
+  // same instant as the Activity's start: the card must switch to a CLOSED
+  // point (no duration) instead of keeping the live clock.
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: at,
+    chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'same-ms thought' } },
+  })
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'a', turn: 1, step: 0, time: at,
+    chunk: { type: 'text-delta', index: 1, text: 'same-ms answer' },
+  })
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  const closedView = strip(vt.getViewport().join('\n'))
+  assert.ok(!/Activity \d/u.test(closedView),
+    `an equal-time Conversation must close the point Activity and hide its duration:\n${closedView}`)
+  assert.ok(closedView.includes('same-ms answer'), `the Conversation row renders:\n${closedView}`)
+
+  // Cache state: a stale LIVE component would resume/extend the count with the
+  // wall clock, so the closed card must stay duration-less across real ticks.
+  await new Promise(resolve => setTimeout(resolve, 1_300))
+  await vt.waitForRender()
+  const settledView = strip(vt.getViewport().join('\n'))
+  assert.ok(!/Activity \d/u.test(settledView),
+    `the closed card must never resume counting (cache switched to the closed clock):\n${settledView}`)
+  app.stop()
+})
+
 test('F7: the lifetime derivation reads the structure in bounded linear order', () => {
   const events: SessionEvent[] = []
   let seq = 0
