@@ -978,7 +978,7 @@ test('B3: the surface withdraws the interaction owner BEFORE it starts the rende
     notify: () => {},
     setQuestionAttention: () => {},
     withdrawPending: () => { order.push('interaction-withdraw') },
-    withdrawPresentation: () => {},
+    withdrawPresentations: () => {},
     closeTransientList: () => {},
   }
   const display = {

@@ -54,6 +54,7 @@ function harness(options: {
   const unsubscribed: string[] = []
   const asks: AskRecord[] = []
   /** The lifetimes the controller withdrew the PRESENTATION for (B3 finding C). */
+  /** The lifetimes the CALLER withdrew after collecting them (production order). */
   const withdrawals: AbortSignal[] = []
   const notices: string[] = []
   const answered: Array<{ sessionId: string; callId: string }> = []
@@ -89,7 +90,6 @@ function harness(options: {
     repaint: () => {},
     currentSessionId: () => currentSession,
     isAdmissibleSession: sessionId => sessionId === currentSession,
-    withdrawPresentation: (lifetime) => { withdrawals.push(lifetime) },
     diag: SILENT_DIAG,
     now: () => 1_000,
     tickMs: 5,
@@ -475,12 +475,14 @@ test('PR3-B B3: a live flow whose Session no longer owns the surface is withdraw
   await settleFrames()
   assert.equal(h.asks.length, 1, 'the live foreground form is presented')
 
-  // A replacement Session takes the surface: the presentation is withdrawn by
-  // the EXACT lifetime the presenter received.
+  // A replacement Session takes the surface: the controller COLLECTS the exact
+  // lifetime the presenter received, and the caller withdraws it (the production
+  // ordering — one batched presentation withdrawal).
   h.setSession('session-b')
-  h.controller.reconcile()
-  assert.equal(h.withdrawals.length, 1, 'the replaced flow is withdrawn exactly once')
-  assert.equal(h.withdrawals[0], h.asks[0]?.signal, 'the withdrawal names the exact presented lifetime')
+  const collected = h.controller.withdrawReplacedPresentation()
+  assert.equal(collected.dropped, true, 'the replaced flow left the model')
+  assert.deepEqual(collected.lifetimes, [h.asks[0]?.signal], 'the withdrawal names the exact presented lifetime')
+  h.withdrawals.push(...collected.lifetimes)
 
   // PRESENTATION only: the official request keeps its own lifetime, so the
   // withdrawal itself settles nothing.
@@ -532,7 +534,6 @@ test('PR3-B B3: the REAL TSP seat parks a continued form on Esc and reopens it w
     repaint: () => {},
     currentSessionId: () => SESSION,
     isAdmissibleSession: sessionId => sessionId === SESSION,
-    withdrawPresentation: lifetime => { seat.presenter.withdrawPresentation(lifetime) },
     diag: SILENT_DIAG,
   })
   try {
@@ -581,6 +582,7 @@ test('PR3-B B3 finding F7: a held timed claim retired by a publication never mou
   })
   let releaseClaim: (() => void) | undefined
   const claimHeld = new Promise<void>(resolve => { releaseClaim = resolve })
+  /** The lifetimes the CALLER withdrew after collecting them (production order). */
   const withdrawals: AbortSignal[] = []
   // The exact lifetime the presenter receives (the controller's combined
   // local+request signal, built BEFORE the claim): the withdrawal must name it.
@@ -604,10 +606,6 @@ test('PR3-B B3 finding F7: a held timed claim retired by a publication never mou
     repaint: () => {},
     currentSessionId: () => currentSession,
     isAdmissibleSession: sessionId => sessionId === currentSession,
-    withdrawPresentation: lifetime => {
-      withdrawals.push(lifetime)
-      seat.presenter.withdrawPresentation(lifetime)
-    },
     diag: SILENT_DIAG,
   })
   let currentSession: string | undefined = SESSION
@@ -636,7 +634,9 @@ test('PR3-B B3 finding F7: a held timed claim retired by a publication never mou
 
     // The replacement Session is published while the claim is still opening.
     currentSession = 'session-b'
-    controller.reconcile()
+    const collected = controller.withdrawReplacedPresentation()
+    seat.presenter.withdrawPresentations(collected.lifetimes)
+    withdrawals.push(...collected.lifetimes)
     assert.equal(withdrawals.length, 1, 'the opening flow IS retired by the publication (registered before the await)')
 
     // The claim finally lands: the presenter is reached, but the form must never

@@ -95,7 +95,7 @@ export interface SurfaceInteractionPresenter {
    * session switch (the TSP `layer` modal) implements this; the others may leave
    * it inert.
    */
-  withdrawPresentation(lifetime: AbortSignal): void
+  withdrawPresentations(lifetimes: readonly AbortSignal[]): void
   /**
    * PR3-B B3 (external review P2-B): close the renderer's TRANSIENT presentation
    * (the TSP Alt+Q list) at a real owner replacement — the same synchronous
@@ -122,7 +122,7 @@ export type PiTuiInteractionApp = Pick<
  * `withdrawPending` is deliberately a NO-OP — the app's own `dispose()`, which
  * the surface runs right after the interaction owner, is the ONE cancellation
  * owner on this branch. It never simulates an answer or swallows an app error.
- * `withdrawPresentation` is a NO-OP for the same ownership reason: PiTui keeps
+ * `withdrawPresentations` is a NO-OP for the same ownership reason: PiTui keeps
  * its long-standing session-switch behavior (a mounted editor-seat flow is NOT
  * withdrawn by a switch there), and this slice changes no PiTui behavior.
  */
@@ -134,7 +134,7 @@ export function pituiSurfaceInteractionPresenter(app: PiTuiInteractionApp): Surf
     notify: (text, kind) => { app.notify(text, kind) },
     setQuestionAttention: parkedCount => { app.setQuestionAttention(parkedCount) },
     withdrawPending: () => {},
-    withdrawPresentation: () => {},
+    withdrawPresentations: () => {},
     closeTransientList: () => {},
   }
 }

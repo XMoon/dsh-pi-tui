@@ -13,10 +13,11 @@
 > signal-less request settlement) and one P3 (the transient list across a
 > replacement) — all fixed in round 11 — and, on the next round, two more P2
 > boundaries (a signal-less LATE admission and the owner-publication →
-> initialization window), both fixed in round 12, and one more on the next round
-> (the commit-section half must perform no Host read) — fixed in round 13. F6/C is
-> kept PARTIAL here until the external review closes the delivery status; B4
-> pending.**
+> initialization window), both fixed in round 12, one more on the next round
+> (the commit-section half must perform no Host read) — fixed in round 13 — and a
+> final one (several replaced modals must leave as ONE atomic batch) — fixed in
+> round 14. F6/C is kept PARTIAL here until the external review closes the delivery
+> status; B4 pending.**
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
@@ -1332,3 +1333,39 @@ DISCRIMINATION (`sha256 -c` verified restore): restoring the commit-time attenti
 notify turns the witness RED with the exact production symptom —
 `transition commit seam failed after publication (child committed) …
 the armed projection read fired …` — plus the zero-read assertion failing.
+
+### Round 14 — the external review's fourth round (P2-D: atomic multi-modal withdrawal)
+
+The fourth round confirmed rounds 11–13 and found the last presentation defect: the
+replaced modals were withdrawn ONE AT A TIME. The seat's withdrawal removes the
+active slot and then `promote()`s the next queued one, so with two replaced
+requests (the first active, the second queued) the first withdrawal promoted and
+RENDERED the second — a replaced modal painted under the already-published
+replacement — before the second withdrawal removed it. The intermediate frame's
+emission depends on SDK flow control, so the defect is not always visible on the
+wire, but the promotion itself is deterministic.
+
+FIX: the withdrawal is now an ATOMIC BATCH. The controller COLLECTS the
+inadmissible live-flow lifetimes (state-only, no presenter call, no Host read) and
+returns them; the interaction owner collects the approval lifetimes as well and
+hands the whole set to the renderer in ONE `withdrawPresentations(lifetimes)` call
+which removes every member of the batch FIRST, then picks the successor and commits
+ONE layer/focus frame. No member of a batch can be promoted or painted in between,
+and a successor (for example the replacement subject's own queued request) takes
+the seat in that same frame. The commit-section half keeps every earlier property
+(no Host read, no attention notify, a local stale-count reset).
+
+WITNESSES: a seat-level witness drives a batch of two replaced approvals with a
+successor already queued and asserts that the batch commits EXACTLY ONE frame, that
+the frame contains no member of the batch, and that the successor appears in that
+same frame; a production-path witness on the real surface runtime records the
+presenter's call SIZES and asserts the publication handed ONE batch of two (never
+one call per modal), that no intermediate overlay was added, that both replaced
+requests settle only through their own lifetimes and that a successor queued
+afterwards takes the seat.
+
+DISCRIMINATION (`sha256 -c` verified restore): reverting the interaction owner to
+one presenter call per lifetime turns the production witness RED on exactly "the
+publication handed the renderer ONE batch with both replaced prompts" (and the
+seat-level witness stays green, because it guards the seat's own batch semantics —
+the two witnesses cover the two halves).

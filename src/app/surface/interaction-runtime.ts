@@ -252,17 +252,19 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * opening target are retired by ONE rule. The official request is untouched: its
    * own abort still settles it `cancelled`.
    */
-  const withdrawReplacedApprovals = (): void => {
-    if (options.isCleanedUp()) return
+  const withdrawReplacedApprovals = (): AbortSignal[] => {
+    if (options.isCleanedUp()) return []
+    const lifetimes: AbortSignal[] = []
     for (const [lifetime, live] of [...liveApprovals]) {
       if (isAdmissible(live.sessionId)) continue
       liveApprovals.delete(lifetime)
-      options.livePresenter()?.withdrawPresentation(lifetime)
+      lifetimes.push(lifetime)
       // P2-2: a request with no Host lifetime has no other owner that could ever
       // settle it, so the replacement does — and only that KIND of request: a
       // request carrying a Host signal keeps the Host's own settlement right.
       live.retire?.()
     }
+    return lifetimes
   }
 
   /**
@@ -272,8 +274,8 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * calls it on activity, so admission and retirement can never disagree.
    */
   const reconcilePresentation = (): void => {
+    withdrawReplacedPresentation()
     questionController?.reconcile()
-    withdrawReplacedApprovals()
   }
 
   /**
@@ -282,9 +284,14 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    */
   const withdrawReplacedPresentation = (): void => {
     if (options.isCleanedUp()) return
-    const dropped = questionController?.withdrawReplacedPresentation() ?? false
-    withdrawReplacedApprovals()
+    const questions = questionController?.withdrawReplacedPresentation() ?? { dropped: false, lifetimes: [] }
+    const approvals = withdrawReplacedApprovals()
+    // ONE atomic withdrawal for the whole publication (external review P2-D):
+    // every replaced presentation leaves the seat before the successor is picked,
+    // so no member of this batch is ever promoted (or painted) in between.
+    options.livePresenter()?.withdrawPresentations([...questions.lifetimes, ...approvals])
     options.livePresenter()?.closeTransientList()
+    const dropped = questions.dropped || approvals.length > 0
     // The replaced subject's parked count must not remain on screen, and this
     // commit-time half must NOT read the Host to re-derive it: the stale count is
     // cleared locally here and the full reconcile (hydration / activity)
@@ -391,11 +398,6 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
         isAdmissibleSession: sessionId => options.isAdmissibleSession(sessionId),
-        // PR3-B B3 (finding C): a live foreground flow whose Session no longer
-        // owns the surface is withdrawn from the PRESENTATION only (the official
-        // request keeps its own lifetime). The read is the non-throwing one: the
-        // controller is retired before the presenter in the teardown order.
-        withdrawPresentation: lifetime => { options.livePresenter()?.withdrawPresentation(lifetime) },
         diag: options.diag(),
       })
       controller.attach()

@@ -126,13 +126,6 @@ export interface QuestionControllerDeps {
    * an ordinary poll.
    */
   readonly isAdmissibleSession: (sessionId: string) => boolean
-  /**
-   * PR3-B B3 (finding C): withdraw the PRESENTATION of one live foreground flow
-   * (identified by the exact lifetime object `ask` received) without settling
-   * its promise — the official request keeps its own Host-owned lifetime, and
-   * its abort still ends it through the ordinary classified path.
-   */
-  readonly withdrawPresentation: (lifetime: AbortSignal) => void
   /** Monotonic-enough local clock (tests inject). */
   readonly now?: () => number
   /** Countdown tick interval (tests inject a short one). */
@@ -316,17 +309,19 @@ export class QuestionSurfaceController {
    * surface is still OPENING keeps its flow. The Host request is untouched (the
    * presenter only drops the presentation, never the promise).
    */
-  private withdrawReplacedLivePresentations(): void {
+  private collectReplacedLivePresentations(): AbortSignal[] {
+    const lifetimes: AbortSignal[] = []
     for (const [lifetime, live] of [...this.livePresentations]) {
       if (this.deps.isAdmissibleSession(live.sessionId)) continue
       this.livePresentations.delete(lifetime)
-      this.deps.withdrawPresentation(lifetime)
+      lifetimes.push(lifetime)
       // P2-2: a request with NO official cancellation lifetime has no other owner
       // that could ever end it, so the replacement settles it HERE (classified
       // `ASK_ABORTED` below — a session-driven end, never a user cancel). A
       // request that HAS one keeps it: only the Host ends that request.
       if (!live.hasHostLifetime) live.retire()
     }
+    return lifetimes
   }
 
   /**
@@ -349,37 +344,37 @@ export class QuestionSurfaceController {
    * explicit {@link reopen} may make a continued Question visible.
    */
   /**
-   * The SYNCHRONOUS publication-commit half (external review P2-B): withdraw the
-   * replaced subject's live presentation and drop its mounted continued forms
-   * WITHOUT reading the projection — the commit section must not perform ANY Host
-   * read (a projection read there could throw after the owner was published and
-   * break the commit bookkeeping). It therefore does NOT notify attention: the
-   * caller clears the stale displayed count locally, and the full reconcile
-   * republishes the authoritative count for the new owner.
+   * The SYNCHRONOUS publication-commit half (external reviews P2-B/P2-C/P2-D):
+   * take the replaced subject's live presentation OUT of the model and drop its
+   * mounted continued forms WITHOUT reading the projection and WITHOUT calling the
+   * presenter — the commit section performs no Host read and no frame of its own,
+   * because the caller hands every collected lifetime to the renderer in ONE
+   * atomic withdrawal (an intermediate promotion of a slot that is about to be
+   * withdrawn would otherwise paint a replaced modal under the new owner).
    *
-   * @returns whether anything left the model (the caller's stale-count signal).
+   * @returns the collected presentation lifetimes plus whether anything left the
+   * model (the caller's stale-count signal).
    */
-  withdrawReplacedPresentation(): boolean {
-    if (this.disposed) return false
-    this.withdrawReplacedLivePresentations()
-    let changed = false
+  withdrawReplacedPresentation(): { dropped: boolean; lifetimes: AbortSignal[] } {
+    if (this.disposed) return { dropped: false, lifetimes: [] }
+    const lifetimes = this.collectReplacedLivePresentations()
+    let dropped = lifetimes.length > 0
     for (const [key, entry] of [...this.entries]) {
       if (this.deps.isAdmissibleSession(entry.sessionId)) continue
       this.removeEntry(key, undefined, false)
-      changed = true
+      dropped = true
     }
-    return changed
+    return { dropped, lifetimes }
   }
 
   reconcile(): void {
     if (this.disposed) return
     this.ensureSubscription()
     const sessionId = this.deps.currentSessionId()
-    // 0. a live foreground flow that is no longer ADMISSIBLE must not keep the
-    //    modal seat: its PRESENTATION is withdrawn. Its promise is deliberately
-    //    NOT settled — the official request keeps its own lifetime, and the
-    //    Host's cancellation still classifies it (never a user cancel).
-    this.withdrawReplacedLivePresentations()
+    // 0. Live foreground flows that are no longer admissible are withdrawn by
+    //    `withdrawReplacedPresentation()` (external review P2-D: the CALLER
+    //    batches them together with the approval presentations and commits ONE
+    //    frame), so this pass only re-derives the continued-entry model.
     if (sessionId === undefined) {
       // No session owns the surface: whatever is mounted belongs to a session
       // that is no longer shown.

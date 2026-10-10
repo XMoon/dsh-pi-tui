@@ -1852,7 +1852,11 @@ Decisions (all terminal-native; none of them copies a Web button):
     drop, before any post-commit await — so a replaced subject's modal can never
     keep the seat (or accept its keys through modal-first routing) while the new
     owner's initialization is still pending. That commit-section half is
-    state-only and non-throwing, and it performs NO Host read at all: it clears the
+    state-only and non-throwing, it performs NO Host read at all, and it withdraws
+    every replaced presentation as ONE ATOMIC BATCH (the controller collects the
+    lifetimes, the interaction owner adds the approvals and the renderer removes
+    them all before it picks the successor), so a member of the batch is never
+    promoted — and never painted — in between; it clears the
     stale displayed count locally and the full pass republishes the authoritative
     count (a projection read inside the commit section could throw after the owner
     was published and strand the commit bookkeeping that follows it).
