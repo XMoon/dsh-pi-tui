@@ -1760,10 +1760,16 @@ export class TranscriptFolder {
       // interval; a freshly materialized one cannot (it is newer than every
       // interval end), so the common "new Conversation becomes visible" case
       // skips the scan entirely — the re-validation stays bounded.
+      // Bounded twice over: a row appended at the raw tail cannot sit inside any
+      // recorded interval, so it skips the coverage scan without looking at the
+      // map at all; otherwise the scan is limited to the displaced rows. The
+      // re-validation AND the visibility regroup share ONE batch.
       this.coalescingRegroups(() => {
-        if (this.mayCoverExistingDisplacement(index)) this.revalidateRelationsCovering(index)
+        if (index !== this.items.length - 1 && this.mayCoverExistingDisplacement(index)) {
+          this.revalidateRelationsCovering(index)
+        }
+        this.scheduleDisplayRegroup(index)
       })
-      this.scheduleDisplayRegroup(index)
     }
     if (this.groupedTurnIndexDirty) return
     if (visible) this.addGroupedTurn(turn)
@@ -3366,16 +3372,10 @@ export class TranscriptFolder {
     this.laneDisplayByAnchor.set(anchor, owned)
     const list = position === 'before' ? owned.before : owned.after
     list.push(displaced)
-    // Two displaced rows on the SAME side are ordered by their own proven
-    // materialization time (a Thinking lane row and a Tool row of one step have
-    // no shared raw-order authority), with the raw index only as the stable
-    // tie-break for rows that carry no evidence at all.
-    list.sort((left, right) => {
-      const a = this.displacedOrderOf(left)
-      const b = this.displacedOrderOf(right)
-      if (a.evidenced !== b.evidenced) return a.evidenced ? -1 : 1
-      return a.key - b.key || left - right
-    })
+    // Ordering goes through `resortAnchorSide` (which the diagnostic counts):
+    // the immediate path sorts now, a bulk caller passes `resort = false` and
+    // orders each touched side ONCE after its batch.
+    if (resort) this.resortAnchorSide(anchor, position)
     this.searchRevisionCounter += 1
     // A real display-relation change can split or join a read run: the ONE
     // adjacency definition must follow it — at the NEW anchor AND at the old one
