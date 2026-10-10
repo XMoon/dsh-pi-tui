@@ -1946,24 +1946,42 @@ export class TranscriptFolder {
    *  its `turnStarts` span, so the affected rows — not the turn — define the work. */
   private affectedSpanAround(index: number): { start: number; end: number } {
     const rows = new Set<number>([index])
-    const anchor = this.laneDisplayByDisplaced.get(index)?.anchor
-    if (anchor !== undefined) {
-      rows.add(anchor)
-      const owned = this.laneDisplayByAnchor.get(anchor)
-      if (owned !== undefined) {
-        for (const row of owned.before) rows.add(row)
-        for (const row of owned.after) rows.add(row)
+    // CLOSE the set over every relation that can move a row in or out of the
+    // display neighborhood: a displaced row's anchor and all of that anchor's
+    // displaced rows, an anchor's own lists, the group each row belongs to, and
+    // the rows displayed immediately around it. One pass is not enough — adding
+    // a group member can bring in ANOTHER anchor or group.
+    // One hop of display adjacency for the SEED only (the run boundary it moves
+    // across); chaining adjacency transitively would swallow the whole turn.
+    const seedBefore = this.displayPredecessorOf(index)
+    if (seedBefore !== undefined) rows.add(seedBefore)
+    const seedAfter = this.displaySuccessorOf(index)
+    if (seedAfter !== undefined) rows.add(seedAfter)
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const row of [...rows]) {
+        const add = (candidate: number | undefined): void => {
+          if (candidate === undefined || rows.has(candidate)) return
+          rows.add(candidate)
+          grew = true
+        }
+        const displaced = this.laneDisplayByDisplaced.get(row)
+        const anchor = displaced?.anchor
+        if (anchor !== undefined) add(anchor)
+        const owners = anchor === undefined ? [row] : [row, anchor]
+        for (const owner of owners) {
+          const owned = this.laneDisplayByAnchor.get(owner)
+          if (owned === undefined) continue
+          for (const peer of owned.before) add(peer)
+          for (const peer of owned.after) add(peer)
+        }
+        const group = this.groupOf.get(row)
+        const members = group === undefined ? undefined : this.groupMembers.get(group)
+        if (members !== undefined) {
+          for (const member of members) add(member)
+        }
       }
-    }
-    const before = this.displayPredecessorOf(index)
-    if (before !== undefined) rows.add(before)
-    const after = this.displaySuccessorOf(index)
-    if (after !== undefined) rows.add(after)
-    for (const row of [...rows]) {
-      const group = this.groupOf.get(row)
-      const members = group === undefined ? undefined : this.groupMembers.get(group)
-      if (members === undefined) continue
-      for (const member of members) rows.add(member)
     }
     let low = Math.min(...rows)
     let high = Math.max(...rows)
@@ -2008,40 +2026,85 @@ export class TranscriptFolder {
   /** The raw index displayed immediately BEFORE `index` (visible rows only): a
    *  displaced row is emitted at its anchor, and an anchor is followed by its
    *  `after` list. */
+  /** The rows ONE raw slot emits, in order: an anchor emits its `before` list,
+   *  itself, then its `after` list; a displaced row emits nothing at its own
+   *  slot (it is emitted at its anchor). This is the same emission rule
+   *  `displayOrderedRawIds` applies, so these helpers stay equivalent to it. */
+  private emittedAt(index: number): number[] {
+    if (this.laneDisplayByDisplaced.has(index)) return []
+    const owned = this.laneDisplayByAnchor.get(index)
+    if (owned === undefined) return [index]
+    return [...owned.before, index, ...owned.after]
+  }
+
+  /** The raw index displayed immediately BEFORE `index` (visible rows only). */
   private displayPredecessorOf(index: number): number | undefined {
-    // The row may itself be an anchor: its own `before` list is emitted right
-    // before it, so its display predecessor is that list's last row.
+    // The row may itself be an anchor: its own emission precedes its successor.
     const own = this.laneDisplayByAnchor.get(index)
-    if (own !== undefined && own.before.length > 0) return own.before[own.before.length - 1]
+    if (own !== undefined && own.before.length > 0) return this.lastVisibleOf(own.before)
     let candidate = index - 1
     while (candidate >= 0) {
-      if (this.laneDisplayByDisplaced.has(candidate) || !this.isVisible(this.items[candidate]!)) {
-        candidate -= 1
-        continue
-      }
-      const owned = this.laneDisplayByAnchor.get(candidate)
-      if (owned !== undefined && owned.after.length > 0) return owned.after[owned.after.length - 1]
-      return candidate
+      const emitted = this.emittedAt(candidate)
+      const visible = this.lastVisibleOf(emitted)
+      if (visible !== undefined) return visible
+      candidate -= 1
     }
     return undefined
   }
 
   /** The raw index displayed immediately AFTER `index` (visible rows only). */
   private displaySuccessorOf(index: number): number | undefined {
-    // An anchor's own `after` list is emitted right after it.
     const own = this.laneDisplayByAnchor.get(index)
-    if (own !== undefined && own.after.length > 0) return own.after[0]
+    if (own !== undefined && own.after.length > 0) return this.firstVisibleOf(own.after)
     let candidate = index + 1
     while (candidate < this.items.length) {
-      if (this.laneDisplayByDisplaced.has(candidate) || !this.isVisible(this.items[candidate]!)) {
-        candidate += 1
-        continue
-      }
-      const owned = this.laneDisplayByAnchor.get(candidate)
-      if (owned !== undefined && owned.before.length > 0) return owned.before[0]
-      return candidate
+      const emitted = this.emittedAt(candidate)
+      const visible = this.firstVisibleOf(emitted)
+      if (visible !== undefined) return visible
+      candidate += 1
     }
     return undefined
+  }
+
+  /** The last VISIBLE row of one emission sequence, when it has any. */
+  private lastVisibleOf(rows: readonly number[]): number | undefined {
+    for (let at = rows.length - 1; at >= 0; at -= 1) {
+      const row = rows[at]!
+      if (this.isVisible(this.items[row]!)) return row
+    }
+    return undefined
+  }
+
+  /** The first VISIBLE row of one emission sequence, when it has any. */
+  private firstVisibleOf(rows: readonly number[]): number | undefined {
+    for (const row of rows) {
+      if (this.isVisible(this.items[row]!)) return row
+    }
+    return undefined
+  }
+
+  /** Re-sort the relation list owning `rawIndex` (a refreshed materialization
+   *  key can move the row inside its side even when the relation is unchanged). */
+  private resortAnchorSideOf(rawIndex: number): void {
+    const current = this.laneDisplayByDisplaced.get(rawIndex)
+    if (current === undefined) return
+    this.resortAnchorSide(current.anchor, current.position)
+  }
+
+  /** Sort one side of an anchor by the rows' own materialization evidence,
+   *  bumping the search revision only when the visible order really changed. */
+  private resortAnchorSide(anchor: number, position: 'before' | 'after'): void {
+    const owned = this.laneDisplayByAnchor.get(anchor)
+    if (owned === undefined) return
+    const list = position === 'before' ? owned.before : owned.after
+    const before = [...list]
+    list.sort((left, right) => {
+      const a = this.displacedOrderOf(left)
+      const b = this.displacedOrderOf(right)
+      if (a.evidenced !== b.evidenced) return a.evidenced ? -1 : 1
+      return a.key - b.key || left - right
+    })
+    if (list.some((row, at) => row !== before[at])) this.searchRevisionCounter += 1
   }
 
   /** Route a display-relation or visibility change into the grouping: while
@@ -2732,10 +2795,14 @@ export class TranscriptFolder {
   private recordPreparingDelta(turn: number, step: number, callId: string, index: number, time: number): void {
     const owner = `${turn}:${step}`
     if (callId !== '') {
+      // Keyed by the durable (turn, step, callId) identity: a call id reused by
+      // another step or turn must never occupy — or be blocked by — this step's
+      // own entry.
+      const key = toolCallKey(turn, step, callId)
       const fallbackKey = preparingFallbackKey(turn, step, index)
       const fallback = this.toolCallPreparingStarts.get(fallbackKey)
-      if (!this.toolCallPreparingStarts.has(callId)) {
-        this.toolCallPreparingStarts.set(callId, { at: fallback?.at ?? time, owner })
+      if (!this.toolCallPreparingStarts.has(key)) {
+        this.toolCallPreparingStarts.set(key, { at: fallback?.at ?? time, owner })
       }
       if (fallback !== undefined) this.toolCallPreparingStarts.delete(fallbackKey)
       return
@@ -2770,7 +2837,8 @@ export class TranscriptFolder {
    * (post-F6 plan §12.14). */
   private absorbPreparingStarts(starts: ReadonlyMap<string, number>, turn: number, step: number): void {
     const owner = `${turn}:${step}`
-    for (const [key, at] of starts) {
+    for (const [callId, at] of starts) {
+      const key = toolCallKey(turn, step, callId)
       if (!this.toolCallPreparingStarts.has(key)) {
         this.toolCallPreparingStarts.set(key, { at, owner })
       }
@@ -2779,11 +2847,21 @@ export class TranscriptFolder {
       // arrives with the settlement). Its wall span must still start at its
       // earliest authoritative evidence — otherwise the displayed elapsed time
       // AND the display order disagree between live and cold.
-      const card = this.items[this.toolCardIndexOf.get(toolCallKey(turn, step, key)) ?? -1]
-      if (card === undefined || card.kind !== 'tool' || card.callId !== key) continue
+      const index = this.toolCardIndexOf.get(key)
+      const card = this.items[index ?? -1]
+      if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) continue
       const timing = transcriptTimingOf(card)
-      if (timing === undefined || timing.startedAt <= at) continue
-      setTranscriptTiming(card, { ...timing, startedAt: at })
+      if (timing !== undefined && timing.startedAt > at) {
+        setTranscriptTiming(card, { ...timing, startedAt: at })
+        // A refreshed materialization key invalidates every derived fact: the
+        // merged group's aggregated timing, and the row's place inside its
+        // anchor's relation list.
+        const group = this.groupOf.get(index)
+        const members = group === undefined ? undefined : this.groupMembers.get(group)
+        if (group !== undefined && members !== undefined) this.mergedReadGroupTiming(group, members, this.crossTurn(members))
+        this.resortAnchorSideOf(index)
+        this.convergeToolRowAgainstAnchor(turn, step, callId)
+      }
     }
   }
 
@@ -2829,13 +2907,14 @@ export class TranscriptFolder {
     for (const block of messageBlocks) {
       if (block.type === 'tool-call') callIds.add(block.id)
     }
-    // A relation already anchored here is re-derived, never inherited: the same
-    // settlement can change the proven first-visible time or drop the ids it
-    // used to name.
-    const anchored = this.laneDisplayByAnchor.get(this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`) ?? -1)
+    // A relation whose call this step's durable evidence no longer names has no
+    // owner: drop it (never inherit it, never re-add it as a candidate).
+    const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
+    const anchored = anchorIndex === undefined ? undefined : this.laneDisplayByAnchor.get(anchorIndex)
     for (const displaced of anchored === undefined ? [] : [...anchored.before, ...anchored.after]) {
       const row = this.items[displaced]
-      if (row !== undefined && row.kind === 'tool' && row.callId !== undefined) callIds.add(row.callId)
+      if (row === undefined || row.kind !== 'tool' || row.callId === undefined) continue
+      if (!callIds.has(row.callId)) this.dropLaneDisplacement(displaced)
     }
     for (const callId of callIds) this.convergeToolRowAgainstAnchor(turn, step, callId)
   }
@@ -2966,7 +3045,12 @@ export class TranscriptFolder {
    * searchable text changed. */
   private setLaneDisplay(displaced: number, anchor: number, position: 'before' | 'after'): void {
     const current = this.laneDisplayByDisplaced.get(displaced)
-    if (current?.anchor === anchor && current.position === position) return
+    if (current?.anchor === anchor && current.position === position) {
+      // The relation is unchanged, but a refreshed materialization key can move
+      // this row within its side: re-sort without recording a new relation.
+      this.resortAnchorSide(anchor, position)
+      return
+    }
     if (current !== undefined) this.removeDisplacedRelation(displaced, current)
     this.laneDisplayByDisplaced.set(displaced, { anchor, position })
     const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
@@ -4447,6 +4531,11 @@ export class TranscriptFolder {
       }
       case 'tool/call': {
         const key = event.data.callId
+        // Read the durable request identity BEFORE this branch consumes it: it is
+        // this call's ownership proof for the reverse convergence direction.
+        const requested = this.requestedToolCalls.get(key)
+        const requestedForStep = requested !== undefined && requested.turn === event.data.turn && requested.step === event.data.step
+          ? requested : undefined
         this.callNames.set(key, event.data.name)
         // The request started: its identity is no longer unresolved. A
         // later TOOL_NOT_STARTED-coded result for this id would be a
@@ -4473,13 +4562,13 @@ export class TranscriptFolder {
         // evidence: the first streamed arguments delta when the call was
         // preparing, else the tool/call event (post-F6 plan §12.7/§12.14 —
         // never a Preparing → durable elapsed reset).
-        const ownerKey = `${callTurn}:${event.data.step}`
-        const cachedStart = this.toolCallPreparingStarts.get(key)
-        // A preparing start belongs to the (turn, step) that observed it: a call
-        // id reused by ANOTHER step or turn must never inherit a foreign owner's
-        // timestamp (that would record another step's clock against this card).
-        const preparingStart = cachedStart !== undefined && cachedStart.owner === ownerKey ? cachedStart : undefined
-        if (cachedStart !== undefined && preparingStart !== undefined) this.toolCallPreparingStarts.delete(key)
+        // The cache key IS the durable (turn, step, callId) identity, so a call id
+        // reused by another step or turn can neither supply nor block this card's
+        // Preparing evidence.
+        const preparingKey = toolCallKey(callTurn, event.data.step, key)
+        const provedByStream = this.toolCallPreparingStarts.has(preparingKey)
+        const preparingStart = this.toolCallPreparingStarts.get(preparingKey)
+        if (preparingStart !== undefined) this.toolCallPreparingStarts.delete(preparingKey)
         setTranscriptTiming(card, {
           startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart.at, event.time),
           running: true,
@@ -4498,8 +4587,12 @@ export class TranscriptFolder {
         // The durable payload carries this call's OWN step: converge the row
         // against a step Assistant row that settled BEFORE this call arrived —
         // the mirror direction of the settlement-side convergence (either side
-        // can be the one that arrives last).
-        this.convergeToolRowAgainstAnchor(callTurn, event.data.step, key)
+        // can be the one that arrives last). Only a call this step's OWN evidence
+        // owns may be reordered: a streamed Preparing delta for THIS (turn, step)
+        // or a durable message block that requested it.
+        if (provedByStream || requestedForStep !== undefined) {
+          this.convergeToolRowAgainstAnchor(callTurn, event.data.step, key)
+        }
         this.pendingCalls.set(key, {
           name: event.data.name,
           args: event.data.arguments,
