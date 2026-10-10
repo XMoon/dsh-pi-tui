@@ -2283,6 +2283,62 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   await vt.waitForRender()
   assert.equal(activitySeconds(vt.getViewport().join('\n')), childFrozen,
     `a closed child Activity must stop counting:\n${plain(vt.getViewport().join('\n'))}`)
+  // ── UX-2 E5 at L6 (the plan's §7 chain): a settled Work closed BY an injected
+  // Context row, a Reasoning lane closed by its own first VISIBLE assistant
+  // text, and the owning turn/end — all through real `session/event` routing
+  // into the mounted viewer's folder. Deterministic event times (the `event()`
+  // helper stamps `base + seq` seconds), so the frozen durations are exact.
+  context.emit('session/event', childA as never, event('turn/start', { turn: 4 }, 300))
+  context.emit('session/event', childA as never, event('tool/call', {
+    turn: 4, step: 0, callId: 'ux2-e5-a' as ToolCallId, name: 'bash', arguments: '{"command":"echo a"}',
+  }, 301))
+  context.emit('session/event', childA as never, event('tool/result', {
+    turn: 4, step: 0,
+    message: {
+      id: MessageId('ux2-e5-a-result'), role: 'tool',
+      toolCallId: 'ux2-e5-a' as ToolCallId,
+      content: [{ type: 'text', text: 'a' }],
+      source: { kind: 'tool', callId: 'ux2-e5-a' as ToolCallId },
+    },
+  }, 302))
+  // An injected Context row (a merge-extensible producer kind, so the event is
+  // assembled structurally like the other suites' `eventAt` fixtures).
+  context.emit('session/event', childA as never, {
+    type: 'user/message',
+    seq: 310,
+    time: 1_700_000_000_000 + 310_000,
+    data: {
+      id: MessageId('ux2-e5-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'injected context e5' }],
+      source: { kind: 'skill-invocation', name: 'demo' },
+    },
+  } as unknown as SessionEvent)
+  context.emit('session/event', childA as never, event('assistant/message', {
+    turn: 4, step: 0,
+    message: {
+      id: MessageId('ux2-e5-reasoning'), role: 'assistant',
+      content: [{ type: 'reasoning', text: 'e5 thought' }, { type: 'text', text: 'e5 answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [
+      { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'reasoning-delta', index: 0, text: 'e5 thought' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 323_000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'e5 thought' } } },
+      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'text-delta', index: 1, text: 'e5 answer' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 326_000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'e5 answer' } } },
+    ],
+  }, 321))
+  context.emit('session/event', childA as never, event('turn/end', { turn: 4, reason: { kind: 'completed' } }, 330))
+  await settle()
+  await vt.waitForRender()
+  const e5View = plain(vt.getViewport().join('\n'))
+  assert.ok(e5View.includes('Context injection demo'),
+    `the injected Context boundary row must render (collapsed form shows its provenance label):\n${e5View}`)
+  const e5Durations = [...e5View.matchAll(/(?:Activity|Thought) (\d+)s/gu)].map(match => match[1])
+  assert.deepEqual(e5Durations.slice(-2), ['9', '3'],
+    `at L6: Context(+10s) closes the settled Tool Work (1s..10s = 9s) and the visible assistant text(+325s) closes the Reasoning lane (322s..325s = 3s):\n${e5View}`)
+
   app.setDisplayPreset('full')
   await settle()
   await vt.waitForRender()
@@ -2408,6 +2464,14 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   // Esc suites exercise; this click proves the route is reached and completes.)
   assert.equal(app.seatTextForTest(), '',
     `the exit must restore the MAIN draft, never keep the child draft:\n${app.seatTextForTest()}`)
+  // Independent lifecycle sinks of the CLICK exit (not inherited from the Esc
+  // suites): the focus seat returns to the editor and the main transcript's
+  // follow state is live (the viewer scope is fully unwound).
+  assert.equal(app.focusSeatForTest(), 'editor',
+    'the glyph exit must return the focus seat to the editor')
+  const restoredScroll = app.fullscreenScrollForTest()
+  assert.ok(restoredScroll !== undefined && restoredScroll.isFollowingEnd,
+    `the glyph exit must leave the MAIN transcript following its end:\n${JSON.stringify(restoredScroll)}`)
 
   // ── UX-2 Main (L6): the MAIN subject's Activity lifetime through the same
   // production Session-event route, after the exit restored the main surface.

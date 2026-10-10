@@ -1823,6 +1823,27 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     'the reverse child flip must not move the LIVE/Main activity.working either')
   assert.equal(extensionAfterReverse.busy, extensionBefore.busy,
     'the reverse child flip must not move the Main session.busy either')
+
+  // ── UX-3 E6 on the REAL Remote viewer: a fullscreen `‹ back` glyph click runs
+  // the production exit route and releases the official Client generation the
+  // viewer retained (the ingress/reference sink, NOT inherited from the Esc
+  // suites — this is the CLICK route).
+  const clientSessions = fixture.aggregate.wire.client.sessions
+  const retainedBeforeExit = retainFacts(clientSessions, CHILD_A_ID).referenceCount
+  assert.ok(retainedBeforeExit > 0, 'precondition: the mounted viewer holds the child generation')
+  app.setFullscreen(true)
+  await waitFor('the fullscreen subject bar painted', () => viewport().includes('‹ back'), 15_000)
+  const exitBarRow = viewport().split('\n').findIndex(row => row.includes('‹ back'))
+  assert.ok(exitBarRow >= 0, `the bar must be painted:\n${viewport()}`)
+  fixture.vt.sendInput(`\x1b[<0;2;${exitBarRow + 1}M`) // press the `‹` glyph cell
+  fixture.vt.sendInput(`\x1b[<0;2;${exitBarRow + 1}m`) // release on the same cell
+  await waitFor('the glyph click exits the viewer', () => !viewport().includes('‹ back'), 15_000)
+  assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main',
+    'the glyph click must run the production viewer exit')
+  await waitFor('the official Client generation is released by the click exit', () =>
+    retainFacts(clientSessions, CHILD_A_ID).referenceCount === 0, 15_000)
+  assert.equal(retainFacts(clientSessions, CHILD_A_ID).referenceCount, 0,
+    'the click exit must release the child generation exactly like the Esc route')
   releaseSecond()
 })
 
