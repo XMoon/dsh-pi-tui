@@ -1617,6 +1617,14 @@ attestation is the only available channel and is legitimate as a recorded tier, 
 owner records it as the accepted closing evidence — which the "Owner QA confirmation"
 section does.
 
+The reviewer then re-checked that revision and returned its final verdict —
+**ACCEPT**, with no remaining P0/P1/P2. It confirmed the archived record names, the
+single status vocabulary across both documents, and it re-hashed all eleven records
+plus the screenshot against the table below (all matching); it also restated that
+the code/test delta — the one added masked witness — is clean, discriminating and
+green. With the qualification record accepted, stage closure awaits only the owner's
+explicit merge approval.
+
 ## Case evidence digests (one-off; the durable record is this table)
 
 | Case | Record / artifact | sha256 |
