@@ -22,7 +22,9 @@ import {
 } from './compact-process-preview.ts'
 import { compactActionStatParts, formatCompactDuration } from '../../transcript/process-summary.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from '../../transcript/work-summary.ts'
+import type { ActivityClock } from '../../transcript/activity-clock.ts'
 import type { TranscriptWorkSpan } from '../../transcript/structure.ts'
+import type { TranscriptTiming } from '../../../domain/transcript/types.ts'
 import { iconLead } from '../../icons.ts'
 import { sectionDisclosureSemantic, type IconStyle } from '../../../domain/display/icons.ts'
 import { color } from '../../theme/runtime.ts'
@@ -112,18 +114,22 @@ export function compactWorkBody(
   return lines
 }
 
-/** The span's duration text at `now`: running spans read the wall clock at
- * RENDER time (the shared repaint heartbeat refreshes them — no per-card
- * timer, post-F6 plan §12.13); settled spans use their authoritative end.
- * Missing evidence omits the duration (never `0s`, §12.16) — a POINT-only
- * span (one instant of evidence, start === end) is not a span and omits it
- * too. */
-function activityDurationText(summary: CompactWorkSummary, now: () => number): string | undefined {
-  const timing = summary.timing
+/** The span's duration text at `now`. The LIVE decision is the ActivityClock's
+ * (the Work span's structural lifetime — never a member's own `running`): a
+ * live span reads the wall clock at RENDER time (the shared WorkingIndicator
+ * repaint heartbeat refreshes it — no per-card timer, post-F6 plan §12.13) and
+ * therefore keeps growing through the model's silent wait. A closed span uses
+ * its PROVEN boundary end; a span whose boundary is not provable (history, an
+ * inactive subject, an unsettled snapshot) falls back to the last trustworthy
+ * member end. Missing evidence omits the duration (never `0s`, §12.16) — a
+ * POINT-only span (one instant of evidence, start === end) is not a span and
+ * omits it too. */
+function activityDurationText(timing: TranscriptTiming | undefined, clock: ActivityClock | undefined, now: () => number): string | undefined {
   if (timing === undefined) return undefined
-  if (timing.running) return formatCompactDuration(Math.max(0, now() - timing.startedAt))
-  if (timing.endedAt === undefined || timing.endedAt === timing.startedAt) return undefined
-  return formatCompactDuration(Math.max(0, timing.endedAt - timing.startedAt))
+  if (clock?.isLive() === true) return formatCompactDuration(Math.max(0, now() - timing.startedAt))
+  const endedAt = clock?.endedAt ?? timing.endedAt
+  if (endedAt === undefined || endedAt === timing.startedAt) return undefined
+  return formatCompactDuration(Math.max(0, endedAt - timing.startedAt))
 }
 
 /**
@@ -145,6 +151,10 @@ export class CompactWorkComponent implements Component {
   private readonly showPreview: boolean
   private readonly iconStyle: IconStyle
   private readonly now: () => number
+  /** The span's Activity lifetime clock (TuiApp's structural authority). An
+   *  absent clock keeps the legacy member-timing rendering for callers that
+   *  have no canonical structure (unit tests, non-TuiApp renderers). */
+  private readonly clock: ActivityClock | undefined
 
   constructor(options: {
     span: TranscriptWorkSpan
@@ -155,6 +165,7 @@ export class CompactWorkComponent implements Component {
     showPreview?: boolean
     iconStyle?: IconStyle
     now?: () => number
+    clock?: ActivityClock
   }) {
     this.summary = options.summary ?? summarizeWorkSpan(options.span)
     this.expanded = options.expanded
@@ -166,6 +177,7 @@ export class CompactWorkComponent implements Component {
     this.showPreview = options.showPreview ?? true
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.now = options.now ?? (() => Date.now())
+    this.clock = options.clock
   }
 
   invalidate(): void {}
@@ -190,7 +202,7 @@ export class CompactWorkComponent implements Component {
       this.expanded,
       contentWidth,
       this.iconStyle,
-      activityDurationText(this.summary, this.now),
+      activityDurationText(this.summary.timing, this.clock, this.now),
       historicalThinkOnly ? 'thought' : 'activity',
     )
     const lines = [color.textDim(header)]

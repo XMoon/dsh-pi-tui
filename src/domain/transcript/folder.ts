@@ -2292,6 +2292,7 @@ export class TranscriptFolder {
             }
           }
           this.syncLiveAssistantPresentation(turn, step, time)
+          this.recordAssistantVisibleTime(turn, step)
           // Accepted reasoning evidence is the Thinking row's honest end
           // candidate: remember it so a streamless settlement can close the
           // row at its real reasoning end instead of end-less (post-F6 plan
@@ -2368,6 +2369,22 @@ export class TranscriptFolder {
     if (text !== '') activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
     this.syncMessage(activity)
     activity.revision += 1
+  }
+
+  /** Record (never regress) the EARLIEST proven first-visible Conversation
+   * time on the step's assistant row. The sidecar is display-only: it tells a
+   * Work Activity where the Conversation boundary actually appeared, so a late
+   * durable settlement can never move that boundary later. `firstVisibleAt` is
+   * reply-text evidence (reasoning/tool-call chunks are excluded by
+   * `assistantChunkHasVisibleReply`), so no Thinking evidence is mistaken for
+   * the Conversation lane. */
+  private recordAssistantVisibleTime(turn: number, step: number): void {
+    const at = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step)
+    if (at === undefined) return
+    const row = this.assistantEntries.get(stepKey(turn, step))
+    if (row === undefined) return
+    const known = transcriptTimingOf(row)
+    if (known === undefined || at < known.startedAt) setTranscriptTiming(row, pointTiming(at))
   }
 
   /** Project the current live block map without duplicating block-end text. */
@@ -3428,7 +3445,7 @@ export class TranscriptFolder {
    * so a resumed session still shows its compaction records.
    */
   private applyCompactionEvent(
-    event: { type: string; data: Record<string, unknown>; seq?: unknown },
+    event: { type: string; data: Record<string, unknown>; seq?: unknown; time: number },
     kind: string,
   ): void {
     const data = event.data as { compactionId?: unknown } & Record<string, unknown>
@@ -3448,8 +3465,16 @@ export class TranscriptFolder {
     const compactionId = typeof data.compactionId === 'string' ? data.compactionId : undefined
     let index = compactionId === undefined ? undefined : this.compacting.get(compactionId)
     if (index === undefined) {
-      this.appendItem({ kind: 'compaction', turn: this.currentTurn, text: '', items: 0, tokens: 0, running: true })
+      const created: Extract<TranscriptMessage, { kind: 'compaction' }> = {
+        kind: 'compaction', turn: this.currentTurn, text: '', items: 0, tokens: 0, running: true,
+      }
+      this.appendItem(created)
       index = this.items.length - 1
+      // The compaction row's authoritative first-visible time closes any
+      // preceding Activity at the moment the checkpoint appeared (the row is a
+      // Context boundary; the point sidecar is display-only and never enters
+      // the Process member walk).
+      setTranscriptTiming(created, pointTiming(event.time))
       if (compactionId !== undefined) this.compacting.set(compactionId, index)
     }
     const entry = this.items[index]
@@ -3674,7 +3699,7 @@ export class TranscriptFolder {
       return
     }
     if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end' || kind === 'session/end-seed') {
-      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown>; seq?: unknown }, kind)
+      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown>; seq?: unknown; time: number }, kind)
       return
     }
     if (kind === 'llm/retry-started') {
@@ -3870,13 +3895,19 @@ export class TranscriptFolder {
                && firstVisible < claimedIdentity.insertionTime) this.commitPreSteerAnswer(activity)
             else if (!isMidTurnSteer) activity.pendingPreSteerAnswerStep = undefined
           }
-          this.appendItem({
+          const userRow: Extract<TranscriptMessage, { kind: 'user' }> = {
             kind: 'user',
             turn: this.currentTurn,
             text,
             content: blocks,
             ...(isMidTurnSteer ? { steer: true as const } : {}),
-          })
+          }
+          this.appendItem(userRow)
+          // The Conversation boundary's OWN first-actually-visible time: the
+          // authoritative event time, never a later settlement/arrival. It only
+          // tells an Activity where to close — the row's semantic class is
+          // untouched and the point sidecar never joins a Work span.
+          setTranscriptTiming(userRow, pointTiming(event.time))
         } else {
           if (text === '') break
           // Injected context: name the producer the way the Web row does
@@ -3885,7 +3916,7 @@ export class TranscriptFolder {
           // live icon-style switch repaints already-folded cards.
           const provenance = contextProvenance(event.data.source)
           const summary = contextSummary(event.data.source)
-          this.appendItem({
+          const contextRow: Extract<TranscriptMessage, { kind: 'system' }> = {
             kind: 'system',
             turn: this.currentTurn,
             text,
@@ -3900,7 +3931,12 @@ export class TranscriptFolder {
             // form-aware Context roles Compact and Focus present. The
             // semantic marker above stays the surfaced authority.
             contextPresentation: sourcePresentation,
-          })
+          }
+          this.appendItem(contextRow)
+          // The Context boundary's own first-visible time (the same
+          // authoritative event time): Work B starts from its own members, so
+          // this only freezes the preceding Activity.
+          setTranscriptTiming(contextRow, pointTiming(event.time))
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of
           // the three process slots — it never enters Think/Message/Tool
@@ -4002,6 +4038,10 @@ export class TranscriptFolder {
         }
         const settledEntry = this.assistantEntries.get(key)
         if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
+        // The durable settlement re-affirms the SAME boundary the live lane
+        // recorded (a cold hydration has only this evidence); the earliest
+        // proven time wins, so a replacement settlement never regresses it.
+        this.recordAssistantVisibleTime(event.data.turn, event.data.step)
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
@@ -4469,6 +4509,9 @@ export class TranscriptFolder {
         const message = this.workflow.onRunStart(event.data.runId, event.data.name, this.currentTurn)
         const index = this.appendItem(message)
         this.workflowIndexes.set(event.data.runId, index)
+        // The workflow card is a Context boundary row: its authoritative
+        // first-visible time (the run-start event) closes a preceding Activity.
+        setTranscriptTiming(message, pointTiming(event.time))
         // Focus aggregation: a workflow run is a durable lifecycle event,
         // NOT a model tool/call — it never touches the Tool slot or the
         // tool count (plan §17).

@@ -258,6 +258,7 @@ import { transcriptRevealAncestryFor, transcriptRevealPathFor, type TranscriptRe
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { CompactWorkComponent } from './tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from './tui/transcript/work-summary.ts'
+import { activityClockOf, resolveWorkLifetimes, type ActivityClock, type WorkLifetime } from './tui/transcript/activity-clock.ts'
 import { ContextClusterComponent } from './tui/components/transcript/context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './tui/transcript/context-structure.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './tui/components/transcript/context-row.ts'
@@ -1763,12 +1764,16 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
 }
 
 /** Canonical Work/cluster membership for one `messages` window, memoized on
- * the array identity (one linear projection per window). */
+ * the array identity (one linear projection per window). The Work lifetimes are
+ * derived in the SAME bounded scan so no card re-walks the transcript at render
+ * time; their turn-boundary input is the sibling `turnActivities` snapshot. */
 interface CanonicalTranscriptIndex {
   readonly messages: readonly TranscriptMessage[]
+  readonly turnActivities: ReadonlyMap<number, TurnActivity>
   readonly workSpans: readonly TranscriptWorkSpan[]
   readonly workByMember: ReadonlyMap<TranscriptMessage, TranscriptWorkSpan>
   readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
+  readonly workLifetimes: ReadonlyMap<TranscriptMessage, WorkLifetime>
 }
 
 /** Compare the semantic container ancestry of two blocks (absent === absent). */
@@ -6720,7 +6725,7 @@ export class TuiApp {
    * of re-projecting a preset materialization per query. */
   private canonicalStructureIndex(): CanonicalTranscriptIndex {
     const memo = this.canonicalIndexMemo
-    if (memo !== undefined && memo.messages === this.messages) return memo
+    if (memo !== undefined && memo.messages === this.messages && memo.turnActivities === this.turnActivities) return memo
     const structure = projectTranscriptStructure(this.messages)
     const workSpans: TranscriptWorkSpan[] = []
     for (const block of structure) {
@@ -6728,9 +6733,13 @@ export class TuiApp {
     }
     const next = {
       messages: this.messages,
+      turnActivities: this.turnActivities,
       workSpans,
       workByMember: workByMemberOf(structure),
       clusterByMember: clusterByMemberOf(structure),
+      // The Activity LIFETIME scan rides the SAME memoized projection: one
+      // bounded pass per transcript snapshot, never per frame or per card.
+      workLifetimes: resolveWorkLifetimes(structure, this.turnActivities),
     }
     this.canonicalIndexMemo = next
     return next
@@ -8788,6 +8797,7 @@ export class TuiApp {
     action: CompactActionPresentation | undefined,
     preparingSummary: string | undefined,
     showPreview: boolean,
+    clock: ActivityClock | undefined,
   ): string {
     const timing = summary.timing
     return [
@@ -8798,6 +8808,10 @@ export class TuiApp {
       preparingSummary ?? '',
       timing === undefined ? '' : `${timing.startedAt}\u0000${timing.endedAt ?? ''}\u0000${timing.running ? '1' : '0'}`,
       showPreview ? '1' : '0',
+      // The finalized Activity clock's STRUCTURAL facts. The live flag is a
+      // render-time predicate (never a signature input: the card re-reads the
+      // committed subject per frame), so only the start/end belong here.
+      clock === undefined ? '' : `${clock.startedAt}\u0000${clock.endedAt ?? ''}`,
     ].join('\u0000')
   }
 
@@ -8833,12 +8847,20 @@ export class TuiApp {
     const latestWorkSpan = this.canonicalStructureIndex().workSpans.at(-1)
     const windowHasNewer = this.transcriptWindow?.hasNewer === true
     const isTrueLatestWork = !windowHasNewer && latestWorkSpan?.owner === span.owner
+    // The Activity's LIFETIME (structure + the owning turn's boundary facts)
+    // finalized with the CURRENT display subject: the live flag is re-derived
+    // on EVERY component creation, so a Remote snapshot-only activity flip can
+    // never keep an earlier `running` boolean latched in a cached card.
+    const lifetime = this.canonicalStructureIndex().workLifetimes.get(span.owner)
+    const clock = lifetime === undefined
+      ? undefined
+      : activityClockOf(lifetime, () => this.transcriptWindow?.hasNewer !== true, () => this.displaySubjectRunning())
     const showPreview =
       this.displayState.preset !== 'compact'
       || blockPreparingSummary !== undefined
-      || summary.timing?.running === true
+      || clock?.isLive() === true
       || isTrueLatestWork
-    const signature = this.compactWorkSignature(summary, action, preparingSummary, showPreview)
+    const signature = this.compactWorkSignature(summary, action, preparingSummary, showPreview, clock)
     const entry = this.workComponents.get(span.owner)
     if (entry !== undefined && sameWorkSpanShape(entry.span, span)
       && entry.expanded === expanded && entry.themeRev === this.themeRevision
@@ -8853,6 +8875,7 @@ export class TuiApp {
       ...(preparingSummary === undefined ? {} : { preparingSummary }),
       showPreview,
       iconStyle: this.iconStyle,
+      ...(clock === undefined ? {} : { clock }),
     })
     this.workComponents.set(span.owner, {
       component,
@@ -9921,6 +9944,17 @@ export class TuiApp {
       this.working.stop()
       this.working.setText('')
     }
+  }
+
+  /** Whether the CURRENTLY DISPLAYED subject is running: the viewed child's
+   * own committed activity, or the Main turn drivers on the main subject. This
+   * is the ONLY liveness authority the Activity clock consumes — the other
+   * subject's facts are never substituted (a Main `workingActive` must not make
+   * a viewed child's Activity live, and vice versa). */
+  private displaySubjectRunning(): boolean {
+    const subject = this.statusStore.snapshot().view.subject
+    if (subject.kind === 'subagent') return subject.activity === 'running'
+    return this.workingActive
   }
 
   /** Capture the rendered top and bottom transcript rows before replacing a
