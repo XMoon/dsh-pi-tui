@@ -139,42 +139,49 @@ Any plugin/profile command joins the same catalog at runtime. Reproduce with
 `grep -rn 'ctx.commands.register' node_modules/@deepseek-ai/*/lib/*.js` plus
 `dsh --profile <p> --dump-config`.
 
-**Fields common to every row in §2 and §3** (the §1.1 TUI-family block does not
-apply here):
+**Fields that are genuinely shared by §2 and §3** (the §1.1 TUI-family block does
+not apply here). Everything else — **route, sink, locality and status** — is
+**per row** and is given in the tables: these rows deliberately do NOT share one
+seam. A gate-only row, a TUI-gate refusal, a shell-branch refusal, an extension
+handler and a Host handler take five different paths, and claiming one common
+"Host handler seam" for all of them would be false.
 
-| Field | Value |
+| Field | Value (shared) |
 |---|---|
 | Backend + renderer | Direct (production) / TSP |
-| Classifier + currentness | the same `classifyCommandLine` (`src/domain/command/policy.ts:158-169`) with live facts built at `src/app/submission/controller.ts:1626-1646`; ownership subject/generation captured at `:743-749` before any await |
-| Input entry | the TSP composer submit gesture (`src/tui/tsp/session.ts:675-687`) → `ApplicationEvents.onSubmit` → `SubmissionController` |
-| Action/presenter seam | `dispatchViaSession` (`controller.ts:743`) → `commands.execute` → the Host handler; extension/skill rows have their own seam named per row |
-| Locality | Host-owned semantics surfaced on the Client; no second authority |
+| Classifier invocation + currentness | `classifyCommandLine` (`src/domain/command/policy.ts:158-169`) with live facts built at `src/app/submission/controller.ts:1626-1646`; ownership subject/generation captured at `:743-749` before any await. **Note:** the *outcome* differs per row (`host-command`, `client-command(extension)`, `ordinary-submission`, or a pre-classification refusal such as the shell branch). |
+| Input entry | the TSP composer submit gesture (`src/tui/tsp/session.ts:675-687`) → `ApplicationEvents.onSubmit` → `SubmissionController` — except CMD-SHELL-001, which is decided at the `!`-prefix branch (`controller.ts:1543`) inside the same entry |
 | Reachability class | `SURFACE_REACHABLE` for every row below |
 | SDK/GUI tier | `n/a` — no SDK node is involved in any of these rows |
 
-| ID | Capability | Producer / registration | Classifier → route | Observable sink | Status | `evidence_state` | Positive | Negative | Owner / gap |
+Per-row overrides are called out in the **classifier → route**, **observable
+sink** and **owner / gap** columns; locality is stated per row in the owner
+column (Host-owned semantics; Client-local gate decision; extension-handler
+behaviour; shell-branch refusal).
+
+| ID | Capability | Producer / registration | Classifier → route | Observable sink | Status | `evidence_state` | Positive | Negative | Owner / locality / gap |
 |---|---|---|---|---|---|---|---|---|---|
-| CMD-HOST-ROUTE | the **generic genuine-Host command dispatch route on TSP** | Host catalog at runtime; the repo's own comment names a Remote Host `/export` (`src/commands.ts:900`) | `hostOriginClaimOf` → `host-command` → `dispatchViaSession` → the Host handler (TUI mirrors subtracted, `src/commands.ts:2126-2149`) | the Host handler itself, once | `SUPPORTED` | `VERIFIED` (`L6`) | `test/tern-tsp-direct-admission.test.ts:49`: a **genuine Host** `/settings` handler ran exactly once on a real Direct composition and was NOT refused by the TSP builtin gate | the same test asserts the refusal text is absent; a successfully mirrored TUI built-in answers `false` for Host origin | owner: Host command catalog; no gap |
-| CMD-HOST-COMPACT | `/compact` own semantic result on TSP | `@deepseek-ai/dsh-command-compact` (installed) | execute-kind descriptor → bare-line claim | the Host compaction handler's effect + reread | `UNCLASSIFIED` | `NOT_RUN` | — | — | `BLOCKED_WITH_OWNER`: rides CMD-HOST-ROUTE, but its own closure was not exercised |
-| CMD-HOST-GOAL | `/goal` own semantic result on TSP | `@deepseek-ai/dsh-command-goal` | leading-input descriptor → claims the argued line | the Host goal handler's effect + reread | `UNCLASSIFIED` | `NOT_RUN` | — | — | same |
-| CMD-HOST-PERMISSION | `/permission` own semantic result on TSP | `@deepseek-ai/dsh-permission-presets` | leading-input descriptor | the permission preset write | `UNCLASSIFIED` | `NOT_RUN` | — | — | same |
-| CMD-HOST-PLAN | `/plan` own semantic result on TSP | `@deepseek-ai/dsh-plan-mode` | leading-input descriptor | plan-mode toggle | `UNCLASSIFIED` | `NOT_RUN` | — | — | same |
-| CMD-HOST-EXPORT | `/export` (Host) own semantic result on TSP | `@deepseek-ai/dsh-session-log-export` | execute-kind descriptor | the Host export acknowledgement | `UNCLASSIFIED` | `NOT_RUN` | — | — | same |
-| CMD-EXPORT-AMBIGUITY | `/export` name coexistence (TUI mirror + a Host `/export` in some profiles) | both registrations exist in some compositions | the TUI mirror LOSES the Host name by construction (`registerOne`'s duplicate refusal, `src/commands.ts:951-962`) | whichever owner wins for that profile | `UNCLASSIFIED` | `NOT_RUN` | — | the duplicate refusal is proven by `src/commands.ts:951-962` | owner: profile composition; no TSP run |
+| CMD-HOST-ROUTE | the **generic genuine-Host command dispatch route on TSP** | Host catalog at runtime; the repo's own comment names a Remote Host `/export` (`src/commands.ts:900`) | `hostOriginClaimOf` → `host-command` → `dispatchViaSession` → `commands.execute` → the Host handler (TUI mirrors subtracted, `src/commands.ts:2126-2149`) | the Host handler itself, once | `SUPPORTED` | `VERIFIED` (`L6`) | `test/tern-tsp-direct-admission.test.ts:49`: a **genuine Host** `/settings` handler ran exactly once on a real Direct composition and was NOT refused by the TSP builtin gate | a successfully mirrored TUI built-in answers `false` for Host origin (`src/commands.ts:2126-2149`), so the positive is not a vacuous "never refuses" | Host-owned; no gap |
+| CMD-HOST-COMPACT | `/compact` own semantic result on TSP | `@deepseek-ai/dsh-command-compact` (installed) | execute-kind descriptor → bare-line claim | the Host compaction handler's effect + reread | `UNCLASSIFIED` | `NOT_RUN` | — | — | Host-owned; `BLOCKED_WITH_OWNER`: rides CMD-HOST-ROUTE, but its own closure was not exercised |
+| CMD-HOST-GOAL | `/goal` own semantic result on TSP | `@deepseek-ai/dsh-command-goal` | leading-input descriptor → claims the argued line | the Host goal handler's effect + reread | `UNCLASSIFIED` | `NOT_RUN` | — | — | Host-owned; same blocker |
+| CMD-HOST-PERMISSION | `/permission` own semantic result on TSP | `@deepseek-ai/dsh-permission-presets` | leading-input descriptor | the permission preset write | `UNCLASSIFIED` | `NOT_RUN` | — | — | Host-owned; same blocker |
+| CMD-HOST-PLAN | `/plan` own semantic result on TSP | `@deepseek-ai/dsh-plan-mode` | leading-input descriptor | plan-mode toggle | `UNCLASSIFIED` | `NOT_RUN` | — | — | Host-owned; same blocker |
+| CMD-HOST-EXPORT | `/export` (Host) own semantic result on TSP | `@deepseek-ai/dsh-session-log-export` | execute-kind descriptor | the Host export acknowledgement | `UNCLASSIFIED` | `NOT_RUN` | — | — | Host-owned; same blocker |
+| CMD-EXPORT-AMBIGUITY | `/export` name coexistence (TUI mirror + a Host `/export` in some profiles) | both registrations exist in some compositions | the TUI mirror LOSES the Host name by construction (`registerOne`'s duplicate refusal, `src/commands.ts:951-962`) | whichever owner wins for that profile | `UNCLASSIFIED` | `NOT_RUN` | — | the duplicate refusal is proven by `src/commands.ts:951-962` | profile composition; no TSP run |
 
 No Host row is called `SUPPORTED` merely because its package is installed or
 because the generic route exists.
 
 ## 3. Extension contributions, skill wrappers and plain submission
 
-These rows use the same common-field block as §2. Per-row fields follow.
+Per-row fields; the shared block above applies only to the four genuinely shared
+values.
 
-| ID | Capability | Producer / registration | Classifier → route | Observable sink | Status | `evidence_state` | Positive | Negative | Owner / gap |
+| ID | Capability | Producer / registration | Classifier → route | Observable sink | Status | `evidence_state` | Positive | Negative | Owner / locality / gap |
 |---|---|---|---|---|---|---|---|---|---|
-| CMD-EXT-001 | an extension command contribution | client command bridge (`mergeContributions`, `src/commands.ts:1085-1100`) | `client-command`+`source:'extension'` → the gate reports `not-a-tui-builtin` → the contribution's own handler | the contribution's handler effect | `SUPPORTED` | `VERIFIED` | `test/tern-tsp-direct-admission.test.ts:330`: a registered contribution runs and is never refused by the TSP gate | the F1 family lock (a non-TUI line is never refused) | owner: extension bridge; no gap |
-| CMD-SUBMIT-001 | an ordinary prompt submission on TSP | — (no command involved) | no parsed command → `ordinary-submission` → `dispatchViaSession` → the shared writer | the Host session writer + the model response | `SUPPORTED` | `VERIFIED` (`REAL_TERN_GUI` per B4, not re-run here) | B4 real-pane C1/C2: a typed + pasted prompt was submitted and answered | the `.rec` records show one submission per gesture (no double-send) | owner: `SubmissionController`; no gap |
-| CMD-EXT-002a | an **unregistered** slash name is classified as `ordinary-submission` and is NOT refused by the TSP builtin gate | — | `classifyCommandLine{}` → `ordinary-submission` | the gate's decision (not refused) | `SUPPORTED` | `VERIFIED` | `test/tern-tsp-runner-interactive.test.ts:76` asserts exactly this (the F1 regression) | the same test asserts the TSP refusal text is absent | owner: the classifier; no gap. **Note:** that test's own comment additionally mentions a session being ensured, which the test does **not** assert — a pre-existing comment/test mismatch, reported here rather than fixed (out of this PR's scope). |
-| CMD-EXT-002b | that unknown-slash line actually reaching the Host writer/model on TSP | — | the shared `ordinary-submission` tail (`controller.ts:1894`) | the session writer + a response | `UNCLASSIFIED` | `NOT_RUN` | — (the shared route is proven for a plain prompt by CMD-SUBMIT-001, but not for a slash-spelled line) | — | `BLOCKED_WITH_OWNER`: exercising the exact line (or asserting the delivered prompt in the F1 test) would close it |
+| CMD-EXT-001 | an extension command contribution | client command bridge (`mergeContributions`, `src/commands.ts:1085-1100`) | `client-command`+`source:'extension'` → the gate reports `not-a-tui-builtin` → the contribution's own handler | the contribution's handler effect | `SUPPORTED` | `VERIFIED` | `test/tern-tsp-direct-admission.test.ts:330`: a registered contribution runs and is never refused by the TSP gate | the F1 family lock (`test/tern-tsp-runner-interactive.test.ts:76`) shows a non-TUI line is not refused while a TUI-owned one is (`:52`) | Client-side extension behaviour (the contribution's own handler); no gap |
+| CMD-SUBMIT-001 | an ordinary prompt submission on TSP | — (no command involved) | no parsed command → `ordinary-submission` → `dispatchViaSession` → the shared writer | the Host session writer + the model response | `SUPPORTED` | `VERIFIED` (`REAL_TERN_GUI` per B4, not re-run here) | B4 real-pane C1/C2: a typed + pasted prompt was submitted and answered | the `.rec` records show one submission per gesture (no double-send) | `SubmissionController` (Host writer via the Client); no gap |
+| CMD-EXT-002 | an **unregistered** slash line reaching the Host writer/model on TSP (`/not-a-registered-command body`) | — | `classifyCommandLine{}` → `ordinary-submission` → the shared ordinary-submission tail (`controller.ts:1894`) | end-to-end: the session writer + a response | `UNCLASSIFIED` | `NOT_RUN` | the ONLY proven half: the line is classified `ordinary-submission` and is **not** refused by the TSP builtin gate (`test/tern-tsp-runner-interactive.test.ts:76`) | the discriminating boundary: the same gate DOES refuse a TUI-owned builtin (`test/tern-tsp-runner-interactive.test.ts:52`), so the non-refusal is not vacuous. The delivery half has no observation. | the classifier is proven; the delivery authority is **not** — `BLOCKED_WITH_OWNER`: exercising the exact line, or asserting the delivered prompt in the F1 test, would close it. (The F1 test's own comment mentions a session being ensured, which the test does **not** assert — a pre-existing comment/test mismatch, reported rather than fixed.) |
 | CMD-SKILL-001 | a **live skill wrapper** `/‹skill-name› [args]` | dynamic `registerOne` per human skill (`src/commands.ts:1813-1870`, revalidating at `1915-1945`) | family is `skill-invocation` (`tuiCommand` suppressed — `src/app/submission/controller.ts:1635-1646`) → the gate never captures it → `dispatchViaSession`/steer | the normalized `/name args` line delivered to the Host + the injected body | `UNCLASSIFIED` | `NOT_RUN` | the classification and the shared delivery route are proven in code and by the shared suites | — | `BLOCKED_WITH_OWNER`: the skill's own closure on TSP (body injection by the Host pre-step, `loadSkill` fallback, args preserved) was not exercised |
 | CMD-SKILL-002 | `/skill <name> args` | `normalizeSkillInvocation` (`src/domain/command/policy.ts:286-299`) | same as CMD-SKILL-001 | same | `UNCLASSIFIED` | `NOT_RUN` | same | — | same blocker |
 | CMD-SKILL-003 | bare `/skill` picker | `src/tui/commands/skills.ts:61` | `client-command(tui)` → `unsupported` → refused | refusal: draft + notice, no Session | `EXPLICIT_UNAVAILABLE` | `VERIFIED` | family refusal lock `test/tern-tsp-runner-interactive.test.ts:52` | `createdSessions === 0`; the draft is restored | owner: the §1 family; gap → 4A |
@@ -253,9 +260,12 @@ B4 `b4-c5-3.rec`. `Negative:` no input-history row is written
 (`test/tern-tsp-direct-admission.test.ts:132`).
 
 **CMD-EXT-002 — `/not-a-registered-command body` (ordinary submission):**
-`classifyCommandLine{}` → `ordinary-submission` → the model path.
-`Positive/Lock:` `test/tern-tsp-runner-interactive.test.ts:76` (the F1
-regression: the gate must never refuse a non-TUI family).
+`classifyCommandLine{}` → `ordinary-submission` → the shared ordinary-submission
+tail (`controller.ts:1894`). **Proven half:** the classification and the gate's
+non-refusal (`test/tern-tsp-runner-interactive.test.ts:76`), with the
+discriminating boundary that the same gate DOES refuse a TUI-owned builtin
+(`:52`). **Unproven half:** the line actually reaching the Host writer/model —
+hence the row is `UNCLASSIFIED`/`NOT_RUN`, not `SUPPORTED`.
 
 **CMD-ELIG — advertised-miss:**
 an advertised name the real session lacks is consumed with an explicit error,
