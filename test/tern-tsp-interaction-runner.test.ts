@@ -1658,3 +1658,37 @@ test('B3 P2-E: a MOUNTED continued form plus a QUEUED approval leave in ONE batc
     await harness.dispose()
   }
 })
+
+// ── External review P2-F: an ordinary event must not close the Alt+Q list ────
+
+test('B3 P2-F: an ordinary Session event keeps the Alt+Q list open (only a publication closes it)', async () => {
+  const harness = await mountRunnerHarness({
+    projection: {
+      active: [{
+        callId: 'call-p2f',
+        questions: [{ id: 'q-p2f', question: 'Still parked?', options: [{ label: 'yes' }] }],
+        state: 'continued',
+      }],
+      settled: [],
+    },
+  })
+  try {
+    await waitFor(() => harness.tern.output.text().includes('Continued questions: 1'), 'the parked count')
+    harness.tern.key('\x1bq')
+    await waitFor(() => harness.tern.output.text().includes('call-p2f'), 'the transient list is open')
+
+    // An ORDINARY event of the CURRENT session: the activity reconcile runs, but
+    // nothing was published, so the user's list must stay exactly where it is.
+    harness.route({ type: 'model/selection', seq: 9, data: { provider: 'p', model: 'm', reasoningEffort: 'high' } })
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.deepEqual(liveOverlays(harness.tern.ops()), ['layer.modal-1'],
+      'the replacement-free reconcile never closed the transient list')
+
+    // The list still works: Enter reopens the parked call through the controller.
+    harness.tern.key('\r')
+    await waitFor(() => harness.tern.output.text().includes('Still parked?'), 'the reopened form')
+  } finally {
+    await harness.dispose()
+  }
+})
