@@ -802,12 +802,24 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   order genuinely brings together still merge; cold builds the groups once after
   `hydrate`, a live settlement re-groups only its own turn, and the cheap
   raw-tail fast path is kept whenever the raw tail IS the display tail.
-  **Still conservative — never a guess, and no universal parity:** nothing is
-  reordered without evidence, i.e. no embedded stream / no proven first-visible
-  reply time, equal timestamps, a tool-call id the step's stream never named, a
-  call id reused by another turn, or tools of another turn/step. Those logs keep
-  the durable append order, so an evidence-poor replay can still differ from the
-  live run. Only an open, non-blocked
+  **The evidence rule (one rule, both arrival directions):** a Tool row is only
+  reordered when its OWN materialization evidence (the earliest of its streamed
+  Preparing delta and its durable `tool/call`) and the Conversation's PROVEN
+  first-visible reply time are both known and strictly different, and when the
+  call's durable `(turn, step, callId)` identity matches this step's own
+  candidates (its embedded stream's deltas or its durable message's tool-call
+  blocks). Every settlement re-derives the relations it already anchors, so an
+  authoritative replacement can never inherit stale order.
+  **Still conservative — never a guess, and no universal parity:** the streamless
+  settlement fallback (which exists only so an Activity can close) is NOT order
+  evidence, so without an embedded stream the durable append order stands; an
+  equal timestamp proves nothing; a call id the step never named, or one reused
+  by another step or turn, is not this step's evidence. Those logs keep the
+  durable append order, so an evidence-poor replay can still differ from the live
+  run. Read grouping is bounded work by construction: a normal `tool/result` on
+  the display tail settles through the local fast path, and a real display-order
+  change re-groups only the LOCAL affected span (its own regression guard caps
+  the span well below a turn), never the whole history. Only an open, non-blocked
   trailing span of a live-tail window
   whose committed display subject is running is live; the live predicate is
   re-read per render (never a latched boolean) and re-reads `now()` on the
