@@ -908,6 +908,8 @@ export class TranscriptFolder {
   private pendingRegroupSeeds: number[] | undefined = undefined
   /** Test-only: how many regroup operations actually ran. */
   private regroupOperationCount = 0
+  /** Test-only: how many anchor-side re-sorts actually ran. */
+  private sideSortOperationCount = 0
   /** Test-only: how many group members the LAST envelope closure visited. A
    *  deterministic guard that a late-result regroup is linear in the affected
    *  run, never quadratic. */
@@ -2215,6 +2217,7 @@ export class TranscriptFolder {
     if (owned === undefined) return
     const list = position === 'before' ? owned.before : owned.after
     const before = [...list]
+    this.sideSortOperationCount += 1
     list.sort((left, right) => {
       const a = this.displacedOrderOf(left)
       const b = this.displacedOrderOf(right)
@@ -3056,29 +3059,16 @@ export class TranscriptFolder {
     // A relation whose call this step's durable evidence no longer names has no
     // owner: drop it (never inherit it, never re-add it as a candidate).
     const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
-    const anchored = anchorIndex === undefined ? undefined : this.laneDisplayByAnchor.get(anchorIndex)
-    for (const displaced of anchored === undefined ? [] : [...anchored.before, ...anchored.after]) {
-      const row = this.items[displaced]
-      if (row === undefined || row.kind !== 'tool' || row.callId === undefined) continue
-      if (!callIds.has(row.callId)) this.dropLaneDisplacement(displaced)
-    }
     this.coalescingRegroups(() => {
-      const sides: { before: number[]; after: number[] } = { before: [], after: [] }
-      for (const callId of callIds) {
-        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId)
-        if (outcome !== undefined) sides[outcome.position].push(outcome.index)
+      // Expired relations are revoked inside the SAME batch: a step that owned
+      // hundreds of displaced rows must not regroup once per revoked relation.
+      const anchored = anchorIndex === undefined ? undefined : this.laneDisplayByAnchor.get(anchorIndex)
+      for (const displaced of anchored === undefined ? [] : [...anchored.before, ...anchored.after]) {
+        const row = this.items[displaced]
+        if (row === undefined || row.kind !== 'tool' || row.callId === undefined) continue
+        if (!callIds.has(row.callId)) this.dropLaneDisplacement(displaced)
       }
-      // A side that owns TWO or more proven rows is ordered by evidence as a
-      // WHOLE: a row already sitting on that side physically joins the relation
-      // too, so live and cold cannot disagree when the durable arrival order
-      // differs from the evidence order. A lone row keeps its physical slot, so
-      // it never jumps across unrelated rows (see regression `F3`).
-      const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
-      if (anchorIndex === undefined) return
-      for (const position of ['before', 'after'] as const) {
-        if (sides[position].length < 2) continue
-        for (const row of sides[position]) this.setLaneDisplay(row, anchorIndex, position)
-      }
+      for (const callId of callIds) this.convergeToolRowAgainstAnchor(turn, step, callId)
     })
     // The latest settlement is the step's authority: Preparing evidence for a
     // call it no longer names must not survive to qualify a LATER durable call
@@ -3102,6 +3092,29 @@ export class TranscriptFolder {
    *  side can arrive last: the settlement converges the calls its own durable
    *  stream named, and a `tool/call` whose durable event carries the step
    *  converges itself against an Assistant row that already settled. */
+  /** The PURE evidence outcome for one Tool row of a step: which side of its
+   *  VISIBLE Conversation its own materialization time proves, when it is proven
+   *  at all. Applies nothing (the reachability guard asks this about siblings). */
+  private toolRowEvidence(
+    turn: number,
+    step: number,
+    callId: string,
+  ): { index: number; position: 'before' | 'after' } | undefined {
+    const key = stepKey(turn, step)
+    const assistantRow = this.assistantEntries.get(key)
+    const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
+    if (assistantRow === undefined || assistantIndex === undefined || !this.isVisible(assistantRow)) return undefined
+    const visibleAt = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step)
+    if (visibleAt === undefined) return undefined
+    const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+    const card = index === undefined ? undefined : this.items[index]
+    if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) return undefined
+    if (card.turn !== turn) return undefined
+    const startedAt = transcriptTimingOf(card)?.startedAt
+    if (startedAt === undefined || startedAt === visibleAt) return undefined
+    return { index, position: startedAt > visibleAt ? 'after' : 'before' }
+  }
+
   private convergeToolRowAgainstAnchor(
     turn: number,
     step: number,
@@ -3136,6 +3149,12 @@ export class TranscriptFolder {
     }
     const shouldFollow = startedAt > visibleAt
     const position: 'before' | 'after' = shouldFollow ? 'after' : 'before'
+    if (!this.sideMoveIsReachable(index, assistantIndex, position, turn, step)) {
+      // Moving the row to the anchor's slot would cross a visible row of another
+      // step or lane: the conservative choice keeps every row where it is.
+      this.dropLaneDisplacement(index)
+      return { index, position }
+    }
     if (shouldFollow === (index > assistantIndex)) {
       // Already in the physical position the evidence asks for: it keeps its own
       // slot (and any relation is dropped). The CALLER decides whether the whole
@@ -3158,6 +3177,40 @@ export class TranscriptFolder {
     }
     this.setLaneDisplay(index, assistantIndex, position)
     return { index, position }
+  }
+
+  /** Whether the anchor's slot and `row` are connected through rows that may be
+   *  crossed: invisible rows, and this step's own Tool rows proven on the SAME
+   *  side. Any other visible row blocks the move, so a displacement can never
+   *  reorder an unrelated (other step/lane) row. */
+  private sideMoveIsReachable(
+    row: number,
+    anchorIndex: number,
+    position: 'before' | 'after',
+    turn: number,
+    step: number,
+  ): boolean {
+    // A displacement lifts the row out of its physical slot and emits it at the
+    // anchor's slot: it therefore crosses every RAW slot in between. That is
+    // allowed only when every VISIBLE row in those slots is invisible-headed or
+    // is this step's own Tool row proven on the SAME side — any other visible row
+    // (another step, another lane) would be reordered, so the move is refused.
+    const from = Math.min(row, anchorIndex) + 1
+    const to = Math.max(row, anchorIndex) - 1
+    for (let candidate = from; candidate <= to; candidate += 1) {
+      for (const visibleRow of this.emittedAt(candidate)) {
+        if (!this.isVisible(this.items[visibleRow]!)) continue
+        const item = this.items[visibleRow]
+        if (item !== undefined && item.kind === 'tool' && item.callId !== undefined && item.turn === turn) {
+          // Identity by ROW, not by call id: a reused id resolves elsewhere and
+          // must never authorize crossing this row.
+          const sibling = this.toolRowEvidence(turn, step, item.callId)
+          if (sibling !== undefined && sibling.index === visibleRow && sibling.position === position) continue
+        }
+        return false
+      }
+    }
+    return true
   }
 
   /** Converge one step's Thinking/Assistant rows to its stored lane
@@ -3234,12 +3287,18 @@ export class TranscriptFolder {
    * display-relation change alters the order matches are emitted in, so
    * refinement against previous matches must be invalidated even when no
    * searchable text changed. */
-  private setLaneDisplay(displaced: number, anchor: number, position: 'before' | 'after'): void {
+  private setLaneDisplay(
+    displaced: number,
+    anchor: number,
+    position: 'before' | 'after',
+    resort = true,
+  ): void {
     const current = this.laneDisplayByDisplaced.get(displaced)
     if (current?.anchor === anchor && current.position === position) {
       // The relation is unchanged, but a refreshed materialization key can move
-      // this row within its side: re-sort without recording a new relation.
-      this.resortAnchorSide(anchor, position)
+      // this row within its side: re-sort without recording a new relation
+      // (bulk callers collect every member first and sort once instead).
+      if (resort) this.resortAnchorSide(anchor, position)
       return
     }
     const previousAnchor = current?.anchor
@@ -3884,6 +3943,7 @@ export class TranscriptFolder {
     lastRegroupSpanRows: number
     lastRegroupMemberVisits: number
     regroupOperations: number
+    sideSortOperations: number
   } {
     return {
       entries: this.searchEntries.length,
@@ -3896,6 +3956,7 @@ export class TranscriptFolder {
       lastRegroupSpanRows: this.lastRegroupSpanRows,
       lastRegroupMemberVisits: this.lastRegroupMemberVisits,
       regroupOperations: this.regroupOperationCount,
+      sideSortOperations: this.sideSortOperationCount,
     }
   }
 

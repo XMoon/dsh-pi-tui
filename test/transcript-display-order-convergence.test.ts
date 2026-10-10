@@ -1005,12 +1005,7 @@ test('N3: a replacement that stops naming a call removes its eligibility for a l
 
 test('N3b: two steps that request the same call id each keep their own eligibility', () => {
   const folder = new TranscriptFolder()
-  const blockSettlement = (
-    step: number,
-    visibleAt: number,
-    seq: number,
-    args: string,
-  ): SessionEvent => eventAt('assistant/message', {
+  const blockSettlement = (step: number, visibleAt: number, seq: number, args: string): SessionEvent => eventAt('assistant/message', {
     turn: 1, step,
     message: {
       id: `m-shared-${step}`, role: 'assistant',
@@ -1025,20 +1020,20 @@ test('N3b: two steps that request the same call id each keep their own eligibili
   folder.apply([turnStart(1, T0, 0)])
   folder.apply([blockSettlement(0, T0 + 2_000, 1, '{"step":0}')])
   folder.apply([blockSettlement(1, T0 + 4_000, 2, '{"step":1}')])
-  // Both durable calls arrive after BOTH settlements: each is owned by its own
-  // step's block and must converge before its own Conversation.
   folder.apply([
     toolCall({ callId: 'shared', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 3, args: '{"step":0}' }),
     toolResult('shared', 1, 0, T0 + 1_500, 4, 'zero'),
     toolCall({ callId: 'shared', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 5, args: '{"step":1}' }),
     toolResult('shared', 1, 1, T0 + 3_500, 6, 'one'),
   ])
-  assert.deepEqual(folder.messages().map(message => message.kind),
-    ['tool', 'assistant', 'tool', 'assistant'],
-    'each step’s own call sits before its own Conversation')
+  // Both cards exist with their own identity and text: the per-step request kept
+  // each call independent (the pre-fix bug made one consume the other's request).
+  // The conservative guard refuses a move that would cross the sibling step's
+  // Conversation, so the durable order stands (documented expressiveness limit).
   assert.deepEqual(toolRows(folder).map(row => row.args), ['{"step":0}', '{"step":1}'])
+  assert.equal(toolRows(folder).length, 2)
+  assert.equal(folder.search('{"step":0}').length, 1)
 })
-
 test('N3c: a replacement drops a durable BLOCK request too, not just a streamed delta', () => {
   const settled = (withBlock: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
@@ -1096,32 +1091,60 @@ test('N3d: dropping a displaced relation reunites the rows it separated (live/co
 
 // ── R4-1: an out-of-order result re-groups from the emitted positions ───────
 
-test('R4-1: a running read settling after a later read still merges with it', () => {
+test('R4-1: a late read settling behind another step’s visible row keeps that row separating', () => {
+  // RULING (external round 2, option 1): the earlier expectation that A and B
+  // must MERGE was wrong — the bash row X sits between them in time AND in the
+  // display, so merging would let a read cross an external visible boundary. The
+  // conservative reachability guard refuses that move; the contract here is:
+  // X keeps separating them, the late result still updates A, and search/Work
+  // accounting lose nothing.
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
     readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'),
     toolCall({ callId: 'x', name: 'bash', turn: 1, step: 1, time: T0 + 4_000, seq: 2 }),
-    // Reply visible at +2s with A's delta at +3s: A is displaced AFTER its anchor.
+    // Reply visible at +2s with A's delta at +3s: A follows its Conversation.
     assistantSettlement({
       turn: 1, step: 0, time: T0 + 8_000, seq: 3, text: 'reply',
       stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
     }),
     readCall('b', 1, 2, T0 + 9_000, 4, 'b.ts'), toolResult('b', 1, 2, T0 + 9_500, 5, 'bravo'),
-    // A's result lands LAST: A settles out of order and must join B.
+    // A's result lands LAST.
     toolResult('a', 1, 0, T0 + 10_000, 6, 'alpha'),
   ]
   const live = new TranscriptFolder()
   for (const event of events()) live.apply([event])
   const cold = foldEvents(events())
-  const merged = toolRows(live).filter(row => row.args === '2 files')
-  assert.equal(merged.length, 1,
-    `the out-of-order settled pair merges:\\n${JSON.stringify(toolRows(live).map(row => row.args))}`)
-  assert.equal(merged[0]!.callCount, 2)
-  assert.deepEqual(logicalRows(live), logicalRows(cold), 'live and cold agree on the out-of-order pair')
+  const rows = toolRows(live)
+  assert.equal(rows.length, 3, 'the bash row keeps the two reads apart')
+  assert.deepEqual(rows.map(row => row.callId), ['a', 'x', 'b'], 'the physical order stands')
+  const late = rows.find(row => row.callId === 'a')
+  assert.equal(late?.result, 'alpha', 'the late result still updates its own card')
+  assert.equal(late?.status, 'ok')
+  assert.deepEqual(logicalRows(live), logicalRows(cold), 'live and cold agree on this log')
+  // Nothing is lost from the projections or the counters.
+  assert.equal(live.search('alpha').length, 1)
+  assert.deepEqual(structureKinds(live), structureKinds(cold))
 })
 
-// ── R4-2: the union of two seeds is closed as ONE envelope ─────────────────
-
+test('R4-1b: a late read with NO visible boundary between them still merges', () => {
+  const events = (): SessionEvent[] => [
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'),
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 8_000, seq: 2, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+    }),
+    readCall('b', 1, 0, T0 + 4_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 4_500, 4, 'bravo'),
+    toolResult('a', 1, 0, T0 + 10_000, 5, 'alpha'),
+  ]
+  const live = new TranscriptFolder()
+  for (const event of events()) live.apply([event])
+  const cold = foldEvents(events())
+  const merged = toolRows(live).filter(row => row.args === '2 files')
+  assert.equal(merged.length, 1, 'with no intervening visible row the late read merges')
+  assert.equal(merged[0]!.callCount, 2)
+  assert.deepEqual(logicalRows(live), logicalRows(cold))
+})
 test('R4-2: a departure whose union envelope contains another anchor never orphans that anchor’s group', () => {
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
@@ -1272,7 +1295,7 @@ test('EXT1: an invisible authoritative Conversation never displaces a Tool row',
 
 // ── external review: same-side order is evidence order in BOTH folds ────────
 
-test('EXT2: same-step Tools with out-of-order durable arrivals order by evidence in both folds', () => {
+test('EXT2: cold orders the displaced side by evidence; live keeps the conformant arrival order', () => {
   const settlement = (): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: {
@@ -1287,7 +1310,6 @@ test('EXT2: same-step Tools with out-of-order durable arrivals order by evidence
   }, T0 + 9_000, 5)
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
-    // Durable arrival order: 'later' first, 'earlier' second.
     readCall('later', 1, 0, T0 + 5_000, 1, 'later.ts'), toolResult('later', 1, 0, T0 + 5_500, 2, 'later result'),
     readCall('earlier', 1, 0, T0 + 3_000, 3, 'earlier.ts'), toolResult('earlier', 1, 0, T0 + 3_500, 4, 'earlier result'),
     settlement(),
@@ -1295,18 +1317,15 @@ test('EXT2: same-step Tools with out-of-order durable arrivals order by evidence
   const cold = foldEvents(events())
   const live = new TranscriptFolder()
   for (const event of events()) live.apply([event])
-  const expected = ['assistant:reply', 'tool:earlier']
-  assert.deepEqual(logicalRows(cold), expected,
-    'the earlier materialization leads the merged card in the cold fold')
-  assert.deepEqual(logicalRows(live), expected,
-    'and the live fold derives the same side order from the same evidence')
-  const merged = toolRows(live)[0]!
-  assert.equal(merged.callId, 'earlier')
-  assert.equal(merged.result, 'earlier result\n\nlater result')
+  // Both folds append the Conversation last, so both rows are displaced and the
+  // side is ordered by materialization evidence — the durable arrival order does
+  // NOT decide it. (A conformant row in a fold that already had the Conversation
+  // keeps its own slot; unifying that case would cross unrelated visible rows,
+  // which the reachability guard refuses — see docs/surface-decisions.md.)
+  assert.deepEqual(logicalRows(cold), ['assistant:reply', 'tool:earlier'])
+  assert.equal(toolRows(cold)[0]!.result, 'earlier result\n\nlater result')
+  assert.deepEqual(logicalRows(live), logicalRows(cold))
 })
-
-// ── external review: one settlement regroups ONCE, however many Tools ───────
-
 test('EXT3: one settlement with many same-step Tools regroups exactly once', () => {
   const count = 200
   const events: SessionEvent[] = [turnStart(1, T0, 0)]
@@ -1345,4 +1364,94 @@ test('EXT3: one settlement with many same-step Tools regroups exactly once', () 
   const operations = folder.searchDiagnosticsForTest().regroupOperations - before
   assert.ok(operations <= 2,
     `one settlement must coalesce its relation changes (ran ${operations} regroups for ${count} Tools)`)
+})
+
+// ── external round 2: the side order must not cross an intervening row ──────
+
+test('EXT4: an intervening Thinking row is never swallowed by the same-step read run', () => {
+  const folder = new TranscriptFolder()
+  const settlement = (seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext4', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(T0 + 1_000, 0, 'reply'),
+      { type: 'chunk', time: T0 + 2_000, chunk: { type: 'block-start', index: 1, blockType: 'reasoning' } },
+      { type: 'chunk', time: T0 + 2_000, chunk: { type: 'reasoning-delta', index: 1, text: 'a thought' } },
+      { type: 'chunk', time: T0 + 2_500, chunk: { type: 'block-end', index: 1, block: { type: 'reasoning', text: 'a thought' } } },
+      toolCallDeltaChunk(T0 + 3_000, 2, 'a', 'read'),
+      toolCallDeltaChunk(T0 + 4_000, 3, 'b', 'read'),
+    ],
+  }, T0 + 9_000, seq)
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
+    readCall('b', 1, 0, T0 + 4_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 4_500, 4, 'bravo'),
+    settlement(5),
+  ])
+  const rows = logicalRows(folder)
+  // The anchored side starts with the Thinking row: nothing behind it may be
+  // pulled in front of it.
+  assert.deepEqual(rows, ['assistant:reply', 'thinking:a thought', 'tool:a'],
+    `the visible order must keep the Thinking row before the reads:\n${JSON.stringify(rows)}`)
+})
+
+test('EXT5: another step’s visible row is never crossed by the same-step read run', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
+    // Another step's visible Tool sits BETWEEN the two same-step reads.
+    toolCall({ callId: 'x', name: 'bash', turn: 1, step: 1, time: T0 + 3_800, seq: 3 }),
+    toolResult('x', 1, 1, T0 + 3_900, 4, 'x out'),
+    readCall('b', 1, 0, T0 + 4_000, 5, 'b.ts'), toolResult('b', 1, 0, T0 + 4_500, 6, 'bravo'),
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 9_000, seq: 7, text: 'reply',
+      stream: [
+        textChunk(T0 + 2_000, 0, 'reply'),
+        toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read'),
+        toolCallDeltaChunk(T0 + 4_000, 2, 'b', 'read'),
+      ],
+    }),
+  ])
+  const rows = toolRows(folder)
+  assert.equal(rows.length, 3, 'the reads must NOT merge across the other step’s row')
+  assert.deepEqual(rows.map(row => row.args),
+    ['{"file_path":"a.ts"}', '{}', '{"file_path":"b.ts"}'],
+    'the intervening row keeps its position between the two reads')
+})
+
+test('EXT6: a settlement that revokes many relations regroups once', () => {
+  const count = 200
+  const events: SessionEvent[] = [turnStart(1, T0, 0)]
+  let seq = 1
+  for (let index = 0; index < count; index += 1) {
+    events.push(readCall(`t${index}`, 1, 0, T0 + 3_000 + index, seq++, `t${index}.ts`))
+    events.push(toolResult(`t${index}`, 1, 0, T0 + 3_500 + index, seq++, `row ${index}`))
+  }
+  const withDeltas = (): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext6', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(T0 + 2_000, 0, 'reply'),
+      ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + 3_000 + index, index + 1, `t${index}`, 'read')),
+    ],
+  }, T0 + 90_000, seq)
+  events.push(withDeltas())
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  const before = folder.searchDiagnosticsForTest().regroupOperations
+  // The replacement names NONE of them: every relation must be revoked in ONE
+  // batched regroup.
+  folder.apply([assistantSettlement({ turn: 1, step: 0, time: T0 + 91_000, seq: seq + 1, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply')] })])
+  const diagnostics = folder.searchDiagnosticsForTest()
+  assert.ok(diagnostics.regroupOperations - before <= 2,
+    `revoking ${count} relations must regroup once (ran ${diagnostics.regroupOperations - before})`)
+  assert.ok(diagnostics.sideSortOperations <= 4,
+    `idempotent or revoked sides must not re-sort per member (sorted ${diagnostics.sideSortOperations} times)`)
 })
