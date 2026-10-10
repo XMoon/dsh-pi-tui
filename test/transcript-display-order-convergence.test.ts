@@ -2050,3 +2050,56 @@ test('INT13: a late assistant/attempt never leaves a Tool relation crossing a re
   assert.equal(toolRows(folder).length, 1)
   assert.equal(toolRows(folder)[0]!.callCount, 2)
 })
+
+test('INT14: a sibling whose own timing did NOT change is still re-derived by a late attempt', () => {
+  const laneStream = (visibleAt: number, bAt: number, aAt: number): Record<string, unknown>[] =>
+    [{ at: visibleAt, kind: 'text' }, { at: bAt, kind: 'b' }, { at: aAt, kind: 'a' }]
+      .sort((left, right) => left.at - right.at)
+      .map((frame, index) => ({
+        type: 'chunk',
+        time: T0 + frame.at,
+        chunk: frame.kind === 'text'
+          ? { type: 'text-delta', index, text: 'reply' }
+          : { type: 'tool-call-delta', index, id: frame.kind, name: 'read', argumentsDelta: '{}' },
+      }))
+  for (const aAt of [4_000, 5_000]) {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      turnStart(1, T0, 0),
+      readCall('a', 1, 0, T0 + 5_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 5_500, 2, 'alpha'),
+      readCall('b', 1, 0, T0 + 6_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 6_500, 4, 'bravo'),
+      assistantSettlement({ turn: 1, step: 0, time: T0 + 9_000, seq: 5, text: 'reply', stream: laneStream(2_000, 3_000, 5_000) }),
+    ])
+    // B's start changes; with `aAt = 5000` A's does NOT. Restoring B's slot still
+    // invalidates A's move, so A must be part of the refresh cohort anyway.
+    folder.apply([eventAt('assistant/attempt', { turn: 1, step: 0, stream: laneStream(2_000, 1_000, aAt) }, T0 + 12_000, 6)])
+    assert.deepEqual(logicalRows(folder), ['tool:a', 'assistant:reply'],
+      `A's own timing unchanged (${aAt}) must not exempt it from the refresh`)
+    assert.equal(toolRows(folder).length, 1)
+    assert.equal(toolRows(folder)[0]!.callCount, 2)
+  }
+})
+
+test('INT15: a late attempt cannot resurrect an id the current message expired', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(1, T0, 0),
+    readCall('c', 1, 0, T0 + 5_000, 1, 'c.ts'), toolResult('c', 1, 0, T0 + 5_500, 2, 'charlie'),
+    // The successful settlement names C ...
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 9_000, seq: 3, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 4_000, 1, 'c', 'read')],
+    }),
+    // ... and the CURRENT message does NOT: C's move is revoked and its id expired.
+    assistantSettlement({ turn: 1, step: 0, time: T0 + 10_000, seq: 4, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply')] }),
+  ])
+  assert.deepEqual(logicalRows(folder), ['tool:c', 'assistant:reply'])
+  // A LOWER-authority late attempt naming C again may refresh its timing facts but
+  // must not re-establish the membership the successful message removed.
+  folder.apply([eventAt('assistant/attempt', {
+    turn: 1, step: 0,
+    stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'c', 'read')],
+  }, T0 + 12_000, 5)])
+  assert.deepEqual(logicalRows(folder), ['tool:c', 'assistant:reply'],
+    'the expired id stays expired and nothing moves')
+})
