@@ -225,7 +225,7 @@ test('observing never advances the model job_output cursor', async () => {
 test('the pi-tui composition mounts the official job-controller row and injects both P1 services', () => {
   const yml = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
   assert.match(yml, /- id: job-controller\r?\n\s+name: '@deepseek-ai\/dsh-api-job-controller'/)
-  assert.match(yml, /inject: \[tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController\]/)
+  assert.match(yml, /inject: \[tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady\]/)
   // No second plugin-manager row: the base layer already mounts it.
   assert.equal((yml.match(/- id: plugin-manager\b/g) ?? []).length, 0)
 })
