@@ -1542,6 +1542,8 @@ async function bootB3Tsp(options: {
   readonly resume: string
   /** The Direct Agent's busy window, per session (see `ownTspBoot`). */
   readonly idleGates?: Map<string, Promise<void>>
+  /** The raw idle gate (see `ownTspBoot`); it wins over `idleGates` when given. */
+  readonly whenIdleGate?: (sessionId: string) => Promise<void>
   /** The Host session-create gate (see `ownTspBoot`): the opening-window hold. */
   readonly createGate?: () => Promise<unknown>
 }): Promise<{ owned: OwnedTspRunner; plane: B3HostPlane; harness: RunnerHarness; ctx: B3CordisPlane }> {
@@ -1553,9 +1555,11 @@ async function bootB3Tsp(options: {
     logFile: join(options.home, 'diag.log'),
     session: options.standing as never,
     resumeId: options.resume,
-    ...options.idleGates === undefined
-      ? {}
-      : { whenIdleGate: (sessionId: string) => options.idleGates?.get(sessionId) ?? Promise.resolve() },
+    ...options.whenIdleGate !== undefined
+      ? { whenIdleGate: options.whenIdleGate }
+      : options.idleGates === undefined
+        ? {}
+        : { whenIdleGate: (sessionId: string) => options.idleGates?.get(sessionId) ?? Promise.resolve() },
     ...options.createGate === undefined ? {} : { createGate: options.createGate },
     provide: rawCtx => {
       const ctx = rawCtx as unknown as B3CordisPlane
@@ -2331,4 +2335,137 @@ test('B3 P3 (9): an open Alt+Q list does not survive a real Session replacement'
   } finally {
     await owned.settle()
   }
+})
+
+async function expectPublicationWindowCurrentness(
+  t: import('node:test').TestContext,
+  command: 'fork' | 'new',
+): Promise<void> {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-pubwindow-')
+  const sessionA = fakeSession({
+    id: 'b3-pubwindow-a',
+    header: { id: 'b3-pubwindow-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  // The CHILD's idle gate is HELD: the transition parks in its post-commit child
+  // quiesce, i.e. B is already the published owner while its initialization
+  // (hydration, the later reconcile) has NOT run — the exact window the review
+  // named.
+  let releaseChildIdle: (() => void) | undefined
+  const childIdle = new Promise<void>(resolve => { releaseChildIdle = resolve })
+  let childGateEntered = false
+  const { owned, harness, ctx } = await bootB3Tsp({
+    life, home, standing: sessionA, resume: sessionA.id,
+    whenIdleGate: sessionId => {
+      if (sessionId === sessionA.id) return Promise.resolve()
+      childGateEntered = true
+      return childIdle
+    },
+  })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
+    const originalCancel = aAgent.cancel
+    const approvalAbort = new AbortController()
+    const questionAbort = new AbortController()
+    // The Host's cancellation of the replaced owner is HELD: A's requests stay in
+    // flight through the whole window, so the modal's absence there can only be
+    // the presentation currentness at publication — never a settlement.
+    let completeCancellation: (() => void) | undefined
+    const cancellationCompletion = new Promise<void>(resolve => { completeCancellation = resolve })
+    aAgent.cancel = () => {
+      void cancellationCompletion.then(() => {
+        approvalAbort.abort()
+        questionAbort.abort()
+      })
+      originalCancel.call(aAgent)
+    }
+    life.defer(() => { aAgent.cancel = originalCancel })
+    life.defer(() => { completeCancellation?.() })
+    life.defer(() => { releaseChildIdle?.() })
+
+    // A's own modal: a live approval (answered by `y`) and a live Question
+    // (answered by Enter).
+    let approvalOutcome: string | undefined
+    let questionOutcome: string | undefined
+    void ctx.waterfall(
+      aAgent,
+      'approval/request',
+      { agent: aAgent, callId: 'call-window-approval', toolName: 'bash', reason: 'A window approval', signal: approvalAbort.signal },
+      () => Promise.resolve('unavailable'),
+    ).then(value => { approvalOutcome = String(value) })
+    void ctx.waterfall(
+      aAgent,
+      'user-questions/request',
+      {
+        agent: aAgent,
+        wait: { callId: 'call-window-question' },
+        questions: [{ id: 'q-window', question: 'A window question?', options: [{ label: 'yes' }] }],
+        signal: questionAbort.signal,
+      },
+      () => Promise.reject(new Error('no answerer')),
+    ).then(
+      () => { questionOutcome = 'answered' },
+      (error: unknown) => { questionOutcome = String((error as { readonly code?: unknown }).code) },
+    )
+    await waitUntil('A\'s modal', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+
+    const transition = commandOf(owned, command)()
+    await waitUntil('the child create', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    // THE WINDOW: the commit published B and the transition is parked in the
+    // post-commit child quiesce — nothing has been hydrated yet.
+    await waitUntil('the post-commit child quiesce', () => childGateEntered, 15_000)
+    assert.equal(presentedSessions(owned.pane).includes(sessionB), false,
+      'B is the published owner but not initialized yet (the window is real)')
+    assert.equal(approvalOutcome, undefined, 'the held Host cancellation has not completed: A\'s approval is in flight')
+    assert.equal(questionOutcome, undefined, 'the held Host cancellation has not completed: A\'s Question is in flight')
+
+    // The commit-time withdrawal must already have left a committed frame — with
+    // BOTH requests still pending, so this is presentation currentness alone.
+    owned.pane.event({ ev: 'focus' })
+    await waitUntil('the replaced modal left the seat AT publication',
+      () => liveLayerModals(owned.pane.frames()).length === 0, 15_000)
+
+    // Keys can no longer ANSWER A: `y`, Enter and Esc are no longer the modal
+    // seat's (they belong to the composer and, for Esc, to the application's own
+    // cancel intent — the correct owner once the modal is gone). Each key is sent
+    // alone, so the witness shows the input ownership step by step.
+    const settleKeys = async (): Promise<void> => {
+      owned.pane.event({ ev: 'focus' })
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    owned.pane.key('y')
+    await settleKeys()
+    assert.notEqual(approvalOutcome, 'allowed-once', '`y` cannot answer the replaced subject\'s approval')
+    assert.ok(owned.pane.output.text().includes('y'), 'the key reached the composer instead of a modal seat')
+    owned.pane.key('\r')
+    await settleKeys()
+    assert.notEqual(questionOutcome, 'answered', 'Enter cannot answer the replaced subject\'s question')
+    owned.pane.key('\u001b')
+    await settleKeys()
+    assert.equal(approvalOutcome, undefined, 'none of `y`/Enter/Esc can settle the replaced subject\'s approval')
+    assert.equal(questionOutcome, undefined, 'none of `y`/Enter/Esc can settle the replaced subject\'s Question')
+
+    // Release the child quiesce: the transition completes, and A's requests are
+    // still owned by their own Host lifetimes.
+    releaseChildIdle!()
+    await transition
+    await waitUntil('B hydrated', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntil('A retired', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
+    completeCancellation!()
+    await waitUntil('A\'s requests settled by their own lifetimes',
+      () => approvalOutcome !== undefined && questionOutcome !== undefined, 15_000)
+    assert.equal(approvalOutcome, 'cancelled', 'the Host cancellation settles the approval fail-closed')
+    assert.equal(questionOutcome, 'ASK_ABORTED', 'the Host cancellation ends the question ASK_ABORTED')
+  } finally {
+    releaseChildIdle?.()
+    await owned.settle()
+  }
+}
+
+test('B3 P2-B (10): the replaced modal leaves the seat AT the owner publication, before the new owner is initialized (fork and /new)', async (t) => {
+  await expectPublicationWindowCurrentness(t, 'fork')
+  await expectPublicationWindowCurrentness(t, 'new')
 })

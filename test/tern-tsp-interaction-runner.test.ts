@@ -1188,7 +1188,7 @@ test('B3 F11: a refused approval admission is drained by the surface teardown (a
   }
 })
 
-test('B3 F11: a refused admission with NO Host signal is still drained by the surface teardown', async () => {
+test('B3 F11/P2-A: a signal-less refused admission settles fail-closed at admission (never waits for TUI exit)', async () => {
   const harness = await mountRunnerHarness()
   let release: (() => void) | undefined
   try {
@@ -1209,12 +1209,13 @@ test('B3 F11: a refused admission with NO Host signal is still drained by the su
     harness.setSession('session-b')
     harness.surface.reconcileInteractionPresentation()
     release!()
-    await Promise.resolve()
-    await Promise.resolve()
-    assert.equal(settledAs, undefined, 'nothing settles while it owns its own (never-aborting) lifetime')
-    // Without this owner the wait could never end: the official signal is optional.
+    // The official signal is optional, so THIS owner is the only possible end:
+    // an already-inadmissible request settles at admission (P2-A) instead of
+    // waiting for the surface teardown.
+    await waitFor(() => settledAs !== undefined, 'the refused admission settled at admission')
+    assert.equal(settledAs, 'cancelled', 'fail-closed, never an allow')
+    // A teardown afterwards is still inert and leaves nothing behind.
     harness.surface.dispose()
-    await waitFor(() => settledAs !== undefined, 'the teardown settled the signal-less refused admission')
     assert.equal(settledAs, 'cancelled')
   } finally {
     // A held middleware always has a fallback release: a failing assertion must
@@ -1411,6 +1412,67 @@ test('B3 P2-2: signal-less live requests are settled by the replacement (fail-cl
     assert.equal(approvalOutcome, 'cancelled', 'the approval stays fail-closed, never an allow')
     assert.deepEqual(liveOverlays(harness.tern.ops()), [], 'no stale slot is left behind')
   } finally {
+    await harness.dispose()
+  }
+})
+
+test('B3 P2-A: an inadmissible request with NO Host lifetime settles at admission (no TUI exit needed)', async () => {
+  const harness = await mountRunnerHarness()
+  let release: (() => void) | undefined
+  try {
+    // Both kinds are held by a legal upstream middleware and released only AFTER
+    // the replacement was published: they reach the answerers already
+    // inadmissible, and neither carries a Host lifetime.
+    const questionOriginal = harness.plane.listeners.get('user-questions/request')
+    const approvalOriginal = harness.plane.listeners.get('approval/request')
+    assert.ok(questionOriginal !== undefined && approvalOriginal !== undefined,
+      'the Direct port registered both listeners')
+    const held = new Promise<void>(resolve => { release = resolve })
+    harness.plane.listeners.set('user-questions/request', (request, next) => held.then(() => questionOriginal(request, next)))
+    harness.plane.listeners.set('approval/request', (request, next) => held.then(() => approvalOriginal(request, next)))
+    let questionOutcome: string | undefined
+    let approvalOutcome: string | undefined
+    const question = harness.questionRequest({
+      agent: { session: { id: SESSION_ID } },
+      wait: { callId: 'call-p2a-question' },
+      questions: [{ id: 'q-p2a', question: 'Late?', options: [{ label: 'yes' }] }],
+    })
+    const approval = harness.approvalRequest({
+      agent: { session: { id: SESSION_ID } },
+      toolName: 'bash',
+      reason: 'late admission',
+    })
+    void question.then(
+      () => { questionOutcome = 'answered' },
+      (error: unknown) => { questionOutcome = String((error as { readonly code?: unknown }).code) },
+    )
+    void approval.then(
+      value => { approvalOutcome = String(value) },
+      (error: unknown) => { approvalOutcome = `rejected:${String(error)}` },
+    )
+
+    harness.setSession('session-b')
+    harness.surface.reconcileInteractionPresentation()
+    release!()
+    await waitFor(() => questionOutcome !== undefined && approvalOutcome !== undefined,
+      'both late requests settled at admission — WITHOUT any surface teardown')
+    assert.equal(questionOutcome, 'ASK_ABORTED', 'the Question keeps its truthful Host-side classification')
+    assert.equal(approvalOutcome, 'cancelled', 'the approval stays fail-closed, never an allow')
+    assert.deepEqual(overlayAdds(harness.tern.ops()), [], 'neither late request was ever presented')
+
+    // POSITIVE CONTROL: the surface is still alive and usable (nothing was
+    // disposed to settle them) — the CURRENT subject's request presents normally.
+    const current = harness.questionRequest({
+      agent: { session: { id: 'session-b' } },
+      wait: { callId: 'call-still-alive' },
+      questions: [{ id: 'q-alive', question: 'Alive?', options: [{ label: 'yes' }] }],
+    })
+    await waitFor(() => overlayAdds(harness.tern.ops()).length === 1, 'the replacement still presents its own request')
+    harness.tern.key('\r')
+    harness.tern.key('\r')
+    assert.deepEqual(await current, { answers: [{ id: 'q-alive', selected: ['yes'] }] })
+  } finally {
+    release?.()
     await harness.dispose()
   }
 })

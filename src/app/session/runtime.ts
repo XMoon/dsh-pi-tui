@@ -74,6 +74,15 @@ export interface SessionRuntimeSurface {
    * own retention contract).
    */
   dropOutgoingActiveDraft(): void
+  /**
+   * PR3-B B3 (external review P2-B): withdraw the REPLACED subject's live
+   * interaction presentation at the SAME synchronous publication commit. The
+   * commit section is state-only and must not throw, so the implementation
+   * performs no Host read and routes any renderer frame failure to that
+   * renderer's fatal sink. Called immediately after `setCurrentOwner`, before any
+   * post-commit await.
+   */
+  withdrawReplacedPresentation(): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
   // First-session (deferred creation) runner operations.
@@ -343,6 +352,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                   deps.surface.dropOutgoingActiveDraft()
                 }
                 core.setCurrentOwner(nextOwner, sessionId)
+                // External review P2-B: the new owner IS published here, so the
+                // replaced subject's modal must already be out of the seat before
+                // the post-commit awaits below (retirement, quiesce, hydration).
+                if (oldOwner !== undefined && oldOwner !== nextOwner) {
+                  deps.surface.withdrawReplacedPresentation()
+                }
                 // The publication is the transition's COMMIT POINT: only from
                 // here on does the `finally` below stop restoring the queued
                 // recalls (a pre-publication failure settles them aborted).
@@ -786,6 +801,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 deps.surface.dropOutgoingActiveDraft()
               }
               core.setCurrentOwner(nextOwner, nextSessionId)
+              // External review P2-B: same publication commit, same rule.
+              if (oldOwner !== undefined && oldOwner !== nextOwner) {
+                deps.surface.withdrawReplacedPresentation()
+              }
               // PR5 v2 §3C (plan-owner amendment): the operation-owned
               // settlement identity composes the PUBLISHED CHILD session id
               // with the epoch THIS rewind claimed at its admission bump —
@@ -1054,6 +1073,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         const resumed = owner as SessionHandle | undefined
         const nextOwner = resumed === undefined ? undefined : deps.owners.fromHandle(resumed)
         core.setCurrentOwner(nextOwner, nextOwner === undefined ? undefined : deps.owners.sessionId(nextOwner))
+        // External review P2-B: a resume publishes a new owner too.
+        if (nextOwner !== undefined) deps.surface.withdrawReplacedPresentation()
         return nextOwner === undefined ? undefined : deps.owners.completionIdentity(nextOwner)
       },
       setCompletionOwner: deps.surface.setCompletionOwner,

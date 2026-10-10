@@ -348,6 +348,24 @@ export class QuestionSurfaceController {
    * Only a live foreground transition (see {@link awaitContinued}) or an
    * explicit {@link reopen} may make a continued Question visible.
    */
+  /**
+   * The SYNCHRONOUS publication-commit half (external review P2-B): withdraw the
+   * replaced subject's live presentation and drop its mounted continued forms
+   * WITHOUT reading the projection (the commit section must not call into the
+   * Host). Advisory metadata is untouched; the full reconcile still runs later.
+   */
+  withdrawReplacedPresentation(): void {
+    if (this.disposed) return
+    this.withdrawReplacedLivePresentations()
+    let changed = false
+    for (const [key, entry] of [...this.entries]) {
+      if (this.deps.isAdmissibleSession(entry.sessionId)) continue
+      this.removeEntry(key, undefined, false)
+      changed = true
+    }
+    if (changed) this.notifyAttention()
+  }
+
   reconcile(): void {
     if (this.disposed) return
     this.ensureSubscription()
@@ -691,8 +709,16 @@ export class QuestionSurfaceController {
       // abort from the surface's point of view, never a user cancel.
       if (this.disposed) throw questionRejection(ASK_ABORTED)
       if (!admissible) {
-        // A replaced subject's late request (F10) is never mounted; only its OWN
-        // lifetime settles it, classified by the ordinary catch below.
+        // A replaced subject's late request (F10) is never mounted. With a
+        // Host-owned lifetime only the Host ends it, classified by the ordinary
+        // catch below. With NO Host lifetime there is no later retirement to wait
+        // for (the request arrives after its Session was replaced), so this
+        // controller settles it at admission (external review P2-A) as a
+        // Host-side end instead of leaving it pending until the TUI exits.
+        if (request.signal === undefined) {
+          retiredByAdmission = true
+          throw questionRejection(ASK_ABORTED)
+        }
         await awaitOwnLifetime()
       }
       // A Session replacement may have retired this flow while the claim was

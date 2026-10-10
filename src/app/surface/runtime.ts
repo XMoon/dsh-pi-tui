@@ -593,6 +593,16 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   reconcileInteractionPresentation(): void
   /**
+   * PR3-B B3 (external review P2-B): the SYNCHRONOUS publication-commit half of
+   * the same currentness policy. The runner calls it from the commit section,
+   * immediately after the new owner is published and BEFORE any post-commit
+   * await, so a replaced subject's modal can never keep the seat (or accept keys
+   * through the modal-first input routing) while the new owner's initialization
+   * is still pending. State-only and non-throwing: it performs no Host read, and
+   * a renderer frame failure routes to that renderer's fatal sink.
+   */
+  withdrawReplacedPresentation(): void
+  /**
    * Attach the A4-7 presentation event routing source (plan §16). The surface
    * owns every routing decision and the apply/paint calls; the runner keeps the
    * Cordis registrations as thin delegations. Called once before the
@@ -1784,6 +1794,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     reconcileInteractionPresentation() {
       interaction.reconcilePresentation()
+    },
+    withdrawReplacedPresentation() {
+      interaction.withdrawReplacedPresentation()
     },
     attachEventRouting(source) {
       routingSource = source

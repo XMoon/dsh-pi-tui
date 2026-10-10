@@ -11,9 +11,11 @@
 > wording (corrected in round 10, doc/comment only). The external review of PR #265
 > then returned request-changes with two P2 lifecycle gaps (a late continued offer,
 > signal-less request settlement) and one P3 (the transient list across a
-> replacement); all three are fixed in round 11 below with discriminating
-> witnesses. F6/C is kept PARTIAL here until the external review closes the
-> delivery status; B4 pending.**
+> replacement) — all fixed in round 11 — and, on the next round, two more P2
+> boundaries (a signal-less LATE admission and the owner-publication →
+> initialization window), both fixed in round 12 with discriminating witnesses.
+> F6/C is kept PARTIAL here until the external review closes the delivery status;
+> B4 pending.**
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
@@ -1253,3 +1255,45 @@ the P2-2 L6 witness RED; removing the approval's → the P2-2 production witness
 ("timed out waiting for both signal-less requests settled"); removing the hydration
 close → the P3 production witness RED ("the transient list must not cross the
 replacement").
+
+### Round 12 — the external review's second round (P2-A late admission, P2-B publication window)
+
+The second external round confirmed the round-11 fixes (the late continued offer,
+the registered signal-less settlement, the transient list) and returned two more
+boundaries. Both are fixed at the root cause, each with a witness that fails on the
+pre-fix code.
+
+P2-A — a request that is ALREADY inadmissible when it reaches the answerer (a legal
+  upstream middleware delayed it past the replacement) had no later retirement
+  event to wait for: with no Host lifetime it stayed pending until the whole TUI
+  exited. It now settles AT ADMISSION — Question `ASK_ABORTED`, approval
+  `cancelled` (fail-closed) — while a request that carries a Host signal keeps the
+  Host's own settlement right. The round-11 F11 expectation for the signal-less
+  shape is updated accordingly (it is no longer teardown-only).
+P2-B — the presentation-currentness withdrawal ran only at `initLiveSession`,
+  i.e. AFTER the post-commit phase (`whenIdleOrAbort`, hydration is later): between
+  the owner publication and that initialization the replaced subject's modal could
+  still own the seat and accept its keys through the modal-first routing. The
+  withdrawal now ALSO rides the SYNCHRONOUS publication commit — immediately after
+  `setCurrentOwner`, in the same commit section as the outgoing-draft drop, for the
+  ordinary transition, the fork adoption and a resume — so the seat is released
+  before any post-commit await. That half is state-only and non-throwing: it reads
+  no Host state, drops the replaced subject's mounted continued entries, settles
+  the signal-less flows by the P2-2 rule and closes the renderer's transient list,
+  with any renderer frame failure routed to that renderer's fatal sink (the
+  park-count projection got the same guard). The full pass still runs at the
+  hydration seam and on the event-driven reconcile.
+
+WITNESSES: (P2-A) both kinds held upstream and released only after the replacement
+was published settle at admission with NO surface teardown, while a positive
+control proves the surface still serves its current subject; (P2-B) a REAL
+publication through a real command (`/fork` AND `/new`) with the child's post-commit
+quiesce HELD and the Host cancellation of the replaced owner ALSO held, so both of
+its requests are still in flight when the witness observes the window: the modal has
+already left the seat, and `y`, Enter and Esc can no longer answer either request
+(they belong to the composer and, for Esc, to the application's own cancel intent).
+
+DISCRIMINATION FOR ROUND 12 (`sha256 -c` verified restores): removing the
+commit-time withdrawal from EITHER publication site turns the P2-B witness RED
+("timed out waiting for the replaced modal left the seat AT publication"); removing
+either kind's admission settlement turns the P2-A witness RED.

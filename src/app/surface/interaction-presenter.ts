@@ -96,6 +96,13 @@ export interface SurfaceInteractionPresenter {
    * it inert.
    */
   withdrawPresentation(lifetime: AbortSignal): void
+  /**
+   * PR3-B B3 (external review P2-B): close the renderer's TRANSIENT presentation
+   * (the TSP Alt+Q list) at a real owner replacement — the same synchronous
+   * publication commit that drops the outgoing draft, BEFORE any post-commit
+   * await. A renderer without such a transient surface leaves it inert.
+   */
+  closeTransientList(): void
 }
 
 /**
@@ -128,5 +135,6 @@ export function pituiSurfaceInteractionPresenter(app: PiTuiInteractionApp): Surf
     setQuestionAttention: parkedCount => { app.setQuestionAttention(parkedCount) },
     withdrawPending: () => {},
     withdrawPresentation: () => {},
+    closeTransientList: () => {},
   }
 }

@@ -1843,8 +1843,16 @@ Decisions (all terminal-native; none of them copies a Web button):
     signal is optional) is settled by this owner at a real replacement — the
     Question as `ASK_ABORTED`, the approval `cancelled` — because nothing else could
     ever end it, while a request carrying a Host signal keeps the Host's own
-    settlement right. The transient Alt+Q list is closed at a real replacement too
-    (it belongs to the subject that opened it).
+    settlement right. A request that is ALREADY inadmissible when it reaches the
+    answerer (a legal upstream delay) has no later retirement to wait for, so the
+    same rule applies AT ADMISSION (Question `ASK_ABORTED`, approval `cancelled`).
+    The transient Alt+Q list is closed at a real replacement too (it belongs to the
+    subject that opened it), and the whole withdrawal ALSO rides the SYNCHRONOUS
+    owner-publication commit — in the same commit section as the outgoing-draft
+    drop, before any post-commit await — so a replaced subject's modal can never
+    keep the seat (or accept its keys through modal-first routing) while the new
+    owner's initialization is still pending. That commit-section half is
+    state-only and non-throwing.
 
     The withdrawal is PRESENTATION ONLY: the official
     request keeps its own Host-owned lifetime, so the Host's own cancellation
