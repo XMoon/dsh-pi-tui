@@ -2103,3 +2103,32 @@ test('INT15: a late attempt cannot resurrect an id the current message expired',
   assert.deepEqual(logicalRows(folder), ['tool:c', 'assistant:reply'],
     'the expired id stays expired and nothing moves')
 })
+
+test('INT16: an expired id stays unowned for a LATER first tool/call after a late attempt', () => {
+  const named = [
+    toolCallDeltaChunk(T0 + 1_000, 0, 'c', 'read'),
+    textChunk(T0 + 2_000, 1, 'reply'),
+  ]
+  for (const attempt of [false, true]) {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      turnStart(1, T0, 0),
+      // The successful settlement names C ...
+      assistantSettlement({ turn: 1, step: 0, time: T0 + 9_000, seq: 1, text: 'reply', stream: named }),
+      // ... and the CURRENT message does NOT: C's Preparing/request eligibility is
+      // cleared while no Tool card exists yet.
+      assistantSettlement({ turn: 1, step: 0, time: T0 + 10_000, seq: 2, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply')] }),
+    ])
+    if (attempt) {
+      folder.apply([eventAt('assistant/attempt', { turn: 1, step: 0, stream: named }, T0 + 12_000, 3)])
+    }
+    // A genuine FIRST durable tool/call for C: it may keep C's physical slot, but
+    // a lower-authority attempt's re-inserted Preparing record must not qualify it
+    // as proven by the current stream.
+    folder.apply([readCall('c', 1, 0, T0 + 13_000, 4, 'c.ts')])
+    assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:c'],
+      `attempt=${attempt}: an expired id must not be displaced before its Conversation`)
+  }
+})
+
+
