@@ -1936,16 +1936,26 @@ test('INT10: replacing the authority is idempotent and never crosses a restored 
     readCall('b', 1, 0, T0 + 6_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 6_500, 4, 'bravo'),
     settlement(2_000, 5),
   ])
-  const first = logicalRows(folder)
-  // The identical authority applied again must change nothing (the cached reach
-  // used to be computed before a conformant sibling restored its own slot).
-  folder.apply([settlement(4_000, 6)])
-  const replaced = logicalRows(folder)
-  folder.apply([settlement(4_000, 7)])
-  assert.deepEqual(logicalRows(folder), replaced, 'an identical authority is idempotent')
-  assert.equal(toolRows(folder).length, 1, 'the two reads stay merged')
-  assert.equal(toolRows(folder)[0]!.callCount, 2)
-  assert.notEqual(first.length, 0)
+  assert.notEqual(logicalRows(folder).length, 0)
+  // BOTH the provable authority (reply at 4000) and the EQUAL/unprovable one
+  // (reply at B's own Preparing time 3000, where no side may be inferred) must be
+  // idempotent: the batch restores the slots of every candidate it will not move
+  // — conformant OR unprovable — BEFORE it measures the shared reach.
+  for (const visibleAt of [4_000, 3_000]) {
+    const probe = new TranscriptFolder()
+    probe.apply([
+      turnStart(1, T0, 0),
+      readCall('a', 1, 0, T0 + 5_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 5_500, 2, 'alpha'),
+      readCall('b', 1, 0, T0 + 6_000, 3, 'b.ts'), toolResult('b', 1, 0, T0 + 6_500, 4, 'bravo'),
+      settlement(2_000, 5),
+    ])
+    probe.apply([settlement(visibleAt, 6)])
+    const replaced = logicalRows(probe)
+    probe.apply([settlement(visibleAt, 7)])
+    assert.deepEqual(logicalRows(probe), replaced, `reply at ${visibleAt} must be idempotent`)
+    assert.equal(toolRows(probe).length, 1, 'the two reads stay merged')
+    assert.equal(toolRows(probe)[0]!.callCount, 2)
+  }
 })
 
 test('INT11: an ordinary thinking-first cold history never walks the relation map', () => {
@@ -1972,5 +1982,40 @@ test('INT11: an ordinary thinking-first cold history never walks the relation ma
     assert.equal(diagnostics.displacementScans, 0,
       `${turns} thinking-first turns have zero Tool relations, so no coverage scan is warranted`)
     assert.equal(folder.messages().length, turns * 2, 'every turn still renders its Conversation and Thinking rows')
+  }
+})
+
+
+test('INT12: an expiring Tool relation never turns a fresh tail into a history rebuild', () => {
+  for (const turns of [50, 100]) {
+    const events: SessionEvent[] = []
+    let seq = 1
+    for (let turn = 1; turn <= turns; turn += 1) {
+      const at = T0 + turn * 12_000
+      const stream = [
+        { type: 'chunk', time: at + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'thought' } },
+        { type: 'chunk', time: at + 1_500, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'thought' } } },
+        textChunk(at + 2_000, 1, 'reply'),
+      ]
+      events.push(
+        turnStart(turn, at, seq++),
+        readCall(`t${turn}`, turn, 0, at + 3_000, seq++, `t${turn}.ts`),
+        toolResult(`t${turn}`, turn, 0, at + 3_500, seq++, `row ${turn}`),
+        // The first settlement creates the relation, the replacement expires it:
+        // every turn leaves the TOOL bound dirty behind a KNOWN higher peak.
+        assistantSettlement({
+          turn, step: 0, time: at + 9_000, seq: seq++, text: 'reply',
+          stream: [...stream, toolCallDeltaChunk(at + 3_000, 2, `t${turn}`, 'read')],
+        }),
+        assistantSettlement({ turn, step: 0, time: at + 10_000, seq: seq++, text: 'reply', stream }),
+        eventAt('turn/end', { turn, reason: { kind: 'completed' } }, at + 11_000, seq++),
+      )
+    }
+    const folder = new TranscriptFolder()
+    folder.hydrate(events)
+    const diagnostics = folder.searchDiagnosticsForTest()
+    assert.equal(diagnostics.maxHiScans, 0,
+      `${turns} turns: a fresh tail past the safe upper bound must not rebuild the maximum`)
+    assert.equal(diagnostics.displacementScans, 0)
   }
 })

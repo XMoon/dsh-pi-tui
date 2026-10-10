@@ -3253,17 +3253,39 @@ export class TranscriptFolder {
       // approve a move across a sibling that this very batch just restored (and
       // repeating the same authority would then flip the result).
       const candidates: string[] = []
-      for (const callId of callIds) {
-        candidates.push(callId)
-        const evidence = this.toolRowEvidence(turn, step, callId)
-        if (evidence === undefined) continue
-        if (this.toolRowIsConformant(evidence, anchorIndex)) this.dropLaneDisplacement(evidence.index)
+      // PASS 1: restore the OWN slot of every candidate this batch will NOT
+      // displace — a known-side conformant row, or one whose side is UNPROVABLE
+      // (equal/absent evidence, which must never be guessed). Both end up in
+      // their physical slot, so the shared reach has to see that final emission.
+      const restoreSlots = (): boolean => {
+        let restored = false
+        for (const callId of candidates) {
+          const evidence = this.toolRowEvidence(turn, step, callId)
+          const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+          if (index === undefined || !this.laneDisplayByDisplaced.has(index)) continue
+          if (evidence !== undefined && !this.toolRowIsConformant(evidence, anchorIndex)) continue
+          this.dropLaneDisplacement(index)
+          restored = true
+        }
+        return restored
       }
+      for (const callId of callIds) candidates.push(callId)
+      restoreSlots()
       // PASS 2: ONE outward scan on the restored snapshot, then apply the moves.
-      const reach = anchorIndex === undefined ? undefined : this.sideReachFrom(turn, step, anchorIndex)
-      for (const callId of candidates) {
-        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
-        if (outcome !== undefined) touched.add(outcome.position)
+      // A move the reach REFUSES restores another slot, so the decisions are
+      // re-derived once more from that state (a bounded 2-iteration fixpoint —
+      // still O(N) per pass, never a per-card walk).
+      for (let pass = 0; pass < 2; pass += 1) {
+        const reach = anchorIndex === undefined ? undefined : this.sideReachFrom(turn, step, anchorIndex)
+        let dropped = false
+        for (const callId of candidates) {
+          const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+          const hadRelation = index !== undefined && this.laneDisplayByDisplaced.has(index)
+          const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
+          if (outcome !== undefined) touched.add(outcome.position)
+          if (hadRelation && (index === undefined || !this.laneDisplayByDisplaced.has(index))) dropped = true
+        }
+        if (!dropped || !restoreSlots()) break
       }
       if (anchorIndex !== undefined) {
         for (const position of touched) this.resortAnchorSide(anchorIndex, position)
@@ -3425,6 +3447,10 @@ export class TranscriptFolder {
     // O(1) exclusion: an interval needs hi > row, so a row at or past the highest
     // recorded end cannot be inside ANY interval — the normal serial tail case,
     // which used to walk the whole map on every settlement.
+    // A removal only LOWERS the true maximum, so the recorded value is a safe
+    // upper bound even while dirty: exclude on it FIRST. A fresh tail row past it
+    // must never pay for a history rebuild it cannot need.
+    if (row >= this.maxToolDisplacementHi) return false
     if (this.maxToolDisplacementHiDirty) {
       this.maxToolDisplacementHiDirty = false
       this.refreshMaxToolDisplacementHi()
