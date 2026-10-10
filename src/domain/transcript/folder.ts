@@ -2141,7 +2141,7 @@ export class TranscriptFolder {
   /** Route a display-relation or visibility change into the grouping: while
    *  hydrating the final rebuild covers it; live, only the LOCAL affected span is
    *  re-grouped. */
-  private scheduleDisplayRegroup(rawIndex: number): void {
+  private scheduleDisplayRegroup(rawIndex: number, alsoSeeds: number | readonly number[] = []): void {
     const item = this.items[rawIndex]
     if (item === undefined || !('turn' in item)) return
     if (this.hydrating) {
@@ -2149,7 +2149,13 @@ export class TranscriptFolder {
       this.groupingDirty = true
       return
     }
-    this.regroupDisplaySpan(this.affectedSpanAround(rawIndex))
+    let span = this.affectedSpanAround(rawIndex)
+    const seeds = typeof alsoSeeds === 'number' ? [alsoSeeds] : alsoSeeds
+    for (const seed of seeds) {
+      const other = this.affectedSpanAround(seed)
+      span = { start: Math.min(span.start, other.start), end: Math.max(span.end, other.end) }
+    }
+    this.regroupDisplaySpan(span)
   }
 
   private appendTailGrouping(index: number, previousIndex: number | undefined): boolean {
@@ -2956,6 +2962,13 @@ export class TranscriptFolder {
       if (!cacheKey.startsWith(prefix)) continue
       if (!callIds.has(cacheKey.slice(prefix.length))) this.toolCallPreparingStarts.delete(cacheKey)
     }
+    // The durable REQUESTS (TOOL_NOT_STARTED compat) are the same authority: a
+    // replacement that stops naming a call removes its request too, so a later
+    // durable call cannot be qualified by the superseded block.
+    for (const requestKey of [...this.requestedToolCalls.keys()]) {
+      if (!requestKey.startsWith(prefix)) continue
+      if (!callIds.has(requestKey.slice(prefix.length))) this.requestedToolCalls.delete(requestKey)
+    }
   }
 
   /** Converge ONE Tool row against its step's Assistant anchor from the row's
@@ -3090,6 +3103,7 @@ export class TranscriptFolder {
       this.resortAnchorSide(anchor, position)
       return
     }
+    const previousAnchor = current?.anchor
     if (current !== undefined) this.removeDisplacedRelation(displaced, current)
     this.laneDisplayByDisplaced.set(displaced, { anchor, position })
     const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
@@ -3108,8 +3122,10 @@ export class TranscriptFolder {
     })
     this.searchRevisionCounter += 1
     // A real display-relation change can split or join a read run: the ONE
-    // adjacency definition must follow it.
+    // adjacency definition must follow it — at the NEW anchor AND at the old one
+    // when the relation was replaced.
     this.scheduleDisplayRegroup(anchor)
+    if (previousAnchor !== undefined && previousAnchor !== anchor) this.scheduleDisplayRegroup(previousAnchor)
   }
 
   /** Remove ONE displaced row's relation, leaving the anchor's OTHER displaced
@@ -3117,7 +3133,11 @@ export class TranscriptFolder {
   private dropLaneDisplacement(displaced: number): void {
     const current = this.laneDisplayByDisplaced.get(displaced)
     if (current === undefined) return
+    const anchor = current.anchor
     this.removeDisplacedRelation(displaced, current)
+    // A departure changes the neighborhood of BOTH endpoints, and the relation
+    // that used to link them is gone: seed the regroup with each of them.
+    this.scheduleDisplayRegroup(displaced, anchor)
   }
 
   /** Remove EVERY relation anchored at `anchor` — its displaced rows fall back
@@ -3125,12 +3145,14 @@ export class TranscriptFolder {
   private dropLaneAnchor(anchor: number): void {
     const owned = this.laneDisplayByAnchor.get(anchor)
     if (owned === undefined) return
-    for (const displaced of [...owned.before, ...owned.after]) {
+    const departing = [...owned.before, ...owned.after]
+    for (const displaced of departing) {
       this.laneDisplayByDisplaced.delete(displaced)
     }
     this.laneDisplayByAnchor.delete(anchor)
     this.searchRevisionCounter += 1
-    this.scheduleDisplayRegroup(anchor)
+    // The anchor AND every row that left it all change neighborhood now.
+    this.scheduleDisplayRegroup(anchor, departing)
   }
 
   /** The shared inverse-map removal: drop the forward record, the anchor's list
@@ -3145,7 +3167,6 @@ export class TranscriptFolder {
       if (owned.before.length === 0 && owned.after.length === 0) this.laneDisplayByAnchor.delete(current.anchor)
     }
     this.searchRevisionCounter += 1
-    this.scheduleDisplayRegroup(current.anchor)
   }
 
 
