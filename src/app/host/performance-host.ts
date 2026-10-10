@@ -34,6 +34,14 @@ export const inject = ['sessionProjections']
  * The readiness gate this row publishes after the unit is registered. It
  * carries NO data — it is not a second performance authority, only the
  * ordering proof that the Host projection exists before the TUI mounts.
+ *
+ * The key is declared the way this repository declares its OWN Cordis
+ * services (`src/startup.ts`'s `TUI_STARTUP_SERVICE`): an exported string
+ * constant, consumed by the dependent row's `inject` list in
+ * `cordis.patch.yml`. The gate is data-free, so there is no value shape to
+ * declare and no `Context` augmentation to add; a consumer that needs to
+ * narrow the read does it at its own call site, exactly as the `tuiStartup`
+ * consumers do.
  */
 export const PI_TUI_PERFORMANCE_READY_SERVICE = 'piTuiPerformanceReady'
 

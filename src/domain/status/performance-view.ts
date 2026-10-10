@@ -115,14 +115,22 @@ export interface DerivedPerformance {
  * Derive the display facts of one Session's `piTuiPerformance` view. This is
  * pure arithmetic over the Host's raw counters: no route, event, or Session
  * selection happens here, and no value is inferred from local history.
+ *
+ * A rate requires BOTH a paired total and at least one eligible sample
+ * (plan §3.2): a zero-sample scope is unknown, so stray counters in such a
+ * scope never become a rate. The TTFB average carries its own sample gate.
  * @param projection - the Session's own Host projection, or `undefined` when
  *   the Host cannot serve that key.
  * @returns the present display facts (an empty object when nothing answers).
  */
 export function derivePerformance(projection: PiTuiPerformanceProjection | undefined): DerivedPerformance {
   if (projection === undefined) return {}
-  const tokensPerSec = rateFromTotals(projection.recent.outputTokens, projection.recent.modelMs)
-  const sessionTokensPerSec = rateFromTotals(projection.all.outputTokens, projection.all.modelMs)
+  const tokensPerSec = projection.recent.samples > 0
+    ? rateFromTotals(projection.recent.outputTokens, projection.recent.modelMs)
+    : undefined
+  const sessionTokensPerSec = projection.all.samples > 0
+    ? rateFromTotals(projection.all.outputTokens, projection.all.modelMs)
+    : undefined
   const firstTokenMs = projection.recent.firstTokenSamples > 0
     ? projection.recent.firstTokenMs / projection.recent.firstTokenSamples
     : undefined
