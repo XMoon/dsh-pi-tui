@@ -774,12 +774,15 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   CAP, never a mere fallback: an Activity can never end after its own turn, so a
   later turn's prompt/Context/Work can never lengthen an already-frozen
   Activity. The close boundary is POSITION- and TIME-qualified: only a block
-  positioned AFTER the Activity whose own proven time is greater than the
+  positioned AFTER the Activity whose own proven time is not EARLIER than the
   Activity's start can close it, so a preceding row (a Context the Activity
   started after) closes nothing, and neither does a reordered row that provably
-  became visible BEFORE it (cold hydration can order a Conversation row after the
-  Process rows it chronologically preceded — such a row also does not disqualify
-  the span as the live tail). The lookup is an exact offline dominance-min: two
+  became visible STRICTLY BEFORE it (cold hydration can order a Conversation row
+  after the Process rows it chronologically preceded — such a row also does not
+  disqualify the span as the live tail). An EQUAL-time following row does close
+  it, from that same instant: a coarse clock that stamps a whole step with one
+  millisecond must freeze the Activity (a point span hides its duration) rather
+  than leave it counting a Conversation that is already visible. The lookup is an exact offline dominance-min: two
   bounded structure passes, two sorts and one indexed query per Activity —
   O(n log n), never a per-Activity re-walk of the window (the structure reads are
   locked by a Proxy-count regression). A following block with no proven

@@ -53,9 +53,12 @@ export interface WorkLifetime {
   /** No proven close boundary yet. */
   readonly open: boolean
   /** No following canonical block prevents liveness: every following block
-   *  either provably became visible BEFORE this Activity started (a reordered
-   *  row) or does not exist. A following block with no proven first-visible
-   *  time DOES prevent it (it cannot be shown to precede the Activity). */
+   *  either does not exist, or provably became visible STRICTLY BEFORE this
+   *  Activity started (a reordered row). A following block with no proven
+   *  first-visible time DOES prevent it (it cannot be shown to precede the
+   *  Activity), and a following block whose time EQUALS the Activity's start
+   *  closes the Activity instead (`open` false, a point span that hides its
+   *  duration) rather than being ignored here. */
   readonly trailing: boolean
 }
 
@@ -97,13 +100,16 @@ export interface ActivityClock {
  * never make the duration shrink.
  *
  * The derivation is POSITION- AND TIME-QUALIFIED: a close boundary is a
- * boundary block POSITIONED AFTER the Activity whose own proven time is greater
- * than the Activity's start. A preceding row (a Context the Activity started
- * after) and a reordered row that provably became visible BEFORE the Activity
- * therefore close nothing, and a following block with NO proven time (a local
- * command card, a synthetic window summary) keeps the span out of the live tail
- * without closing it. The lookup is an exact offline 2D dominance-min, so no
- * ordering assumption about the Activities' starts is needed.
+ * boundary block POSITIONED AFTER the Activity whose own proven time is not
+ * EARLIER than the Activity's start. A preceding row (a Context the Activity
+ * started after) and a PROVABLY STRICTLY EARLIER reordered row therefore close
+ * nothing; an equal-time following row, by contrast, is already visible and
+ * closes the Activity from the same instant (a point span hides its duration —
+ * a coarse clock must never leave it live). A following block with NO proven
+ * time (a local command card, a synthetic window summary) keeps the span out of
+ * the live tail without closing it. The lookup is an exact offline 2D
+ * dominance-min, so no ordering assumption about the Activities' starts is
+ * needed.
  *
  * The boundary is CAPPED by the owning turn's `turn/end`: an Activity can never
  * end after its turn, so a row of a later turn can never lengthen an
@@ -195,7 +201,14 @@ export function resolveWorkLifetimes(
   let cursor = 0
   let order = 0
   for (const span of orderedSpans) {
-    while (cursor < entries.length && entries[cursor]!.time > span.startedAt) {
+    // A following boundary closes the Activity from the SAME instant on: only a
+    // row that is PROVABLY STRICTLY EARLIER (a reordered row that became visible
+    // before the Activity started) may be ignored. Coarse clocks legitimately
+    // stamp a whole step (reasoning, its block-end and the first visible text)
+    // with one millisecond, and an equal-time Conversation is already visible —
+    // the Activity must close there (a point span hides its duration) rather
+    // than staying live.
+    while (cursor < entries.length && entries[cursor]!.time >= span.startedAt) {
       order += 1
       insert(entries[cursor]!.position, order)
       orderTime[order] = entries[cursor]!.time
