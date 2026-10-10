@@ -1267,6 +1267,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const folder = activeFolder()
     searchBoundRevision = folder.searchRevision()
     if (lastSearchQuery === '' || lastSearchFolder === undefined || folder !== lastSearchFolder) return undefined
+    // A PASSIVE commit (a settlement, a read-group split) can replace the card a
+    // stored match was resolved against: the old representative then no longer
+    // contains the query, and binding it would highlight the wrong card until
+    // the next explicit navigation. Re-run the same lightweight query and
+    // re-derive the representative set BEFORE binding, so the highlight/target
+    // always follows the occurrence (the refresh is inert when the revision did
+    // not move).
+    refreshSearchMatchesIfStale()
+    refreshSearchMatchMessages()
     return { matchMessages: resolveSearchMatchMessages(), target: resolveSearchTarget(), grantReveal: false }
   }
   // PR D1 P1: while the search overlay is open the transcript keeps
