@@ -691,12 +691,30 @@ export function applyRunnerWithRuntime(
         },
         isSurfaceDisposed: () => cleanedUp,
         beginOpening: (sessionId) => surface.openingJournal.begin(sessionId),
-        clearOpening: (token) => surface.openingJournal.clear(token as object),
+        clearOpening: (token) => {
+          // The journal's own token identity contract is unchanged (a stale token
+          // is still ignored).
+          surface.openingJournal.clear(token as object)
+          // PR3-B B3 (finding F14): ENDING an opening changes the presentation
+          // authority — a rolled-back target's flow is no longer admissible — so
+          // the FULL presentation pass runs HERE. Without this producer the
+          // retired target's modal could survive on an idle surface: a rollback
+          // need not publish anything and need not produce a later main-session
+          // event, so no other trigger would ever reconcile it.
+          surface.reconcileInteractionPresentation()
+        },
         settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         settleLocalSubmitAck: (reason) => submission.settleLocalSubmitAck(reason),
         resetSubmitLatency: () => submission.resetSubmitLatency(),
         setCompletionOwner: (identity) => surface.setCompletionOwner(identity),
         initLiveSession: (owner) => {
+          // PR3-B B3 (findings C/F6): the committed owner takes the
+          // presentation BEFORE its first frame. A replaced subject's live
+          // Question form AND live approval prompt are withdrawn from the modal
+          // seat here (presentation only — each official request keeps its own
+          // lifetime), so no stale form, count, prompt or input seat can survive
+          // into the new session's presentation.
+          surface.reconcileInteractionPresentation()
           const agent = directAgentOfOwner(owner)
           if (agent === undefined) {
             // M3-4 PR2: a Remote-owned generation initializes its whole
@@ -765,7 +783,12 @@ export function applyRunnerWithRuntime(
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
         sessionCreateCwd: () => process.cwd(),
         currentOpening: () => surface.openingJournal.current(),
-        resetOpening: () => surface.openingJournal.reset(),
+        resetOpening: () => {
+          // The whole journal is dropped (the first-session finally): the SAME
+          // authority change, the SAME pass (F14).
+          surface.openingJournal.reset()
+          surface.reconcileInteractionPresentation()
+        },
       },
       isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
       diag,

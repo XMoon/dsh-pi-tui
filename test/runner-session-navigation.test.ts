@@ -4,6 +4,7 @@
  * stale-callback fencing, and Host-owned fork anchors. */
 
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { MessageId } from '@deepseek-ai/dsh-llm'
@@ -19,9 +20,12 @@ import {
   sessionEvents,
   settle,
   type FakeSession,
+  type RunnerHarness,
 } from './support/runner-harness.ts'
-import { installProbe, modelEvent } from './support/runner-session-fixtures.ts'
+import { installProbe, liveAgentOf, modelEvent } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import type { TspPane, TspWireFrame } from './support/tsp-terminal-fixture.ts'
+import { ownTspBoot, waitUntil, type OwnedTspRunner } from './support/tsp-runner-harness.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -1395,4 +1399,840 @@ test('PR5 R6-5: a cancellation detected at N+2 is suppressed once navigation adv
   assert.deepEqual(publishedReject, ['fork refused by Host (gateway/internal)'],
     'the same rejection is suppressed after a later navigation advance (N+2)')
   void t
+})
+
+// ── PR3-B B3 (finding C): an answerable Question under a REAL transition ────
+//
+// These witnesses boot the REAL composition root (`mountRunner` →
+// `applyRunner` → `startRunner`, TSP opt-in over the scripted pane) and drive
+// the REAL registered `/new`, `/fork` and `/resume` commands: the
+// `SessionTransitionGate`, the session core, the owner mapping and the owner
+// retirement (cancel → idle → drain → flush → dispose) are the production
+// ones, and so is every currentness read they drive.
+//
+// The HOST BACKEND behind them is the suite's existing one-sided stand-in
+// (`test/support/runner-harness.ts`): `fakeSession` (the in-memory Session log +
+// header) and `fakeAgent` (status/whenIdle/cancel/followup/steer, with the
+// `whenIdleGate` busy window this section uses), driven through the fake
+// `persistence` / `sessionQuery` / `agents` / `sessions` / `agentDefaultModel` /
+// `llm` / `commands` services the composition root resolves. On top of that this
+// section installs the official interaction plane (`userQuestions` +
+// `sessionProjections`) through the same Cordis provide path. Nothing here
+// substitutes a session id, an owner, a publication or a retirement fact: the
+// assertions read the pane WIRE (the `layer`/`dock` ops the real renderer
+// committed) and the harness's real retirement log.
+
+/** One official question payload the witnesses ask. */
+interface B3Question {
+  readonly id: string
+  readonly question: string
+  readonly options?: readonly { readonly label: string }[]
+}
+
+/** The one-sided official Host plane (see the section comment). */
+interface B3HostPlane {
+  readonly services: { readonly userQuestions: unknown; readonly sessionProjections: unknown }
+  /**
+   * Deliver one LIVE official request through the official waterfall (the Agent
+   * is the dispatch scope, exactly like `UserQuestionService.ask`) and return
+   * the answer promise the Host's tool call awaits.
+   */
+  ask(agent: unknown, sessionId: string, callId: string, questions: readonly B3Question[], signal: AbortSignal): Promise<unknown>
+  /** Seed one CONTINUED call into the durable projection (the cold shape). */
+  seedContinued(sessionId: string, callId: string, questions: readonly B3Question[]): void
+  /** Fire the projection change subscription for one unit. */
+  changed(sessionId: string, key: 'userQuestions' | 'inbox'): void
+  /** The late answers the Host's own sink accepted. */
+  readonly answers: readonly { readonly callId: string; readonly answer: unknown }[]
+}
+
+function b3HostPlane(
+  waterfall: (agent: unknown, name: string, payload: unknown, fallback: () => Promise<unknown>) => Promise<unknown>,
+): B3HostPlane {
+  const states = new Map<string, { questions: { active: unknown[]; settled: unknown[] } }>()
+  const callSessions = new Map<string, string>()
+  const listeners = new Set<(session: unknown, key: string) => void>()
+  const answers: { callId: string; answer: unknown }[] = []
+  const stateOf = (sessionId: string): { questions: { active: unknown[]; settled: unknown[] } } => {
+    const existing = states.get(sessionId)
+    if (existing !== undefined) return existing
+    const created = { questions: { active: [] as unknown[], settled: [] as unknown[] } }
+    states.set(sessionId, created)
+    return created
+  }
+  return {
+    services: {
+      userQuestions: {
+        // These witnesses never claim a timed wait (the B3 L6 F6.1 suite owns
+        // the claim/countdown semantics): a silent no-op here would fabricate a
+        // Host wait, so the call fails loudly instead.
+        attachWait: () => { throw new Error('the B3 navigation Host plane never claims a timed wait') },
+        answer: (_agent: unknown, callId: string, answer: unknown) => {
+          answers.push({ callId, answer })
+          const sessionId = callSessions.get(callId)
+          if (sessionId !== undefined) {
+            stateOf(sessionId).questions.settled.push({
+              callId,
+              answers: (answer as { readonly answers: unknown }).answers,
+            })
+          }
+          return true
+        },
+      },
+      sessionProjections: {
+        stateOf: (session: unknown, key: string) => {
+          const id = (session as { readonly id?: unknown } | undefined)?.id
+          if (typeof id !== 'string') return undefined
+          // The Inbox unit carries no queued `user-question-reply` in these
+          // witnesses: the queued-reply fact has its own L6 coverage.
+          if (key === 'inbox') return { 'next-step': [], 'next-turn': [] }
+          if (key !== 'userQuestions') return undefined
+          return stateOf(id)
+        },
+        onChanged: (listener: (session: unknown, key: string) => void) => {
+          listeners.add(listener)
+          return () => { listeners.delete(listener) }
+        },
+      },
+    },
+    ask(agent, sessionId, callId, questions, signal) {
+      callSessions.set(callId, sessionId)
+      return waterfall(agent, 'user-questions/request', {
+        agent,
+        wait: { callId, timed: false },
+        questions,
+        signal,
+      }, () => Promise.reject(new Error('no user-questions answerer accepted the request')))
+    },
+    seedContinued(sessionId, callId, questions) {
+      callSessions.set(callId, sessionId)
+      stateOf(sessionId).questions.active.push({ callId, questions, state: 'continued' })
+    },
+    changed(sessionId, key) {
+      for (const listener of [...listeners]) listener({ id: sessionId }, key)
+    },
+    answers,
+  }
+}
+
+/** The Cordis plane as the official `provide`/`emit` surface. */
+function ctxOf(context: Context): B3CordisPlane & { provide(name: string, value: unknown): void } {
+  return context as unknown as B3CordisPlane & { provide(name: string, value: unknown): void }
+}
+
+/** The Cordis plane the witnesses drive (the official event/waterfall API). */
+interface B3CordisPlane {
+  emit(name: string, ...args: unknown[]): void
+  waterfall(agent: unknown, name: string, payload: unknown, fallback: () => Promise<unknown>): Promise<unknown>
+  /**
+   * Register one official waterfall listener. `prepend` puts it BEFORE the
+   * registered answerers, which is how a witness models a legal upstream
+   * middleware that awaits before calling `next`.
+   */
+  on(name: string, listener: (...args: unknown[]) => unknown, options?: { readonly prepend?: boolean }): unknown
+}
+
+/** Boot the REAL runner with the TSP opt-in plus the official Host plane. */
+async function bootB3Tsp(options: {
+  readonly life: import('./support/temp-lifecycle.ts').TestLifecycle
+  readonly home: string
+  /** The standing sessions the Direct harness owns. */
+  readonly standing: FakeSession | readonly FakeSession[]
+  /** The session the runner RESUMES at startup. */
+  readonly resume: string
+  /** The Direct Agent's busy window, per session (see `ownTspBoot`). */
+  readonly idleGates?: Map<string, Promise<void>>
+  /** The Host session-create gate (see `ownTspBoot`): the opening-window hold. */
+  readonly createGate?: () => Promise<unknown>
+}): Promise<{ owned: OwnedTspRunner; plane: B3HostPlane; harness: RunnerHarness; ctx: B3CordisPlane }> {
+  let plane: B3HostPlane | undefined
+  let cordis: B3CordisPlane | undefined
+  const owned = await ownTspBoot({
+    life: options.life,
+    home: options.home,
+    logFile: join(options.home, 'diag.log'),
+    session: options.standing as never,
+    resumeId: options.resume,
+    ...options.idleGates === undefined
+      ? {}
+      : { whenIdleGate: (sessionId: string) => options.idleGates?.get(sessionId) ?? Promise.resolve() },
+    ...options.createGate === undefined ? {} : { createGate: options.createGate },
+    provide: rawCtx => {
+      const ctx = rawCtx as unknown as B3CordisPlane
+      cordis = ctx
+      plane = b3HostPlane((agent, name, payload, fallback) => ctx.waterfall(agent, name, payload, fallback))
+      rawCtx.provide('userQuestions', plane.services.userQuestions)
+      rawCtx.provide('sessionProjections', plane.services.sessionProjections)
+    },
+  })
+  assert.ok(plane !== undefined && cordis !== undefined, 'the Host plane must be provided before the boot')
+  return { owned, plane, harness: owned.harness as unknown as RunnerHarness, ctx: cordis }
+}
+
+/** The harness's REGISTERED command handler (the production command entry). */
+function commandOf(owned: OwnedTspRunner, name: string): (...args: never[]) => unknown {
+  const commands = (owned.harness as unknown as RunnerHarness).commands as {
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }
+  const handler = commands.handler(name)
+  assert.ok(handler !== undefined, `the real runner must register /${name}`)
+  return handler
+}
+
+/** The live `layer.modal-*` ids after replaying `frames` in order. */
+function liveLayerModals(frames: readonly TspWireFrame[]): string[] {
+  const live = new Set<string>()
+  for (const frame of frames) {
+    for (const op of frame.ops) {
+      if (op[0] === 'add' && /^layer\.modal-\d+$/u.test(op[1])) live.add(op[1])
+      else if (op[0] === 'del' && /^layer\.modal-\d+$/u.test(op[1])) live.delete(op[1])
+    }
+  }
+  return [...live]
+}
+
+/**
+ * The live `layer.modal-*` ids at the FIRST frame that presents `text` (one
+ * Session's own identity on the wire). `undefined` when that frame never came,
+ * so a publication that never happened can never satisfy the assertion.
+ */
+function liveLayerModalsAt(frames: readonly TspWireFrame[], text: string): string[] | undefined {
+  const live = new Set<string>()
+  for (const frame of frames) {
+    for (const op of frame.ops) {
+      if (op[0] === 'add' && /^layer\.modal-\d+$/u.test(op[1])) live.add(op[1])
+      else if (op[0] === 'del' && /^layer\.modal-\d+$/u.test(op[1])) live.delete(op[1])
+    }
+    if (JSON.stringify(frame.ops).includes(text)) return [...live]
+  }
+  return undefined
+}
+
+/** Whether the pane's CURRENT frame owns the dock's continued-Question line. */
+function attentionLineLive(frames: readonly TspWireFrame[]): boolean {
+  let live = false
+  for (const frame of frames) {
+    for (const op of frame.ops) {
+      if (op[0] === 'add' && op[1] === 'dock.question-attention') live = true
+      else if (op[0] === 'del' && op[1] === 'dock.question-attention') live = false
+    }
+  }
+  return live
+}
+
+/** The Session ids whose welcome card the renderer has presented, in order. */
+function presentedSessions(pane: TspPane): string[] {
+  const presented: string[] = []
+  for (const match of pane.output.text().matchAll(/DSH session ([^\s\\"]+)/gu)) {
+    const id = match[1] as string
+    if (presented.at(-1) !== id) presented.push(id)
+  }
+  return presented
+}
+
+/** The recorded outcome of one Host tool call (never a bare rejection). */
+type B3RequestOutcome =
+  | { readonly kind: 'answered'; readonly answer: unknown }
+  | { readonly kind: 'rejected'; readonly error: unknown }
+
+function outcomeOf(pending: Promise<unknown>): Promise<B3RequestOutcome> {
+  return pending.then(
+    answer => ({ kind: 'answered' as const, answer }),
+    error => ({ kind: 'rejected' as const, error }),
+  )
+}
+
+/** One live question payload the witnesses ask. */
+const B3_QUESTION: readonly B3Question[] = [
+  { id: 'q-c', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] },
+]
+
+test('B3 finding C (1): the real /new quiesce parks on a LIVE Question — A keeps the presentation until the user really answers', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-new-')
+  const sessionA = fakeSession({
+    id: 'b3-c-new-a',
+    header: { id: 'b3-c-new-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  // The Direct Agent's busy window is the HOST's own fact: an unanswered
+  // question keeps the tool call open, so the Agent is not idle until that
+  // request really settles. The test never releases the gate by hand.
+  const idleGates = new Map<string, Promise<void>>()
+  const releaseIdle = new Map<string, () => void>()
+  const { owned, plane, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    idleGates.set(sessionA.id, new Promise<void>(resolve => { releaseIdle.set(sessionA.id, resolve) }))
+    // A held gate always has a fallback release: a failure path must never park
+    // the Agent's `whenIdle` on a promise nobody resolves.
+    life.defer(() => { releaseIdle.get(sessionA.id)?.() })
+    const abort = new AbortController()
+    // The Host's own tool call: the busy gate ends with the request, and the
+    // outcome is recorded (never a bare rejection that could mask a later
+    // assertion failure as an unhandled rejection).
+    const delivered = outcomeOf(plane.ask(
+      liveAgentOf(harness, sessionA.id), sessionA.id, 'call-c-new', B3_QUESTION, abort.signal,
+    ))
+    void delivered.then(() => { releaseIdle.get(sessionA.id)?.() })
+    await waitUntil('the live form on the pane', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    assert.ok(owned.pane.output.text().includes('Which target?'), 'the official question text is rendered')
+
+    // The REAL /new. It is the registered command ENTRY, not a composer draft:
+    // the modal seat owns every key while the question is live (the modal-first
+    // contract), so the command plane is the production path to a transition.
+    const transition = commandOf(owned, 'new')()
+    await waitUntil('the pre-commit quiesce', () => harness.retirementEvents.includes(`idle:${sessionA.id}`), 15_000)
+    await settle()
+
+    assert.equal(harness.createdSessions.length, 0, 'the parked quiesce must not have created B')
+    assert.deepEqual(
+      harness.retirementEvents.filter(entry => entry === `cancel:${sessionA.id}` || entry === `dispose:${sessionA.id}`),
+      [], 'A must not be retired while its Question is unanswered')
+    assert.deepEqual(presentedSessions(owned.pane), [sessionA.id], 'A still owns the presented Session')
+    assert.equal(liveLayerModals(owned.pane.frames()).length, 1, 'the live form still owns the modal seat')
+
+    // The REAL answer on the pane resolves the ORIGINAL official sink ...
+    owned.pane.key('\r')
+    owned.pane.key('\r')
+    assert.deepEqual(await delivered, { kind: 'answered', answer: { answers: [{ id: 'q-c', selected: ['alpha'] }] } },
+      'the official producer observed the real answer')
+
+    // ... which idles the Agent, so the SAME transition commits B and retires A.
+    await transition
+    await waitUntil('the /new child', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    assert.ok(harness.retirementEvents.includes(`cancel:${sessionA.id}`), 'the committed switch cancels A')
+    assert.ok(harness.retirementEvents.includes(`dispose:${sessionA.id}`), 'the committed switch disposes A')
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('B3 finding C (2): the real /fork publication withdraws A\'s live modal while the Host cancellation is STILL in flight', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-fork-')
+  const sessionA = fakeSession({
+    id: 'b3-c-fork-a',
+    header: { id: 'b3-c-fork-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, plane, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    const abort = new AbortController()
+    const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
+    const originalCancel = aAgent.cancel
+    // The official Agent cancel ENDS the in-flight tool call — but the Host's
+    // cancellation is a real, asynchronous backend step: the Agent is cancelled
+    // NOW while the request lifetime ends only when the cancellation COMPLETES.
+    // The test holds that completion (never the abort itself), which is exactly
+    // the window finding C is about: the presentation must already be gone.
+    let completeCancellation: (() => void) | undefined
+    const cancellationCompletion = new Promise<void>(resolve => { completeCancellation = resolve })
+    let cancels = 0
+    aAgent.cancel = () => {
+      cancels += 1
+      void cancellationCompletion.then(() => { abort.abort() })
+      originalCancel.call(aAgent)
+    }
+    life.defer(() => { aAgent.cancel = originalCancel })
+    // The held cancellation completion always has a fallback release: a failure
+    // path must never leave the fake Host's cancel half-finished.
+    life.defer(() => { completeCancellation?.() })
+    let requestOutcome: B3RequestOutcome | undefined
+    const delivered = outcomeOf(plane.ask(aAgent, sessionA.id, 'call-c-fork', B3_QUESTION, abort.signal))
+    void delivered.then(outcome => { requestOutcome = outcome })
+    await waitUntil('the live form on the pane', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    const aModal = liveLayerModals(owned.pane.frames())[0]
+
+    const fork = commandOf(owned, 'fork')()
+    await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+
+    // THE finding-C contract: B's OWN publication frame must not present A's
+    // modal — and it must not be the Host cancellation that removed it.
+    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+      'B\'s publication frame must not present the replaced subject\'s modal')
+    assert.equal(requestOutcome, undefined,
+      'A\'s Host request is still in flight: the withdrawal is presentation-only, never a fabricated settlement')
+
+    // The REAL post-`command/done` source retirement ends the request as the
+    // official Host abort — exactly once, never a user cancel.
+    await fork
+    await waitUntil('A retirement', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
+    assert.equal(cancels, 1, 'the replaced owner is cancelled exactly once by the real retirement')
+    assert.equal(requestOutcome, undefined, 'the held cancellation has not completed yet, so the request still stands')
+    completeCancellation!()
+    const outcome = await delivered
+    assert.equal(outcome.kind, 'rejected', 'the retired request must never resolve with answers')
+    assert.equal((outcome as { readonly error?: { readonly code?: unknown } }).error?.code, 'ASK_ABORTED',
+      'the completed Host cancellation classifies the request ASK_ABORTED')
+
+    // A Question that arrives for the replacement subject gets a FRESH seat
+    // identity and answers into ITS OWN request.
+    const bAbort = new AbortController()
+    const bDelivered = outcomeOf(plane.ask(liveAgentOf(harness, sessionB), sessionB, 'call-c-b',
+      [{ id: 'q-b', question: 'B target?', options: [{ label: 'yes' }] }], bAbort.signal))
+    await waitUntil('B\'s own form', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    const bModal = liveLayerModals(owned.pane.frames())[0]
+    assert.notEqual(bModal, aModal, 'the replacement subject gets a fresh seat identity')
+    assert.ok(owned.pane.output.text().includes('B target?'), 'B\'s own question is presented')
+    owned.pane.key('\r')
+    owned.pane.key('\r')
+    assert.deepEqual(await bDelivered, { kind: 'answered', answer: { answers: [{ id: 'q-b', selected: ['yes'] }] } },
+      'the replacement subject\'s request settles with its own answer')
+    await waitUntil('the answered modal leaves the seat', () => liveLayerModals(owned.pane.frames()).length === 0, 15_000)
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('B3 finding C (3): a real publication withdraws a MOUNTED continued form and re-scopes its attention', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-switch-')
+  const sessionA = fakeSession({
+    id: 'b3-c-switch-a',
+    header: { id: 'b3-c-switch-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, plane, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // The Host's durable projection lists one CONTINUED call for A, and a REAL
+    // routed event re-derives reachability (the production trigger).
+    plane.seedContinued(sessionA.id, 'call-c-switch',
+      [{ id: 'q-switch', question: 'Late answer?', options: [{ label: 'yes' }, { label: 'no' }] }])
+    ctx.emit('session/event', sessionA, event('model/selection', { provider: 'p', model: 'm' }, sessionA.snapshotEvents().length))
+    await waitUntil('the parked count', () => attentionLineLive(owned.pane.frames()), 15_000)
+    assert.ok(owned.pane.output.text().includes('Continued questions: 1 · Alt+Q'), 'the dock presents the parked count')
+    assert.deepEqual(liveLayerModals(owned.pane.frames()), [], 'a cold discovery mounts no form')
+
+    // Alt+Q (the real CSI-u sequence the pane sends) → the transient list →
+    // Enter reopens the SAME logical call through the controller's own recheck.
+    owned.pane.key('\u001b[113;3u')
+    await waitUntil('the continued list', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    const listModal = liveLayerModals(owned.pane.frames())[0]
+    owned.pane.key('\r')
+    await waitUntil('the mounted late-answer form', () => {
+      const live = liveLayerModals(owned.pane.frames())
+      return live.length === 1 && live[0] !== listModal
+    }, 15_000)
+    const aModal = liveLayerModals(owned.pane.frames())[0]
+    assert.ok(owned.pane.output.text().includes('Late answer?'), 'the official continued question is on the form')
+
+    // The REAL publication of a replacement Session. The TSP renderer has no
+    // session picker in this build (its `/sessions`/`/resume` overlay needs the
+    // PiTui app), so the registered `/new` entry is the production switch path
+    // the modal seat leaves free — the composer is fenced while the form is up.
+    const transition = commandOf(owned, 'new')()
+    await waitUntil('the replacement Session', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+      'the replacement publication frame must not present the continued form')
+    assert.equal(attentionLineLive(owned.pane.frames()), false,
+      'the replaced subject\'s parked count leaves the dock with its form')
+    // The official side is untouched: the local model was dropped, the Host's
+    // call stays answerable, and no answer was dispatched for the replacement.
+    assert.deepEqual(plane.answers, [], 'a session switch never dispatches an official answer')
+    await transition
+    await waitUntil('A retirement', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
+    assert.notEqual(aModal, undefined, 'the withdrawn form owned the seat before the switch')
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('B3 finding C (4): switching away and BACK restores the continued entry from the official projection', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-return-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const sessionA = fakeSession({
+    id: 'b3-c-return-a',
+    header: { id: 'b3-c-return-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const sessionB = fakeSession({
+    id: 'b3-c-return-b',
+    header: { id: 'b3-c-return-b', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('session b content'),
+  })
+  const harness = makeHarness(home, [sessionA, sessionB])
+  context = new Context()
+  const plane = b3HostPlane((agent, name, payload, fallback) => ctxOf(context!).waterfall(agent, name, payload, fallback))
+  ctxOf(context).provide?.('userQuestions', plane.services.userQuestions)
+  ctxOf(context).provide?.('sessionProjections', plane.services.sessionProjections)
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  await settle()
+
+  // The TSP renderer has no session picker in this build, so the ordinary
+  // switch/return half of finding C runs on the PiTui mount — the renderer whose
+  // `/resume` picker IS production-complete. The withdrawn form half is proven on
+  // the TSP pane by witness (3); this witness proves the OTHER half: the entry is
+  // dropped on the way out and RESTORED from the official projection on return.
+  plane.seedContinued(sessionA.id, 'call-c-return',
+    [{ id: 'q-return', question: 'Late answer?', options: [{ label: 'yes' }, { label: 'no' }] }])
+  ctxOf(context).emit('session/event', sessionA, event('model/selection', { provider: 'p', model: 'm' }, sessionA.snapshotEvents().length))
+  await waitUntil('the parked count', () => probe.capturedQuestionAttention.at(-1) === 1, 15_000)
+
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must mount a TuiApp')
+  const submit = app as unknown as { setDraft(text: string): void; submitDraft(): void }
+  const shown = (): string => JSON.stringify(probe.capturedMessages ?? [])
+  submit.setDraft(`/resume ${sessionB.id}`)
+  submit.submitDraft()
+  await waitUntil('B switched in', () => shown().includes('session b content'), 15_000)
+  assert.equal(probe.capturedQuestionAttention.at(-1), 0,
+    'the replaced subject\'s parked entry leaves the presentation with it')
+  assert.deepEqual(plane.answers, [], 'a session switch never dispatches an official answer')
+
+  // Back to A: the OFFICIAL projection is the restore source (a fresh parked
+  // entry), never a retained local form.
+  submit.setDraft(`/resume ${sessionA.id}`)
+  submit.submitDraft()
+  await waitUntil('A switched back', () => shown().includes('A standing state') && !shown().includes('session b content'), 15_000)
+  await waitUntil('the restored parked count', () => probe.capturedQuestionAttention.at(-1) === 1, 15_000)
+  assert.deepEqual(plane.answers, [], 'the restore dispatches no answer either')
+})
+
+test('B3 finding C/F6 (5): a real publication withdraws A\'s live APPROVAL prompt while its request is still in flight', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-approval-')
+  const sessionA = fakeSession({
+    id: 'b3-c-approval-a',
+    header: { id: 'b3-c-approval-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
+    const originalCancel = aAgent.cancel
+    // The official Agent cancel ends the in-flight approval request (its signal
+    // aborts) — held here until the test completes it, exactly like the LIVE
+    // Question witness: the withdrawal must not depend on this cancellation.
+    let completeCancellation: (() => void) | undefined
+    const cancellationCompletion = new Promise<void>(resolve => { completeCancellation = resolve })
+    const approvalAbort = new AbortController()
+    let cancels = 0
+    aAgent.cancel = () => {
+      cancels += 1
+      void cancellationCompletion.then(() => { approvalAbort.abort() })
+      originalCancel.call(aAgent)
+    }
+    life.defer(() => { aAgent.cancel = originalCancel })
+    life.defer(() => { completeCancellation?.() })
+    // The official approval waterfall (the Direct adapter derives the Session
+    // identity from the request's OWN Agent, exactly like dsh's `ask`).
+    let approvalOutcome: string | undefined
+    void ctx.waterfall(
+      aAgent,
+      'approval/request',
+      { agent: aAgent, callId: 'call-c-approval', toolName: 'bash', reason: 'C needs the shell', signal: approvalAbort.signal },
+      () => Promise.resolve('unavailable'),
+    ).then(
+      value => { approvalOutcome = String(value) },
+      (error: unknown) => { approvalOutcome = `rejected:${String(error)}` },
+    )
+    await waitUntil('the approval prompt', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    assert.ok(owned.pane.output.text().includes('C needs the shell'), 'the official approval reason is rendered')
+    const aModal = liveLayerModals(owned.pane.frames())[0]
+
+    const fork = commandOf(owned, 'fork')()
+    await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+      'B\'s publication frame must not present the replaced subject\'s approval prompt')
+    assert.equal(approvalOutcome, undefined,
+      'the approval request is still in flight: the withdrawal is presentation-only, never an implicit allow')
+
+    // The REAL post-`command/done` retirement completes the Host cancellation.
+    await fork
+    await waitUntil('A retirement', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
+    assert.equal(cancels, 1, 'the replaced owner is cancelled exactly once by the real retirement')
+    assert.equal(approvalOutcome, undefined, 'the held cancellation has not completed yet')
+    completeCancellation!()
+    await waitUntil('the approval settled fail-closed', () => approvalOutcome !== undefined, 15_000)
+    assert.equal(approvalOutcome, 'cancelled',
+      'the Host cancellation settles the withdrawn approval `cancelled` — never an allow')
+
+    // The replacement subject's own approval takes a FRESH seat identity and is
+    // answered explicitly.
+    const bAbort = new AbortController()
+    let bOutcome: string | undefined
+    void ctx.waterfall(
+      liveAgentOf(harness, sessionB),
+      'approval/request',
+      { agent: liveAgentOf(harness, sessionB), callId: 'call-c-b-approval', toolName: 'bash', reason: 'B needs the shell', signal: bAbort.signal },
+      () => Promise.resolve('unavailable'),
+    ).then(value => { bOutcome = String(value) })
+    await waitUntil('B\'s own approval prompt', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    assert.notEqual(liveLayerModals(owned.pane.frames())[0], aModal, 'the replacement subject gets a fresh seat identity')
+    assert.ok(owned.pane.output.text().includes('B needs the shell'), 'B\'s own approval is presented')
+    owned.pane.key('y')
+    await waitUntil('the explicit allow', () => bOutcome === 'allowed-once', 15_000)
+    await waitUntil('the answered prompt leaves the seat', () => liveLayerModals(owned.pane.frames()).length === 0, 15_000)
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('B3 finding F10 (6): a replaced subject\'s request that arrives AFTER the publication is never mounted (production path)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-late-')
+  const sessionA = fakeSession({
+    id: 'b3-c-late-a',
+    header: { id: 'b3-c-late-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
+    const originalCancel = aAgent.cancel
+    let completeCancellation: (() => void) | undefined
+    const cancellationCompletion = new Promise<void>(resolve => { completeCancellation = resolve })
+    const approvalAbort = new AbortController()
+    aAgent.cancel = () => {
+      void cancellationCompletion.then(() => { approvalAbort.abort() })
+      originalCancel.call(aAgent)
+    }
+    life.defer(() => { aAgent.cancel = originalCancel })
+    life.defer(() => { completeCancellation?.() })
+
+    // A LEGAL upstream waterfall middleware that awaits before calling `next`:
+    // A's request exists while A is still the owner, but reaches this answerer
+    // only after B has been published (its cancellation has not completed).
+    let releaseMiddleware: (() => void) | undefined
+    const middlewareHold = new Promise<void>(resolve => { releaseMiddleware = resolve })
+    life.defer(() => { releaseMiddleware?.() })
+    let admitted = false
+    ctx.on(
+      'approval/request',
+      (...args: unknown[]) => {
+        const next = args[1] as () => unknown
+        return middlewareHold.then(() => {
+          admitted = true
+          return next()
+        })
+      },
+      { prepend: true },
+    )
+
+    let approvalOutcome: string | undefined
+    void ctx.waterfall(
+      aAgent,
+      'approval/request',
+      { agent: aAgent, callId: 'call-c-late', toolName: 'bash', reason: 'late request', signal: approvalAbort.signal },
+      () => Promise.resolve('unavailable'),
+    ).then(
+      value => { approvalOutcome = String(value) },
+      (error: unknown) => { approvalOutcome = `rejected:${String(error)}` },
+    )
+    await settle()
+    assert.deepEqual(liveLayerModals(owned.pane.frames()), [],
+      'the held request has not reached the answerer yet: nothing is presented')
+
+    // B is published BEFORE the request is admitted.
+    const fork = commandOf(owned, 'fork')()
+    await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+
+    // The delayed request is admitted now: the proof is the REAL admission (not a
+    // timer), and it must NEVER be mounted.
+    releaseMiddleware!()
+    await waitUntil('the delayed request reached the answerer', () => admitted, 15_000)
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+      'B\'s publication frame presents nothing of the replaced subject')
+    assert.deepEqual(liveLayerModals(owned.pane.frames()), [],
+      'the late request is never mounted into the replacement')
+    assert.equal(approvalOutcome, undefined, 'it keeps its own lifetime (no fabricated settlement)')
+
+    // Only the Host's own (real, held) cancellation settles it, fail-closed.
+    await fork
+    await waitUntil('A retirement', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
+    assert.equal(approvalOutcome, undefined, 'the held cancellation has not completed yet')
+    completeCancellation!()
+    await waitUntil('the late request settled fail-closed', () => approvalOutcome !== undefined, 15_000)
+    assert.equal(approvalOutcome, 'cancelled', 'the Host cancellation settles it `cancelled` — never an allow')
+
+    // POSITIVE CONTROL: the CURRENT subject's own approval is still answered.
+    const bAbort = new AbortController()
+    let bOutcome: string | undefined
+    void ctx.waterfall(
+      liveAgentOf(harness, sessionB),
+      'approval/request',
+      {
+        agent: liveAgentOf(harness, sessionB),
+        callId: 'call-c-late-b',
+        toolName: 'bash',
+        reason: 'B needs the shell',
+        signal: bAbort.signal,
+      },
+      () => Promise.resolve('unavailable'),
+    ).then(value => { bOutcome = String(value) })
+    await waitUntil('B\'s own approval prompt', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    owned.pane.key('y')
+    await waitUntil('the explicit allow', () => bOutcome === 'allowed-once', 15_000)
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('B3 finding F13: the DEFAULT PiTui branch still forwards a foreign-session request to the app (the new policy is renderer-owned only)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-pitui-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const sessionA = fakeSession({
+    id: 'b3-c-pitui-a',
+    header: { id: 'b3-c-pitui-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const sessionB = fakeSession({
+    id: 'b3-c-pitui-b',
+    header: { id: 'b3-c-pitui-b', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('session b content'),
+  })
+  const harness = makeHarness(home, [sessionA, sessionB])
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: sessionA.id }, { sessionId: sessionA.id })
+  await settle()
+  assert.ok(probe.apps.at(-1), 'the default branch mounts the real TuiApp')
+
+  // A request whose Session is NOT the one this surface shows — the same shape the
+  // renderer-owned branch refuses at admission. On the DEFAULT branch it must be
+  // forwarded to the app exactly as before this slice (the new policy is scoped to
+  // the TSP renderer mount; there is no authority scope adjustment for PiTui).
+  context.emit('approval/request', {
+    agent: { session: { id: sessionB.id } },
+    callId: 'call-c-pitui-foreign',
+    toolName: 'bash',
+    reason: 'foreign-session request',
+  } as never, undefined as never)
+  await settle()
+  assert.equal(probe.capturedApproval?.toolName, 'bash',
+    'the default branch delegated the foreign-session request to the app')
+})
+
+test('B3 finding F14 (7): a REAL opening rollback retires the opening target\'s presentation with NO extra trigger', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-rollback-')
+  const sessionA = fakeSession({
+    id: 'b3-c-rollback-a',
+    header: { id: 'b3-c-rollback-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  // The Host's create is HELD inside the transition's opening window, then made to
+  // FAIL: the real rollback path (the transition's own `clearOpening`).
+  let releaseCreate: (() => void) | undefined
+  const createHeld = new Promise<void>(resolve => { releaseCreate = resolve })
+  let refuseCreate = false
+  const { owned, harness, ctx } = await bootB3Tsp({
+    life, home, standing: sessionA, resume: sessionA.id,
+    createGate: async () => {
+      await createHeld
+      if (refuseCreate) throw new Error('the Host refused to create the session')
+    },
+  })
+  let releaseMiddleware: (() => void) | undefined
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // Discover the opening target's id from the production create call itself (the
+    // journal already opened it at admission, before this call).
+    const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
+    const originalCreate = agents.create
+    let target: string | undefined
+    agents.create = options => {
+      target = options.sessionId
+      return originalCreate.call(agents, options)
+    }
+    life.defer(() => { agents.create = originalCreate })
+
+    const transition = commandOf(owned, 'new')()
+    await waitUntil('the opening target', () => target !== undefined, 15_000)
+    // The target's own requests are ADMITTED while the journal is opening it.
+    const questionAbort = new AbortController()
+    let questionOutcome: string | undefined
+    const targetId = target as string
+    void ctx.waterfall(
+      { session: { id: targetId } },
+      'user-questions/request',
+      {
+        agent: { session: { id: targetId } },
+        wait: { callId: 'call-rollback' },
+        questions: [{ id: 'q-rollback', question: 'Opening target?', options: [{ label: 'yes' }] }],
+        signal: questionAbort.signal,
+      },
+      () => Promise.reject(new Error('no answerer')),
+    ).then(
+      () => { questionOutcome = 'answered' },
+      (error: unknown) => { questionOutcome = String((error as { readonly code?: unknown }).code) },
+    )
+    const approvalAbort = new AbortController()
+    let approvalOutcome: string | undefined
+    void ctx.waterfall(
+      { session: { id: targetId } },
+      'approval/request',
+      { agent: { session: { id: targetId } }, callId: 'call-rollback-approval', toolName: 'bash', reason: 'opening approval', signal: approvalAbort.signal },
+      () => Promise.resolve('unavailable'),
+    ).then(value => { approvalOutcome = String(value) })
+    await waitUntil('the opening target\'s own presentation', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    assert.equal(harness.createdSessions.length, 0, 'the create is still held inside the opening window')
+
+    // The create FAILS: the real transition rolls the opening back. NO session
+    // event, NO manual reconcile and NO other presentation trigger is issued by
+    // the test.
+    refuseCreate = true
+    releaseCreate!()
+    await transition
+    // The scripted pane's SDK loop advances on terminal input, so the witness
+    // PUMPS it with one neutral event: that only lets an already-committed frame
+    // land (the same withdrawal lands unpumped in the L6 harness, and the real
+    // pane paints continuously) — it is never a presentation trigger.
+    owned.pane.event({ ev: 'focus' })
+    await waitUntil('the rolled-back target\'s presentation left the surface',
+      () => liveLayerModals(owned.pane.frames()).length === 0, 15_000)
+    assert.equal(harness.createdSessions.length, 0, 'no session was created (the opening was rolled back)')
+    // Presentation-only: both official requests keep their OWN lifetimes.
+    assert.equal(questionOutcome, undefined, 'the question is still in flight')
+    assert.equal(approvalOutcome, undefined, 'the approval is still in flight')
+    questionAbort.abort()
+    approvalAbort.abort()
+    await waitUntil('the Host ends settle them', () => questionOutcome !== undefined && approvalOutcome !== undefined, 15_000)
+    assert.equal(questionOutcome, 'ASK_ABORTED', 'the Host end classifies the retired flow ASK_ABORTED')
+    assert.equal(approvalOutcome, 'cancelled', 'the retired approval settles fail-closed')
+  } finally {
+    releaseMiddleware?.()
+    releaseCreate?.()
+    await owned.settle()
+  }
 })

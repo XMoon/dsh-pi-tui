@@ -111,6 +111,8 @@ export interface RunnerProbe {
    */
   displaySubject(): unknown
   capturedViewerMode: unknown
+  /** Every parked-Question count the presenter published (B3 finding C). */
+  capturedQuestionAttention: number[]
   capturedApproval: { toolName?: string; arguments?: string; danger?: boolean } | undefined
   scrollToBottomCount: number
   capturedModels: string[]
@@ -136,6 +138,7 @@ export function installProbe(): RunnerProbe {
     capturedDisplaySubject: undefined,
     displaySubject: () => undefined,
     capturedViewerMode: undefined,
+    capturedQuestionAttention: [],
     capturedApproval: undefined,
     scrollToBottomCount: 0,
     capturedModels: [],
@@ -152,6 +155,7 @@ export function installProbe(): RunnerProbe {
   const originalCommitDisplaySubject = TuiApp.prototype.commitDisplaySubject
   const originalStatusUpdate = StatusStore.prototype.update
   const originalSetViewerMode = TuiApp.prototype.setViewerMode
+  const originalSetQuestionAttention = TuiApp.prototype.setQuestionAttention
   const originalShowApprovalPrompt = TuiApp.prototype.showApprovalPrompt
   const originalSetStatus = TuiApp.prototype.setStatus
   const originalSetWelcomeCard = TuiApp.prototype.setWelcomeCard
@@ -201,6 +205,10 @@ export function installProbe(): RunnerProbe {
     probe.capturedViewerMode = mode
     return originalSetViewerMode.call(this, mode)
   }
+  TuiApp.prototype.setQuestionAttention = function (count) {
+    probe.capturedQuestionAttention.push(count)
+    return originalSetQuestionAttention.call(this, count)
+  }
   TuiApp.prototype.showApprovalPrompt = function (request) {
     probe.capturedApproval = request
     return Promise.resolve('cancelled')
@@ -238,6 +246,7 @@ export function installProbe(): RunnerProbe {
     TuiApp.prototype.commitDisplaySubject = originalCommitDisplaySubject
     StatusStore.prototype.update = originalStatusUpdate
     TuiApp.prototype.setViewerMode = originalSetViewerMode
+    TuiApp.prototype.setQuestionAttention = originalSetQuestionAttention
     TuiApp.prototype.showApprovalPrompt = originalShowApprovalPrompt
     TuiApp.prototype.setStatus = originalSetStatus
     TuiApp.prototype.setWelcomeCard = originalSetWelcomeCard

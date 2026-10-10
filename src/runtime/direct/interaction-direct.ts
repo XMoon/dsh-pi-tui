@@ -307,10 +307,14 @@ export class DirectInteractionPort implements InteractionPort {
   onApprovalRequest(listener: ApprovalRequestListener): void {
     this.ctx.on('approval/request', (req: ApprovalRequest, next: unknown) => {
       // Adapt the same-process ApprovalRequest onto the transport-neutral
-      // shape the TUI consumes (the listener never needs req.agent).
+      // shape the TUI consumes. The request's OWN Agent supplies the Session
+      // identity (B3 findings C/F6) so a published replacement can retire this
+      // presentation; no Agent object crosses the port.
+      const sessionId = (req.agent as { readonly session?: { readonly id?: unknown } } | undefined)?.session?.id
       const like: ApprovalRequestLike = {
         ...req.signal !== undefined ? { signal: req.signal } : {},
         callId: req.callId !== undefined ? String(req.callId) : undefined,
+        ...typeof sessionId === 'string' ? { sessionId } : {},
         toolName: req.toolName,
         reason: req.reason,
       }

@@ -41,7 +41,6 @@
 import { connect as sdkConnect, ui } from '@stencil-hq/tern'
 import type { Key, Node, Session, SessionInput, Surface } from '@stencil-hq/tern'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
-import { cancellationError } from '../../runtime/process/tasks.ts'
 import type {
   DisplayDockNotice,
   DisplayStatusFacts,
@@ -50,8 +49,10 @@ import type {
 } from '../../app/surface/display-seam.ts'
 import type { SubmissionComposerPort } from '../../app/submission/composer-port.ts'
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
-import type { SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
+import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
+import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
+import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -112,6 +113,17 @@ export interface TspInputHandlers {
   steer(text: string): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
+  /**
+   * PR3-B B3 (§3.8): the FRESH authoritative continued-Question rows for the
+   * Alt+Q list (the seat filters `presentation === 'parked'`). A read of the
+   * ONE controller — never a renderer-owned registry.
+   */
+  listContinuedQuestions(): readonly TspContinuedRow[]
+  /**
+   * PR3-B B3 (§3.8): reopen one continued Question through the ORIGINAL
+   * controller, whose own recheck decides. The renderer mounts no form itself.
+   */
+  reopenContinuedQuestion(sessionId: string, callId: string): boolean
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -249,6 +261,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let noticeSeq = 0
   let scopeEpoch = 0
 
+  /**
+   * The renderer's FATAL path (the tty owner is gone, or a modal frame commit
+   * failed): ONE latch for every fatal source, routed to the runner's fatal
+   * lifecycle (error outcome, no resume hint) — never a normal exit and never
+   * a second invocation.
+   */
+  const routeFatal = (error: unknown): void => {
+    if (exitRequested) return
+    exitRequested = true
+    const fatal = options.onFatal
+    if (fatal !== undefined) fatal(error)
+    else options.requestExit()
+  }
+
   // ── Renderer-local presentation state ──
   /** The CURRENT presentation-key scope namespace (`scope-<n>-` prefixes). */
   let scopeKeys = new TranscriptNodeKeys()
@@ -293,6 +319,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     notify: (text, kind) => display.notify(text, kind),
   })
   /**
+   * PR3-B B3: the ONE interaction seat (the renderer's modal presentation
+   * owner). It is created at mount and replaced the B0 INERT presenter, so the
+   * `interaction` projection the surface installs is REAL from the start; the
+   * `supportsModals` capability only flips once `bindInput` has installed the
+   * application callbacks the seat routes Alt+Q through (never before).
+   */
+  const seat: TspInteractionSeat = createTspInteractionSeat({
+    render: () => render(),
+    // A frame/focus failure while settling a prompt must reach the runner's
+    // fatal lifecycle (the tty owner is broken), never become a silent modal
+    // cancellation; a repeated failure keeps the FIRST fatal (exitRequested).
+    onFatal: (error) => { routeFatal(error) },
+    notify: (text, kind) => { display.notify(text, kind) },
+    setSettledQuestionAnswersLookup: (lookup) => {
+      settledQuestionAnswers = lookup
+      rebuildLastMain()
+      render()
+    },
+  })
+  /**
    * PR3-A supports NO viewer, so this read is the explicit UNSUPPORTED capability
    * (the seam's `supportsViewer` is false and `enterView` declines at its real
    * admission point). It is deliberately NOT a generation authority: a future
@@ -300,26 +346,58 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * generation instead of maintaining a second one here.
    */
   let viewerGeneration = 0
+  /**
+   * PR3-B B3 (§3.9): the authoritative settled-answer lookup installed by the
+   * interaction owner, and the last transcript projection the native nodes were
+   * built from. The lookup is never cached into answers — it is re-read on
+   * every rebuild, so a settled batch reaches the `ask_user_question` row
+   * without a second fold.
+   */
+  let settledQuestionAnswers: SettledQuestionAnswersLookup | undefined
+  let lastMessages: readonly TranscriptMessage[] = []
 
-  /** Re-render both regions in ONE frame (the SDK diffs). */
-  let composerFocused = false
-  const render = (): void => {
+  /** The hardware caret this renderer last asked for (the ONE focus truth it
+   *  keeps: it re-issues the op only when the DESIRED seat changes, including
+   *  the return to the composer after a modal — the pre-B3 one-shot latch left
+   *  the composer dead after the first modal close). */
+  let lastAppliedFocusId: string | null | undefined
+
+  /** Apply the seat's desired hardware focus after a committed frame. */
+  const applyFocus = (force: boolean): void => {
+    if (disposed) return
+    const desired = seat.hasModalSeat() ? seat.desiredFocusId() : 'dock.composer'
+    if (!force && desired === lastAppliedFocusId) return
+    lastAppliedFocusId = desired
+    composer.setFocused(desired === 'dock.composer')
+    surface.focus(desired)
+  }
+
+  /** Re-render every region in ONE frame (the SDK diffs). The `layer` region is
+   *  ALWAYS submitted (an omitted region would be deleted by the full-view
+   *  diff, wiping an open modal on the next unrelated repaint). */
+  function render(): void {
     if (disposed) return
     const dockNode = dockView()
     const mainNode = lastMain
     surface.render({
       ...(mainNode === undefined ? {} : { main: mainNode }),
       ...(dockNode === undefined ? {} : { dock: dockNode }),
+      layer: seat.renderLayer(),
     })
-    // Focus the composer only AFTER its node exists in a committed frame (a
-    // focus op for an absent node is meaningless); the node id is stable, so
-    // one call after the FIRST dock render is enough for the whole lifetime
-    // (B3 re-focuses after modal close).
-    if (!composerFocused && dockNode !== undefined) {
-      composerFocused = true
-      composer.setFocused(true)
-      surface.focus('dock.composer')
-    }
+    // The focus op is meaningful only for a node of a COMMITTED frame (the
+    // SDK never validates it), so it always follows the render above.
+    applyFocus(false)
+  }
+
+  /** Rebuild the canonical transcript from the last projection (same scope and
+   *  source identity: a settled-answer repaint is NOT a new subject). */
+  const rebuildLastMain = (): void => {
+    if (disposed) return
+    lastMain = transcriptView(projectTranscriptStructure(lastMessages), scopeKeys, {
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      scopePrefix,
+      ...(settledQuestionAnswers === undefined ? {} : { settledQuestionAnswersLookup: settledQuestionAnswers }),
+    })
   }
 
   const dockView = (): Node | undefined => {
@@ -344,6 +422,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lines.push(ui.text({ key: 'pending-submit', text: pendingSubmit === 'submit' ? 'Submitting…' : 'Queued…' }))
     }
     if (dock.statusLine !== '') lines.push(ui.text({ key: 'status', text: dock.statusLine }))
+    // PR3-B B3 (§3.8): the parked-Question count is a PRESENTATION of the ONE
+    // controller's read (`InteractionRuntime.publishAttention` → presenter);
+    // the Alt+Q entry is the inspection route, never an answerability fact.
+    if (seat.attentionCount() > 0) {
+      lines.push(ui.text({ key: 'question-attention', text: `Continued questions: ${seat.attentionCount()} · ${TSP_CONTINUED_INSPECTION_LABEL}` }))
+    }
     for (const notice of dock.notices) {
       lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${notice.text}` : notice.text }))
     }
@@ -390,10 +474,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
     }
-    lastMain = transcriptView(projectTranscriptStructure(messages), scopeKeys, {
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-      scopePrefix,
-    })
+    // PR3-B B3 (§3.9): remember the projection so a settled-answer lookup can
+    // rebuild the native nodes WITHOUT a new fold, a new scope or a new source
+    // identity — the settled repaint is a presentation change only.
+    lastMessages = messages
+    rebuildLastMain()
     render()
   }
 
@@ -514,7 +599,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     getViewerGeneration: () => viewerGeneration,
     supportsTaskCenter: false,
     supportsViewer: false,
-    supportsModals: false,
+    // PR3-B B3 (§3.5.1): the capability is advertised only once the seat's
+    // application wiring is real — `bindInput` has installed the handlers the
+    // modal routes Alt+Q and its forms through. Before that the interaction
+    // runtime keeps its own fail-closed admission.
+    get supportsModals() { return boundHandlers !== undefined },
   }
 
   // ── Input: the ONE SDK loop, the fixed §3.4 precedence ──
@@ -547,9 +636,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
 
   const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
-    // 2. No active modal in B1 (supportsModals stays false) — with a live
-    //    modal (B3) the modal owns these keys FIRST.
-    // 3. The interrupt/cancel intent (PR3-B §3.4 row 3): Ctrl+C and Escape
+    // 2. The MODAL SEAT owns every key while it is up (PR3-B B3 addendum
+    //    §3.5.4). The SDK's `overlay(modal: true)` masks the picture but does
+    //    NOT capture the keyboard, so this app-side route IS the modal
+    //    boundary; it precedes the hydration fence (a form for the CURRENT
+    //    subject stays answerable while a later hydration starts — the
+    //    controller/renderer presentation retirement withdraws it).
+    if (seat.hasModalSeat()) {
+      seat.handleKey(key, handlers)
+      return false
+    }
+    // 3. `Alt+Q` (PR3-B B3 §3.8): the inspection entry for parked continued
+    //    Questions — only with no modal and outside the hydration window (the
+    //    list belongs to the subject that is currently owned, so the SAME
+    //    fence as every other key applies).
+    if (!fencedOut(key) && key.alt === true && key.ctrl !== true && key.meta !== true
+      && key.shift !== true && key.name === 'q') {
+      seat.openContinuedList(handlers)
+      return false
+    }
+    // 4. The interrupt/cancel intent (PR3-B §3.4 row 3): Ctrl+C and Escape
     //    map to the EXISTING application cancel path — never an
     //    unconditional exit. Interrupting a live Agent must not kill the
     //    TUI. The composer's exit-empty (below) is the only exit gesture.
@@ -561,7 +667,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       handlers.cancel()
       return false
     }
-    // 4. The composer reducer owns everything else (Ctrl+D empty-exit,
+    // 5. The composer reducer owns everything else (Ctrl+D empty-exit,
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
     const edit = composer.applyKey(key)
     if (edit.kind === 'submit') {
@@ -586,9 +692,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * BOTH the live key path and the held-key replay at the bind — a second copy
    * would let the replay bypass the fence (the B2 review's F3 follow-up).
    * The lifecycle cancel/exit intents are never fenced: they are not writes.
+   *
+   * PR3-B B3 (§3.5.4): a live MODAL SEAT outranks the fence. The form was
+   * presented for the subject the surface still owns (the controller/renderer
+   * retirement is what withdraws it when the owner really changes), so its
+   * answer keys stay deliverable while a later hydration starts.
    */
   const fencedOut = (key: Key): boolean => {
     if (!hydrating) return false
+    if (seat.hasModalSeat()) return false
     const lifecycleIntent = (key.ctrl === true && (key.name === 'c' || key.name === 'd'))
       || key.name === 'escape'
     return !lifecycleIntent
@@ -596,7 +708,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
 
   /** Route one input: exit intents act; everything else waits for the bind. */
   const routeInput = (input: SessionInput): boolean => {
-    if (input.type !== 'key') return false
+    if (input.type === 'event') {
+      // PR3-B B3 (§3.5.5): the modal seat gates events addressed at the
+      // underlying composer. A terminal focus claim must not move the caret
+      // away from an open form, so the seat's own focus is re-asserted; every
+      // other event keeps its existing (unhandled) course.
+      if (seat.handleEvent(input.event)) applyFocus(true)
+      return false
+    }
     const key = input.key
     // PRE-BIND Ctrl+C keeps the PR3-A emergency-exit compatibility (a quit
     // during a cancelled startup must not wait for a bind that never comes);
@@ -643,12 +762,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // The tty owner died after mount: FATAL, never a normal exit — the
         // runner's fatal lifecycle owns the error outcome and cleanup.
         options.log?.('tsp renderer: input loop failed', { error: String(error) })
-        if (!exitRequested) {
-          exitRequested = true
-          const fatal = options.onFatal
-          if (fatal !== undefined) fatal(error)
-          else options.requestExit()
-        }
+        routeFatal(error)
       }
     })()
   }
@@ -661,21 +775,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   // hidden PiTui instance; `setSubmitPending` surfaces the existing pending
   // fact in the dock (no derived queue state).
   const composerPort: SubmissionComposerPort = composer
-  /** The B0 INERT modal presenter: no form exists yet, so every ask rejects
-   *  with the flow's cancellation error (never a fabricated answer). The
-   *  fail-closed admission in the interaction runtime decides BEFORE this
-   *  presenter is consulted; the rejects are the belt to that suspenders for
-   *  any direct call. B3 replaces this with the real TSP presenter. */
-  const inertInteraction: SurfaceInteractionPresenter = {
-    showApprovalPrompt() { return Promise.reject(cancellationError('approval prompt cancelled')) },
-    askQuestions() { return Promise.reject(cancellationError('question flow cancelled')) },
-    setSettledQuestionAnswersLookup() {},
-    notify(text, kind) { display.notify(text, kind) },
-  }
   return {
     display,
     composer: composerPort,
-    interaction: inertInteraction,
+    // PR3-B B3 (§3.5.1): the REAL interaction presenter (the seat) replaces
+    // the B0 inert one. It is installed with the mount, but the surface only
+    // opts into modals once `bindInput` has committed the application wiring.
+    interaction: seat.presenter,
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')
       if (inputBound) throw new Error('the TSP renderer input is already bound')
@@ -697,6 +803,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     dispose: async () => {
       if (disposed) return
       disposed = true
+      // PR3-B B3 (§3.5.6): the seat retires SYNCHRONOUSLY — every active and
+      // queued modal promise settles (approval `cancelled`, question the flow's
+      // cancellation error) before the surface/session close below, and the
+      // call is idempotent with the interaction owner's own `withdrawPending`.
+      seat.dispose()
       // Both steps are ALWAYS attempted — the tty restore (and the SDK's own
       // input drain) lives inside `session.close()`, so a surface-close
       // failure must still reach it, exactly once. A `try/finally` would

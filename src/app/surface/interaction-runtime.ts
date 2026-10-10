@@ -44,9 +44,9 @@ export interface SurfaceInteractionDeps {
 export interface InteractionRuntimeOptions {
   /**
    * PR3-B §3.2: the renderer-facing modal presenter. The composition injects
-   * the narrow `SurfaceInteractionPresenter` projection here (the PiTui
-   * branch delegates to the live `TuiApp`; a TSP presenter is mounted only
-   * after its real form exists — until B3 the TSP branch stays fail-closed).
+   * the narrow `SurfaceInteractionPresenter` projection here (the PiTui branch
+   * is the delegating adapter over the live `TuiApp`; the TSP branch installs
+   * its real interaction seat — B3 — and opts into modals only afterwards).
    * Reads before `start()` throw, exactly like the previous `mounted()` read.
    */
   readonly presenter: () => SurfaceInteractionPresenter
@@ -65,6 +65,22 @@ export interface InteractionRuntimeOptions {
   readonly display: () => import('./display-seam.ts').SurfaceDisplaySeam
   /** The live routed session id (the authoritative read of a settled answer). */
   readonly currentSessionId: () => string | undefined
+  /**
+   * ADMISSION/PRESENTATION currentness (B3 findings F10/F12): whether a request
+   * for this Session may still be PRESENTED. The surface's own authority answers
+   * `true` for the Session it currently shows AND for a Session currently being
+   * opened (a tentative opening is not an owner replacement), so a replaced
+   * subject's late request — a legal upstream delay can deliver it after the
+   * replacement was published — is never mounted, while an opening target's
+   * request still is. The SAME authority decides the continuous retirement
+   * sweep, so admission and presentation follow ONE policy.
+   *
+   * It is wired ONLY on the renderer-owned branch (the TSP modal seat, F13): the
+   * PiTui branch (the default AND the SDK-declined fallback) answers `true`
+   * unconditionally and keeps its original delegation semantics — every request
+   * is forwarded to the app exactly as before this slice.
+   */
+  readonly isAdmissibleSession: (sessionId: string) => boolean
   /** The surface coalesced repaint (the controller asks for it after a mutation). */
   readonly schedulePaint: () => void
   /** The attached Task Center's diagnostics channel (late-bound: the Task Center
@@ -72,8 +88,6 @@ export interface InteractionRuntimeOptions {
   readonly diag: () => Diag
   /** The aggregate's cleanup latch (a retired surface publishes nothing). */
   readonly isCleanedUp: () => boolean
-  /** Publish the parked-Question count into the surface chrome. */
-  readonly setQuestionAttention: (parkedCount: number) => void
   /** The Task Center's PRESENTATION-only refresh after an attention change. */
   readonly onAttentionChanged: () => void
 }
@@ -88,6 +102,20 @@ export interface InteractionRuntime {
   attentionRows(): readonly QuestionAttentionRow[]
   /** Publish the parked-Question count (idempotent; a no-op after cleanup). */
   publishAttention(): void
+  /**
+   * PR3-B B3 (findings C/F6): withdraw the PRESENTATION of every live approval
+   * whose Session no longer owns the surface. The official request keeps its own
+   * lifetime (its abort still settles it `cancelled` — the fail-closed outcome),
+   * so this only ends the stale modal's ownership of the seat.
+   */
+  withdrawReplacedApprovals(): void
+  /**
+   * Re-derive the WHOLE presentation (Question flows/entries + live approvals)
+   * against the surface's currentness authority. The publication seam and the
+   * ordinary event-driven reconcile both call THIS, so a presentation that
+   * stopped being admissible is retired by the same rule that admitted it.
+   */
+  reconcilePresentation(): void
   /** Release the attention subscription, the controller and the answer lookup. */
   dispose(): void
 }
@@ -98,17 +126,118 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
   let questionController: QuestionSurfaceController | undefined
   /** The controller's attention subscription, released with the surface. */
   let questionAttentionDisposal: (() => void) | undefined
+  /**
+   * The live approval presentations, keyed by the EXACT lifetime the seat
+   * received (the request's own signal), carrying the Session identity the
+   * backend derived from the official request. The approval flow has no
+   * continuation model, so this registry is what lets a published replacement
+   * retire its presentation (B3 findings C/F6).
+   */
+  const liveApprovals = new Map<AbortSignal, { readonly sessionId: string }>()
+  /**
+   * Whether THIS owner is ended. Combined with the surface's own cleanup latch it
+   * fences ADMISSION (B3 finding F11): a request that only arrives during/after
+   * exit teardown must never register a presentation this owner can no longer
+   * drain — it takes the same fail-closed cancellation the sibling approval
+   * answerers answer in that window.
+   */
+  let ended = false
+  /**
+   * The refused admissions' waits (F11): they never reached the seat, so THIS
+   * owner is their teardown owner.
+   */
+  const refusedPresentations = new Set<() => void>()
 
   /**
    * Publish how many PARKED actionable Questions exist, so the footer's ↓
    * trigger and the Quick Task Center stay reachable for a Questions-only
    * session (addendum §11). A visible Question is not counted: it already owns
    * the editor seat. This never touches the active-work counts.
+   *
+   * PR3-B B3: the count is a PRESENTATION fact and therefore travels through
+   * the renderer's own presenter (PiTui app chrome, TSP dock line) instead of a
+   * PiTui-only `TuiApp` read — the read-only renderer has no app at all.
    */
   const publishAttention = (): void => {
     if (options.isCleanedUp()) return
     const rows = questionController?.attentionRows() ?? []
-    options.setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
+    options.presenter().setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
+  }
+
+  /** Whether a request for this Session may still be presented (F10/F12/F13). */
+  const isAdmissible = (sessionId: string): boolean => options.isAdmissibleSession(sessionId)
+
+  /**
+   * This request's OWN presentation lifetime (F9) plus the release that detaches
+   * the borrowed Host wiring (F11). The official signal is a BORROWED
+   * cancellation scope and is not guaranteed to be unique per request, so it is
+   * never the presentation address itself; the derivation keeps the borrowed
+   * abort semantics exactly and gives this owner an explicit handle to detach.
+   */
+  const presentationLifetime = (host: AbortSignal | undefined): { lifetime: AbortSignal; release: () => void } => {
+    const own = new AbortController()
+    if (host === undefined) return { lifetime: own.signal, release: () => {} }
+    if (host.aborted) {
+      own.abort()
+      return { lifetime: own.signal, release: () => {} }
+    }
+    const forward = (): void => { own.abort() }
+    host.addEventListener('abort', forward, { once: true })
+    return { lifetime: own.signal, release: () => { host.removeEventListener('abort', forward) } }
+  }
+
+  /**
+   * The fail-closed outcome of a request that must NEVER be presented: nothing is
+   * mounted and nothing is settled until the Host's OWN lifetime ends, or until
+   * THIS owner's lifetime ends. The wait is registered here (F11) because the seat
+   * never received it: a teardown drains it exactly like every other live
+   * presentation, so a refused admission can never become an unowned hanging
+   * promise.
+   */
+  const waitForLifetime = (lifetime: AbortSignal, release: () => void): Promise<ApprovalOutcome> =>
+    new Promise(resolve => {
+      let settled = false
+      let detachLifetime: (() => void) | undefined
+      const finish = (): void => {
+        if (settled) return
+        settled = true
+        refusedPresentations.delete(finish)
+        detachLifetime?.()
+        release()
+        resolve('cancelled')
+      }
+      const onAbort = (): void => { finish() }
+      refusedPresentations.add(finish)
+      if (lifetime.aborted) { finish(); return }
+      lifetime.addEventListener('abort', onAbort, { once: true })
+      detachLifetime = () => { lifetime.removeEventListener('abort', onAbort) }
+    })
+
+  /**
+   * Withdraw the PRESENTATION of every live approval that is no longer ADMISSIBLE
+   * (findings C/F6/F10/F12) — the same authority that admits a request decides
+   * whether it may keep owning the seat, so a replaced subject and a rolled-back
+   * opening target are retired by ONE rule. The official request is untouched: its
+   * own abort still settles it `cancelled`.
+   */
+  const withdrawReplacedApprovals = (): void => {
+    if (options.isCleanedUp()) return
+    for (const [lifetime, live] of [...liveApprovals]) {
+      if (isAdmissible(live.sessionId)) continue
+      liveApprovals.delete(lifetime)
+      options.livePresenter()?.withdrawPresentation(lifetime)
+    }
+  }
+
+  /**
+   * Re-derive the WHOLE presentation against that SAME authority: the Question
+   * controller's live flows and continued entries, plus every live approval. The
+   * runner calls it at a publication and the ordinary event-driven reconcile
+   * calls it on activity, so admission and retirement can never disagree.
+   */
+  const reconcilePresentation = (): void => {
+    questionController?.reconcile()
+    withdrawReplacedApprovals()
   }
 
   return {
@@ -153,14 +282,32 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       // commands.
       port.onApprovalRequest((req, next) => {
         if (req.signal?.aborted === true) return Promise.resolve<ApprovalOutcome>('cancelled')
+        // The owner is GONE (a request can still arrive during exit teardown): the
+        // fail-closed cancellation, never a registration nothing can drain (F11).
+        if (ended || options.isCleanedUp()) return Promise.resolve<ApprovalOutcome>('cancelled')
         const args = req.callId === undefined ? undefined : deps.lookupCallArgs(req.callId)
+        // This request's OWN presentation lifetime (F9) and its borrowed-abort
+        // release (F11).
+        const { lifetime, release } = presentationLifetime(req.signal)
+        const sessionId = req.sessionId
+        if (sessionId !== undefined && !isAdmissible(sessionId)) {
+          // A request whose Session the surface no longer shows (B3 finding F10):
+          // it is NEVER presented, and nothing is fabricated — only its OWN
+          // lifetime (or this owner's teardown) settles it, with the fail-closed
+          // outcome this presenter already answers for an ended wait.
+          return waitForLifetime(lifetime, release)
+        }
+        if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId })
         return options.presenter().showApprovalPrompt({
           toolName: req.toolName,
           reason: req.reason,
-          signal: req.signal,
+          signal: lifetime,
           ...args === undefined ? {} : { arguments: args },
           ...args !== undefined && req.toolName === 'bash' && deps.dangerCommand(args) ? { danger: true } : {},
-        }, true)
+        }, true).finally(() => {
+          liveApprovals.delete(lifetime)
+          release()
+        })
       })
       // The interactive question answerer: ask_user_question tool calls
       // become dialog flows; the tool receives the structured answers. M3-3B
@@ -185,6 +332,12 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         notify: (message, level) => { options.presenter().notify(message, level) },
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
+        isAdmissibleSession: sessionId => options.isAdmissibleSession(sessionId),
+        // PR3-B B3 (finding C): a live foreground flow whose Session no longer
+        // owns the surface is withdrawn from the PRESENTATION only (the official
+        // request keeps its own lifetime). The read is the non-throwing one: the
+        // controller is retired before the presenter in the teardown order.
+        withdrawPresentation: lifetime => { options.livePresenter()?.withdrawPresentation(lifetime) },
         diag: options.diag(),
       })
       controller.attach()
@@ -201,16 +354,34 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     controller: () => questionController,
     attentionRows: () => questionController?.attentionRows() ?? [],
     publishAttention,
+    withdrawReplacedApprovals,
+    reconcilePresentation,
     dispose() {
+      if (ended) return
+      ended = true
       // Retire every one-shot slot before its callback runs: a throwing release
       // can never strand the later ones, and a second dispose is inert.
       const questionAttention = questionAttentionDisposal
       const controller = questionController
       questionAttentionDisposal = undefined
       questionController = undefined
+      // PR3-B B3 (§3.2.4): the ORDER is part of the contract. The controller
+      // retires FIRST, so a live question/approval is still classified by the
+      // Host's own ASK_ABORTED / ASK_CANCELLED path; only then does the
+      // presenter withdraw the promises it still owns (a TSP form whose modal
+      // dies with the surface), and the settled lookup is cleared last so no
+      // late repaint can reach through it.
       runSyncDisposalSteps('interaction runtime disposal', [
         () => questionAttention?.(),
         () => controller?.dispose(),
+        () => options.livePresenter()?.withdrawPending(),
+        // F11: a refused admission never reached the seat, so THIS owner drains
+        // it here — exactly once, and its borrowed Host listener is detached with
+        // it. Nothing may outlive the surface as an unowned pending promise.
+        () => { for (const finish of [...refusedPresentations]) finish() },
+        // The pending approvals were settled by the withdrawal above; the
+        // registry must not outlive the presenter it addresses.
+        () => { liveApprovals.clear() },
         () => options.livePresenter()?.setSettledQuestionAnswersLookup(undefined),
       ])
     },

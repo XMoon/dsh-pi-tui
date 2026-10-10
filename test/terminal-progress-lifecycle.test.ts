@@ -30,6 +30,7 @@ import { createSurfaceRuntime, type SurfaceRuntime } from '../src/app/surface/ru
 import { createTerminalProgressInterval } from '../src/domain/terminal-progress/interval.ts'
 import { createSurfaceLifecycle } from '../src/app/bootstrap/lifecycle.ts'
 import { createInteractionRuntime } from '../src/app/surface/interaction-runtime.ts'
+import { pituiSurfaceInteractionPresenter } from '../src/app/surface/interaction-presenter.ts'
 import type { MainProgressAuthority, RoutedSessionEvent, SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { TerminalNotificationPresentation } from '../src/app/surface/notification-runtime.ts'
 import type { ApprovalOutcome } from '../src/tui/panels/approval-dialog.ts'
@@ -607,14 +608,16 @@ function mountSurface(
     setApprovalPolicy: () => true,
   } as unknown as InteractionPort
   const agentInteraction = createInteractionRuntime({
-    presenter: () => surface.app,
-    livePresenter: () => surface.app,
+    // PR3-B B3: the PiTui presenter is the narrow delegating adapter over the
+    // live app (the app itself cannot satisfy `withdrawPending`).
+    presenter: () => pituiSurfaceInteractionPresenter(surface.app),
+    livePresenter: () => pituiSurfaceInteractionPresenter(surface.app),
     display: () => surface.display,
     currentSessionId: () => 'session-terminal-progress-test',
+    isAdmissibleSession: () => true,
     schedulePaint: () => {},
     diag: () => SILENT_DIAG,
     isCleanedUp: () => false,
-    setQuestionAttention: () => {},
     onAttentionChanged: () => {},
   })
   agentInteraction.attach(interactionPort, { lookupCallArgs: () => undefined, dangerCommand: () => false })

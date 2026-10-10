@@ -124,7 +124,7 @@ async function mountPane(
       cancel: () => { options.onCancel?.() },
       submit: (text, request) => onSubmit(text, request),
       steer: () => {},
-      noteUserInput: () => {},
+      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
     })
   }
   return {
@@ -283,7 +283,7 @@ test('B2: a key HELD across a generation bump cannot submit when the bind replay
     harness.renderer.bindInput({
       exit: () => {}, cancel: () => {},
       submit: (text) => { submissions.push(text) },
-      steer: () => {}, noteUserInput: () => {},
+      steer: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
     })
     await settle()
     assert.deepEqual(submissions, [], 'the held Enter did NOT cross the hydration fence at the replay')

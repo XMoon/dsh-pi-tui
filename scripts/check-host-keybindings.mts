@@ -165,6 +165,13 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // comparison and the message it returns for that one key.
   { file: 'src/tui/keybindings/ui/recorder.ts', line: "if (key === 'shift+enter') {" },
   { file: 'src/tui/keybindings/ui/recorder.ts', line: "return { key: undefined, message: 'Shift+Enter is reserved for inserting a newline.' }" },
+  // (8) The key-label vocabulary's FIXED TSP inspection chord
+  // (`keybindings/hints.ts`): the TSP seat owns no keymap action (the chord is
+  // dispatched from the raw SDK key stream), so the label cannot come from
+  // `keyHint` — and it cannot lie either, because no remap exists for it. The
+  // label lives in the key-label authority and the renderer imports it, which
+  // is why this row is owned by the keybindings tree.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'" },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */

@@ -1807,6 +1807,50 @@ Decisions (all terminal-native; none of them copies a Web button):
    repaint, because the answer no longer describes the live surface (the new
    generation re-derives its own truth). A disconnected Connection likewise
    presents no answerable card from a last-known binding.
+10. **A PUBLISHED Session owns the presentation: the replaced subject's live form
+    leaves the seat.** The runner calls
+    `SurfaceRuntime.reconcileInteractionPresentation()` from its published-session
+    seam (`initLiveSession`), BEFORE the new owner's first frame, and the
+    interaction owner withdraws every live presentation whose Session is no longer
+    the surface's current one — a Question flow through the ONE controller, and an
+    APPROVAL prompt through the same registry (its Session identity comes from the
+    official request's OWN Agent, never a fabricated one). A flow whose timed
+    claim is still OPENING is retired too: its form is never mounted once the
+    claim lands. The identity used for that withdrawal is PER REQUEST (a borrowed
+    Host cancellation scope may be shared by several requests, so it is never
+    itself the address), and a replaced subject's request that only ARRIVES after
+    the replacement was published is refused at ADMISSION against the surface's
+    own currentness authority — the Session it shows or is currently OPENING (a
+    tentative opening is not an owner replacement). A refused admission presents
+    nothing and settles nothing itself: the request keeps its own lifetime — and
+    because the seat never received it, THIS owner registers that wait and drains
+    it on teardown, detaching the borrowed Host listener. Admission, retirement and
+    the ordinary activity reconcile all consult the SAME authority, so a Session
+    being OPENED keeps its flow while a replaced subject (or a rolled-back opening)
+    loses it; that authority is enabled ONLY for a renderer-owned presentation (the
+    TSP mount) — the default PiTui branch, including the SDK-declined fallback,
+    answers `true` unconditionally and keeps its original delegation semantics.
+    The authority has a PRODUCER at every place it changes: the runner's own
+    opening `clear`/`reset` seams run the full pass after mutating the journal (a
+    rollback need not publish anything and there is no periodic reconcile), and an
+    ended owner refuses admission outright — a request that only arrives during or
+    after exit teardown takes the fail-closed cancellation instead of registering a
+    presentation nothing can drain.
+
+    The withdrawal is PRESENTATION ONLY: the official
+    request keeps its own Host-owned lifetime, so the Host's own cancellation
+    still ends it (classified `ASK_ABORTED`, never a user cancel), a surface
+    teardown still settles it exactly once, and the replacement subject inherits
+    neither the form, nor the input seat, nor the previous subject's parked count
+    or callbacks. The renderer-facing member is
+    `withdrawPresentation(lifetime)` — the TSP seat implements it (its
+    `layer` modal must not outlive the owner that opened it) while the PiTui
+    adapter is deliberately inert, exactly like `withdrawPending`. The pre-commit
+    quiesce deliberately leaves the outgoing owner's form mounted and answerable:
+    the withdrawal is driven by the PUBLISHED-session seam or by the ordinary
+    activity reconcile against the SAME currentness authority, never by a
+    tentative opening.
+    Evidence: `docs/tern-tsp/evidence/pr3-b.md` (rounds 5–9).
 
 ## A credential backend that cannot enumerate records still has a usable /logout
 

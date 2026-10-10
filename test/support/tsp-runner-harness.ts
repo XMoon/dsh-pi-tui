@@ -57,7 +57,10 @@ export async function ownTspBoot(options: {
   readonly life: import('./temp-lifecycle.ts').TestLifecycle
   readonly home: string
   readonly logFile: string
-  readonly session?: { readonly id: string }
+  /** The standing session(s) the Direct harness owns (resumable/persisted). */
+  readonly session?: { readonly id: string } | readonly { readonly id: string }[]
+  /** The session the runner RESUMES at startup; defaults to `session.id`. */
+  readonly resumeId?: string
   readonly provide?: (ctx: { provide(name: string, value: unknown): void }) => unknown
   readonly shell?: unknown
   readonly appExit?: () => void
@@ -68,18 +71,47 @@ export async function ownTspBoot(options: {
    *  authority `applyRunner` reads, so the preference under test is the real
    *  configured one. */
   readonly config?: Record<string, unknown>
+  /**
+   * The Direct Agent's idle gate, per session (`makeHarness`'s own
+   * `whenIdleGate`): a suite that needs the real quiesce/retirement ordering to
+   * observe a BUSY Agent (e.g. a Host tool call still waiting for an answer)
+   * returns the Host-owned promise that ends when that call ends.
+   */
+  readonly whenIdleGate?: (sessionId: string) => Promise<void>
+  /**
+   * The Host session-CREATE gate (`makeHarness`'s own `createGate`): awaited
+   * inside the simulated `agents.create`, so a suite can hold a real transition
+   * inside its OPENING window and then let the create FAIL (the rollback path).
+   */
+  readonly createGate?: () => Promise<unknown>
   /** Runs with the owned pane BEFORE the connector can probe it. */
   readonly beforeMount?: (pane: TspPane) => void
 }): Promise<OwnedTspRunner> {
   const { makeHarness, mountRunner, disposeContext } = await import('./runner-harness.ts')
   const pane = installTspPane()
   options.beforeMount?.(pane)
+  // The resume target: an explicit id wins; a STANDING SET has no single id, so
+  // a suite that boots several sessions must name the one to resume.
+  const standing = options.session as
+    | { readonly id?: unknown }
+    | readonly { readonly id?: unknown }[]
+    | undefined
+  const resumeId = options.resumeId
+    ?? (standing !== undefined && 'id' in standing && typeof standing.id === 'string' ? standing.id : undefined)
   const { Context } = await import('@deepseek-ai/cordis')
   const ctx = new Context()
   options.provide?.(ctx)
   process.env.DSH_PI_TUI_RENDERER = 'tsp'
   process.env.DSH_PI_TUI_LOG = options.logFile
-  const harness = makeHarness(options.home, options.session as never)
+  const harness = makeHarness(
+    options.home,
+    options.session as never,
+    undefined,
+    undefined,
+    options.createGate,
+    undefined,
+    options.whenIdleGate,
+  )
   if (options.shell !== undefined) (harness as { shell?: unknown }).shell = options.shell
   let fiber: { dispose(): Promise<void> } | undefined
   let settlement: Promise<void> | undefined
@@ -102,7 +134,7 @@ export async function ownTspBoot(options: {
   options.life.defer(() => settleAll())
   fiber = await mountRunner(
     ctx, options.home, harness,
-    options.session === undefined ? {} : { sessionId: options.session.id },
+    resumeId === undefined ? {} : { sessionId: resumeId },
     options.config ?? {},
     options.appExit ?? (() => {}),
   )
