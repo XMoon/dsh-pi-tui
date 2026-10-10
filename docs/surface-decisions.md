@@ -1856,7 +1856,10 @@ Decisions (all terminal-native; none of them copies a Web button):
     every replaced presentation as ONE ATOMIC BATCH (the controller collects the
     lifetimes, the interaction owner adds the approvals and the renderer removes
     them all before it picks the successor), so a member of the batch is never
-    promoted — and never painted — in between; it clears the
+    promoted — and never painted — in between; the local settlement of a
+    signal-less request (and of a mounted continued form) runs only AFTER that
+    batch, so a synchronous abort can never settle — and thereby promote — a slot
+    the batch is about to withdraw; it clears the
     stale displayed count locally and the full pass republishes the authoritative
     count (a projection read inside the commit section could throw after the owner
     was published and strand the commit bookkeeping that follows it).

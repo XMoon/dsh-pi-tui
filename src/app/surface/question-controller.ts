@@ -309,19 +309,22 @@ export class QuestionSurfaceController {
    * surface is still OPENING keeps its flow. The Host request is untouched (the
    * presenter only drops the presentation, never the promise).
    */
-  private collectReplacedLivePresentations(): AbortSignal[] {
+  private collectReplacedLivePresentations(): { lifetimes: AbortSignal[]; settle: Array<() => void> } {
     const lifetimes: AbortSignal[] = []
+    const settle: Array<() => void> = []
     for (const [lifetime, live] of [...this.livePresentations]) {
       if (this.deps.isAdmissibleSession(live.sessionId)) continue
       this.livePresentations.delete(lifetime)
       lifetimes.push(lifetime)
-      // P2-2: a request with NO official cancellation lifetime has no other owner
-      // that could ever end it, so the replacement settles it HERE (classified
-      // `ASK_ABORTED` below — a session-driven end, never a user cancel). A
-      // request that HAS one keeps it: only the Host ends that request.
-      if (!live.hasHostLifetime) live.retire()
+      // P2-2/P2-E: a request with NO official cancellation lifetime has no other
+      // owner that could ever end it, so the replacement will settle it — but the
+      // abort is DEFERRED until the presentation batch has taken every replaced
+      // slot out of the seat (an abort here would settle its slot synchronously,
+      // promote another replaced slot and paint it).
+      // A request that HAS a Host lifetime keeps it: only the Host ends that one.
+      if (!live.hasHostLifetime) settle.push(live.retire)
     }
-    return lifetimes
+    return { lifetimes, settle }
   }
 
   /**
@@ -355,16 +358,26 @@ export class QuestionSurfaceController {
    * @returns the collected presentation lifetimes plus whether anything left the
    * model (the caller's stale-count signal).
    */
-  withdrawReplacedPresentation(): { dropped: boolean; lifetimes: AbortSignal[] } {
-    if (this.disposed) return { dropped: false, lifetimes: [] }
-    const lifetimes = this.collectReplacedLivePresentations()
+  withdrawReplacedPresentation(): { dropped: boolean; lifetimes: AbortSignal[]; settle: () => void } {
+    if (this.disposed) return { dropped: false, lifetimes: [], settle: () => {} }
+    const live = this.collectReplacedLivePresentations()
+    const lifetimes = [...live.lifetimes]
+    const settle = [...live.settle]
     let dropped = lifetimes.length > 0
     for (const [key, entry] of [...this.entries]) {
       if (this.deps.isAdmissibleSession(entry.sessionId)) continue
-      this.removeEntry(key, undefined, false)
+      // The mounted form's OWN lifetime joins the presentation batch, and its abort
+      // is deferred to the settle step exactly like the live flows above.
+      const mounted = entry.mounted
+      this.entries.delete(key)
+      entry.mounted = undefined
+      if (mounted !== undefined) {
+        lifetimes.push(mounted.signal)
+        settle.push(() => { mounted.abort() })
+      }
       dropped = true
     }
-    return { dropped, lifetimes }
+    return { dropped, lifetimes, settle: () => { for (const run of settle) run() } }
   }
 
   reconcile(): void {
