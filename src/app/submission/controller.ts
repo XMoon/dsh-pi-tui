@@ -253,6 +253,15 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly tuiSettings: { get(): TuiSettingsDoc } | undefined
   /** The exact owner-subject currentness fence. */
   readonly captureMatches: (subject: SessionSubject | undefined) => boolean
+  /**
+   * PR3-B §7.3 (B2 F2): whether the OWNER a captured subject pinned has been
+   * REPLACED by a different one (the ownership core's opaque-ref comparison —
+   * never a session-id comparison). The stale-restore policy consults it:
+   * only a genuinely replaced owner suppresses the restore on a
+   * switch-dropping renderer; a same-owner generation invalidation still
+   * restores.
+   */
+  readonly ownerWasReplaced: (subject: SessionSubject | undefined) => boolean
   /** The transport-forked prepare seam (M3-4 PR3 §10/§12): absent keeps the
    * Direct prepareUserMessage pipeline; a Remote selection injects the SAME
    * PreparedPrompt path the plain-prompt flow uses, so steer and prompt share
@@ -1147,6 +1156,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           wasAdvertisedAtSubmit,
           parsedName: parsedAtSubmit?.name,
           submitTurn,
+          // PR3-B §7.3 (F2): the subject pinned at the gesture's admission —
+          // the fallback prompt's stale-restore discriminator.
+          staleSubject: submittedSubject,
         })
         return
       }
@@ -1319,12 +1331,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.app().setEditorText(merged)
         return merged === value
       },
-      restoreStaleDraftIntoEditor: (value) => {
-        // PR3-B §7.3 (F2): a stale restore is suppressed on a renderer whose
-        // committed switch dropped the outgoing draft (TSP) — the old text
-        // must not reseed the new session's composer. A retaining renderer
-        // (PiTui) merges exactly like the ordinary path.
-        if (!deps.retainsStaleDraftRestore) {
+      restoreStaleDraftIntoEditor: (value, capturedSubject) => {
+        // PR3-B §7.3 (F2): suppress ONLY when BOTH facts hold — the OWNER a
+        // captured subject pinned was genuinely REPLACED (the ownership
+        // core's opaque-ref authority: a same-owner generation invalidation
+        // — a failed switch kept the old owner — answers false) AND the
+        // renderer drops drafts at committed switches (TSP; its publication
+        // already cleared the outgoing text). Either failing means the
+        // draft still belongs to a live session: merge it back exactly like
+        // the ordinary restore (PiTui always merges).
+        if (!deps.retainsStaleDraftRestore
+          && deps.ownerWasReplaced(capturedSubject as SessionSubject | undefined)) {
           return 'dropped'
         }
         const merged = mergeDraft(deps.app().getDraft(), value)

@@ -57,6 +57,16 @@ export interface SessionSubjectAuthority {
   capture(): SessionSubject | undefined
   /** True only for the same exact owner AND the same generation. */
   isCurrent(subject: SessionSubject): boolean
+  /**
+   * PR3-B §7.3 (B2 F2): whether the OWNER (not the generation) a subject
+   * pinned has been REPLACED by a different one. The exact cross-owner
+   * discriminator for draft policy: a same-owner generation invalidation (a
+   * failed switch kept the old owner; a re-publication) answers FALSE — the
+   * user's draft belongs to the still-current session — while a committed
+   * A→B replacement answers TRUE. An unpinnable/sessionless subject or an
+   * absent live owner answers FALSE (nothing was replaced).
+   */
+  ownerReplaced(subject: SessionSubject | undefined): boolean
 }
 
 /**
@@ -89,6 +99,12 @@ export function createSessionSubjectAuthority(
       if (record === undefined) return false
       const live = peek()
       return live !== undefined && live.owner === record.owner && live.generation === record.generation
+    },
+    ownerReplaced: (subject) => {
+      const record = subject === undefined ? undefined : pinned.get(subject)
+      if (record === undefined) return false
+      const live = peek()
+      return live !== undefined && live.owner !== record.owner
     },
   }
 }

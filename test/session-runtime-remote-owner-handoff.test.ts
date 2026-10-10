@@ -306,6 +306,26 @@ test('H1: ordinary switch = retain NEW → commit NEW → release OLD → post-h
   assert.ok(h.isLive('session-b'), 'the NEW generation stays retained')
 })
 
+test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE the new session\'s init/catalog', async () => {
+  // The external review's probe-886 shape: the OLD draft must be gone
+  // BEFORE the new session becomes editable (its hydration lifts the input
+  // fence) — i.e. before ANY post-commit await (init/catalog), never after
+  // the whole transition settles. Witnessed on the real runtime's event
+  // order: the drop event must precede BOTH the new session's init and its
+  // catalog refresh.
+  const h = harness()
+  h.publishRetained('session-a')
+  await h.runtime.switchSession('session-b')
+  const dropIndex = h.events.indexOf('dropDraft')
+  const initIndex = h.events.findIndex(event => event === 'init:session-b')
+  const catalogIndex = h.events.findIndex(event => event === 'catalog:session-b')
+  assert.ok(dropIndex !== -1, 'the drop fired')
+  assert.ok(initIndex !== -1 && dropIndex < initIndex,
+    `the drop precedes the new session's init (drop@${dropIndex}, init@${initIndex})`)
+  assert.ok(catalogIndex !== -1 && dropIndex < catalogIndex,
+    `the drop precedes the new session's catalog refresh (drop@${dropIndex}, catalog@${catalogIndex})`)
+})
+
 test('PR3-B §7.3 (F1 wiring): the active-draft drop fires ONLY at the committed cross-owner switch', async () => {
   // The production call positions: a successful ordinary switch drops the
   // outgoing draft exactly once (AFTER the publication, with the new owner

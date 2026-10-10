@@ -265,6 +265,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // The OLD owner is captured at ADMISSION: the post-commit retirement must
     // retire exactly the owner this transition replaced.
     const oldOwner = core.owner()
+    // PR3-B §7.3 (F1): the OLD session id, captured at the SAME admission
+    // instant — the genuine-cross-owner discriminator the synchronous
+    // publication drop reads. `undefined` means no outgoing session (the
+    // first-session creation publishes without one); a same id is a
+    // re-publication, not a switch. Captured via the CORE (never the owners
+    // access, which can throw inside the commit).
+    const oldSessionIdForDrop = core.currentSessionId()
     // The NEW owner this transaction commits, mapped ONCE in the synchronous
     // commit section: the post-commit phases reuse it instead of re-wrapping
     // the handle (each `fromHandle` of a Remote reference wrapper is an
@@ -324,6 +331,21 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 const sessionId = deps.owners.sessionId(nextOwner)
                 committedOwner = nextOwner
                 committedSessionId = sessionId
+                // PR3-B §7.3 (F1): the active-draft drop rides the
+                // publication's SYNCHRONOUS commit block — after the
+                // captured facts are resolved, inside the same seam as
+                // `setCurrentOwner`, BEFORE the first await (retirement,
+                // hydration, catalog) and therefore before any new-source
+                // frame can lift the input fence: the outgoing text is gone
+                // before the new session is editable, and no post-hydration
+                // keystroke can be wiped by a late clear. Only a GENUINE
+                // cross-owner switch drops: an outgoing owner existed and
+                // its session differs (the first-session creation publishes
+                // without one; a same-id re-publication is not a switch; a
+                // pre-publication failure never reaches the seam).
+                if (oldOwner !== undefined && oldSessionIdForDrop !== undefined && oldSessionIdForDrop !== sessionId) {
+                  deps.surface.dropOutgoingActiveDraft()
+                }
                 core.setCurrentOwner(nextOwner, sessionId)
                 // The publication is the transition's COMMIT POINT: only from
                 // here on does the `finally` below stop restoring the queued
@@ -518,12 +540,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       // keep their pinned drafts so a stale submission can still restore its
       // text with a live backing draft.
       deps.surface.clearUnpinnedDrafts()
-      // PR3-B §7.3: the SAME committed-switch point drops the outgoing
-      // session's active editor draft (TSP clears; PiTui keeps its
-      // retention). This site is reached ONLY after the publication
-      // committed — a failed/pre-publication switch returns above and never
-      // drops, and the first-session creation (shape C) never passes here.
-      deps.surface.dropOutgoingActiveDraft()
+      // (PR3-B §7.3: the ACTIVE-draft drop moved onto the publication's
+      // synchronous commit block — see the publishOwner seam in
+      // `transitionTo`. Keeping it here left the race the review probed: the
+      // new session's hydration had already lifted the input fence, so a
+      // post-hydration keystroke was wiped by this late clear, and the old
+      // text stayed in the composer through B's first editable frames.)
       return undefined
     } catch (error) {
       const message = safeErrorMessage(error)
@@ -756,6 +778,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // publication; after `setCurrentOwner` the commit point is
               // seamless (plain assignments only).
               const identity = deps.owners.completionIdentity(nextOwner)
+              // PR3-B §7.3 (F1): the active-draft drop rides the SAME
+              // synchronous publication commit as the ordinary switch —
+              // before any post-commit await (source retirement, quiesce,
+              // hydration, catalog), so the adopted child's first editable
+              // frame never shows the source session's text and no
+              // post-hydration keystroke is wiped. Only a genuine
+              // cross-owner adoption drops (the pre-published id pair was
+              // snapshotted above).
+              if (oldOwner !== undefined && oldSessionId !== undefined && oldSessionId !== nextSessionId) {
+                deps.surface.dropOutgoingActiveDraft()
+              }
               core.setCurrentOwner(nextOwner, nextSessionId)
               // PR5 v2 §3C (plan-owner amendment): the operation-owned
               // settlement identity composes the PUBLISHED CHILD session id
@@ -943,10 +976,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
       }
       deps.surface.clearUnpinnedDrafts()
-      // PR3-B §7.3: the committed fork adoption is the same confirmed
-      // cross-owner switch — drop the outgoing active draft (see the
-      // ordinary switch site).
-      deps.surface.dropOutgoingActiveDraft()
+      // (PR3-B §7.3: the ACTIVE-draft drop moved onto the adoption's
+      // synchronous publication commit — see the publishOwner seam above.)
       return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}`, adoptedNavigation }
     } catch (error) {
       // An owner the adoption cleanup already released exactly once must not
