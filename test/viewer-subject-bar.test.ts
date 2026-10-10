@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
-import { renderViewerSubjectBar } from '../src/tui/presentation/viewer-subject-bar.ts'
+import { renderViewerSubjectBar, renderViewerSubjectBarLine } from '../src/tui/presentation/viewer-subject-bar.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
@@ -219,6 +219,32 @@ test('control characters and line breaks in Host strings never break the single-
     `raw ANSI must be stripped whole, not left as visible payload:\n${ansiLabel}`)
   assert.ok(ansiLabel.includes('reviewer') && ansiLabel.includes('bold'),
     `the plain text survives the strip:\n${ansiLabel}`)
+})
+
+test('the navigation hit cells are exactly the painted glyph cells at every width', () => {
+  const snapshot = childSnapshot()
+  for (const width of [140, 120, 80, 60, 40, 34, 25, 20, 6, 3, 2, 1]) {
+    const line = renderViewerSubjectBarLine({ snapshot, childTitle: 'Audit ownership', width })
+    const text = plain(line.text)
+    // The painted prefix decides: the full `‹ back` word is 6 cells, the narrow
+    // `‹` is 1, and a line whose glyph was replaced by the final truncation has
+    // NO hit cell (clicking the replacement must stay inert).
+    const expected = text.startsWith('‹ back') ? 6 : text.startsWith('‹') ? 1 : 0
+    assert.equal(line.navigationCells, expected,
+      `width ${width}: hit cells must match the painted glyph (${JSON.stringify(text)})`)
+    assert.ok(line.navigationCells <= visibleWidth(line.text),
+      `width ${width}: the hit set can never exceed the line`)
+  }
+  assert.equal(renderViewerSubjectBarLine({ snapshot: emptyStatusSnapshot(), width: 100 }).navigationCells, 0,
+    'the main subject renders no navigation cells')
+})
+
+test('the string API stays the exact text of the metadata API', () => {
+  const snapshot = childSnapshot()
+  for (const width of [140, 80, 40, 20, 1]) {
+    assert.equal(renderViewerSubjectBar({ snapshot, childTitle: 'Audit ownership', width }),
+      renderViewerSubjectBarLine({ snapshot, childTitle: 'Audit ownership', width }).text)
+  }
 })
 
 test('a long label and a long model leave the model identifiable at width 20', () => {
