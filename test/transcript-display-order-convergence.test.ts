@@ -1348,6 +1348,7 @@ test('EXT3: one settlement with many same-step Tools regroups exactly once', () 
   const folder = new TranscriptFolder()
   folder.hydrate(events)
   const before = folder.searchDiagnosticsForTest().regroupOperations
+  const beforeSorts = folder.searchDiagnosticsForTest().sideSortOperations
   // A same-step replacement re-converges every Tool relation: the batch must run
   // ONE joint closure, not one per Tool.
   folder.apply([eventAt('assistant/message', {
@@ -1361,9 +1362,13 @@ test('EXT3: one settlement with many same-step Tools regroups exactly once', () 
       ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + 3_000 + index, index + 1, `t${index}`, 'read')),
     ],
   }, T0 + 91_000, seq + 1)])
-  const operations = folder.searchDiagnosticsForTest().regroupOperations - before
+  const diagnostics = folder.searchDiagnosticsForTest()
+  const operations = diagnostics.regroupOperations - before
   assert.ok(operations <= 2,
     `one settlement must coalesce its relation changes (ran ${operations} regroups for ${count} Tools)`)
+  const sorts = diagnostics.sideSortOperations - beforeSorts
+  assert.ok(sorts <= 4,
+    `one settlement must order each touched side once (sorted ${sorts} times for ${count} Tools)`)
 })
 
 // ── external round 2: the side order must not cross an intervening row ──────
@@ -1445,15 +1450,15 @@ test('EXT6: a settlement that revokes many relations regroups once', () => {
   events.push(withDeltas())
   const folder = new TranscriptFolder()
   folder.hydrate(events)
-  const before = folder.searchDiagnosticsForTest().regroupOperations
+  const before = folder.searchDiagnosticsForTest()
   // The replacement names NONE of them: every relation must be revoked in ONE
-  // batched regroup.
+  // batched regroup, without re-sorting per revoked member.
   folder.apply([assistantSettlement({ turn: 1, step: 0, time: T0 + 91_000, seq: seq + 1, text: 'reply', stream: [textChunk(T0 + 2_000, 0, 'reply')] })])
-  const diagnostics = folder.searchDiagnosticsForTest()
-  assert.ok(diagnostics.regroupOperations - before <= 2,
-    `revoking ${count} relations must regroup once (ran ${diagnostics.regroupOperations - before})`)
-  assert.ok(diagnostics.sideSortOperations <= 4,
-    `idempotent or revoked sides must not re-sort per member (sorted ${diagnostics.sideSortOperations} times)`)
+  const after = folder.searchDiagnosticsForTest()
+  assert.ok(after.regroupOperations - before.regroupOperations <= 2,
+    `revoking ${count} relations must regroup once (ran ${after.regroupOperations - before.regroupOperations})`)
+  assert.ok(after.sideSortOperations - before.sideSortOperations <= 4,
+    `revoking ${count} relations must not sort per member (sorted ${after.sideSortOperations - before.sideSortOperations})`)
 })
 
 // ── external round 3, P2-A: a later visibility change re-validates relations ──
@@ -1512,4 +1517,49 @@ test('EXT7: a row that becomes visible revokes the displacement it was invisible
     xSettlement(true, 5, T0 + 8_100),
   ])
   assert.deepEqual(logicalRows(cold), logicalRows(live), 'live and cold agree on the guarded result')
+})
+
+
+// ── external round 4, P2-B: O(1) sorts per settlement ───────────────────────
+
+test('EXT8: establishing many relations in ONE settlement sorts a constant number of times', () => {
+  const count = 200
+  const events: SessionEvent[] = [turnStart(1, T0, 0)]
+  let seq = 1
+  for (let index = 0; index < count; index += 1) {
+    events.push(readCall(`t${index}`, 1, 0, T0 + 3_000 + index, seq++, `t${index}.ts`))
+    events.push(toolResult(`t${index}`, 1, 0, T0 + 3_500 + index, seq++, `row ${index}`))
+  }
+  // The FIRST settlement proves only the reply, so no relation exists yet.
+  events.push(eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext8', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [textChunk(T0 + 2_000, 0, 'reply')],
+  }, T0 + 90_000, seq))
+  const folder = new TranscriptFolder()
+  folder.hydrate(events)
+  const before = folder.searchDiagnosticsForTest()
+  // The replacement names every Tool at once: FIRST-TIME establishment of N
+  // relations in one settlement must sort each touched side once.
+  folder.apply([eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-ext8', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [
+      textChunk(T0 + 2_000, 0, 'reply'),
+      ...Array.from({ length: count }, (_, index) => toolCallDeltaChunk(T0 + 3_000 + index, index + 1, `t${index}`, 'read')),
+    ],
+  }, T0 + 91_000, seq + 1)])
+  const after = folder.searchDiagnosticsForTest()
+  const sorts = after.sideSortOperations - before.sideSortOperations
+  assert.ok(sorts <= 4,
+    `establishing ${count} relations must sort each side once (sorted ${sorts} times)`)
+  assert.ok(after.regroupOperations - before.regroupOperations <= 2,
+    `establishing ${count} relations must coalesce into one regroup (ran ${after.regroupOperations - before.regroupOperations})`)
+  assert.equal(toolRows(folder).length, 1, 'the whole displaced side merged into one read card')
 })

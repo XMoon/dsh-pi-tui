@@ -3084,7 +3084,19 @@ export class TranscriptFolder {
         if (row === undefined || row.kind !== 'tool' || row.callId === undefined) continue
         if (!callIds.has(row.callId)) this.dropLaneDisplacement(displaced)
       }
-      for (const callId of callIds) this.convergeToolRowAgainstAnchor(turn, step, callId)
+      // The batch DEFERS its own ordering: it collects the sides it touched and
+      // orders each of them once at the end (the existing Lane relation keeps its
+      // own single sort), so the sort count per settlement is constant instead of
+      // growing with the Tool count — and the final sort still sees every member
+      // of the side, Thinking included.
+      const touched = new Set<'before' | 'after'>()
+      for (const callId of callIds) {
+        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false)
+        if (outcome !== undefined) touched.add(outcome.position)
+      }
+      if (anchorIndex !== undefined) {
+        for (const position of touched) this.resortAnchorSide(anchorIndex, position)
+      }
     })
     // The latest settlement is the step's authority: Preparing evidence for a
     // call it no longer names must not survive to qualify a LATER durable call
@@ -3135,6 +3147,7 @@ export class TranscriptFolder {
     turn: number,
     step: number,
     callId: string,
+    resort = true,
   ): { index: number; position: 'before' | 'after' } | undefined {
     const key = stepKey(turn, step)
     const assistantRow = this.assistantEntries.get(key)
@@ -3191,7 +3204,7 @@ export class TranscriptFolder {
       if (shouldFollow && thinkingIndex > assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'after')
       if (!shouldFollow && thinkingIndex < assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'before')
     }
-    this.setLaneDisplay(index, assistantIndex, position, true, { turn, step })
+    this.setLaneDisplay(index, assistantIndex, position, resort, { turn, step })
     return { index, position }
   }
 
