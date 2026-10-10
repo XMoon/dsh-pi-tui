@@ -9878,11 +9878,37 @@ export class TuiApp {
     }
   }
 
-  /** Reconcile the working row against its drivers (turn activity,
-   * compaction, pending submit): the row animates while any is live, with
-   * the label chosen by {@link effectiveWorkingMessage} and an
-   * indeterminate progress-bar suffix while a compaction runs. */
+  /** Reconcile the working row against the COMMITTED display subject.
+   *
+   * MAIN: the row animates while any of its drivers is live (turn activity,
+   * compaction, pending submit), with the label chosen by
+   * {@link effectiveWorkingMessage} and an indeterminate progress-bar suffix
+   * while a compaction runs.
+   *
+   * SUBAGENT (child viewer): the SAME row shows the DISPLAYED child's own
+   * activity — `Working...` while the child runs, zero rows while it is
+   * inactive. The Main machine fields keep updating underneath (the runner
+   * keeps calling {@link setWorking} / {@link setCompactionPhase} /
+   * {@link setSubmitPending}), but their label, progress suffix and plugin
+   * override never leak into the child surface; the next commit of the main
+   * subject (viewer exit) shows the LATEST Main state, not an entry-time
+   * snapshot. */
   private reconcileWorkingRow(): void {
+    const subject = this.statusStore.snapshot().view.subject
+    if (subject.kind === 'subagent') {
+      this.working.setSuffixAnimation(undefined)
+      if (subject.activity === 'running') {
+        this.working.setMessage('Working...')
+        this.working.start()
+      } else {
+        // `stop()`/`setText('')` request no repaint of their own (unlike
+        // `start()`'s display update), so the zero-row state is painted here.
+        this.working.stop()
+        this.working.setText('')
+        this.requestRender()
+      }
+      return
+    }
     this.working.setMessage(this.effectiveWorkingMessage())
     if (this.compactionPhase === 'idle') {
       this.working.setSuffixAnimation(undefined)
@@ -11968,6 +11994,13 @@ export class TuiApp {
     // count — and a visible todo panel/extension count would keep rendering
     // the previous subject until an unrelated event.
     this.projectStatus({ ...patch, activity: this.activityStatus() })
+    // The working row reads the COMMITTED view subject
+    // (`statusStore.snapshot().view.subject`), so it must re-derive here, in
+    // the SAME logical transaction that published the new subject — before the
+    // legacy/status-bar/todo/welcome projections below run. The synchronous
+    // repaint requested by the indicator's own display update carries the
+    // reconciled row.
+    this.reconcileWorkingRow()
     if (presentation === undefined) {
       // MAIN: the legacy display fields are the live session's own — merge
       // them and let `setStatus` project + notify as before.
@@ -16281,7 +16314,15 @@ export class TuiApp {
     const host = this.extensionHost
     if (host === undefined) return
     host.updateActivity({
-      working: this.working.isActive(),
+      // The extension `ActivitySnapshot.working` is the LIVE/MAIN session's
+      // background activity (M3-5 PR1 contract decision), NOT the visible
+      // working row: after the working row follows the committed display
+      // subject, `working.isActive()` would report a CHILD's activity while a
+      // child is viewed. Publish the Main-driven derivation instead — exactly
+      // the rule the Main-visible working row uses (turn activity, compaction
+      // phase, pending submit; the plugin override only relabels an already
+      // live row and never drives visibility on its own).
+      working: this.workingActive || this.compactionPhase !== 'idle' || this.submitPendingDetail !== undefined,
       queuedCount: this.queueItems.length,
       taskCount: this.taskSummaryRich ? this.taskSummary.runningJobs : this.dockTasks.length,
       childAgentCount: this.taskSummaryRich ? this.taskSummary.runningAgents : this.dockAgents.length,

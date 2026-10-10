@@ -2079,6 +2079,25 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(!viewA.includes('p/parent-model'), `the parent model must not render anywhere on the child surface:\n${viewA}`)
   assert.ok(!viewA.includes('display-subject-parent'), `the parent session identity must not render anywhere on the child surface:\n${viewA}`)
 
+  // ── UX-1 (three-UX-fixes plan §4/§7 E1): the working row follows the
+  // DISPLAYED child's own activity through the REAL Direct viewer path. The
+  // child's `turn/end` durable event parks the viewer activity
+  // (`viewer.endTurn()` → `refreshFooter`/`refreshStatus` →
+  // `commitDisplaySubject` → `reconcileWorkingRow`); the next `turn/start`
+  // re-activates it. The Main session is idle throughout (its own fixture turn
+  // already ended), so the row can only describe the child.
+  assert.ok(viewA.includes('Working...'), `a running child must own the working row:\n${viewA}`)
+  context.emit('session/event', childA as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 44))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Working...'),
+    `the child's turn/end must clear the working row:\n${vt.getViewport().join('\n')}`)
+  context.emit('session/event', childA as never, event('turn/start', { turn: 2 }, 45))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Working...'),
+    `the child's next turn/start must re-arm the working row:\n${vt.getViewport().join('\n')}`)
+
   // INVALIDATION (M3-5 PR1 review R4): a child `session/title` alone — with NO
   // step/end / turn/end boundary around it — must re-derive the display subject
   // immediately. The Host commits the event AND its projection moves.
@@ -2175,6 +2194,24 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-model-v2')
   assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos)
 
+  // UX-1 discriminator (plan §4): the parent's own turn is LIVE now
+  // (`workingActive` true), while the DISPLAYED child A is still running — the
+  // row belongs to the child. Parking the child (`turn/end`) must clear the row
+  // EVEN THOUGH Main is running: the visible row follows the committed display
+  // subject, never the Main drivers.
+  assert.ok(vt.getViewport().join('\n').includes('Working...'),
+    `precondition: the displayed running child owns the row:\n${vt.getViewport().join('\n')}`)
+  context.emit('session/event', childA as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 46))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Working...'),
+    `an inactive displayed child must hide the row even while Main runs:\n${vt.getViewport().join('\n')}`)
+  context.emit('session/event', childA as never, event('turn/start', { turn: 3 }, 47))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Working...'),
+    `the displayed child's own turn/start must re-arm the row:\n${vt.getViewport().join('\n')}`)
+
   // Child A → child B through the SAME real Task Center entry: no A residue.
   input('\x1b')
   await settle()
@@ -2220,6 +2257,11 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(!restored.includes('[subagent · continuable]'), `the viewer badge must clear:\n${restored}`)
   assert.ok(!restored.includes('‹ back'), `the subject bar must clear on exit:\n${restored}`)
   assert.ok(!restored.includes('child-b-ws'), `the child workspace must clear:\n${restored}`)
+  // UX-1: the exit re-derives the row from the LATEST Main fields, not the
+  // entry-time snapshot — the parent's own `turn/start` (emitted while the child
+  // owned the surface) is still live, so the row returns as a MAIN row.
+  assert.ok(restored.includes('Working...'),
+    `the exit must show the LATEST Main working state:\n${restored}`)
 
   // NEGATIVE CONTROL: with child A's official SessionStatus projection REMOVED,
   // its bounded transcript fold sum (10/2) must NOT be presented as the
