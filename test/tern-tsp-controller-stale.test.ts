@@ -12,6 +12,12 @@
  * composer on a switch-dropping renderer (TSP), while a same-owner
  * invalidation and a retaining renderer (PiTui) still merge.
  *
+ * PR3-B §7.3 (B2 round 11 F1): the SAME parked window with the LIFETIME
+ * ended (the real teardown pair — cleaned up + aborted) and the parked await
+ * rejected as teardown does it. The async failure restore must write nothing
+ * and announce nothing; the same rejection with a live lifetime stays the
+ * positive control (the restoring failure path).
+ *
  * Level: the REAL `createSubmissionController` over the REAL ownership
  * core/subject authority — the replacement fact is computed by the real
  * WeakMap-pinned authority, never a precomputed boolean. The service seams
@@ -27,14 +33,22 @@ import test from 'node:test'
 interface Recorded {
   readonly editor: string[]
   readonly notices: string[]
+  /** Editor writes recorded AFTER the lifetime ended (round 11 case). */
+  readonly postLifetimeEditorWrites: string[]
 }
 
 /** One controller-consumer scenario over the real controller + real core. */
 async function runQueuedSubmitAcrossOwnerChange(options: {
   /** How the ownership slot changes while the submit is parked. */
-  readonly change: 'replaced-owner' | 'same-owner-bump'
+  readonly change?: 'replaced-owner' | 'same-owner-bump'
   /** The renderer's stale-restore policy (TSP false / PiTui true). */
   readonly retainsStaleDraftRestore: boolean
+  /** End the controller's lifetime (abort + cleaned up, the real teardown
+   * pair) while the submit is parked. */
+  readonly endLifetime?: boolean
+  /** Reject the parked history await (the async failure restore's window):
+   * the teardown cancellation shape, or an ordinary async failure. */
+  readonly historyRejects?: 'abort' | 'failure'
 }): Promise<Recorded> {
   const { createSubmissionController } = await import('../src/app/submission/controller.ts')
   const { createSessionOwnershipCore } = await import('../src/app/session/ownership-core.ts')
@@ -71,6 +85,11 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   let releaseHistory!: () => void
   const historyGate = new Promise<void>(resolve => { releaseHistory = resolve })
 
+  // The controller's LIFETIME (round 11): the real signal + cleaned-up pair
+  // teardown sets, driven here independently of the ownership slot.
+  const lifetime = new AbortController()
+  let cleanedUp = false
+
   const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
   // A callable deep-inert stub: every nested member is itself (callable),
   // so any dep this scenario never exercises stays inert without a
@@ -84,8 +103,8 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   const deps: Record<string, unknown> = {
     app: () => composer,
     diag,
-    signal: new AbortController().signal,
-    isCleanedUp: () => false,
+    signal: lifetime.signal,
+    isCleanedUp: () => cleanedUp,
     logError: () => {},
     liveAgent: () => agentA,
     ownership: {
@@ -118,8 +137,16 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
         resolveSession: () => Promise<string | undefined>,
         persist: (sessionId: string | undefined) => void,
       ) => {
-        // The parked window: the owner change lands while this awaits.
+        // The parked window: the owner change (or the lifetime end) lands
+        // while this awaits.
         await historyGate
+        if (options.historyRejects !== undefined) {
+          // The REAL shapes the probe observed: the teardown cancellation (a
+          // DOMException AbortError) and an ordinary async failure.
+          throw options.historyRejects === 'abort'
+            ? new DOMException('the submission was cancelled', 'AbortError')
+            : new Error('the history write failed')
+        }
         const sessionId = await resolveSession()
         if (sessionId !== undefined) persist(sessionId)
       },
@@ -160,11 +187,18 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(editorText, '', 'fixture check: the submit cleared the editor before the parking window')
 
-  // The owner change lands INSIDE the awaited window (the real core).
-  if (options.change === 'replaced-owner') {
+  // The owner change (or the lifetime end) lands INSIDE the awaited window.
+  let lifetimeEditorMark = -1
+  if (options.endLifetime === true) {
+    // The real teardown pair, in the production order (cleanup first, abort
+    // in the same synchronous batch).
+    cleanedUp = true
+    lifetime.abort()
+    lifetimeEditorMark = recorded.editor.length
+  } else if (options.change === 'replaced-owner') {
     core.bumpGeneration()
     core.setCurrentOwner(ownerB, 'session-b')
-  } else {
+  } else if (options.change === 'same-owner-bump') {
     // A same-owner invalidation: only the generation moves.
     core.bumpGeneration()
   }
@@ -172,7 +206,11 @@ async function runQueuedSubmitAcrossOwnerChange(options: {
   releaseHistory()
   await new Promise(resolve => setTimeout(resolve, 200))
 
-  return recorded
+  return {
+    editor: recorded.editor,
+    notices: recorded.notices,
+    postLifetimeEditorWrites: lifetimeEditorMark < 0 ? [] : recorded.editor.slice(lifetimeEditorMark),
+  }
 }
 
 test('round10 F1: a REPLACED owner on a switch-dropping renderer (TSP) never reseeds the new composer', async () => {
@@ -210,4 +248,32 @@ test('round10 F1: a retaining renderer (PiTui) restores even on a genuinely repl
     `PiTui keeps its cross-session restore: ${JSON.stringify(recorded.editor)}`)
   assert.ok(recorded.notices.some(note => note.includes('try again')),
     `the PiTui notice promises the restored retry: ${JSON.stringify(recorded.notices)}`)
+})
+
+test('round11 F1: the async failure restore with a LIVE lifetime stays the positive control', async () => {
+  const recorded = await runQueuedSubmitAcrossOwnerChange({
+    retainsStaleDraftRestore: true,
+    historyRejects: 'failure',
+  })
+  assert.ok(recorded.editor.some(entry => entry.includes('queued from A')),
+    `a live failure still restores the draft: ${JSON.stringify(recorded.editor)}`)
+  assert.ok(recorded.notices.some(note => note.includes('submission failed')),
+    `a live failure still reports itself: ${JSON.stringify(recorded.notices)}`)
+})
+
+test('round11 F1: an ENDED lifetime (abort + cleanup) writes and announces NOTHING', async () => {
+  for (const rejection of ['abort', 'failure'] as const) {
+    const recorded = await runQueuedSubmitAcrossOwnerChange({
+      // The retaining renderer is the worst case: the owner policy never
+      // suppresses PiTui, so only the lifetime fence can keep the dead editor
+      // clean (the review's regression shape).
+      retainsStaleDraftRestore: true,
+      endLifetime: true,
+      historyRejects: rejection,
+    })
+    assert.equal(recorded.postLifetimeEditorWrites.length, 0,
+      `${rejection}: no editor write survives the lifetime: ${JSON.stringify(recorded.postLifetimeEditorWrites)}`)
+    assert.equal(recorded.notices.length, 0,
+      `${rejection}: a cancelled gesture announces nothing: ${JSON.stringify(recorded.notices)}`)
+  }
 })
