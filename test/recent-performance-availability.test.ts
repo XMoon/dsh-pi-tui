@@ -241,12 +241,14 @@ test('PR5 §3.2: a bounded window without enough samples starts UNAVAILABLE (unk
   assert.equal(h.available(), false)
 })
 
-test('PR3-B §7.3: the generation reset drops the active draft through the seam (genuine A→B only)', async () => {
-  // The B2 external review's F1 wiring witness: the ONE draft-drop point is
-  // the SYNCHRONOUS generation boundary (`resetForGeneration` — the
-  // session-lifecycle authority a same-session rehydrate never crosses).
-  // The reset calls the seam exactly once; ordinary hydration and a window
-  // rehydrate (same generation, no reset) never touch it.
+test('PR3-B §7.3 (F1): the generation reset NEVER drops the active draft (the drop moved to the committed switch)', async () => {
+  // The round-6 review's F1 correction witness: the generation reset is an
+  // INVALIDATION signal (the first-session creation bumps it; a
+  // pre-publication failure bumps it while the old owner stands), so the
+  // draft drop must NOT live there. This presentation-level witness pins
+  // that `resetForGeneration` never calls the drop seam; the drop's REAL
+  // production positions (the session runtime's committed post-publication
+  // sites) are pinned by session-runtime-remote-owner-handoff.test.ts.
   const h = harness()
   h.setWindow([], false)
   await h.coldHydrate()
@@ -254,10 +256,10 @@ test('PR3-B §7.3: the generation reset drops the active draft through the seam 
   await h.rehydrate()
   assert.equal(h.draftClears(), 0, 'a same-session window rehydrate never drops the draft')
   h.resetForGeneration()
-  assert.equal(h.draftClears(), 1,
-    'the synchronous generation reset dropped the active draft exactly once (the genuine-switch boundary)')
+  assert.equal(h.draftClears(), 0,
+    'the generation reset alone NEVER drops the draft (an invalidation, not a confirmed switch — the first-session shape bumps it too)')
   h.resetForGeneration()
-  assert.equal(h.draftClears(), 2, 'each genuine switch drops exactly once')
+  assert.equal(h.draftClears(), 0, 'repeated invalidations keep the draft')
 })
 
 test('PR5 §3.2: a window that reached the history start is AVAILABLE even with zero valid samples', async () => {

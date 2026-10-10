@@ -61,6 +61,11 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
       // cross-session retention is PiTui's long-standing contract; the
       // plan's clear-on-switch rule scopes the TSP active draft only.
     },
+    retainsStaleDraftRestore() {
+      // PiTui RETAINS: its editor owns the draft, so a stale submission's
+      // text always comes back to the user (steer.test.ts's restore family).
+      return true
+    },
     resetInputHistory: entries => app.resetInputHistory(entries),
     setSearchResult: (index, count) => app.setSearchResult(index, count),
     notify: (text, kind) => app.notify(text, kind),

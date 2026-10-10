@@ -340,17 +340,20 @@ test('B2: a hydration that NEVER commits stays fail-closed (Loading retained, no
 test('B2: a GENUINE session switch clears the old draft — Enter into B never sends A\'s text', async () => {
   // The exact state sequence of the external review's P2: session A's
   // unsubmitted draft must not survive into B. The session-lifecycle
-  // authority (the generation reset) drops the active draft at the bump —
-  // BEFORE the new subject's frame commits — so when the fence lifts, the
-  // composer starts EMPTY and B's first submit carries only B's own text.
+  // authority drops the active draft at the COMMITTED cross-owner
+  // publication (the session runtime's post-commit sites — see the wiring
+  // witness in recent-performance-availability.test.ts for the production
+  // call positions); the renderer contract under test here is the seam
+  // pair `beginSessionHydration()` + `clearActiveDraft()` followed by B's
+  // own commit.
   const submissions: string[] = []
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
     harness.input.type('draft from A')
     await settle()
     assert.equal(harness.renderer.composer.getDraft(), 'draft from A')
-    // The synchronous generation boundary of a GENUINE switch: the owner
-    // raises the hydration window AND drops the outgoing session's draft.
+    // The committed-switch seam pair (the runtime calls these back-to-back
+    // at the post-publication site).
     harness.renderer.display.beginSessionHydration()
     harness.renderer.display.clearActiveDraft()
     await settle()
@@ -373,6 +376,46 @@ test('B2: a GENUINE session switch clears the old draft — Enter into B never s
     await settle()
     assert.deepEqual(submissions, ['', 'typed in B'],
       'after the empty handover, B\'s own draft submits normally (A\'s text never appears)')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B2 §7.3 (F1): the FIRST-session creation and a generation bump WITHOUT a committed switch never drop the draft', async () => {
+  // The round-6 review's discriminator: the generation reset alone is an
+  // INVALIDATION signal, not a confirmed A→B. The first-session creation
+  // (commit shape C) bumps too, and a pre-publication failure bumps while
+  // the OLD owner still stands — in both shapes the draft belongs to the
+  // live/still-current subject and MUST survive. The renderer-side
+  // contract: only the explicit `clearActiveDraft()` (called solely from
+  // the session runtime's committed post-publication sites) ever drops the
+  // text; `beginSessionHydration()` alone never does.
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) })
+  try {
+    // Shape C (first session): the user types while the deferred create is
+    // in flight; the creation's generation bump + hydration window raise —
+    // but there is no OUTGOING session, so no drop may happen.
+    harness.input.type('typed while the first session creates')
+    await settle()
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'first' })
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'typed while the first session creates',
+      'the first-session creation preserved the draft (no outgoing session ⇒ no drop)')
+    // The pre-publication failure shape: a generation bump happened (the
+    // invalidation) but the publication failed — the OLD owner stands and
+    // its own fold re-commits. The hydration window lifts on the new source
+    // token; the draft was never dropped.
+    harness.input.type(' + kept')
+    await settle()
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'still-A' })
+    await settle()
+    assert.equal(harness.renderer.composer.getDraft(), 'typed while the first session creates + kept',
+      'an invalidated-but-unswitched generation preserved the draft (the drop needs the committed publication)')
   } finally {
     await harness.dispose()
   }
@@ -438,43 +481,28 @@ test('B2: a FAILED switch (hydration raised, never cleared, no new subject) pres
   }
 })
 
-test('B2: a late ASYNC restore for the OLD session cannot reseed the new session\'s composer', async () => {
-  // The stale-rollback path: a submission made in A fails AFTER the switch
-  // already happened; its synchronous restore (`mergeDraftIntoEditor`) is
-  // scope/generation-fenced by the submission runtime. The renderer-side
-  // guarantee under test here: after the switch cleared the draft, the ONLY
-  // writers to the composer are the bound application port mutators — so
-  // the observable contract is that the cleared state STAYS cleared through
-  // the fence lift and B's own events. (The producer-side fence — the
-  // submission runtime's generation check before `mergeDraftIntoEditor` —
-  // is pinned by steer.test.ts's "a generation bump between the snapshot
-  // and the delivery aborts stale and restores the draft" family.)
+test('B2 §7.3 (F2): the TSP renderer declares the switch-dropping stale-restore contract', async () => {
+  // The renderer-side half of the F2 contract: after a committed switch
+  // dropped the outgoing draft, the renderer DECLARES that a stale
+  // submission's restore must be suppressed (`retainsStaleDraftRestore()`
+  // === false). The suppression itself lives in the submission runtime —
+  // its REAL async regression (old busy steer parked at prepare → the
+  // switch → the stale settle) is in a3-writer-admission.test.ts; this case
+  // pins the renderer's capability answer and that the composer has no
+  // hidden second owner (the port mutator stays the only writer).
   const submissions: string[] = []
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
-    harness.input.type('late restore target')
-    await settle()
-    // The switch boundary (the same sequence as the genuine-switch case).
-    harness.renderer.display.beginSessionHydration()
-    harness.renderer.display.clearActiveDraft()
-    await settle()
-    harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'B' })
-    await settle()
-    assert.equal(harness.renderer.composer.getDraft(), '', 'the switch cleared the draft')
-    // A LATE async restore attempt for A arrives as a plain port write. The
-    // renderer itself cannot know its provenance — but the cleared state
-    // plus B's committed fence is the contract this pins; the scope fence
-    // lives in the submission runtime (its own regression family).
-    harness.renderer.composer.setEditorText('late restore from A')
-    await settle()
-    assert.equal(harness.renderer.composer.getDraft(), 'late restore from A',
-      'the port mutator is the ONLY writer (the renderer adds no hidden cache; the producer-side scope fence is separately pinned)')
-    // Explicitly undo the synthetic restore so the finally-dispose state is
-    // deterministic; then prove the REAL path — the submission runtime —
-    // never performs this write for a stale scope (see steer.test.ts).
+    assert.equal(harness.renderer.display.retainsStaleDraftRestore(), false,
+      'the TSP renderer drops stale restores across a committed switch (PiTui retains — its adapter test and steer.test.ts pin that half)')
+    // The composer exposes no other restore path: the port mutator is the
+    // only writer, so the runtime's suppression decision is total.
+    assert.equal(harness.renderer.composer.getDraft(), '', 'the composer starts empty')
+    harness.renderer.composer.setEditorText('probe')
+    assert.equal(harness.renderer.composer.getDraft(), 'probe',
+      'the port mutator remains the only writer (no hidden cache or second owner)')
     harness.renderer.composer.setEditorText('')
-    await settle()
-    assert.deepEqual(submissions, [], 'no submission fired during the stale-restore probe')
+    assert.deepEqual(submissions, [])
   } finally {
     await harness.dispose()
   }

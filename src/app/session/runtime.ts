@@ -63,6 +63,17 @@ export interface SessionRuntimeSurface {
   reportSwitch(from: string | undefined, to: SessionOwnerRef): void
   /** Drop the unpinned per-session drafts after a committed switch/fork. */
   clearUnpinnedDrafts(): void
+  /**
+   * PR3-B §7.3 (the B2 external-review F1): drop the ACTIVE editor draft at
+   * a COMMITTED cross-owner switch. Called ONLY at the two sites that have
+   * already proven the publication (the ordinary switch's and the fork
+   * adoption's post-commit phases) — never at the generation reset (an
+   * invalidation signal the first-session creation and a pre-publication
+   * failure also produce) and never for a same-session resume. The surface
+   * implementation routes to the display seam (the PiTui adapter keeps its
+   * own retention contract).
+   */
+  dropOutgoingActiveDraft(): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
   // First-session (deferred creation) runner operations.
@@ -507,6 +518,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       // keep their pinned drafts so a stale submission can still restore its
       // text with a live backing draft.
       deps.surface.clearUnpinnedDrafts()
+      // PR3-B §7.3: the SAME committed-switch point drops the outgoing
+      // session's active editor draft (TSP clears; PiTui keeps its
+      // retention). This site is reached ONLY after the publication
+      // committed — a failed/pre-publication switch returns above and never
+      // drops, and the first-session creation (shape C) never passes here.
+      deps.surface.dropOutgoingActiveDraft()
       return undefined
     } catch (error) {
       const message = safeErrorMessage(error)
@@ -926,6 +943,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
       }
       deps.surface.clearUnpinnedDrafts()
+      // PR3-B §7.3: the committed fork adoption is the same confirmed
+      // cross-owner switch — drop the outgoing active draft (see the
+      // ordinary switch site).
+      deps.surface.dropOutgoingActiveDraft()
       return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}`, adoptedNavigation }
     } catch (error) {
       // An owner the adoption cleanup already released exactly once must not

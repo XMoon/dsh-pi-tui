@@ -193,6 +193,7 @@ function harness() {
     refreshLiveCatalog: async (owner) => { events.push(`catalog:${services.owners.sessionId(owner)}`) },
     reportSwitch: (from, to) => { events.push(`switch:${from ?? '(none)'}->${services.owners.sessionId(to)}`) },
     clearUnpinnedDrafts: () => {},
+    dropOutgoingActiveDraft: () => { events.push('dropDraft') },
     reportSwitchFailure: (sessionId, message) => { events.push(`switchfail:${sessionId}:${message}`) },
     launchComposition: async () => ({ composition: {} }),
     setResumeFailure: () => {},
@@ -303,6 +304,33 @@ test('H1: ordinary switch = retain NEW → commit NEW → release OLD → post-h
   assert.equal(h.countRefs('session-a'), 0, 'the OLD generation is fully released')
   assert.equal(h.core.currentSessionId(), 'session-b')
   assert.ok(h.isLive('session-b'), 'the NEW generation stays retained')
+})
+
+test('PR3-B §7.3 (F1 wiring): the active-draft drop fires ONLY at the committed cross-owner switch', async () => {
+  // The production call positions: a successful ordinary switch drops the
+  // outgoing draft exactly once (AFTER the publication, with the new owner
+  // current); a superseded/pre-publication failed switch NEVER drops; and
+  // the first-session creation (commit shape C) NEVER drops — there is no
+  // outgoing session. The drop is NOT at the generation reset (every shape
+  // bumps it).
+  const h = harness()
+  h.publishRetained('session-a')
+  assert.equal(h.events.includes('dropDraft'), false, 'no drop before any switch')
+  // A superseded open (pre-publication failure): OLD stays current.
+  h.arms.set('session-b', { supersede: true })
+  await h.runtime.switchSession('session-b')
+  assert.equal(h.events.includes('dropDraft'), false,
+    'a pre-publication failed switch never drops the draft (the old owner stands)')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the OLD session stayed current')
+  // The committed switch: exactly one drop.
+  await h.runtime.switchSession('session-c')
+  assert.equal(h.events.filter(event => event === 'dropDraft').length, 1,
+    'the committed cross-owner switch dropped the outgoing draft exactly once')
+  assert.equal(h.core.currentSessionId(), 'session-c')
+  // A same-id open is a no-op switch: no further drop.
+  await h.runtime.switchSession('session-c')
+  assert.equal(h.events.filter(event => event === 'dropDraft').length, 1,
+    'a same-id no-op switch never drops again')
 })
 
 test('H2: a NEW superseded before commit is released; OLD stays current; no init', async () => {
@@ -545,6 +573,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
       refreshLiveCatalog: async () => {},
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
+    dropOutgoingActiveDraft: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
       setResumeFailure: () => {},
@@ -689,6 +718,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
       refreshLiveCatalog: async () => {},
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
+    dropOutgoingActiveDraft: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
       setResumeFailure: () => {},
@@ -800,6 +830,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       refreshLiveCatalog: async () => {},
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
+    dropOutgoingActiveDraft: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
       setResumeFailure: () => {},
@@ -881,6 +912,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       refreshLiveCatalog: async () => {},
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
+    dropOutgoingActiveDraft: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
       setResumeFailure: () => {},
