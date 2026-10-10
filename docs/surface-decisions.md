@@ -770,14 +770,26 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   provably became visible after the Activity started (the fold records a point
   sidecar on the actually-visible Conversation/Context rows: assistant
   first-visible reply text, user/injected-context messages, workflow runs,
-  compaction cards), and finally the owning turn's `turn/end`. The forward scan
-  makes the derivation ORDER-INDEPENDENT: a following row that provably became
-  visible BEFORE the Activity started (cold hydration can order a Conversation
-  row after the Process rows it chronologically preceded) neither closes the
-  Activity nor disqualifies it as the live tail, so live and cold hydration
-  derive the SAME lifetime for the same event sequence. A following block with
-  no proven first-visible time keeps the span out of the live tail without
-  closing it. Only an open, non-blocked trailing span of a live-tail window
+  compaction cards), and finally the owning turn's `turn/end` — which is a TIME
+  CAP, never a mere fallback: an Activity can never end after its own turn, so a
+  later turn's prompt/Context/Work can never lengthen an already-frozen
+  Activity. The boundary is read from each row's OWN proven time (one bounded
+  pass collects them; the per-Activity work is a lookup, never a re-walk of the
+  window), not from its physical position, so a following row that provably
+  became visible BEFORE the Activity started (cold hydration can order a
+  Conversation row after the Process rows it chronologically preceded) neither
+  closes the Activity nor disqualifies it as the live tail. A following block
+  with no proven first-visible time keeps the span out of the live tail without
+  closing it. **Scope limit (pinned by `test/activity-clock.test.ts`):** the
+  canonical Work MEMBERSHIP — which Process rows share one Activity — is decided
+  by the fold's display order. When cold hydration appends a step's settlement
+  AFTER that step's tool rows while its first visible text preceded them, cold
+  shows ONE Activity where live showed TWO (and a raw-adjacent settled-read pair
+  is likewise merged by the fold's read grouping before any display rule can act).
+  Converging that needs the fold's display-order authority (the same mechanism
+  `convergeStepLaneOrder` uses) plus display-aware read grouping; it is tracked
+  as a separate fold unit and is NOT claimed here. Only an open, non-blocked
+  trailing span of a live-tail window
   whose committed display subject is running is live; the live predicate is
   re-read per render (never a latched boolean) and re-reads `now()` on the
   shared repaint heartbeat (no per-card timers). An Activity with no proven end

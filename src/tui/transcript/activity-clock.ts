@@ -92,16 +92,29 @@ export interface ActivityClock {
  * consistency floor, so a boundary earlier than proven member evidence can
  * never make the duration shrink.
  *
- * The forward scan (instead of only the immediate successor) is what makes the
- * derivation ORDER-INDEPENDENT: cold hydration can order a Conversation row
- * after Process rows it chronologically preceded (the live lane materializes
- * the assistant row on its first visible chunk, the durable settlement appends
- * at its own event index). Such a row provably appeared BEFORE the Activity, so
- * it neither closes it nor disqualifies it as the live tail — live and cold
- * therefore derive the SAME lifetime for the same event sequence. A following
- * block with NO proven time (a local command card, a synthetic window summary)
- * cannot be shown to precede the Activity, so it keeps the span out of the live
- * tail without closing it.
+ * The derivation is ORDER-TOLERANT for the boundary itself: cold hydration can
+ * order a Conversation row after Process rows it chronologically preceded (the
+ * live lane materializes the assistant row on its first visible chunk, the
+ * durable settlement appends at its own event index). A row that provably
+ * became visible BEFORE the Activity started does not close it, so the boundary
+ * is read from the block's own time rather than from its physical position, and
+ * one bounded pass collects those times for every span. A following block with
+ * NO proven time (a local command card, a synthetic window summary) keeps the
+ * span out of the live tail without closing it.
+ *
+ * The boundary is CAPPED by the owning turn's `turn/end`: an Activity can never
+ * end after its turn, so a row of a later turn can never lengthen an
+ * already-frozen Activity.
+ *
+ * KNOWN LIMIT (pinned by `test/activity-clock.test.ts` as a live/cold
+ * differential): the canonical Work MEMBERSHIP (which Process rows share one
+ * span) is decided by the fold's row ORDER, not by this clock. When cold
+ * hydration appends a step's settlement AFTER that step's tool rows while its
+ * first visible text preceded them, cold shows ONE Activity where the live fold
+ * showed TWO; a raw-adjacent settled-read pair is moreover MERGED by the fold's
+ * read grouping before any display rule could act. Converging that belongs to
+ * the fold's display-order authority (the `convergeStepLaneOrder` mechanism plus
+ * display-aware read grouping) and is tracked as a separate unit.
  * @param structure - the canonical structural blocks for one window.
  * @param turnActivities - the folded turn boundary facts of the SAME snapshot.
  */
@@ -109,6 +122,29 @@ export function resolveWorkLifetimes(
   structure: readonly TranscriptStructureBlock[],
   turnActivities: ReadonlyMap<number, TurnActivity>,
 ): ReadonlyMap<TranscriptMessage, WorkLifetime> {
+  // ONE bounded pass collects every PROVEN first-visible boundary time and one
+  // backward pass marks whether any FOLLOWING block lacks such a time (the tail
+  // rule). Per-span work is then one binary search plus the row's own members —
+  // the structure is never re-walked per Work (a 100-Work window costs 2 passes,
+  // not 10k reads).
+  const boundaryTimes: number[] = []
+  const noTimeAfter = new Array<boolean>(structure.length + 1).fill(false)
+  for (let index = structure.length - 1; index >= 0; index -= 1) {
+    const at = boundaryTimeOf(structure[index]!)
+    noTimeAfter[index] = noTimeAfter[index + 1]! || at === undefined
+    if (at !== undefined) boundaryTimes.push(at)
+  }
+  boundaryTimes.sort((left, right) => left - right)
+  const earliestBoundaryAfter = (startedAt: number): number | undefined => {
+    let low = 0
+    let high = boundaryTimes.length
+    while (low < high) {
+      const middle = (low + high) >> 1
+      if (boundaryTimes[middle]! <= startedAt) low = middle + 1
+      else high = middle
+    }
+    return boundaryTimes[low]
+  }
   const lifetimes = new Map<TranscriptMessage, WorkLifetime>()
   for (let index = 0; index < structure.length; index += 1) {
     const block = structure[index]
@@ -117,34 +153,24 @@ export function resolveWorkLifetimes(
     if (timing === undefined) continue
     const memberEnd = timing.endedAt
     const startedAt = timing.startedAt
-    let boundary = interactionBoundaryOf(block.span, startedAt)
-    let tailBlocked = false
-    for (let next = index + 1; next < structure.length; next += 1) {
-      const at = boundaryTimeOf(structure[next]!)
-      if (at === undefined) {
-        // No proven first-visible time: it cannot be shown to precede this
-        // Activity, so it disqualifies the live tail (and proves no close).
-        tailBlocked = true
-        continue
-      }
-      if (at <= startedAt) continue // provably earlier: a reordered row
-      tailBlocked = true
-      if (boundary === undefined || at < boundary) boundary = at
-    }
-    let endedAt: number | undefined
-    if (boundary !== undefined) {
-      endedAt = memberEnd === undefined ? boundary : Math.max(boundary, memberEnd)
-    } else {
-      const turn = turnActivities.get(block.span.turn)
-      if (turn?.completed === true && turn.endedAt !== undefined) {
-        endedAt = memberEnd === undefined ? turn.endedAt : Math.max(turn.endedAt, memberEnd)
-      }
-    }
+    let boundary = interactionBoundaryOf(block.span)
+    const following = earliestBoundaryAfter(startedAt)
+    if (following !== undefined && (boundary === undefined || following < boundary)) boundary = following
+    // The owning turn's end is a CAP, never a fallback: an Activity can never
+    // end after its turn ended, and a row of a LATER turn (or a much later
+    // prompt in the same window) must never lengthen an already-frozen
+    // Activity.
+    const turn = turnActivities.get(block.span.turn)
+    const turnEnd = turn?.completed === true ? turn.endedAt : undefined
+    if (turnEnd !== undefined) boundary = boundary === undefined ? turnEnd : Math.min(boundary, turnEnd)
+    const endedAt = boundary === undefined
+      ? undefined
+      : memberEnd === undefined ? boundary : Math.max(boundary, memberEnd)
     lifetimes.set(block.span.owner, {
       startedAt,
       ...(endedAt === undefined ? {} : { endedAt }),
       open: endedAt === undefined,
-      trailing: !tailBlocked,
+      trailing: !noTimeAfter[index + 1]!,
     })
   }
   return lifetimes
@@ -178,13 +204,17 @@ export function activityClockOf(
  *  Activity. The row is matched by NAME while running exactly like the fold's
  *  work accounting (`compactActionSourceOf` excludes it regardless of status),
  *  so the Activity freezes at the same instant whether the tool is still
- *  waiting (a Process member) or has settled (a following interaction card). */
-function interactionBoundaryOf(span: TranscriptWorkSpan, startedAt: number): number | undefined {
+ *  waiting (a Process member) or has settled (a following interaction card).
+ *  A member's own start is never earlier than the span start (the span start IS
+ *  the earliest member start), so no ordering guard applies: when the
+ *  interaction is the Activity's FIRST and only member the hand-over IS the
+ *  Activity, which closes it immediately and renders no duration. */
+function interactionBoundaryOf(span: TranscriptWorkSpan): number | undefined {
   let earliest: number | undefined
   for (const member of span.members) {
     if (member.kind !== 'tool' || !isSurfacedInteractionToolName(member.name)) continue
     const at = transcriptTimingOf(member)?.startedAt
-    if (at === undefined || at <= startedAt) continue
+    if (at === undefined) continue
     if (earliest === undefined || at < earliest) earliest = at
   }
   return earliest
