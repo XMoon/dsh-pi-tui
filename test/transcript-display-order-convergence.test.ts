@@ -1092,3 +1092,112 @@ test('N3d: dropping a displaced relation reunites the rows it separated (live/co
   assert.equal(merged.length, 1)
   assert.equal(merged[0]!.callCount, 2)
 })
+
+test('N3c: a replacement drops a durable BLOCK request too, not just a streamed delta', () => {
+  const settled = (withBlock: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-n3c', role: 'assistant',
+      content: withBlock
+        ? [{ type: 'text', text: 'reply' }, { type: 'tool-call', id: 'a', name: 'bash', arguments: '{}' }]
+        : [{ type: 'text', text: 'reply' }],
+      source: { kind: 'assistant' },
+    },
+    stream: [textChunk(T0 + 2_000, 0, 'reply')],
+  }, T0 + 6_000, seq)
+  const folder = new TranscriptFolder()
+  folder.apply([turnStart(1, T0, 0)])
+  folder.apply([settled(true, 1)])
+  // The authoritative replacement stops naming A.
+  folder.apply([settled(false, 2)])
+  folder.apply([
+    toolCall({ callId: 'a', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 3 }),
+    toolResult('a', 1, 0, T0 + 1_500, 4, 'ok'),
+  ])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:a'],
+    'the superseded durable block no longer qualifies the later call')
+})
+
+test('N3d: dropping a displaced relation reunites the rows it separated (live/cold parity)', () => {
+  const events = (): SessionEvent[] => [
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
+    readCall('b', 1, 1, T0 + 4_000, 3, 'b.ts'), toolResult('b', 1, 1, T0 + 4_500, 4, 'bravo'),
+    toolCall({ callId: 'x', name: 'bash', turn: 1, step: 2, time: T0 + 5_000, seq: 5 }),
+    readCall('c', 1, 3, T0 + 6_000, 6, 'c.ts'), toolResult('c', 1, 3, T0 + 6_500, 7, 'charlie'),
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 9_000, seq: 8, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+    }),
+    // A reply-only replacement: A's relation departs, so A returns to its
+    // physical slot and the rows it had separated must be re-evaluated.
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 9_100, seq: 9, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply')],
+    }),
+  ]
+  const live = new TranscriptFolder()
+  for (const event of events()) live.apply([event])
+  const cold = foldEvents(events())
+  assert.equal(toolRows(live).length, 3, 'A+B merge again once A departs; X and C stay separate')
+  assert.deepEqual(logicalRows(live), logicalRows(cold),
+    'the live departure reflow agrees with the cold fold')
+  const merged = toolRows(live).filter(row => row.args === '2 files')
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0]!.callCount, 2)
+})
+
+test('N3c: a replacement drops a durable BLOCK request too, not just a streamed delta', () => {
+  const settled = (withBlock: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-n3c', role: 'assistant',
+      content: withBlock
+        ? [{ type: 'text', text: 'reply' }, { type: 'tool-call', id: 'a', name: 'bash', arguments: '{}' }]
+        : [{ type: 'text', text: 'reply' }],
+      source: { kind: 'assistant' },
+    },
+    stream: [textChunk(T0 + 2_000, 0, 'reply')],
+  }, T0 + 6_000, seq)
+  const folder = new TranscriptFolder()
+  folder.apply([turnStart(1, T0, 0)])
+  folder.apply([settled(true, 1)])
+  // The authoritative replacement stops naming A.
+  folder.apply([settled(false, 2)])
+  folder.apply([
+    toolCall({ callId: 'a', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 3 }),
+    toolResult('a', 1, 0, T0 + 1_500, 4, 'ok'),
+  ])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:a'],
+    'the superseded durable block no longer qualifies the later call')
+})
+
+test('N3d: dropping a displaced relation reunites the rows it separated (live/cold parity)', () => {
+  const events = (): SessionEvent[] => [
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
+    readCall('b', 1, 1, T0 + 4_000, 3, 'b.ts'), toolResult('b', 1, 1, T0 + 4_500, 4, 'bravo'),
+    toolCall({ callId: 'x', name: 'bash', turn: 1, step: 2, time: T0 + 5_000, seq: 5 }),
+    readCall('c', 1, 3, T0 + 6_000, 6, 'c.ts'), toolResult('c', 1, 3, T0 + 6_500, 7, 'charlie'),
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 9_000, seq: 8, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+    }),
+    // A reply-only replacement: A's relation departs, so A returns to its
+    // physical slot and the rows it had separated must be re-evaluated.
+    assistantSettlement({
+      turn: 1, step: 0, time: T0 + 9_100, seq: 9, text: 'reply',
+      stream: [textChunk(T0 + 2_000, 0, 'reply')],
+    }),
+  ]
+  const live = new TranscriptFolder()
+  for (const event of events()) live.apply([event])
+  const cold = foldEvents(events())
+  assert.equal(toolRows(live).length, 3, 'A+B merge again once A departs; X and C stay separate')
+  assert.deepEqual(logicalRows(live), logicalRows(cold),
+    'the live departure reflow agrees with the cold fold')
+  const merged = toolRows(live).filter(row => row.args === '2 files')
+  assert.equal(merged.length, 1)
+  assert.equal(merged[0]!.callCount, 2)
+})
+
