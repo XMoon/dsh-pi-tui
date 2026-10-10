@@ -1455,3 +1455,61 @@ test('EXT6: a settlement that revokes many relations regroups once', () => {
   assert.ok(diagnostics.sideSortOperations <= 4,
     `idempotent or revoked sides must not re-sort per member (sorted ${diagnostics.sideSortOperations} times)`)
 })
+
+// ── external round 3, P2-A: a later visibility change re-validates relations ──
+
+test('EXT7: a row that becomes visible revokes the displacement it was invisible under', () => {
+  const xSettlement = (visible: boolean, seq: number, time: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 1,
+    message: {
+      id: 'm-x', role: 'assistant',
+      content: visible ? [{ type: 'text', text: 'x reply' }] : [],
+      source: { kind: 'assistant' },
+    },
+    stream: [textChunk(T0 + 1_000, 0, 'x reply')],
+  }, time, seq)
+  const ySettlement = (seq: number): SessionEvent => eventAt('assistant/message', {
+    turn: 1, step: 0,
+    message: {
+      id: 'm-y', role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' },
+    },
+    stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+  }, T0 + 9_000, seq)
+
+  const live = new TranscriptFolder()
+  live.hydrate([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
+  ])
+  // REAL live transient Assistant row (step 1), then an EMPTY authoritative
+  // replacement makes it invisible without any system row.
+  live.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'x', turn: 1, step: 1, time: T0 + 1_000,
+    chunk: { type: 'text-delta', index: 0, text: 'x reply' },
+  })
+  live.apply([xSettlement(false, 3, T0 + 8_000)])
+  // Y (step 0) is visible at +2s and A started at +3s: A belongs AFTER Y, and the
+  // move crosses the (invisible) X slot, which is allowed.
+  live.apply([ySettlement(4)])
+  assert.deepEqual(logicalRows(live), ['assistant:reply', 'tool:a'],
+    'with X invisible the read follows Y (X is skipped in the display)')
+  // X becomes VISIBLE again: the recorded move now spans X, so it must be revoked.
+  live.apply([xSettlement(true, 5, T0 + 8_100)])
+  const rows = logicalRows(live)
+  assert.deepEqual(rows, ['tool:a', 'assistant:x reply', 'assistant:reply'],
+    `the read may not cross the now-visible X:\n${JSON.stringify(rows)}`)
+  // Search representative and the read group stay correct through the revoke.
+  assert.equal(live.search('alpha').length, 1)
+  assert.equal(toolRows(live).length, 1)
+  assert.equal(toolRows(live)[0]!.callCount, 1)
+  // The supported cold path derives the same result.
+  const cold = foldEvents([
+    turnStart(1, T0, 0),
+    readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha'),
+    xSettlement(false, 3, T0 + 8_000),
+    ySettlement(4),
+    xSettlement(true, 5, T0 + 8_100),
+  ])
+  assert.deepEqual(logicalRows(cold), logicalRows(live), 'live and cold agree on the guarded result')
+})

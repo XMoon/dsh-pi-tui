@@ -712,7 +712,16 @@ export class TranscriptFolder {
    * physical meaning and needs no remap. Mutate ONLY through
    * `setLaneDisplay`/`dropLaneDisplacement`/`dropLaneAnchor` (they keep the two inverse maps
    * in sync and bump the search revision). */
-  private readonly laneDisplayByDisplaced = new Map<number, { anchor: number; position: 'before' | 'after' }>()
+  private readonly laneDisplayByDisplaced = new Map<number, {
+    anchor: number
+    position: 'before' | 'after'
+    /** The step whose convergence established this relation, when known: a later
+     *  visibility change re-validates the affected relations with it. */
+    owner?: { turn: number; step: number }
+    /** The raw interval this move spans (its own slot to its anchor's slot). */
+    lo: number
+    hi: number
+  }>()
   /** Inverse of {@link laneDisplayByDisplaced}: one anchor row (the settled
    * Assistant row of a step) → the rows emitted around it during
    * `displayOrderedRawIds`. `before`/`after` keep the displaced raw indexes in
@@ -1747,6 +1756,13 @@ export class TranscriptFolder {
       // A hidden anchor may not order anything: revoke the Tool relations it
       // owned, then re-derive the neighborhood from the FINAL visibility state.
       if (!visible) this.dropLaneAnchor(index)
+      // A row that already existed can sit INSIDE a recorded displacement
+      // interval; a freshly materialized one cannot (it is newer than every
+      // interval end), so the common "new Conversation becomes visible" case
+      // skips the scan entirely — the re-validation stays bounded.
+      this.coalescingRegroups(() => {
+        if (this.mayCoverExistingDisplacement(index)) this.revalidateRelationsCovering(index)
+      })
       this.scheduleDisplayRegroup(index)
     }
     if (this.groupedTurnIndexDirty) return
@@ -3175,8 +3191,30 @@ export class TranscriptFolder {
       if (shouldFollow && thinkingIndex > assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'after')
       if (!shouldFollow && thinkingIndex < assistantIndex) this.setLaneDisplay(thinkingIndex, assistantIndex, 'before')
     }
-    this.setLaneDisplay(index, assistantIndex, position)
+    this.setLaneDisplay(index, assistantIndex, position, true, { turn, step })
     return { index, position }
+  }
+
+  /** Fast exclusion for the visibility re-validation: does any recorded
+   *  displacement interval strictly contain `row`? */
+  private mayCoverExistingDisplacement(row: number): boolean {
+    for (const relation of this.laneDisplayByDisplaced.values()) {
+      if (row > relation.lo && row < relation.hi) return true
+    }
+    return false
+  }
+
+  /** Re-validate every existing displacement whose interval covers `row`: a row
+   *  that just became (in)visible can invalidate a relation that was legal when
+   *  it was established. Bounded by the displaced-row map, never the transcript. */
+  private revalidateRelationsCovering(row: number): void {
+    for (const [displaced, relation] of [...this.laneDisplayByDisplaced]) {
+      if (row <= relation.lo || row >= relation.hi) continue
+      const owner = relation.owner
+      if (owner === undefined) continue
+      if (this.sideMoveIsReachable(displaced, relation.anchor, relation.position, owner.turn, owner.step)) continue
+      this.dropLaneDisplacement(displaced)
+    }
   }
 
   /** Whether the anchor's slot and `row` are connected through rows that may be
@@ -3241,7 +3279,7 @@ export class TranscriptFolder {
     }
     // The Assistant row anchors the step; the Thinking row is displayed
     // immediately before (thinking-first) or after (assistant-first) it.
-    this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after')
+    this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after', true, { turn, step })
   }
 
   /** THE single display-order traversal of the raw items: raw physical
@@ -3292,6 +3330,7 @@ export class TranscriptFolder {
     anchor: number,
     position: 'before' | 'after',
     resort = true,
+    owner?: { turn: number; step: number },
   ): void {
     const current = this.laneDisplayByDisplaced.get(displaced)
     if (current?.anchor === anchor && current.position === position) {
@@ -3303,7 +3342,13 @@ export class TranscriptFolder {
     }
     const previousAnchor = current?.anchor
     if (current !== undefined) this.removeDisplacedRelation(displaced, current)
-    this.laneDisplayByDisplaced.set(displaced, { anchor, position })
+    this.laneDisplayByDisplaced.set(displaced, {
+      anchor,
+      position,
+      ...(owner === undefined ? {} : { owner }),
+      lo: Math.min(displaced, anchor),
+      hi: Math.max(displaced, anchor),
+    })
     const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
     this.laneDisplayByAnchor.set(anchor, owned)
     const list = position === 'before' ? owned.before : owned.after
