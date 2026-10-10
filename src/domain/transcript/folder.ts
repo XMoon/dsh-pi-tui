@@ -731,6 +731,8 @@ export class TranscriptFolder {
    * step's Tool rows whose own materialization time proves they belong on the
    * other side of the Conversation. */
   private readonly laneDisplayByAnchor = new Map<number, { before: number[]; after: number[] }>()
+  /** Highest recorded displacement interval end (see `mayCoverExistingDisplacement`). */
+  private maxDisplacementHi = 0
   /** Raw item index of each GENUINE `tool/call` card, keyed by its durable
    * `(turn, step, callId)` identity (never the tool name). The index is recorded
    * once at append and the card's object identity is re-verified before use, so
@@ -922,6 +924,14 @@ export class TranscriptFolder {
   /** Bumped whenever a Lane relation changes what an anchor slot EMITS, so the
    *  Tool batch only re-validates when the emission really changed. */
   private laneEmissionChanges = 0
+  /** Test-only: how many emitted rows the closure helpers actually VISITED.
+   *  This is the real neighbour/closure work (an allocation-free substitute for
+   *  the old emission copies), so a displacement over a large side can be proven
+   *  linear instead of quadratic. */
+  private emittedRowVisits = 0
+  /** Test-only: how many times the displacement interval map was WALKED. A
+   *  normal serial tail settlement must never walk it (the O(1) end exclusion). */
+  private displacementScanCount = 0
   /** Test-only: how many group members the LAST envelope closure visited. A
    *  deterministic guard that a late-result regroup is linear in the affected
    *  run, never quadratic. */
@@ -1999,6 +2009,7 @@ export class TranscriptFolder {
     // read group's members for every covered row made a late-result regroup
     // quadratic in the run size.
     const expandedGroups = new Set<unknown>()
+    const expandedAnchors = new Set<number>()
     let memberVisits = 0
     const extendTo = (candidate: number | undefined): boolean => {
       if (candidate === undefined) return false
@@ -2043,6 +2054,10 @@ export class TranscriptFolder {
         for (const owner of anchor === undefined ? [row] : [row, anchor]) {
           const owned = this.laneDisplayByAnchor.get(owner)
           if (owned === undefined) continue
+          // Each anchor's peer lists are expanded ONCE per operation: a side with
+          // many members would otherwise re-scan them for every member row.
+          if (expandedAnchors.has(owner)) continue
+          expandedAnchors.add(owner)
           for (const peer of owned.before) grew = extendTo(peer) || grew
           for (const peer of owned.after) grew = extendTo(peer) || grew
         }
@@ -2136,28 +2151,66 @@ export class TranscriptFolder {
    *  itself, then its `after` list; a displaced row emits nothing at its own
    *  slot (it is emitted at its anchor). This is the same emission rule
    *  `displayOrderedRawIds` applies, so these helpers stay equivalent to it. */
-  private emittedAt(index: number): number[] {
-    if (this.laneDisplayByDisplaced.has(index)) return []
+  /** Visit one raw slot's emitted rows IN ORDER without building an array: the
+   *  anchor's `before` list, the anchor itself, then its `after` list. A
+   *  displaced row emits nothing at its own slot. Visiting with no allocation is
+   *  what keeps the closure paths linear. Returns true when `visit` asked to stop. */
+  private emitSlot(index: number, visit: (row: number) => boolean | void): boolean {
+    if (this.laneDisplayByDisplaced.has(index)) return false
     const owned = this.laneDisplayByAnchor.get(index)
-    if (owned === undefined) return [index]
-    return [...owned.before, index, ...owned.after]
+    if (owned === undefined) return visit(index) === true
+    for (const row of owned.before) {
+      this.emittedRowVisits += 1
+      if (visit(row) === true) return true
+    }
+    this.emittedRowVisits += 1
+    if (visit(index) === true) return true
+    for (const row of owned.after) {
+      this.emittedRowVisits += 1
+      if (visit(row) === true) return true
+    }
+    return false
   }
 
-  /** The last VISIBLE row of one emission sequence, when it has any. */
-  private lastVisibleOf(rows: readonly number[]): number | undefined {
-    for (let at = rows.length - 1; at >= 0; at -= 1) {
-      const row = rows[at]!
-      if (this.isVisible(this.items[row]!)) return row
-    }
-    return undefined
+  /** The last VISIBLE row emitted by one raw slot, when it has any. */
+  private lastVisibleEmittedAt(index: number): number | undefined {
+    let found: number | undefined
+    this.emitSlot(index, row => {
+      if (this.isVisible(this.items[row]!)) found = row
+    })
+    return found
   }
 
-  /** The first VISIBLE row of one emission sequence, when it has any. */
-  private firstVisibleOf(rows: readonly number[]): number | undefined {
-    for (const row of rows) {
-      if (this.isVisible(this.items[row]!)) return row
-    }
-    return undefined
+  /** The first VISIBLE row emitted by one raw slot, when it has any. */
+  private firstVisibleEmittedAt(index: number): number | undefined {
+    let found: number | undefined
+    this.emitSlot(index, row => {
+      if (!this.isVisible(this.items[row]!)) return false
+      found = row
+      return true
+    })
+    return found
+  }
+
+  /** Whether one raw slot blocks a displacement of this step's Tool rows: any
+   *  visible row that is not itself a same-side proven Tool of `(turn, step)`. */
+  private slotBlocksMove(candidate: number, turn: number, step: number): boolean {
+    let blocked = false
+    this.emitSlot(candidate, row => {
+      if (!this.isVisible(this.items[row]!)) return false
+      const item = this.items[row]
+      if (item === undefined || item.kind !== 'tool' || item.callId === undefined || item.turn !== turn) {
+        blocked = true
+        return true
+      }
+      const sibling = this.toolRowEvidence(turn, step, item.callId)
+      if (sibling === undefined || sibling.index !== row) {
+        blocked = true
+        return true
+      }
+      return false
+    })
+    return blocked
   }
 
   /** The raw index displayed immediately BEFORE `index` in the FINAL display
@@ -2232,7 +2285,7 @@ export class TranscriptFolder {
   private slotPredecessorOf(index: number): number | undefined {
     let candidate = index - 1
     while (candidate >= 0) {
-      const visible = this.lastVisibleOf(this.emittedAt(candidate))
+      const visible = this.lastVisibleEmittedAt(candidate)
       if (visible !== undefined) return visible
       candidate -= 1
     }
@@ -2243,7 +2296,7 @@ export class TranscriptFolder {
   private slotSuccessorOf(index: number): number | undefined {
     let candidate = index + 1
     while (candidate < this.items.length) {
-      const visible = this.firstVisibleOf(this.emittedAt(candidate))
+      const visible = this.firstVisibleEmittedAt(candidate)
       if (visible !== undefined) return visible
       candidate += 1
     }
@@ -3034,10 +3087,18 @@ export class TranscriptFolder {
    * (post-F6 plan §12.14). */
   private absorbPreparingStarts(starts: ReadonlyMap<string, number>, turn: number, step: number): void {
     const owner = `${turn}:${step}`
+    const refreshed: string[] = []
+    const touchedGroups = new Set<unknown>()
     for (const [callId, at] of starts) {
       const key = toolCallKey(turn, step, callId)
-      if (!this.toolCallPreparingStarts.has(key)) {
-        this.toolCallPreparingStarts.set(key, { at, owner })
+      const cached = this.toolCallPreparingStarts.get(key)
+      // FIRST-WINS is wrong across settlements: a later settlement that proves an
+      // EARLIER Preparing time must replace the recorded one, otherwise a durable
+      // card materializing afterwards starts at the stale, later timestamp.
+      if (cached === undefined) this.toolCallPreparingStarts.set(key, { at, owner })
+      else if (at < cached.at) {
+        cached.at = at
+        cached.owner = owner
       }
       // The card may have materialized BEFORE its Preparing evidence became
       // visible (a durable `tool/call` whose streamed arguments delta only
@@ -3048,18 +3109,32 @@ export class TranscriptFolder {
       const card = this.items[index ?? -1]
       if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) continue
       const timing = transcriptTimingOf(card)
-      if (timing !== undefined && timing.startedAt > at) {
-        setTranscriptTiming(card, { ...timing, startedAt: at })
-        // A refreshed materialization key invalidates every derived fact: the
-        // merged group's aggregated timing, and the row's place inside its
-        // anchor's relation list.
-        const group = this.groupOf.get(index)
-        const members = group === undefined ? undefined : this.groupMembers.get(group)
-        if (group !== undefined && members !== undefined) this.mergedReadGroupTiming(group, members, this.crossTurn(members))
-        this.resortAnchorSideOf(index)
-        this.convergeToolRowAgainstAnchor(turn, step, callId)
-      }
+      if (timing === undefined || timing.startedAt <= at) continue
+      setTranscriptTiming(card, { ...timing, startedAt: at })
+      refreshed.push(callId)
+      const group = this.groupOf.get(index)
+      if (group !== undefined) touchedGroups.add(group)
     }
+    if (refreshed.length === 0) return
+    // ONE coalesced pass for the whole refresh: the merged groups' aggregated
+    // timing is re-derived once per group, the relations are re-applied without
+    // sorting, and each touched side is ordered exactly once. Refreshing N
+    // timestamps used to run N sorts and N regroups.
+    this.coalescingRegroups(() => {
+      for (const group of touchedGroups) {
+        const members = this.groupMembers.get(group as never)
+        if (members === undefined) continue
+        this.mergedReadGroupTiming(group as never, members, this.crossTurn(members))
+      }
+      const touched = new Set<'before' | 'after'>()
+      for (const callId of refreshed) {
+        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false)
+        if (outcome !== undefined) touched.add(outcome.position)
+      }
+      const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
+      if (anchorIndex === undefined) return
+      for (const position of touched) this.resortAnchorSide(anchorIndex, position)
+    })
   }
 
   /** The durable lane-order authority for one settled assistant step: the
@@ -3273,10 +3348,24 @@ export class TranscriptFolder {
   /** Fast exclusion for the visibility re-validation: does any recorded
    *  displacement interval strictly contain `row`? */
   private mayCoverExistingDisplacement(row: number): boolean {
+    // O(1) exclusion: an interval needs hi > row, so a row at or past the highest
+    // recorded end cannot be inside ANY interval — the normal serial tail case,
+    // which used to walk the whole map on every settlement.
+    if (row >= this.maxDisplacementHi) return false
+    this.displacementScanCount += 1
     for (const relation of this.laneDisplayByDisplaced.values()) {
       if (row > relation.lo && row < relation.hi) return true
     }
     return false
+  }
+
+  /** Recompute the running highest interval end after a relation was removed. */
+  private refreshMaxDisplacementHi(): void {
+    let max = 0
+    for (const relation of this.laneDisplayByDisplaced.values()) {
+      if (relation.hi > max) max = relation.hi
+    }
+    this.maxDisplacementHi = max
   }
 
   /** Re-validate every existing displacement whose interval covers `row`: a row
@@ -3303,16 +3392,7 @@ export class TranscriptFolder {
    *  `backward`/`forward` are the counts of consecutive passable slots. Computed
    *  ONCE per settlement batch (the per-row walk made a batch of N rows O(N²)). */
   private sideReachFrom(turn: number, step: number, anchorIndex: number): { backward: number; forward: number } {
-    const passable = (candidate: number): boolean => {
-      for (const visibleRow of this.emittedAt(candidate)) {
-        if (!this.isVisible(this.items[visibleRow]!)) continue
-        const item = this.items[visibleRow]
-        if (item === undefined || item.kind !== 'tool' || item.callId === undefined || item.turn !== turn) return false
-        const sibling = this.toolRowEvidence(turn, step, item.callId)
-        if (sibling === undefined || sibling.index !== visibleRow) return false
-      }
-      return true
-    }
+    const passable = (candidate: number): boolean => !this.slotBlocksMove(candidate, turn, step)
     let backward = 0
     for (let candidate = anchorIndex - 1; candidate >= 0; candidate -= 1) {
       if (!passable(candidate)) break
@@ -3338,24 +3418,12 @@ export class TranscriptFolder {
     step: number,
   ): boolean {
     // A displacement lifts the row out of its physical slot and emits it at the
-    // anchor's slot: it therefore crosses every RAW slot in between. That is
-    // allowed only when every VISIBLE row in those slots is invisible-headed or
-    // is this step's own Tool row proven on the SAME side — any other visible row
-    // (another step, another lane) would be reordered, so the move is refused.
+    // anchor's slot: it crosses every RAW slot in between, which is allowed only
+    // when none of them blocks the move (see `slotBlocksMove`).
     const from = Math.min(row, anchorIndex) + 1
     const to = Math.max(row, anchorIndex) - 1
     for (let candidate = from; candidate <= to; candidate += 1) {
-      for (const visibleRow of this.emittedAt(candidate)) {
-        if (!this.isVisible(this.items[visibleRow]!)) continue
-        const item = this.items[visibleRow]
-        if (item !== undefined && item.kind === 'tool' && item.callId !== undefined && item.turn === turn) {
-          // Identity by ROW, not by call id: a reused id resolves elsewhere and
-          // must never authorize crossing this row.
-          const sibling = this.toolRowEvidence(turn, step, item.callId)
-          if (sibling !== undefined && sibling.index === visibleRow && sibling.position === position) continue
-        }
-        return false
-      }
+      if (this.slotBlocksMove(candidate, turn, step)) return false
     }
     return true
   }
@@ -3453,13 +3521,16 @@ export class TranscriptFolder {
     }
     const previousAnchor = current?.anchor
     if (current !== undefined) this.removeDisplacedRelation(displaced, current)
+    const lo = Math.min(displaced, anchor)
+    const hi = Math.max(displaced, anchor)
     this.laneDisplayByDisplaced.set(displaced, {
       anchor,
       position,
       ...(owner === undefined ? {} : { owner }),
-      lo: Math.min(displaced, anchor),
-      hi: Math.max(displaced, anchor),
+      lo,
+      hi,
     })
+    if (hi > this.maxDisplacementHi) this.maxDisplacementHi = hi
     const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
     this.laneDisplayByAnchor.set(anchor, owned)
     const list = position === 'before' ? owned.before : owned.after
@@ -3505,8 +3576,9 @@ export class TranscriptFolder {
 
   /** The shared inverse-map removal: drop the forward record, the anchor's list
    *  entry and (when it was the last one) the anchor record itself. */
-  private removeDisplacedRelation(displaced: number, current: { anchor: number; position: 'before' | 'after' }): void {
+  private removeDisplacedRelation(displaced: number, current: { anchor: number; position: 'before' | 'after'; lo: number; hi: number }): void {
     this.laneDisplayByDisplaced.delete(displaced)
+    if (current.hi >= this.maxDisplacementHi) this.refreshMaxDisplacementHi()
     const owned = this.laneDisplayByAnchor.get(current.anchor)
     if (owned !== undefined) {
       const list = current.position === 'before' ? owned.before : owned.after
@@ -4092,6 +4164,8 @@ export class TranscriptFolder {
     refinedCandidates: number
     lastRegroupSpanRows: number
     lastRegroupMemberVisits: number
+    emittedRowVisits: number
+    displacementScans: number
     regroupOperations: number
     sideSortOperations: number
   } {
@@ -4105,6 +4179,8 @@ export class TranscriptFolder {
       refinedCandidates: this.searchRefineCandidates,
       lastRegroupSpanRows: this.lastRegroupSpanRows,
       lastRegroupMemberVisits: this.lastRegroupMemberVisits,
+      emittedRowVisits: this.emittedRowVisits,
+      displacementScans: this.displacementScanCount,
       regroupOperations: this.regroupOperationCount,
       sideSortOperations: this.sideSortOperationCount,
     }
