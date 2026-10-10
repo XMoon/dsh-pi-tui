@@ -24,9 +24,17 @@ afterEach(() => {
   }
 })
 
-function startApp(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp } {
+function startApp(
+  width = 100,
+  height = 24,
+  onSingleEscape?: () => boolean | void,
+): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(width, height)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    ...(onSingleEscape === undefined ? {} : { onSingleEscape }),
+  })
   app.start()
   startedApps.add(app)
   return { vt, app }
@@ -130,8 +138,9 @@ test('the subject bar is exactly one pinned row under the header in fullscreen, 
   app.stop()
 })
 
-test('a fullscreen click on the bar never reaches the transcript; the first transcript row click does', async () => {
-  const { vt, app } = startApp()
+test('the navigation glyph cells exit through the Esc route; the rest of the bar is inert', async () => {
+  const escapes: number[] = []
+  const { vt, app } = startApp(100, 24, () => { escapes.push(1); return true })
   app.setTranscript(longUserMessage().messages())
   enterChildDisplaySubject(app, { ...CHILD })
   app.setFullscreen(true)
@@ -140,15 +149,136 @@ test('a fullscreen click on the bar never reaches the transcript; the first tran
   const barY = view.findIndex(row => row.includes('‹ back'))
   assert.ok(barY >= 0, `the subject bar must be visible:\n${view.join('\n')}`)
 
-  // The bar row is chrome, NOT transcript row 0: a click there is inert.
+  // The label/model/padding cells are inert — the bar is chrome, not a target.
   clickCell(vt, 10, barY)
   view = await rows(vt)
+  assert.equal(escapes.length, 0, 'a label cell must not exit the viewer')
   assert.equal(compactMarkerCount(view), 1, `a bar click must not toggle the transcript:\n${view.join('\n')}`)
+  clickCell(vt, 60, barY)
+  await rows(vt)
+  assert.equal(escapes.length, 0, 'a model/padding cell must not exit the viewer')
+
+  // The `‹ back` glyph itself runs the ORIGINAL viewer Esc route exactly once.
+  clickCell(vt, 1, barY)
+  view = await rows(vt)
+  assert.equal(escapes.length, 1, `the glyph click must call the viewer Esc route once:\n${view.join('\n')}`)
+  assert.equal(compactMarkerCount(view), 1, `the glyph click must not touch the transcript:\n${view.join('\n')}`)
 
   // The row directly under the bar IS transcript row 0: the click toggles it.
   clickCell(vt, 10, barY + 1)
   view = await rows(vt)
   assert.equal(compactMarkerCount(view), 0, `the first transcript row click must toggle the bubble:\n${view.join('\n')}`)
+  assert.equal(escapes.length, 1, 'the transcript click must not exit the viewer')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a one-shot (readonly) child exposes the same glyph exit route', async () => {
+  const escapes: number[] = []
+  const { vt, app } = startApp(100, 24, () => { escapes.push(1); return true })
+  app.setTranscript(longUserMessage().messages())
+  enterChildDisplaySubject(app, { ...CHILD, mode: 'one-shot', access: undefined, activity: 'inactive' } as never)
+  app.setFullscreen(true)
+  const view = await rows(vt)
+  const barY = view.findIndex(row => row.includes('‹ back'))
+  assert.ok(barY >= 0, `the one-shot bar must render the navigation:\n${view.join('\n')}`)
+  clickCell(vt, 1, barY)
+  await rows(vt)
+  assert.equal(escapes.length, 1, 'the readonly child must use the same exit callback')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a glyph press released on a DIFFERENT child never exits', async () => {
+  const escapes: number[] = []
+  const { vt, app } = startApp(100, 24, () => { escapes.push(1); return true })
+  app.setTranscript(longUserMessage().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  const view = await rows(vt)
+  const barY = view.findIndex(row => row.includes('‹ back'))
+  assert.ok(barY >= 0, `the subject bar must be visible:\n${view.join('\n')}`)
+  // Press the glyph of child A, switch to child B, then release on the same
+  // cell: the press-time generation no longer describes the displayed viewer.
+  vt.sendInput(`\x1b[<0;2;${barY + 1}M`)
+  await rows(vt)
+  enterChildDisplaySubject(app, { ...CHILD, id: 'child-2', label: 'child B' })
+  await rows(vt)
+  vt.sendInput(`\x1b[<0;2;${barY + 1}m`)
+  await rows(vt)
+  assert.equal(escapes.length, 0, 'a child switch must invalidate the back gesture')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a glyph press released after a resize never exits', async () => {
+  const escapes: number[] = []
+  const { vt, app } = startApp(100, 24, () => { escapes.push(1); return true })
+  app.setTranscript(longUserMessage().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  const view = await rows(vt)
+  const barY = view.findIndex(row => row.includes('‹ back'))
+  assert.ok(barY >= 0, `the subject bar must be visible:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;2;${barY + 1}M`)
+  await rows(vt)
+  vt.resize(100, 20)
+  await rows(vt)
+  vt.sendInput(`\x1b[<0;2;${barY + 1}m`)
+  await rows(vt)
+  assert.equal(escapes.length, 0, 'a resize between press and release must invalidate the gesture')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a glyph press then a Question modal never exits through the bar', async () => {
+  const escapes: number[] = []
+  const { vt, app } = startApp(100, 24, () => { escapes.push(1); return true })
+  app.setTranscript(longUserMessage().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  const view = await rows(vt)
+  const barY = view.findIndex(row => row.includes('‹ back'))
+  assert.ok(barY >= 0, `the subject bar must be visible:\n${view.join('\n')}`)
+  vt.sendInput(`\x1b[<0;2;${barY + 1}M`)
+  await rows(vt)
+  // The question owns the modal front after the press: the release must be
+  // consumed by the modal front, never by the stale back lure.
+  app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'yes' }, { label: 'no' }] }]).catch(() => {})
+  await rows(vt)
+  vt.sendInput(`\x1b[<0;2;${barY + 1}m`)
+  await rows(vt)
+  assert.equal(escapes.length, 0, 'a modal taking the front must invalidate the gesture')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('the passthrough search box owns the bar cells it actually covers', async () => {
+  const escapes: number[] = []
+  // 24 columns: the top-right search box (min width 24 clamped to the margin)
+  // covers the bar row from column 1 on, so it overlaps most of the `‹ back`
+  // glyph band but NOT column 0.
+  const { vt, app } = startApp(24, 24, () => { escapes.push(1); return true })
+  app.setTranscript(longUserMessage().messages())
+  enterChildDisplaySubject(app, { ...CHILD })
+  app.setFullscreen(true)
+  await rows(vt)
+  app.startTranscriptSearch()
+  await rows(vt)
+  const view = await rows(vt)
+  assert.ok(view.join('\n').includes('Find transcript'),
+    `precondition: the search box must be visible:\n${view.join('\n')}`)
+  const barY = view.findIndex(row => row.includes('‹'))
+  assert.ok(barY >= 0, `the subject bar must be visible:\n${view.join('\n')}`)
+
+  // A covered glyph cell belongs to the box: the bar must not act under it.
+  clickCell(vt, 2, barY)
+  await rows(vt)
+  assert.equal(escapes.length, 0, 'a cell covered by the search box must not exit')
+  // Column 0 is outside the box (its margin): the passthrough keeps it live.
+  clickCell(vt, 0, barY)
+  await rows(vt)
+  assert.equal(escapes.length, 1, 'the uncovered glyph cell must keep working under the box')
   app.setFullscreen(false)
   app.stop()
 })
@@ -174,7 +304,8 @@ test('wheel scrolling never moves the pinned subject bar', async () => {
 })
 
 test('a Question-owned modal inspection uses the SAME bar-inclusive transcript offset', async () => {
-  const { vt, app } = startApp()
+  const escapes: number[] = []
+  const { vt, app } = startApp(100, 24, () => { escapes.push(1); return true })
   app.setTranscript(longUserMessage().messages())
   enterChildDisplaySubject(app, { ...CHILD })
   app.setFullscreen(true)
@@ -192,6 +323,12 @@ test('a Question-owned modal inspection uses the SAME bar-inclusive transcript o
   clickCell(vt, 10, barY)
   view = await rows(vt)
   assert.equal(compactMarkerCount(view), 1, `a bar click must stay inert during the question:\n${view.join('\n')}`)
+  // The `‹ back` GLYPH cells are equally inert while the question owns the
+  // modal front: the Back affordance must never pierce a capturing modal.
+  clickCell(vt, 1, barY)
+  view = await rows(vt)
+  assert.equal(escapes.length, 0, 'the glyph must not exit through the question modal')
+  assert.equal(compactMarkerCount(view), 1, `a glyph click must stay inert during the question:\n${view.join('\n')}`)
 
   clickCell(vt, 10, barY + 1)
   view = await rows(vt)

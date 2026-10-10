@@ -149,7 +149,7 @@ import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
 import type { StatusStore } from './domain/status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
 import { displayPolicyFor } from './tui/transcript/display-policy.ts'
-import { renderViewerSubjectBar as renderViewerSubjectBarLine } from './tui/presentation/viewer-subject-bar.ts'
+import { renderViewerSubjectBarLine } from './tui/presentation/viewer-subject-bar.ts'
 import { sanitizedPhysicalLine } from './tui/presentation/lines.ts'
 import { isDisplayPresetAvailable, isFocusDisplayPreset } from './domain/display/preset.ts'
 import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './domain/status/types.ts'
@@ -2009,6 +2009,16 @@ type TranscriptCellGesture = {
   termRows: number
 }
 
+/** The gesture hit id of the pinned viewer subject bar's `‹ back` affordance. */
+const VIEWER_BACK_HIT = 'back'
+
+/** The stable owner identity of one PAINTED `‹ back` band: a child switch, a
+ *  viewer reopen or an exit bumps the generation, so a press can never
+ *  transfer to a different viewer (viewer UX plan §6.2). */
+function viewerBackOwnerId(back: { subjectId: string; generation: number }): string {
+  return `viewer-back:${back.subjectId}:${back.generation}`
+}
+
 /** One Question-owned inspection gesture. The Question object identity is
  * part of the fence so a press cannot survive a question settle or transfer
  * to the normal fullscreen click path. */
@@ -2326,6 +2336,10 @@ export class TuiApp {
   /** The bar text currently installed (the no-churn guard: an identical
    * re-projection never invalidates the component or requests a frame). */
   private viewerSubjectBarText = ''
+  /** The painted `‹ back`/`‹` hit cells of the CURRENT bar line (`0` when the
+   *  bar is absent or the glyph was clipped away) — the fullscreen back-click
+   *  target, produced by the same formatting pass as `viewerSubjectBarText`. */
+  private viewerSubjectBarNavigationCells = 0
   private readonly messagesView: Container
   private readonly footer: Text
   /** The M4 widget zones (extension widgets around the editor seat). */
@@ -3131,6 +3145,15 @@ export class TuiApp {
          * the user's visible frame share one epoch — a rebuild that has not
          * repainted yet must never reinterpret a painted row. */
         copyBlankRows: ReadonlySet<number>
+        /** The PAINTED viewer subject bar band (viewer UX plan §6.2): the bar's
+         * own 0-based screen row and the navigation hit cells `[0, cells)`
+         * exactly as drawn in THIS frame, plus the viewer subject/generation
+         * they belong to. `undefined` on the main subject (zero rows). The
+         * fullscreen `‹ back` gesture resolves ONLY against this band — the
+         * subject bar is pinned chrome, never a transcript row hit. */
+        viewerBack:
+          | { top: number; cells: number; subjectId: string; generation: number }
+          | undefined
       }
     | undefined
 
@@ -10360,6 +10383,7 @@ export class TuiApp {
       viewportHeight: scroll?.viewportHeight ?? 0,
       rows,
       copyBlankRows,
+      viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
       const now = performance.now()
@@ -10380,6 +10404,26 @@ export class TuiApp {
         searchActive: this.searchOverlay !== undefined,
       })
       this.scrollFramePending = false
+    }
+  }
+
+  /** The viewer subject bar's PAINTED `‹ back` band for the frame being
+   * committed, or `undefined` when the bar painted no row / no navigation
+   * glyph. The band is captured at the frame-paint boundary (never re-derived
+   * at click time) so the gesture can only resolve what the user actually
+   * saw, and it carries the viewer subject + generation the frame belongs to. */
+  private paintedViewerBack(
+    headerHeight: number,
+    barHeight: number,
+  ): { top: number; cells: number; subjectId: string; generation: number } | undefined {
+    if (barHeight <= 0 || this.viewerSubjectBarNavigationCells <= 0) return undefined
+    const subject = this.statusStore.snapshot().view.subject
+    if (subject.kind !== 'subagent') return undefined
+    return {
+      top: headerHeight,
+      cells: this.viewerSubjectBarNavigationCells,
+      subjectId: subject.id,
+      generation: this.viewerGeneration,
     }
   }
 
@@ -10876,6 +10920,24 @@ export class TuiApp {
       this.fullscreenCellGesture = undefined
       return
     }
+    // The pinned viewer subject bar's `‹ back` glyph is the ONE navigable cell
+    // of that chrome row (viewer UX plan §6.2): it is resolved against the
+    // PAINTED band recorded by the frame commit, never against a live
+    // re-render, and it carries the viewer subject + generation so the release
+    // can prove the SAME child is still displayed. A passthrough search box
+    // that actually covers the cell owns the press instead.
+    const viewerBack = snapshot.viewerBack
+    if (viewerBack !== undefined && y === viewerBack.top && x < viewerBack.cells
+      && !this.searchOverlayCoversCell(x, y)) {
+      this.fullscreenCellGesture = {
+        ownerId: viewerBackOwnerId(viewerBack),
+        row: 0,
+        hitId: VIEWER_BACK_HIT,
+        columns: snapshot.columns,
+        termRows: snapshot.termRows,
+      }
+      return
+    }
     // The todo dock/panel is ONE semantic target (the first click MUTATES
     // the layout — the dock vanishes, the panel takes its rows): record
     // the todo identity so a release on the repainted panel still acts.
@@ -10923,6 +10985,20 @@ export class TuiApp {
   private overlayBlocksTranscriptPointer(): boolean {
     if (!this.overlayBroker.hasVisibleModalOverlay()) return false
     return !this.overlayBroker.isOnlyVisibleModal(this.searchOverlay)
+  }
+
+  /** Whether the passthrough transcript-search overlay ACTUALLY covers one
+   *  screen cell in its last rendered frame. The search box is the ONE modal
+   *  that lets background pointer gestures through, so a fullscreen `‹ back`
+   *  click must obey its real hit instead of piercing a box drawn over the
+   *  navigation cells (viewer UX plan §6.2). */
+  private searchOverlayCoversCell(x: number, y: number): boolean {
+    const overlay = this.searchOverlay
+    if (overlay === undefined || overlay.isHidden()) return false
+    const bounds = overlay.getBounds()
+    if (bounds === undefined || bounds.width <= 0 || bounds.height <= 0) return false
+    return y >= bounds.row && y < bounds.row + bounds.height
+      && x >= bounds.col && x < bounds.col + bounds.width
   }
 
   private handleFullscreenClick(x: number, y: number): void {
@@ -11024,6 +11100,30 @@ export class TuiApp {
       (snapshot.columns !== this.fullscreenCellGesture.columns || snapshot.termRows !== this.fullscreenCellGesture.termRows)
     ) {
       this.fullscreenCellGesture = undefined
+      return
+    }
+    // The `‹ back` release (viewer UX plan §6.2): the press-time owner must
+    // still describe the CURRENT viewer — same painted subject, same viewer
+    // generation, same committed display subject — and the cell must still be
+    // part of the glyph in BOTH the painted frame and the current layout (a
+    // narrow reflow can move the glyph off the cell). Only then does the click
+    // run the ORIGINAL Esc route, which owns every lifecycle effect
+    // (`exitView` → draft/ingress/anchor/focus restoration). The gesture is
+    // dropped BEFORE the callback: a synchronous teardown/re-enter must never
+    // see a stale latch or receive a second exit.
+    const pressedBack = this.fullscreenCellGesture
+    if (pressedBack?.hitId === VIEWER_BACK_HIT) {
+      this.fullscreenCellGesture = undefined
+      const viewerBack = snapshot.viewerBack
+      if (viewerBack === undefined || y !== viewerBack.top) return
+      if (pressedBack.ownerId !== viewerBackOwnerId(viewerBack)) return
+      if (this.viewerGeneration !== viewerBack.generation) return
+      const subject = this.statusStore.snapshot().view.subject
+      if (subject.kind !== 'subagent' || subject.id !== viewerBack.subjectId) return
+      if (x >= viewerBack.cells || x >= this.viewerSubjectBarNavigationCells) return
+      if (this.searchOverlayCoversCell(x, y)) return
+      this.lastEscapeAt = undefined
+      this.events.onSingleEscape?.()
       return
     }
     // The dock strip (the todo summary row) sits directly above the panel:
@@ -16441,16 +16541,20 @@ export class TuiApp {
       && presentation.title !== ''
       ? presentation.title
       : undefined
-    const text = renderViewerSubjectBarLine({
+    const line = renderViewerSubjectBarLine({
       snapshot,
       ...childTitle === undefined ? {} : { childTitle },
       width: Math.max(1, this.terminal.columns),
     })
+    // The navigation hit cells come from the SAME formatting pass as the text
+    // (never a click-time re-guess of the width ladder). Updated even when the
+    // text is unchanged: the metadata must describe the CURRENT bar.
+    this.viewerSubjectBarNavigationCells = line.navigationCells
     // No-churn: an identical re-projection (the common case on every status
     // refresh) must not invalidate the component or request another frame.
-    if (text === this.viewerSubjectBarText) return
-    this.viewerSubjectBarText = text
-    this.viewerSubjectBar.setText(text)
+    if (line.text === this.viewerSubjectBarText) return
+    this.viewerSubjectBarText = line.text
+    this.viewerSubjectBar.setText(line.text)
     this.requestRender()
   }
 

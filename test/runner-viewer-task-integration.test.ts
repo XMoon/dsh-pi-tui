@@ -2293,6 +2293,32 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     `an absent official child model must render the unknown token, never a parent value:\n${viewNoOfficial}`)
   assert.ok(!viewNoOfficial.includes('child-a-model'),
     `the removed official model must not linger in the subject bar:\n${viewNoOfficial}`)
+
+  // ── UX-3 (three-UX-fixes plan §7 E6): the FULLSCREEN `‹ back` glyph runs the
+  // REAL viewer exit. This is a real SGR press/release on the painted subject
+  // bar through the production `onCellPress`/`onCellClick` seam and the
+  // production `onSingleEscape` → `viewerRuntime.exitView()` route — never a
+  // synthetic `setViewerMode(undefined)`.
+  const generationBeforeBack = app.getViewerGeneration()
+  app.setFullscreen(true)
+  await settle()
+  await vt.waitForRender()
+  const fullscreenRows = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  const barRow = fullscreenRows.findIndex(row => row.includes('‹ back'))
+  assert.ok(barRow >= 0, `the subject bar must be painted in fullscreen:\n${fullscreenRows.join('\n')}`)
+  vt.sendInput(`\x1b[<0;2;${barRow + 1}M`) // press the `‹` glyph cell
+  vt.sendInput(`\x1b[<0;2;${barRow + 1}m`) // release on the same cell
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedViewerMode, undefined,
+    'the glyph click must run the production viewer exit (setViewerMode(undefined))')
+  assert.ok(app.getViewerGeneration() > generationBeforeBack,
+    'the real exit must bump the viewer generation')
+  const backToMain = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  assert.ok(!backToMain.includes('‹ back'),
+    `the subject bar must clear after the glyph exit:\n${backToMain}`)
+  assert.ok(backToMain.includes('display-subject-parent'),
+    `the MAIN session must be restored after the glyph exit:\n${backToMain}`)
 })
 
 test('F4-R1: a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {
