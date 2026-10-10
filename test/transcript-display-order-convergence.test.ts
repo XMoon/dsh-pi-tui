@@ -1613,3 +1613,46 @@ test('EXT9: a Lane displacement survives the re-validation of a visible Assistan
     'a visible intervening row never lets the Tool guard reorder the lane')
 })
 
+
+// ── internal round 5: a LANE relocation re-validates Tool displacements ──────
+
+test('EXT10: a recreated Lane row revokes the Tool displacement it now blocks', () => {
+  const xSettlement = (stream: readonly Record<string, unknown>[], seq: number, time: number): SessionEvent =>
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: 'm-x10', role: 'assistant', content: [], source: { kind: 'assistant' } },
+      stream,
+    }, time, seq)
+  const reasoningStream = (text: string, at: number): Record<string, unknown>[] => [
+    { type: 'chunk', time: at, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+    { type: 'chunk', time: at, chunk: { type: 'reasoning-delta', index: 0, text } },
+    { type: 'chunk', time: at + 500, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text } } },
+  ]
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(1, T0, 0)])
+  // ToolA (step 0) is the first raw row.
+  folder.apply([readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 3_500, 2, 'alpha')])
+  // AssistantX (step 1): EMPTY durable content, reasoning-first stream -> a hidden
+  // Assistant row plus a Thinking row, lane authority THINKING-FIRST.
+  folder.apply([xSettlement(reasoningStream('x thought', T0 + 1_000), 3, T0 + 6_000)])
+  // A late finalized EMPTY reasoning hides that Thinking row (authority retained).
+  folder.apply([xSettlement([], 4, T0 + 7_000)])
+  // AssistantY (step 0): reply visible at +2s, A's delta at +3s -> A is displaced
+  // AFTER Y, crossing the now-hidden X/Thinking slots.
+  folder.apply([assistantSettlement({
+    turn: 1, step: 0, time: T0 + 8_000, seq: 5, text: 'reply',
+    stream: [textChunk(T0 + 2_000, 0, 'reply'), toolCallDeltaChunk(T0 + 3_000, 1, 'a', 'read')],
+  })])
+  assert.deepEqual(logicalRows(folder), ['assistant:reply', 'tool:a'],
+    'while the crossed slots stay hidden the read may follow its Conversation')
+  // A later reasoning delta recreates step 1's Thinking row and the lane authority
+  // moves it BEFORE its (still hidden) Assistant anchor: slot 1 emits a visible row
+  // again, which invalidates A's recorded move.
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 's', attemptId: 'x', turn: 1, step: 1, time: T0 + 9_000,
+    chunk: { type: 'reasoning-delta', index: 0, text: 'x thought again' },
+  })
+  const rows = logicalRows(folder)
+  assert.deepEqual(rows, ['tool:a', 'thinking:x thought again', 'assistant:reply'],
+    `the read may not cross the recreated Lane row:\n${JSON.stringify(rows)}`)
+})
