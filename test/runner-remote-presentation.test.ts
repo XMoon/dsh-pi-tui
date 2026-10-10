@@ -1406,7 +1406,7 @@ test('L6 §7.4-5 literal skill gesture over a mounted Remote surface: the Client
 
 /* ───────── §7.4-7 mounted /status over a paged performance window (F8) ──── */
 
-test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; the RECENT figures fold the MOUNTED window', async (t) => {
+test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; the RECENT figures come from the Session\'s own Host projection', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-status-paged'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1415,22 +1415,22 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
     append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
   }
-  // The OLDEST turns carry the recent-sample evidence. CLOCK CONTRACT
-  // (round-5 hardening, review F8.2): the fold's TTFT is
-  // max(0, first-chunk-time − step/start event time) and its decode span is
-  // max(0, assistant/message event time − first-chunk-time) — BOTH event
-  // times are the official Session's real wall clock (append assigns
-  // Date.now()), while the STREAM chunk times are fixture-controlled. So a
-  // legal non-zero sample needs: chunks anchored slightly AHEAD of the
-  // step/start append (non-zero TTFT), and the assistant/message appended
-  // only AFTER a real wait past the first chunk (non-zero decode span).
-  // The seeded span is ~100ms TTFT and ~300ms decode per sampled turn
-  // (settlement lands ≈anchor+400 after the real wait; the first chunk is
-  // at anchor+100 — ±loop jitter), i.e. 200 tokens over ~0.3s ≈ 667 tok/s:
-  // a `TTFB 0.1s`-class and bounded three-digit `tok/s` rendering —
-  // asserted as a REQUIRED MATCH (assert.match throws on failure; the
-  // previous `exec() !== undefined` form was vacuously true because exec
-  // returns null, not undefined).
+  // The seeded committed turns carry the recent-sample evidence, folded by the
+  // Session's OWN Host `piTuiPerformance` projection (TPS plan PR-2: the Client
+  // no longer folds its bounded window, and the recent figures no longer
+  // depend on how much history that window holds). CLOCK CONTRACT (round-5
+  // hardening, review F8.2, updated by the TPS model-wall formula): the
+  // projection's TTFB is `assistant/attempt` − `step/start` and its per-step
+  // span is `assistant/message` − `step/start` — BOTH event times are the
+  // official Session's real wall clock (append assigns Date.now()), while the
+  // STREAM chunk times are fixture-controlled. So a legal non-zero sample
+  // needs a real wait between the step's `step/start` append and the
+  // `assistant/message` append. The seeded span is ~100ms TTFB and ~300ms
+  // decode per sampled turn (settlement lands ≈anchor+400 after the real
+  // wait), i.e. 200 tokens over ~0.4s ≈ 500 tok/s: a `TTFB 0.1s`-class and
+  // bounded three-digit `tok/s` rendering — asserted as a REQUIRED MATCH
+  // (assert.match throws on failure; the previous `exec() !== undefined` form
+  // was vacuously true because exec returns null, not undefined).
   for (let turn = 1; turn <= 5; turn += 1) {
     const anchor = Date.now()
     session.append('turn/start', { turn })

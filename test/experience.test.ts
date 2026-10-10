@@ -52,7 +52,7 @@ test('footer shows model, cwd, branch, counters, context pressure, and stats', a
     // facts (never a preformatted compatibility string).
     usage: {
       tokens: { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0, sessionTokensPerSec: 44 },
       turns: 2,
       steps: 5,
     },
@@ -67,7 +67,9 @@ test('footer shows model, cwd, branch, counters, context pressure, and stats', a
   // the stats row's right edge (the legacy bar style stays available to
   // custom layouts).
   assert.ok(view.includes('25k/100k (25%)'), `context pressure missing:\n${view}`)
-  assert.ok(view.includes('↑1.2k ↓3.4k  TTFB 8.1s  0 tok/s'), `stats line missing:\n${view}`)
+  // TPS plan PR-3: the default speed placement shows the labelled pair, so a
+  // measured-zero recent rate still renders beside the whole-Session figure.
+  assert.ok(view.includes('↑1.2k ↓3.4k  TTFB 8.1s  R5 0 · All 44 tok/s'), `stats line missing:\n${view}`)
 })
 
 test('plan mode shows badges in header and footer and tints the editor border', async () => {
