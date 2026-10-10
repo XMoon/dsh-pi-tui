@@ -753,6 +753,13 @@ export function applyRunnerWithRuntime(
           draftImages.clearUnpinned()
           draftFiles.clearUnpinned()
         },
+        withdrawReplacedPresentation: () => {
+          // PR3-B B3 (external review P2-B): the SAME synchronous publication
+          // commit as the draft drop — a replaced subject's modal must leave the
+          // seat before any post-commit await (source retirement, quiesce,
+          // hydration), never only at the later `initLiveSession` reconcile.
+          surface.withdrawReplacedPresentation()
+        },
         dropOutgoingActiveDraft: () => {
           // PR3-B §7.3: the committed cross-owner switch drops the outgoing
           // session's active editor draft through the renderer-neutral display

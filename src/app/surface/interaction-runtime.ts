@@ -116,6 +116,16 @@ export interface InteractionRuntime {
    * stopped being admissible is retired by the same rule that admitted it.
    */
   reconcilePresentation(): void
+  /**
+   * The SYNCHRONOUS publication-commit half of the same policy (external review
+   * P2-B): withdraw the replaced subject's live presentation (its foreground
+   * flows, a live approval prompt, its mounted continued forms) and close the
+   * renderer's transient list, WITHOUT any projection read, subscription work or
+   * Host access — safe to run inside the commit section, where the outgoing owner
+   * has just been replaced and modal-first input routing would otherwise still
+   * accept keys for it. The full pass still runs later (hydration/activity).
+   */
+  withdrawReplacedPresentation(): void
   /** Release the attention subscription, the controller and the answer lookup. */
   dispose(): void
 }
@@ -266,6 +276,17 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     withdrawReplacedApprovals()
   }
 
+  /**
+   * The commit-section half: state-only, non-throwing (the renderer's own frame
+   * failure routes to its fatal sink), no Host read.
+   */
+  const withdrawReplacedPresentation = (): void => {
+    if (options.isCleanedUp()) return
+    questionController?.withdrawReplacedPresentation()
+    withdrawReplacedApprovals()
+    options.livePresenter()?.closeTransientList()
+  }
+
   return {
     attach(port, deps) {
       // PR3-A: a renderer that cannot present interactive modals (the
@@ -318,10 +339,14 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         const sessionId = req.sessionId
         if (sessionId !== undefined && !isAdmissible(sessionId)) {
           // A request whose Session the surface no longer shows (B3 finding F10):
-          // it is NEVER presented, and nothing is fabricated — only its OWN
-          // lifetime (or this owner's teardown) settles it, with the fail-closed
-          // outcome this presenter already answers for an ended wait.
-          return waitForLifetime(lifetime, release)
+          // it is NEVER presented. With a Host-owned lifetime only the Host ends
+          // it (unchanged). With NO Host lifetime there is no later retirement to
+          // wait for — this request arrives AFTER its Session was replaced — so
+          // THIS owner settles it fail-closed AT ADMISSION (external review P2-A)
+          // instead of leaving it pending until the whole TUI exits.
+          return req.signal === undefined
+            ? Promise.resolve<ApprovalOutcome>('cancelled')
+            : waitForLifetime(lifetime, release)
         }
         if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId, retire })
         return options.presenter().showApprovalPrompt({
@@ -382,6 +407,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     publishAttention,
     withdrawReplacedApprovals,
     reconcilePresentation,
+    withdrawReplacedPresentation,
     dispose() {
       if (ended) return
       ended = true

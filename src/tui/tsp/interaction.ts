@@ -812,7 +812,14 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   const closeTransientList = (): void => {
     if (disposed || !listOpen) return
     closeList()
-    options.render()
+    try {
+      options.render()
+    } catch (error) {
+      // Same fatal contract as the withdrawal above: the publication commit calls
+      // this synchronously, so a frame failure must reach the fatal sink rather
+      // than escape into the transaction.
+      options.onFatal(error)
+    }
   }
 
   /** Enter on the list: capture the candidate, close the list and commit the
@@ -1198,13 +1205,24 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     setQuestionAttention(parkedCount) {
       if (disposed || parkedCount === attention) return
       attention = parkedCount
-      options.render()
+      try {
+        options.render()
+      } catch (error) {
+        // The park-count projection rides the same frame path as every other
+        // presentation: a broken terminal reaches the renderer's fatal sink
+        // instead of throwing into whoever asked for the repaint (the publication
+        // commit calls this on its synchronous path).
+        options.onFatal(error)
+      }
     },
     withdrawPending() {
       retireAll()
     },
     withdrawPresentation(lifetime) {
       withdrawPresentation(lifetime)
+    },
+    closeTransientList() {
+      closeTransientList()
     },
   }
 
