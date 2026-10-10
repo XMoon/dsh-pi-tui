@@ -773,14 +773,17 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   compaction cards), and finally the owning turn's `turn/end` — which is a TIME
   CAP, never a mere fallback: an Activity can never end after its own turn, so a
   later turn's prompt/Context/Work can never lengthen an already-frozen
-  Activity. The boundary is read from each row's OWN proven time (one bounded
-  pass collects them; the per-Activity work is a lookup, never a re-walk of the
-  window), not from its physical position, so a following row that provably
-  became visible BEFORE the Activity started (cold hydration can order a
-  Conversation row after the Process rows it chronologically preceded) neither
-  closes the Activity nor disqualifies it as the live tail. A following block
-  with no proven first-visible time keeps the span out of the live tail without
-  closing it. **Scope limit (pinned by `test/activity-clock.test.ts`):** the
+  Activity. The close boundary is POSITION- and TIME-qualified: only a block
+  positioned AFTER the Activity whose own proven time is greater than the
+  Activity's start can close it, so a preceding row (a Context the Activity
+  started after) closes nothing, and neither does a reordered row that provably
+  became visible BEFORE it (cold hydration can order a Conversation row after the
+  Process rows it chronologically preceded — such a row also does not disqualify
+  the span as the live tail). The lookup is an exact offline dominance-min: two
+  bounded structure passes, two sorts and one indexed query per Activity —
+  O(n log n), never a per-Activity re-walk of the window (the structure reads are
+  locked by a Proxy-count regression). A following block with no proven
+  first-visible time keeps the span out of the live tail without closing it. **Scope limit (pinned by `test/activity-clock.test.ts`):** the
   canonical Work MEMBERSHIP — which Process rows share one Activity — is decided
   by the fold's display order. When cold hydration appends a step's settlement
   AFTER that step's tool rows while its first visible text preceded them, cold

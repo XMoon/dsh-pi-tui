@@ -2324,11 +2324,26 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
       { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
       { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'reasoning-delta', index: 0, text: 'e5 thought' } },
       { type: 'chunk', time: 1_700_000_000_000 + 323_000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'e5 thought' } } },
-      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
-      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'text-delta', index: 1, text: 'e5 answer' } },
-      { type: 'chunk', time: 1_700_000_000_000 + 326_000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'e5 answer' } } },
+      { type: 'chunk', time: 1_700_000_000_000 + 324_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 324_000, chunk: { type: 'text-delta', index: 1, text: 'e5 answer' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'e5 answer' } } },
     ],
   }, 321))
+  // A THIRD Work that is still OPEN when turn/end arrives: this is the decisive
+  // L6 turn-end sink (deleting the turn/end event would leave it open and render
+  // no duration, so the assertion below fails).
+  context.emit('session/event', childA as never, event('tool/call', {
+    turn: 4, step: 1, callId: 'ux2-e5-c' as ToolCallId, name: 'bash', arguments: '{"command":"echo c"}',
+  }, 327))
+  context.emit('session/event', childA as never, event('tool/result', {
+    turn: 4, step: 1,
+    message: {
+      id: MessageId('ux2-e5-c-result'), role: 'tool',
+      toolCallId: 'ux2-e5-c' as ToolCallId,
+      content: [{ type: 'text', text: 'c' }],
+      source: { kind: 'tool', callId: 'ux2-e5-c' as ToolCallId },
+    },
+  }, 328))
   context.emit('session/event', childA as never, event('turn/end', { turn: 4, reason: { kind: 'completed' } }, 330))
   await settle()
   await vt.waitForRender()
@@ -2336,8 +2351,8 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(e5View.includes('Context injection demo'),
     `the injected Context boundary row must render (collapsed form shows its provenance label):\n${e5View}`)
   const e5Durations = [...e5View.matchAll(/(?:Activity|Thought) (\d+)s/gu)].map(match => match[1])
-  assert.deepEqual(e5Durations.slice(-2), ['9', '3'],
-    `at L6: Context(+10s) closes the settled Tool Work (1s..10s = 9s) and the visible assistant text(+325s) closes the Reasoning lane (322s..325s = 3s):\n${e5View}`)
+  assert.deepEqual(e5Durations.slice(-3), ['9', '2', '3'],
+    `at L6: Context(+10s) closes the settled Tool Work (9s); the visible assistant text(+324s) closes the Reasoning lane (322s..324s = 2s); the owning turn/end(+330s) closes the still-open third Work (327s..330s = 3s):\n${e5View}`)
 
   app.setDisplayPreset('full')
   await settle()

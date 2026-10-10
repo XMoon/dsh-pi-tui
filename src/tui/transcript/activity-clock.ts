@@ -12,11 +12,15 @@
  * boundary closed it?" — the members' own timing sidecars stay the authority
  * for Think/Tool rows and for the conservative fallback below.
  *
- * The derivation is a single forward pass over the canonical structure, so a
- * span's successor is the block that ACTUALLY follows it — never a preview, a
- * folded state or `workSpans.at(-1)`. Boundary times are read from the row
- * sidecars the fold records from `SessionEvent.time` (a missing sidecar means
- * UNKNOWN: the Activity stays open and no end is synthesized).
+ * The derivation is bounded and reuses ONE structure walk plus an exact
+ * position/time-qualified lookup: two bounded passes over the canonical
+ * structure, two sorts and one Fenwick (binary-indexed tree) query per Activity
+ * — O(n log n) total, never a per-Activity re-walk of the window (the reads are
+ * locked by a Proxy-count regression). A span's close boundary is the block that
+ * actually FOLLOWS it, never a preview, a folded state or `workSpans.at(-1)`.
+ * Boundary times are read from the row sidecars the fold records from
+ * `SessionEvent.time` (a missing sidecar means UNKNOWN: the Activity stays open
+ * and no end is synthesized).
  *
  * `ActivityClock` is the small per-card projection TuiApp finalizes from a
  * lifetime plus the CURRENT display-subject activity: `isLive` is the only live
@@ -86,21 +90,20 @@ export interface ActivityClock {
  *       `ask_user_question` / `exit_plan_mode` is still a Process member — its
  *       active panel owns the UI — but the agent handed control to the human
  *       there, so the waiting time is never part of the Activity), or
- *   (b) the first FOLLOWING canonical block that provably became visible after
- *       this Activity started,
+ *   (b) the first canonical block POSITIONED AFTER this Activity that provably
+ *       became visible after it started,
  * and finally the owning turn's `turn/end`. A proven member end is kept as the
  * consistency floor, so a boundary earlier than proven member evidence can
  * never make the duration shrink.
  *
- * The derivation is ORDER-TOLERANT for the boundary itself: cold hydration can
- * order a Conversation row after Process rows it chronologically preceded (the
- * live lane materializes the assistant row on its first visible chunk, the
- * durable settlement appends at its own event index). A row that provably
- * became visible BEFORE the Activity started does not close it, so the boundary
- * is read from the block's own time rather than from its physical position, and
- * one bounded pass collects those times for every span. A following block with
- * NO proven time (a local command card, a synthetic window summary) keeps the
- * span out of the live tail without closing it.
+ * The derivation is POSITION- AND TIME-QUALIFIED: a close boundary is a
+ * boundary block POSITIONED AFTER the Activity whose own proven time is greater
+ * than the Activity's start. A preceding row (a Context the Activity started
+ * after) and a reordered row that provably became visible BEFORE the Activity
+ * therefore close nothing, and a following block with NO proven time (a local
+ * command card, a synthetic window summary) keeps the span out of the live tail
+ * without closing it. The lookup is an exact offline 2D dominance-min, so no
+ * ordering assumption about the Activities' starts is needed.
  *
  * The boundary is CAPPED by the owning turn's `turn/end`: an Activity can never
  * end after its turn, so a row of a later turn can never lengthen an
@@ -122,55 +125,105 @@ export function resolveWorkLifetimes(
   structure: readonly TranscriptStructureBlock[],
   turnActivities: ReadonlyMap<number, TurnActivity>,
 ): ReadonlyMap<TranscriptMessage, WorkLifetime> {
-  // ONE bounded pass collects every PROVEN first-visible boundary time and one
-  // backward pass marks whether any FOLLOWING block lacks such a time (the tail
-  // rule). Per-span work is then one binary search plus the row's own members —
-  // the structure is never re-walked per Work (a 100-Work window costs 2 passes,
-  // not 10k reads).
-  const boundaryTimes: number[] = []
-  const noTimeAfter = new Array<boolean>(structure.length + 1).fill(false)
-  for (let index = structure.length - 1; index >= 0; index -= 1) {
-    const at = boundaryTimeOf(structure[index]!)
+  const size = structure.length
+  // PASS 1 — one bounded walk collects each block's proven first-visible
+  // boundary time (a context cluster is walked once), the suffix fact "some
+  // FOLLOWING block has no proven time" (the tail rule) and every Work span's
+  // own inputs. The structure is never re-walked per Activity.
+  interface SpanInput {
+    readonly owner: TranscriptMessage
+    readonly index: number
+    readonly startedAt: number
+    readonly memberEnd: number | undefined
+    readonly turnEnd: number | undefined
+    readonly interaction: number | undefined
+  }
+  const boundaryAt = new Array<number | undefined>(size)
+  const noTimeAfter = new Array<boolean>(size + 1).fill(false)
+  const spans: SpanInput[] = []
+  for (let index = size - 1; index >= 0; index -= 1) {
+    const block = structure[index]!
+    const at = block.kind === 'work' ? undefined : boundaryTimeOf(block)
+    boundaryAt[index] = at
     noTimeAfter[index] = noTimeAfter[index + 1]! || at === undefined
-    if (at !== undefined) boundaryTimes.push(at)
-  }
-  boundaryTimes.sort((left, right) => left - right)
-  const earliestBoundaryAfter = (startedAt: number): number | undefined => {
-    let low = 0
-    let high = boundaryTimes.length
-    while (low < high) {
-      const middle = (low + high) >> 1
-      if (boundaryTimes[middle]! <= startedAt) low = middle + 1
-      else high = middle
-    }
-    return boundaryTimes[low]
-  }
-  const lifetimes = new Map<TranscriptMessage, WorkLifetime>()
-  for (let index = 0; index < structure.length; index += 1) {
-    const block = structure[index]
-    if (block === undefined || block.kind !== 'work') continue
+    if (block.kind !== 'work') continue
     const timing = summarizeWorkSpan(block.span).timing
     if (timing === undefined) continue
-    const memberEnd = timing.endedAt
-    const startedAt = timing.startedAt
-    let boundary = interactionBoundaryOf(block.span)
-    const following = earliestBoundaryAfter(startedAt)
-    if (following !== undefined && (boundary === undefined || following < boundary)) boundary = following
-    // The owning turn's end is a CAP, never a fallback: an Activity can never
-    // end after its turn ended, and a row of a LATER turn (or a much later
-    // prompt in the same window) must never lengthen an already-frozen
-    // Activity.
     const turn = turnActivities.get(block.span.turn)
-    const turnEnd = turn?.completed === true ? turn.endedAt : undefined
-    if (turnEnd !== undefined) boundary = boundary === undefined ? turnEnd : Math.min(boundary, turnEnd)
-    const endedAt = boundary === undefined
+    spans.push({
+      owner: block.span.owner,
+      index,
+      startedAt: timing.startedAt,
+      memberEnd: timing.endedAt,
+      turnEnd: turn?.completed === true ? turn.endedAt : undefined,
+      interaction: interactionBoundaryOf(block.span),
+    })
+  }
+
+  // PASS 2 — the EXACT close boundary: the earliest proven time among the
+  // boundary blocks POSITIONED AFTER the Activity whose own time is greater
+  // than its start. A preceding row (a Context the Activity started after) or a
+  // reordered row can never close it, and no ordering assumption about the
+  // spans' starts is needed: this is an offline 2D dominance-min. Sweeping the
+  // spans by DESCENDING start while inserting every qualifying boundary into a
+  // Fenwick over reversed positions storing the insertion order means the
+  // LARGEST insertion order inside a position range is the SMALLEST qualifying
+  // time (all inserted entries already exceed the current start, and they were
+  // inserted in descending time). Two sorts + one O(log n) query per Activity.
+  const entries: { readonly position: number; readonly time: number }[] = []
+  for (let index = 0; index < size; index += 1) {
+    const at = boundaryAt[index]
+    if (at !== undefined) entries.push({ position: index, time: at })
+  }
+  entries.sort((left, right) => right.time - left.time)
+  const orderedSpans = [...spans].sort((left, right) => right.startedAt - left.startedAt)
+  const bestOrder = new Int32Array(size + 1)
+  const orderTime: number[] = []
+  const insert = (position: number, order: number): void => {
+    for (let slot = size - position; slot <= size; slot += slot & -slot) {
+      if (order > bestOrder[slot]!) bestOrder[slot] = order
+    }
+  }
+  const latestOrderAfter = (position: number): number => {
+    let best = 0
+    for (let slot = size - 1 - position; slot > 0; slot -= slot & -slot) {
+      if (bestOrder[slot]! > best) best = bestOrder[slot]!
+    }
+    return best
+  }
+  const followingBoundary = new Map<number, number>()
+  let cursor = 0
+  let order = 0
+  for (const span of orderedSpans) {
+    while (cursor < entries.length && entries[cursor]!.time > span.startedAt) {
+      order += 1
+      insert(entries[cursor]!.position, order)
+      orderTime[order] = entries[cursor]!.time
+      cursor += 1
+    }
+    const best = latestOrderAfter(span.index)
+    if (best > 0) followingBoundary.set(span.index, orderTime[best]!)
+  }
+
+  const lifetimes = new Map<TranscriptMessage, WorkLifetime>()
+  for (const span of spans) {
+    let boundary = span.interaction
+    const following = followingBoundary.get(span.index)
+    if (following !== undefined && (boundary === undefined || following < boundary)) boundary = following
+    // The owning turn's end closes the Activity when nothing earlier did, and it
+    // is ALSO the final CAP: a late member settlement (a pending tool card that
+    // legitimately settles after its own turn ended) may extend the member's own
+    // timing but never the Activity's lifetime.
+    const candidate = boundary ?? span.turnEnd
+    let endedAt = candidate === undefined
       ? undefined
-      : memberEnd === undefined ? boundary : Math.max(boundary, memberEnd)
-    lifetimes.set(block.span.owner, {
-      startedAt,
+      : span.memberEnd === undefined ? candidate : Math.max(candidate, span.memberEnd)
+    if (endedAt !== undefined && span.turnEnd !== undefined) endedAt = Math.min(endedAt, span.turnEnd)
+    lifetimes.set(span.owner, {
+      startedAt: span.startedAt,
       ...(endedAt === undefined ? {} : { endedAt }),
       open: endedAt === undefined,
-      trailing: !noTimeAfter[index + 1]!,
+      trailing: !noTimeAfter[span.index + 1]!,
     })
   }
   return lifetimes
