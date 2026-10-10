@@ -13,9 +13,10 @@
 > signal-less request settlement) and one P3 (the transient list across a
 > replacement) — all fixed in round 11 — and, on the next round, two more P2
 > boundaries (a signal-less LATE admission and the owner-publication →
-> initialization window), both fixed in round 12 with discriminating witnesses.
-> F6/C is kept PARTIAL here until the external review closes the delivery status;
-> B4 pending.**
+> initialization window), both fixed in round 12, and one more on the next round
+> (the commit-section half must perform no Host read) — fixed in round 13. F6/C is
+> kept PARTIAL here until the external review closes the delivery status; B4
+> pending.**
 
 ## B1 — `feat(tern-tsp): controlled composer and SDK key input`
 
@@ -1297,3 +1298,37 @@ DISCRIMINATION FOR ROUND 12 (`sha256 -c` verified restores): removing the
 commit-time withdrawal from EITHER publication site turns the P2-B witness RED
 ("timed out waiting for the replaced modal left the seat AT publication"); removing
 either kind's admission settlement turns the P2-A witness RED.
+
+### Round 13 — the external review's third round (P2-C: the commit half must be state-only)
+
+The third external round confirmed the round-12 fixes and found that the new
+commit-time half was not actually state-only: the controller's commit method
+notified attention, which republished the count through
+`InteractionRuntime.publishAttention` → `QuestionController.attentionRows` →
+`DirectInteractionPort.snapshot(sessionId)` → the official
+`sessionProjections.stateOf(...)` read — a HOST READ inside the synchronous
+publication commit, placed before the commit bookkeeping that follows it
+(`transitionCommitted` / `forkCommitted` / `committedNavigation`). A throwing
+projection read there would therefore strand exactly that bookkeeping even though
+the owner was already published.
+
+FIX (no new authority, no Session-ownership move): the commit-time method now
+returns whether anything left the model and does NOT notify attention; the caller
+clears the STALE displayed count locally (`setQuestionAttention(0)`) and the full
+reconcile — hydration or the event-driven activity pass — republishes the
+authoritative count for the new owner. It remains a no-op on the default PiTui
+branch, because `dropped` can only be true where the renderer-owned admission
+authority applies.
+
+WITNESS: a real publication with a MOUNTED continued form for A (so the drop has
+real work to do, which is exactly the path that used to publish attention) while
+the child's projection read is ARMED to throw before the commit: the witness
+asserts the commit performed NO `userQuestions` read for the new owner, that the
+armed read never fired, that the replaced continued form left the interactive seat
+in the publication window, and that the transition then completes with the new
+owner published and the replaced owner retired exactly once.
+
+DISCRIMINATION (`sha256 -c` verified restore): restoring the commit-time attention
+notify turns the witness RED with the exact production symptom —
+`transition commit seam failed after publication (child committed) …
+the armed projection read fired …` — plus the zero-read assertion failing.

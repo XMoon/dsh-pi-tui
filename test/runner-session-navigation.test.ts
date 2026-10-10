@@ -1444,6 +1444,15 @@ interface B3HostPlane {
   changed(sessionId: string, key: 'userQuestions' | 'inbox'): void
   /** The late answers the Host's own sink accepted. */
   readonly answers: readonly { readonly callId: string; readonly answer: unknown }[]
+  /**
+   * Every official projection read the port performed, by session id and unit
+   * (external review P2-C): the commit-time withdrawal must produce NONE.
+   */
+  readonly projectionReads: readonly { readonly id: string; readonly key: string }[]
+  /** Arm a THROW for one session id's projection reads (the commit-window probe). */
+  failProjectionFor: string | undefined
+  /** How many armed reads actually fired (must stay 0 for a state-only commit). */
+  readonly projectionFailures: { value: number }
 }
 
 function b3HostPlane(
@@ -1453,6 +1462,8 @@ function b3HostPlane(
   const callSessions = new Map<string, string>()
   const listeners = new Set<(session: unknown, key: string) => void>()
   const answers: { callId: string; answer: unknown }[] = []
+  const projectionReads: { id: string; key: string }[] = []
+  const projectionFailures = { value: 0 }
   const stateOf = (sessionId: string): { questions: { active: unknown[]; settled: unknown[] } } => {
     const existing = states.get(sessionId)
     if (existing !== undefined) return existing
@@ -1460,7 +1471,7 @@ function b3HostPlane(
     states.set(sessionId, created)
     return created
   }
-  return {
+  const plane: B3HostPlane = {
     services: {
       userQuestions: {
         // These witnesses never claim a timed wait (the B3 L6 F6.1 suite owns
@@ -1483,6 +1494,11 @@ function b3HostPlane(
         stateOf: (session: unknown, key: string) => {
           const id = (session as { readonly id?: unknown } | undefined)?.id
           if (typeof id !== 'string') return undefined
+          projectionReads.push({ id, key })
+          if (plane.failProjectionFor === id) {
+            projectionFailures.value += 1
+            throw new Error(`the armed projection read fired for ${id}`)
+          }
           // The Inbox unit carries no queued `user-question-reply` in these
           // witnesses: the queued-reply fact has its own L6 coverage.
           if (key === 'inbox') return { 'next-step': [], 'next-turn': [] }
@@ -1512,7 +1528,11 @@ function b3HostPlane(
       for (const listener of [...listeners]) listener({ id: sessionId }, key)
     },
     answers,
+    projectionReads,
+    failProjectionFor: undefined,
+    projectionFailures,
   }
+  return plane
 }
 
 /** The Cordis plane as the official `provide`/`emit` surface. */
@@ -2468,4 +2488,84 @@ async function expectPublicationWindowCurrentness(
 test('B3 P2-B (10): the replaced modal leaves the seat AT the owner publication, before the new owner is initialized (fork and /new)', async (t) => {
   await expectPublicationWindowCurrentness(t, 'fork')
   await expectPublicationWindowCurrentness(t, 'new')
+})
+
+test('B3 P2-C (11): the commit-time withdrawal performs NO Host projection read (a throwing read cannot reach it)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-commitread-')
+  const sessionA = fakeSession({
+    id: 'b3-commitread-a',
+    header: { id: 'b3-commitread-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  // Two holds: the CREATE gate (so the child's id is known and its projection read
+  // can be ARMED before the commit) and the child's post-commit idle gate (the
+  // publication window).
+  let releaseCreate: (() => void) | undefined
+  const createHeld = new Promise<void>(resolve => { releaseCreate = resolve })
+  let releaseChildIdle: (() => void) | undefined
+  const childIdle = new Promise<void>(resolve => { releaseChildIdle = resolve })
+  let childGateEntered = false
+  let target: string | undefined
+  const { owned, harness, ctx, plane } = await bootB3Tsp({
+    life, home, standing: sessionA, resume: sessionA.id,
+    createGate: () => createHeld,
+    whenIdleGate: sessionId => {
+      if (sessionId === sessionA.id) return Promise.resolve()
+      childGateEntered = true
+      return childIdle
+    },
+  })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A MOUNTED continued form for A: the commit-time drop must have real work to
+    // do (the path that used to publish attention, i.e. read the Host).
+    plane.seedContinued(sessionA.id, 'call-commit-read',
+      [{ id: 'q-commit-read', question: 'Parked?', options: [{ label: 'yes' }] }])
+    ctx.emit('session/event', sessionA, event('model/selection', { provider: 'p', model: 'm' }, sessionA.snapshotEvents().length))
+    await waitUntil('the parked count', () => attentionLineLive(owned.pane.frames()), 15_000)
+    owned.pane.key('\u001b[113;3u')
+    await waitUntil('the continued list', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
+    owned.pane.key('\r')
+    await waitUntil('the mounted continued form', () => owned.pane.output.text().includes('Parked?'), 15_000)
+
+    // Discover the child's id from the production create call, then hold the create.
+    const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
+    const originalCreate = agents.create
+    agents.create = options => {
+      target = options.sessionId
+      return originalCreate.call(agents, options)
+    }
+    life.defer(() => { agents.create = originalCreate })
+    const transition = commandOf(owned, 'new')()
+    await waitUntil('the create hold', () => target !== undefined, 15_000)
+    // ARM the child's projection reads BEFORE the commit: a state-only commit
+    // never triggers one, and a read that DOES reach the commit would throw there.
+    plane.failProjectionFor = target
+    releaseCreate!()
+    await waitUntil('the publication window', () => childGateEntered, 15_000)
+
+    const childReads = plane.projectionReads.filter(read => read.id === target && read.key === 'userQuestions')
+    assert.deepEqual(childReads, [],
+      'the commit-time withdrawal performed NO Host projection read for the new owner')
+    assert.equal(plane.projectionFailures.value, 0, 'the armed read never fired inside the commit')
+    // The replaced subject's mounted continued form left the interactive seat.
+    owned.pane.event({ ev: 'focus' })
+    await waitUntil('the replaced continued form left the seat',
+      () => liveLayerModals(owned.pane.frames()).length === 0, 15_000)
+
+    // Disarm and finish: the transition completes normally (the commit bookkeeping
+    // was never disturbed) and the new owner is published.
+    plane.failProjectionFor = undefined
+    releaseChildIdle!()
+    await transition
+    await waitUntil('the new owner published', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    assert.ok(harness.retirementEvents.includes(`dispose:${sessionA.id}`), 'the replaced owner was retired exactly once')
+  } finally {
+    releaseCreate?.()
+    releaseChildIdle?.()
+    await owned.settle()
+  }
 })

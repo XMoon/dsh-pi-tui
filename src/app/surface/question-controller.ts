@@ -351,11 +351,16 @@ export class QuestionSurfaceController {
   /**
    * The SYNCHRONOUS publication-commit half (external review P2-B): withdraw the
    * replaced subject's live presentation and drop its mounted continued forms
-   * WITHOUT reading the projection (the commit section must not call into the
-   * Host). Advisory metadata is untouched; the full reconcile still runs later.
+   * WITHOUT reading the projection — the commit section must not perform ANY Host
+   * read (a projection read there could throw after the owner was published and
+   * break the commit bookkeeping). It therefore does NOT notify attention: the
+   * caller clears the stale displayed count locally, and the full reconcile
+   * republishes the authoritative count for the new owner.
+   *
+   * @returns whether anything left the model (the caller's stale-count signal).
    */
-  withdrawReplacedPresentation(): void {
-    if (this.disposed) return
+  withdrawReplacedPresentation(): boolean {
+    if (this.disposed) return false
     this.withdrawReplacedLivePresentations()
     let changed = false
     for (const [key, entry] of [...this.entries]) {
@@ -363,7 +368,7 @@ export class QuestionSurfaceController {
       this.removeEntry(key, undefined, false)
       changed = true
     }
-    if (changed) this.notifyAttention()
+    return changed
   }
 
   reconcile(): void {

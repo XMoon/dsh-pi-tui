@@ -1852,7 +1852,10 @@ Decisions (all terminal-native; none of them copies a Web button):
     drop, before any post-commit await — so a replaced subject's modal can never
     keep the seat (or accept its keys through modal-first routing) while the new
     owner's initialization is still pending. That commit-section half is
-    state-only and non-throwing.
+    state-only and non-throwing, and it performs NO Host read at all: it clears the
+    stale displayed count locally and the full pass republishes the authoritative
+    count (a projection read inside the commit section could throw after the owner
+    was published and strand the commit bookkeeping that follows it).
 
     The withdrawal is PRESENTATION ONLY: the official
     request keeps its own Host-owned lifetime, so the Host's own cancellation
