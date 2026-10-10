@@ -66,8 +66,8 @@ Permalinks: [the TSP mount branch](https://github.com/XMoon/dsh-pi-tui/blob/6a6c
 |---|---|---|---|---|---|---|
 | PANEL-001 | Settings panel | `settings-runtime.ts:133` | `/settings` handler (`settings.ts:243`) | `SettingsSurface.app: TuiApp` (`settings-runtime.ts:65`) | panel rows; writes through `runner.tuiSettings` | Client UI over Host settings |
 | PANEL-002 | Footer/statusline configurator | `settings-runtime.ts` (footer part) | `/footer` (`settings.ts:1086`) | the same `TuiApp` surface | persisted footer layout + notify | Client UI |
-| PANEL-003 | Display preset (full/focus/compact/status) | display policy in `settings-runtime.ts` | `/display`, `/focus` | `applyDisplayPreset` + `app.notify` | display state + dock projection | Client UI |
-| PANEL-004 | Focus display toggle | display policy | `/focus` | same | display state | Client UI |
+| PANEL-003 | Display preset (full/focus/compact/status) | command adapter `settings.ts:175-183` (`displayPresetOf`/`applyDisplayPreset`) over the runner's display state; `settings-runtime.ts:133` boot display | `/display` (`settings.ts:1206`) | `applyDisplayPreset` + `app.notify` | the runner's display preset + the dock projection | Client UI |
+| PANEL-004 | Focus display toggle | same adapter (`settings.ts:175-183`) | `/focus` (`settings.ts:1229`) | same | the runner's focus flag | Client UI |
 | PANEL-005 | Session browser (`/sessions`,`/resume`,`/search`) | `session-presentation.ts:312` | `openSessionPicker` (`sessions.ts:778,889`) | the picker overlay owner | Host session list read + switch intent | Client UI over Host sessions |
 | PANEL-006 | Task Center (`/tasks`,`/subagents`) | `task-runtime.ts:360` | `runner.openTasksBrowser()` (`tasks.ts:33`) | `mounted: () => TuiApp` (`task-runtime.ts:175`), gated by `supportsTaskCenter` (`:521,535`) | task rows from the Job/subagent registries | Client UI over Host registries |
 | PANEL-007 | Job viewer | `task-runtime.ts` (same owner) | same browser | same | job detail rows | Client UI |
@@ -145,6 +145,13 @@ ladder (`src/tui/interaction/input-router.ts:178-263`). The TSP renderer has
 | `down`+empty editor | `app.tasks.open` | `:126` | `NOT_REACHABLE` |
 | `ctrl+r` | `app.history.search` | `:128` | `NOT_REACHABLE` |
 | `alt+k` | `app.shell.dismissSettled` | `:130` | `NOT_REACHABLE` |
+| *(no default; deprecated)* | `app.input.queue` | `:87` | `NOT_REACHABLE` — the deprecated queue action; TSP queueing is the busy-`Enter` policy, not a chord |
+| *(bindable, no default)* | `app.transcript.toggleFullscreen` | `:116` | `NOT_REACHABLE` |
+| *(no default; reserved)* | `app.session.open`, `app.session.new`, `app.session.resume`, `app.model.open` | `:135-139` | `NOT_REACHABLE` — the dispatcher returns `true` without a host call |
+
+That completes all **26** `app.*` action ids declared in `APP_KEYBINDINGS`
+(`src/tui/keybindings/definitions.ts:26-520`; the six no-default rows above are
+enumerated rather than folded into a "reserved" summary).
 
 ### 4.2 Focused-component actions — Question (`question.*`)
 
@@ -152,11 +159,11 @@ ladder (`src/tui/interaction/input-router.ts:178-263`). The TSP renderer has
 |---|---|---|
 | `enter` | `question.confirm` (`definitions.ts:287`) | `SUPPORTED` via the seat (`tsp/interaction.ts:982-1020`, `1044-1054`) |
 | `escape` | `question.cancel` (`:295`) | `SUPPORTED` |
-| `left` / `right` | `question.previous` (`:303`) / `question.next` (`:311`) | `SUPPORTED` (paging) |
-| `up` / `down` | `question.cursorUp` (`:319`) / `question.cursorDown` (`:327`) | `SUPPORTED` (option list) |
-| `pageUp` / `pageDown` | `question.pageUp` (`:335`) / `question.pageDown` (`:343`) | `SUPPORTED` |
-| `e` | `question.toggleExpand` (`:351`) | `NOT_REACHABLE` — the TSP seat has no expand toggle |
-| `space` | `question.toggleSelection` (`:359`) | `SUPPORTED` (multi-select, `tsp/interaction.ts:982-1020`) |
+| `left` / `right` | `question.previous` (`:303`) / `question.next` (`:311`) | `SUPPORTED` (paging — the seat pages with left/right, `tsp/interaction.ts:998-1006`) |
+| `up` / `down` | `question.cursorUp` (`:319`) / `question.cursorDown` (`:327`) | `SUPPORTED` (option list, `tsp/interaction.ts:988-996`) |
+| `pageUp` / `pageDown` | `question.pageUp` (`:335`) / `question.pageDown` (`:343`) | `NOT_REACHABLE` — the TSP seat has **no** page-key route (verified: the seat handles only up/down/left/right/enter/space/escape) |
+| `e` | `question.toggleExpand` (`:351`) | `NOT_REACHABLE` — the seat has no expand toggle |
+| `space` | `question.toggleSelection` (`:359`) | `SUPPORTED` (multi-select, `tsp/interaction.ts:1013`) |
 
 The TSP seat's own key contract for the same seat (its authority is the seat,
 not `APP_KEYBINDINGS`): approval `y`/`n`/`escape`/`ctrl+c`
@@ -184,11 +191,10 @@ continued list `up`/`down`/`enter`/`escape` (`:860-886`).
 | `up` / `down` | `tasks.cursorUp` (`:453`) / `tasks.cursorDown` (`:461`) | `NOT_REACHABLE` |
 | `pageUp` / `pageDown` | `tasks.pageUp` (`:469`) / `tasks.pageDown` (`:477`) | `NOT_REACHABLE` |
 
-Other focused-component maps (approval `y`/`n`, task-stop confirm, save-location,
-history search, plugin manager, pickers, footer configurator, keybinding editors,
-leader sequences) are all PiTui-only and `NOT_REACHABLE` on TSP; they are
-enumerated in the keybinding registry and in the TSP key contract's absence
-(`grep` for any of them in `src/tui/tsp/**` finds none).
+The remaining focused-component and panel-local key maps — which are **not** all
+in `APP_KEYBINDINGS` — are enumerated key by key in §4.5; every one of them is
+PiTui-only and `NOT_REACHABLE` on TSP (`grep` for any of them in
+`src/tui/tsp/**` finds none).
 
 ### 4.4 TSP fixed chords (not in `APP_KEYBINDINGS`)
 
@@ -199,6 +205,47 @@ enumerated in the keybinding registry and in the TSP key contract's absence
 | `ctrl+c` / `escape` | the existing cancel/interrupt intent | `SUPPORTED` |
 | `ctrl+d` (empty draft) | exit | `SUPPORTED` |
 | any other control chord | the reducer returns `none` (`tsp/editor.ts:271-278`) | `NOT_REACHABLE` (silently ignored — **not** `EXPLICIT_UNAVAILABLE`, see §6) |
+
+### 4.5 Component-local and panel-local key maps (PiTui-only)
+
+These are handled inside the component's own `handleInput`, not by
+`APP_KEYBINDINGS`. All are `NOT_REACHABLE` on TSP because the panel itself has no
+TSP entry; the caller column names the panel that owns the key.
+
+| Panel / caller (source:line) | Keys | Effect | TSP |
+|---|---|---|---|
+| Footer configurator (`src/tui/footer/configurator.ts:200-286`) | `backspace`, `escape`, `enter` | edit / back / confirm the row | `NOT_REACHABLE` |
+| ″ | printable text | row text input | `NOT_REACHABLE` |
+| ″ | `s` (rows mode) | save through the ONE save path | `NOT_REACHABLE` |
+| ″ | `a` / `m` / `f` / `space` (row mode) | add / move / cycle format / remove | `NOT_REACHABLE` |
+| ″ | `shift+up` / `shift+down` | reorder (legacy compat) | `NOT_REACHABLE` |
+| ″ | `up` / `down` / `left` / `right` | navigate / move zone | `NOT_REACHABLE` |
+| Plugin Manager (`src/tui/plugin-manager/panel.ts:91-124`) | `escape`, `ctrl+c` | back | `NOT_REACHABLE` |
+| ″ | `up` / `ctrl+p`, `down` / `ctrl+n` | move | `NOT_REACHABLE` |
+| ″ | `enter` | open/activate | `NOT_REACHABLE` |
+| ″ | `r` / `R` | refresh the registry | `NOT_REACHABLE` |
+| ″ | `i` / `I` | start install | `NOT_REACHABLE` |
+| ″ install mode (`:126-190`) | `tab` | switch spec/registry focus | `NOT_REACHABLE` |
+| ″ install mode | `enter`, `up`, `down` | inspect / choose a registry entry | `NOT_REACHABLE` |
+| Save-location prompt (`src/tui/interaction/save-location.ts:328-352`) | `y` or `question.confirm` | overwrite/accept | `NOT_REACHABLE` |
+| ″ | `n` or `question.cancel` | return | `NOT_REACHABLE` |
+| ″ | `tab`, `question.cursorUp`, `question.cursorDown` | move between fields | `NOT_REACHABLE` |
+| Keybinding list (`src/tui/keybindings/ui/list.ts:271-306`) | `escape`, `up`, `down`, `pageUp`, `pageDown`, `enter` | navigate / open the action editor | `NOT_REACHABLE` |
+| Key recorder (`src/tui/keybindings/ui/recorder.ts:176`) | `escape` | cancel the recording | `NOT_REACHABLE` |
+| Keybinding action editor (`src/tui/keybindings/ui/action-editor.ts:288-492`) | `escape`, `up`/`k`, `down`/`j`, `delete`/`backspace`, `enter` | navigate / edit / bind / accept | `NOT_REACHABLE` |
+| History search panel (`src/tui/panels/history-panel.ts:267-283`) | `tab` | cycle scope | `NOT_REACHABLE` |
+| ″ | `up`, `down`, `pageUp`, `pageDown` | move | `NOT_REACHABLE` |
+| ″ | `enter` / `ctrl+j` | accept | `NOT_REACHABLE` |
+| ″ | `escape` / `ctrl+c` | cancel | `NOT_REACHABLE` |
+| Task Center stop confirmation (`src/tui/panels/task-panel.ts:602-607`) | `escape` cancel; `y`/`Y` confirm the stop | confirm dialog | `NOT_REACHABLE` (Task Center itself is PANEL-006) |
+| Approval input (`src/tui/interaction/approval-runtime.ts:111-128`) | `y` allow-once; `n` reject; `escape`/`ctrl+c` cancel; every other key consumed | PiTui approval seat | TSP has its **own** seat for the same authority (PANEL-014), so the PiTui keys are `NOT_REACHABLE` while the TSP equivalents are `SUPPORTED` |
+| Model picker (`src/tui/pickers/model-picker.ts:528-549`) | `right`, `left`, `enter`, `escape` | effort / cancel / apply | `NOT_REACHABLE` |
+| Leader sequences (`src/tui/keybindings/leader.ts:98-117`) | `leaderKey` + binding, `escape` | user-configured chords | `NOT_REACHABLE` |
+
+The one authority overlap worth naming: the PiTui approval dialog and the TSP
+seat implement the **same** `InteractionPort`/`QuestionSurfaceController`
+authority (PANEL-014); the TSP seat's own keys are listed in §4.2 and are
+`SUPPORTED`.
 
 ## 5. Session / Task / Viewer — currentness and locality
 
