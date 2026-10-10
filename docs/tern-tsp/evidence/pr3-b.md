@@ -1452,10 +1452,13 @@ control-key matrix is recorded in the chapter at the end of this document.
 > **Status: qualification COMPLETE — no qualification item is open.** The
 > attestation-only physical sub-items were reviewed by the owner, who recorded
 > attestation as the accepted closing evidence for them (see "Owner QA
-> confirmation" below); every §6.4 case and every B-01..B-09 gate is `DONE`, with
-> The one scope exception is an OWNER-APPROVED qualification-scope amendment (the physical masked Question → PR4), never a silent pass. Stage
-> closure additionally needs the reviewer's acceptance of this revision and the
-> owner's explicit merge approval.
+> confirmation" below); every §6.4 case and every B-01..B-09 gate is `DONE`. The
+> one scope exception is an OWNER-APPROVED qualification-scope amendment: the
+> physical masked Question is deferred to PR4 (see §6.4-6, B-05 and the amendments
+> below), never a silent pass. Stage closure additionally needs the reviewer's
+> acceptance of this revision and the owner's explicit merge approval, and it does
+> NOT cover that deferred physical item — "qualification COMPLETE" means every
+> other item is closed, with the masked deferral named and owned.
 >
 > **Physical provenance limit:** the TSP wire carries frames plus ack/resize
 > events only — it carries NO key or preedit events. Every physical input below
@@ -1563,6 +1566,14 @@ inside that product suite.
 3. Native editor chords (`Ctrl+A`, `Ctrl+V`, undo/selection/clipboard) are ignored
    by the controlled composer and belong to the post-PR3-B editor/UX milestone
    (PR4), exactly as the PR3-B contract states.
+4. **Catalog readiness (observed; tracked outside B4).** Immediately after launch,
+   before the Host command catalog resolves, a submission of a slash name the Host
+   later claims can still be refused by the TSP builtin gate: with the temporary
+   test Host above, the first `/settings` (~53 ms after the handshake) produced the
+   TSP notice while the steady state routes the same input to the Host command
+   (`b4-hostcmd-origin.rec`). This is a Host catalog / extension-host startup
+   characteristic shared by any catalog consumer, not a TSP admission defect, and
+   it is recorded here for catalog-readiness UX tracking rather than as B4 work.
 
 ## Owner QA confirmation and the B4 review record
 
