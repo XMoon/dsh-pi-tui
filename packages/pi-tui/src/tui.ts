@@ -233,6 +233,15 @@ const DEVICE_ATTRIBUTES_RESPONSE_PATTERN = /^\x1b\[\?[\d;]*c$/;
 const TERMINAL_BACKGROUND_QUERY = "\x1b]11;?\x07";
 
 /**
+ * Whether ANY screen in this process has issued a narrow OSC 11 observation (X060). The physical
+ * terminal input chain is shared while a probe belongs to one screen, so once this process owns
+ * background observations every screen consumes an unowned background reply instead of forwarding
+ * it as user input. A process that only uses upstream's API keeps upstream's behavior (an unowned
+ * color reply is ordinary input again).
+ */
+let backgroundObservationOwned = false;
+
+/**
  * Interface for components that can receive focus and display a hardware cursor.
  * When focused, the component should emit CURSOR_MARKER at the cursor position
  * in its render output. TUI will find this marker and position the hardware
@@ -769,12 +778,6 @@ export abstract class TuiBase extends Container implements TUI {
 	 * replies belong to the oldest one. Queries stay here after a timeout to collect late replies.
 	 */
 	private pendingTerminalColorQueries: PendingTerminalColorQuery[] = [];
-	/**
-	 * Whether this screen has issued a narrow OSC 11 observation (see the API below). Only then
-	 * does the screen treat an unowned background reply as its own protocol traffic instead of
-	 * upstream's "color replies are ordinary input again".
-	 */
-	private backgroundProbeOwned = false;
 	/** The single in-flight narrow OSC 11 background observation (see the API below). */
 	private backgroundProbe:
 		| { promise: Promise<RgbColor | undefined>; settle: (background: RgbColor | undefined) => void; timer: NodeJS.Timeout }
@@ -1622,12 +1625,14 @@ export abstract class TuiBase extends Container implements TUI {
 			this.backgroundProbe = undefined;
 			clearTimeout(probe.timer);
 			probe.settle(response.rgb);
-			return true;
 		}
-		// A stray or late background reply is consumed on a screen that uses the
-		// narrow seam, so it can never reach the editor or a raw input listener.
-		// A screen that never probes keeps upstream's forwarding behavior.
-		return this.backgroundProbeOwned;
+		// A background reply is terminal protocol traffic, never editor input —
+		// including one that arrives after its observation timed out, was released
+		// by stop(), or belongs to a screen that has since been swapped out. The
+		// physical terminal input chain is shared, so forwarding it would surface
+		// a protocol reply as user activity on whichever screen owns the terminal
+		// now (the host's onUserInput / raw-input path). (X060.)
+		return backgroundObservationOwned;
 	}
 
 	private settleBackgroundProbe(background: RgbColor | undefined): void {
@@ -1972,9 +1977,9 @@ export abstract class TuiBase extends Container implements TUI {
 	 * - one in-flight observation per screen: concurrent calls on the same screen share it;
 	 * - resolves `undefined` on timeout, and on `stop()` (the pending resolver and timer are
 	 *   released, so a stopped screen never applies a late result);
-	 * - from the first call onward, a well-formed OSC 11 reply is consumed at this layer (late and
-	 *   stray ones too) and can never reach the editor or a raw input listener; a screen that never
-	 *   calls this keeps upstream's "an unowned color reply is ordinary input" behavior;
+	 * - once this process has used the seam, a well-formed OSC 11 reply is consumed at this layer
+	 *   (late, stray and cross-screen ones too) and can never reach the editor or a raw input
+	 *   listener, because the physical terminal input chain is shared while a probe is per screen;
 	 * - OSC 11 carries no request id, so the resolved colour is an observation of the CURRENT
 	 *   terminal background, not a reply strictly attributable to this request. Callers own the
 	 *   "still relevant?" guard (screen identity, screen stopped, a newer explicit theme choice).
@@ -1988,7 +1993,7 @@ export abstract class TuiBase extends Container implements TUI {
 			settle = resolve;
 		});
 		const timer = setTimeout(() => this.settleBackgroundProbe(undefined), timeoutMs);
-		this.backgroundProbeOwned = true;
+		backgroundObservationOwned = true;
 		this.backgroundProbe = { promise, settle, timer };
 		this.terminal.write(TERMINAL_BACKGROUND_QUERY);
 		return promise;

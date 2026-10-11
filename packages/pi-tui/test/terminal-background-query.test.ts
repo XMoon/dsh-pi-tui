@@ -139,6 +139,27 @@ describe("TUI.queryTerminalBackgroundColor (narrow OSC 11 seam)", () => {
 		}
 	});
 
+	it("consumes an unowned background reply that lands on another screen", async () => {
+		// The physical terminal input chain is shared while an observation belongs
+		// to one screen: the main screen observes and is stopped, then the reply
+		// arrives at a freshly started screen that never probed. It must not
+		// surface as user activity on the screen that owns the terminal now.
+		const leaving = setup();
+		const pending = leaving.tui.queryTerminalBackgroundColor({ timeoutMs: 1000 });
+		leaving.tui.stop();
+		assert.strictEqual(await pending, undefined, "stop() releases the observation");
+
+		const fresh = setup();
+		try {
+			fresh.terminal.sendInput("\x1b]11;#eeeeee\x07");
+			assert.deepStrictEqual(fresh.component.inputs, [], "a cross-screen background reply never reaches the input listeners");
+			fresh.terminal.sendInput("\x1b]10;#ffffff\x07");
+			assert.deepStrictEqual(fresh.component.inputs, ["\x1b]10;#ffffff\x07"], "other colour replies still follow upstream");
+		} finally {
+			fresh.tui.stop();
+		}
+	});
+
 	it("shares the parse with a concurrent full query instead of starving it", async () => {
 		const { terminal, tui } = setup();
 		try {
