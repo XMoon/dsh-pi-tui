@@ -35,6 +35,7 @@ import type { SessionSubject } from '../session/subject.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
+import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 
 /**
@@ -372,6 +373,15 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   /** The open browser's mode: Question attention rows are mode-dependent
    *  (Quick lists parked ones only, Full lists every actionable one). */
   let activeTaskBrowserMode: 'quick' | 'full' | undefined
+  /**
+   * Monotonic identity of the LAST opened Task Browser. The navigation tails
+   * (Esc → Quick restore, Quick → Full promotion) close over the epoch of the
+   * browser that opened them, so a browser a synchronous callback opened while
+   * the old one was closing can never be overwritten. A retired browser's own
+   * token is NOT such a fence: its own `onRetired` legitimately clears it, so
+   * "token is clear" cannot be told apart from "someone newer owns the slot".
+   */
+  let taskBrowserEpoch = 0
   let activeJobViewerClose: (() => void) | undefined
   /**
    * The CURRENT selected-Job viewer instance. The ownership SessionSubject is
@@ -554,18 +564,32 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     row: { readonly jobKind: string; readonly label: string; readonly status: string; readonly detail?: string },
   ): void => {
     const source = taskCenter()
-    // One viewer at a time, and a fresh selection replaces the previous.
-    activeJobViewerClose?.()
     const ownerSessionId = source.sessionId()
-    if (ownerSessionId === undefined) return
+    if (ownerSessionId === undefined) {
+      // No live root session: nothing to observe. Retire the previous viewer
+      // (it belonged to the session that just went away) rather than leaving a
+      // ghost observation behind; never open a new one on a dead session.
+      const previousCloser = activeJobViewerClose
+      activeJobViewerClose = undefined
+      previousCloser?.()
+      return
+    }
     // The destructive-intent fence is captured at OPEN time (like the browser
     // fence): a Stop confirmed later belongs to THIS viewer's subject.
     const viewerSubject = source.captureSubject()
     // …and the viewer INSTANCE token is the currentness fence: the ownership
     // subject alone stays current across a same-Session Job A -> Job B
     // replacement, so a stale settlement is dropped by identity.
+    //
+    // The NEW intent is committed BEFORE the previous viewer is closed:
+    // closing it runs owner code (its onClose) that may synchronously re-enter
+    // this opener, and that newer selection must win.
     const viewerToken = {}
+    const previousCloser = activeJobViewerClose
     activeJobViewerToken = viewerToken
+    activeJobViewerClose = undefined
+    previousCloser?.()
+    if (activeJobViewerToken !== viewerToken) return
     const viewerCurrent = (): boolean => activeJobViewerToken === viewerToken
     const fallbackText = row.jobKind === 'subagent'
       ? source.subagentJobViewHint(row.status, row.detail)
@@ -585,6 +609,15 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // the documented safety valve — and says so explicitly.
       observationError = safeErrorMessage(error)
     }
+    // ONE release owner for THIS open's subscription: Esc, the parent browser
+    // retiring, a session reset and the final surface teardown all funnel
+    // through the same closer, which releases exactly once.
+    let observationReleased = false
+    const releaseOnce = (): void => {
+      if (observationReleased) return
+      observationReleased = true      // before releasing the external subscription
+      closeObserver()
+    }
     const refreshBody = (): string => {
       if (observed !== undefined) return formatJobObservation(observed)
       // Only the opening row projection before the first observed snapshot:
@@ -600,7 +633,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       viewerCurrent()
       && source.subjectMatches(viewerSubject)
       && isActiveJobStatus(observed?.status ?? row.status)
-    activeJobViewerClose = options.mounted().openOutputViewer({
+    const closer = options.mounted().openOutputViewer({
       title,
       initial: fallbackText,
       refresh: refreshBody,
@@ -629,16 +662,31 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // to the parent browser, not to the editor.
       closeHint: 'back',
       onClose: () => {
+        // Read the currentness ONCE: a stale (replaced) viewer must neither
+        // clear the live closer nor repaint with its own context.
+        const wasCurrent = activeJobViewerToken === viewerToken
         // Invalidate THIS viewer's instance fence BEFORE releasing, so a Stop
         // settlement still in flight can never notify a replacement surface.
-        if (activeJobViewerToken === viewerToken) activeJobViewerToken = undefined
+        if (wasCurrent) {
+          activeJobViewerToken = undefined
+          activeJobViewerClose = undefined
+        }
         // Closing the viewer always releases the observer (Esc, the parent
-        // browser closing, a session transition, or surface teardown).
-        closeObserver()
-        activeJobViewerClose = undefined
-        refreshTasks()
+        // browser closing, a session transition, or surface teardown); the
+        // owner repaint is an INDEPENDENT obligation.
+        runSyncDisposalSteps('job viewer finalization', [
+          releaseOnce,
+          () => {
+            if (wasCurrent && activeJobViewerToken === undefined && !options.isCleanedUp()) refreshTasks()
+          },
+        ])
       },
     })
+    // Only the STILL-current selection owns the global closer slot: if the
+    // mount synchronously closed/replaced this viewer, the newer owner's slot
+    // must survive and this stale handle is closed on its own.
+    if (activeJobViewerToken === viewerToken) activeJobViewerClose = closer
+    else closer()
   }
 
   /**
@@ -719,6 +767,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // bound to the browser that hosted the confirmation (PR review P1).
     const browserSubject = source.captureSubject()
     const browserToken = {}
+    const browserEpoch = (taskBrowserEpoch += 1)
     activeTaskBrowserToken = browserToken
     let jobSnapshots: readonly TaskBrowserJobInput[] = []
     const jobs = source.jobs
@@ -905,23 +954,37 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         if (options.isCleanedUp()) return 'close'
         const disposition = selectRow(value)
         if (disposition === 'keep-open') return 'keep-open'
-        activeTaskBrowser = undefined
-        activeTaskBrowserToken = undefined
-        activeTaskBrowserMode = undefined
-        resetTaskBrowserScope()
+        // A terminal navigation retires THIS browser's slot only while it is
+        // still the current one: a reentrant open from the selection callback
+        // already owns the slot and must not be zeroed (nor have its scope
+        // reset under it).
+        if (activeTaskBrowserToken === browserToken) {
+          activeTaskBrowser = undefined
+          activeTaskBrowserToken = undefined
+          activeTaskBrowserMode = undefined
+          resetTaskBrowserScope()
+        }
         return 'close'
       },
-      () => {
+      (viewState) => {
         if (options.isCleanedUp()) return
-        const current = activeTaskBrowser?.getViewState?.()
-        activeTaskBrowser = undefined
-        activeTaskBrowserToken = undefined
-        activeTaskBrowserMode = undefined
-        resetTaskBrowserScope()
+        // The restore tail belongs to the browser GENERATION that opened it:
+        // a browser a synchronous callback opened while this one was closing
+        // (the physical hide restores plugin focus) already owns the slot and
+        // must not be overwritten by a stale Quick. The retired browser's own
+        // token cannot express this — `onRetired` just cleared it.
+        if (taskBrowserEpoch !== browserEpoch) return
+        if (activeTaskBrowserToken === browserToken) {
+          activeTaskBrowser = undefined
+          activeTaskBrowserToken = undefined
+          activeTaskBrowserMode = undefined
+          resetTaskBrowserScope()
+        }
         if (viewMode === 'full' && restoreState !== undefined) {
-          // Esc from a promoted full view returns to Quick with the latest
-          // shared context, not the state from the promotion moment.
-          const state = current ?? quickTaskState ?? restoreState
+          // Esc from a promoted full view returns to Quick with the state
+          // captured BEFORE the frame was disposed (TuiApp's onCancel seam),
+          // not the state from the promotion moment.
+          const state = viewState ?? quickTaskState ?? restoreState
           openTasksBrowser('quick', state)
         }
       },
@@ -961,18 +1024,50 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         },
         onViewFull: state => {
           if (options.isCleanedUp()) return
-          activeTaskBrowser = undefined
-          activeTaskBrowserToken = undefined
-          activeTaskBrowserMode = undefined
+          // Same generation fence as the Esc restore: the promotion tail must
+          // not overwrite a browser a callback opened while THIS one was being
+          // retired by `requestClose('promote')`.
+          if (taskBrowserEpoch !== browserEpoch) return
+          if (activeTaskBrowserToken === browserToken) {
+            activeTaskBrowser = undefined
+            activeTaskBrowserToken = undefined
+            activeTaskBrowserMode = undefined
+          }
           quickTaskState = state
           openTasksBrowser('full', state)
         },
         onStop: stopRow,
         onViewportExpose: ids => { if (!options.isCleanedUp()) runtime?.acknowledge(ids) },
+        onRetired: reason => {
+          // A retire of a browser that is no longer the current one is a
+          // strict no-op: it must never touch the newer browser, its Job child
+          // or its dataset scope.
+          if (activeTaskBrowserToken !== browserToken) return
+          // Retire this browser's identity BEFORE closing the Job child: the
+          // child's own finalizer (and any user callback it runs) may open a
+          // newer Task Browser synchronously, and that newer owner must win.
+          activeTaskBrowser = undefined
+          activeTaskBrowserToken = undefined
+          activeTaskBrowserMode = undefined
+          // The child's OWN finalizer clears its token/closer; this browser
+          // only asks it to close. `promote` preserves the dataset scope so a
+          // Workflow-scoped Quick → Full does not fall back to `all`.
+          const childCloser = activeJobViewerClose
+          runSyncDisposalSteps('task browser retire', [
+            () => { if (reason !== 'promote') resetTaskBrowserScope() },
+            () => childCloser?.(),
+          ])
+        },
       },
     )
-    activeTaskBrowser = handle
-    activeTaskBrowserMode = viewMode
+    // A synchronously retired/replaced browser must not be re-installed as the
+    // active handle: close the stale handle on its own (idempotent) instead.
+    if (activeTaskBrowserToken === browserToken) {
+      activeTaskBrowser = handle
+      activeTaskBrowserMode = viewMode
+    } else {
+      handle.close()
+    }
     // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
     // panel reports each attention row the first time it enters the
     // open viewport (first frame AND every later scroll/page/jump), and
@@ -1226,23 +1321,42 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // (so closing the hidden parent cannot leave the child alive), then
       // the browser, then reset the coordinator + the synchronous
       // badge/summary/row mirrors (the new session's first listing is async
-      // and the old session's state must not hang on screen).
-      activeJobViewerClose?.()
+      // and the old session's state must not hang on screen). The identity
+      // slots are retired BEFORE any closer runs, so a stale onClose cannot
+      // touch the new session; the independent obligations are all attempted
+      // even when one of them throws.
+      const viewerCloser = activeJobViewerClose
+      const browserHandle = activeTaskBrowser
       activeJobViewerClose = undefined
-      activeTaskBrowser?.close()
+      activeJobViewerToken = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
       activeTaskBrowserMode = undefined
-      taskRuntime?.reset()
-      // The dataset scope is session-scoped too: a switched-in session must
-      // never inherit a Workflow-scoped browser (PR2 plan §10.8).
-      taskBrowserScope = { kind: 'all' }
-      if (options.display().supportsTaskCenter) {
-        options.mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
-        options.mounted().setTasks([])
-      }
-      if (options.display().supportsTaskCenter) options.mounted().setAgents([])
-      taskBrowserRows = []
+      // Retire the browser GENERATION as part of the same precommit, BEFORE any
+      // closer runs: a pending navigation tail that closed over the retired
+      // browser (a reset triggered synchronously from a plugin focus callback
+      // while that browser was closing) must not open a stale Quick afterwards.
+      // The browser's own token cannot express this — it is already cleared.
+      taskBrowserEpoch += 1
+      // EVERY session-scoped obligation is an independent step, so one
+      // throwing closer can neither strand the other closers nor leave the old
+      // session's scope/chrome on screen. The step ORDER is the baseline
+      // non-throwing order (closers, coordinator, dataset scope, mirrors, rows)
+      // — the batch only makes each step non-truncating.
+      runSyncDisposalSteps('task runtime reset', [
+        () => viewerCloser?.(),
+        () => browserHandle?.close(),
+        () => taskRuntime?.reset(),
+        () => { taskBrowserScope = { kind: 'all' } },
+        () => {
+          if (options.display().supportsTaskCenter) {
+            options.mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
+          }
+        },
+        () => { if (options.display().supportsTaskCenter) options.mounted().setTasks([]) },
+        () => { if (options.display().supportsTaskCenter) options.mounted().setAgents([]) },
+        () => { taskBrowserRows = [] },
+      ])
     },
     openTasksBrowser(viewMode, restoreState, scope, header) {
       openTasksBrowser(viewMode, restoreState, scope, header)
@@ -1264,20 +1378,31 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       jobsEventsDispose = undefined
     },
     disposeJobObservation() {
-      // Release the selected-Job follow stream explicitly: TuiApp.dispose()
-      // does not invoke the viewer's onClose, so the observer would otherwise
-      // outlive the surface.
-      activeJobViewerClose?.()
+      // The runner's explicit release position for the selected-Job follow
+      // stream. The viewer's own physical finalization also releases it, so
+      // this is idempotent (`releaseOnce`); the identity is retired BEFORE the
+      // closer runs, so a re-entrant finalization cannot repaint the dead
+      // surface.
+      const closer = activeJobViewerClose
       activeJobViewerClose = undefined
+      activeJobViewerToken = undefined
+      closer?.()
     },
     disposeTaskBrowser() {
-      // TuiApp.dispose() hides overlays without invoking their user cancel
-      // callbacks. Drop the browser handle and invalidate the token so an
-      // action already waiting on Direct/Host work cannot notify or repaint
-      // the dead surface after teardown.
+      // TuiApp.dispose() physically disposes overlays without invoking their
+      // cancel callback (a browser's owner notification is `onRetired`, which
+      // the frame's physical disposal already delivered). Drop the browser
+      // handle, invalidate the token and retire the browser generation
+      // (symmetrically with `resetTasks`) so an action already waiting on
+      // Direct/Host work — including a pending navigation tail — cannot notify,
+      // open or repaint the dead surface after teardown. In production this
+      // runs under the runner's cleanup latch, so `openTasksBrowser` is already
+      // refused; the generation advance is the same retirement primitive, not a
+      // separately reachable path.
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
       activeTaskBrowserMode = undefined
+      taskBrowserEpoch += 1
     },
   }
 }
