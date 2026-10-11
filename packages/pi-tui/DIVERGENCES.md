@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `c21ba67c4791a26239739f5dfea4238c1bf4afd2`
+- Audited local source commit: `ee8702b75aaeba3f1bb6204ccffab703b35af5a2`
 - Branch audited: `chore/pi-tui-v1.1.0-revendor`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
@@ -816,6 +816,8 @@ OSC color replies carry no request id, so a reply that arrives after its query t
 - queryTerminalColors keeps the upstream mechanism (OSC 10/11/4 burst, DA1 sentinel, FIFO queue, onLateReply) but writes the burst only when the wire is free (pumpTerminalColorQueries / terminalColorQueryWritten)
 - a timed-out query stays the outstanding tombstone; the next waiting query is written only after that query's DA1 sentinel
 - a late reply is delivered to its own query's deliver/onLateReply callback and can never be attributed to a later query
+- a query that times out while an earlier query still owns the wire was never written and is dropped from the queue (no stale burst after it settled, and no unbounded pending-query retention on a terminal that never answers DA1)
+- a well-formed OSC 10/11/4 reply is swallowed even when this screen has no query pending (a reply for a query issued before a fullscreen swap or stop must never reach the input pipeline as typed input)
 
 #### Dependency map
 
@@ -847,8 +849,9 @@ OSC color replies carry no request id, so a reply that arrives after its query t
 - packages/pi-tui/test/osc11-query.test.ts: at most one color query is written while an earlier query is outstanding, and the next query is written only after the DA1 sentinel
 - packages/pi-tui/test/osc11-query.test.ts: a late reply is swallowed (never forwarded as input) and is delivered to its own query's onLateReply, never to a later concurrent query
 - packages/pi-tui/test/terminal-colors.test.ts: the upstream queryTerminalColors contract (single burst, DA1 completion, incomplete palette dropped, late replies after a timeout)
-- packages/pi-tui/test/terminal-colors.test.ts: active-screen query routing
+- test/rendering.test.ts: autoDetectTheme applies the detected theme through the ACTIVE screen in fullscreen mode
 - test/rendering.test.ts: trackTerminalTheme queries the terminal colors once, derives the scheme from the reported background, and re-queries after disable
+- packages/pi-tui/test/osc11-query.test.ts: a query that times out while an earlier query owns the wire is never written, and a stray well-formed color reply with no pending query is swallowed rather than forwarded as input (both mutation-checked)
 
 #### Upstream comparison
 
@@ -876,7 +879,7 @@ OSC color replies carry no request id, so a reply that arrives after its query t
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Re-audited at v1.1.0 (abe508e1): the mechanism moved from the local serialized OSC 11 API to a serialization guard on the upstream queryTerminalColors mechanism, and the Host migrated to queryTerminalColors. The obsolete queryTerminalBackgroundColor/queryTerminalColorScheme seam is removed (upstream removed it); no removed public API was resurrected. Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used.
+- Notes: Re-audited at v1.1.0 (abe508e1): the mechanism moved from the local serialized OSC 11 API to a serialization guard on the upstream queryTerminalColors mechanism, and the Host migrated to queryTerminalColors. The obsolete queryTerminalBackgroundColor/queryTerminalColorScheme seam is removed (upstream removed it); no removed public API was resurrected. Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used. Round-1 review follow-ups applied: the timeout path again drops a never-written queued query (the base rule the upstream consumer had lost) and an unmatched well-formed color reply is swallowed even with no pending query, with mutation-checked guards in osc11-query.test.ts and terminal-colors.test.ts.
 
 ### X009 — No stray spacer blank on the final row when exiting
 
@@ -1585,6 +1588,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release
 - the retained mouse-press target's click synthesis is painted-placement fenced: a still-mounted component whose overlay moved or reflowed (e.g. a centered overlay that grew after the press selected a described row) does not receive a synthetic click retargeted with the old origin
 - the painted-placement liveness check re-derives a nested descendant's CURRENT painted origin from the last-painted child layouts (Box padding + preceding sibling heights): a descendant that reflowed INSIDE a stable overlay root (a preceding sibling grew) no longer receives a synthetic click retargeted with the old origin
+- a delegated (forwarded) mouse result re-targets the gesture owner: the forwarding component becomes the retained press target with its own origin recomputed, so a delegating component that is not a Container (e.g. a SettingsList that renders its submenu itself) can be located by the painted-placement liveness check and re-routes the release click through its own current hit-testing
 
 #### Dependency map
 
@@ -1637,6 +1641,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - packages/pi-tui/test/tui-alt-screen.test.ts: a descendant that reflowed inside a stable overlay root (sibling heights changed, root bounds identical) does not receive a ghost synthetic click at the original cell; a fresh press at the new row works
 - packages/pi-tui/test/tui-alt-screen.test.ts: a layout-root descendant that reflowed inside its ancestor (header shrank, target moved) does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (ancestor rect + last-painted child offset), not old-origin containment; a fresh press at the new row works
 - packages/pi-tui/test/tui-alt-screen.test.ts: an implicit-document child (legacy single-document mode, no setLayoutRoot) that reflowed after a sibling shrank does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (implicit document box origin + TuiBase last-painted child offset), not mounted liveness; a fresh press at the new row works
+- packages/pi-tui/test/mouse-components.test.ts: keeps a settings list focused when a click in its submenu closes the submenu (the delegated press target is the forwarding component and re-routes the release click)
 
 #### Upstream comparison
 
