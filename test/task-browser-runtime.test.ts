@@ -533,7 +533,8 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   const bump = presentationSource.slice(bumpStart, bumpEnd)
   assert.ok(bump.includes('surface.resetTasks()'), 'the session bump must reset the surface-owned Task Center')
   const reset = taskSource.slice(taskSource.indexOf('resetTasks() {'))
-  assert.ok(reset.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')
+  assert.ok(reset.includes('const browserHandle = activeTaskBrowser'), 'the session bump must capture the open browser')
+  assert.ok(reset.includes('browserHandle?.close()'), 'the session bump must close the open browser')
   assert.ok(reset.includes('taskRuntime?.reset()'), 'the session bump must drop the cached catalog')
   // PR review P2: the OLD session's running badge must not hang on the
   // footer until the new session's async listing lands (a failed listing
@@ -615,7 +616,12 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
 test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
   const marker = 'const openTasksBrowser = ('
   const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
-  const cancelBlock = open.slice(open.indexOf("() => {"), open.indexOf('},', open.indexOf('() => {')) + 3)
+  // The cancel callback now takes the view state TuiApp captured BEFORE the
+  // browser frame was disposed (the panel is gone by the time it runs).
+  const cancelMarker = '(viewState) => {'
+  const cancelBlock = open.slice(open.indexOf(cancelMarker), open.indexOf('},', open.indexOf(cancelMarker)) + 3)
+  assert.ok(cancelBlock.includes('viewState'),
+    'the Esc path must use the state captured before the frame is disposed')
   assert.ok(cancelBlock.includes("viewMode === 'full' && restoreState !== undefined"),
     'Esc must reopen Quick only when the full view was promoted from Quick')
   assert.ok(cancelBlock.includes("openTasksBrowser('quick', state)"),
@@ -835,7 +841,8 @@ test('PR2 review: every task-browser close path resets the dataset scope', () =>
     'the selection close path must reset the dataset scope')
   assert.ok(selectBlock.includes('activeTaskBrowserToken = undefined'),
     'the selection close path must invalidate delayed actions')
-  const cancelBlock = open.slice(open.indexOf('() => {'), open.indexOf('},', open.indexOf('() => {')) + 3)
+  const cancelMarker = '(viewState) => {'
+  const cancelBlock = open.slice(open.indexOf(cancelMarker), open.indexOf('},', open.indexOf(cancelMarker)) + 3)
   assert.ok(cancelBlock.includes('resetTaskBrowserScope()'),
     'the Esc close path must reset the dataset scope')
   assert.ok(cancelBlock.includes('activeTaskBrowserToken = undefined'),
