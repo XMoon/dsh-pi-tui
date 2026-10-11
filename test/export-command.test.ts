@@ -872,8 +872,8 @@ async function mountRunner(
   return fiber
 }
 
-/** Drive one editor submit through the app's terminal input. The text is sent
- * as ONE input event so the trailing Enter submits the complete draft. */
+/** Drive one editor submit through the app's terminal input: the text as one
+ * input event, then `\r` to submit it. */
 function submitText(app: TuiApp, text: string): void {
   const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
   tui.handleTerminalInput(text)
