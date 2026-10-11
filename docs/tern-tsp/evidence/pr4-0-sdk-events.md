@@ -592,13 +592,14 @@ await surface.close({ keep: false }); await session.close(); log({ phase: 'close
 | locate nodes | `tern ctl --control /tmp/pr40.sock tree` | the real laid-out element rects used for the click coordinates |
 | drive gestures | `tern ctl --control /tmp/pr40.sock --file /tmp/pr40-clicksN.txt` (`click <x> <y>`, `dblclick`, `type "…"`, `key Backspace`, `key Enter`) | `{"ok":true}` per command |
 | probe 7 phase control | `tern ctl --control /tmp/pr40.sock --file …` with `click 640 118` (stage A), then `key m` (opens the modal; the probe logs `modal-open`), then `click 640 118` (stage B) and `click 640 427` (stage C) | stages A/C produced an `action`, stage B produced nothing — see §6.2 |
-| stop | `tern ctl --control /tmp/pr40.sock quit` | pane closed; probes 1–5 had already been terminated during iteration, probe 6 then wrote its final `closed` line and exited 0 |
+| stop | `tern ctl --control /tmp/pr40.sock quit` | pane closed; probes 1–5 had already been terminated during iteration (their logs end WITHOUT a `closed` line), and probes 6 and 7 each then wrote their final `closed` line and exited 0 |
 
 Probe process exit status: **not observable** through `tern ctl`. The logs show
-it indirectly — probes 1–5 end without a `closed` line (the process was killed
-mid-iteration), probe 6 ends with `{"phase":"closed"}` (a clean exit 0).
-The logs are **append-only**, so a digest is only final once the probe process
-is gone; the values below were taken after all seven probes had stopped.
+it indirectly — probes 1–5 end without a `closed` line (each process was killed
+mid-iteration), while probes 6 and 7 end with `{"phase":"closed"}` (a clean
+exit 0, written when the pane closed). The logs are **append-only**, so a digest
+is only final once the probe process is gone; the values below were taken after
+all seven probes had stopped.
 
 ### B.3 Digests of the sanitized logs
 
@@ -610,12 +611,20 @@ is gone; the values below were taken after all seven probes had stopped.
 | 4 (click + menu) | `/tmp/pr40-probe4.jsonl` | `6f2841639b793d37dc35688bd385e9e249ea73fc41d9968bf2340d8d87d1d7cb` |
 | 5 (native editor) | `/tmp/pr40-probe5.jsonl` | `d72f19b1b6696de097b8897e77f4a7fa6845458676b4255549077e8ff7340272` |
 | 6 (modal, first observation) | `/tmp/pr40-probe6.jsonl` | `bdbeed2198ba1fc532f9a963204264e148da560ebe3b0fc1209297ea73eab135` |
-| 7 (modal, three-stage control) | `/tmp/pr40-probe7.jsonl` | `1e65c12b4b2a5f880a41182a7bafdc35bb7582571fc7575a9f6b1b9f9b52c8f6` |
+| 7 (modal, three-stage control) | `/tmp/pr40-probe7.jsonl` | `14ba23e480561fc9d1a34dbc592c52863c52ee8515d52e8d690c47d9c2c5602a` |
 
 The `/tmp` logs are ephemeral and not committed; Appendix A plus B.2 regenerate
-them. (Probe 6's digest was corrected after an independent review: the earlier
-value was taken before the pane quit, and the append-only log then gained its
-final `closed` line.)
+them.
+
+**Digest rule (learned twice, so it is stated):** a probe log is APPEND-ONLY and
+a clean run writes a final `{"phase":"closed"}` line only when the probe process
+ends — which for a pane-hosted probe happens when the pane closes. Every digest
+in this table is therefore of the FINAL file, taken after all probe processes had
+exited (`ps` showed none alive). Two values in earlier revisions of this document
+were taken too early and were corrected: probe 6 (before the pane quit) and probe
+7 (same mistake — its digest moved from `1e65c12b…` to `14ba23e4…` once the
+`closed` line landed). Probes 1–5 were terminated during iteration and therefore
+have no `closed` line; their digests are stable because those processes are gone.
 
 ## Appendix C — pinned permalinks for the decisive claims
 
