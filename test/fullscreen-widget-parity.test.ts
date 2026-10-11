@@ -14,9 +14,11 @@ import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { Text, visibleWidth } from '@xmoon76/pi-tui'
-import { TuiApp, type StatusData } from '../src/tui-app.ts'
+import { TuiApp, type OwnedRunner, type StatusData, type TuiAppEventsBase } from '../src/tui-app.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { runOwned } from '../src/runtime/process/tasks.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, apply as applyExtensionHost } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { setTheme } from '../src/tui/theme/runtime.ts'
@@ -59,8 +61,26 @@ interface WidgetHarness {
   attachCount(): number
 }
 
-/** A real TuiApp + SurfaceHost + ExtensionLedger on a live VirtualTerminal. */
-function makeHarness(cols: number, rows: number, ledger = new ExtensionLedger(() => {})): WidgetHarness {
+/** The owned-task entry the runner wires in production: the clipboard paste
+ * routes through it, so a harness that exercises the right-click paste uses
+ * the REAL `runOwned` with a silent capture diag. */
+const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+const owned: OwnedRunner = (label, task, options) => {
+  runOwned(label, task, { ...options, diag })
+}
+
+/** A real TuiApp + SurfaceHost + ExtensionLedger on a live VirtualTerminal.
+ * `options.app` extends the TuiApp options (e.g. `readClipboardText`) and
+ * `options.events` the events bag (e.g. the real `runOwned`). */
+function makeHarness(
+  cols: number,
+  rows: number,
+  ledger = new ExtensionLedger(() => {}),
+  options: {
+    app?: NonNullable<ConstructorParameters<typeof TuiApp>[2]>
+    events?: Partial<TuiAppEventsBase> & { runOwned?: OwnedRunner }
+  } = {},
+): WidgetHarness {
   const submitted: string[] = []
   const vt = new VirtualTerminal(cols, rows)
   let app!: TuiApp
@@ -73,7 +93,7 @@ function makeHarness(cols: number, rows: number, ledger = new ExtensionLedger(()
     attaches += 1
     originalAttach.call(host, chrome, snapshot)
   }
-  app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} }, { extensionHost: host })
+  app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {}, ...options.events }, { extensionHost: host, ...options.app })
   app.start()
   startedApps.add(app)
   host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
@@ -155,6 +175,29 @@ function outlet(host: SurfaceHost, zone: 'above' | 'below'): string {
 function click(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<0;${x};${y}M`)
   vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
+/** One SGR SECONDARY-button press (button 2) at 1-based coordinates: the
+ * fork's right-click clipboard-paste trigger. Only the press matters —
+ * `handleRightClickPaste` rejects releases. */
+function rightClick(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<2;${x};${y}M`)
+}
+
+/** Run `body` with `process.platform` reporting `win32`. The fork gates the
+ * right-click clipboard paste to win32 (`packages/pi-tui/src/tui-alt-screen.ts`,
+ * the X-divergence `handleRightClickPaste`), so the REAL trigger is
+ * unreachable on this host; the descriptor is restored in a `finally` (each
+ * test FILE runs in its own process, and this helper cannot leak past its
+ * await). */
+async function withWin32Platform<T>(body: () => Promise<T>): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+  try {
+    return await body()
+  } finally {
+    if (descriptor !== undefined) Object.defineProperty(process, 'platform', descriptor)
+  }
 }
 
 function rowsWith(lines: readonly string[], needle: string): number[] {
@@ -1122,4 +1165,71 @@ test('D-T24: a Save Location prompt re-derives the grant on enter and on restore
   await settle()
   await h.vt.waitForRender()
   assert.equal(rowsWith(painted(h.vt), 'SAVE-BELOW-24').length, 1, 'the abort-driven restore re-derives the roomier grant')
+})
+
+test('D-T25: a right-click paste that shrinks the Save Location frame re-derives the grant before its completion resolves', async () => {
+  // The Save Location prompt's suggestion list is cleared SYNCHRONOUSLY on
+  // input while the replacement scan is still pending
+  // (src/tui/interaction/save-location.ts refreshSuggestions), so the frame
+  // shrinks with no host render request until the async completion lands. The
+  // synthetic right-click paste must therefore re-derive the budget itself.
+  const suggestions = Array.from({ length: 5 }, (_, index) => ({ value: `dir-${index + 1}/`, displayPath: `dir-${index + 1}` }))
+  let releaseCompletion: (() => void) | undefined
+  const deps = {
+    resolveDirectory: (input: string) => `/tmp/${input}`,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async (raw: string) => {
+      if (raw === './') return suggestions
+      // HELD: the pasted path's scan never resolves until the test releases it.
+      return await new Promise<typeof suggestions | null>((resolve) => { releaseCompletion = () => resolve(null) })
+    },
+  }
+  const h = makeHarness(80, 20, new ExtensionLedger(() => {}), {
+    app: { readClipboardText: async () => 'newdir/' },
+    events: { runOwned: owned },
+  })
+  registerWidget(h.ledger, 'input.widget.above', 'a1', 'PASTE-ABOVE-25')
+  registerWidget(h.ledger, 'input.widget.below', 'b1', 'PASTE-BELOW-25')
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+
+  const prompt = h.app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-25.zip', initialDirectory: './' },
+    deps,
+  )
+  const promptSettled = prompt.then(value => value, error => String(error))
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'above'), '', 'the tall five-suggestion frame retires the above zone')
+  assert.equal(outlet(h.host, 'below'), '', 'the tall five-suggestion frame retires the below zone')
+  const tallFrame = modalSeatBottom(painted(h.vt))
+
+  // The REAL right-click clipboard trigger (win32-gated in the fork), landing
+  // inside the prompt frame.
+  await withWin32Platform(async () => {
+    rightClick(h.vt, 12, tallFrame - 2)
+    await settle()
+    await h.vt.waitForRender()
+  })
+  assert.ok(releaseCompletion !== undefined, 'the right-click paste must start the held directory completion')
+  const shrunk = painted(h.vt)
+  const shrunkBottom = modalSeatBottom(shrunk)
+  assert.ok(shrunkBottom < tallFrame, `the suggestion-less frame must be shorter (${shrunkBottom} < ${tallFrame}):\n${shrunk.join('\n')}`)
+  // The discriminating assertion: the grant follows the SHORTER frame while the
+  // completion is still held.
+  assert.equal(rowsWith(shrunk, 'PASTE-ABOVE-25').length, 1, `the shorter frame restores the above zone:\n${shrunk.join('\n')}`)
+  assert.equal(rowsWith(shrunk, 'PASTE-BELOW-25').length, 1, `the shorter frame restores the below zone:\n${shrunk.join('\n')}`)
+  assertFooterPainted(h, shrunk, shrunkBottom)
+
+  releaseCompletion()
+  await settle()
+  await h.vt.waitForRender()
+  const released = painted(h.vt)
+  assert.equal(rowsWith(released, 'PASTE-BELOW-25').length, 1, 'releasing the completion keeps the grant stable')
+  assertFooterPainted(h, released, modalSeatBottom(released))
+
+  h.vt.sendInput('\x1b')
+  await promptSettled
 })
