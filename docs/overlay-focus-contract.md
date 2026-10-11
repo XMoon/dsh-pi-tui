@@ -202,6 +202,14 @@ When you add or change an overlay path, cover the family it belongs to:
   fourth `onDispose`; precommit the latch before the user callback runs; keep
   the physical hide and the owner notification as INDEPENDENT
   `runSyncDisposalSteps` steps (see §10).
+- **A new blocker that takes the seat** (question / save / approval class):
+  commit the blocking intent BEFORE the park and before any call that can run a
+  plugin callback, then park the optional tenant; the modal must never be able
+  to observe an unblocked seat (see §11).
+- **A private optional seat tenant**: one record, one per-open token, one
+  caller-owned `close`; REFUSE before the factory; restore only at the LAST
+  blocker and only while `isCurrent()` holds; never let the tenant become a
+  second focus/currentness authority (see §11).
 - **Assertions to add**: `assertOverlayForestForTest()` after reentrant
   operations; focus/blur counts around internal restores; the logical
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
@@ -343,3 +351,98 @@ exactly ONE per-open finalizer, and every close route funnels through it:
 Evidence: `test/surface-lifecycle-closure.test.ts` (Esc, returned closer, screen
 swap, parent-only close, Quick/Full restore, Job A → B, session reset, final
 dispose, throwing child dispose, Sign-in notice identity).
+
+## 11. Optional seat tenant: PARK / REFUSE
+
+A private Client-local caller may project ONE optional tenant into the editor
+seat. Phase 3A ships the seam and its arbitration, not a product surface:
+`TuiApp.tryOpenOptionalSeatTenant` is private and no command or extension
+service opens a tenant yet. The three BLOCKING owners (Question, Approval, Save
+Location) outrank it, and the record never becomes a second authority over them
+or over the editor seat.
+
+- **Authority.** The single record (`phase: 'active' | 'parked'`, one per-open
+  `token`, one caller-owned `close`) lives in `TuiApp`. The component and its
+  lifetime stay caller-owned, and `EditorSeatHolder` stays the only owner of the
+  host/plugin editor it manages. Currentness is the caller's `isCurrent()`
+  predicate (its session/generation subject) — never a status cwd/text, a
+  `TuiApp.generation` on its own, or a shadow `focused` boolean.
+- **REFUSE is a capacity result.** The open checks a disposed surface, a live
+  Question (`activeQuestions`), a live approval (`approvals.isActive()`) and a
+  live Save Location (`activeSaveLocation`) BEFORE the factory runs: a refused
+  request calls no factory, calls no `close`, writes no notification and leaves
+  the blocking owner untouched.
+- **One source of truth for the seat projection.** `seatFallbackComponent()`
+  derives the physical occupant from the LIVE owner — Question frame > Save
+  Location frame > ACTIVE-and-current optional tenant > the latest host/plugin
+  editor — and returns `undefined` while a blocking owner is live but its frame
+  is not built yet, so a synchronous callback's late tail can never project a
+  newer winner over it. `mountSeatChild()`, `focusSeatOwner()`, the fullscreen
+  focus fallbacks and the plugin `viewSwap` guard all read that ONE derivation;
+  physical focus is never inferred from, and never rewritten by, a parked
+  tenant.
+- **PARK is committed before the blocker's first callback.** A Question commits
+  `activeQuestions` and parks the tenant BEFORE the Save Location handoff; an
+  approval commits its pending prompt as active BEFORE the park, the Save
+  Location cancellation and the mount; a Save Location commits
+  `activeSaveLocation` BEFORE the park. The tenant therefore never flashes an
+  intermediate ACTIVE → PARK round trip, and a settling Save Location can never
+  take its "nothing else is active" restore path behind a prompt that is
+  already mounting.
+- **Question → Save Location handoff.** A Question that supersedes a Save
+  Location passes its own state into `settleSaveLocation(state, result,
+  handoff)`. When that flow is STILL the live active one, the prompt transfers
+  its `suspendedOverlays` to the flow and SKIPS the seat remount, the focus
+  fallback and `resumeSuspendedRoots` (the question resumes the graph once, at
+  its own final settle). Prompt disposal, the abort-listener cleanup and the
+  promise settlement stay independent steps. A callback that invalidated the
+  flow first makes the handoff a no-op, so the settle restores normally instead
+  of resurrecting a settled target.
+- **Restore only at the LAST blocker.** The Question/Save final settles clear
+  their owner first, then call `maybeRestoreOptionalSeat()`; an approval
+  restores only after `showNext()` proved the LIVE queue drained (`active ===
+  undefined && queue.length === 0`), so a queued A → B approval keeps the tenant
+  PARKED between the two prompts. The restore re-reads `isCurrent()` and the
+  live blocker set; a stale subject is retired instead of restored.
+- **Exactly-once identity.** `retireOptionalSeat(token)` drops the identity
+  FIRST, latches `finalized` BEFORE the caller's `close()`, and attempts the
+  cleanup and the fallback projection as INDEPENDENT `runSyncDisposalSteps`
+  entries; a lease that arrives late is a strict no-op for the newer record. A
+  monotonic request revision fences BOTH a re-entrant factory and a re-entrant
+  previous `close()`: a candidate whose revision went stale releases exactly
+  itself and never installs (there is no unconditional
+  `finally { optionalSeat = old }`).
+- **Input.** While the tenant is `active`, current and PHYSICALLY focused — and
+  after every modal / viewer / search / capturing-overlay owner had its turn —
+  the ordinary keys go to its `handleInput` and are consumed: the Host editor
+  submit / steer / queue / task actions, the leader machine and the
+  plugin-editor Enter forward must never fire behind it. Host-RESERVED input
+  keeps its owner: physical Esc (the interrupt/exit lifecycle seam), the
+  effective exit key, the terminal protocol (focus reports, key release/repeat,
+  mouse) and the unstable raw-capture stage all run outside this path. A parked
+  or stale tenant receives nothing.
+- **Approval mount fence.** `ApprovalRuntime.showNext()` commits `active =
+  pending` BEFORE the park / save cancellation / mount, and `mount()`
+  re-validates `active === pending && !settled && !isDisposed()` AFTER
+  `showApprovalOverlay` returned: a losing mount hides only the handle it
+  created, disposes only the frame it created, registers no fullscreen rebind
+  and never publishes over the newer prompt.
+- **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
+  rides the caller's `close()` as the FIRST independent step of the `tui
+  dispose` batch, so a throwing tenant cleanup neither skips the
+  approval/question/save/holder teardown nor is swallowed — both failures
+  surface as `AggregateError.errors` in batch order.
+- **By-design boundaries.** An approval alone never fences the physical seat (it
+  is a host overlay), so a plugin recompile may still swap the seat beneath it.
+  `stop()`/`start()` and the external-editor round-trip are NOT disposal: the
+  logical record survives them. No History or Approval product migration rides
+  this seam — `openHistorySearch()` keeps its own managed overlay and its own
+  PARK semantics, and it is deliberately not an optional tenant.
+
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-25: activation and
+real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
+and Approval including both FIFOs, replacement and re-entrant-close identity,
+a stale subject, a plugin editor HMR while parked, regular↔fullscreen, final
+disposal, throwing-cleanup aggregation, Save preemption by a Question and by an
+Approval, an Approval + Question overlap, a capturing-overlay handoff, the
+untouched History overlay, and input routing).
