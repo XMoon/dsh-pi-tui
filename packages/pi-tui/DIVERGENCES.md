@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `ee8702b75aaeba3f1bb6204ccffab703b35af5a2`
+- Audited local source commit: `7d9bd69b098dfa7112ae61d589f54289951e4dcc`
 - Branch audited: `chore/pi-tui-v1.1.0-revendor`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
@@ -817,7 +817,7 @@ OSC color replies carry no request id, so a reply that arrives after its query t
 - a timed-out query stays the outstanding tombstone; the next waiting query is written only after that query's DA1 sentinel
 - a late reply is delivered to its own query's deliver/onLateReply callback and can never be attributed to a later query
 - a query that times out while an earlier query still owns the wire was never written and is dropped from the queue (no stale burst after it settled, and no unbounded pending-query retention on a terminal that never answers DA1)
-- a well-formed OSC 10/11/4 reply is swallowed even when this screen has no query pending (a reply for a query issued before a fullscreen swap or stop must never reach the input pipeline as typed input)
+- a well-formed OSC 10/11/4 reply and the DA1 sentinel that ends the same burst are swallowed even when this screen has no query pending (a reply or a stray DA1 for a query issued before a fullscreen swap or stop must never reach the input pipeline, where the DA1 would read as user activity)
 
 #### Dependency map
 
@@ -851,7 +851,7 @@ OSC color replies carry no request id, so a reply that arrives after its query t
 - packages/pi-tui/test/terminal-colors.test.ts: the upstream queryTerminalColors contract (single burst, DA1 completion, incomplete palette dropped, late replies after a timeout)
 - test/rendering.test.ts: autoDetectTheme applies the detected theme through the ACTIVE screen in fullscreen mode
 - test/rendering.test.ts: trackTerminalTheme queries the terminal colors once, derives the scheme from the reported background, and re-queries after disable
-- packages/pi-tui/test/osc11-query.test.ts: a query that times out while an earlier query owns the wire is never written, and a stray well-formed color reply with no pending query is swallowed rather than forwarded as input (both mutation-checked)
+- packages/pi-tui/test/osc11-query.test.ts: a query that times out while an earlier query owns the wire is never written, and a stray well-formed color reply plus its DA1 sentinel are swallowed rather than forwarded as input (mutation-checked)
 
 #### Upstream comparison
 
@@ -879,7 +879,7 @@ OSC color replies carry no request id, so a reply that arrives after its query t
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Re-audited at v1.1.0 (abe508e1): the mechanism moved from the local serialized OSC 11 API to a serialization guard on the upstream queryTerminalColors mechanism, and the Host migrated to queryTerminalColors. The obsolete queryTerminalBackgroundColor/queryTerminalColorScheme seam is removed (upstream removed it); no removed public API was resurrected. Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used. Round-1 review follow-ups applied: the timeout path again drops a never-written queued query (the base rule the upstream consumer had lost) and an unmatched well-formed color reply is swallowed even with no pending query, with mutation-checked guards in osc11-query.test.ts and terminal-colors.test.ts.
+- Notes: Re-audited at v1.1.0 (abe508e1): the mechanism moved from the local serialized OSC 11 API to a serialization guard on the upstream queryTerminalColors mechanism, and the Host migrated to queryTerminalColors. The obsolete queryTerminalBackgroundColor/queryTerminalColorScheme seam is removed (upstream removed it); no removed public API was resurrected. Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used. Round-2 review follow-up applied: the no-pending-query branch also swallows the burst-ending DA1 sentinel (an unowned DA1 otherwise reads as user activity in the Host input path); the trade-off (an integration writing its own CSI c and reading the answer through raw input would lose it) is recorded in the source comment, and no such consumer exists in this repo. Round-1 review follow-ups applied: the timeout path again drops a never-written queued query (the base rule the upstream consumer had lost) and an unmatched well-formed color reply is swallowed even with no pending query, with mutation-checked guards in osc11-query.test.ts and terminal-colors.test.ts.
 
 ### X009 — No stray spacer blank on the final row when exiting
 
