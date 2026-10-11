@@ -1321,6 +1321,14 @@ export interface PickerOptions {
   }
 }
 
+/**
+ * Why an open Task Browser was retired. `'promote'` is the Quick → Full
+ * transition (the ONE reason that must preserve the dataset scope); the other
+ * three are the terminal closures. This is the owner-notification signal, not
+ * a product action.
+ */
+type TaskBrowserCloseReason = 'cancel' | 'select' | 'promote' | 'external'
+
 /** Options for {@link TuiApp.openTaskBrowser}. */
 export interface TaskBrowserOptions {
   /** Show explicit `/` search mode when true. */
@@ -1364,6 +1372,16 @@ export interface TaskBrowserOptions {
   onStop?: (value: string) => void
   /** First-time viewport exposure of attention rows (the ack signal). */
   onViewportExpose?: (ids: readonly string[]) => void
+  /**
+   * The browser reached its terminal closure, whatever removed it: an explicit
+   * user/Esc/selection/promotion close or a PHYSICAL disposal that never went
+   * through the returned closer (`TuiApp.dispose`, a fullscreen screen swap, a
+   * broker detach). Fired EXACTLY once per open, and NEVER for a mere
+   * suppression (`setHidden`/a Job detail hiding its parent) — the parent
+   * instance survives those. The owner uses it to release the child Job
+   * observer that lives under this browser.
+   */
+  onRetired?: (reason: TaskBrowserCloseReason) => void
 }
 
 /** Live control of an open picker. */
@@ -18225,7 +18243,9 @@ export class TuiApp {
    *   detail overlay opened by the callback (e.g. the Job View) hides the
    *   browser through the overlay stack; `'keep-open'` preserves the exact
    *   browser instance/state for the detail's Esc.
-   * @param onCancel - dismissed without a choice.
+   * @param onCancel - dismissed without a choice; receives the view state
+   *   captured BEFORE the browser frame is disposed (a Full promoted from
+   *   Quick restores its search/selection from it).
    * @param options - header/search/sizing configuration.
    * @returns a handle to close the browser or replace its rows (e.g. when
    * jobs change while it is open).
@@ -18233,7 +18253,7 @@ export class TuiApp {
   openTaskBrowser(
     items: readonly TaskPanelItem[],
     onSelect: (value: string) => 'close' | 'keep-open',
-    onCancel: () => void,
+    onCancel: (state: TaskBrowserViewState) => void,
     options: TaskBrowserOptions,
   ): TaskBrowserHandle {
     // A finally-disposed surface must not mint the panel's 1s elapsed
@@ -18252,6 +18272,18 @@ export class TuiApp {
         collapsedIds: new Set(options.collapsedIds ?? []),
       }), visibleItems: () => [], viewportItems: () => [] }
     }
+    // ONE per-open retire owner: every terminal closure funnels here, so the
+    // owner is notified exactly once whether the browser died through
+    // `requestClose` or through a physical disposal (a fullscreen screen swap,
+    // `TuiApp.dispose`, a broker detach) that never reached the returned
+    // closer. A mere SUPPRESSION (a Job detail hiding its parent) never
+    // reaches it — the parent instance survives and must keep its state.
+    let retired = false
+    const retireOnce = (reason: TaskBrowserCloseReason): void => {
+      if (retired) return
+      retired = true                 // precommit BEFORE the owner callback
+      options.onRetired?.(reason)
+    }
     const panel = new TaskBrowserPanel(
       items.map(item => ({ ...item })),
       options.maxVisible ?? 10,
@@ -18265,7 +18297,7 @@ export class TuiApp {
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
         onViewFull: state => {
-          close()
+          requestClose('promote')
           options.onViewFull?.(state)
         },
         mode: options.mode,
@@ -18287,11 +18319,15 @@ export class TuiApp {
         // callback would destroy the parent state that `keep-open`
         // exists to preserve.
         const disposition = onSelect(value)
-        if (disposition === 'close') close()
+        if (disposition === 'close') requestClose('select')
       },
       () => {
-        close()
-        onCancel()
+        // Capture the view state BEFORE the frame is disposed: `onCancel` is
+        // the Quick-restore seam (a Full promoted from Quick restores its
+        // search/selection), and the panel is gone by the time it runs.
+        const state = panel.getViewState()
+        requestClose('cancel')
+        onCancel(state)
       },
       () => this.requestRender(),
     )
@@ -18327,25 +18363,34 @@ export class TuiApp {
     }
     const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
       panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
-    })
+    }, () => retireOnce('external'))
     const handle = this.showOverlayOnHost(frame, {
       width: overlayWidth,
       maxHeight: overlayMaxHeight,
       margin: fullMode ? 1 : undefined,
     })
-    // One close path: hide the overlay AND stop the panel's 1s elapsed tick
-    // (an unref'd interval must still be cleared — the panel is gone).
-    // `close` is a `let` declared before the panel callbacks above reference
-    // it; it is assigned here, after `handle` exists. The callbacks only
-    // fire on later user input, so the late assignment is safe.
-    let close: () => void = () => {}
-    // The owning FocusForwardingFrame + disposeOnHide release the panel
-    // (its 1s elapsed tick) on hide — no manual dispose here (X007).
-    close = (): void => {
-      handle.hide()
+    // One close path: notify the owner and hide the overlay (the owning
+    // FocusForwardingFrame + disposeOnHide release the panel's 1s elapsed
+    // tick — no manual dispose here, X007). `requestClose` is a `let`
+    // declared before the panel callbacks above reference it; it is assigned
+    // here, after `handle` exists. The callbacks only fire on later user
+    // input, so the late assignment is safe.
+    let closing = false
+    let requestClose: (reason: TaskBrowserCloseReason) => void = () => {}
+    requestClose = (reason: TaskBrowserCloseReason): void => {
+      if (closing || retired) return
+      closing = true
+      // The owner closure runs BEFORE the physical parent hide: the Job child
+      // overlay lives under this browser's logical slot and must be released
+      // while the parent is still alive. Both obligations are independent — a
+      // throwing owner release must not strand the physical hide.
+      runSyncDisposalSteps('task browser close', [
+        () => retireOnce(reason),
+        () => handle.hide(),
+      ])
     }
     return {
-      close,
+      close: () => requestClose('external'),
       setItems: (next: readonly TaskPanelItem[], preferredValue?: string) => {
         panel.setItems(next.map(item => ({ ...item })), preferredValue)
         this.requestRender()
@@ -18703,20 +18748,33 @@ export class TuiApp {
     }
     const initialHint = hintOf()
     const panel = new OutputViewerPanel(options.title, options.initial, initialHint.hint, initialHint.fallback)
-    let closed = false
-    const close = (): void => {
-      if (closed) return
-      closed = true
-      // The panel OWNS the refresh interval: hide() runs the
-      // disposeOnHide chain (FocusForwardingFrame.dispose →
-      // OutputViewerPanel.dispose → clearInterval), so a final surface
-      // teardown that never calls this closer still stops the timer.
-      handle.hide()
+    // ONE per-open finalizer is the ONLY notification owner: Esc, the returned
+    // closer and the frame's physical `onDispose` all funnel here, so
+    // `onClose` fires exactly once however the overlay died (including a
+    // fullscreen screen swap / final teardown that never called the closer).
+    let finalized = false
+    const finalizeOnce = (): void => {
+      if (finalized) return
+      finalized = true                 // precommit BEFORE the user callback
       options.onClose?.()
+    }
+    let closeRequested = false
+    const requestClose = (): void => {
+      if (closeRequested || finalized) return
+      closeRequested = true            // precommit BEFORE hide/onDispose
+      // The panel OWNS the refresh interval: hide() runs the disposeOnHide
+      // chain (FocusForwardingFrame.dispose → OutputViewerPanel.dispose →
+      // clearInterval), so a final surface teardown that never calls this
+      // closer still stops the timer. The finalizer is an INDEPENDENT
+      // obligation: a throwing hide must not strand the observer release.
+      runSyncDisposalSteps('output viewer close', [
+        () => handle.hide(),
+        () => finalizeOnce(),
+      ])
     }
     panel.handleInput = (data: string): void => {
       if (matchesKey(data, 'escape')) {
-        close()
+        requestClose()
         return
       }
       // The tasks.* actions are CAPTURING-scope component actions: the host
@@ -18737,13 +18795,13 @@ export class TuiApp {
     // the frame's own top/bottom border rows (the panel budgets its
     // CONTENT, exactly like the picker/task-browser shells).
     const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry =>
-      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)))
+      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)), finalizeOnce)
     const handle = this.showOverlayOnHost(frame, {
       width: OUTPUT_VIEWER_WIDTH,
       maxHeight: OUTPUT_VIEWER_MAX_HEIGHT,
     })
     panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000, hintOf)
-    return close
+    return requestClose
   }
 
   /** Switch the active color theme and repaint everything. Every surface
