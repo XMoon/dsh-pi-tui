@@ -1,0 +1,695 @@
+/** Panel state and pure selectors for the native TSP `/model` presentation.
+ *
+ * This module answers only "what is the panel currently browsing / offering":
+ * its state, the pure selectors over it, the action bar's contents, and the
+ * measured layout budget. It renders nothing, mutates nothing and writes
+ * nothing, so the view builder and the key map stay pure functions over one
+ * explicit state object.
+ * @module tui/tsp/model-picker-state
+ */
+import type { PickerAction, PickerItem } from '@stencil-hq/tern'
+import type {
+  ModelPickerDirectory,
+  ModelPickerRequest,
+} from '../../app/command/model-presentation.ts'
+import {
+  effortChoicesOf,
+  initialEffortOf,
+  type InlineEffortChoice,
+  type ModelPickerFailureRow,
+  type ModelPickerModelRow,
+} from '../pickers/model-directory.ts'
+
+/** The read/write lifecycle of the panel. `pending` is an ADMITTED write. */
+export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
+
+/** The visible page. `lg` shows the wide page; `md` drills through all three. */
+export type ModelPickerPage = 'models' | 'details' | 'effort'
+
+/** K2: the three logical regions Tab moves between. Only `primary-action` may
+ *  ever commit a write, and only when it is visible and enabled. */
+export type ModelPickerZone = 'models' | 'effort' | 'primary-action'
+
+export interface ModelPickerPanel {
+  /** The presenter serial: an event bound to another panel can never act here. */
+  readonly serial: number
+  readonly request: ModelPickerRequest
+  revision: number
+  disposed: boolean
+  phase: ModelPickerPhase
+  page: ModelPickerPage
+  zone: ModelPickerZone
+  /** The scope filter (`all` or one provider id) — browse state, never authority. */
+  scope: string
+  query: string
+  cursor: number
+  /** The highlighted model's stable row id. */
+  selected: string | undefined
+  /**
+   * Which action bar entry owns Enter while the keyboard is in the action zone.
+   * `undefined` (and any id the current page no longer offers) resolves to the
+   * Primary Action, so entering the zone always lands on the frozen default.
+   */
+  actionFocus: string | undefined
+  /** The zone the keyboard came from when it entered the action bar (Esc returns
+   *  there instead of guessing between the effort selector and the list). */
+  previousZone: ModelPickerZone | undefined
+  /** The page the effort selector was opened FROM (frozen §4.4: a compact Esc
+   *  returns to the previous page, not always to the model list). */
+  previousPage: ModelPickerPage | undefined
+  /** The single local notice (a read error or the last write outcome). */
+  notice: string
+  directory: ModelPickerDirectory | undefined
+  rows: readonly ModelPickerModelRow[]
+  failures: readonly ModelPickerFailureRow[]
+  /**
+   * The details page's presentation cursor (an index into its inert fact rows).
+   * It only keeps the native list scrolled to the row the user is reading, so a
+   * long description's tail stays reachable from the keyboard.
+   */
+  factCursor: number
+  /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
+  efforts: Map<string, string>
+}
+
+/* ------------------------------------------------------------------ widths */
+
+const graphemeSegmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })
+/**
+ * East Asian Wide/Fullwidth, emoji and supplementary planes occupy two columns;
+ * everything else one. A conservative classification is fine here: it only makes
+ * a wrap earlier and the layout budget smaller.
+ */
+const WIDE_GRAPHEME = /[\u1100-\u115F\u2E80-\uA4CF\uA960-\uA97F\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]|[\u{1F000}-\u{1FAFF}]|[\u{20000}-\u{3FFFD}]/u
+const LINE_BREAK = /[\n\r\v\f\u2028\u2029]/
+const columnsOf = (grapheme: string): number => {
+  // A tab can advance to the next tab stop (several widest-glyph units), so it
+  // is priced conservatively rather than as one column.
+  if (grapheme === '\t') return 3
+  return WIDE_GRAPHEME.test(grapheme) ? 2 : 1
+}
+
+/** The display columns of one text (never UTF-16 units). */
+export function displayWidth(text: string): number {
+  let width = 0
+  for (const { segment } of graphemeSegmenter.segment(text)) width += columnsOf(segment)
+  return width
+}
+
+/**
+ * Wrap `text` into lines of at most `columns` DISPLAY columns, breaking on
+ * grapheme boundaries (a surrogate pair is never split) and preferring the last
+ * space (a break consumes it, which is what a word wrap does). An explicit
+ * newline always breaks.
+ */
+export function wrapColumns(text: string, columns: number): readonly string[] {
+  const lines: string[] = []
+  let line = ''
+  let width = 0
+  /** Commit the current line KEEPING an empty one: the renderer preserves an
+   *  explicit blank line, so dropping it would under-count the height. */
+  const emit = (): void => {
+    lines.push(line.trim())
+    line = ''
+    width = 0
+  }
+  const flushWrapped = (): void => {
+    const trimmed = line.trim()
+    if (trimmed === '') return
+    lines.push(trimmed)
+    line = ''
+    width = 0
+  }
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    // A grapheme cluster can CARRY the break (`\r\n` is one cluster, and a lone
+    // CR or a Unicode line/paragraph separator is its own): every such segment
+    // is exactly ONE rendered line break.
+    if (LINE_BREAK.test(segment)) {
+      emit()
+      continue
+    }
+    const cell = columnsOf(segment)
+    if (width + cell > columns && line !== '') {
+      const space = line.lastIndexOf(' ')
+      if (space > 0) {
+        const rest = line.slice(space + 1)
+        line = line.slice(0, space)
+        flushWrapped()
+        line = rest
+        width = displayWidth(rest)
+      } else {
+        flushWrapped()
+      }
+    }
+    line += segment
+    width += cell
+  }
+  flushWrapped()
+  return lines
+}
+
+/* ------------------------------------------------------------------- scope */
+
+/** The provider-scope filter's "every provider" value (the panel's own state;
+ *  the WIRE id of that scope is {@link scopeId}'s `scope:all`). */
+export const ALL_SCOPES = 'all'
+const SCOPE_PREFIX = 'scope:'
+
+/** The wire/local id of one provider scope. The prefix keeps a scope click
+ *  distinguishable from a model-row click (a JSON array) on the same channel. */
+export function scopeId(providerId: string): string {
+  return SCOPE_PREFIX + providerId
+}
+
+/** The PROVIDER a scope id filters, or `undefined` when the id is not a scope. */
+export function scopeProviderId(id: string): string | undefined {
+  return id.startsWith(SCOPE_PREFIX) ? id.slice(SCOPE_PREFIX.length) : undefined
+}
+
+/* --------------------------------------------------------------------- rows */
+
+/** The stable wire/local id of one model row. JSON keeps provider and model
+ *  distinct (model ids are not globally unique) in a printable identifier. */
+export function modelRowId(row: ModelPickerModelRow): string {
+  return JSON.stringify([row.providerId, row.modelId])
+}
+
+/** The inert failure row's id. It is deliberately not a scope id and not a model
+ *  row id, so no browse path can ever mistake it for a selectable model. */
+export function failureRowId(providerId: string): string {
+  return `failure:${providerId}`
+}
+
+/* ---------------------------------------------------------------- selectors */
+
+/** The rows the current query and scope make visible, in directory order. */
+export function visibleModels(panel: ModelPickerPanel): readonly ModelPickerModelRow[] {
+  const query = panel.query.toLowerCase()
+  return panel.rows.filter((row) =>
+    (panel.scope === ALL_SCOPES || row.providerId === panel.scope) &&
+    `${row.providerName} ${row.providerId} ${row.modelName} ${row.modelId}`.toLowerCase().includes(query),
+  )
+}
+
+/** The highlighted row, or `undefined` when nothing visible is selected. */
+export function highlightedModel(panel: ModelPickerPanel): ModelPickerModelRow | undefined {
+  return visibleModels(panel).find((row) => modelRowId(row) === panel.selected)
+}
+
+/** The effort candidates a model advertises; empty means "no selector at all". */
+export function modelChoices(row: ModelPickerModelRow | undefined): readonly InlineEffortChoice[] {
+  return row === undefined ? [] : effortChoicesOf(row)
+}
+
+/** The local draft effort of one model (undefined when it has no metadata). */
+export function draftedEffort(
+  panel: ModelPickerPanel,
+  row: ModelPickerModelRow | undefined,
+): string | undefined {
+  return row === undefined ? undefined : panel.efforts.get(modelRowId(row))
+}
+
+/**
+ * The single-line write subject, captured at open and never re-derived. The two
+ * strings are kept SHORT on purpose: at the 400px minimum supported pane the
+ * compact strip gives its label 40% of the sheet (a measured 120px), so a longer
+ * sentence would be ellipsized there — the subject must stay completely visible
+ * at every supported width (real-pane check: its rendered advance stays inside
+ * the font's own band instead of stopping at the cap).
+ */
+export function subjectLine(panel: ModelPickerPanel): string {
+  return panel.request.subject.sessionless ? 'Default model' : 'Session model'
+}
+
+/** The advertised description of one model, from the authoritative directory. */
+export function advertisedDescription(
+  panel: ModelPickerPanel,
+  row: ModelPickerModelRow,
+): string | undefined {
+  return panel.directory?.directory.groups
+    .find((group) => group.id === row.providerId)
+    ?.models.find((model) => model.id === row.modelId)?.description
+}
+
+/** One inert fact row of the panel's configured selection state. */
+export interface ModelPickerFact {
+  readonly id: string
+  readonly label: string
+  readonly detail: string
+}
+
+/** The compact one-token value of a configured selection. The details card is
+ *  narrow, and the surround spaces of a `a / b / c` form cost a whole extra
+ *  wrapped line under the worst-case width bound. */
+const factValue = (selection: { provider: string; model: string; reasoningEffort?: string }): string =>
+  `${selection.provider}/${selection.model}${selection.reasoningEffort === undefined ? '' : `/${selection.reasoningEffort}`}`
+
+/**
+ * The configured-selection facts shown in the details area, in ONE place each:
+ * `Current` only for a live Session (never for a sessionless subject) and
+ * `Default` from `directory.default` — including its own effort, which the
+ * row-level projection cannot carry when the default is not the current model.
+ */
+export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFact[] {
+  const directory = panel.directory
+  if (directory === undefined) return []
+  return [
+    ...(panel.request.subject.sessionless || directory.current === undefined
+      ? []
+      : [{ id: 'fact-current', label: 'Current', detail: factValue(directory.current) }]),
+    { id: 'fact-default', label: 'Default', detail: factValue(directory.directory.default) },
+  ]
+}
+
+/** The single-line keyboard hint of the current zone (rendered by the view and
+ *  counted by the layout budget, so the two can never disagree). */
+export function zoneHintText(panel: ModelPickerPanel): string {
+  // Every hint stays within one worst-case line, so the hint never eats the
+  // layout budget (the action bar's shape cue carries the focus itself).
+  if (panel.phase === 'pending') return 'Selecting…'
+  if (panel.phase === 'error') return 'Retry first'
+  if (panel.zone === 'effort') return '↑↓ draft'
+  if (panel.zone === 'primary-action') return 'Enter: apply'
+  return 'Tab: actions'
+}
+
+/* --------------------------------------------------------------- action bar */
+
+/** The single visible Primary Action of the current phase. Only this action may
+ *  ever commit; while the directory read failed it IS the read-only Retry. */
+function primaryAction(panel: ModelPickerPanel): PickerAction {
+  if (panel.phase === 'pending') {
+    return { id: 'apply', label: 'Selecting…', primary: true, disabled: true }
+  }
+  const label = panel.phase === 'error'
+    ? 'Retry'
+    : panel.request.subject.sessionless ? 'Save default' : 'Apply'
+  return {
+    id: 'apply',
+    label,
+    primary: true,
+    // Loading admits no write, so the action must LOOK unavailable rather than
+    // silently refusing a click (a Retry keeps the previous rows selectable).
+    disabled: panel.phase === 'loading'
+      || (panel.phase !== 'error' && highlightedModel(panel) === undefined)
+      ? true
+      : undefined,
+  }
+}
+
+/** The partial-read recovery action: the reached providers stay usable and this
+ *  re-reads the whole directory through the command's one read owner. */
+function retryAction(panel: ModelPickerPanel): PickerAction | undefined {
+  return panel.phase === 'ready' && panel.failures.length > 0
+    ? { id: 'retry', label: 'Retry failed providers' }
+    : undefined
+}
+
+/**
+ * The action bar for the CURRENT phase and page: the ONE owner of "which actions
+ * exist". The complete details and the complete Effort list are ALWAYS offered
+ * while the highlighted model has them: at wide width the inline radio rows are
+ * the primary selector, but a different UI font, an enlarged font or another zoom
+ * can change what that column really shows, so the `Choose effort` page — the
+ * same picker list, the same draft and the same confirmation — stays one action
+ * away in EVERY layout and environment. The view renders exactly this list and
+ * the key map moves the keyboard focus across it, so a visible action can never
+ * be unreachable or a no-op.
+ */
+export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
+  const actions: PickerAction[] = [{ id: 'close', label: 'Close', end: true }]
+  // Only `ready` admits browsing: a loading panel admits the search box and
+  // Close, an admitted write admits Close, and a failed read admits only the
+  // action bar's Retry. Rendering a browse action the phase refuses would make
+  // it a visible no-op (and a keyboard focus target that cannot act).
+  if (panel.phase !== 'ready') {
+    actions.push(primaryAction(panel))
+    return actions
+  }
+  const retry = retryAction(panel)
+  if (panel.page !== 'models') actions.push({ id: 'back', label: 'Back' })
+  const row = highlightedModel(panel)
+  if (panel.page === 'models') {
+    actions.push({ id: 'details', label: 'Details', disabled: row === undefined ? true : undefined })
+  }
+  // The effort page IS the selector, so its own action bar never offers a
+  // second, contradictory "Models" entry (Back is the way out).
+  if (panel.page !== 'effort' && modelChoices(row).length > 0) {
+    actions.push({ id: 'effort-page', label: 'Choose effort' })
+  }
+  if (retry !== undefined) actions.push(retry)
+  actions.push(primaryAction(panel))
+  return actions
+}
+
+/** The action that owns Enter right now. */
+export function focusedAction(panel: ModelPickerPanel): PickerAction {
+  const actions = pickerActions(panel)
+  const explicit = actions.find((action) => action.id === panel.actionFocus && action.disabled !== true)
+  // `pickerActions` always ends with the Primary Action.
+  return explicit ?? actions[actions.length - 1]!
+}
+
+/** The next ENABLED action in the bar, wrapping in `delta`'s direction. */
+export function stepActionFocus(panel: ModelPickerPanel, delta: -1 | 1): string {
+  const offered = pickerActions(panel).filter((action) => action.disabled !== true)
+  const at = offered.findIndex((action) => action.id === focusedAction(panel).id)
+  const next = offered[(Math.max(at, 0) + delta + offered.length) % offered.length]
+  return next?.id ?? focusedAction(panel).id
+}
+
+/* ------------------------------------------------------------- details page */
+
+/** The measured ONE-line width a Details fact row offers its `detail`, in px.
+ *
+ *  The SDK renders a fact row's `detail` on a SINGLE measured 18px line and
+ *  clips what does not fit with an ellipsis: an unbroken fragment never becomes
+ *  two lines, so "the row is 36px tall" is not a readability budget. The two
+ *  numbers below are the slots of the NARROWEST pane each layout supports, both
+ *  measured in the real Tern production presenter:
+ *
+ *  - compact (`sz-md`, `narrow`, `pv-hide`): 286px at the 400px minimum
+ *    supported pane width (560px gives 446px).
+ *  - wide (`sz-lg`, side preview): 366px at 1040px — the narrowest pane the
+ *    client keeps the details column BESIDE the list (at 1000-1020px it moves
+ *    the preview below and the list becomes full width, which is wider and
+ *    therefore covered by the same bound; 1100px gives 426px).
+ */
+const FACT_SLOT_COMPACT_PX = 286
+const FACT_SLOT_WIDE_PX = 366
+/** The Owner-frozen caps of one fact row (compact / wide). */
+const FACT_LINE_COLUMNS_COMPACT = 11
+const FACT_LINE_COLUMNS_WIDE = 21
+/** The label of a fact row shares its line, and our labels are static ASCII of a
+ *  known font: 9px per character is an upper bound of the measured ~6.4px/char
+ *  (`Provider` measures 51px), so the room a label leaves is provable. */
+const FACT_LABEL_CHAR_PX = 9
+/** One column of slack: the slots above are integer measurements, and the
+ *  rendered advance of the widest glyph is measured, not exactly 20px. */
+const FACT_SLOT_SLACK_PX = 20
+
+/**
+ * The display columns one Details fact row may carry on its single line, given
+ * the label it shares that line with. Every character is priced at
+ * {@link WIDE_GLYPH_PX} (the measured worst-case advance of one display column,
+ * so any glyph mix is covered), the row's own label is subtracted, and the
+ * Owner-frozen caps (11 compact / 21 wide) are upper bounds the measured slot
+ * may tighten further.
+ */
+export function factLineColumns(wide: boolean, label: string): number {
+  const slot = (wide ? FACT_SLOT_WIDE_PX : FACT_SLOT_COMPACT_PX)
+    - label.length * FACT_LABEL_CHAR_PX
+    - FACT_SLOT_SLACK_PX
+  const cap = wide ? FACT_LINE_COLUMNS_WIDE : FACT_LINE_COLUMNS_COMPACT
+  return Math.max(1, Math.min(cap, Math.floor(slot / WIDE_GLYPH_PX)))
+}
+
+/**
+ * One labelled fact as complete, readable rows: the row that carries the label
+ * shares its line with it, so its fragment fits the room the label leaves, and
+ * the remainder continues on label-less rows at the full row bound. Every
+ * fragment therefore fits its own row's measured ONE-line slot.
+ */
+function wrappedRows(id: string, label: string, text: string, wide: boolean): PickerItem[] {
+  const lines = wrapColumns(text, factLineColumns(wide, ''))
+  const head = wrapColumns(lines[0] ?? '', factLineColumns(wide, label))
+  const rows = [...head, ...lines.slice(1)]
+  // A value that wraps to nothing (an empty advertised name) still keeps its
+  // labelled row rather than disappearing from the page.
+  if (rows.length === 0) rows.push('')
+  return rows.map((line, index) => ({
+    id: index === 0 ? id : `${id}-${index + 1}`,
+    label: index === 0 ? label : '',
+    detail: line,
+  }))
+}
+
+/** The model-details page's inert fact rows (a compact or wide-list page).
+ *
+ *  EVERY fact value goes through {@link wrappedRows}: a row renders ONE line and
+ *  ellipsizes what does not fit, so a long name/provider/ID/configured value can
+ *  only be read completely when its continuation rows exist AND each fragment
+ *  fits the row's own measured one-line slot. `wide` selects the slot/bound of
+ *  the layout the page is rendered in. The values are the directory's own — this
+ *  page never rewrites or re-derives what the writer sends. */
+export function detailFactItems(
+  panel: ModelPickerPanel,
+  row: ModelPickerModelRow,
+  wide: boolean,
+): PickerItem[] {
+  const description = advertisedDescription(panel, row)
+  const draft = draftedEffort(panel, row)
+  const draftLabel = modelChoices(row).find((choice) => choice.value === draft)?.label
+  return [
+    ...wrappedRows('fact-model', 'Model', row.modelName, wide),
+    ...wrappedRows('fact-provider', 'Provider', `${row.providerName} (${row.providerId})`, wide),
+    ...wrappedRows('fact-id', 'ID', row.modelId, wide),
+    // The configured facts come from the ONE directory DTO, so a Default effort
+    // is never lost when the default is not the current model.
+    ...configuredFacts(panel).flatMap((fact) => wrappedRows(fact.id, fact.label, fact.detail, wide)),
+    // A long description is wrapped into complete, readable rows.
+    ...(description === undefined ? [] : wrappedRows('fact-description', 'Description', description, wide)),
+    ...(draftLabel === undefined ? [] : wrappedRows('fact-draft', 'Draft effort', draftLabel, wide)),
+    ...(panel.notice === '' ? [] : wrappedRows('fact-notice', 'Status', panel.notice, wide)),
+  ]
+}
+
+/** The details page's cursor, clamped to the rows it currently offers. */
+export function detailCursor(
+  panel: ModelPickerPanel,
+  row: ModelPickerModelRow | undefined,
+  wide: boolean,
+): number {
+  if (row === undefined) return 0
+  const count = detailFactItems(panel, row, wide).length
+  return Math.min(Math.max(panel.factCursor, 0), Math.max(0, count - 1))
+}
+
+/* ------------------------------------------------------------ layout budget */
+
+/**
+ * The glyph advance bound of the wide preview's font.
+ *
+ * The pane renders PROPORTIONAL text, so a terminal-column count is not a line
+ * count: a `'W'.repeat(34)` label wraps into two native rows even though 34
+ * columns "fit". The measured widest ASCII glyph advance is ~14.6px, so every
+ * character (and every 2-column CJK/emoji grapheme) is priced at 20px: the
+ * resulting line count is an UPPER BOUND for any glyph mix, never an estimate.
+ */
+const WIDE_GLYPH_PX = 20
+/** The content width of the wide details card / radio row (340px box, 296px
+ *  slot, 248px of text). */
+const WIDE_TEXT_PX = 248
+/** The columns one wide line may carry under that bound. */
+const WIDE_TEXT_COLUMNS = Math.floor(WIDE_TEXT_PX / WIDE_GLYPH_PX)
+
+/*
+ * Measured vertical geometry of the wide side preview (real Tern 0.7.2,
+ * production presenter): one details line 28.2px, one single-line radio row
+ * 22.2px, ~20px more per extra LABEL line inside a row, ~16px between the two
+ * cards and 10px of row-column padding. The box itself follows the pane height —
+ * 594px at 1280x800, 494px at 1200x700, 434px at 1100x640, 394px at 1280x600
+ * (pane height - 206, its content starting 20px lower) — and the SDK's resize
+ * event carries only COLUMNS, so the budget is a FIXED floor
+ * ({@link WIDE_USABLE_HEIGHT_PX}): a taller pane keeps the same conservative
+ * decision, which is safe, and a shorter pane is outside the documented support
+ * envelope described on that constant.
+ */
+const WIDE_LINE_PX = 28.2
+const WIDE_ROW_PX = 22.2
+const WIDE_LABEL_LINE_PX = 20
+const WIDE_CARD_GAP_PX = 16
+/** The measured bottom padding of a card body whose last child is a ROW COLUMN
+ *  (`22.2px` per single-line row is a 20.2px line plus the column's 2px gap, so
+ *  the body's 10px bottom padding is not yet covered). A card body whose last
+ *  child is a text line already covers its padding with the per-line gap. */
+const WIDE_CARD_PAD_PX = 10
+/**
+ * The usable content height the fit budget is priced against: the SHORTEST
+ * supported wide pane, measured in the real Tern production presenter. One pane
+ * height costs 226px of chrome (the sheet's head and the action bar), so
+ * 1280x600 gives a 394px details box whose content starts 20px lower = 374px
+ * (1100x640 = 414px, 1200x700 = 474px, 1280x800 = 574px).
+ *
+ * This is a LAYOUT BUDGET, not an SDK guarantee: `SessionCaps` carries only
+ * `cols`/`cell` and the resize event only `cols`/`cell`/`visible`, so the
+ * presenter cannot detect a shorter pane and cannot degrade further. Panes
+ * below this floor are an explicitly accepted limitation, documented in
+ * `docs/tern-tsp/model-selection.md` and never claimed as automatically safe.
+ */
+const WIDE_USABLE_HEIGHT_PX = 374
+
+/** Truncate one line to the worst-case column bound, marking the cut. A single
+ *  clamped line is what the action-first details column shows for a long value
+ *  (the complete value stays readable in the Details page). */
+export function clampColumns(text: string, columns: number): string {
+  const graphemes = [...graphemeSegmenter.segment(text)].map((entry) => entry.segment)
+  let width = 0
+  let kept = ''
+  for (const grapheme of graphemes) {
+    const cell = columnsOf(grapheme)
+    if (width + cell > columns) return `${kept.trimEnd()}…`
+    kept += grapheme
+    width += cell
+  }
+  return kept
+}
+
+/** The identity fields the action-first column shows, each on at most this many
+ *  pre-wrapped lines (the complete value stays readable in the Details page). */
+const WIDE_IDENTITY_MAX_LINES = 2
+
+/**
+ * The wide details column is ACTION-FIRST: it shows the model identity
+ * (name head, provider, ID) pre-wrapped to at most {@link WIDE_IDENTITY_MAX_LINES}
+ * provable lines per field, and gives the vertical space to the Reasoning Effort
+ * radio rows. The complete description and the extended facts live in the Details
+ * page, so a long description can never decide whether the effort stays inline.
+ */
+export function wideIdentityLines(row: ModelPickerModelRow): readonly string[] {
+  const field = (text: string): string[] => {
+    const lines = wrapColumns(text, WIDE_TEXT_COLUMNS)
+    if (lines.length <= WIDE_IDENTITY_MAX_LINES) return [...lines]
+    return [
+      ...lines.slice(0, WIDE_IDENTITY_MAX_LINES - 1),
+      clampColumns(lines.slice(WIDE_IDENTITY_MAX_LINES - 1).join(' '), WIDE_TEXT_COLUMNS),
+    ]
+  }
+  return [
+    ...field(`Provider: ${row.providerName} (${row.providerId})`),
+    ...field(`ID: ${row.modelId}`),
+  ]
+}
+
+/**
+ * Whether the wide side preview provably presents the WHOLE details card and
+ * EVERY advertised effort. When it cannot, the wide shell is KEPT (provider
+ * scopes + model list + the details column) and only the current model's full
+ * details/effort move into the same picker's drill-down pages.
+ *
+ * It prices every rendered field and every effort LABEL at the measured
+ * widest-glyph advance (an upper bound for any glyph mix, unlike a terminal
+ * column count), then compares the resulting height against the fixed floor of
+ * the shortest SUPPORTED wide pane. Anything that does not fit switches the same
+ * picker to the bounded column + drill-down pages, so a candidate can never be
+ * selected while it sits outside the preview.
+ */
+export function widePreviewFits(
+  panel: ModelPickerPanel,
+  row: ModelPickerModelRow | undefined,
+): boolean {
+  // A missing selection or a model with NO effort still renders the identity,
+  // which can overflow on its own at a short pane: the budget never skips it.
+  if (row === undefined) return true
+  return widePreviewNeededPx(panel, row) <= WIDE_USABLE_HEIGHT_PX
+}
+
+/**
+ * The ONE-line form of a text: every whitespace run — an explicit LF, CRLF, CR
+ * or Unicode line/paragraph separator included — collapses to a single space, so
+ * the result is exactly one rendered line and the budget prices it as one. The
+ * complete value always stays readable on the Details page.
+ */
+function oneLine(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * The details card's head: the model name folded to ONE provable line. The
+ * complete name stays readable in the model list row and on the Details page.
+ */
+export function modelHeadLine(row: ModelPickerModelRow): string {
+  return clampColumns(oneLine(row.modelName), WIDE_TEXT_COLUMNS)
+}
+
+/**
+ * The single one-line summary of the action-first column: the transient notice
+ * when there is one (its complete text is the Details page's `Status` fact),
+ * otherwise a one-line description summary. It is ALWAYS exactly one rendered
+ * line, so a long description is never a reason to drill down.
+ */
+export function wideSummaryLine(
+  panel: ModelPickerPanel,
+  row: ModelPickerModelRow | undefined,
+): string | undefined {
+  if (panel.notice !== '') return clampColumns(oneLine(panel.notice), WIDE_TEXT_COLUMNS)
+  if (row === undefined) return undefined
+  const description = advertisedDescription(panel, row)
+  return description === undefined ? undefined : clampColumns(oneLine(description), WIDE_TEXT_COLUMNS)
+}
+
+/**
+ * The single OPTIONAL line of the action-first column: shown only while the
+ * budget still has room for exactly one more measured line.
+ */
+export function widePreviewOptionalLine(
+  panel: ModelPickerPanel,
+  row: ModelPickerModelRow | undefined,
+): string | undefined {
+  const summary = wideSummaryLine(panel, row)
+  if (summary === undefined || row === undefined) return summary
+  const roomForOneMore = widePreviewNeededPx(panel, row) + WIDE_LINE_PX <= WIDE_USABLE_HEIGHT_PX
+  return roomForOneMore ? summary : undefined
+}
+
+/**
+ * The vertical space the full details card + every effort radio row need, in
+ * pixels. Exported so a metric or a probe can price a model without re-deriving
+ * the rule; the production decision compares it against the fixed floor
+ * ({@link WIDE_USABLE_HEIGHT_PX}), so pricing it against other pane heights is a
+ * CAPACITY curve and not what the presenter does at those heights.
+ */
+export function widePreviewNeededPx(panel: ModelPickerPanel, row: ModelPickerModelRow): number {
+  const choices = modelChoices(row)
+  // The identity (two clamped lines) plus the keyboard hint; the description is
+  // NOT part of the decision.
+  const bodyLines = wideIdentityLines(row).length + 1
+  const rowPx = choices.reduce(
+    (total, choice) =>
+      total + WIDE_ROW_PX
+      + (Math.max(1, wrapColumns(choice.label, WIDE_TEXT_COLUMNS).length) - 1) * WIDE_LABEL_LINE_PX,
+    0,
+  )
+  // One card head (details, clamped to one provable line) plus, when the model
+  // advertises efforts, the effort head, the card gap, the radio rows and the
+  // row column's own bottom padding.
+  return WIDE_LINE_PX
+    + bodyLines * WIDE_LINE_PX
+    + (choices.length === 0 ? 0 : WIDE_LINE_PX + WIDE_CARD_GAP_PX + rowPx + WIDE_CARD_PAD_PX)
+}
+
+/* ------------------------------------------------------------ draft payload */
+
+/**
+ * Seed/re-seed every model's draft after a (re-)read: keep a surviving value
+ * only while it is still advertised, otherwise fall back to the model's real
+ * declared default. A model that lost its metadata loses its draft entry.
+ */
+export function seedDrafts(
+  rows: readonly ModelPickerModelRow[],
+  previous: ReadonlyMap<string, string>,
+): Map<string, string> {
+  const next = new Map<string, string>()
+  for (const row of rows) {
+    const id = modelRowId(row)
+    const choices = effortChoicesOf(row)
+    const kept = previous.get(id)
+    const value = kept !== undefined && choices.some((choice) => choice.value === kept)
+      ? kept
+      : initialEffortOf(row, choices)
+    if (value !== undefined) next.set(id, value)
+  }
+  return next
+}
+
+/** The write payload for one row + draft: the provider-default sentinel is
+ *  OMITTED (never serialized as an effort literal). */
+export function selectionOf(
+  row: ModelPickerModelRow,
+  draft: string | undefined,
+  providerDefault: string,
+): { provider: string; model: string; reasoningEffort?: string } {
+  return draft === undefined || draft === providerDefault
+    ? { provider: row.providerId, model: row.modelId }
+    : { provider: row.providerId, model: row.modelId, reasoningEffort: draft }
+}

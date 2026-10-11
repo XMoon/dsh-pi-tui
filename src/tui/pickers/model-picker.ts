@@ -39,69 +39,44 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
-import type { ModelDirectoryDto, ModelSelectionDto } from '../../runtime/catalog-port.ts'
+import type { ModelSelectionDto } from '../../runtime/catalog-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
 import { selectListTheme } from '../theme/runtime.ts'
 
-/** The semantic settlement of one applied selection, as the picker needs it:
- *  a rejected/cancelled/unsupported write never committed, so the picker stays
- *  usable; a committed/indeterminate settle dismisses it. */
-export type ModelApplyOutcome = 'committed' | 'rejected' | 'cancelled' | 'indeterminate' | 'unsupported' | 'superseded'
-
-/** The loaded/effective selection the picker highlights and badges. */
-export interface ModelPickerCurrent {
-  readonly provider: string
-  readonly model: string
-  /** The EXPLICIT effective reasoning effort, when the Session projection has
-   *  one; absent means the picker must NOT invent a "current effort". */
-  readonly reasoningEffort?: string
-}
-
-/** One flattened model presentation row, identity-complete: provider/model are
- *  kept separately so duplicate model ids across providers never collapse. */
-export interface ModelPickerModelRow {
-  readonly providerId: string
-  readonly providerName: string
-  readonly modelId: string
-  readonly modelName: string
-  readonly efforts: readonly { readonly id: string; readonly name: string }[]
-  readonly defaultEffort?: string
-  readonly isCurrent: boolean
-  readonly isDefault: boolean
-  /** The explicit effort of the CURRENT Session selection (fact badge only). */
-  readonly currentEffort?: string
-  /**
-   * The explicit effort of the picker's CONFIGURED selection (the live Session
-   * selection, or — sessionless — the directory default). Seeds the inline
-   * effort value WITHOUT implying a `current` badge, so a sessionless global
-   * default of high never silently downgrades to the model default.
-   */
-  readonly configuredEffort?: string
-}
-
-/** One provider whose catalog read failed; inert in the list. */
-export interface ModelPickerFailureRow {
-  readonly providerId: string
-  readonly providerName: string
-  readonly message: string
-}
-
-export interface ModelPickerProjection {
-  readonly models: readonly ModelPickerModelRow[]
-  readonly failures: readonly ModelPickerFailureRow[]
-}
-
-/** The hydration payload the command layer supplies once the directory read
- *  settles (the panel may already be visible in its loading state). */
-export interface ModelPickerDirectory {
-  readonly directory: ModelDirectoryDto
-  readonly current: ModelPickerCurrent | undefined
-  readonly sessionless: boolean
-}
+import type {
+  ModelApplyOutcome,
+  ModelPickerDirectory,
+  ModelPickerSubject,
+} from '../../app/command/model-presentation.ts'
+import {
+  modelIdentity,
+  projectModelDirectory,
+  effortChoicesOf,
+  initialEffortOf,
+  PROVIDER_DEFAULT,
+  type ModelPickerModelRow,
+  type ModelPickerFailureRow,
+  type InlineEffortChoice,
+} from './model-directory.ts'
+export { modelIdentity, projectModelDirectory } from './model-directory.ts'
+export type {
+  ModelPickerCurrent,
+  ModelPickerModelRow,
+  ModelPickerFailureRow,
+  ModelPickerProjection,
+} from './model-directory.ts'
+export type {
+  ModelApplyOutcome,
+  ModelPickerDirectory,
+  ModelPickerSubject,
+} from '../../app/command/model-presentation.ts'
 
 /** The picker's dependencies: the command layer's write/lifecycle seams. The
  *  directory arrives later through {@link ModelPicker.setDirectory}. */
 export interface ModelPickerDeps {
+  /** The write subject the command captured at open: whether the user was
+   *  sessionless. Fixed for this picker's whole life (never re-derived here). */
+  subject: ModelPickerSubject
   /** Commit a selection and resolve with its semantic settlement. */
   apply(selection: ModelSelectionDto): Promise<ModelApplyOutcome> | ModelApplyOutcome
   /** Request a frame so a hydration/effort/selecting change renders. */
@@ -118,8 +93,6 @@ export interface ModelPickerDeps {
 }
 
 const IDENTITY_SEP = '\u0000'
-/** The synthetic `provider default` effort choice (submit without an effort). */
-const PROVIDER_DEFAULT = `${IDENTITY_SEP}provider-default`
 const FAILURE_PREFIX = `${IDENTITY_SEP}failure${IDENTITY_SEP}`
 /** One shared group key for EVERY failed provider, so all failures collapse
  *  into a single private `Unavailable` section (a real provider's own
@@ -130,90 +103,6 @@ const FAILURE_GROUP_KEY = `${IDENTITY_SEP}unavailable`
 const MODEL_MODE_HINT = '↑↓ model · enter effort/select · esc close'
 /** Effort-mode footer hint: the same row, now editing its effort. */
 const EFFORT_MODE_HINT = '←→ effort · enter select · esc back'
-
-/** Full logical identity of a model row. Model ids are not globally unique. */
-export function modelIdentity(providerId: string, modelId: string): string {
-  return `${providerId}${IDENTITY_SEP}${modelId}`
-}
-
-/**
- * Project the Host directory into identity-complete presentation rows. Pure:
- * no terminal/component state, so the current/default/effort rules are unit
- * testable without a rendering snapshot.
- */
-export function projectModelDirectory(
-  directory: ModelDirectoryDto,
-  current: ModelPickerCurrent | undefined,
-  sessionless: boolean,
-): ModelPickerProjection {
-  const models: ModelPickerModelRow[] = []
-  for (const group of directory.groups) {
-    for (const model of group.models) {
-      // Full (provider, model) identity: a same-id model under another
-      // provider must never be marked current/default.
-      const matchesConfigured = current !== undefined
-        && current.provider === group.id
-        && current.model === model.id
-      const isCurrentModel = !sessionless && matchesConfigured
-      const isDefault = directory.default.provider === group.id && directory.default.model === model.id
-      models.push({
-        providerId: group.id,
-        providerName: group.name,
-        modelId: model.id,
-        modelName: model.name,
-        efforts: model.reasoning?.efforts ?? [],
-        ...(model.reasoning?.defaultEffort === undefined ? {} : { defaultEffort: model.reasoning.defaultEffort }),
-        isCurrent: isCurrentModel,
-        isDefault,
-        // Only the current model can carry a current effort; it must be the
-        // EXPLICIT projection effort (an absent one stays absent).
-        ...(isCurrentModel && current?.reasoningEffort !== undefined ? { currentEffort: current.reasoningEffort } : {}),
-        // The configured selection's effort is independent of the `current`
-        // badge: sessionless has no current model, yet its global default's
-        // effort must still seed the inline effort value.
-        ...(matchesConfigured && current?.reasoningEffort !== undefined ? { configuredEffort: current.reasoningEffort } : {}),
-      })
-    }
-  }
-  const failures: ModelPickerFailureRow[] = directory.failures.map(failure => ({
-    providerId: failure.id,
-    providerName: failure.name,
-    message: failure.message,
-  }))
-  return { models, failures }
-}
-
-/** One picker-local effort candidate: the PROTOCOL `value` (effort id, or the
- *  synthetic provider-default sentinel) plus the HUMAN-facing `label` the row
- *  renders. State and write payloads use `value`; only the display uses the
- *  label, so a renamed effort can never change what is submitted. */
-interface InlineEffortChoice {
-  readonly value: string
-  readonly label: string
-}
-
-/** The picker-local effort CHOICES for one model, in cycle order. A model with
- *  NO effort metadata has none — the effort keys must be a true no-op there.
- *  The synthetic `provider default` joins the cycle only when the model
- *  declares efforts but no concrete default. */
-function effortChoicesOf(row: ModelPickerModelRow): readonly InlineEffortChoice[] {
-  if (row.efforts.length === 0) return []
-  const efforts = row.efforts.map(effort => ({ value: effort.id, label: effort.name }))
-  return row.defaultEffort === undefined
-    ? [{ value: PROVIDER_DEFAULT, label: 'Default' }, ...efforts]
-    : efforts
-}
-
-/** The initial picker-local effort VALUE for one model: the configured/current
- *  explicit effort when advertised, else the model default, else the first
- *  candidate (provider default); `undefined` for a model with no effort
- *  metadata at all. */
-function initialEffortOf(row: ModelPickerModelRow, choices: readonly InlineEffortChoice[]): string | undefined {
-  if (choices.length === 0) return undefined
-  const advertised = (value: string | undefined): string | undefined =>
-    value !== undefined && choices.some(choice => choice.value === value) ? value : undefined
-  return advertised(row.configuredEffort) ?? advertised(row.defaultEffort) ?? choices[0]!.value
-}
 
 /** The human-facing label for one effort value within a row's candidates. */
 function effortLabelOf(choices: readonly InlineEffortChoice[], value: string): string | undefined {
@@ -309,7 +198,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     // Every (re-)hydration starts from a clean latch: only THIS refresh may
     // consume the next key, and only if it actually drops the bound model.
     this.swallowNextKey = false
-    const projection = projectModelDirectory(input.directory, input.current, input.sessionless)
+    const projection = projectModelDirectory(input.directory, input.current, this.deps.subject.sessionless)
     // A refresh must NOT discard the user's picker-local effort edits: keep the
     // previous value for every surviving identity while it is still advertised,
     // and only (re-)anchor to configured/default/provider-default otherwise.
@@ -360,6 +249,23 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       this.modelsList.setSelectedValue(modelIdentity(input.current.provider, input.current.model))
     }
     this.modelsList.setMaxRows(this.rowGrant)
+    this.deps.requestRender()
+  }
+
+  /** Enter the loading presentation: the command layer's read owner started
+   *  (re-)reading the directory. Restores exactly the constructor's state while
+   *  keeping the mounted panel, so a retry never closes and reopens it. */
+  setLoading(): void {
+    if (this.disposed) return
+    this.swallowNextKey = false
+    this.modelRows.clear()
+    this.effortChoices.clear()
+    this.choicesByModel.clear()
+    this.interactionMode = { kind: 'models' }
+    this.modelsList.setHint(MODEL_MODE_HINT)
+    this.failures = []
+    this.modelsList.setItems([])
+    this.modelsList.setNoMatchText('  Loading models…')
     this.deps.requestRender()
   }
 

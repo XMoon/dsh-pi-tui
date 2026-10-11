@@ -72,6 +72,7 @@ import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } 
 import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
+import type { ModelPresentation } from './app/command/model-presentation.ts'
 import { registerReloadCommand, registerSkillCommand, type SkillsCommandDeps } from './tui/commands/skills.ts'
 import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
@@ -815,6 +816,7 @@ export function registerTuiCommands(
   runner: TuiCommandRunner,
   initial?: InitialCommandCatalog,
   catalogSeams: CommandCatalogSeams = {},
+  modelPresentation?: ModelPresentation,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -2028,7 +2030,10 @@ export function registerTuiCommands(
 
 
   registerReloadCommand(skillsCommandDeps)
-  const modelCommands = createModelCommands({ runner, app: app as TuiApp, registerOne, recordCommandDraftDisposition })
+  const modelCommands = createModelCommands({
+    runner, app: app as TuiApp, registerOne, recordCommandDraftDisposition,
+    ...(modelPresentation === undefined ? {} : { modelPresentation }),
+  })
   modelCommands.registerModel()
 
   sessionCommands.registerNew()

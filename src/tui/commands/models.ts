@@ -18,7 +18,8 @@ import type { SessionScope } from '../../app/session/scope.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { isCancellation, runOwned, type OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import { ModelPicker, type ModelApplyOutcome } from '../pickers/model-picker.ts'
+import type { ModelApplyOutcome, ModelPresentation } from '../../app/command/model-presentation.ts'
+import { pituiModelPresentation } from '../pickers/model-presentation-pitui.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { OperationResult } from '../../runtime/write-outcome.ts'
 import type { RegisterOne, TuiCommandRunner } from '../../commands.ts'
@@ -57,6 +58,7 @@ type ModelCommandRunner = Pick<
 export interface ModelCommandDeps {
   runner: ModelCommandRunner
   app: TuiApp
+  modelPresentation?: ModelPresentation
   registerOne: RegisterOne
   recordCommandDraftDisposition: (commandId: string | undefined, disposition: 'restored' | 'suppressed') => void
 }
@@ -171,6 +173,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
       name: 'model',
       description: 'Switch the model (and reasoning effort) for this session; before a session exists, change the default when supported',
       handler: async () => {
+        const presentation = deps.modelPresentation ?? pituiModelPresentation(app)
         const models = runner.catalog.models
         if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
         // The picker belongs to the Session that opened it: capture BOTH the
@@ -243,7 +246,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
                   : outcome.kind === 'unsupported'
                     ? outcome.reason
                     : 'the default model save was cancelled'
-              app.notify(`model default save: ${detail}`, 'error')
+              presentation.notify(`model default save: ${detail}`, 'error')
               // An unsupported backend and a proven refusal keep the picker
               // usable; an indeterminate settle dismisses with the notice.
               return outcome.kind
@@ -284,7 +287,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // A transition fence is a proven pre-dispatch refusal; the write
             // may still be retried, so it must not surface as a failure.
             if (!(error instanceof TransitionInProgressError)) {
-              app.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
+              presentation.notify(`model selection save: ${safeErrorMessage(error)}`, 'error')
             }
             runner.refreshStatus()
             runner.updateWelcomeCard()
@@ -300,9 +303,9 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           // repaints a surface this operation no longer owns), and NO stale notice.
           if (ownerLost() || result.ownership === 'superseded') return 'superseded'
           runner.setModelSelectionPending(undefined, token)
-          if (outcome.kind === 'rejected') app.notify(`model selection: ${outcome.error.message}`, 'error')
-          else if (outcome.kind === 'indeterminate') app.notify('model selection is indeterminate — the display reconciles from the Session; do not retry', 'error')
-          else if (outcome.kind === 'unsupported') app.notify(`model selection unsupported: ${outcome.reason}`, 'error')
+          if (outcome.kind === 'rejected') presentation.notify(`model selection: ${outcome.error.message}`, 'error')
+          else if (outcome.kind === 'indeterminate') presentation.notify('model selection is indeterminate — the display reconciles from the Session; do not retry', 'error')
+          else if (outcome.kind === 'unsupported') presentation.notify(`model selection unsupported: ${outcome.reason}`, 'error')
           // The authoritative Session projection decides the display in
           // every case: a rejected/indeterminate outcome never paints the
           // requested choice as committed.
@@ -315,88 +318,101 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // background work, so the user gets instant feedback and may type a
         // query while it loads.
         const surfaceToken = ++modelSurfaceToken
-        // The picker's `close` closure needs the mounted overlay's closer; it is
-        // assigned right after the picker is constructed and only ever invoked
-        // later (a user Esc/settlement), never during construction.
-        let closer: () => void = () => {}
-        const picker = new ModelPicker({
+        // The write subject is captured BEFORE the first read (v2 §4.1/UX-D15)
+        // and is fixed for the panel's whole life: the read never re-derives the
+        // subject from a later, possibly different Session.
+        const subject = { sessionless: runner.currentSessionId === undefined }
+        // ONE directory-read owner for the FIRST read and every Retry. The
+        // single `reading` latch is the read epoch: a retry while a read is in
+        // flight is refused (RETRY LOADING admits no second read), and a
+        // settled response can only belong to the latest token+scope read.
+        let reading = false
+        const picker = presentation.open({
+          subject,
+          isCurrent: () => surfaceToken === modelSurfaceToken && ownerCurrent(),
+          retry: () => loadOnce(),
           // The picker owns presentation only: brand the effort id here so the
           // official session/global-default write semantics stay untouched.
           apply: (next) => apply(next.reasoningEffort === undefined
             ? { provider: next.provider, model: next.model }
             : { provider: next.provider, model: next.model, reasoningEffort: ReasoningEffortId(next.reasoningEffort) }),
-          requestRender: () => app.requestRender(),
-          // Close only while this surface still owns the picker slot; a superseded
-          // panel must never tear down the newer one.
-          close: () => { if (surfaceToken === modelSurfaceToken) closer() },
           // The owned-task entry for the semantic write: runOwned with the
           // runner's diag pre-attached (AGENTS.md — never a bare void).
           runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
             runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.currentSessionId })
           },
         })
-        closer = app.openModelPicker(picker)
-        // ONE owned Host-generation directory read hydrates the SAME already
-        // mounted picker IN PLACE (never a second overlay). openModelPicker
-        // supersedes any previous /model picker surface.
-        runOwned('model directory', () => models.loadDirectory(runner.signal), {
-          diag: runner.diag,
-          sessionId: () => runner.currentSessionId,
-          // An abort or a typed read supersession is a cancellation, not a
-          // failure: the port honors the signal / connection generation, so a
-          // rejection that races either must land in the debug channel, never an
-          // ERROR diagnostic.
-          isCancellation: (error) => picker.isDisposed()
-            || surfaceToken !== modelSurfaceToken
-            || runner.signal.aborted
-            || error instanceof SupersededReadError,
-          // A cancelled read (abort / typed supersession) leaves NO trustworthy
-          // catalog: close THIS loading panel silently rather than leaving it
-          // stuck on Loading… forever. Never close a newer surface (the token
-          // guard) and never a panel the user already closed.
-          onCancel: () => {
-            if (surfaceToken === modelSurfaceToken && !picker.isDisposed()) closer()
-          },
-          onResult: (directory) => {
-            // A newer `/model` owns the surface now.
-            if (surfaceToken !== modelSurfaceToken) return
-            if (!ownerCurrent()) {
-              // The Session moved while loading: this panel belongs to the old
-              // subject — close it silently (no hydrate, no notice).
-              if (!picker.isDisposed()) closer()
-              return
-            }
-            if (picker.isDisposed()) return
-            // An authoritative Host read reconciles a lingering UNRESOLVED
-            // sessionless default intent (v2 §0.3.2) — the read is the truth.
-            runner.reconcileDefaultIntent(directory.default)
-            const sessionless = runner.currentSessionId === undefined
-            picker.setDirectory({
-              directory,
-              // PR5 (plan §3.3): a live Session's current value comes from the
-              // TRANSPORT-NEUTRAL semantic read `ModelCatalog.sessionSelection`
-              // (Direct: the live Agent's selection owner; Remote: the official
-              // `modelSelection` projection of the retained binding) — never
-              // the Direct-oriented `selected.current` facade, which answers
-              // `undefined` on the Remote branch. A sessionless surface
-              // highlights the directory default and never fabricates a
-              // `current` model.
-              current: sessionless
-                ? directory.default
-                : models.sessionSelection(runner.currentSessionId),
-              sessionless,
-            })
-          },
-          onError: (error) => {
-            if (surfaceToken !== modelSurfaceToken) return
-            if (!ownerCurrent()) {
-              if (!picker.isDisposed()) closer()
-              return
-            }
-            if (picker.isDisposed()) return
-            picker.setLoadError(safeErrorMessage(error))
-          },
-        })
+        const closer = () => { if (surfaceToken === modelSurfaceToken) picker.close() }
+        /** Read (or re-read) the directory through the original owner. Never a
+         *  second catalog read: the same `loadDirectory`, scope, signal, token
+         *  and supersession semantics serve the first read and every Retry. */
+        const loadOnce = (): void => {
+          if (surfaceToken !== modelSurfaceToken || picker.isDisposed() || reading) return
+          reading = true
+          picker.setLoading()
+          runOwned('model directory', () => models.loadDirectory(runner.signal), {
+            diag: runner.diag,
+            sessionId: () => runner.currentSessionId,
+            // An abort or a typed read supersession is a cancellation, not a
+            // failure: the port honors the signal / connection generation, so a
+            // rejection that races either must land in the debug channel, never an
+            // ERROR diagnostic.
+            isCancellation: (error) => picker.isDisposed()
+              || surfaceToken !== modelSurfaceToken
+              || runner.signal.aborted
+              || error instanceof SupersededReadError,
+            // A cancelled read (abort / typed supersession) leaves NO trustworthy
+            // catalog: close THIS loading panel silently rather than leaving it
+            // stuck on Loading… forever. Never close a newer surface (the token
+            // guard) and never a panel the user already closed.
+            onCancel: () => {
+              reading = false
+              if (surfaceToken === modelSurfaceToken && !picker.isDisposed()) closer()
+            },
+            onResult: (directory) => {
+              reading = false
+              // A newer `/model` owns the surface now.
+              if (surfaceToken !== modelSurfaceToken) return
+              if (!ownerCurrent()) {
+                // The Session moved while loading: this panel belongs to the old
+                // subject — close it silently (no hydrate, no notice).
+                if (!picker.isDisposed()) closer()
+                return
+              }
+              if (picker.isDisposed()) return
+              // An authoritative Host read reconciles a lingering UNRESOLVED
+              // sessionless default intent (v2 §0.3.2) — the read is the truth.
+              runner.reconcileDefaultIntent(directory.default)
+              const sessionId = runner.currentSessionId
+              picker.setDirectory({
+                directory,
+                // PR5 (plan §3.3): a live Session's current value comes from the
+                // TRANSPORT-NEUTRAL semantic read `ModelCatalog.sessionSelection`
+                // (Direct: the live Agent's selection owner; Remote: the official
+                // `modelSelection` projection of the retained binding) — never
+                // the Direct-oriented `selected.current` facade, which answers
+                // `undefined` on the Remote branch. A sessionless surface
+                // highlights the directory default and never fabricates a
+                // `current` model. The SUBJECT is the one captured at open: the
+                // scope fence above already proved it did not move.
+                current: subject.sessionless || sessionId === undefined
+                  ? directory.default
+                  : models.sessionSelection(sessionId),
+              })
+            },
+            onError: (error) => {
+              reading = false
+              if (surfaceToken !== modelSurfaceToken) return
+              if (!ownerCurrent()) {
+                if (!picker.isDisposed()) closer()
+                return
+              }
+              if (picker.isDisposed()) return
+              picker.setLoadError(safeErrorMessage(error))
+            },
+          })
+        }
+        loadOnce()
         return { kind: 'success' }
       },
     })
