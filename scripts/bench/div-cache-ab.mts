@@ -229,11 +229,24 @@ function positiveOr(value: number, fallback: number): number {
 /** Hard sanity caps: a typo must fail loudly instead of allocating the host. */
 const MAX_LINES = 20_000
 const MAX_FRAMES = 2_000
+const MAX_ROUNDS = 200
+const MAX_COLS = 1_000
+const MAX_ROWS = 500
+const MIN_WORKER_TIMEOUT_MS = 1_000
+const MAX_WORKER_TIMEOUT_MS = 3_600_000
 
 function bounded(value: number, fallback: number, max: number, label: string): number {
 	const resolved = positiveOr(value, fallback)
 	if (resolved > max) throw new Error(`${label}=${resolved} exceeds the safety cap ${max}`)
 	return resolved
+}
+
+/** Clamp a numeric CLI knob into an inclusive range (fail fast, never default silently). */
+function ranged(value: number, min: number, max: number, label: string): number {
+	if (!Number.isFinite(value) || value < min || value > max) {
+		throw new Error(`${label}=${String(value)} must be within ${min}..${max}`)
+	}
+	return Math.floor(value)
 }
 
 function fnv1a(text: string, seed = 0x811c9dc5): number {
@@ -401,7 +414,7 @@ function buildLayout(entry: ForkEntry, shape: string, args: Args): LayoutParts {
 		// Mirrors the host's fullscreen tree: NO auto-basis entry exists, so
 		// measureWidth is never called (the fork cache is inert here).
 		const transcript = new Container()
-		const transcriptLines = positiveOr(args.lines, 300)
+		const transcriptLines = bounded(args.lines, 300, MAX_LINES, 'lines')
 		for (let i = 0; i < transcriptLines; i += 1) {
 			transcript.addChild(new Text(makeNonAsciiCorpus(1, 200 + i, false)[0]!, 1, 0))
 		}
@@ -418,22 +431,58 @@ function buildLayout(entry: ForkEntry, shape: string, args: Args): LayoutParts {
 		])
 		return { root, frame: () => {} }
 	}
-	// shape === 'auto-hstack-churn' (default): auto-basis HStack rows whose text
-	// changes every frame (stream/editor churn).
-	const rows: Array<{ text: Component & { setText?: (value: string) => void }; component: Component }> = []
-	for (let i = 0; i < 10; i += 1) {
-		const text = new Text(makeNonAsciiCorpus(1, 300 + i, false)[0]!, 0, 0)
-		rows.push({ text, component: text })
+	// shape === 'auto-hstack-churn': REAL auto-basis HStack rows whose text value
+	// changes every frame, so renderLayoutFrame re-measures every
+	// (component,width) pair through the X014 path on every frame. The previous
+	// version of this shape was a padded VStack of plain Texts: it never called
+	// measureWidth at all and therefore was not an X014 churn control.
+	const churnCells: ChurnText[] = []
+	const churnRows: Component[] = []
+	for (let row = 0; row < 10; row += 1) {
+		const entries: Array<{ component: Component; basis: 'auto' }> = []
+		for (let cell = 0; cell < 6; cell += 1) {
+			const text = new ChurnText(makeNonAsciiCorpus(1, 300 + row * 10 + cell, false)[0]!, entry.wrapTextWithAnsi)
+			churnCells.push(text)
+			entries.push({ component: text, basis: 'auto' })
+		}
+		churnRows.push(new HStack(entries, { gap: 1 }))
 	}
-	const root = new VStack(rows.map(({ component }) => ({ component, shrink: 0 })))
-	let frameIndex = 0
+	const root = new VStack(churnRows.map(component => ({ component, shrink: 0 })))
+	let churnFrame = 0
 	return {
 		root,
 		frame: () => {
-			frameIndex += 1
-			// Re-render churn: invalidate so every frame re-measures the rows.
-			for (const row of rows) row.text.invalidate?.()
+			churnFrame += 1
+			// Stream-like churn: every cell's value changes, so it re-renders and
+			// its (component,width) pair is measured again by the layout engine.
+			for (const cell of churnCells) cell.setValue(`${cell.value}.`)
 		},
+	}
+}
+
+/** Minimal mutable text component for the churn workload (no fork internals). */
+class ChurnText implements Component {
+	value: string
+	private readonly wrapText: (text: string, width: number) => string[]
+	private cachedWidth = -1
+	private cachedValue = ''
+	private cachedLines: string[] = []
+	constructor(value: string, wrapText: (text: string, width: number) => string[]) {
+		this.value = value
+		this.wrapText = wrapText
+	}
+	setValue(next: string): void {
+		this.value = next
+	}
+	render(width: number): string[] {
+		if (this.cachedWidth === width && this.cachedValue === this.value) return this.cachedLines
+		this.cachedLines = this.wrapText(this.value, Math.max(1, width))
+		this.cachedWidth = width
+		this.cachedValue = this.value
+		return this.cachedLines
+	}
+	invalidate(): void {
+		this.cachedWidth = -1
 	}
 }
 
@@ -443,7 +492,7 @@ function layoutWorkload(id: string, description: string, shape: string): Workloa
 		family: 'X014',
 		description,
 		run(entry, args) {
-			const terminal = new NullTerminal(args.cols, args.rows)
+			const terminal = new NullTerminal(ranged(args.cols, 20, MAX_COLS, 'cols'), ranged(args.rows, 5, MAX_ROWS, 'rows'))
 			const tui = new entry.TuiAltScreen(terminal, false, '/tmp/div-cache-ab')
 			const parts = buildLayout(entry, shape, args)
 			tui.setLayoutRoot(parts.root)
@@ -455,7 +504,6 @@ function layoutWorkload(id: string, description: string, shape: string): Workloa
 				parts.frame(i)
 				tui.renderNow()
 			}
-			let hash = 0x811c9dc5
 			const frames = bounded(args.frames, 120, MAX_FRAMES, 'frames')
 			const start = performance.now()
 			for (let i = 0; i < frames; i += 1) {
@@ -463,10 +511,13 @@ function layoutWorkload(id: string, description: string, shape: string): Workloa
 				tui.renderNow()
 			}
 			const ms = performance.now() - start
-			// Geometry hash: the rendered frame must be identical across variants.
-			for (const line of parts.root.render(args.cols)) hash = fnv1a(line, hash)
 			tui.stop()
-			return { ms, hash, ops: frames }
+			// Equivalence sink: every byte the ALT SCREEN wrote for these frames.
+			// `root.render()` would NOT prove layout equivalence: X014 lives inside
+			// renderLayoutFrame()'s measureWidth, so a different measured width can
+			// change HStack allocation, clipping and the painted rows while the
+			// root's own render() stays identical.
+			return { ms, hash: terminal.writeHash, ops: frames, ...probePayload() }
 		},
 	}
 }
@@ -506,11 +557,21 @@ function makeMainScreenLines(count: number, corpus: X035Corpus): string[] {
 	for (let i = 0; i < count; i += 1) {
 		const word = words[i % words.length]!
 		const prefix = String(i).padStart(6, ' ')
+		if (corpus === 'ascii') {
+			// Truly ASCII visible characters only (SGR escapes are ASCII bytes);
+			// no box-drawing, check marks or CJK, so this stays an insensitive
+			// control for the non-ASCII width cache.
+			if (i % 5 === 0) lines.push(`\x1b[36m${prefix} > ${word} says hello world, streamed token chunk follows here\x1b[0m`)
+			else if (i % 5 === 1) lines.push(`${prefix} | ${word} plain text row with a longer tail to fill the line width aa`)
+			else if (i % 5 === 2) lines.push(`\x1b[33m${prefix} * done ${word}\x1b[0m ${'x'.repeat(30)}`)
+			else lines.push(`${prefix} ${word}`)
+			continue
+		}
 		if (corpus === 'wide' && i % 7 === 0) {
 			lines.push(`\x1b[35m${prefix} ▸ ${'wide '.repeat(60)}${word}\x1b[0m`)
 			continue
 		}
-		if (corpus !== 'ascii' && i % 5 === 3) {
+		if (i % 5 === 3) { // mixed/wide only (the ascii case returned above)
 			lines.push(`${prefix} 中文内容混排 ${word} 测试宽度计算逻辑 ·${'·'.repeat(20)}`)
 			continue
 		}
@@ -562,9 +623,9 @@ function x035Workload(id: string, description: string, lines: number, mode: X035
 		description,
 		run(entry, args) {
 			resetProbeCounters()
-			const terminal = new NullTerminal(args.cols, args.rows)
+			const terminal = new NullTerminal(ranged(args.cols, 20, MAX_COLS, 'cols'), ranged(args.rows, 5, MAX_ROWS, 'rows'))
 			const tui = new entry.TuiMainScreen(terminal)
-			const count = positiveOr(args.lines, lines)
+			const count = bounded(args.lines, lines, MAX_LINES, 'lines')
 			const base = makeMainScreenLines(count, mode.corpus)
 			const kittyIds = mode.kitty === true ? [7, 11, 13] : []
 			const kittyPositions = [1, Math.floor(count / 2), count - 2]
@@ -603,8 +664,11 @@ function x035Workload(id: string, description: string, lines: number, mode: X035
 			const frames = bounded(args.frames, 30, MAX_FRAMES, 'frames')
 			const widths = mode.resizeWidths
 			const start = performance.now()
+			// Spread the widths across the measured frames (a fixed period of 5
+			// covered only two of three widths in a 10-frame window).
+			const period = widths === undefined ? 0 : Math.max(1, Math.floor(frames / widths.length))
 			for (let i = 0; i < frames; i += 1) {
-				if (widths !== undefined) terminal.columns = widths[Math.floor(i / 5) % widths.length]!
+				if (widths !== undefined) terminal.columns = widths[Math.floor(i / period) % widths.length]!
 				tui.renderNow()
 			}
 			const ms = performance.now() - start
@@ -720,15 +784,15 @@ async function runOrchestrator(raw: Record<string, string>): Promise<void> {
 		return { label: part.slice(0, at), entry: resolve(part.slice(at + 1)) }
 	})
 	if (variants.length === 0) throw new Error('--variants LABEL=PATH,... is required in orchestrator mode')
-	const rounds = Number(raw.rounds ?? '7')
+	const rounds = ranged(Number(raw.rounds ?? '7'), 1, MAX_ROUNDS, 'rounds')
 	// Untracked investigation artifact by convention (see docs/perf-baseline.md):
 	// the durable verdicts live in the doc, the raw rounds stay out of git.
 	const outDir = resolve(raw.out ?? join(REPO_ROOT, 'temp', 'perf', 'div-cache-ab'))
 	mkdirSync(outDir, { recursive: true })
 	const selected = (raw.workloads ?? WORKLOADS.map(w => w.id).join(',')).split(',').filter(Boolean)
 	const trials: Array<'cold' | 'warm'> = (raw.trials ?? 'cold,warm').split(',').filter(Boolean) as Array<'cold' | 'warm'>
-	const cols = raw.cols ?? '120'
-	const rows = raw.rows ?? '40'
+	const cols = String(ranged(Number(raw.cols ?? '120'), 20, MAX_COLS, 'cols'))
+	const rows = String(ranged(Number(raw.rows ?? '40'), 5, MAX_ROWS, 'rows'))
 	const lines = raw.lines ?? '0'
 	const frames = raw.frames ?? '120'
 
@@ -769,7 +833,11 @@ async function runOrchestrator(raw: Record<string, string>): Promise<void> {
 						],
 						// A hung worker must die quickly: the whole harness is
 						// additionally expected to run under a cgroup memory cap.
-						{ cwd: REPO_ROOT, encoding: 'utf8', timeout: Number(raw['worker-timeout-ms'] ?? '120000') },
+						{
+							cwd: REPO_ROOT,
+							encoding: 'utf8',
+							timeout: ranged(Number(raw['worker-timeout-ms'] ?? '120000'), MIN_WORKER_TIMEOUT_MS, MAX_WORKER_TIMEOUT_MS, 'worker-timeout-ms'),
+						},
 					)
 					if (result.status !== 0) {
 						throw new Error(`worker failed for ${variant.label}/${workloadId}/${trial}:\n${result.stdout}\n${result.stderr}`)

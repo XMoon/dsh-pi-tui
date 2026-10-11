@@ -1622,7 +1622,7 @@
    "tests": [
     "packages/pi-tui/test/layout.test.ts: indirect measure and scrollbar layout correctness",
     "packages/pi-tui/test/render-churn-bench.ts: total layout/render churn with representative workload",
-    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_LAYOUT_CACHE, 21 paired rounds per width 80/120/160: paired medians 0.92x-1.05x with sign tests 4/21-13/21 (no robust direction) and the aliased best case only 1.03x-1.10x, so the fixed 5%/10% retirement thresholds are NOT_PROVEN and the verdict is INCONCLUSIVE; instrumented measureWidth counters: host tree 0 calls, extension-shaped auto stack exactly 1 call per (component,width) pair per frame, aliased 3.0/2.0 calls per pair per frame"
+    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_LAYOUT_CACHE, 21 paired rounds per width 80/120/160 including the corrected churn fixture (real auto-basis HStack rows; the earlier VStack-of-Texts shape never called measureWidth at all): paired medians 0.92x-1.05x with sign tests 4/21-14/21 (no robust direction), so the fixed 5%/10% retirement thresholds are NOT_PROVEN and the verdict is INCONCLUSIVE; per-frame instrumented counts — auto stack 96 calls / 96 pairs, churn 60/60, host tree 0, aliased 5/2 — i.e. 0 cache-serviceable calls per frame in every reachable shape; equivalence is checked on the painted frame (every byte the alt screen wrote) and is discriminating (measured width x4 fails with HASH MISMATCH, while a +-1 column error is absorbed by allocateStackSizes)"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -3640,7 +3640,7 @@
     "packages/pi-tui/test/tui-render.test.ts: equal primitive-line frame and steady-frame performance regression",
     "packages/pi-tui/test/render-preprocess-bench.ts: 1k-10k line benchmark",
     "test/rendering.test.ts: indirect host component-array stability only; it does not prove main-screen cache identity",
-    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_RAW_REUSE, 9 rounds x 11 workloads on the real Regular path (TuiApp -> TuiMainScreen): every real workload is slower without the fast path in 9/9 rounds (paired median 1.78x-176.8x; steady 10k 153.7x, over-wide rows 176.8x, 1% dirty 8.78x, 100%-dirty control 1.00x); the complete terminal write stream is byte-identical across variants for all 11 workloads incl. kitty line moves, append/shrink and width 80<->120<->160; instrumented probe: 10k steady = 10,014 lines processed and 130,000 reused over 14 frames, 0 reused at 100% dirty, asciiVisibleWidthEarlyExit 1-2% of preprocessing time"
+    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_RAW_REUSE, 9 rounds x 11 workloads driven through the Regular screen class TuiMainScreen with a synthetic streaming component (the full TuiApp composition is not exercised): every real workload is slower without the fast path in 9/9 rounds (paired median 1.78x-176.8x; steady 10k 153.7x, over-wide rows 176.8x); corrected fixtures give 1% injected dirty 7.06x, 10% injected 2.79x, ASCII-only-visible corpus 4.35x, width cycle 80/120/160 1.60x (8/9 rounds), 100%-dirty control 1.00x — injection is per frame, so the adjacent-frame delta is about 2N%; the terminal write stream hashes identically across variants for all 11 workloads incl. kitty moves, append/shrink and width changes (32-bit FNV over every written byte, not a byte-for-byte comparison); instrumented probe: 10k steady = 10,014 lines processed and 130,000 reused over 14 frames, 0 reused at 100% dirty; asciiVisibleWidthEarlyExit 1-2% of preprocessing time; nearest-rank p95 with 9 rounds equals the maximum round"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -4015,7 +4015,7 @@
    "tests": [
     "packages/pi-tui/test/layout.test.ts and wrap-ansi.test.ts: width correctness",
     "packages/pi-tui/test/render-preprocess-bench.ts: X035 render benchmark with incidental CJK workload",
-    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE(4096) vs W512, 7 interleaved rounds: the warm CJK working sets are 1.89x (1024 strings) and 1.96x (4096 strings) slower at 512, plain long CJK 1.78x, wrapped-transcript pass 59.6x (workload-specific), with the insensitive controls ASCII fast path 0.99x and the 8192-string superset 0.97x; instrumented cache counters show 100% warm-pass hits at 4096 vs 0% at 512 for the 1024/4096 working sets"
+    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE(4096) vs W512, 7 interleaved rounds; the timed interval covers two corpus walks (cold fill + repeat): the CJK working sets are 1.89x (1024 strings) and 1.96x (4096 strings) slower at 512, plain long CJK 1.78x, and the post-wrap width re-measure workload (wrapTextWithAnsi runs before the timer) 59.6x, which is workload-specific and not a full render pass; insensitive controls: ASCII fast path 0.99x, 8192-string superset 0.97x; instrumented cache counters show 100% second-pass hits at 4096 vs 0% at 512 for the 1024/4096 working sets"
    ],
    "upstream": {
     "equivalence": "NO",

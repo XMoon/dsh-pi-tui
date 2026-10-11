@@ -427,7 +427,14 @@ this document recorded on 2026-09-21.
 > `NullTerminal` 120×40 (X014 additionally at 80/160), forced synchronous
 > frames, one fresh worker PROCESS per (round, variant, workload) with the
 > variant order rotated per round. Rounds: 7 (X039 four-way), 9 (X035 A/B),
-> 21 (X014 paired, per width). Full methodology, per-round raw data and the
+> 21 (X014 paired, per width). Percentiles are nearest-rank, so with 9 rounds a
+> reported "p95" equals the maximum round: X035's tail numbers are not a stable
+> tail-latency claim. X035 drives a controlled synthetic streaming component
+> through the host's Regular screen class `TuiMainScreen` (the class
+> `src/tui-app.ts` mounts); the full `TuiApp` composition, a real terminal and the
+> complete Kitty lifecycle are **not** exercised. "Equivalence" here means an
+> identical 32-bit FNV hash of every byte written to the terminal sink — not a
+> byte-for-byte comparison. Full methodology, per-round raw data and the
 > analysis: `temp/perf/div-cache-ab-report-20261011.md` (untracked investigation
 > artifact; the verdicts below are the durable record). Every run executed under
 > `systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0` plus a
@@ -451,6 +458,10 @@ noise band is reported as `INCONCLUSIVE`.
 | `NO_LAYOUT_CACHE` | `packages/pi-tui/src/layout.ts`: upstream `measureWidth` (`renderCached(...).reduce(max visibleWidth)`) restored, `LayoutContext.maxWidthCache` member + its context init removed |
 | `NO_RAW_REUSE` | `packages/pi-tui/src/tui-main-screen.ts`: only the same-raw-line preprocessing fast path disabled (`const reuseProcessed = false`); truncation, `asciiVisibleWidthEarlyExit`, `normalizeTerminalOutput`, `SEGMENT_RESET` and the kitty-id bookkeeping stay byte-identical |
 
+The variants are **hand-built** from these recipes in throwaway worktrees (the harness
+measures; it does not patch sources), so a re-run is "apply the recipe, build, then one
+harness command" — not one command end to end.
+
 Each variant's built `packages/pi-tui/dist/index.mjs` has a distinct sha256, and the
 harness loads exactly the `--entry` it is given, so no variant can silently measure
 another variant's build. Every worker reports a result hash; the orchestrator fails
@@ -462,20 +473,20 @@ if variants disagree, which is the cross-variant equivalence check below.
 outside the 5 % budget on exactly the scenarios the 4096 cache exists for, and the
 controls behave as the mechanism predicts:
 
-| Workload (warm pass, median ms) | 4096 (`BASE`) | 512 (`W512`) | 512 / 4096 |
+| Workload (median ms of the timed interval — two corpus walks: cold fill + repeat) | 4096 (`BASE`) | 512 (`W512`) | 512 / 4096 |
 | --- | --- | --- | --- |
 | 1024 distinct styled CJK/emoji lines | 100.2 | 189.4 | **1.89×** |
 | 4096 distinct styled CJK/emoji lines | 393.6 | 770.1 | **1.96×** |
 | 1000 plain long CJK lines | 89.9 | 160.3 | **1.78×** |
-| wrapped-transcript render pass (600 CJK lines) | 1.06 | 62.9 | **59.6×** (workload-specific) |
+| post-wrap width re-measure (600 CJK lines; `wrapTextWithAnsi` runs BEFORE the timer, only the per-row `visibleWidth` calls are timed) | 1.06 | 62.9 | **59.6×** |
 | control: 4000 styled ASCII lines (cache bypassed) | 5.84 | 5.78 | 0.99× |
 | control: 8192 distinct lines (above both sizes) | 778.9 | 757.7 | 0.97× |
 
 Mechanism counters from a scratch-instrumented build agree: for the 1024- and
 4096-string working sets the 4096 cache gives 100 % hits on the second pass
 (1024/1024 and 4096/4096) while 512 gives **0**; for 8192 both thrash. The 59.6×
-figure belongs to that one wrapped-row workload and must not be quoted as a
-whole-TUI speedup.
+figure belongs to that one post-wrap re-measure workload — it is not a full render pass
+and must not be quoted as a whole-TUI speedup.
 
 ### X014 — per-frame `LayoutContext.maxWidthCache` → `INCONCLUSIVE`
 
@@ -486,11 +497,31 @@ whole-TUI speedup.
 | `layout-auto-hstack` (extension-shaped: 12 rows × 8 auto entries) | 1.004× | 1.012× | 1.021× |
 | `layout-aliased-hstack` (one instance in several entries — the cache's best case) | 0.991× | 1.035× | 1.014× |
 | `layout-host-tree` (VStack + ScrollView + dock, the host's own shape) | 0.998× | 0.921× | 0.995× |
-| `layout-auto-hstack-churn` (rows invalidated every frame) | 1.053× | 0.960× | 1.027× |
+| `layout-auto-hstack-churn` (10 rows × 6 auto-basis cells whose text changes every frame) | 0.983× | 0.952× | 1.015× |
 
 No cell reaches a robust direction: paired medians span 0.92×–1.05× and the sign
-tests sit between 4/21 and 13/21 rounds in either direction, so the fixed thresholds
-cannot be shown to pass. The mechanism explains why: the cache can only hit when the
+tests sit between 4/21 and 14/21 rounds in either direction, so the fixed thresholds
+cannot be shown to pass. (The `churn` row is a correction: its earlier revision was a
+padded `VStack` of plain `Text`s and never called `measureWidth` at all, so its
+first-run numbers were not an X014 control. It is now 10 rows × 6 auto-basis `HStack`
+cells whose text changes every frame, re-measured over 21 rounds per width.)
+
+Per-frame `measureWidth` counts from an instrumented build (calls / distinct
+`(component,width)` pairs / calls the per-frame cache could serve):
+
+| Shape | calls | pairs | cache-serviceable |
+| --- | --- | --- | --- |
+| auto-basis HStack rows (12 × 8) | 96 | 96 | **0** |
+| churn rows (10 × 6, text changes every frame) | 60 | 60 | **0** |
+| host-like tree (VStack + ScrollView + dock) | 0 | 0 | 0 |
+| aliased instances (2 instances across 5 entries) | 5 | 2 | 3 |
+
+Equivalence is checked on the frame the LAYOUT ENGINE produced — every byte the alt
+screen wrote — not on `root.render()`, which cannot see a changed `measureWidth`. The
+sink is discriminating: scaling the measured width by 4 in the `NO_LAYOUT_CACHE` variant
+makes the run fail with `HASH MISMATCH` (exit 1), while a ±1-column error on a single
+auto entry is absorbed by `allocateStackSizes` and yields a genuinely identical painted
+frame (expected for these fixed-width fixtures). The mechanism explains why: the cache can only hit when the
 *same component instance* is measured from several auto-basis entries within one
 frame, and the only reachable product path (an extension horizontal stack,
 `src/extension/internal/component-compiler.ts`) compiles each child once, so every
@@ -511,36 +542,48 @@ churn cell look like a +80 % tail regression. The corrected verdict is
 
 ### X035 — main-screen processed-line reuse → `KEEP`
 
-9 rounds × 11 workloads, 10 frames each, `BASE` vs `NO_RAW_REUSE` on the real Regular
-path (`TuiApp` → `TuiMainScreen`; fullscreen is not measured here):
+9 rounds × 11 workloads, 10 frames each, `BASE` vs `NO_RAW_REUSE`, driven through the
+host's Regular screen class `TuiMainScreen` (the class `src/tui-app.ts` mounts) with a
+continuously streaming synthetic component; the full `TuiApp` composition and
+fullscreen are not measured here:
 
 | Workload (10 frames, median ms) | reuse ON | reuse OFF | paired OFF/ON median |
 | --- | --- | --- | --- |
 | steady transcript 1k lines, spinner-only change | 3.0 | 10.3 | **3.24×** |
 | steady transcript 5k lines | 10.4 | 48.7 | **4.56×** |
 | steady transcript 10k lines | 15.1 | 2171.6 | **153.7×** |
-| 5k lines, 1 % of lines dirty per frame | 57.1 | 496.7 | **8.78×** |
-| 5k lines, 10 % dirty | 279.7 | 790.7 | **2.57×** |
+| 5k lines, each frame injects a change into 1 % of lines | 49.6 | 345.6 | **7.06×** |
+| 5k lines, each frame injects a change into 10 % of lines | 231.9 | 694.9 | **2.79×** |
 | 5k lines, 100 % dirty (control) | 1382.0 | 1406.1 | 1.00× |
-| 5k ASCII/styled lines | 12.0 | 33.8 | 3.20× |
+| 5k lines whose visible characters are ASCII only (SGR styling aside) | 9.9 | 41.4 | **4.35×** |
 | 5k lines with over-wide rows (truncation path) | 8.7 | 1342.5 | **176.8×** |
 | 5k lines, transcript grows/shrinks every frame | 12.0 | 40.4 | 3.52× |
 | 5k lines, three kitty image lines moving per frame | 35.4 | 63.0 | 1.78× |
-| 5k lines, width cycles 80/120/160 every 5 frames | 20.9 | 58.9 | 2.28× |
+| 5k lines, width cycles 80 → 120 → 160 across the measured frames | 36.5 | 53.4 | 1.60× (8/9 rounds slower) |
 
-Every real workload is slower without the fast path in **9 of 9 rounds**, and the
-dirty-fraction curve is exactly the mechanism: the cache saves the work for
-*unchanged* lines, so the benefit decays as the dirty fraction grows (1 % → 8.8×,
-10 % → 2.6×) and disappears when every line changes (100 % → 1.00×, the negative
-control). It does **not** reduce the per-frame cost to O(changed): the two arrays
-(`processedLines`, `lineImageIds`) and the differential scan remain O(N).
+Every real workload is slower without the fast path in **9 of 9 rounds** (the
+width-resize row in 8 of 9), and the dirty-fraction curve is exactly the mechanism: the
+cache saves the work for *unchanged* lines, so the benefit decays as the dirty fraction
+grows (1 % → 7.1×, 10 % → 2.8×) and disappears when every line changes (100 % → 1.00×,
+the negative control). "Inject a change into N % of lines" is the *per-frame injection*
+fraction: each frame is rebuilt from the pristine corpus, so the previous injection is
+reverted and the adjacent-frame delta is roughly 2 N % (the instrumented run confirms
+it: at 1 % injected, ≈2.6 % of lines per frame reach the preprocessing branch). It does
+**not** reduce the per-frame cost to O(changed): the two arrays (`processedLines`,
+`lineImageIds`) and the differential scan remain O(N).
 
-Correctness/equivalence (this is what makes the numbers usable): the complete
-terminal write stream is **byte-identical** between the two variants for all 11
-workloads × 9 rounds — including kitty image lines moving every frame, transcripts
-growing and shrinking, and width changes — and the source audit confirms
-`restoreRenderState()` / `resetRenderState()` clear the cache while the per-index
-kitty-id alignment cannot survive a length change by construction. An instrumented
+The ascii row, the two dirty rows and the resize row were re-measured after the review
+fixes (the ascii corpus previously contained `▸`/`│`/`✓` glyphs and was not ASCII, and
+the resize window previously covered only two of the three widths); the other rows come
+from the first 9-round run. Run-to-run spread on this shared box is wide enough that a
+single ratio should not be read to two decimals — the sign tests are the robust part.
+
+Correctness/equivalence (this is what makes the numbers usable): the complete terminal
+write stream hashes **identically** between the two variants for all 11 workloads × 9
+rounds — including kitty image lines moving every frame, transcripts growing and
+shrinking, and width changes — and the source audit confirms that `restoreRenderState()`
+/ `resetRenderState()` clear the cache (`captureRenderState()` only exports the state)
+while the per-index kitty-id alignment cannot survive a length change by construction. An instrumented
 build adds the mechanism counts: at 10k steady, 14 frames process 10,014 lines and
 reuse 130,000 (i.e. only the first frame and the changed spinner line are processed);
 at 100 % dirty the reuse count is 0. `asciiVisibleWidthEarlyExit` accounts for only
@@ -558,7 +601,9 @@ pnpm install && pnpm --dir packages/pi-tui build && sha256sum packages/pi-tui/di
 systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 timeout 3600 \
   node --expose-gc --import tsx/esm scripts/bench/div-cache-ab.mts \
   --variants BASE=<base>/packages/pi-tui/dist/index.mjs,NO_RAW_REUSE=<off>/packages/pi-tui/dist/index.mjs \
-  --rounds 9 --frames 10 --workloads x035-steady-10k,... --out temp/perf/div-cache-ab
+  --rounds 9 --frames 10 \
+  --workloads x035-steady-10k,x035-dirty-1pct,x035-corpus-ascii \
+  --out temp/perf/div-cache-ab
 ```
 
 The cap is not optional. An early revision of this harness used
