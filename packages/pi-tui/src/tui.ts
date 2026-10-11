@@ -237,7 +237,8 @@ const TERMINAL_BACKGROUND_QUERY = "\x1b]11;?\x07";
  * terminal input chain is shared while a probe belongs to one screen, so once this process owns
  * background observations every screen consumes an unowned background reply instead of forwarding
  * it as user input. A process that only uses upstream's API keeps upstream's behavior (an unowned
- * color reply is ordinary input again).
+ * color reply is ordinary input again) — upstream's suite relies on that, and Node's test runner
+ * isolates test files, so a suite that never calls the seam still sees upstream's forwarding.
  */
 let backgroundObservationOwned = false;
 

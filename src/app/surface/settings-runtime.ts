@@ -477,6 +477,18 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * step must precede the first fullscreen entry.
    */
   const applyBootDisplay = (): void => {
+  // The live scheme-report listener is registered for EVERY persisted theme: the
+  // apply-time guards below decide whether a report may win, and a runtime switch
+  // to `auto` (the settings/skills paths) enables Mode 2031 without re-entering
+  // this boot wiring — an `auto`-only registration would silently drop those
+  // reports. Registered once, so the fan-out has exactly one apply site.
+  deps.surface.app.onTerminalThemeChange((theme) => {
+    // The opt-out owns the palette: a terminal that reports a scheme change
+    // must not override NO_COLOR / FORCE_COLOR=0 / CI by switching the user to
+    // the light palette.
+    if (themeOptOut()) return
+    if (deps.tuiSettings?.get().theme === 'auto') deps.surface.app.applyTheme(theme)
+  })
   // The Home/End preset is TUI-owned (TS5 §12): the application owner hands
   // the persisted raw value to the mounted surface.
   deps.surface.app.setHomeEndMode(deps.tuiSettings?.get().homeEndKeys)
@@ -496,13 +508,6 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     runDetached('theme autodetect', () => deps.surface.app.autoDetectTheme({
       shouldApply: () => deps.tuiSettings?.get().theme === 'auto',
     }), { diag: deps.diag })
-    deps.surface.app.onTerminalThemeChange((theme) => {
-      // The opt-out owns the palette: a terminal that reports a scheme change
-      // (Mode 2031 is enabled above) must not override NO_COLOR / FORCE_COLOR=0
-      // / CI by switching the user to the light palette.
-      if (themeOptOut()) return
-      if (deps.tuiSettings?.get().theme === 'auto') deps.surface.app.applyTheme(theme)
-    })
     // Enable Mode 2031 on the screens: the terminal reports live scheme
     // changes only while the mode is set. The boot sample above is the only
     // color query — tracking does not sample again.
