@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `a18967044fb7e6fd4cc3fddf8cf7a677ae386041`
+- Audited local source commit: `ed7dafdd45531f29705bc76e163a1b68808c57c9`
 - Branch audited: `chore/pi-tui-v1.1.0-revendor`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
@@ -1594,6 +1594,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - the retained mouse-press target's click synthesis is painted-placement fenced: a still-mounted component whose overlay moved or reflowed (e.g. a centered overlay that grew after the press selected a described row) does not receive a synthetic click retargeted with the old origin
 - the painted-placement liveness check re-derives a nested descendant's CURRENT painted origin from the last-painted child layouts (Box padding + preceding sibling heights): a descendant that reflowed INSIDE a stable overlay root (a preceding sibling grew) no longer receives a synthetic click retargeted with the old origin
 - a delegated (forwarded) mouse result re-targets the gesture owner: the forwarding component becomes the retained press target with its own origin recomputed, so a delegating component that is not a Container (e.g. a SettingsList that renders its submenu itself) can be located by the painted-placement liveness check and re-routes the release click through its own current hit-testing
+- upstream's resetTextSelection() is adopted AND wired: the Host drops the vendor text selection (and its multi-click history) when a transcript WINDOW replacement puts different content under the selection coordinates; ordinary re-renders, disclosure toggles, theme changes and streaming appends keep the user selection (upstream #9311, whose coding-agent calls it before rendering a replaced transcript)
 
 #### Dependency map
 
@@ -1647,6 +1648,8 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 - packages/pi-tui/test/tui-alt-screen.test.ts: a layout-root descendant that reflowed inside its ancestor (header shrank, target moved) does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (ancestor rect + last-painted child offset), not old-origin containment; a fresh press at the new row works
 - packages/pi-tui/test/tui-alt-screen.test.ts: an implicit-document child (legacy single-document mode, no setLayoutRoot) that reflowed after a sibling shrank does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (implicit document box origin + TuiBase last-painted child offset), not mounted liveness; a fresh press at the new row works
 - packages/pi-tui/test/mouse-components.test.ts: keeps a settings list focused when a click in its submenu closes the submenu (the delegated press target is the forwarding component and re-routes the release click)
+- packages/pi-tui/test/tui-alt-screen.test.ts: resetTextSelection drops an active selection and the multi-click history a real click recorded
+- test/compact-window-hardening.test.ts: a window replacement resets the fullscreen selection while a same-window rebuild and an expand rebuild keep it (mutation-checked)
 
 #### Upstream comparison
 
@@ -1674,7 +1677,7 @@ The host needs single-cell fullscreen clicks for click-to-expand. Double-click s
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 declared the long-user bubble's ordinary user-text rows (collapsed and expanded alike) Host disclosure targets — a selection-owned → disclosure-owned ownership change recorded in why/host above; the fork's click-granularity classifier itself is unchanged.
+- Notes: Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 declared the long-user bubble's ordinary user-text rows (collapsed and expanded alike) Host disclosure targets — a selection-owned → disclosure-owned ownership change recorded in why/host above; the fork's click-granularity classifier itself is unchanged. External review observation (PR #272): the adopted upstream resetTextSelection() initially had no caller in this repository; the Host now calls it exactly on a transcript window replacement, which is the path whose selection coordinates point into replaced content.
 
 ### X019 — Text no-op dispose inheritance shim
 
