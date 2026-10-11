@@ -180,18 +180,28 @@ function rowAt(lines: readonly string[], index: number): string {
   return row
 }
 
+/** The bottom row of the MODAL frame occupying the seat (a Question or Save
+ * Location frame): the editor prompt row is gone while a modal owns the seat,
+ * so the modal's own bottom border anchors the same structural check. */
+function modalSeatBottom(lines: readonly string[]): number {
+  const bottom = lines.findLastIndex(line => line.includes('╰'))
+  assert.ok(bottom >= 0, `the modal frame's bottom border must be painted:\n${lines.join('\n')}`)
+  return bottom
+}
+
 /** Every footer row the composer produced must be physically painted, and the
  * viewport bottom must be the footer's last row (a clipped pinned row would
  * make the trailing count negative). Fullscreen-only: the regular document
- * flows from the top and its overflow enters the scrollback. */
-function assertFooterPainted(h: WidgetHarness, lines: readonly string[]): void {
+ * flows from the top and its overflow enters the scrollback. `seatBottom`
+ * overrides the editor-prompt anchor for the modal-owns-the-seat cases. */
+function assertFooterPainted(h: WidgetHarness, lines: readonly string[], seatBottom?: number): void {
   const rows = h.app.footerRenderRowsForTest()
   assert.ok(rows.length > 0, 'the footer must render at least one row')
   for (const row of rows.map(strip).map(text => text.trimEnd())) {
     if (row === '') continue
     assert.ok(lines.some(line => line.includes(row)), `a footer row was clipped out of the viewport: ${JSON.stringify(row)}\n${lines.join('\n')}`)
   }
-  const trailing = lines.length - 1 - editorBounds(lines).bottom - rows.length
+  const trailing = lines.length - 1 - (seatBottom ?? editorBounds(lines).bottom) - rows.length
   assert.ok(trailing >= 0, `the pinned footer is clipped below the viewport (${trailing}):\n${lines.join('\n')}`)
 }
 
@@ -968,4 +978,148 @@ test('D-T21b: a widget row is not a fullscreen Todo pointer target', async () =>
   await settle()
   await h.vt.waitForRender()
   assert.equal(h.app.isTodoPanelVisible(), false, 'a real Todo panel row still toggles the panel')
+})
+
+// ── D-T22..D-T24: modal seat replacement (external review P2) ────────────
+//
+// The three cases drive every direction through an ABORT (or the raw
+// presentation call) instead of a key press: a key press re-enters
+// `handleQuestionKey`, which ends in `TuiApp.requestRender()` and would mask a
+// bypassed budget sync, so a key-driven test cannot prove the fix.
+
+test('D-T22: a Question frame replacing the seat under a capturing overlay re-derives the grant', async () => {
+  const h = makeHarness(80, 14)
+  registerWidget(h.ledger, 'input.widget.above', 'a1', 'MODAL-ABOVE-22')
+  registerWidget(h.ledger, 'input.widget.below', 'b1', 'MODAL-BELOW-22')
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(rowsWith(painted(h.vt), 'MODAL-BELOW-22').length, 1, 'the roomy grant paints the below zone')
+
+  // A capturing overlay owns the seat FIRST, so the Question's own
+  // setFocusSeat('overlay') is a no-op: the presentation path itself is the
+  // only budget trigger (external review P2 — a raw screen render left it
+  // stale and clipped the footer).
+  h.app.openPicker([{ value: 'p', label: 'PICK-22' }], () => {}, () => {})
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(h.app.focusSeatForTest(), 'overlay')
+
+  const controller = new AbortController()
+  const question = h.app.askQuestions(
+    [{ id: 'q', question: 'TALL-22?', options: Array.from({ length: 6 }, (_, index) => ({ label: `OPT-${index + 1}` })) }],
+    controller.signal,
+  )
+  const questionSettled = question.then(value => value, error => String(error))
+  await settle()
+  await h.vt.waitForRender()
+  const lines = painted(h.vt)
+  assert.equal(outlet(h.host, 'above'), '', 'the taller seat retires the above zone')
+  assert.equal(outlet(h.host, 'below'), '', 'the taller seat retires the below zone')
+  assert.equal(rowsWith(lines, 'MODAL-ABOVE-22').length + rowsWith(lines, 'MODAL-BELOW-22').length, 0,
+    `no stale widget row may survive the seat replacement:\n${lines.join('\n')}`)
+  const scroll = h.app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.viewportHeight >= 1, `the transcript keeps its minimum row: ${JSON.stringify(scroll)}`)
+  assertFooterPainted(h, lines, modalSeatBottom(lines))
+  assert.equal(h.app.focusSeatForTest(), 'overlay')
+
+  // The abort-driven restore (NOT a key press) must re-derive the roomier
+  // grant for the restored editor seat.
+  controller.abort()
+  await questionSettled
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(rowsWith(painted(h.vt), 'MODAL-BELOW-22').length, 1, 'the abort-driven restore re-derives the roomier grant')
+})
+
+test('D-T23: a queued Question handover re-derives the grant for the new frame height', async () => {
+  const h = makeHarness(80, 20)
+  registerRows(h.ledger, 'input.widget.above', 'a1', ['ABOVE-23-1', 'ABOVE-23-2', 'ABOVE-23-3'])
+  registerWidget(h.ledger, 'input.widget.below', 'b1', 'BELOW-23')
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'above').split('\n').length, 3, 'the editor seat leaves room for three above rows')
+  assert.equal(outlet(h.host, 'below'), 'BELOW-23')
+
+  const controller = new AbortController()
+  const first = h.app.askQuestions([{ id: 'q1', question: 'SHORT-23?', options: [{ label: 'ONLY' }] }], controller.signal)
+  const firstSettled = first.then(value => value, error => String(error))
+  const second = h.app.askQuestions([{ id: 'q2', question: 'TALL-23?', options: Array.from({ length: 8 }, (_, index) => ({ label: `OPT-${index + 1}` })) }])
+  const secondSettled = second.then(value => value, error => String(error))
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'below'), 'BELOW-23', 'the short frame still leaves room for the zones')
+
+  // Abort the first flow: the seat hands straight over to the queued frame
+  // (FOUR rows taller here) with NO key press in between, so the handover
+  // itself must re-derive the budget, and the seat stays 'overlay' throughout.
+  controller.abort()
+  await firstSettled
+  await settle()
+  await h.vt.waitForRender()
+  const lines = painted(h.vt)
+  assert.ok(lines.join('\n').includes('TALL-23?'), `the queued question must own the seat:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('❯')), 'the editor must NOT be restored between two queued questions')
+  assert.equal(h.app.focusSeatForTest(), 'overlay')
+  // 80x20: protected chrome = header 1 + the 12-row frame; the grant room is
+  // 20 - 13 - FOOTER_MAX(4) - 1 transcript row = 2 rows.
+  assert.equal(outlet(h.host, 'above').split('\n').length, 2, 'the grant follows the taller frame')
+  assert.equal(outlet(h.host, 'below'), '', 'the below zone yields to the taller frame')
+  assert.equal(rowsWith(lines, 'ABOVE-23-3').length, 0, 'the withdrawn third above row must not linger')
+  const scroll = h.app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.viewportHeight >= 1, `the transcript keeps its minimum row: ${JSON.stringify(scroll)}`)
+  assertFooterPainted(h, lines, modalSeatBottom(lines))
+
+  h.vt.sendInput('\x1b')
+  await secondSettled
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'above').split('\n').length, 3, 'the editor restore brings the full grant back')
+  assert.equal(outlet(h.host, 'below'), 'BELOW-23')
+})
+
+test('D-T24: a Save Location prompt re-derives the grant on enter and on restore', async () => {
+  const h = makeHarness(80, 14)
+  registerWidget(h.ledger, 'input.widget.above', 'a1', 'SAVE-ABOVE-24')
+  registerWidget(h.ledger, 'input.widget.below', 'b1', 'SAVE-BELOW-24')
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(rowsWith(painted(h.vt), 'SAVE-BELOW-24').length, 1, 'the roomy grant paints the below zone')
+
+  h.app.openPicker([{ value: 'p', label: 'PICK-24' }], () => {}, () => {})
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(h.app.focusSeatForTest(), 'overlay')
+
+  const controller = new AbortController()
+  const prompt = h.app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-24.zip', initialDirectory: './' },
+    {
+      resolveDirectory: (input: string) => `/tmp/${input}`,
+      isDirectory: () => true,
+      targetExists: () => false,
+      complete: async () => null,
+    },
+    controller.signal,
+  )
+  const promptSettled = prompt.then(value => value, error => String(error))
+  await settle()
+  await h.vt.waitForRender()
+  const lines = painted(h.vt)
+  assert.equal(outlet(h.host, 'above'), '', 'the prompt frame retires the above zone')
+  assert.equal(outlet(h.host, 'below'), '', 'the prompt frame retires the below zone')
+  assert.equal(rowsWith(lines, 'SAVE-BELOW-24').length, 0, `no stale widget row survives the prompt:\n${lines.join('\n')}`)
+  const scroll = h.app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.viewportHeight >= 1, `the transcript keeps its minimum row: ${JSON.stringify(scroll)}`)
+  assertFooterPainted(h, lines, modalSeatBottom(lines))
+
+  // The abort-driven restore (NOT a key press) must re-derive the roomier
+  // grant for the restored editor seat.
+  controller.abort()
+  assert.deepEqual(await promptSettled, { kind: 'cancelled' })
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(rowsWith(painted(h.vt), 'SAVE-BELOW-24').length, 1, 'the abort-driven restore re-derives the roomier grant')
 })
