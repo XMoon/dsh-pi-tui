@@ -184,19 +184,27 @@ function rightClick(vt: VirtualTerminal, x: number, y: number): void {
   vt.sendInput(`\x1b[<2;${x};${y}M`)
 }
 
-/** Run `body` with `process.platform` reporting `win32`. The fork gates the
- * right-click clipboard paste to win32 (`packages/pi-tui/src/tui-alt-screen.ts`,
- * the X-divergence `handleRightClickPaste`), so the REAL trigger is
- * unreachable on this host; the descriptor is restored in a `finally` (each
- * test FILE runs in its own process, and this helper cannot leak past its
- * await). */
-async function withWin32Platform<T>(body: () => Promise<T>): Promise<T> {
-  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
-  Object.defineProperty(process, 'platform', { ...descriptor, value: 'win32' })
+/** Run `body` with the fork's right-click clipboard paste ENABLED. The fork
+ * (`packages/pi-tui/src/tui-alt-screen.ts` `handleRightClickPaste`) requires
+ * BOTH `process.platform === 'win32'` and a non-VSCode `TERM_PROGRAM`; neither
+ * holds on every host that runs this suite, so both gates are neutralised in
+ * ONE finally-restored scope. The restoration is exact: the original platform
+ * descriptor, and the original `TERM_PROGRAM` string or its absence (a VSCode
+ * integrated terminal keeps `TERM_PROGRAM=vscode`, where the fork refuses the
+ * paste by design). Each test FILE runs in its own process, and this helper
+ * cannot leak past its await. */
+async function withRightClickPaste<T>(body: () => Promise<T>): Promise<T> {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  const hadTermProgram = Object.prototype.hasOwnProperty.call(process.env, 'TERM_PROGRAM')
+  const termProgram = process.env.TERM_PROGRAM
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' })
+  process.env.TERM_PROGRAM = 'test-terminal'
   try {
     return await body()
   } finally {
-    if (descriptor !== undefined) Object.defineProperty(process, 'platform', descriptor)
+    if (hadTermProgram) process.env.TERM_PROGRAM = termProgram
+    else delete process.env.TERM_PROGRAM
+    if (platform !== undefined) Object.defineProperty(process, 'platform', platform)
   }
 }
 
@@ -1208,7 +1216,7 @@ test('D-T25: a right-click paste that shrinks the Save Location frame re-derives
 
   // The REAL right-click clipboard trigger (win32-gated in the fork), landing
   // inside the prompt frame.
-  await withWin32Platform(async () => {
+  await withRightClickPaste(async () => {
     rightClick(h.vt, 12, tallFrame - 2)
     await settle()
     await h.vt.waitForRender()
