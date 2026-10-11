@@ -13,8 +13,8 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `2717a89facd7861f21a0e755e3460c9eb6cbcd68`
-- Branch audited: `chore/div-retire-a-legacy-paths`
+- Audited local source commit: `fd1b7e7790f709816ea8ae3854c7ee9c1b26614b`
+- Branch audited: `chore/div-retire-b-paste-burst`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Kimi reference snapshot: `MoonshotAI/kimi-code@9e881528a89945a373002b0b229f91735e8f2c4f`
@@ -26,6 +26,7 @@
 - Host-visible API changes were migrated with the minimum edit: TuiApp queries the fork's queryTerminalColors and derives the initial scheme from the reported background (upstream removed the DSR 996 probe), and the Host test/bench terminal fakes implement the new Terminal.setProgramStatus interface without ever driving it.
 - Validated against the immutable source snapshot recorded in verification.auditedSourceCommit.
 - Post-PR272 DIV retirement audit (PR A): X027 and X049 were retired by product decision, their fork hunks deleted and packages/pi-tui/src/autocomplete.ts plus src/alt-screen-search.ts restored to the pinned v1.1.0 blobs byte-for-byte; both records describe the post-retirement reality, including the deliberate loss of the retired local behavior.
+- Post-PR272 DIV retirement audit (PR B): X038 was retired by product decision — src/paste-burst.ts deleted, the Editor paste-burst state/option/setter/feeds and the Enter-suppression branch removed — and the record describes the post-retirement reality, including the deliberate loss of the lost-marker paste fallback; true bracketed paste and X037 submit remapping stay intact.
 
 ## Audit rules
 
@@ -86,7 +87,7 @@
 ## Summary
 
 - Records: 61
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 47, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 4, `SUPERSEDED`: 3
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 46, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 5, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -128,7 +129,7 @@
 | X035 | ACTIVE | HIGH | PERF_HOST_DEPENDENT | NO |
 | X036 | ACTIVE | HIGH | HARD_HOST_API | NO |
 | X037 | ACTIVE | CRITICAL | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
-| X038 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
+| X038 | REMOVED_UNUSED | HIGH | BUGFIX_MISSING_UPSTREAM | YES |
 | X039 | ACTIVE | MEDIUM | PERF_HOST_DEPENDENT | NO |
 | X040 | ACTIVE | HIGH | PUBLIC_COMPONENT_CONTRACT | NO |
 | X041 | MOVED_TO_HOST | HIGH | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
@@ -3100,19 +3101,18 @@ Fullscreen focus reports must clean up native selection on FOCUS_OUT while still
 
 #### Why it exists
 
-Editor submission must be remappable without changing plain Input submission. The editor binding is also shared by physical-submit detection, PasteBurst, and backslash-Enter fallback.
+Editor submission must be remappable without changing plain Input submission. The editor binding is also shared by the backslash-Enter fallback.
 
 #### Changed surface
 
 - process-global tui.editor.submit binding definition
 - Editor submit and backslash-enter checks use the editor binding
-- X038 physical Enter detection reads the same effective binding
 - the editor keeps its Ctrl+Home/End bindings (tui.editor.cursorLineStart/cursorLineEnd) that upstream v1.1.0 dropped while moving the viewport shortcuts onto tui.altScreen.top/bottom, so the host's Home/End 'viewport' preset still reaches the editor
 
 #### Dependency map
 
 **Vendor internal**
-- Editor submit branch, PasteBurst physical-submit check, backslash-enter fallback, and keybinding registry share tui.editor.submit.
+- Editor submit branch, backslash-enter fallback and keybinding registry share tui.editor.submit.
 - Audit note: All three Editor paths must move together.
 
 **Inheritance / structural**
@@ -3134,7 +3134,7 @@ Editor submission must be remappable without changing plain Input submission. Th
 - submit: ctrl+x affects Editor but not question/search Input
 - physical Enter under a remapped binding is distinguished from the remapped chord
 - backslash-enter uses the effective editor submit keys
-- Audit note: A host-only interception would bypass or duplicate X038 and Editor internal semantics.
+- Audit note: A host-only interception would bypass or duplicate the Editor's internal submit semantics.
 
 #### Guarding tests
 
@@ -3158,8 +3158,8 @@ Editor submission must be remappable without changing plain Input submission. Th
 
 #### Retirement conditions
 
-- Upstream must provide a per-editor binding/action consumed by submit, PasteBurst physical-submit detection, and backslash-enter fallback.
-- Run anti-pollution, remap, PasteBurst, history, and editor input tests before changing either half.
+- Upstream must provide a per-editor binding/action consumed by submit and the backslash-enter fallback.
+- Run anti-pollution, remap, history and editor input tests before changing either half.
 
 #### Replacement mapping
 
@@ -3172,11 +3172,11 @@ Editor submission must be remappable without changing plain Input submission. Th
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: KEEP HARD. Cross-audited with X038; both the binding definition and editor call sites are required. Re-verified at v1.1.0 (abe508e1): the editor submit split is unchanged upstream, and the upstream Home/End rebinding was reconciled so the host's two presets keep working.
+- Notes: KEEP HARD. Both the binding definition and the editor call sites are required; the former X038 cross-audit no longer applies (X038 was retired in PR B). Re-verified at v1.1.0 (abe508e1): the editor submit split is unchanged upstream, and the upstream Home/End rebinding was reconciled so the host's two presets keep working.
 
-### X038 — PasteBurst non-bracketed paste fallback
+### X038 — PasteBurst non-bracketed paste fallback (retired)
 
-- Status: `ACTIVE`
+- Status: `REMOVED_UNUSED`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `HIGH`
 - Files: `src/paste-burst.ts`, `src/components/editor.ts`
@@ -3185,60 +3185,60 @@ Editor submission must be remappable without changing plain Input submission. Th
 
 #### Why it exists
 
-Terminals and tmux can lose bracketed-paste markers and deliver a paste as rapid plain characters. The trailing physical Enter must insert a newline rather than submit a partial draft.
+Retired by product decision (post-PR272 DIV retirement plan, PR B). The former fallback inferred a paste from timing alone: eight or more single printable characters within 8ms made the editor turn the following physical Enter into a newline instead of submitting, and the typing remained the only paste evidence. The product decision is that rapidly typed characters followed by a submit key must behave like normal typing and submission, so src/paste-burst.ts is deleted, the Editor pasteBurst state, the disablePasteBurst option and the setDisablePasteBurst setter are removed, and the submit branch no longer converts a physical Enter into a newline. Real bracketed paste (CSI 200~/201~), the X004A paste-marker registry, undo/redo (X004B) and the editor-owned submit binding (X037) are unchanged; no replacement heuristic was added, and lost bracketed-paste markers are deliberately no longer compensated for.
 
 #### Changed surface
 
-- PasteBurst single-character timing detector
-- Editor disablePasteBurst option/setter and integration
-- physical-submit Enter suppression with X037 remap distinction
+- retired: the PasteBurst single-character timing detector (src/paste-burst.ts deleted)
+- retired: the Editor disablePasteBurst option, the disablePasteBurst field and the setDisablePasteBurst setter
+- retired: the physical-Enter suppression branch inside the tui.editor.submit handling (X037 remapping itself is untouched)
+- retired: the pasteBurst reset/feed calls in the input loop and the two printable-insertion branches
 
 #### Dependency map
 
 **Vendor internal**
-- PasteBurst state, Editor input loop, bracketed-paste path, insert-point feeds, and submit binding are one input-ordering contract.
-- Audit note: The multi-character chunk reset is intentional for typed-ahead/test input.
+- None found (audited).
+- Audit note: The only vendor-internal consumer was Editor (field, setter, input-loop reset and the two printable-insertion feeds, plus the submit branch); no other fork file imported PasteBurst, and src/paste-burst.ts is deleted.
 
 **Inheritance / structural**
-- TuiEditor exposes the disablePasteBurst setter through its Editor integration.
-- Audit note: No host copy can observe each physical character after the fork parser consumes it.
+- None found (audited).
+- Audit note: The retired state lived entirely in Editor; TuiEditor extends Editor and consumed only the setter. No override, super edge or other locally extended component depended on the removed behavior.
 
 **Host**
-- Host editor paste path across SSH, tmux, iTerm2, and remapped submit configurations.
-- Audit note: The bugfix is editor-internal and deliberately has no single host import consumer.
+- None found (audited).
+- Audit note: No host module imported PasteBurst or called setDisablePasteBurst or passed the option (the host drove submit behavior through the editor seat only), so no host path consumed the retired fallback.
 
 **Public / extension**
-- Editor constructor option and setDisablePasteBurst integration surface.
-- Audit note: Integrations can opt out while the default remains enabled.
+- None found (audited).
+- Audit note: PasteBurst is not exported from the package entry, and the disablePasteBurst constructor option belonged to the private vendored Editor; the published extension surface exposes its own structural autocomplete/editor types and never this option.
 
 **Behavioral coupling**
-- eight or more single chars within the burst window mark a paste
-- physical Enter is suppressed to newline
-- remapped submit chord still submits mid-burst
-- physical Enter under a remap breaks the burst
-- Audit note: The X037 cross-semantics are part of this record.
+- None found (audited).
+- Audit note: Deliberate product tradeoff: a rapid plain-character stream followed by a physical submit key now submits the complete draft instead of inserting a newline; terminals or multiplexers that expose only undifferentiated keystrokes no longer receive a paste fallback. True bracketed paste keeps its multiline text and undo behavior.
 
 #### Guarding tests
 
-- packages/pi-tui/test/editor.test.ts: PasteBurst fallback and X037 cross tests
-- docs/tmux-testing.md: two-step terminal driving guidance
-- test/editor-input-mode.test.ts: submit behavior
+- retired: the describe("paste-burst fallback (X038)") suite in packages/pi-tui/test/editor.test.ts is deleted together with its opt-out, runtime-toggle and X037-cross cases
+- replacement regression: packages/pi-tui/test/editor.test.ts pins the retired behavior as a negative control — eight or more rapidly injected printable characters followed by a physical Enter submit exactly once with the original text and never substitute a newline, and a remapped submit chord still submits once (X037)
+- surviving coverage: the independent describe("editor submit binding split (X037)") suite plus the host submit/keybinding suites (test/keybinding-integration.test.ts, test/editor-input-mode.test.ts, test/shell-editor-mode.test.ts)
+- surviving coverage (real paste): the bracketed-paste and paste-marker/undo suites (X004A/X004B) plus test/shell-editor-mode.test.ts and test/editor-input-mode.test.ts host normalization cases
 
 #### Upstream comparison
 
 - Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
-- Semantic equivalence: `NO`
+- Semantic equivalence: `YES`
 - Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Relevant upstream files:
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Both the pinned baseline and the audited upstream reference have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports.
+- Remaining semantic delta: The pinned v1.1.0 baseline has no PasteBurst module and no paste-burst state in the Editor input loop or submit branch; the retired regions of packages/pi-tui/src/components/editor.ts now match the upstream handling (a submit-binding match submits, backslash-Enter still inserts a newline, disableSubmit still returns early). The other local divergences that share this file (X004A/X004B, X037, X050, X051 and friends) are untouched, so the comparison is region-scoped.
 
 #### Retirement conditions
 
-- Retire only if supported terminal environments provide reliable bracketed paste markers or upstream implements an equivalent fallback and opt-out contract.
-- Run terminal/tmux timing, remapped submit, and editor input tests.
+- Product decision: no timing-based paste inference and no opt-out toggle; do not re-add a PasteBurst-like heuristic or a substitute API.
+- True bracketed paste (CSI 200~/201~) and the X004A paste-marker registry remain the only paste contract.
+- Recheck this record only if upstream ships an equivalent fallback plus an opt-out contract and the product reverses the decision.
 
 #### Replacement mapping
 
@@ -3246,12 +3246,14 @@ Terminals and tmux can lose bracketed-paste markers and deliver a paste as rapid
 
 #### Retirement evidence
 
-- None recorded.
+- Deletion evidence: src/paste-burst.ts is absent, and the PasteBurst import, class file, disablePasteBurst option/field, setDisablePasteBurst setter, onPlainChar feeds, reset call and Enter-suppression branch have no live source, test or documentation reference.
+- Source evidence: the retired regions of packages/pi-tui/src/components/editor.ts match the pinned v1.1.0 handling, and upstream has no paste-burst module at all.
+- Gate evidence: fork typecheck, the fork editor suite (including the new negative regression), the host editor/keybinding suites, gate:pi-vendor-diff --strict and gate:pi-divergence-ledger pass with this record retired.
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Restored and re-audited after the earlier incorrect no-host-consumer removal.
+- Notes: Retirement audit for the post-PR272 DIV retirement plan PR B. An earlier removal of this behavior was reverted because it was judged from host imports; this retirement is a recorded product decision, not a no-consumer finding, and the true bracketed-paste path stays covered.
 
 ### X039 — WIDTH_CACHE_SIZE 4096
 
