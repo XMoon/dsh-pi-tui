@@ -1301,3 +1301,54 @@ test('keybinding editor: the unavailable fallback degrades to its Esc row on a s
   panel.setMaxRows(Number.POSITIVE_INFINITY)
   assert.equal(panel.render(40).length, 4, 'a non-finite grant restores the full fallback')
 })
+
+test('action editor: the scrolled choose-binding Leader row keeps its painted ordinal (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  // A configured leader key keeps the Leader choice available.
+  const parsed = parseUserKeybindings({ leader: 'ctrl+q' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 5,
+  })
+  try {
+    editor.handleInput('a') // choose-binding: Direct is selected
+    editor.render(60)
+    editor.handleInput('\x1b[B') // Down: Leader selected, the window re-centers
+    const view = editor.render(60).map(plain)
+    const leaderRow = view.findIndex(line => line.includes('Leader completion'))
+    assert.ok(leaderRow >= 0, `the scrolled Leader choice must stay painted:\n${view.join('\n')}`)
+    assert.notEqual(leaderRow, 4, 'the scrolled window must not assume the fixed row 4')
+    assert.ok(editor.handleMouse(mouse('press', 10, leaderRow, 60, 5))?.handled, 'the painted Leader row is clickable')
+    editor.handleMouse(mouse('click', 10, leaderRow, 60, 5))
+    assert.match(plain(editor.render(60).join('\n')), /Record shortcut/, 'the painted Leader row must start the leader recorder')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: the key recorder view is NOT row-budgeted (documented short-grant degradation)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('\r') // leader editor
+    panel.handleInput('\r') // start the recorder
+    assert.match(plain(panel.render(60).join('\n')), /Record shortcut/, 'the recorder must be active')
+    const full = panel.render(60)
+    // The independent recorder view is a fixed, grant-independent assembly:
+    // plan C3 keeps this degradation instead of adding a second scrollport.
+    panel.setMaxRows(1)
+    const short = panel.render(60)
+    assert.equal(short.length, 8, `the recorder view is fixed (${short.length} rows observed at this revision)`)
+    assert.deepEqual(short, full, 'the recorder view must ignore the panel grant')
+    assert.match(plain(short[short.length - 1]!), /Esc: cancel/, 'its own footer still ends the view')
+  } finally {
+    manager.dispose()
+  }
+})

@@ -714,7 +714,7 @@ test('standalone keybindings editor keeps the full terminal budget (PR-C standal
     runMutation: () => {},
     maxRows: () => app.keybindingEditorMaxRows(),
   })
-  app.openKeybindingEditor(panel)
+  const close = app.openKeybindingEditor(panel)
   try {
     await vt.waitForRender()
     const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
@@ -739,6 +739,10 @@ test('standalone keybindings editor keeps the full terminal budget (PR-C standal
     await vt.waitForRender()
     lines = vt.getViewport().map(strip)
     assert.ok(lines.some(line => line.includes('Search: submit')), `the query must survive the return:\n${lines.join('\n')}`)
+    // The real closer removes the editor (the returned handle owns the hide).
+    close()
+    await vt.waitForRender()
+    assert.ok(!vt.getViewport().map(strip).some(line => line.includes('Enter: details')), 'the closer must remove the editor')
   } finally {
     manager.dispose()
   }
