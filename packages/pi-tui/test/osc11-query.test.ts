@@ -195,4 +195,50 @@ describe("serialized terminal color queries (X008)", () => {
 			tui.stop();
 		}
 	});
+
+	it("drops a query that times out while an earlier query still owns the wire", async () => {
+		const { terminal, tui } = setup();
+		try {
+			const owner = tui.queryTerminalColors({ timeoutMs: 500 });
+			const queued = tui.queryTerminalColors({ timeoutMs: 5 });
+			assert.strictEqual(terminal.colorQueryCount(), 1, "the queued query must not be written yet");
+
+			// The queued query settles on its own timeout while it has never been
+			// written: it must be dropped, never sent later as a stale burst.
+			assert.strictEqual((await queued).background, undefined);
+			terminal.sendInput("\x1b]11;#336699\x07"); // the owner's reply
+			terminal.sendInput(DA1); // ends the owner's turn
+			assert.strictEqual(terminal.colorQueryCount(), 1, "a settled queued query must never be written");
+			assert.deepStrictEqual((await owner).background, OWN);
+
+			// A fresh query still gets the wire and its own reply.
+			const third = tui.queryTerminalColors({ timeoutMs: 500 });
+			assert.strictEqual(terminal.colorQueryCount(), 2);
+			terminal.sendInput("\x1b]11;#111111\x07");
+			terminal.sendInput(DA1);
+			assert.deepStrictEqual((await third).background, LATE);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("swallows a stray color reply when no query is waiting", async () => {
+		const { terminal, tui } = setup();
+		try {
+			const forwarded: string[] = [];
+			tui.addInputListener((data) => {
+				forwarded.push(data);
+				return undefined;
+			});
+
+			// A reply for a query issued on another screen (or whose tombstone was
+			// already consumed) is still a protocol response, never typed input.
+			terminal.sendInput("\x1b]11;#000000\x07");
+			terminal.sendInput("\x1b]10;#ffffff\x07");
+			terminal.sendInput("\x1b]4;3;#ff0000\x07");
+			assert.deepStrictEqual(forwarded, [], "an unmatched color reply leaked into the input path");
+		} finally {
+			tui.stop();
+		}
+	});
 });

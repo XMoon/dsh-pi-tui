@@ -1546,7 +1546,13 @@ export abstract class TuiBase extends Container implements TUI {
 	private consumeTerminalColorResponse(data: string): boolean {
 		const query = this.pendingTerminalColorQueries[0];
 		if (!query) {
-			return false;
+			// X008: a well-formed OSC color reply is a terminal protocol response,
+			// never editor input — even when THIS screen has no query waiting (the
+			// reply belongs to a query issued before a fullscreen swap / stop, or
+			// to a query whose tombstone was already consumed). Upstream forwards
+			// it to the input pipeline; the fork keeps swallowing it so a stray
+			// reply can never be mistaken for typed input.
+			return parseOscColorResponse(data) !== undefined;
 		}
 		if (DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data)) {
 			this.pendingTerminalColorQueries.shift();
@@ -1927,6 +1933,15 @@ export abstract class TuiBase extends Container implements TUI {
 			query.timer = setTimeout(() => {
 				query.deliver = onLateReply;
 				resolve(this.terminalColorQueryResult(query));
+				// X008: a query that timed out while an EARLIER query still owned the
+				// wire was never written. Drop it so a settled query can never be
+				// sent later as a stale burst, and pending queries cannot accumulate
+				// on a terminal that never answers DA1. The oldest waiting query
+				// stays the tombstone for the replies it may still receive.
+				if (this.pendingTerminalColorQueries[0] !== query) {
+					const index = this.pendingTerminalColorQueries.indexOf(query);
+					if (index !== -1) this.pendingTerminalColorQueries.splice(index, 1);
+				}
 			}, timeoutMs);
 			// X008: the query bytes are written only when the wire is free; the
 			// public timeout still settles the Promise, but a timed-out query
