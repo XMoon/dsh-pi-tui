@@ -333,8 +333,9 @@ export class UserBubbleComponent implements Component {
 
   /** Whether the current render is an EXPANDED compact-capable bubble: the
    * visual rows exceed the threshold, so its whole BODY is the local collapse
-   * surface (a compact marker is painted instead while folded). */
-  showsCollapseControl(): boolean {
+   * surface (a compact marker is painted instead while folded). There is no
+   * separate collapse control row to place. */
+  expandedBodyCollapsible(): boolean {
     return this.lastCollapseEligible
   }
 

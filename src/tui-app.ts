@@ -737,8 +737,8 @@ class PendingUserComponent implements Component {
     return this.bubble.compactMarkerRow()
   }
 
-  showsCollapseControl(): boolean {
-    return this.bubble.showsCollapseControl()
+  expandedBodyCollapsible(): boolean {
+    return this.bubble.expandedBodyCollapsible()
   }
 
   disclosureBodyRowCount(): number {
@@ -9019,7 +9019,7 @@ export class TuiApp {
       let userDisclosureHits: readonly UserDisclosureHit[] | undefined
       const containerPath = this.rowContainerPath(block)
       if (block.kind === 'pending-tail' && block.item.kind === 'user') {
-        userDisclosureHits = this.userDisclosureHitsFor(component, rendered, truncatedMarker, {
+        userDisclosureHits = this.userDisclosureHitsFor(component, {
           kind: 'pending',
           key: pendingUserDisclosureKey(block.item.row),
         })
@@ -9027,7 +9027,7 @@ export class TuiApp {
         truncatedMarker = block.truncated === true
         attachments = this.attachmentRangesOf(component, width)
         if (isUserMessageDisclosureCandidate(block.message)) {
-          userDisclosureHits = this.userDisclosureHitsFor(component, rendered, truncatedMarker, {
+          userDisclosureHits = this.userDisclosureHitsFor(component, {
             kind: 'durable',
             message: block.message,
           })
@@ -9236,8 +9236,6 @@ export class TuiApp {
    * remains the keyboard owner in every surface. */
   private userDisclosureHitsFor(
     component: Component,
-    rendered: readonly string[],
-    truncatedMarker: boolean,
     target: UserDisclosureTarget,
   ): readonly UserDisclosureHit[] | undefined {
     const bubble = userDisclosureComponentOf(component)
@@ -9246,7 +9244,7 @@ export class TuiApp {
       return [{ startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'expand', target }]
     }
     if (this.fullscreen === undefined) return undefined
-    if (!bubble.showsCollapseControl()) return undefined
+    if (!bubble.expandedBodyCollapsible()) return undefined
     return [{ startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'collapse', target }]
   }
 
@@ -9264,7 +9262,7 @@ export class TuiApp {
     return mounted.map(entry => {
       const rendered = entry.component.render(width)
       if (entry.block.kind === 'pending-tail' && entry.block.item.kind === 'user') {
-        const userDisclosureHits = this.userDisclosureHitsFor(entry.component, rendered, entry.truncatedMarker, {
+        const userDisclosureHits = this.userDisclosureHitsFor(entry.component, {
           kind: 'pending',
           key: pendingUserDisclosureKey(entry.block.item.row),
         })
@@ -9279,7 +9277,7 @@ export class TuiApp {
       }
       const attachments = this.attachmentRangesOf(entry.component, width)
       const userDisclosureHits = isUserMessageDisclosureCandidate(entry.block.message)
-        ? this.userDisclosureHitsFor(entry.component, rendered, entry.truncatedMarker, {
+        ? this.userDisclosureHitsFor(entry.component, {
             kind: 'durable',
             message: entry.block.message,
           })
