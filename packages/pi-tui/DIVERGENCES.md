@@ -2342,12 +2342,12 @@ Retired by product decision (post-PR272 DIV retirement plan, PR A). The former p
 
 **Behavioral coupling**
 - None found (audited).
-- Audit note: Deliberate product tradeoff: a directory line that fd prints without a trailing separator is typed as a file again (upstream behavior). The host never used the fd-backed provider path, and the upstream fd suite plus the host completion suites stay green.
+- Audit note: Deliberate product tradeoff: a directory line that fd prints without a trailing separator is typed as a file again (upstream behavior). The host never used the fd-backed provider path, so the host completion suites are the green evidence here; the restored upstream fd-typing path is fd-gated (the fd @ file suggestions block SKIPS when fd is absent, as in the audited environment) and is not claimed as executed regression coverage.
 
 #### Guarding tests
 
 - retired: packages/pi-tui/test/autocomplete.test.ts is upstream v1.1.0 verbatim again (the typeDirectoryOutputLines describe block and its import were deleted rather than left asserting a removed mechanism)
-- surviving coverage (upstream fd path): the fd @ file suggestion cases in packages/pi-tui/test/autocomplete.test.ts
+- fd-gated coverage: the upstream fd @ file suggestion cases in packages/pi-tui/test/autocomplete.test.ts are skipped when fd is absent, so they are listed as fd-gated and not as executed passing evidence
 - surviving coverage (host routing): test/file-completion-convergence.test.ts, test/autocomplete-provider.test.ts, test/directory-completion.test.ts, test/image-arg-completion.test.ts, test/client-file-completion.test.ts, test/shell-completion.test.ts
 
 #### Upstream comparison
@@ -2374,7 +2374,7 @@ Retired by product decision (post-PR272 DIV retirement plan, PR A). The former p
 
 - Deletion evidence: typeDirectoryOutputLines and both call sites are removed; the helper name, its import and the retired slicing exception have no live source or test reference.
 - Source evidence: packages/pi-tui/src/autocomplete.ts and packages/pi-tui/test/autocomplete.test.ts match the pinned v1.1.0 blobs (diff empty).
-- Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host completion suites pass with this record retired.
+- Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host completion suites pass with this record retired (the fd-gated fd @ file suggestions block SKIPS when fd is absent and is not part of that evidence).
 
 #### Audit record
 
