@@ -38,6 +38,7 @@ import type { TerminalProgressState } from '@xmoon76/pi-tui'
 import { applyRunnerWithRuntime } from '../src/app/bootstrap.ts'
 import { Config as TuiConfigSchema } from '../src/index.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { isTernTerminal } from '../src/tui/terminal/tern.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
 import type { RemoteApplicationOverride } from '../src/app/application-runtime.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -112,6 +113,17 @@ async function mountRemoteRunner(
   life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
+  })
+  // The runner mounts through the production entry (`startProcessTui`), which
+  // reads the HOST terminal identity: a suite started inside a Tern pane would
+  // otherwise silently switch this fixture — which asserts the boolean OSC 9;4
+  // contract — to the X059 stateful projection. Held for the whole test because
+  // the owner switch re-mounts the app.
+  const previousTermProgram = process.env.TERM_PROGRAM
+  if (isTernTerminal()) delete process.env.TERM_PROGRAM
+  life.defer(() => {
+    if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = previousTermProgram
   })
   host.ctx.provide('appExit', (code: number) => { void code })
   const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
