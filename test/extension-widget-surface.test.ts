@@ -157,6 +157,60 @@ test('SurfaceHost: dispose clears the widget zones (no stale rows after teardown
   assert.equal(host.hasWidgetsBelow(), false)
 })
 
+test('SurfaceHost: a zero widget grant empties the zone and a positive grant restores the SAME registration (PR-D)', () => {
+  const ledger = new ExtensionLedger()
+  let renders = 0
+  const host = new SurfaceHost(ledger, () => { renders += 1 })
+  host.attach({ header: {} as never, dock: {} as never, footer: {} as never }, surfaceSnapshot())
+  const handle = ledger.register('input.widget.above', { id: 'zero' }, {
+    view: { kind: 'text', spans: [{ text: 'restorable' }] },
+  }, 'owner-zero')
+  ledger.register('input.widget.below', { id: 'zero-below' }, {
+    view: { kind: 'text', spans: [{ text: 'below-restorable' }] },
+  }, 'owner-zero')
+  host.refreshOutlets()
+  assert.equal(stripAnsi(host.widgetsAboveText()), 'restorable')
+  assert.equal(stripAnsi(host.widgetsBelowText()), 'below-restorable')
+
+  host.setWidgetRowsAbove(0)
+  host.setWidgetRowsBelow(0)
+  assert.equal(host.widgetsAboveText(), '', 'a zero above grant projects no rows')
+  assert.equal(host.widgetsBelowText(), '', 'a zero below grant projects no rows')
+  assert.equal(host.hasWidgetsAbove(), false)
+  assert.equal(host.hasWidgetsBelow(), false)
+  assert.equal(ledger.snapshot('input.widget.above').records.length, 1, 'the registration is NOT removed')
+
+  // Restoring the grant brings BOTH zones back without re-registering.
+  host.setWidgetRowsAbove(3)
+  host.setWidgetRowsBelow(3)
+  assert.equal(stripAnsi(host.widgetsAboveText()), 'restorable')
+  assert.equal(stripAnsi(host.widgetsBelowText()), 'below-restorable')
+  assert.equal(host.hasWidgetsAbove(), true)
+  assert.equal(host.hasWidgetsBelow(), true)
+
+  handle.dispose()
+  host.refreshOutlets()
+  assert.equal(host.widgetsAboveText(), '', 'disposal still clears the zone')
+  host.dispose()
+})
+
+test('SurfaceHost: a below-only contribution is not starved by an empty above zone (PR-D)', () => {
+  const ledger = new ExtensionLedger()
+  const host = new SurfaceHost(ledger, () => {})
+  host.attach({ header: {} as never, dock: {} as never, footer: {} as never }, surfaceSnapshot())
+  ledger.register('input.widget.below', { id: 'only-below' }, {
+    view: { kind: 'text', spans: [{ text: 'only-below' }] },
+  }, 'owner-b')
+  host.refreshOutlets()
+  // The host grants above first, but only for REAL above demand.
+  host.setWidgetRowsAbove(3)
+  host.setWidgetRowsBelow(1)
+  assert.equal(host.widgetsAboveText(), '', 'the empty above zone projects nothing')
+  assert.equal(host.hasWidgetsAbove(), false)
+  assert.equal(stripAnsi(host.widgetsBelowText()), 'only-below', 'the below zone keeps its own grant')
+  host.dispose()
+})
+
 test('SurfaceStateStore: widget state flows to the store slices', () => {
   const store = new SurfaceStateStore({ requestRender: () => {} })
   const state = store.get()
