@@ -3777,18 +3777,17 @@
     "src/keybindings.ts",
     "src/components/editor.ts"
    ],
-   "why": "Editor submission must be remappable without changing plain Input submission. The editor binding is also shared by physical-submit detection, PasteBurst, and backslash-Enter fallback.",
+   "why": "Editor submission must be remappable without changing plain Input submission. The editor binding is also shared by the backslash-Enter fallback.",
    "changedSurface": [
     "process-global tui.editor.submit binding definition",
     "Editor submit and backslash-enter checks use the editor binding",
-    "X038 physical Enter detection reads the same effective binding",
     "the editor keeps its Ctrl+Home/End bindings (tui.editor.cursorLineStart/cursorLineEnd) that upstream v1.1.0 dropped while moving the viewport shortcuts onto tui.altScreen.top/bottom, so the host's Home/End 'viewport' preset still reaches the editor"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
-      "Editor submit branch, PasteBurst physical-submit check, backslash-enter fallback, and keybinding registry share tui.editor.submit."
+      "Editor submit branch, backslash-enter fallback and keybinding registry share tui.editor.submit."
      ],
      "notes": "All three Editor paths must move together."
     },
@@ -3823,7 +3822,7 @@
       "physical Enter under a remapped binding is distinguished from the remapped chord",
       "backslash-enter uses the effective editor submit keys"
      ],
-     "notes": "A host-only interception would bypass or duplicate X038 and Editor internal semantics."
+     "notes": "A host-only interception would bypass or duplicate the Editor's internal submit semantics."
     }
    },
    "tests": [
@@ -3849,8 +3848,8 @@
    },
    "retirement": {
     "conditions": [
-     "Upstream must provide a per-editor binding/action consumed by submit, PasteBurst physical-submit detection, and backslash-enter fallback.",
-     "Run anti-pollution, remap, PasteBurst, history, and editor input tests before changing either half."
+     "Upstream must provide a per-editor binding/action consumed by submit and the backslash-enter fallback.",
+     "Run anti-pollution, remap, history and editor input tests before changing either half."
     ],
     "replacementMapping": [],
     "evidence": []
@@ -3865,7 +3864,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "KEEP HARD. Cross-audited with X038; both the binding definition and editor call sites are required. Re-verified at v1.1.0 (abe508e1): the editor submit split is unchanged upstream, and the upstream Home/End rebinding was reconciled so the host's two presets keep working."
+    "notes": "KEEP HARD. Both the binding definition and the editor call sites are required; the former X038 cross-audit no longer applies (X038 was retired in PR B). Re-verified at v1.1.0 (abe508e1): the editor submit split is unchanged upstream, and the upstream Home/End rebinding was reconciled so the host's two presets keep working."
    }
   },
   "X038": {

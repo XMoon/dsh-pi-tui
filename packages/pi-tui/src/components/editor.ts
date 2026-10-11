@@ -2,7 +2,6 @@ import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocompl
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
-import { PasteBurst } from "../paste-burst.ts";
 import {
 	type Component,
 	CURSOR_MARKER,
@@ -265,16 +264,6 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
-	/**
-	 * Disable the non-bracketed paste-burst fallback (dsh-pi-tui divergence
-	 * X038). Default false (the fallback is ON): terminals that lose
-	 * bracketed-paste markers (iTerm2/tmux) deliver pastes as rapid plain
-	 * character streams, and the trailing Enter must insert a newline
-	 * instead of submitting the half-pasted draft. Exposed as an option so
-	 * tests and integrations that legitimately type fast sequences followed
-	 * by Enter can opt out.
-	 */
-	disablePasteBurst?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -425,28 +414,14 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 
-	// Non-bracketed paste-burst fallback (dsh-pi-tui divergence X038)
-	private pasteBurst = new PasteBurst();
-	private disablePasteBurst = false;
-
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
-
-	/**
-	 * Toggle the non-bracketed paste-burst fallback at runtime
-	 * (dsh-pi-tui divergence X038). Default: enabled.
-	 */
-	setDisablePasteBurst(disabled: boolean): void {
-		this.disablePasteBurst = disabled;
-		if (disabled) this.pasteBurst.reset();
-	}
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
-		this.disablePasteBurst = options.disablePasteBurst ?? false;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
@@ -911,31 +886,6 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// Non-bracketed paste-burst tracking (dsh-pi-tui divergence X038,
-		// kimi-exact semantics): a rapid stream of SINGLE plain characters
-		// followed by Enter is treated as a lost-marker paste. Enter itself
-		// keeps the burst alive; a single printable character feeds it; any
-		// other input (multi-char chunks, arrows, chords, escapes) breaks
-		// it — multi-char reads are ordinary typed-ahead text or an explicit
-		// whole-line injection, not a terminal dribbling a paste one
-		// character at a time. Disabled integrations skip the tracking
-		// entirely.
-		//
-		// The burst's Enter is the PHYSICAL Enter that currently carries
-		// the submit binding (X037 × X038 cross-divergence): a remapped
-		// submit key (e.g. Ctrl+X) is a chord, not a paste's trailing
-		// Enter — it must reset the burst and submit, never be suppressed
-		// into a newline.
-		const isPhysicalSubmitEnter =
-			data !== "\n" &&
-			matchesKey(data, "enter") &&
-			kb.matches(data, "tui.editor.submit");
-		const burstChar = decodePrintableKey(data)
-			?? (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 0x7f ? data : undefined);
-		if (!this.disablePasteBurst && !isPhysicalSubmitEnter && burstChar === undefined) {
-			this.pasteBurst.reset();
-		}
-
 		// Ctrl+C - let parent handle (exit/clear)
 		if (kb.matches(data, "tui.input.copy")) {
 			return;
@@ -1113,24 +1063,6 @@ export class Editor implements Component, Focusable {
 				return;
 			}
 
-			// Paste-burst fallback (dsh-pi-tui divergence X038): this Enter
-			// directly follows a rapid plain-character stream — a lost-marker
-			// paste's trailing Enter. Insert a newline instead of submitting
-			// the half-pasted draft (and keep the window open: a multi-line
-			// paste ends with several Enter-delimited lines). Only a PHYSICAL
-			// Enter that currently carries the submit binding is suppressed
-			// (X037 × X038): a remapped submit chord (Ctrl+X) submits even
-			// mid-burst.
-			if (
-				!this.disablePasteBurst &&
-				isPhysicalSubmitEnter &&
-				this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())
-			) {
-				this.addNewLine();
-				this.pasteBurst.extendWindow(Date.now());
-				return;
-			}
-
 			this.submitValue();
 			return;
 		}
@@ -1198,14 +1130,12 @@ export class Editor implements Component, Focusable {
 
 		const printable = decodePrintableKey(data);
 		if (printable !== undefined) {
-			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(printable);
 			return;
 		}
 
 		// Regular characters
 		if (data.charCodeAt(0) >= 32) {
-			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(data);
 		}
 	}

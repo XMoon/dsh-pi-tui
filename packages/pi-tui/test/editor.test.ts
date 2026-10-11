@@ -4746,114 +4746,55 @@ describe("Oversized paste and undo snapshot isolation", () => {
 	});
 });
 
-describe("paste-burst fallback (X038)", () => {
-	it("inserts a newline instead of submitting when Enter follows a rapid character stream", () => {
+describe("rapid typing submits without the retired paste-burst heuristic (X038 retired)", () => {
+	it("submits exactly once when a rapid character stream is followed by Enter", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
+		const submitted: string[] = [];
 		editor.onSubmit = (text) => {
-			submitted = text;
+			submitted.push(text);
 		};
 
-		for (const ch of "hello world pasted") editor.handleInput(ch);
+		// Eleven single-character reads back to back: the retired heuristic
+		// treated >= 8 plain chars inside 8ms as a lost-marker paste and turned
+		// the trailing physical Enter into a newline. Rapid typing must submit
+		// the complete draft exactly once.
+		for (const ch of "hello world") editor.handleInput(ch);
 		editor.handleInput("\r");
 
-		assert.strictEqual(submitted, undefined, "the trailing Enter of a lost-marker paste must not submit");
-		assert.strictEqual(editor.getText(), "hello world pasted\n");
+		assert.deepStrictEqual(submitted, ["hello world"]);
+		assert.strictEqual(editor.getText(), "", "a submit must not leave a substituted newline behind");
 	});
 
-	it("keeps converting Enter to newline across consecutive paste lines", () => {
+	it("submits once per Enter across a rapid multi-line stream (no newline substitution)", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
+		const submitted: string[] = [];
 		editor.onSubmit = (text) => {
-			submitted = text;
+			submitted.push(text);
 		};
 
-		for (const ch of "first line!!") editor.handleInput(ch);
-		editor.handleInput("\r"); // paste line 1 end -> newline
-		for (const ch of "second") editor.handleInput(ch); // paste dribbles one char per chunk
-		editor.handleInput("\r"); // still inside the paste window -> newline
+		for (const ch of "first line") editor.handleInput(ch);
+		editor.handleInput("\r");
+		for (const ch of "second line") editor.handleInput(ch);
+		editor.handleInput("\r");
 
-		assert.strictEqual(submitted, undefined);
-		assert.strictEqual(editor.getText(), "first line!!\nsecond\n");
+		assert.deepStrictEqual(submitted, ["first line", "second line"]);
 	});
 
-	it("submits normally when the input is slow (not a burst)", () => {
+	it("keeps Shift+Enter (tui.input.newLine) as a newline in a rapid stream", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
+		const submitted: string[] = [];
 		editor.onSubmit = (text) => {
-			submitted = text;
+			submitted.push(text);
 		};
 
-		// Fewer than the 8-char burst minimum
-		editor.handleInput("h");
-		editor.handleInput("i");
-		editor.handleInput("\r");
+		for (const ch of "abcdefgh") editor.handleInput(ch);
+		editor.handleInput("\n");
 
-		assert.strictEqual(submitted, "hi");
+		assert.deepStrictEqual(submitted, []);
+		assert.strictEqual(editor.getText(), "abcdefgh\n");
 	});
 
-	it("resets the burst on a non-printable key between chars and Enter", () => {
-		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
-		editor.onSubmit = (text) => {
-			submitted = text;
-		};
-
-		for (const ch of "hello world pasted") editor.handleInput(ch);
-		editor.handleInput("\x1b[D"); // Left arrow breaks the burst
-		editor.handleInput("\x1b[C"); // Right arrow restores the cursor
-		editor.handleInput("\r");
-
-		assert.strictEqual(submitted, "hello world pasted", "an intervening navigation key must end the burst");
-	});
-
-	it("a multi-char chunk resets the burst (kimi-exact semantics)", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			let submitted: string | undefined;
-			editor.onSubmit = (text) => {
-				submitted = text;
-			};
-
-			for (const ch of "hello world pasted") editor.handleInput(ch);
-			editor.handleInput("tail"); // one multi-char read: typed-ahead text, not a dribbled paste
-			editor.handleInput("\r");
-
-			assert.strictEqual(submitted, "hello world pastedtail");
-		});
-
-		it("disablePasteBurst option opts out (submits the burst)", () => {
-		const editor = new Editor(createTestTUI(), defaultEditorTheme, { disablePasteBurst: true });
-		let submitted: string | undefined;
-		editor.onSubmit = (text) => {
-			submitted = text;
-		};
-
-		for (const ch of "hello world pasted") editor.handleInput(ch);
-		editor.handleInput("\r");
-
-		assert.strictEqual(submitted, "hello world pasted");
-	});
-
-	it("setDisablePasteBurst toggles the fallback at runtime", () => {
-		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
-		editor.onSubmit = (text) => {
-			submitted = text;
-		};
-
-		editor.setDisablePasteBurst(true);
-		for (const ch of "hello world pasted") editor.handleInput(ch);
-		editor.handleInput("\r");
-		assert.strictEqual(submitted, "hello world pasted");
-
-		submitted = undefined;
-		editor.setDisablePasteBurst(false);
-		for (const ch of "again a burst") editor.handleInput(ch);
-		editor.handleInput("\r");
-		assert.strictEqual(submitted, undefined, "re-enabling must restore the fallback");
-	});
-
-	it("a remapped submit chord submits even mid-burst (X037 × X038)", () => {
+	it("keeps the X037 remapped submit contract in a rapid stream", () => {
 		setKeybindings(
 			new KeybindingsManager(TUI_KEYBINDINGS, {
 				"tui.editor.submit": "ctrl+x",
@@ -4861,49 +4802,23 @@ describe("paste-burst fallback (X038)", () => {
 		);
 		try {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			let submitted: string | undefined;
+			const submitted: string[] = [];
 			editor.onSubmit = (text) => {
-				submitted = text;
+				submitted.push(text);
 			};
 
-			for (const ch of "abcdefgh") editor.handleInput(ch); // rapid burst
-			editor.handleInput("\x18"); // ctrl+x — the remapped submit
-
-			assert.strictEqual(
-				submitted,
-				"abcdefgh",
-				"a remapped submit chord must submit even mid-burst (the burst suppresses only a physical Enter)",
-			);
-		} finally {
-			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
-		}
-	});
-
-	it("a physical Enter under a remapped submit breaks the burst instead of submitting (X037 × X038)", () => {
-		setKeybindings(
-			new KeybindingsManager(TUI_KEYBINDINGS, {
-				"tui.editor.submit": "ctrl+x",
-			}),
-		);
-		try {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			let submitted: string | undefined;
-			editor.onSubmit = (text) => {
-				submitted = text;
-			};
-
-			for (const ch of "abcdefgh") editor.handleInput(ch); // rapid burst
-			editor.handleInput("\r"); // physical Enter: no longer the submit key
-			assert.strictEqual(submitted, undefined, "Enter must not submit under the remap");
-			assert.strictEqual(editor.getText(), "abcdefgh", "Enter is not a newline under the remap either");
+			for (const ch of "abcdefgh") editor.handleInput(ch);
+			editor.handleInput("\r"); // physical Enter no longer carries the submit binding
+			assert.deepStrictEqual(submitted, [], "Enter must not submit under the remap");
 
 			editor.handleInput("\x18"); // ctrl+x
-			assert.strictEqual(submitted, "abcdefgh", "the chord must submit after the burst was broken");
+			assert.deepStrictEqual(submitted, ["abcdefgh"], "the remapped chord submits exactly once");
 		} finally {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 		}
 	});
 });
+
 
 describe("editor submit binding split (X037)", () => {
 	it("the editor submits on tui.editor.submit, not tui.input.submit", () => {
