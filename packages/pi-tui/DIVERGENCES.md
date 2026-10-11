@@ -13,8 +13,8 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `e80d5bff8e4c3cc58a6a3fc07d56c98f93802230`
-- Branch audited: `chore/pi-tui-v1.1.0-revendor`
+- Audited local source commit: `2717a89facd7861f21a0e755e3460c9eb6cbcd68`
+- Branch audited: `chore/div-retire-a-legacy-paths`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Kimi reference snapshot: `MoonshotAI/kimi-code@9e881528a89945a373002b0b229f91735e8f2c4f`
@@ -25,6 +25,7 @@
 - Historical records (ABSORBED_UPSTREAM, MOVED_TO_HOST, SUPERSEDED, REMOVED_UNUSED) were re-pinned to the new baseline for gate consistency but were not re-applied; none was resurrected.
 - Host-visible API changes were migrated with the minimum edit: TuiApp queries the fork's queryTerminalColors and derives the initial scheme from the reported background (upstream removed the DSR 996 probe), and the Host test/bench terminal fakes implement the new Terminal.setProgramStatus interface without ever driving it.
 - Validated against the immutable source snapshot recorded in verification.auditedSourceCommit.
+- Post-PR272 DIV retirement audit (PR A): X027 and X049 were retired by product decision, their fork hunks deleted and packages/pi-tui/src/autocomplete.ts plus src/alt-screen-search.ts restored to the pinned v1.1.0 blobs byte-for-byte; both records describe the post-retirement reality, including the deliberate loss of the retired local behavior.
 
 ## Audit rules
 
@@ -85,7 +86,7 @@
 ## Summary
 
 - Records: 61
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 49, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 3
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 47, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 4, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -116,7 +117,7 @@
 | X024 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X025 | ACTIVE | HIGH | PACKAGING | NO |
 | X026 | ABSORBED_UPSTREAM | MEDIUM | HARD_HOST_API | YES |
-| X027 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X027 | REMOVED_UNUSED | MEDIUM | BUGFIX_MISSING_UPSTREAM | YES |
 | X028 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
 | X029 | ACTIVE | HIGH | HARD_HOST_API | NO |
 | X030 | ACTIVE | HIGH | HARD_HOST_API | NO |
@@ -138,7 +139,7 @@
 | X046 | ACTIVE | CRITICAL | HARD_HOST_API | NO |
 | X047 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
 | X048 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
-| X049 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X049 | REMOVED_UNUSED | MEDIUM | BUGFIX_MISSING_UPSTREAM | YES |
 | X050 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X051 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
 | X052 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
@@ -2303,9 +2304,9 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Historical absorbed record rechecked against the pinned baseline and recorded Pi source. It remains a real host capability, but no longer a local divergence.
 
-### X027 — fd directory typing does not rely on trailing separator
+### X027 — fd directory typing does not rely on trailing separator (retired)
 
-- Status: `ACTIVE`
+- Status: `REMOVED_UNUSED`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `MEDIUM`
 - Files: `src/autocomplete.ts`
@@ -2314,59 +2315,56 @@ The former local clipboard seam is now provided by Earendil 0.84.4 through copyS
 
 #### Why it exists
 
-fd output can identify a directory without a trailing slash, including through symlinks. statSync classification preserves the directory path and uses the separator only as a fallback.
+Retired by product decision (post-PR272 DIV retirement plan, PR A). The former patch typed fd plain-text stdout lines with statSync so a BARE directory line (no trailing separator) still classified as a directory, and normalized result paths WITHOUT that separator so the provider never sliced a directory name. The helper, its walkDirectoryWithFd call site and the caller-side slicing exception were deleted, and packages/pi-tui/src/autocomplete.ts is upstream v1.1.0 verbatim again: fd lines are typed by the trailing separator alone. The surviving CombinedAutocompleteProvider (including its fd branch) is upstream-owned, and the host @-mention and /image paths use HostFilePort / ClientLocalDiscoveryDriver, so nothing consumes the removed classifier; this record is not a claim that the optional fd-backed provider path is unreachable.
 
 #### Changed surface
 
-- typeDirectoryOutputLines stat-based directory classification
-- trailing separator fallback only when stat fails
+- retired: typeDirectoryOutputLines stat-based directory classification (upstream inline trailing-separator typing is restored)
+- retired: the provider path normalization that avoided slicing a directory line trailing separator
 
 #### Dependency map
 
 **Vendor internal**
-- CombinedAutocompleteProvider and directory-output typing share path normalization and completion item construction.
-- Audit note: The provider owns the behavior below host wrappers.
+- None found (audited).
+- Audit note: The retired helper had one vendor-internal caller (walkDirectoryWithFd), which uses upstream inline trailing-separator classification again; no other fork file referenced it.
 
 **Inheritance / structural**
-- MentionProvider wraps the fork's CombinedAutocompleteProvider for shell-mode/path positions; the wrapper does not replace the fork classifier.
-- Audit note: The current host passes fdPath=null to this inner provider for deterministic fallback, so no claim is made that the host's @-mention HostFilePort path exercises fd output.
+- None found (audited).
+- Audit note: MentionProvider still wraps CombinedAutocompleteProvider but never participated in the retired classifier (the host passes fdPath=null); no override or inheritance edge depended on the local delta.
 
 **Host**
-- src/tui/interaction/autocomplete/provider.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider
-- public AutocompleteProvider consumers may provide an fd-backed provider
-- Audit note: The current @ flow uses HostFilePort/discoverMention and the /image path uses completePathArgument over ClientLocalDiscoveryDriver (its own Client finder); neither is counted as a direct fd consumer of X027.
+- None found (audited).
+- Audit note: Host completion is HostFilePort/discoverMention for @ and ClientLocalDiscoveryDriver for /image; src/tui/interaction/autocomplete/provider.ts constructs the upstream provider unchanged, so no host path consumed the removed classifier.
 
 **Public / extension**
-- AutocompleteProvider output is public through editor completion integration
-- CombinedAutocompleteProvider accepts an fd-backed path for callers that opt into it
-- Audit note: Directory item type and insertion behavior are observable when the fd-backed provider path is used.
+- None found (audited).
+- Audit note: CombinedAutocompleteProvider stays public and still accepts an fd-backed path, now with upstream typing; no public or extension contract promised the removed stat-based classification.
 
 **Behavioral coupling**
-- bare directory lines remain directories
-- symlinks are followed by stat
-- failed stat keeps a trailing separator as a fallback
-- Audit note: The audited upstream reference also changed nested/fuzzy ordering, which is not part of X027.
+- None found (audited).
+- Audit note: Deliberate product tradeoff: a directory line that fd prints without a trailing separator is typed as a file again (upstream behavior). The host never used the fd-backed provider path, and the upstream fd suite plus the host completion suites stay green.
 
 #### Guarding tests
 
-- packages/pi-tui/test/autocomplete.test.ts: typeDirectoryOutputLines and fd-backed provider cases
-- test/file-completion-convergence.test.ts: host file completion is explicitly separate and does not prove fd-path usage
+- retired: packages/pi-tui/test/autocomplete.test.ts is upstream v1.1.0 verbatim again (the typeDirectoryOutputLines describe block and its import were deleted rather than left asserting a removed mechanism)
+- surviving coverage (upstream fd path): the fd @ file suggestion cases in packages/pi-tui/test/autocomplete.test.ts
+- surviving coverage (host routing): test/file-completion-convergence.test.ts, test/autocomplete-provider.test.ts, test/directory-completion.test.ts, test/image-arg-completion.test.ts, test/client-file-completion.test.ts, test/shell-completion.test.ts
 
 #### Upstream comparison
 
 - Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
-- Semantic equivalence: `NO`
+- Semantic equivalence: `YES`
 - Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Relevant upstream files:
 - packages/tui/src/autocomplete.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Both the pinned baseline and the audited upstream reference classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character.
+- Remaining semantic delta: packages/pi-tui/src/autocomplete.ts matches the pinned v1.1.0 blob byte-for-byte: fd stdout lines are typed by a trailing separator and the provider slices that separator before building items. No local delta remains.
 
 #### Retirement conditions
 
-- Retire only when upstream directory completion classifies bare and symlinked directories with the same insertion text and fallback behavior.
-- Run fd, symlink, trailing-slash, and host @ completion tests.
+- Product decision: keep upstream trailing-separator typing; do not restore a stat-based classifier or a caller-side slicing exception.
+- Recheck this record only if a future host consumer actually opts into an fd-backed provider path.
 
 #### Replacement mapping
 
@@ -2374,12 +2372,14 @@ fd output can identify a directory without a trailing slash, including through s
 
 #### Retirement evidence
 
-- None recorded.
+- Deletion evidence: typeDirectoryOutputLines and both call sites are removed; the helper name, its import and the retired slicing exception have no live source or test reference.
+- Source evidence: packages/pi-tui/src/autocomplete.ts and packages/pi-tui/test/autocomplete.test.ts match the pinned v1.1.0 blobs (diff empty).
+- Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host completion suites pass with this record retired.
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Separated X027 from upstream's unrelated nested/fuzzy autocomplete changes. The current host's @ and /image paths are separate from fd output; the public fd-backed provider path remains a supported vendor capability, so this is not classified as unused.
+- Notes: Retirement audit for the post-PR272 DIV retirement plan PR A. The relocationAudit NOT_MOVABLE decision naming this ID predates the retirement and is kept as a historical audit record.
 
 ### X028 — Fullscreen viewport boundary, pre-input, and search-reset seams
 
@@ -4064,9 +4064,9 @@ Input supports arbitrary prompts (new Input({ prompt: ... })) and renders them w
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed the pinned v1.1.0 baseline still uses event.x - 2; the fork fix is a one-line arithmetic change with click-position regressions.
 
-### X049 — Fullscreen transcript-search query Input mouse forwarding
+### X049 — Fullscreen transcript-search query Input mouse forwarding (retired)
 
-- Status: `ACTIVE`
+- Status: `REMOVED_UNUSED`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `MEDIUM`
 - Files: `src/alt-screen-search.ts`
@@ -4075,54 +4075,56 @@ Input supports arbitrary prompts (new Input({ prompt: ... })) and renders them w
 
 #### Why it exists
 
-AltScreenSearchComponent renders a mouse-aware Input and forwards keyboard/focus to it, but had no component-level mouse forwarding: a click on the query Input fell through to the overlay component, which has no handleMouse(), so the fullscreen transcript-search query cursor could not be positioned by mouse. The Host cannot fix this cleanly because the component and its private Input are inside the vendored fork.
+Retired by product decision (post-PR272 DIV retirement plan, PR A). The former patch added component-level handleMouse forwarding (with the last-painted lastInputWidth) so a press on AltScreenSearchComponent private query Input positioned that Input cursor. The forwarding, its field and its render assignment were deleted, and packages/pi-tui/src/alt-screen-search.ts is upstream v1.1.0 verbatim again. No surviving surface consumed it: the host transcript search is TranscriptSearchComponent with its own query-row mouse parity, and the host consumes tui.altScreen.search in onBeforeViewportInput before the fork built-in fullscreen search can open.
 
 #### Changed surface
 
-- AltScreenSearchComponent.handleMouse forwards press events on the last-painted query-content row to its private Input, with the gesture/focus target rewritten to the component (X018 liveness tracks the mounted unit); the result-count suffix and borders stay inert
+- retired: AltScreenSearchComponent.handleMouse forwarding of press events on the query-content row to its private Input
+- retired: the lastInputWidth render cache that backed that hit test
 
 #### Dependency map
 
 **Vendor internal**
-- AltScreenSearchComponent owns the private Input; the component-level handleMouse uses the last-painted input width (cached in render) and the same previous/current query comparison as handleInput.
-- Audit note: Single-component forwarding inside the fork; no other component reads the search query row.
+- None found (audited).
+- Audit note: No other vendor component referenced the removed handleMouse or lastInputWidth; TuiAltScreen keyboard and navigation-button handling (X028) is untouched.
 
 **Inheritance / structural**
-- AltScreenSearchComponent implements Component and Focusable; the new handleMouse follows the MouseRegion/Frame wrapper pattern (dispatch to the private child, rewrite target/focus to the mounted unit).
-- Audit note: No override/super edge affected.
+- None found (audited).
+- Audit note: The removed handler was a Component-level override on AltScreenSearchComponent; no super/override edge or fan-out depended on it.
 
 **Host**
-- The built-in fullscreen transcript search relies on this vendor-owned component; TuiAltScreen.handleSearchMouseEvent still owns the navigation buttons.
-- Audit note: Host behavior improves for the query Input; navigation-button handling is unchanged.
+- None found (audited).
+- Audit note: The host mounts its own TranscriptSearchComponent (src/tui/interaction/transcript-search.ts, unchanged) and suppresses the fork native search key, so no host path consumed the removed forwarding.
 
 **Public / extension**
-- AltScreenSearchComponent is not part of the public extension surface; the change is vendor-internal.
-- Audit note: No extension API change.
+- None found (audited).
+- Audit note: AltScreenSearchComponent is not part of the public extension surface; the removed behavior was vendor-internal, so no public contract loses a published guarantee.
 
 **Behavioral coupling**
-- press on the query-content row positions the Input cursor at the clicked value column
-- the result-count suffix, top/bottom borders, and the navigation-button row stay inert
-- typing after the click inserts at the clicked query position
-- Audit note: Regression tests cover cursor positioning, inert chrome, and the fullscreen integration path.
+- None found (audited).
+- Audit note: Deliberate product tradeoff: a click on the fork built-in fullscreen search query row no longer positions the cursor (upstream behavior). The Host search box keeps its own query-row click-to-position behavior.
 
 #### Guarding tests
 
-- packages/pi-tui/test/tui-alt-screen.test.ts: X049 — query Input press positions the cursor, typing inserts at the clicked column, result-count suffix and borders inert, and the fullscreen TuiAltScreen click-to-position integration
+- retired: the three X049 cases in packages/pi-tui/test/tui-alt-screen.test.ts were deleted (query-cursor press, inert result-count/borders, fullscreen click-to-position); the remaining native search cases stay upstream-owned
+- surviving coverage (host search routing): test/transcript-search-interaction.test.ts asserts that the Host shortcut opens the Host box, that the fork native search is never painted, and that a remapped Host action keeps the old defaults suppressed
+- surviving coverage (host query-row mouse parity): test/transcript-search.test.ts plus the in-box click cases in test/transcript-search-interaction.test.ts
 
 #### Upstream comparison
 
 - Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
-- Semantic equivalence: `NO`
+- Semantic equivalence: `YES`
 - Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Relevant upstream files:
 - packages/tui/src/alt-screen-search.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: The pinned v1.1.0 baseline (abe508e1) lacks component-level mouse forwarding for the transcript-search query Input; the fork forwards press events to the private Input with last-painted geometry and wrapper target/focus ownership.
+- Remaining semantic delta: packages/pi-tui/src/alt-screen-search.ts matches the pinned v1.1.0 blob byte-for-byte: AltScreenSearchComponent renders the query Input but has no component-level mouse forwarding. No local delta remains.
 
 #### Retirement conditions
 
-- Retire only when pinned upstream includes semantically equivalent query-Input mouse forwarding in AltScreenSearchComponent (or the component is restructured so the Host can forward without changing the vendor surface), then run the query-cursor, inert-chrome, and fullscreen integration tests.
+- Product decision: the fork built-in fullscreen search stays upstream-owned; do not re-add query-row mouse forwarding or a substitute API.
+- The Host transcript search keeps its own query-row click-to-position contract in TranscriptSearchComponent.
 
 #### Replacement mapping
 
@@ -4130,12 +4132,14 @@ AltScreenSearchComponent renders a mouse-aware Input and forwards keyboard/focus
 
 #### Retirement evidence
 
-- None recorded.
+- Deletion evidence: the handleMouse override, the lastInputWidth field and its render assignment are removed and have no live source or test reference.
+- Source evidence: packages/pi-tui/src/alt-screen-search.ts matches the pinned v1.1.0 blob (diff empty) and the three X049 test cases are gone.
+- Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host transcript-search suites pass with this record retired.
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed the pinned v1.1.0 baseline lacks the query-Input mouse forwarding; the fork fix is component-level forwarding with last-painted geometry and wrapper target/focus ownership.
+- Notes: Retirement audit for the post-PR272 DIV retirement plan PR A. The relocationAudit NOT_MOVABLE and UPSTREAM_LEVER decisions naming this ID predate the retirement and are kept as historical audit records.
 
 ### X050 — Editor mouse click parity: wrapped-segment cursor placement and slash-completion submit
 
