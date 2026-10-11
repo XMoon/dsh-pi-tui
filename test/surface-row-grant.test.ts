@@ -80,12 +80,13 @@ function selectedRowText(vt: VirtualTerminal): string {
 interface StandaloneState {
   readonly panel: KeybindingEditorPanel | undefined
   readonly close: (() => void) | undefined
-  /** Raw `dispose()` invocations (the panel's own Esc teardown AND the
-   * owning frame's disposeOnHide both call it). */
-  readonly disposeCalls: number
-  /** Invocations that actually ran the teardown body (the panel's own
-   * `disposed` guard makes the later owner's call a no-op). */
-  readonly effectiveDisposals: number
+  /** ACTUAL invocations of the panel's `onDispose` obligation (the command
+   * factory's unregister), i.e. the observed teardown effect. `dispose()` is
+   * reached twice on the Esc path (the panel closes itself, then the owning
+   * FocusForwardingFrame's disposeOnHide releases it); the second call must
+   * be a no-op, so this counter is the exactly-once evidence — a removed
+   * idempotence guard would make it 2. */
+  readonly teardowns: number
 }
 
 interface Harness {
@@ -188,28 +189,27 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
     return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
   }
   // Test instrumentation ONLY for the standalone `/keybindings` path:
-  // observe the panel the real command mounts and count EFFECTIVE teardowns.
-  // `dispose()` is reached twice on the Esc path (the panel closes itself,
-  // then the owning FocusForwardingFrame's disposeOnHide releases it); only
-  // the first call may run the teardown body, which the panel's own guard
-  // enforces. The probe reads that guard before delegating to the UNBOUND
-  // original (never a bound receiver).
+  // observe the panel the real command mounts and count the ACTUAL teardown
+  // effect. The command factory registers the panel first (its `unregister`
+  // IS the panel's `onDispose` callback); `openKeybindingEditor` registers it
+  // again for its own close handle, so only the FIRST registration is the
+  // panel's teardown obligation.
   let standalonePanel: KeybindingEditorPanel | undefined
   let standaloneClose: (() => void) | undefined
-  let disposeCalls = 0
-  let effectiveDisposals = 0
+  let teardowns = 0
+  let registrations = 0
+  const originalTrackKeybindingEditor = app.trackKeybindingEditor
+  app.trackKeybindingEditor = ((component: Parameters<TuiApp['trackKeybindingEditor']>[0]) => {
+    const unregister = originalTrackKeybindingEditor.call(app, component)
+    const registration = ++registrations
+    return () => {
+      if (registration === 1) teardowns += 1
+      unregister()
+    }
+  }) as TuiApp['trackKeybindingEditor']
   const originalOpenKeybindingEditor = app.openKeybindingEditor
   app.openKeybindingEditor = ((panel: Parameters<TuiApp['openKeybindingEditor']>[0]) => {
-    if (panel instanceof KeybindingEditorPanel) {
-      standalonePanel = panel
-      const originalDispose = panel.dispose
-      panel.dispose = () => {
-        const alreadyDisposed = (panel as unknown as { disposed: boolean }).disposed
-        disposeCalls += 1
-        originalDispose.call(panel)
-        if (!alreadyDisposed) effectiveDisposals += 1
-      }
-    }
+    if (panel instanceof KeybindingEditorPanel) standalonePanel = panel
     const close = originalOpenKeybindingEditor.call(app, panel)
     standaloneClose = close
     return close
@@ -219,7 +219,7 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
     app,
     invoke,
     panel: () => captured,
-    standalone: () => ({ panel: standalonePanel, close: standaloneClose, disposeCalls, effectiveDisposals }),
+    standalone: () => ({ panel: standalonePanel, close: standaloneClose, teardowns }),
   }
 }
 
@@ -518,18 +518,18 @@ test('C-T08: the bare /keybindings command keeps the whole-terminal budget and d
     assert.ok(frame.bottomBorder, `${columns}x${rows}: the standalone frame bottom border must be painted:\n${view}`)
     assert.match(view, /Esc: close/)
     // Esc (empty query) closes the REAL panel: the base screen returns and
-    // the panel teardown body ran exactly once (the owning frame's later
-    // dispose call is a guarded no-op).
+    // the panel's teardown effect ran exactly once (the owning frame's later
+    // dispose call must not reach the teardown body again).
     h.vt.sendInput('\x1b')
     await h.vt.waitForRender()
     view = viewportText(h.vt)
     assert.ok(!view.includes('Keyboard shortcuts'), `${columns}x${rows}: Esc must close the standalone editor:\n${view}`)
     const closed = h.standalone()
-    assert.equal(closed.effectiveDisposals, 1, `${columns}x${rows}: the teardown must run exactly once (raw dispose calls: ${closed.disposeCalls})`)
+    assert.equal(closed.teardowns, 1, `${columns}x${rows}: the panel teardown effect must run exactly once`)
     // A repeated close is idempotent.
     closed.close?.()
     await h.vt.waitForRender()
-    assert.equal(h.standalone().effectiveDisposals, 1, `${columns}x${rows}: a repeated close must not dispose twice`)
+    assert.equal(h.standalone().teardowns, 1, `${columns}x${rows}: a repeated close must not re-run the teardown body`)
     h.app.dispose()
     startedApps.delete(h.app)
   }
