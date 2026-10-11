@@ -3844,7 +3844,15 @@ export class TuiApp {
       // guard above plus the focus-identity re-check guarantee the method
       // exists on the still-focused component.
       target.handleInput!(`\x1b[200~${text}\x1b[201~`)
-      screen.requestRender()
+      // PR-D (external review P2 / internal F3): this synthetic paste
+      // deliberately bypasses routeInput, but it is NOT exempt from the host
+      // budget sync. The Save Location prompt clears its suggestion list
+      // SYNCHRONOUSLY on input and only calls onChange after the async
+      // directory completion resolves — so a taller prompt frame shrinks here
+      // while the fullscreen widget grant and the footer capacity are still
+      // derived from the old (taller) seat. Go through the host render funnel
+      // instead of painting the raw screen.
+      this.requestRender()
     }, { onCancel: () => {}, onError: () => {} })
   }
 
