@@ -120,7 +120,7 @@ describe("parseOscColorResponse", () => {
 });
 
 const PALETTE_REPLIES = Array.from({ length: 16 }, (_, index) => `\x1b]4;${index};#000000\x07`);
-const SENTINEL = "\x1b[12;34R"; // DSR 6 cursor position report ends the burst
+const DA1 = "\x1b[?62;22c";
 const BLACK = { r: 0, g: 0, b: 0 };
 const WHITE = { r: 255, g: 255, b: 255 };
 
@@ -140,26 +140,26 @@ describe("TUI.queryTerminalColors", () => {
 		try {
 			const query = tui.queryTerminalColors({ timeoutMs: 1000 });
 			const written = terminal.writes.at(-1) ?? "";
-			assert.ok(written.startsWith("\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?\x07") && written.endsWith("\x1b[6n"));
+			assert.ok(written.startsWith("\x1b]10;?\x07\x1b]11;?\x07\x1b]4;0;?\x07") && written.endsWith("\x1b[c"));
 
 			terminal.sendInput("x");
 			terminal.sendInput("\x1b]10;#ffffff\x07");
 			terminal.sendInput("\x1b]11;rgb:0000/0000/0000\x1b\\");
 			for (const reply of PALETTE_REPLIES) terminal.sendInput(reply);
-			// Resolves once every reply arrived, without waiting for the sentinel.
+			// Resolves once every reply arrived, without waiting for DA1.
 			assert.deepStrictEqual(await query, {
 				foreground: WHITE,
 				background: BLACK,
 				palette: Array.from({ length: 16 }, () => BLACK),
 			});
-			terminal.sendInput(SENTINEL);
+			terminal.sendInput(DA1);
 			assert.deepStrictEqual(component.inputs, ["x"]);
 		} finally {
 			tui.stop();
 		}
 	});
 
-	it("resolves on the DSR 6 sentinel with the replies that arrived, in query order", async () => {
+	it("resolves on DA1 with the replies that arrived, in query order", async () => {
 		const { terminal, tui } = setup();
 		try {
 			const first = tui.queryTerminalColors({ timeoutMs: 1000 });
@@ -167,8 +167,8 @@ describe("TUI.queryTerminalColors", () => {
 			terminal.sendInput("\x1b]11;#000000\x07");
 			// An incomplete palette is dropped.
 			for (const reply of PALETTE_REPLIES.slice(0, 8)) terminal.sendInput(reply);
-			terminal.sendInput(SENTINEL);
-			terminal.sendInput(SENTINEL);
+			terminal.sendInput(DA1);
+			terminal.sendInput(DA1);
 
 			assert.deepStrictEqual(await first, { foreground: undefined, background: BLACK, palette: undefined });
 			assert.deepStrictEqual(await second, { foreground: undefined, background: undefined, palette: undefined });
@@ -177,7 +177,7 @@ describe("TUI.queryTerminalColors", () => {
 		}
 	});
 
-	it("reports late replies after a timeout and consumes them until the sentinel", async () => {
+	it("reports late replies after a timeout and consumes them until DA1", async () => {
 		const { terminal, tui, component } = setup();
 		try {
 			const late: TerminalColors[] = [];
@@ -186,16 +186,13 @@ describe("TUI.queryTerminalColors", () => {
 			assert.strictEqual((await query).background, undefined);
 
 			terminal.sendInput("\x1b]11;#ffffff\x07");
-			terminal.sendInput(SENTINEL);
+			terminal.sendInput(DA1);
 			assert.deepStrictEqual(late, [{ foreground: undefined, background: WHITE, palette: undefined }]);
 			assert.deepStrictEqual(component.inputs, []);
 
-			// With no query pending, a well-formed color reply stays a protocol
-			// response: the fork swallows it instead of forwarding it to the
-			// input pipeline (dsh-pi-tui divergence X008; upstream treats it as
-			// ordinary input).
+			// With no query pending, color replies are ordinary input again.
 			terminal.sendInput("\x1b]11;#ffffff\x07");
-			assert.deepStrictEqual(component.inputs, []);
+			assert.deepStrictEqual(component.inputs, ["\x1b]11;#ffffff\x07"]);
 		} finally {
 			tui.stop();
 		}
