@@ -251,12 +251,19 @@ describe("serialized terminal color queries (X008)", () => {
 	it("never lets a DA1 end a color query (the sentinel is a DSR 6 report)", async () => {
 		const { terminal, tui } = setup();
 		try {
+			const forwarded: string[] = [];
+			tui.addInputListener((data) => {
+				forwarded.push(data);
+				return undefined;
+			});
 			// The burst ends with `CSI 6 n`, so a DA1 belonging to the keyboard
 			// negotiation (or a stale one from before a restart) must not free the
-			// serialized wire; a second query stays unwritten.
+			// serialized wire; a second query stays unwritten, and the DA1 must not
+			// reach the input pipeline either (it is never typed input).
 			const first = tui.queryTerminalColors({ timeoutMs: 500 });
 			terminal.sendInput("\x1b]11;#336699\x07");
 			terminal.sendInput(DA1);
+			assert.deepStrictEqual(forwarded, [], "a DA1 must never reach the input listeners");
 			const settled = await Promise.race([
 				first.then((colors) => ({ kind: "resolved" as const, colors })),
 				wait(50).then(() => ({ kind: "waiting" as const })),

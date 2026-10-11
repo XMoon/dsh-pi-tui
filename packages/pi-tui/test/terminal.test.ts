@@ -1083,6 +1083,8 @@ describe("ProcessTerminal DA1 ownership across a restart (X016/X008)", () => {
 		terminal: ProcessTerminal;
 		screen: TuiMainScreen;
 		writes: string[];
+		/** Data that reached the screen's input listeners (the Host input pipeline). */
+		delivered: string[];
 		send(data: string): void;
 		startSession(): void;
 		stopSession(): void;
@@ -1094,9 +1096,14 @@ describe("ProcessTerminal DA1 ownership across a restart (X016/X008)", () => {
 		const terminal = new ProcessTerminal();
 		const screen = new TuiMainScreen(terminal);
 		const writes: string[] = [];
+		const delivered: string[] = [];
 		let dataHandler: ((data: string) => void) | undefined;
 		let cleaned = false;
 		const previousOn = process.stdin.on;
+		screen.addInputListener((data) => {
+			delivered.push(data);
+			return undefined;
+		});
 		const withCapture = <T,>(body: () => T): T => {
 			const previous = process.stdout.write;
 			process.stdout.write = ((chunk: string | Uint8Array) => {
@@ -1117,6 +1124,7 @@ describe("ProcessTerminal DA1 ownership across a restart (X016/X008)", () => {
 			terminal,
 			screen,
 			writes,
+			delivered,
 			send(data: string): void {
 				withCapture(() => dataHandler?.(data));
 			},
@@ -1192,6 +1200,87 @@ describe("ProcessTerminal DA1 ownership across a restart (X016/X008)", () => {
 				2,
 				"the next color query must still be written after the sentinel arrived",
 			);
+			harness.send("\x1b]11;#111111\x07");
+			harness.send(SENTINEL);
+			assert.deepStrictEqual((await second).background, { r: 0x11, g: 0x11, b: 0x11 });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	const daQueryCount = (writes: string[]): number => writes.filter((write) => write.endsWith("\x1b[c")).length;
+	const colorBurstCount = (writes: string[]): number => writes.filter((write) => write.includes("\x1b]10;?\x07")).length;
+	const settleWithin = async (
+		query: Promise<{ background?: unknown }>,
+		ms: number,
+	): Promise<"resolved" | "waiting"> =>
+		Promise.race([
+			query.then(() => "resolved" as const),
+			wait(ms).then(() => "waiting" as const),
+		]);
+
+	it("walks the restart + DA1 acceptance sequence (steps 1-8)", async () => {
+		const harness = setupTwoLayer();
+		try {
+			// 1. start A sends the keyboard negotiation + its DA1.
+			harness.startSession();
+			assert.equal(daQueryCount(harness.writes), 1, "step 1: session A sends negotiation + DA1");
+			// 2. stop A without ever answering A's DA1.
+			harness.stopSession();
+			assert.equal(harness.terminal.kittyProtocolActive, false, "step 2: stop() pops the Kitty protocol");
+			// 3. start B sends a new negotiation + DA1.
+			harness.startSession();
+			assert.equal(daQueryCount(harness.writes), 2, "step 3: session B sends its own negotiation + DA1");
+			// 4. B's DA1 arrives: the negotiation completes and the reply is consumed
+			//    (it must not reach the Host input pipeline).
+			harness.send(DA1);
+			assert.deepStrictEqual(harness.delivered, [], "step 4: the owed DA reply is consumed, not delivered as input");
+			// 5. the screen starts a color query.
+			const query = harness.colorQuery(() => harness.screen.queryTerminalColors({ timeoutMs: 500 }));
+			assert.equal(colorBurstCount(harness.writes), 1, "step 5: the color burst is written");
+			// 6. the color replies arrive; a DA1 must NOT end the query — the burst's
+			//    own sentinel is a DSR 6 report (the deliberate deviation from
+			//    upstream's DA1 sentinel, so the keyboard accounting cannot eat it).
+			harness.send("\x1b]11;#336699\x07");
+			harness.send(DA1);
+			assert.equal(await settleWithin(query, 50), "waiting", "step 6: a DA1 never ends a color query");
+			assert.deepStrictEqual(harness.delivered, [], "step 6: the color reply and the DA1 stay out of the input pipeline");
+			harness.send(SENTINEL);
+			// 7. the color query completes with its own reply.
+			assert.deepStrictEqual((await query).background, { r: 0x33, g: 0x66, b: 0x99 }, "step 7: the query completes");
+			// 8. a second query is written: no residual wire-slot block.
+			const second = harness.colorQuery(() => harness.screen.queryTerminalColors({ timeoutMs: 500 }));
+			assert.equal(colorBurstCount(harness.writes), 2, "step 8: the next color query is written");
+			harness.send("\x1b]11;#111111\x07");
+			harness.send(SENTINEL);
+			assert.deepStrictEqual((await second).background, { r: 0x11, g: 0x11, b: 0x11 }, "step 8: and it completes too");
+			// Control: the recorder really observes ordinary input.
+			harness.send("x");
+			assert.deepStrictEqual(harness.delivered, ["x"], "control: ordinary keys still reach the input pipeline");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("(step 9) tolerates A's stale DA1 arriving after B started", async () => {
+		const harness = setupTwoLayer();
+		try {
+			harness.startSession();
+			harness.stopSession();
+			harness.startSession();
+			// A's stale DA1 arrives late, BEFORE B's own DA1: it is consumed by the
+			// owed-DA bookkeeping (or swallowed by TuiBase once a window has elapsed),
+			// and in no case reaches the Host input pipeline.
+			harness.send(DA1);
+			assert.deepStrictEqual(harness.delivered, [], "a stale DA1 must never reach the input pipeline");
+			// It neither ends nor blocks a color query issued now.
+			const query = harness.colorQuery(() => harness.screen.queryTerminalColors({ timeoutMs: 500 }));
+			harness.send("\x1b]11;#336699\x07");
+			assert.equal(await settleWithin(query, 50), "waiting", "the stale DA1 must not end the color query");
+			harness.send(SENTINEL);
+			assert.deepStrictEqual((await query).background, { r: 0x33, g: 0x66, b: 0x99 });
+			const second = harness.colorQuery(() => harness.screen.queryTerminalColors({ timeoutMs: 500 }));
+			assert.equal(colorBurstCount(harness.writes), 2, "the wire is free after the sentinel");
 			harness.send("\x1b]11;#111111\x07");
 			harness.send(SENTINEL);
 			assert.deepStrictEqual((await second).background, { r: 0x11, g: 0x11, b: 0x11 });
