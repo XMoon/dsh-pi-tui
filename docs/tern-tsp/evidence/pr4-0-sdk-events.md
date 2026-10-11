@@ -116,7 +116,7 @@ builder / JSX intrinsic — the vocabulary kind `block` has none.
 
 ## 5. Real-Tern 0.7.0 headless probe — positive results
 
-**Method (fully reproducible from this document):** the six probe programs are
+**Method (fully reproducible from this document):** the seven probe programs are
 retained verbatim in [Appendix A](#appendix-a--probe-sources), and the exact run
 commands, exit statuses and fixture manifest are in
 [Appendix B](#appendix-b--run-record-fixture-manifest-and-digests). They are
@@ -170,11 +170,24 @@ nodes", not "no pointer hit target".
    require the GUI/IME path, so this is recorded as `GUI_BLOCKED`, not as
    "unsupported". It does mean the current app-controlled composer is the
    approach that is *proven* to work at this tier.
-2. **A real `overlay{modal:true}` DOES intercept background pointer actions.**
-   Probe 6 placed a clickable button behind a `modal:true` overlay: clicking the
-   background coordinate produced **no** `action`; only the overlay's own button
-   fired. The app-side modal-first key route remains the authority for keys (the
-   SDK's `modal` masks the picture, not the keyboard).
+2. **A real `overlay{modal:true}` DOES intercept background pointer actions —
+   proved with a three-stage control on ONE button at ONE coordinate.**
+   Probe 6 first showed that clicking a background button behind a `modal:true`
+   overlay produced no `action`, which alone could not distinguish interception
+   from a bad coordinate. Probe 7 closes that gap in a single run, with the
+   background button's rect verified unchanged ([200,110,880,16] →
+   click 640,118) in BOTH states:
+
+   | Stage | State | Gesture | Observed |
+   |---|---|---|---|
+   | A | no modal | click the background button (640,118) | `action{id:'main.bg', act:'bg-click'}` — **positive control** |
+   | B | modal open (button rect unchanged) | click the SAME coordinate (640,118) | **no event at all** — suppressed |
+   | C | modal open | click the overlay's own button (640,427) | `action{id:'layer.ov.ovbtn', act:'ov-click'}` — the modal still works |
+
+   So the suppression is caused by the modal overlay, not by the coordinate or a
+   hit-test change (`/tmp/pr40-probe7.jsonl`, digest in Appendix B.3). The
+   app-side modal-first key route remains the authority for keys: the SDK's
+   `modal` masks the picture, not the keyboard.
 3. **A node with no `actions` and no handler produces no `action`/`select`/
    `activate`/`change`** (a plain `ui.text` click produced nothing) — "Tern can
    draw it" is not "it is clickable". The exception is `focus`: clicking a
@@ -501,13 +514,69 @@ for await (const input of session) {
 await surface.close({ keep: false }); await session.close(); log({ phase: 'closed' }); process.exit(0)
 ```
 
+### A.7 `pr4-0-sdk-event-probe7.mjs` (modal, three-stage control)
+
+```js
+/**
+ * PR4-0 probe 7 (disposable): the THREE-STAGE modal pointer control the
+ * external review asked for — the SAME background button, at the SAME
+ * coordinate, clicked (a) with no modal up, (b) with the modal up, and
+ * (c) the modal's own button. Stage (b) after stage (a) is what turns
+ * "no action observed" into "the modal intercepted the action".
+ *
+ * Phase control is deterministic: the probe renders `main` only, and opens the
+ * modal when it receives the key `m` through the normal SDK input loop.
+ */
+import { appendFileSync } from 'node:fs'
+import { connect, html, ui } from '@stencil-hq/tern'
+
+const LOG = process.env.PR40_LOG ?? '/tmp/pr40-probe7.jsonl'
+const log = (r) => appendFileSync(LOG, JSON.stringify(r) + '\n')
+const shape = (e) => { const o = { ev: e.ev }; for (const f of ['sf', 'id', 'act', 'item']) if (e[f] !== undefined) o[f] = e[f]; return o }
+
+const session = await connect({ app: 'pr40-probe7' })
+if (session === null) { log({ phase: 'connect', result: 'null' }); process.exit(2) }
+const surface = session.open({ id: 's1', mode: 'inline', title: 'pr40-probe7', listen: true })
+
+const main = ui.col({ key: 'root' },
+  ui.text({ key: 'hdr', text: 'probe7 modal control' }),
+  html.button({ key: 'bg', actions: { click: 'bg-click' } }, 'BACKGROUND BUTTON'),
+)
+surface.render({ main })
+log({ phase: 'rendered-no-modal', seq: surface.seq })
+
+let modal = false
+let n = 0
+for await (const input of session) {
+  if (input.type === 'key') {
+    log({ phase: 'yield-key', key: { name: input.key.name } })
+    if (input.key.name === 'm' && !modal) {
+      modal = true
+      surface.render({
+        main,
+        layer: ui.col({ key: 'layer' }, ui.overlay({ key: 'ov', modal: true, anchor: 'center', size: 'md' },
+          ui.text({ key: 'ov-text', text: 'MODAL OVERLAY' }),
+          html.button({ key: 'ovbtn', actions: { click: 'ov-click' } }, 'OVERLAY BUTTON'),
+        )),
+      })
+      log({ phase: 'modal-open', seq: surface.seq })
+    }
+  } else {
+    log({ phase: 'yield-event', event: shape(input.event) })
+    if (input.event.ev === 'gone') break
+  }
+  if (++n > 300) break
+}
+await surface.close({ keep: false }); await session.close(); log({ phase: 'closed' }); process.exit(0)
+```
+
 ## Appendix B — run record, fixture manifest and digests
 
 ### B.1 Fixture manifest
 
 | Item | Value |
 |---|---|
-| Program | the six scripts in Appendix A, run with `node` (v24.20.0) from the worktree root so `@stencil-hq/tern` resolves |
+| Program | the seven scripts in Appendix A, run with `node` (v24.20.0) from the worktree root so `@stencil-hq/tern` resolves |
 | Content | synthetic strings only (`PR4-0 probe`, `Button A`, `Item one`, `x`, `seed`, `BACKGROUND BUTTON`, …) |
 | Session/credentials | none: no DSH session, no Agent, no Host, no transcript, no credential read |
 | Log | sanitized JSONL (`shape()` whitelists fields; `text` is recorded as a length only) |
@@ -522,13 +591,14 @@ await surface.close({ keep: false }); await session.close(); log({ phase: 'close
 | run a probe | `tern ctl --control /tmp/pr40.sock --file /tmp/pr40-scnN.txt` where the scenario line is `run "PR40_LOG=… node temp/tern/pr4-0-sdk-event-probeN.mjs"` | `{"ok":true}` (the pane accepted the command; the probe's own exit status is not carried by `tern ctl`) |
 | locate nodes | `tern ctl --control /tmp/pr40.sock tree` | the real laid-out element rects used for the click coordinates |
 | drive gestures | `tern ctl --control /tmp/pr40.sock --file /tmp/pr40-clicksN.txt` (`click <x> <y>`, `dblclick`, `type "…"`, `key Backspace`, `key Enter`) | `{"ok":true}` per command |
+| probe 7 phase control | `tern ctl --control /tmp/pr40.sock --file …` with `click 640 118` (stage A), then `key m` (opens the modal; the probe logs `modal-open`), then `click 640 118` (stage B) and `click 640 427` (stage C) | stages A/C produced an `action`, stage B produced nothing — see §6.2 |
 | stop | `tern ctl --control /tmp/pr40.sock quit` | pane closed; probes 1–5 had already been terminated during iteration, probe 6 then wrote its final `closed` line and exited 0 |
 
 Probe process exit status: **not observable** through `tern ctl`. The logs show
 it indirectly — probes 1–5 end without a `closed` line (the process was killed
 mid-iteration), probe 6 ends with `{"phase":"closed"}` (a clean exit 0).
 The logs are **append-only**, so a digest is only final once the probe process
-is gone; the values below were taken after all six probes had stopped.
+is gone; the values below were taken after all seven probes had stopped.
 
 ### B.3 Digests of the sanitized logs
 
@@ -539,7 +609,8 @@ is gone; the values below were taken after all six probes had stopped.
 | 3 (per-kind arming) | `/tmp/pr40-probe3.jsonl` | `6ebcd5a91033fe8a8ececdb73afd3a6338b56f43eda2e590c7a3092d5e2f52e6` |
 | 4 (click + menu) | `/tmp/pr40-probe4.jsonl` | `6f2841639b793d37dc35688bd385e9e249ea73fc41d9968bf2340d8d87d1d7cb` |
 | 5 (native editor) | `/tmp/pr40-probe5.jsonl` | `d72f19b1b6696de097b8897e77f4a7fa6845458676b4255549077e8ff7340272` |
-| 6 (modal) | `/tmp/pr40-probe6.jsonl` | `bdbeed2198ba1fc532f9a963204264e148da560ebe3b0fc1209297ea73eab135` |
+| 6 (modal, first observation) | `/tmp/pr40-probe6.jsonl` | `bdbeed2198ba1fc532f9a963204264e148da560ebe3b0fc1209297ea73eab135` |
+| 7 (modal, three-stage control) | `/tmp/pr40-probe7.jsonl` | `1e65c12b4b2a5f880a41182a7bafdc35bb7582571fc7575a9f6b1b9f9b52c8f6` |
 
 The `/tmp` logs are ephemeral and not committed; Appendix A plus B.2 regenerate
 them. (Probe 6's digest was corrected after an independent review: the earlier
