@@ -10,8 +10,10 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import type { SaveLocationDeps } from '../src/tui/interaction/save-location.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -330,6 +332,89 @@ test('a leader completion of app.tasks.open is consumed while a Question owns in
   vt.sendInput('t') // completing key
   await vt.waitForRender()
   assert.equal(tasksOpened, 1, 'the leader completion must fire again after the Question settles')
+  app.stop()
+})
+
+test('a remapped trigger and leader completion stay inert under an Approval', async () => {
+  // E-T08: all THREE blocking owners must refuse the additive triggers. The
+  // array binding declares the direct key and the leader completion of the
+  // same action in ONE user config (a second declaration would be ignored).
+  let tasksOpened = 0
+  const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, managerWith({
+    leader: 'ctrl+x',
+    'app.tasks.open': ['ctrl+n', '<leader>t'],
+  }))
+  app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
+  await vt.waitForRender()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  vt.sendInput('\x0e') // ctrl+n — the remapped direct trigger
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the remapped direct trigger must not open tasks under an Approval')
+  vt.sendInput('\x18') // leader prefix
+  await vt.waitForRender()
+  vt.sendInput('t') // completing key
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the leader completion must not open tasks under an Approval')
+  assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'the Approval must stay mounted')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+  await vt.waitForRender()
+  vt.sendInput('\x0e')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 1, 'the remapped trigger must fire after the Approval settles')
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 2, 'the leader completion must fire after the Approval settles')
+  app.stop()
+})
+
+test('a remapped trigger and leader completion stay inert under a Save Location prompt', async (t) => {
+  // E-T08: the Save Location prompt consumes every key BEFORE the modal
+  // inspection plane, so neither trigger may reach the resolver.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pr-e-kb-')
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input === './' ? root : input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+  let tasksOpened = 0
+  const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, managerWith({
+    leader: 'ctrl+x',
+    'app.tasks.open': ['ctrl+n', '<leader>t'],
+  }))
+  app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
+  await vt.waitForRender()
+  const prompt = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  void prompt.catch(() => {})
+  await vt.waitForRender()
+  vt.sendInput('\x0e') // ctrl+n
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the remapped direct trigger must not open tasks under a Save Location prompt')
+  vt.sendInput('\x18') // the leader prefix is ordinary prompt input here
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the leader completion must not open tasks under a Save Location prompt')
+  assert.ok(vt.getViewport().join('\n').includes('Save session archive'), 'the prompt must stay mounted')
+  vt.sendInput('\x1b')
+  assert.deepEqual(await prompt, { kind: 'cancelled' })
+  await vt.waitForRender()
+  vt.sendInput('\x0e')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 1, 'the remapped trigger must fire after the prompt settles')
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 2, 'the leader completion must fire after the prompt settles')
   app.stop()
 })
 

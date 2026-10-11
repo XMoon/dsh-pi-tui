@@ -162,7 +162,7 @@ test('parked Question attention keeps ?N and the hint; a presented Question only
   assert.equal(opened(), 1, 'the restored ↓ must reach the sink while attention stays parked')
 })
 
-test('an active Approval drops the hint and keeps its own decision keys authoritative', async () => {
+test('an active Approval drops the hint in the full and compact footers and keeps its decision keys', async () => {
   const { vt, app, opened } = startApp()
   oneRunningTask(app)
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
@@ -178,9 +178,25 @@ test('an active Approval drops the hint and keeps its own decision keys authorit
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened(), 1, 'the restored ↓ must reach the sink')
+
+  // The responsive compact density (`[1t·↓]`) is the second consumer of the
+  // same context flag: a pending Approval must drop and restore it too.
+  vt.resize(28, 24)
+  screen = await view(vt)
+  assert.ok(screen.includes('[1t·↓]'), `the compact item must advertise ↓:\n${screen}`)
+  const compactDecision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  screen = await view(vt)
+  assert.ok(screen.includes('pprove'), `the narrow approval dialog must stay painted:\n${screen}`)
+  assert.ok(!screen.includes('[1t·↓]') && !screen.includes('↓ view'),
+    `the compact ↓ must drop under an Approval:\n${screen}`)
+  await assertModalConsumesDown(vt, opened, 1)
+  vt.sendInput('n')
+  assert.equal(await compactDecision, 'rejected')
+  screen = await view(vt)
+  assert.ok(screen.includes('[1t·↓]'), `the compact ↓ must return after the Approval settles:\n${screen}`)
 })
 
-test('a Save Location prompt drops the hint and restores it on cancel', async (t) => {
+test('a Save Location prompt drops the hint in the full and compact footers and restores it on cancel', async (t) => {
   const life = testLifecycle(t)
   const deps = saveLocationDeps(life.tempDir('dsh-pr-e-save-'))
   const { vt, app, opened } = startApp()
@@ -203,6 +219,25 @@ test('a Save Location prompt drops the hint and restores it on cancel', async (t
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened(), 1, 'the restored ↓ must reach the sink')
+
+  // Same boundary at the compact density.
+  vt.resize(28, 24)
+  screen = await view(vt)
+  assert.ok(screen.includes('[1t·↓]'), `the compact item must advertise ↓:\n${screen}`)
+  const compact = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  void compact.catch(() => {})
+  screen = await view(vt)
+  assert.ok(screen.includes('Save session archive'), `the narrow prompt must own the seat:\n${screen}`)
+  assert.ok(!screen.includes('[1t·↓]') && !screen.includes('↓ view'),
+    `the compact ↓ must drop under a Save Location capture:\n${screen}`)
+  await assertModalConsumesDown(vt, opened, 1)
+  vt.sendInput('\x1b')
+  assert.deepEqual(await compact, { kind: 'cancelled' })
+  screen = await view(vt)
+  assert.ok(screen.includes('[1t·↓]'), `the compact ↓ must return after the prompt settles:\n${screen}`)
 })
 
 test('a queued Question handover never flashes the hint between flows', async () => {
@@ -290,10 +325,11 @@ test('the full, responsive-compact and fullscreen footers hide and restore the h
   const wideQuestion = askYes(app, 'q1', 'wide?')
   screen = await view(vt)
   assert.ok(!screen.includes('↓ view'), `the full footer Question must drop the hint:\n${screen}`)
-  await answerFirstOption(vt)
-  await wideQuestion
+  // Enter → cancel → the affordance returns (the plan's enter/reopen axis).
+  vt.sendInput('\x1b')
+  await assert.rejects(wideQuestion, /cancelled/)
   screen = await view(vt)
-  assert.ok(screen.includes('↓ view'), `the full footer hint must return after settle:\n${screen}`)
+  assert.ok(screen.includes('↓ view'), `the full footer hint must return after a cancel:\n${screen}`)
 
   // Width pressure re-renders the SAME builtin task item at its compact
   // density (`[1t·↓]`): the second consumer of the one context flag.

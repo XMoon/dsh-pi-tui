@@ -186,6 +186,36 @@ test('panel: Down/Up move the selection; the detail follows', async () => {
   assert.equal(panel.selected()?.content, 'third')
 })
 
+test('panel: PageDown/PageUp page by six and clamp; an empty list pages nowhere', async () => {
+  // E-T12 paging baseline: the panel's OWN handlers must keep paging the
+  // list (a modal/footer change may never route these keys elsewhere).
+  const source = new FakeSource()
+  source.rows = Array.from({ length: 20 }, (_, index) => row(`row-${index}`, index))
+  const { panel } = makePanel(source)
+  panel.start()
+  await settle()
+  panel.handleInput('\x1b[6~') // PageDown
+  assert.equal(panel.selected()?.content, 'row-6')
+  panel.handleInput('\x1b[6~') // PageDown
+  assert.equal(panel.selected()?.content, 'row-12')
+  for (let step = 0; step < 5; step += 1) panel.handleInput('\x1b[6~')
+  assert.equal(panel.selected()?.content, 'row-19', 'PageDown clamps at the last row')
+  panel.handleInput('\x1b[5~') // PageUp
+  assert.equal(panel.selected()?.content, 'row-13')
+  for (let step = 0; step < 5; step += 1) panel.handleInput('\x1b[5~')
+  assert.equal(panel.selected()?.content, 'row-0', 'PageUp clamps at the first row')
+
+  // Negative control: paging an empty result list selects nothing.
+  const empty = new FakeSource()
+  empty.rows = []
+  const { panel: emptyPanel } = makePanel(empty)
+  emptyPanel.start()
+  await settle()
+  emptyPanel.handleInput('\x1b[6~')
+  emptyPanel.handleInput('\x1b[5~')
+  assert.equal(emptyPanel.selected(), undefined, 'paging an empty list must stay a no-op')
+})
+
 test('panel: a stale async result never overwrites a fresher query', async () => {
   // Deterministic race: search #1 (query '') is still pending when the
   // query changes. Resolving the STALE #1 first must drop it; the FRESH
