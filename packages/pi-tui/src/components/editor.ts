@@ -793,7 +793,7 @@ export class Editor implements Component, Focusable {
 			// private SelectList is not mounted in the TUI tree, so X018
 			// gesture liveness (isMouseTargetLive) would clear the gesture
 			// on release and the synthetic click would never reach the
-			// list. (Mirrors the Search/X049 wrapper semantics.)
+			// list. (The same private-inner-component wrapper pattern.)
 			return {
 				...result,
 				...(result.focus ? { focusTarget: this } : {}),

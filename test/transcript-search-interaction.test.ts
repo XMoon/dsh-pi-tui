@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -242,6 +243,48 @@ test('interaction: boundary paging reaches the host while search is open', async
   vt.sendInput('\x1b[6~')
   await vt.waitForRender()
   assert.deepEqual(moves, [[-1, 'page'], [1, 'page']], 'PageDown at the bottom must reach the newer boundary')
+  app.stop()
+})
+
+test('interaction: the Host search shortcut opens the Host box and never the fork native search', async () => {
+  const { vt, app, queries } = startSearchApp()
+  await vt.waitForRender()
+
+  // Ctrl+F (Host default) and Ctrl+Shift+F (the default shared with the fork's
+  // native tui.altScreen.search) must both resolve to the Host box: the Host
+  // query is the only search surface over the full folded transcript.
+  for (const key of ['\x06', '\x1b[102;6u']) {
+    vt.sendInput(key)
+    await vt.waitForRender()
+    assert.equal(app.isSearching(), true, `${JSON.stringify(key)} must open the Host search box`)
+    const painted = vt.getViewport().join('\n')
+    assert.ok(painted.includes('Find transcript'), 'the Host box must be painted')
+    assert.ok(!painted.includes('Find in transcript'), 'the fork native search must never be painted')
+    assert.ok(!painted.includes('Shift+Enter'), 'the fork native navigation row must never be painted')
+    vt.sendInput('needle')
+    await vt.waitForRender()
+    assert.equal(queries.at(-1), 'needle', 'the Host query must receive the typing')
+    app.closeTranscriptSearch()
+    await vt.waitForRender()
+    assert.equal(app.isSearching(), false, 'precondition: the box closes before the next key')
+  }
+
+  // Negative control: with the Host action remapped, the old defaults stay
+  // suppressed — an old default must never silently re-enable the fork's
+  // rendered-line search, and must not reach the Host query either.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+g' }))
+  queries.length = 0
+  for (const key of ['\x06', '\x1b[102;6u']) {
+    vt.sendInput(key)
+    await vt.waitForRender()
+    assert.equal(app.isSearching(), false, `${JSON.stringify(key)} must open nothing once remapped`)
+    const painted = vt.getViewport().join('\n')
+    assert.ok(!painted.includes('Find in transcript'), 'the fork native search must stay suppressed after a remap')
+    assert.ok(!painted.includes('Shift+Enter'), 'the fork native navigation row must stay suppressed after a remap')
+    vt.sendInput('zzz')
+    await vt.waitForRender()
+  }
+  assert.deepEqual(queries, [], 'a suppressed key must never reach the Host query')
   app.stop()
 })
 

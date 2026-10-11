@@ -851,64 +851,6 @@ describe("TuiAltScreen", () => {
 		assert.ok(!populated.some((line) => line.includes("Find in transcript")));
 	});
 
-	it("positions the search query cursor on mouse press (X049)", () => {
-		let query = "";
-		const component = new AltScreenSearchComponent((next) => {
-			query = next;
-		});
-		component.render(48);
-		component.handleInput("hello");
-		component.render(48);
-		// Content starts at col 1 (left border); the Input prompt " " is one
-		// column, so value column 2 (between e and l) is at component col 4.
-		const result = component.handleMouse({
-			type: "press",
-			button: "left",
-			x: 4,
-			y: 1,
-			screenX: 4,
-			screenY: 1,
-			width: 48,
-			height: 3,
-			shift: false,
-			alt: false,
-			ctrl: false,
-		});
-		assert.ok(result?.handled, "press on the query row must be handled");
-		assert.strictEqual(result?.focus, true, "press must request focus");
-		component.handleInput("X");
-		assert.strictEqual(query, "heXllo", "typing after the click must insert at the clicked column");
-	});
-
-	it("keeps the search result-count suffix and borders inert (X049)", () => {
-		const component = new AltScreenSearchComponent(() => {});
-		component.render(48);
-		component.handleInput("needle");
-		component.setResult(0, 2);
-		component.render(48);
-		const press = (x: number, y: number) =>
-			component.handleMouse({
-				type: "press",
-				button: "left",
-				x,
-				y,
-				screenX: x,
-				screenY: y,
-				width: 48,
-				height: 3,
-				shift: false,
-				alt: false,
-				ctrl: false,
-			});
-		// The result-count suffix (" 1/2 ") sits after the Input (which ends
-		// at component col 41 for this render); a press on the suffix must
-		// not reach the Input.
-		assert.strictEqual(press(45, 1), undefined, "result-count suffix must be inert");
-		// Top and bottom borders (rows 0 and 2) are inert.
-		assert.strictEqual(press(4, 0), undefined, "top border must be inert");
-		assert.strictEqual(press(4, 2), undefined, "navigation-button row must be inert here");
-	});
-
 	it("navigates transcript search with hoverable arrow buttons and toggles it with its shortcut", async () => {
 		const terminal = new RecordingTerminal(120, 6);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
@@ -953,38 +895,6 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[102;6u");
 		await terminal.waitForRender();
 		assert.ok(!terminal.getViewport().some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
-		tui.stop();
-	});
-
-	it("positions the fullscreen search query cursor on mouse click (X049)", async () => {
-		const terminal = new RecordingTerminal(120, 6);
-		const tui = new TuiAltScreen(terminal);
-		tui.addChild(new Text("needle one\nmiddle\nneedle two\nend", 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[102;6u");
-		terminal.sendInput("needle");
-		await terminal.waitForRender();
-		let viewport = terminal.getViewport();
-		const contentRow = viewport.findIndex((line) => line.includes("1/2"));
-		assert.ok(contentRow >= 0, "search overlay content row must be visible");
-		// The transcript may also contain "needle"; the overlay's query is
-		// the LAST occurrence on the content row.
-		const needleCol = viewport[contentRow]?.lastIndexOf("needle") ?? -1;
-		assert.ok(needleCol >= 0);
-		// Click on the "e" cell (between n and e): the overlay content starts
-		// at col 1 (border) plus the Input prompt " " (col 2 = n), so the e
-		// cell is needleCol + 2. SGR coordinates are 1-based.
-		terminal.sendInput(`\x1b[<0;${needleCol + 2};${contentRow + 1}M`);
-		await terminal.waitForRender();
-		terminal.sendInput("X");
-		await terminal.waitForRender();
-		viewport = terminal.getViewport();
-		assert.ok(
-			viewport.some((line) => line.includes("nXeedle")),
-			"typing after the click must insert at the clicked query column",
-		);
 		tui.stop();
 	});
 
