@@ -222,7 +222,7 @@ describe("serialized terminal color queries (X008)", () => {
 		}
 	});
 
-	it("swallows a stray color reply when no query is waiting", async () => {
+	it("swallows a stray color reply and its DA1 sentinel when no query is waiting", async () => {
 		const { terminal, tui } = setup();
 		try {
 			const forwarded: string[] = [];
@@ -231,12 +231,15 @@ describe("serialized terminal color queries (X008)", () => {
 				return undefined;
 			});
 
-			// A reply for a query issued on another screen (or whose tombstone was
-			// already consumed) is still a protocol response, never typed input.
+			// A reply (and the DA1 that ends the same burst) for a query issued on
+			// another screen — or whose tombstone was already consumed — is still a
+			// protocol response, never typed input. A stray DA1 must not read as
+			// user activity either.
 			terminal.sendInput("\x1b]11;#000000\x07");
 			terminal.sendInput("\x1b]10;#ffffff\x07");
 			terminal.sendInput("\x1b]4;3;#ff0000\x07");
-			assert.deepStrictEqual(forwarded, [], "an unmatched color reply leaked into the input path");
+			terminal.sendInput(DA1);
+			assert.deepStrictEqual(forwarded, [], "an unmatched color reply or DA1 leaked into the input path");
 		} finally {
 			tui.stop();
 		}

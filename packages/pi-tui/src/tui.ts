@@ -1546,13 +1546,16 @@ export abstract class TuiBase extends Container implements TUI {
 	private consumeTerminalColorResponse(data: string): boolean {
 		const query = this.pendingTerminalColorQueries[0];
 		if (!query) {
-			// X008: a well-formed OSC color reply is a terminal protocol response,
-			// never editor input — even when THIS screen has no query waiting (the
-			// reply belongs to a query issued before a fullscreen swap / stop, or
-			// to a query whose tombstone was already consumed). Upstream forwards
-			// it to the input pipeline; the fork keeps swallowing it so a stray
-			// reply can never be mistaken for typed input.
-			return parseOscColorResponse(data) !== undefined;
+			// X008: a well-formed OSC color reply — and the DA1 sentinel that ends
+			// the same query burst — is a terminal protocol response, never editor
+			// input, even when THIS screen has no query waiting (the reply belongs
+			// to a query issued before a fullscreen swap / stop, or to a query
+			// whose tombstone was already consumed). Upstream forwards both to the
+			// input pipeline, where a stray DA1 reads as user activity; the fork
+			// keeps swallowing them. Trade-off: an integration that writes its own
+			// `CSI c` and reads the answer back through raw input would lose it;
+			// the vendor exposes no such consumer and none exists in this repo.
+			return parseOscColorResponse(data) !== undefined || DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data);
 		}
 		if (DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data)) {
 			this.pendingTerminalColorQueries.shift();
