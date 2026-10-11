@@ -34,6 +34,7 @@ import { pituiSurfaceInteractionPresenter } from '../src/app/surface/interaction
 import type { MainProgressAuthority, RoutedSessionEvent, SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { TerminalNotificationPresentation } from '../src/app/surface/notification-runtime.ts'
 import type { ApprovalOutcome } from '../src/tui/panels/approval-dialog.ts'
+import { isTernTerminal } from '../src/tui/terminal/tern.ts'
 import type {
   ApprovalRequestLike,
   InteractionPort,
@@ -554,8 +555,15 @@ function mountSurface(
     endOpening: () => { surface.openingJournal.reset() },
   }
   beforeStart?.(controls)
+  // The mount goes through the production entry (`startProcessTui`), which reads
+  // the HOST terminal identity: a suite started inside a Tern pane would
+  // otherwise silently switch every non-Tern fixture to the X059 stateful
+  // projection. The fixture owns the identity for its mount window, so an
+  // INHERITED Tern identity is removed; an explicitly pinned non-Tern program
+  // (the `realProgress` keepalive cases) is preserved.
   const previousTermProgram = process.env.TERM_PROGRAM
   if (options.tern === true) process.env.TERM_PROGRAM = 'tern'
+  else if (isTernTerminal()) delete process.env.TERM_PROGRAM
   try {
     surface.start({
       events: { onSubmit: () => {}, onExit: () => {} },
