@@ -1222,6 +1222,58 @@ test('A-12 a late Sign-in notice onClose cannot clear the CURRENT notice handle'
   }
 })
 
+test('A-14 a viewer disposed during its own mount never starts its refresh timer', async () => {
+  const { vt, app } = startApp()
+  // A REAL plugin overlay owns the keyboard first. The new viewer's mount focus
+  // transition blurs it, and its onBlur swaps the screen — which physically
+  // disposes the viewer that is still mounting, BEFORE openOutputViewer
+  // returns. The refresh timer must never be armed for that dead panel.
+  let blurs = 0
+  const component: AdvancedInteractiveComponent = {
+    render: () => ({ kind: 'text', spans: [{ text: 'plugin overlay' }] }),
+    onBlur: () => {
+      blurs += 1
+      if (blurs === 1) app.setFullscreen(true)
+    },
+  }
+  const lease = app.showAdvancedInteractiveOverlay(component)
+  await vt.waitForRender()
+
+  const starts: number[] = []
+  const originalStart = OutputViewerPanel.prototype.startRefreshing
+  OutputViewerPanel.prototype.startRefreshing = function (
+    this: OutputViewerPanel,
+    ...args: Parameters<typeof originalStart>
+  ): void {
+    starts.push(1)
+    originalStart.apply(this, args)
+  }
+  try {
+    let closes = 0
+    app.openOutputViewer({
+      title: 'job detail',
+      initial: 'body',
+      refresh: () => 'body',
+      onClose: () => { closes += 1 },
+      intervalMs: 10,
+    })
+    await vt.waitForRender()
+    assert.ok(blurs >= 1, 'the mount focus transition must have blurred the plugin overlay')
+    assert.equal(app.isFullscreen(), true, 'the plugin onBlur must have swapped the screen')
+    assert.equal(closes, 1, 'the mount-time disposal must finalize the viewer exactly once')
+    assert.equal(starts.length, 0,
+      'a viewer finalized during its own mount must never start a refresh timer (leaked interval)')
+    assert.equal(app.overlayGraphState().handles, 1, 'only the remountable plugin overlay survives the swap')
+  } finally {
+    OutputViewerPanel.prototype.startRefreshing = originalStart
+  }
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  lease.close()
+  await vt.waitForRender()
+  app.stop()
+})
+
 test('A-13 a throwing owner retire and a throwing parent hide are both attempted; no ghost child remains', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
