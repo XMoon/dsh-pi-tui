@@ -18800,7 +18800,15 @@ export class TuiApp {
       width: OUTPUT_VIEWER_WIDTH,
       maxHeight: OUTPUT_VIEWER_MAX_HEIGHT,
     })
-    panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000, hintOf)
+    // Mounting is not a callback-free atomic step: the focus transition can
+    // synchronously run an existing plugin's onBlur, which may swap the screen
+    // (or tear the surface down) and thereby dispose THIS viewer while the
+    // mount call is still returning. The finalizer has already run, so the
+    // owned panel is disposed and an interval started here would never be
+    // cleared — arm the timer only while the viewer is still live.
+    if (!finalized) {
+      panel.startRefreshing(options.refresh, () => this.requestRender(), options.intervalMs ?? 1000, hintOf)
+    }
     return requestClose
   }
 
