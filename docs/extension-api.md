@@ -101,8 +101,9 @@ grant hides the rows physically; it never removes the registration, so a
 later resize or a taller surface repaints the same contribution without
 re-registering. The grant follows the surface's LIVE pinned-chrome height, not
 only the terminal geometry: a growing draft, an opened Todo panel, queue or
-busy rows re-derive it before the next paint (a shrinking chrome restores the
-zones the same way). Widgets never take keyboard focus or mouse targets, keep
+busy rows, or a Question / Save Location frame replacing the editor seat
+re-derive it before the next paint (a shrinking chrome restores the zones the
+same way). Widgets never take keyboard focus or mouse targets, keep
 their registered ordering/importance inside the granted zone, and re-bake
 their palette on a theme switch. An empty zone paints no row at all. Public
 signatures are unchanged.
