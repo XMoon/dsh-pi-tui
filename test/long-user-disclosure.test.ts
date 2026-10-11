@@ -1554,3 +1554,30 @@ test('fullscreen Compact: a body click collapses only the user, the Work bulk ke
   app.setFullscreen(false)
   app.stop()
 })
+
+test('fullscreen: two expanded long users keep exactly one normal separator row', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.setTranscript([user(lines(11, 'a-'), 0), user(lines(11, 'b-'), 1)])
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 2, 'both long prompts start compact')
+
+  // Expand BOTH messages through their markers (the second marker moves after
+  // the first expansion, so resolve it from the repainted view).
+  clickCell(vt, 10, rows.findIndex(row => row.includes('rows compacted')))
+  rows = await viewRows(vt)
+  clickCell(vt, 10, rows.findIndex(row => row.includes('rows compacted')))
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('a-11')) && rows.some(row => row.includes('b-11')), `both are expanded:\n${rows.join('\n')}`)
+
+  // Between the two blocks sits exactly ONE ordinary separator row: the retired
+  // tail control must never occupy or replace it.
+  const aTail = rows.findIndex(row => row.includes('a-11'))
+  const bHead = rows.findIndex(row => row.includes('b-1'))
+  assert.ok(aTail >= 0 && bHead > aTail, `both blocks must be in order:\n${rows.join('\n')}`)
+  assert.equal(bHead - aTail, 2, `exactly one separator row between the blocks:\n${rows.join('\n')}`)
+  assert.equal((rows[aTail + 1] ?? '').trim(), '', `the separator row stays blank:\n${rows.join('\n')}`)
+  assert.equal(collapseFooterRows(rows).length, 0, 'no label occupies the separator')
+  app.setFullscreen(false)
+  app.stop()
+})
