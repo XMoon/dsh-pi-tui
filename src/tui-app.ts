@@ -18891,22 +18891,25 @@ export class TuiApp {
   }
 
   /**
-   * Query the terminal background (OSC 11) and apply the matching palette,
-   * with the kimi detection chain: colour-opt-out environments (NO_COLOR /
-   * FORCE_COLOR=0 / CI) stay dark without querying; a terminal that never
-   * answers falls back to COLORFGBG (VT100/xterm convention); a terminal
-   * with neither leaves the current theme untouched.
+   * Query the terminal colors (OSC 10/11/4 through the fork's
+   * `queryTerminalColors` — upstream v1.1.0 replaced the old OSC 11 accessor)
+   * and apply the palette matching the reported BACKGROUND, with the kimi
+   * detection chain: colour-opt-out environments (NO_COLOR / FORCE_COLOR=0 /
+   * CI) stay dark without querying; a terminal that never answers falls back
+   * to COLORFGBG (VT100/xterm convention); a terminal with neither leaves the
+   * current theme untouched.
    *
    * The query targets the screen that OWNS the terminal input handler (the
-   * alt screen in fullscreen mode): a query on the stopped main screen
-   * would have its reply swallowed by the alt screen's OSC 11 consumer and
+   * alt screen in fullscreen mode): a query on the stopped main screen would
+   * have its reply swallowed by the alt screen's color-query consumer and
    * time out, silently turning `auto` into a no-op.
    *
-   * Concurrent calls COALESCE onto one shared in-flight query — overlapping
-   * OSC 11 queries have no sequence ids, so replies would mis-pair by FIFO
-   * order. The LATEST {@link AutoDetectOptions.shouldApply} guard is
-   * consulted at settle time, so a late result can never override a newer
-   * explicit theme choice.
+   * Concurrent calls COALESCE onto one shared in-flight query. The fork
+   * serializes the physical color queries themselves (dsh-pi-tui divergence
+   * X008): at most one query is outstanding, so replies can never mis-pair.
+   * The LATEST {@link AutoDetectOptions.shouldApply} guard is consulted at
+   * settle time, so a late result can never override a newer explicit theme
+   * choice.
    * @param options.shouldApply - returns false to drop the settled result
    *   instead of applying it (default: always apply).
    */
@@ -18923,10 +18926,11 @@ export class TuiApp {
   }
 
   private async runAutoDetect(): Promise<void> {
-    const rgb = await this.activeScreen.queryTerminalBackgroundColor({ timeoutMs: 800 })
+    const colors = await this.activeScreen.queryTerminalColors({ timeoutMs: 800 })
     if (this.disposed) return
     const guard = this.autoDetectGuard
     const apply = (): boolean => guard === undefined || guard()
+    const rgb = colors.background
     if (rgb !== undefined) {
       if (apply()) this.applyTheme(detectThemeFromBackground(rgb))
       return
@@ -18937,19 +18941,21 @@ export class TuiApp {
 
   /**
    * Follow the terminal's live colour-scheme reports while `following` is
-   * true. Enabling sends one DSR 996 query — xterm-class terminals only
-   * START reporting after being asked — and reported schemes fan out to the
-   * {@link onTerminalThemeChange} listeners (which guard whether to apply,
-   * typically against the persisted `auto` preference). Disabling stops
-   * tracking. Idempotent.
+   * true. Enabling samples the terminal colors once and derives the initial
+   * scheme from the reported background (upstream v1.1.0 removed the DSR 996
+   * probe; the reported background decides everywhere), after which reported
+   * schemes fan out to the {@link onTerminalThemeChange} listeners (which
+   * guard whether to apply, typically against the persisted `auto`
+   * preference). Disabling stops tracking. Idempotent.
    * @param following - whether to track and apply live scheme reports.
    */
   trackTerminalTheme(following: boolean): void {
     if (following === this.followingTerminalTheme) return
     this.followingTerminalTheme = following
     if (!following) return
-    this.activeScreen.queryTerminalColorScheme({ timeoutMs: 800 })
-      .then((scheme) => {
+    this.activeScreen.queryTerminalColors({ timeoutMs: 800 })
+      .then((colors) => {
+        const scheme = colors.background === undefined ? undefined : detectThemeFromBackground(colors.background)
         if (scheme === undefined || !this.followingTerminalTheme) return
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
       })

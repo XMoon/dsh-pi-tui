@@ -1730,7 +1730,7 @@ test('autoDetectTheme drops the settled result when shouldApply returns false', 
   assert.equal(currentPalette, before, 'a refused result must not change the palette')
 })
 
-test('trackTerminalTheme enables DSR 996 scheme tracking idempotently', async () => {
+test('trackTerminalTheme queries the terminal colors and derives the scheme idempotently', async () => {
   const vt = new VirtualTerminal(100, 24)
   const writes: string[] = []
   const spy = new Proxy(vt, {
@@ -1747,13 +1747,20 @@ test('trackTerminalTheme enables DSR 996 scheme tracking idempotently', async ()
 
   startedApps.add(app)
   try {
+    const received: string[] = []
+    app.onTerminalThemeChange((theme) => { received.push(theme) })
     app.trackTerminalTheme(true)
     app.trackTerminalTheme(true) // idempotent: no second query
-    assert.equal(writes.filter(data => data.includes('\x1b[?996n')).length, 1,
-      'enabling tracking must query DSR 996 exactly once')
+    assert.equal(writes.filter(data => data.includes('\x1b]10;?\x07')).length, 1,
+      'enabling tracking must query the terminal colors exactly once')
+    // Upstream v1.1.0 removed the DSR 996 probe: the reported background decides.
+    vt.sendInput('\x1b]11;#eeeeee\x07')
+    vt.sendInput('\x1b[?62;22c') // DA1 ends the color query
+    await viewport(vt)
+    assert.deepEqual(received, ['light'], 'the reported background decides the tracked scheme')
     app.trackTerminalTheme(false)
     app.trackTerminalTheme(true) // re-enabling after disable queries again
-    assert.equal(writes.filter(data => data.includes('\x1b[?996n')).length, 2,
+    assert.equal(writes.filter(data => data.includes('\x1b]10;?\x07')).length, 2,
       're-enabling after disable must query again')
   } finally {
     app.stop()

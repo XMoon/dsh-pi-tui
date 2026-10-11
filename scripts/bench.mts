@@ -65,6 +65,7 @@ class BenchTerminal implements Terminal {
   clearScreen(): void {}
   setTitle(_title: string): void {}
   setProgress(_active: boolean): void {}
+  setProgramStatus(): void {}
 }
 
 /** Every benchmark surface owns one final dispose, including failed sections. */

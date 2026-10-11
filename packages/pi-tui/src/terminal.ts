@@ -1,12 +1,15 @@
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { setKittyProtocolActive } from "./keys.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
-import { getNativeModuleCandidates } from "./native-module-path.ts";
+import { getNativePlatformHelper } from "./native-platform.ts";
+import {
+	formatProgramStatus,
+	isProgramStatusReply,
+	PROGRAM_STATUS_QUERY,
+	type ProgramStatus,
+} from "./program-status.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
-
-const cjsRequire = createRequire(import.meta.url);
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 /** OSC 9;4 state 1 value 0 — a WORKING progress state whose completion
@@ -19,7 +22,8 @@ const TERMINAL_PROGRESS_PAUSED_SEQUENCE = "\x1b]9;4;4\x07";
 const NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
-const KITTY_KEYBOARD_PROTOCOL_QUERY = `\x1b[>${DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u\x1b[c`;
+const KITTY_KEYBOARD_PROTOCOL_QUERY = `\x1b[>${DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u`;
+const DEVICE_ATTRIBUTES_QUERY = "\x1b[c";
 
 export type KeyboardProtocolNegotiationSequence =
 	| { type: "kitty-flags"; flags: number }
@@ -120,6 +124,12 @@ export interface Terminal {
 	setProgress(active: boolean): void;
 
 	/**
+	 * Report what the program is doing (OSC 7501). Sent only to terminals that support it; the latest
+	 * status is re-sent when support is confirmed or the terminal restarts.
+	 */
+	setProgramStatus(status: ProgramStatus): void;
+
+	/**
 	 * Optional richer OSC 9;4 state projection (X059). Consumers that only
 	 * know the boolean `setProgress` keep working unchanged; `ProcessTerminal`
 	 * implements it so a host can express `paused` (OSC 9;4;4, e.g. Tern's
@@ -190,11 +200,19 @@ export class ProcessTerminal implements Terminal {
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
 	private keyboardProtocolPushed = false;
+	/** DA1 replies owed to keyboard protocol queries. Later DA1 replies answer other queries and are forwarded. */
+	private pendingKeyboardProtocolDeviceAttributes = 0;
 	private keyboardProtocolNegotiationBuffer = "";
 	private keyboardProtocolBufferFlushTimer?: ReturnType<typeof setTimeout>;
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
+	/** Latest program status, kept across stop() so start() can report it again. */
+	private programStatus?: ProgramStatus;
+	/** Whether the terminal confirmed OSC 7501 support since the last start(), or `PI_PROGRAM_STATUS=1`. */
+	private programStatusSupported = false;
+	/** The support query was sent and its DA1 sentinel has not arrived yet. */
+	private programStatusQueryPending = false;
 	/** The PHYSICAL OSC 9;4 state (X059). Tracked separately from the
 	 * keepalive timer because `paused` is a real state with no interval: only
 	 * this field can tell `stop()` that there is something to clear. */
@@ -298,16 +316,24 @@ export class ProcessTerminal implements Terminal {
 
 		// Forward individual sequences to the input handler
 		this.stdinBuffer.on("data", (sequence) => {
-			const negotiationSequence = this.readKeyboardProtocolNegotiationSequence(sequence);
-			if (negotiationSequence === "pending") {
+			if (isProgramStatusReply(sequence)) {
+				if (this.programStatusQueryPending) {
+					this.programStatusQueryPending = false;
+					this.programStatusSupported = true;
+					this.writeProgramStatus();
+				}
+				return;
+			}
+			const negotiation = this.readKeyboardProtocolNegotiationSequence(sequence);
+			if (negotiation === "pending") {
 				this.scheduleKeyboardProtocolNegotiationBufferFlush();
 				return; // Wait briefly for the rest of a split Kitty response.
 			}
-			if (this.handleKeyboardProtocolNegotiationSequence(negotiationSequence)) {
+			if (negotiation && this.handleKeyboardProtocolNegotiationSequence(negotiation.parsed)) {
 				return;
 			}
 
-			this.forwardInputSequence(sequence);
+			this.forwardInputSequence(negotiation?.sequence ?? sequence);
 		});
 
 		// Re-wrap paste content with bracketed paste markers for existing editor handling
@@ -335,6 +361,9 @@ export class ProcessTerminal implements Terminal {
 	 * - 1 = disambiguate escape codes
 	 * - 2 = report event types (press/repeat/release)
 	 * - 4 = report alternate keys (shifted key, base layout key)
+	 *
+	 * The OSC 7501 program status query shares the DA sentinel: a terminal that supports it replies
+	 * before DA. `PI_PROGRAM_STATUS=1` or `0` skips the query.
 	 */
 	private queryAndEnableKittyProtocol(): void {
 		this.setupStdinBuffer();
@@ -346,15 +375,27 @@ export class ProcessTerminal implements Terminal {
 		// negotiated mode is kept as-is; only the parser is rebuilt.
 		if (this.keyboardProtocolPushed) return;
 		this.keyboardProtocolPushed = true;
+		this.pendingKeyboardProtocolDeviceAttributes += 1;
 		this.clearKeyboardProtocolNegotiationBuffer();
-		process.stdout.write(KITTY_KEYBOARD_PROTOCOL_QUERY);
+		const programStatusOverride = process.env.PI_PROGRAM_STATUS;
+		this.programStatusSupported = programStatusOverride === "1";
+		this.programStatusQueryPending = programStatusOverride !== "1" && programStatusOverride !== "0";
+		const programStatusQuery = this.programStatusQueryPending ? PROGRAM_STATUS_QUERY : "";
+		process.stdout.write(`${KITTY_KEYBOARD_PROTOCOL_QUERY}${programStatusQuery}${DEVICE_ATTRIBUTES_QUERY}`);
+		this.writeProgramStatus();
 	}
 
 	private handleKeyboardProtocolNegotiationSequence(
-		negotiationSequence: KeyboardProtocolNegotiationSequence | undefined,
+		negotiationSequence: KeyboardProtocolNegotiationSequence,
 	): boolean {
-		if (!negotiationSequence) return false;
 		this.clearKeyboardProtocolNegotiationBuffer();
+		if (negotiationSequence.type === "device-attributes") {
+			if (this.pendingKeyboardProtocolDeviceAttributes === 0) return false;
+			this.pendingKeyboardProtocolDeviceAttributes -= 1;
+			// The last owed DA answers the latest query, which got no program status reply first. Earlier DA
+			// replies belong to queries from before a restart.
+			if (this.pendingKeyboardProtocolDeviceAttributes === 0) this.programStatusQueryPending = false;
+		}
 		if (negotiationSequence.type === "kitty-flags") {
 			if (negotiationSequence.flags !== 0) {
 				this.disableModifyOtherKeys();
@@ -374,15 +415,16 @@ export class ProcessTerminal implements Terminal {
 		return true;
 	}
 
+	/** Returns the parsed negotiation reply with its full (possibly reassembled) sequence. */
 	private readKeyboardProtocolNegotiationSequence(
 		sequence: string,
-	): KeyboardProtocolNegotiationSequence | "pending" | undefined {
+	): { parsed: KeyboardProtocolNegotiationSequence; sequence: string } | "pending" | undefined {
 		if (this.keyboardProtocolNegotiationBuffer) {
 			const bufferedSequence = this.keyboardProtocolNegotiationBuffer + sequence;
 			const negotiationSequence = parseKeyboardProtocolNegotiationSequence(bufferedSequence);
 			if (negotiationSequence) {
 				this.clearKeyboardProtocolNegotiationBuffer();
-				return negotiationSequence;
+				return { parsed: negotiationSequence, sequence: bufferedSequence };
 			}
 			if (isKeyboardProtocolNegotiationSequencePrefix(bufferedSequence)) {
 				this.setKeyboardProtocolNegotiationBuffer(bufferedSequence);
@@ -392,7 +434,7 @@ export class ProcessTerminal implements Terminal {
 		}
 
 		const negotiationSequence = parseKeyboardProtocolNegotiationSequence(sequence);
-		if (negotiationSequence) return negotiationSequence;
+		if (negotiationSequence) return { parsed: negotiationSequence, sequence };
 		if (isKeyboardProtocolNegotiationSequencePrefix(sequence)) {
 			this.setKeyboardProtocolNegotiationBuffer(sequence);
 			return "pending";
@@ -464,22 +506,7 @@ export class ProcessTerminal implements Terminal {
 	private enableWindowsVTInput(): void {
 		if (process.platform !== "win32") return;
 		try {
-			const arch = process.arch;
-			if (arch !== "x64" && arch !== "arm64") return;
-
-			// Dynamic require so non-Windows and bundled/browser paths never load the
-			// native helper. Installed packages resolve it from pi-tui; standalone
-			// binaries resolve the copy next to the executable.
-			const nativePath = path.join("native", "win32", "prebuilds", `win32-${arch}`, "win32-console-mode.node");
-			for (const modulePath of getNativeModuleCandidates(nativePath)) {
-				try {
-					const helper = cjsRequire(modulePath) as { enableVirtualTerminalInput?: () => boolean };
-					helper.enableVirtualTerminalInput?.();
-					return;
-				} catch {
-					// Try the next possible packaging location.
-				}
-			}
+			getNativePlatformHelper()?.enableVirtualTerminalInput?.();
 		} catch {
 			// Native helper not available — Shift+Tab won't be distinguishable from Tab.
 		}
@@ -533,6 +560,12 @@ export class ProcessTerminal implements Terminal {
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 			this.progressState = "clear";
 		}
+		// Remove the status while stopped, for example after exit or while suspended. start() reports it again.
+		if (this.programStatusSupported && this.programStatus) {
+			process.stdout.write(formatProgramStatus({ state: "clear" }));
+		}
+		this.programStatusSupported = false;
+		this.programStatusQueryPending = false;
 
 		// Disable bracketed paste mode
 		process.stdout.write("\x1b[?2004l");
@@ -633,6 +666,17 @@ export class ProcessTerminal implements Terminal {
 	setTitle(title: string): void {
 		// OSC 0;title BEL - set terminal window title
 		process.stdout.write(`\x1b]0;${title}\x07`);
+	}
+
+	setProgramStatus(status: ProgramStatus): void {
+		this.programStatus = status.state === "clear" ? undefined : status;
+		if (this.programStatusSupported) process.stdout.write(formatProgramStatus(status));
+	}
+
+	private writeProgramStatus(): void {
+		if (this.programStatusSupported && this.programStatus) {
+			process.stdout.write(formatProgramStatus(this.programStatus));
+		}
 	}
 
 	setProgress(active: boolean): void {
