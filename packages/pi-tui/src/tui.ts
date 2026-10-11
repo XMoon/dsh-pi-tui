@@ -220,15 +220,20 @@ const TERMINAL_PALETTE_SIZE = 16;
 /** OSC 10 and 11 plus OSC 4 for every palette color. */
 const TERMINAL_COLOR_REPLY_COUNT = 2 + TERMINAL_PALETTE_SIZE;
 /**
- * Default colors, palette colors 0-15, and a trailing primary device attributes (DA1) request.
- * Every terminal answers DA1 and terminals answer in order, so the DA1 reply marks the end of
- * the color replies, including for terminals that ignore the color queries.
+ * Default colors, palette colors 0-15, and a trailing device status report (DSR 6) request.
+ * Every terminal answers DSR 6 with a cursor position report, so it marks the end of the color
+ * replies, including for terminals that ignore the color queries. Deliberately NOT a primary
+ * device attributes (DA1) request (dsh-pi-tui divergence X008): `ProcessTerminal` consumes DA
+ * replies for its own keyboard-negotiation accounting (X016), so a DA1 sentinel can be eaten by
+ * that layer after a stop/restart and would leave this serialized wire blocked forever.
  */
 const TERMINAL_COLOR_QUERY = `\x1b]10;?\x07\x1b]11;?\x07${Array.from(
 	{ length: TERMINAL_PALETTE_SIZE },
 	(_, index) => `\x1b]4;${index};?\x07`,
-).join("")}\x1b[c`;
+).join("")}\x1b[6n`;
 const DEVICE_ATTRIBUTES_RESPONSE_PATTERN = /^\x1b\[\?[\d;]*c$/;
+/** Reply to the DSR 6 sentinel that ends a color query burst. */
+const CURSOR_POSITION_REPORT_PATTERN = /^\x1b\[\d+;\d+R$/;
 
 /**
  * Interface for components that can receive focus and display a hardware cursor.
@@ -1544,24 +1549,29 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private consumeTerminalColorResponse(data: string): boolean {
+		// A primary device attributes reply is a terminal protocol response, never
+		// typed input — and never this consumer's sentinel, because the burst ends
+		// with a DSR 6 request instead (X008). ProcessTerminal's keyboard
+		// negotiation accounting owns DA replies (X016); an unowned one reaches
+		// this layer and is swallowed rather than forwarded as user activity.
+		if (DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data)) {
+			return true;
+		}
 		const query = this.pendingTerminalColorQueries[0];
 		if (!query) {
-			// X008: a well-formed OSC color reply — and the DA1 sentinel that ends
-			// the same query burst — is a terminal protocol response, never editor
-			// input, even when THIS screen has no query waiting (the reply belongs
-			// to a query issued before a fullscreen swap / stop, or to a query
-			// whose tombstone was already consumed). Upstream forwards both to the
-			// input pipeline, where a stray DA1 reads as user activity; the fork
-			// keeps swallowing them. Trade-off: an integration that writes its own
-			// `CSI c` and reads the answer back through raw input would lose it;
-			// the vendor exposes no such consumer and none exists in this repo.
-			return parseOscColorResponse(data) !== undefined || DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data);
+			// X008: a well-formed OSC color reply — and the cursor-position report
+			// that ends the same query burst — is a terminal protocol response,
+			// never editor input, even when THIS screen has no query waiting (the
+			// reply belongs to a query issued before a fullscreen swap / stop, or
+			// to a query whose tombstone was already consumed). Upstream forwards
+			// both to the input pipeline; the fork keeps swallowing them.
+			return parseOscColorResponse(data) !== undefined || CURSOR_POSITION_REPORT_PATTERN.test(data);
 		}
-		if (DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data)) {
+		if (CURSOR_POSITION_REPORT_PATTERN.test(data)) {
 			this.pendingTerminalColorQueries.shift();
-			// X008: the DA1 sentinel ends this query's turn on the wire. Only
-			// now may the next waiting query be written, so the replies that
-			// arrive next can only belong to that next query.
+			// X008: the sentinel ends this query's turn on the wire. Only now may
+			// the next waiting query be written, so the replies that arrive next
+			// can only belong to that next query.
 			this.terminalColorQueryWritten = false;
 			this.completeTerminalColorQuery(query);
 			this.pumpTerminalColorQueries();

@@ -8,6 +8,7 @@ import {
 	resolveEscapeTimeoutMs,
 	shouldKeepTerminalProgressAlive,
 } from "../src/terminal.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
 
 describe("resolveEscapeTimeoutMs", () => {
 	it("uses PI_TUI_ESC_TIMEOUT when configured", () => {
@@ -372,6 +373,20 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		} finally {
 			harness.cleanup();
 			mock.timers.reset();
+		}
+	});
+
+	it("stops treating a device-attributes reply as owed once its window expires", () => {
+		const harness = setupNegotiation();
+		try {
+			// White-box: the deadline bounds a wire transaction, so a DA that never
+			// arrived within the negotiation window is released instead of being
+			// carried over to consume unrelated later replies.
+			(harness.terminal as unknown as { deviceAttributesDeadline: number }).deviceAttributesDeadline = Date.now() - 1;
+			harness.send("\x1b[?62;4;52c");
+			assert.equal(harness.getInput(), "\x1b[?62;4;52c", "an expired debt must forward its DA reply (TuiBase swallows it)");
+		} finally {
+			harness.cleanup();
 		}
 	});
 });
@@ -1042,6 +1057,146 @@ describe("ProcessTerminal dimensions", () => {
 			} else {
 				process.env.LINES = previousLines;
 			}
+		}
+	});
+});
+
+
+/**
+ * X016/X008 cross-layer guard: the sentinel of the color-query burst is produced
+ * by TuiBase but classified by ProcessTerminal's keyboard-negotiation accounting.
+ * A DA still owed by a session that already ended (or one that never arrived)
+ * must not consume the NEXT session's replies, and a DA1 must never end a color
+ * query at all - otherwise the serialized color wire (X008) stays blocked and
+ * every later color query would never be written.
+ *
+ * `process.stdout.write` is replaced only for SYNCHRONOUS windows: the node:test
+ * child reports its results over stdout, so a patch left across an await would
+ * swallow the report of the tests that already ran.
+ */
+describe("ProcessTerminal DA1 ownership across a restart (X016/X008)", () => {
+	const SENTINEL = "\x1b[12;34R"; // DSR 6 cursor position report ends a color burst
+	const DA1 = "\x1b[?62;22c";
+	const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+	type TwoLayerHarness = {
+		terminal: ProcessTerminal;
+		screen: TuiMainScreen;
+		writes: string[];
+		send(data: string): void;
+		startSession(): void;
+		stopSession(): void;
+		colorQuery(call: () => Promise<unknown>): Promise<{ background?: unknown }>;
+		cleanup(): void;
+	};
+
+	function setupTwoLayer(): TwoLayerHarness {
+		const terminal = new ProcessTerminal();
+		const screen = new TuiMainScreen(terminal);
+		const writes: string[] = [];
+		let dataHandler: ((data: string) => void) | undefined;
+		let cleaned = false;
+		const previousOn = process.stdin.on;
+		const withCapture = <T,>(body: () => T): T => {
+			const previous = process.stdout.write;
+			process.stdout.write = ((chunk: string | Uint8Array) => {
+				writes.push(String(chunk));
+				return true;
+			}) as typeof process.stdout.write;
+			try {
+				return body();
+			} finally {
+				process.stdout.write = previous;
+			}
+		};
+		process.stdin.on = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "data") dataHandler = listener as (data: string) => void;
+			return process.stdin;
+		}) as typeof process.stdin.on;
+		return {
+			terminal,
+			screen,
+			writes,
+			send(data: string): void {
+				withCapture(() => dataHandler?.(data));
+			},
+			// A real start() installs this handler, so every simulated session
+			// re-installs it (stop() clears it).
+			startSession(): void {
+				withCapture(() => {
+					(terminal as unknown as { inputHandler?: (data: string) => void }).inputHandler = (data) => {
+						(screen as unknown as { handleTerminalInput(data: string): void }).handleTerminalInput(data);
+					};
+					(terminal as unknown as { queryAndEnableKittyProtocol(): void }).queryAndEnableKittyProtocol();
+				});
+			},
+			stopSession(): void {
+				withCapture(() => terminal.stop());
+			},
+			colorQuery(call: () => Promise<unknown>): Promise<{ background?: unknown }> {
+				return withCapture(call) as Promise<{ background?: unknown }>;
+			},
+			cleanup(): void {
+				if (cleaned) return;
+				cleaned = true;
+				try {
+					withCapture(() => terminal.stop());
+				} finally {
+					process.stdin.on = previousOn;
+					setKittyProtocolActive(false);
+				}
+			},
+		};
+	}
+
+	it("keeps the color-query wire alive when a previous session's DA1 is lost", async () => {
+		const harness = setupTwoLayer();
+		try {
+			// Session A queries Kitty/program status and its DA1 never arrives.
+			harness.startSession();
+			harness.stopSession();
+			// Session B queries again and its own DA1 is answered normally.
+			harness.startSession();
+			assert.equal(
+				harness.writes.filter((write) => write.endsWith("\x1b[c")).length,
+				2,
+				"each session must send its own device-attributes query",
+			);
+			harness.send(DA1);
+
+			// The screen issues a color query. Its sentinel is a DSR 6 report, so the
+			// keyboard-negotiation accounting - stale debt or not - cannot eat it.
+			const query = harness.colorQuery(() => harness.screen.queryTerminalColors({ timeoutMs: 500 }));
+			harness.send("\x1b]11;#336699\x07");
+			harness.send(DA1);
+			const early = await Promise.race([
+				query.then(() => "resolved" as const),
+				wait(50).then(() => "waiting" as const),
+			]);
+			assert.equal(early, "waiting", "a DA1 must never end a color query");
+			harness.send(SENTINEL);
+			const settled = await Promise.race([
+				query.then((colors) => ({ kind: "resolved" as const, colors })),
+				wait(200).then(() => ({ kind: "timeout" as const })),
+			]);
+			assert.equal(settled.kind, "resolved", "the color query must complete on its own DSR 6 sentinel");
+			assert.deepStrictEqual(
+				settled.kind === "resolved" ? settled.colors.background : undefined,
+				{ r: 0x33, g: 0x66, b: 0x99 },
+			);
+
+			// And the serialized wire is free: the next query is written.
+			const second = harness.colorQuery(() => harness.screen.queryTerminalColors({ timeoutMs: 500 }));
+			assert.equal(
+				harness.writes.filter((write) => write.includes("\x1b]10;?\x07")).length,
+				2,
+				"the next color query must still be written after the sentinel arrived",
+			);
+			harness.send("\x1b]11;#111111\x07");
+			harness.send(SENTINEL);
+			assert.deepStrictEqual((await second).background, { r: 0x11, g: 0x11, b: 0x11 });
+		} finally {
+			harness.cleanup();
 		}
 	});
 });

@@ -3,11 +3,11 @@ import { describe, it } from "node:test";
 import { type Terminal, type TerminalColors, TuiMainScreen, type TUI } from "../src/index.ts";
 
 /**
- * X008: terminal color queries (OSC 10/11/4, ended by a DA1 sentinel) carry no
+ * X008: terminal color queries (OSC 10/11/4, ended by a DSR 6 sentinel) carry no
  * request id, so the fork serializes them — at most one query is ever
  * outstanding on the wire. A timed-out query stays the tombstone for the
  * replies that can still arrive; the next waiting query is written only after
- * the outstanding query's DA1 sentinel. These tests drive the real
+ * the outstanding query's DSR 6 sentinel. These tests drive the real
  * `queryTerminalColors` API and the production reply consumer.
  */
 
@@ -64,6 +64,7 @@ class RecordingTerminal implements Terminal {
 	}
 }
 
+const SENTINEL = "\x1b[12;34R";
 const DA1 = "\x1b[?62;22c";
 const LATE = { r: 0x11, g: 0x11, b: 0x11 };
 const OWN = { r: 0x33, g: 0x66, b: 0x99 };
@@ -91,15 +92,15 @@ describe("serialized terminal color queries (X008)", () => {
 			const second = tui.queryTerminalColors({ timeoutMs: 500 });
 			assert.strictEqual(terminal.colorQueryCount(), 1, "B was written while A was still outstanding");
 
-			// A's late reply is consumed by A, then A's DA1 sentinel frees the
+			// A's late reply is consumed by A, then A's DSR 6 sentinel frees the
 			// wire and only then is B written.
 			terminal.sendInput("\x1b]11;#111111\x07");
 			assert.strictEqual(terminal.colorQueryCount(), 1);
-			terminal.sendInput(DA1);
-			assert.strictEqual(terminal.colorQueryCount(), 2, "B must be written after A's DA1 sentinel");
+			terminal.sendInput(SENTINEL);
+			assert.strictEqual(terminal.colorQueryCount(), 2, "B must be written after A's DSR 6 sentinel");
 
 			terminal.sendInput("\x1b]11;#336699\x07");
-			terminal.sendInput(DA1);
+			terminal.sendInput(SENTINEL);
 			assert.deepStrictEqual((await second).background, OWN);
 		} finally {
 			tui.stop();
@@ -136,14 +137,14 @@ describe("serialized terminal color queries (X008)", () => {
 			const second = tui.queryTerminalColors({ timeoutMs: 500 });
 			assert.strictEqual((await first).background, undefined);
 
-			// A's late reply lands on A's late-reply callback, and A's DA1
+			// A's late reply lands on A's late-reply callback, and A's DSR 6
 			// sentinel ends A's turn before B is written.
 			terminal.sendInput("\x1b]11;#111111\x07");
-			terminal.sendInput(DA1);
+			terminal.sendInput(SENTINEL);
 			assert.deepStrictEqual(late, [LATE], "A's late reply must be delivered to A");
 
 			terminal.sendInput("\x1b]11;#336699\x07");
-			terminal.sendInput(DA1);
+			terminal.sendInput(SENTINEL);
 			assert.deepStrictEqual((await second).background, OWN, "B must resolve with its own reply");
 		} finally {
 			tui.stop();
@@ -166,10 +167,10 @@ describe("serialized terminal color queries (X008)", () => {
 			]);
 			assert.strictEqual(settled.kind, "waiting", "B resolved from A's late reply");
 
-			// A's DA1 ends A; B is written and pairs with its own reply.
-			terminal.sendInput(DA1);
+			// A's sentinel ends A; B is written and pairs with its own reply.
+			terminal.sendInput(SENTINEL);
 			terminal.sendInput("\x1b]11;#336699\x07");
-			terminal.sendInput(DA1);
+			terminal.sendInput(SENTINEL);
 			assert.deepStrictEqual((await second).background, OWN);
 		} finally {
 			tui.stop();
@@ -187,9 +188,9 @@ describe("serialized terminal color queries (X008)", () => {
 			await wait(300);
 			terminal.sendInput("\x1b]11;#111111\x07"); // A's very late reply
 			assert.strictEqual(terminal.colorQueryCount(), 1);
-			terminal.sendInput(DA1);
+			terminal.sendInput(SENTINEL);
 			terminal.sendInput("\x1b]11;#336699\x07"); // B's reply
-			terminal.sendInput(DA1);
+			terminal.sendInput(SENTINEL);
 			assert.deepStrictEqual((await second).background, OWN, "B must resolve with its own reply");
 		} finally {
 			tui.stop();
@@ -207,7 +208,7 @@ describe("serialized terminal color queries (X008)", () => {
 			// written: it must be dropped, never sent later as a stale burst.
 			assert.strictEqual((await queued).background, undefined);
 			terminal.sendInput("\x1b]11;#336699\x07"); // the owner's reply
-			terminal.sendInput(DA1); // ends the owner's turn
+			terminal.sendInput(SENTINEL); // ends the owner's turn
 			assert.strictEqual(terminal.colorQueryCount(), 1, "a settled queued query must never be written");
 			assert.deepStrictEqual((await owner).background, OWN);
 
@@ -215,14 +216,14 @@ describe("serialized terminal color queries (X008)", () => {
 			const third = tui.queryTerminalColors({ timeoutMs: 500 });
 			assert.strictEqual(terminal.colorQueryCount(), 2);
 			terminal.sendInput("\x1b]11;#111111\x07");
-			terminal.sendInput(DA1);
+			terminal.sendInput(SENTINEL);
 			assert.deepStrictEqual((await third).background, LATE);
 		} finally {
 			tui.stop();
 		}
 	});
 
-	it("swallows a stray color reply and its DA1 sentinel when no query is waiting", async () => {
+	it("swallows a stray color reply, sentinel and DA1 when no query is waiting", async () => {
 		const { terminal, tui } = setup();
 		try {
 			const forwarded: string[] = [];
@@ -231,15 +232,45 @@ describe("serialized terminal color queries (X008)", () => {
 				return undefined;
 			});
 
-			// A reply (and the DA1 that ends the same burst) for a query issued on
-			// another screen — or whose tombstone was already consumed — is still a
-			// protocol response, never typed input. A stray DA1 must not read as
-			// user activity either.
+			// A reply (and the sentinel that ends the same burst) for a query issued
+			// on another screen — or whose tombstone was already consumed — is still
+			// a protocol response, never typed input. A stray DA1 must not read as
+			// user activity either: ProcessTerminal's keyboard-negotiation
+			// accounting owns DA replies, so an unowned one is swallowed here.
 			terminal.sendInput("\x1b]11;#000000\x07");
 			terminal.sendInput("\x1b]10;#ffffff\x07");
 			terminal.sendInput("\x1b]4;3;#ff0000\x07");
+			terminal.sendInput(SENTINEL);
 			terminal.sendInput(DA1);
-			assert.deepStrictEqual(forwarded, [], "an unmatched color reply or DA1 leaked into the input path");
+			assert.deepStrictEqual(forwarded, [], "an unmatched color reply, sentinel or DA1 leaked into the input path");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("never lets a DA1 end a color query (the sentinel is a DSR 6 report)", async () => {
+		const { terminal, tui } = setup();
+		try {
+			// The burst ends with `CSI 6 n`, so a DA1 belonging to the keyboard
+			// negotiation (or a stale one from before a restart) must not free the
+			// serialized wire; a second query stays unwritten.
+			const first = tui.queryTerminalColors({ timeoutMs: 500 });
+			terminal.sendInput("\x1b]11;#336699\x07");
+			terminal.sendInput(DA1);
+			const settled = await Promise.race([
+				first.then((colors) => ({ kind: "resolved" as const, colors })),
+				wait(50).then(() => ({ kind: "waiting" as const })),
+			]);
+			assert.strictEqual(settled.kind, "waiting", "a DA1 must not complete a color query");
+
+			const second = tui.queryTerminalColors({ timeoutMs: 500 });
+			assert.strictEqual(terminal.colorQueryCount(), 1, "the wire stays busy until the DSR 6 sentinel");
+			terminal.sendInput(SENTINEL);
+			assert.strictEqual(terminal.colorQueryCount(), 2, "the DSR 6 sentinel frees the wire");
+			assert.deepStrictEqual((await first).background, OWN);
+			terminal.sendInput("\x1b]11;#111111\x07");
+			terminal.sendInput(SENTINEL);
+			assert.deepStrictEqual((await second).background, LATE);
 		} finally {
 			tui.stop();
 		}
