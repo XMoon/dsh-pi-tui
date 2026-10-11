@@ -106,6 +106,19 @@ test('a live scheme report only changes the theme while the preference is auto',
   assert.deepEqual(harness.applied, [], 'a manual theme ignores live reports')
 })
 
+test('a runtime switch from a manual theme to auto follows live reports', () => {
+  const harness = mountThemeRuntime()
+  harness.setTheme('dark')
+  harness.runtime.applyBootDisplay()
+  assert.deepEqual(harness.applied, ['dark'], 'the persisted manual theme wins at boot')
+  harness.applied.length = 0
+  // /settings or a reload switches to auto at runtime: it samples once and
+  // enables Mode 2031, so the live listener must already exist.
+  harness.setTheme('auto')
+  harness.report('light')
+  assert.deepEqual(harness.applied, ['light'], 'a runtime switch to auto must follow live reports')
+})
+
 test('a live scheme report cannot bypass the colour opt-out', () => {
   const previous = process.env.NO_COLOR
   process.env.NO_COLOR = '1'
