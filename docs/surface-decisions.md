@@ -1608,31 +1608,23 @@ into fullscreen without Focus, exactly like the ephemeral pending lane: the
 master is a cross-surface preference that also drives tool/system detail, so it
 is deliberately NOT reset on the transition. Disabling the toggleExpand key
 removes only the KEYBOARD affordance — in fullscreen the surface is never
-stranded: every expanded prompt still shows the tail `▴ Collapse · click`
-control and every folded one still shows the `click to expand` marker, so the
-mouse round-trip works with no key. In regular the expanded prompt simply
-renders full (no label), and Ctrl+O is the collapse owner.
+stranded: every expanded prompt still collapses by a plain click on its BODY
+and every folded one still shows the `click to expand` marker, so the mouse
+round-trip works with no key. In regular the expanded prompt simply renders
+full (no label), and Ctrl+O is the collapse owner.
 
 The collapsed state exposes the compact marker; in FULLSCREEN the EXPANDED
-state exposes a tail collapse control at the message tail — reusing the
-trailing separator row when one follows, or one dedicated presentation row for
-the final block. The direction is explicit in the shared disclosure metadata
-(`expand` vs `collapse`) and in the fullscreen hit identity, so a stale press
-can never transfer an expand target to a collapse target (or to a replacement
-pending row). The tail label is `▴ Collapse · click / <key>` without Focus and
-`▴ Collapse · click` inside a Focus (Ctrl+O owns the Thought-root bulk there, so
-the card never advertises a dead key). The tail control is deliberately
-FULLSCREEN-ONLY: regular draws into the terminal main screen, where no
-app-owned copy pipeline exists, so a visible label there would be picked up by
-the terminal's native selection — and regular has no mouse disclosure anyway, so
-its only job would be a keyboard hint not worth polluting scrollback copy. In
-fullscreen the tail row is presentation chrome: the fork's copy-source seam
-(X057) copies it as the blank separator it replaced, while paint, search,
-word/line selection and the mouse hit map keep reading the rendered line. The
-excluded rows are derived at the PAINT boundary (`copyBlankRows` on the
-last-painted snapshot), so the copy filter shares the same frame epoch as the
-scroll content the user actually saw — a rebuild that has not repainted yet can
-never leak the chrome or blank the wrong row.
+state is collapsed by a plain click anywhere on the message BODY. The direction
+is explicit in the shared disclosure metadata (`expand` vs `collapse`) and in
+the fullscreen hit identity, so a stale press can never transfer an expand
+target to a collapse target (or to a replacement pending row). A dedicated
+trailing `▴ Collapse` control row is deliberately NOT painted on any surface:
+the whole-bubble click is the single affordance, no presentation label can be
+picked up by the terminal's native selection on the regular main screen, and no
+keyboard hint needs to pollute scrollback copy. The fullscreen copy source is
+therefore the real transcript content: the retired fork copy-source seam (X057)
+and its blank-row bookkeeping are gone, so nothing has to be filtered out of a
+selection.
 
 Ctrl+O keeps its existing ownership: in regular/fullscreen-non-Focus it turns
 the recent-turn master off and clears the true long-user overrides when either

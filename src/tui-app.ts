@@ -2048,24 +2048,16 @@ type FullscreenRowEntry = {
   containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
-  /** The visible long-user disclosure hit ranges (entry-relative): the WHOLE
+  /** The visible long-user disclosure hit range (entry-relative): the WHOLE
    * user-text bubble in either state (expand while collapsed, collapse while
-   * expanded) plus the tail control row when expanded. Rows matching no hit
-   * stay inert so chrome like the pending status line never becomes an
-   * implicit button. */
+   * expanded). Rows matching no hit stay inert so chrome like the pending
+   * status line never becomes an implicit button. */
   userDisclosureHits?: ReadonlyArray<UserDisclosureHit>
   hasTrailingSpacer: boolean
 }
 
 /** The direction one visible long-user disclosure control performs. */
 type UserDisclosureAction = 'expand' | 'collapse'
-
-/** Which part of the long-user bubble one disclosure hit covers: the bubble
- * itself (collapsed or expanded — the whole local disclosure surface) or the
- * expanded tail control row. Part of the press/release identity so a stale
- * gesture can never transfer between parts that repainted onto the same
- * cell. */
-type UserDisclosureHitSlot = 'bubble' | 'tail'
 
 /** What one long-user disclosure control acts on: a durable transcript
  * message or an ephemeral pending-user row (identified by its stable key). */
@@ -2074,15 +2066,13 @@ type UserDisclosureTarget =
   | { readonly kind: 'pending'; readonly key: string }
 
 /** One bidirectional long-user disclosure hit: the entry-relative row range
- * [startRow, endRow), the direction, the slot it covers, and the target. The
- * action and slot are explicit so a stale press/release fence can never
- * confuse an expand target with a collapse target — or a bubble gesture with
- * the tail control — that repainted onto the same cell. */
+ * [startRow, endRow) of the user-text BODY, the direction, and the target.
+ * The action is explicit so a stale press/release fence can never confuse an
+ * expand target with a collapse target that repainted onto the same cell. */
 type UserDisclosureHit = {
   readonly startRow: number
   readonly endRow: number
   readonly action: UserDisclosureAction
-  readonly slot: UserDisclosureHitSlot
   readonly target: UserDisclosureTarget
 }
 
@@ -2102,8 +2092,8 @@ function userDisclosureComponentOf(
 
 /** The mount-shape signature of one block's long-user disclosure hits: the
  * mounted tree differs between the collapsed marker render and the expanded
- * body/tail render (the tail control child vs the spacer), so a change must
- * take the structural rebuild path instead of an in-place content refresh. */
+ * body render, so a change must take the structural rebuild path instead of
+ * an in-place content refresh. */
 function userDisclosureMountAction(
   hits: ReadonlyArray<UserDisclosureHit> | undefined,
 ): UserDisclosureAction | undefined {
@@ -3139,12 +3129,6 @@ export class TuiApp {
          * so a repaint that reinterprets the pressed row can never pass
          * the release fence. */
         rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
-        /** The PAINTED content rows whose copy source is blank presentation
-         * chrome (the expanded long-user tail control). Derived at the paint
-         * boundary from the same projection as `rows`, so the copy filter and
-         * the user's visible frame share one epoch — a rebuild that has not
-         * repainted yet must never reinterpret a painted row. */
-        copyBlankRows: ReadonlySet<number>
         /** The PAINTED viewer subject bar band (viewer UX plan §6.2): the bar's
          * own 0-based screen row and the navigation hit cells `[0, cells)`
          * exactly as drawn in THIS frame, plus the viewer subject/generation
@@ -3163,8 +3147,8 @@ export class TuiApp {
    * by the async image-settle seam (a thumbnail invalidates without either),
    * and by a terminal resize (detected at the commit). A frame that only
    * scrolls or repaints chrome keeps the flag clear and reuses the committed
-   * `rows` + `copyBlankRows` verbatim; chrome heights and scroll state are
-   * re-read fresh every commit. The click-time live re-checks
+   * `rows` verbatim; chrome heights and scroll state are re-read fresh every
+   * commit. The click-time live re-checks
    * (`handleFullscreenClick` / `completeQuestionTranscriptInspection`) still
    * call `refreshMessageRows` themselves, so the stale-frame release fence
    * keeps measuring live state exactly as before. */
@@ -6114,11 +6098,6 @@ export class TuiApp {
         // OSC 52 write; the alt screen never needs to understand
         // tmux/SSH/Wayland/X11.
         copySelection: this.copySelection,
-        // The expanded long-user tail control is presentation chrome: it must
-        // never reach the clipboard. Its visual row copies as the blank
-        // separator it replaced (fork seam X057), so a selection crossing the
-        // message tail stays byte-faithful to the old separator semantics.
-        selectionLineText: context => this.selectionLineText(context),
         // Fullscreen mouse capture also swallows native OSC 8 link
         // activation and (on Windows) the native right-click paste — the
         // host owns both: the opener validates http/https and the paste
@@ -9244,23 +9223,17 @@ export class TuiApp {
     return undefined
   }
 
-  /** The visible long-user disclosure hit ranges of a long-user bubble
-   * (durable or pending): the WHOLE bubble is the local disclosure surface in
-   * either state — a plain single click anywhere on a collapsed bubble (head
-   * text, marker, or tail text) expands that one message, and a plain single
-   * click anywhere on an expanded bubble collapses it (the Claude-style local
-   * block toggle), with the existing tail control row as the explicit
-   * fallback. The compact marker stays as the visual affordance naming the
-   * behavior; it is not the only hit target. The pending wrapper's status
-   * line (`steering…` / `sending…` / `waiting…`) sits outside every hit
-   * range. The tail is FULLSCREEN-only: regular draws into the terminal main
-   * screen, where an app-owned copy filter cannot exist, so a visible label
-   * there WOULD be copied by the terminal's native selection — Ctrl+O stays
-   * the regular collapse owner, and regular text stays terminal-native
-   * selection (regular never mounts mouse hit targets at all). In fullscreen
-   * the tail row is the trailing separator row when one follows, or one
-   * dedicated presentation row charged to the final block (the height rule
-   * mirrors it). */
+  /** The visible long-user disclosure hit range of a long-user bubble
+   * (durable or pending): the WHOLE bubble BODY is the local disclosure
+   * surface in either state — a plain single click anywhere on a collapsed
+   * bubble (head text, marker, or tail text) expands that one message, and a
+   * plain single click anywhere on an expanded bubble collapses it (the
+   * Claude-style local block toggle). The compact marker stays as the visual
+   * affordance naming the behavior; it is not the only hit target. The
+   * pending wrapper's status line (`steering…` / `sending…` / `waiting…`)
+   * sits outside the hit range, and in fullscreen the message BODY is the
+   * only hit target (the dedicated tail label was retired) while Ctrl+O
+   * remains the keyboard owner in every surface. */
   private userDisclosureHitsFor(
     component: Component,
     rendered: readonly string[],
@@ -9270,15 +9243,11 @@ export class TuiApp {
     const bubble = userDisclosureComponentOf(component)
     if (bubble === undefined) return undefined
     if (bubble.compactMarkerRow() !== undefined) {
-      return [{ startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'expand', target, slot: 'bubble' }]
+      return [{ startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'expand', target }]
     }
     if (this.fullscreen === undefined) return undefined
     if (!bubble.showsCollapseControl()) return undefined
-    const tailRow = rendered.length + (truncatedMarker ? 1 : 0)
-    return [
-      { startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'collapse', target, slot: 'bubble' },
-      { startRow: tailRow, endRow: tailRow + 1, action: 'collapse', target, slot: 'tail' },
-    ]
+    return [{ startRow: 0, endRow: bubble.disclosureBodyRowCount(), action: 'collapse', target }]
   }
 
   /**
@@ -9360,11 +9329,7 @@ export class TuiApp {
   }
 
   /** The normal physical height charged to one rendered block, preserving the
-   * existing zero-row and original-index Spacer rules exactly. An expanded
-   * long-user tail control REUSES the trailing separator row when one
-   * follows; for the final block it is one dedicated presentation row, so the
-   * height must charge it here (the row map and the mounted tree share this
-   * single rule). */
+   * existing zero-row and original-index Spacer rules exactly. */
   private normalTranscriptBlockHeight(
     entry: RenderedTranscriptBlock,
     index: number,
@@ -9372,8 +9337,7 @@ export class TuiApp {
   ): number {
     if (entry.rendered.length === 0 && !entry.truncatedMarker) return 0
     const trailing = index < total - 1 ? 1 : 0
-    const tailControl = entry.userDisclosureHits?.some(hit => hit.action === 'collapse' && hit.slot === 'tail') === true && trailing === 0 ? 1 : 0
-    return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + trailing + tailControl
+    return entry.rendered.length + (entry.truncatedMarker ? 1 : 0) + trailing
   }
 
   /** Drop presentation floors and their measured padding. */
@@ -9517,10 +9481,7 @@ export class TuiApp {
             const marker = truncateToWidth(color.textMuted('  (output may be truncated)'), width, '…')
             this.messagesView.addChild(new TranscriptGutterComponent(new Text(marker, 0, 0)))
           }
-          const hasTrailingSpacer = index < renderedBlocks.length - 1
-          if (entry.userDisclosureHits?.some(hit => hit.action === 'collapse' && hit.slot === 'tail') === true) {
-            this.messagesView.addChild(new TranscriptGutterComponent(this.userCollapseControlText(width)))
-          } else if (hasTrailingSpacer) {
+          if (index < renderedBlocks.length - 1) {
             this.messagesView.addChild(new Spacer())
           }
         }
@@ -10333,8 +10294,8 @@ export class TuiApp {
    * only when `fullscreenRowsDirty` says transcript geometry may have
    * changed (a row-map writer ran, an async image settled, the terminal
    * resized) or no snapshot exists yet; a pure repaint — a scroll, an
-   * editor keystroke, a chrome tick — reuses the committed rows and
-   * copyBlankRows verbatim. Async image staleness is owned by the settle
+   * editor keystroke, a chrome tick — reuses the committed rows verbatim.
+   * Async image staleness is owned by the settle
    * seam (`settleThumbnailRender`), NOT by this boundary. The
    * click-time live re-checks keep their own `refreshMessageRows` calls,
    * so the press/release fence still measures live state. Chrome heights
@@ -10360,13 +10321,12 @@ export class TuiApp {
     // (remeasure + per-row hit identities) is only recomputed when transcript
     // geometry may actually have changed. A pure repaint — a scroll, an
     // editor keystroke, a footer/activity tick — reuses the committed `rows`
-    // and `copyBlankRows` verbatim; chrome heights and scroll state below are
-    // still re-read fresh from the painted frame. The click-time re-checks
+    // verbatim; chrome heights and scroll state below are still re-read fresh
+    // from the painted frame. The click-time re-checks
     // keep their own `refreshMessageRows` calls, so press/release validation
     // measures live state exactly as before.
     const rowsDirty = this.fullscreenRowsDirty
     let rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
-    let copyBlankRows: ReadonlySet<number>
     const refreshStart = this.scrollProfiler.enabled ? performance.now() : 0
     let refreshEnd = refreshStart
     let hitsEnd = refreshStart
@@ -10374,21 +10334,6 @@ export class TuiApp {
       this.refreshMessageRows()
       this.fullscreenRowsDirty = false
       refreshEnd = this.scrollProfiler.enabled ? performance.now() : 0
-      const welcomeHeight = this.welcomeCard.lastRenderedHeight
-      // The painted rows whose copy source is presentation chrome, derived from
-      // the SAME projection/height base as `rows` below (the last-painted
-      // frame), so the copy filter can never reinterpret a row against a newer,
-      // not-yet-painted rebuild.
-      const freshCopyBlankRows = new Set<number>()
-      let rowTop = welcomeHeight
-      for (const entry of this.messageRows) {
-        // Only the TAIL control row is copy chrome (X057): the expanded body
-        // rows are real user text and must keep copying verbatim.
-        for (const hit of entry.userDisclosureHits ?? []) {
-          if (hit.action === 'collapse' && hit.slot === 'tail') freshCopyBlankRows.add(rowTop + hit.startRow)
-        }
-        rowTop += entry.height
-      }
       const hitsStart = this.scrollProfiler.enabled ? performance.now() : 0
       rows = this.messageRows.map((entry, index) => ({
         ownerId: this.fullscreenRowOwnerId(entry, index),
@@ -10396,10 +10341,8 @@ export class TuiApp {
         hits: this.fullscreenRowHits(entry, index),
       }))
       hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
-      copyBlankRows = freshCopyBlankRows
     } else {
       rows = previousSnapshot.rows
-      copyBlankRows = previousSnapshot.copyBlankRows
     }
     this.fullscreenPaintSnapshot = {
       columns: this.terminal.columns,
@@ -10420,7 +10363,6 @@ export class TuiApp {
       scrollTop: scroll?.scrollTop ?? 0,
       viewportHeight: scroll?.viewportHeight ?? 0,
       rows,
-      copyBlankRows,
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
@@ -10504,13 +10446,11 @@ export class TuiApp {
     inMessage: number,
     nextVisible: FullscreenRowEntry | undefined,
   ): string {
-    // The long-user disclosure targets win FIRST: the tail control sits on
-    // the trailing separator row (or one dedicated final row), which the
-    // generic blank-row escape hatch would otherwise consume, and the bubble
-    // is the local disclosure surface that must never fall through to a
-    // Work/Thought container owner. Only rows inside a hit range act; every
-    // other row of the entry (the pending status line) is INERT so chrome
-    // never becomes an implicit button.
+    // The long-user disclosure targets win FIRST: the bubble BODY is the local
+    // disclosure surface and must never fall through to a Work/Thought
+    // container owner. Only rows inside a hit range act; every other row of the
+    // entry (the pending status line) is INERT so chrome never becomes an
+    // implicit button.
     if (entry.userDisclosureHits !== undefined) {
       const hit = this.userDisclosureHitAt(entry, inMessage)
       return hit === undefined ? 'inert' : this.userDisclosureHitIdentity(hit)
@@ -10599,14 +10539,14 @@ export class TuiApp {
 
   /** The press/release semantic identity of one long-user disclosure hit:
    * the durable message token or the stable pending key, ALWAYS qualified by
-   * the direction AND the slot. A stale press must never transfer an expand
-   * target to a collapse target — or a bubble gesture to the tail control (or
-   * to a different pending row) — that repainted onto the same cell. */
+   * the direction. A stale press must never transfer an expand target to a
+   * collapse target (or to a different pending row) that repainted onto the
+   * same cell. */
   private userDisclosureHitIdentity(hit: UserDisclosureHit): string {
     if (hit.target.kind === 'durable') {
-      return `user:${hit.action}:${hit.slot}:${this.identityToken(hit.target.message)}`
+      return `user:${hit.action}:${this.identityToken(hit.target.message)}`
     }
-    return `pending-user:${hit.action}:${hit.slot}:${hit.target.key}`
+    return `pending-user:${hit.action}:${hit.target.key}`
   }
 
   /** The semantic identity of one Workflow card row hit (the durable
@@ -11250,12 +11190,10 @@ export class TuiApp {
     }
     this.fullscreenCellGesture = undefined
     {
-      // The long-user disclosure targets are resolved FIRST (the tail control
-      // shares the trailing separator row with the generic blank-row escape
-      // hatch, and the bubble must not fall through to a container owner).
-      // Only rows inside a hit range act — the bubble, or the tail; every
-      // other row of the entry has an inert identity and never reaches this
-      // branch.
+      // The long-user disclosure targets are resolved FIRST (the bubble must
+      // not fall through to a container owner). Only rows inside a hit range
+      // act — the bubble BODY; every other row of the entry has an inert
+      // identity and never reaches this branch.
       if (entry.userDisclosureHits !== undefined) {
         const hit = this.userDisclosureHitAt(entry, inMessage)
         if (hit !== undefined) this.applyUserDisclosureHit(hit)
@@ -11440,7 +11378,7 @@ export class TuiApp {
   }
 
   /** Apply one bidirectional long-user disclosure hit (a collapsed bubble row
-   * → expand; an expanded bubble row or the tail control → collapse). The
+   * → expand; an expanded bubble BODY row → collapse). The
    * durable override reuses the per-message disclosure state; the pending
    * override is presentation-only ephemeral state keyed by the stable pending
    * identity. The canonical `message.text` is never touched. */
@@ -17585,31 +17523,6 @@ export class TuiApp {
     if (!this.regularExpandKeyAvailable()) return false
     if (this.fullscreen === undefined) return true
     return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
-  }
-
-  /** The expanded long-user tail control: presentation chrome naming the
-   * collapse affordance of the CURRENT surface. Right-aligned within the
-   * transcript content width; a narrow width truncates instead of wrapping. */
-  private userCollapseControlText(width: number): Text {
-    const label = `▴ Collapse · ${this.expandHint(this.userFoldHint())}`
-    const clipped = visibleWidth(label) <= width ? label : truncateToWidth(label, width, '…')
-    const pad = ' '.repeat(Math.max(0, width - visibleWidth(clipped)))
-    return new Text(color.textDim(pad + clipped), 0, 0)
-  }
-
-  /** The copy-source filter of one selected row: the expanded long-user tail
-   * control is presentation chrome that must never reach the clipboard, and
-   * its visual row copies as the blank separator it replaced (fork seam
-   * X057). Paint, search, word/line selection and the mouse hit map are
-   * untouched — only the copy source is filtered. The decision comes from the
-   * LAST-PAINTED snapshot (the same epoch that produced the ScrollView's
-   * `scrollContentLines`), never the live `messageRows`: a rebuild that has
-   * not repainted yet must not reinterpret a painted row — otherwise the
-   * painted tail chrome would leak, or a painted real row the newer
-   * projection calls chrome would be wrongly blanked. */
-  private selectionLineText(context: { row: number; line: string; scrollView?: ScrollView }): string | undefined {
-    if (context.scrollView === undefined || context.scrollView !== this.fullscreenScroll) return undefined
-    return this.fullscreenPaintSnapshot?.copyBlankRows.has(context.row) === true ? '' : undefined
   }
 
   /** The effective disclosure state of one ephemeral pending-user row: the
