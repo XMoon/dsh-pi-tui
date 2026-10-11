@@ -6489,6 +6489,13 @@ export class TuiApp {
     // current map; an explicit map replacement stays on the structural path
     // because the activity ownership epoch cannot be proven in place.
     if (activitiesChanged || windowChanged) this.clearFocusLiveHeightState()
+    // Upstream #9311, absorbed in the v1.1.0 vendor as
+    // `TuiAltScreen.resetTextSelection()`: the vendor's selection coordinates
+    // point into the transcript being replaced, so a window/corpus replacement
+    // must drop the selection and its multi-click history. Only a replacement
+    // resets it — theme/expand re-renders, disclosure toggles and streaming
+    // appends keep the user's selection.
+    if (windowChanged) this.fullscreen?.resetTextSelection()
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities
     this.streamingToolPreviews = [...(streamingToolPreviews ?? [])]

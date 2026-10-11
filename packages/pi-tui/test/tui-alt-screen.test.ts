@@ -3974,3 +3974,43 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.deepStrictEqual(actions, ["row1"], "a fresh press at the new row must activate the right row");
 		tui.stop();
 	});
+
+describe("resetTextSelection (upstream #9311 absorption)", () => {
+	const lastClickOf = (tui: TuiAltScreen): unknown => (tui as unknown as { lastClick?: unknown }).lastClick;
+
+	it("drops the active selection", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag-select two rows.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "the drag must leave an active selection");
+
+		tui.resetTextSelection();
+		assert.strictEqual(tui.hasActiveSelection(), false, "resetTextSelection must drop the selection");
+		tui.stop();
+	});
+
+	it("drops the multi-click history a real click recorded", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		await terminal.waitForRender();
+		assert.notStrictEqual(lastClickOf(tui), undefined, "a real click records the multi-click history");
+
+		tui.resetTextSelection();
+		assert.strictEqual(lastClickOf(tui), undefined, "resetTextSelection must drop the multi-click history");
+		tui.stop();
+	});
+});
