@@ -231,7 +231,7 @@
     "@deepseek-ai/dsh-workspace": "0.2.0-rc.2",
     "@deepseek-ai/schemastery": "~3.18.4",
     "@types/node": "^22.0.0",
-    "@xmoon76/pi-tui": "workspace:^0.84.4",
+    "@xmoon76/pi-tui": "workspace:^1.1.0",
     "@xterm/headless": "5.5.0",
     "husky": "^9.1.7",
     "immer": "^10.1.1",

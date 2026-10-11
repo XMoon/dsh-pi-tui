@@ -3,17 +3,17 @@
  "baseline": {
   "repository": "earendil-works/pi",
   "package": "packages/tui",
-  "tag": "v0.85.1",
-  "commit": "d981de1229ef899957bbe968bc8dcda02a21f477"
+  "tag": "v1.1.0",
+  "commit": "abe508e1b89912adde45528136c3221eb69acdd7"
  },
  "verification": {
-  "auditedAt": "2026-09-09",
-  "branch": "chore/revendor-pi-tui-v0.85.1",
-  "auditedSourceCommit": "d9cfef25b9a9b98ce6b7818bcd14601538d1f1de",
+  "auditedAt": "2026-10-11",
+  "branch": "chore/pi-tui-v1.1.0-revendor",
+  "auditedSourceCommit": "c21ba67c4791a26239739f5dfea4238c1bf4afd2",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
-    "commit": "d981de1229ef899957bbe968bc8dcda02a21f477"
+    "commit": "abe508e1b89912adde45528136c3221eb69acdd7"
    },
    "kimi": {
     "repository": "MoonshotAI/kimi-code",
@@ -21,10 +21,15 @@
    }
   },
   "method": [
-   "PR3 re-vendor audit: replaced the Earendil packages/tui baseline with exact v0.85.1 (d981de1), re-audited every source-active divergence against the new baseline, re-applied only retained DSH seams, adopted the upstream renderer, mouse, search, Loader and terminal changes, and validated the current Host question/transcript/focus/input surfaces against the immutable source snapshot recorded in verification.auditedSourceCommit."
+   "v1.1.0 diff-first re-vendor: froze the fork base commit, produced the U0->local, U0->U1 and local-test diffs, built a hunk-level conflict matrix for every local hunk, constructed the candidate from the Earendil v1.1.0 tree and transplanted the local hunks with a per-file three-way merge, then reconciled each conflict against the upstream implementation and its callers.",
+   "Every ACTIVE record was re-verified as a contract at v1.1.0: its local hunk is still present in the candidate source, its upstream comparison still holds against the pinned v1.1.0 tree, and its guarding test still covers the behavior.",
+   "Historical records (ABSORBED_UPSTREAM, MOVED_TO_HOST, SUPERSEDED, REMOVED_UNUSED) were re-pinned to the new baseline for gate consistency but were not re-applied; none was resurrected.",
+   "Host-visible API changes were migrated with the minimum edit: TuiApp queries the fork's queryTerminalColors and derives the initial scheme from the reported background (upstream removed the DSR 996 probe), and the Host test/bench terminal fakes implement the new Terminal.setProgramStatus interface without ever driving it.",
+   "Validated against the immutable source snapshot recorded in verification.auditedSourceCommit."
   ],
   "notes": [
-   "Upstream v0.85.1 (c505f4c19 'fix(tui): remove coding-agent config reads from pi-tui') intentionally removed the PI_HARDWARE_CURSOR / PI_CLEAR_ON_SHRINK / PI_CODING_AGENT_DIR environment knobs that existed in v0.84.4; the re-vendor follows upstream (hardcoded defaults, constructor parameters remain the contract). Guarded by the showHardwareCursor constructor-parameter test in tui-alt-screen.test.ts."
+   "The v0.85.1 baseline (c505f4c19 'fix(tui): remove coding-agent config reads from pi-tui') had already removed the PI_HARDWARE_CURSOR / PI_CLEAR_ON_SHRINK / PI_CODING_AGENT_DIR environment knobs that existed in v0.84.4; the fork follows upstream (hardcoded defaults, constructor parameters remain the contract). Guarded by the showHardwareCursor constructor-parameter test in tui-alt-screen.test.ts.",
+   "v1.1.0 removed queryTerminalBackgroundColor/queryTerminalColorScheme in favour of queryTerminalColors (OSC 10/11/4 + DA1), moved the viewport shortcuts onto Ctrl+Home/End, and added the required Terminal.setProgramStatus plus the native/ prebuild surface. The fork keeps its host-visible contracts: X008 serializes the new color queries, X037 keeps the editor Ctrl+Home/End bindings for the host Home/End preset, the host keeps its single OSC 7501 writer, and native/ prebuilds stay unvendored (X025)."
   ]
  },
  "categoryDefinitions": {
@@ -151,7 +156,7 @@
    "records": [
     "X011"
    ],
-   "reason": "Earendil v0.85.1 clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior."
+   "reason": "The pinned v1.1.0 Earendil input.ts clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior."
   },
   {
    "decision": "NOT_MOVABLE",
@@ -172,7 +177,7 @@
    "records": [
     "X050"
    ],
-   "reason": "Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against upstream v0.85.1 and main); they cannot be reproduced through the public Editor surface from a host wrapper."
+   "reason": "Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against the pinned v1.1.0 baseline); they cannot be reproduced through the public Editor surface from a host wrapper."
   },
   {
    "decision": "NOT_MOVABLE",
@@ -307,8 +312,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -409,8 +414,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -494,8 +499,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -587,8 +592,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -605,7 +610,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -677,8 +682,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts",
@@ -695,7 +700,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -770,8 +775,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -788,7 +793,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -858,8 +863,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/word-navigation.ts"
@@ -875,7 +880,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -936,7 +941,7 @@
       "src/tui/pickers/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)",
       "src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)"
      ],
-     "notes": "Host final teardown relies on exactly-once release. Post-v0.85.1 audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts)."
+     "notes": "Host final teardown relies on exactly-once release. Post-revendor audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts)."
     },
     "publicExtension": {
      "audited": true,
@@ -972,8 +977,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -996,7 +1001,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1005,11 +1010,11 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted. Re-audited after the v0.85.1 mouse-parity pass: the Model/Effort async submenu ownership chain is closed by external disposal."
+    "notes": "Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted. Re-audited after the v0.85.1 mouse-parity pass: the Model/Effort async submenu ownership chain is closed by external disposal. Re-verified for the v1.1.0 re-vendor (abe508e1): the Box/Container/SettingsList disposal seams are untouched upstream and the transplant kept every dispose exactly-once guard."
    }
   },
   "X008": {
-   "title": "Serialized OSC 11 queries with late-reply tombstone",
+   "title": "Serialized terminal color queries with late-reply tombstone",
    "status": "ACTIVE",
    "category": [
     "BUGFIX_MISSING_UPSTREAM"
@@ -1018,11 +1023,11 @@
    "files": [
     "src/tui.ts"
    ],
-   "why": "OSC 11 replies carry no request id, so a reply that arrives after its query timed out cannot be paired by content. The fork serializes queries: at most one query is ever in flight, and a timed-out query stays as the active tombstone until a late reply consumes it — the next waiting query is sent only after consumption, so a late reply can never be misattributed to a different query.",
+   "why": "OSC color replies carry no request id, so a reply that arrives after its query timed out cannot be paired by content. Upstream v1.1.0 writes the full OSC 10/11/4 + DA1 burst on every queryTerminalColors call, so a late reply to a timed-out query can be attributed to a later query. The fork writes at most one query at a time: a timed-out query stays the tombstone on the wire until its DA1 sentinel arrives, and only then is the next waiting query written.",
    "changedSurface": [
-    "OSC 11 queries are serialized through a single active slot plus a waiting queue",
-    "a timed-out in-flight query remains the active late-reply tombstone until consumed",
-    "late OSC 11 replies are swallowed by the tombstone (or the no-reply-expected path) before generic counter handling"
+    "queryTerminalColors keeps the upstream mechanism (OSC 10/11/4 burst, DA1 sentinel, FIFO queue, onLateReply) but writes the burst only when the wire is free (pumpTerminalColorQueries / terminalColorQueryWritten)",
+    "a timed-out query stays the outstanding tombstone; the next waiting query is written only after that query's DA1 sentinel",
+    "a late reply is delivered to its own query's deliver/onLateReply callback and can never be attributed to a later query"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -1063,32 +1068,34 @@
     }
    },
    "tests": [
-    "packages/pi-tui/test/osc11-query.test.ts: timed-out query queue/counter alignment",
+    "packages/pi-tui/test/osc11-query.test.ts: at most one color query is written while an earlier query is outstanding, and the next query is written only after the DA1 sentinel",
+    "packages/pi-tui/test/osc11-query.test.ts: a late reply is swallowed (never forwarded as input) and is delivered to its own query's onLateReply, never to a later concurrent query",
+    "packages/pi-tui/test/terminal-colors.test.ts: the upstream queryTerminalColors contract (single burst, DA1 completion, incomplete palette dropped, late replies after a timeout)",
     "packages/pi-tui/test/terminal-colors.test.ts: active-screen query routing",
-    "packages/pi-tui/test/osc11-query.test.ts: serialized queries — a late reply to a timed-out query is swallowed by its tombstone and never resolves a concurrent or later query (A-timeout/B-pending and A-timeout-then-B-later regressions)"
+    "test/rendering.test.ts: trackTerminalTheme queries the terminal colors once, derives the scheme from the reported background, and re-queries after disable"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream keeps timed-out queries in the pending queue and uses a different counter check; it is not equivalent under a late reply."
+    "semanticDelta": "Upstream v1.1.0 (abe508e1) writes a full color-query burst per call and attributes replies FIFO to the oldest pending query, so a late reply to a timed-out query can be attributed to a later one. The fork adds the serialized write while keeping the upstream API, queue and DA1 sentinel."
    },
    "retirement": {
     "conditions": [
-     "Retire only after upstream proves the same timeout, late-reply, retry, and active-screen ordering semantics with protocol tests."
+     "Retire only after upstream proves the same timeout, late-reply, per-query attribution, retry, and active-screen ordering semantics with protocol tests."
     ],
     "replacementMapping": [],
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1097,7 +1104,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used."
+    "notes": "Re-audited at v1.1.0 (abe508e1): the mechanism moved from the local serialized OSC 11 API to a serialization guard on the upstream queryTerminalColors mechanism, and the Host migrated to queryTerminalColors. The obsolete queryTerminalBackgroundColor/queryTerminalColorScheme seam is removed (upstream removed it); no removed public API was resurrected. Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used."
    }
   },
   "X009": {
@@ -1158,8 +1165,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts"
@@ -1175,7 +1182,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1244,8 +1251,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/stdin-buffer.ts"
@@ -1261,7 +1268,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1333,14 +1340,14 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "The pinned v0.85.1 baseline (d981de1) already clips the prompt at tiny widths (availableWidth <= 0 returns truncateToWidth(this.prompt, width, \"\")); the local source matches the upstream baseline exactly for this behavior."
+    "semanticDelta": "The pinned v1.1.0 baseline (abe508e1) already clips the prompt at tiny widths (availableWidth <= 0 returns truncateToWidth(this.prompt, width, \"\")); the local source matches the upstream baseline exactly for this behavior."
    },
    "retirement": {
     "conditions": [
@@ -1349,7 +1356,7 @@
     "replacementMapping": [],
     "evidence": [
      "git blob comparison at the pinned commit shows no local source divergence for the prompt-clipping path.",
-     "The pinned v0.85.1 upstream input.ts returns truncateToWidth(this.prompt, width, \"\") when availableWidth <= 0.",
+     "The pinned v1.1.0 upstream input.ts returns truncateToWidth(this.prompt, width, \"\") when availableWidth <= 0.",
      "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed."
     ]
    },
@@ -1363,7 +1370,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Absorbed upstream: the pinned v0.85.1 baseline (d981de1) already clips Input prompts at extremely narrow widths, so the fork keeps the pinned upstream behavior with no local source divergence; direct width-0/1 regressions guard the absorbed behavior (equivalence YES)."
+    "notes": "Absorbed upstream: the pinned v1.1.0 baseline (abe508e1) already clips Input prompts at extremely narrow widths, so the fork keeps the pinned upstream behavior with no local source divergence; direct width-0/1 regressions guard the absorbed behavior (equivalence YES; re-confirmed at v1.1.0)."
    }
   },
   "X012": {
@@ -1423,8 +1430,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/fuzzy.ts",
@@ -1509,8 +1516,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/loader.ts"
@@ -1604,8 +1611,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/layout.ts"
@@ -1622,7 +1629,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1689,8 +1696,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/keys.ts"
@@ -1787,8 +1794,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/terminal.ts"
@@ -1805,7 +1812,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1876,8 +1883,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts",
@@ -2011,8 +2018,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2028,7 +2035,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-29",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2102,8 +2109,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/text.ts",
@@ -2204,8 +2211,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2221,7 +2228,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2294,8 +2301,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/utils.ts",
@@ -2313,7 +2320,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2387,8 +2394,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2404,7 +2411,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2486,8 +2493,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2504,7 +2511,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2579,8 +2586,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2597,7 +2604,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2623,7 +2630,8 @@
    "why": "The vendored package has an XMoon package shell and must build from its own CWD without the root tsdown config shadowing it. Native self-reference must follow the package rename.",
    "changedSurface": [
     "package-local tsdown entry/output/declaration configuration",
-    "TUI_PACKAGE_NAME native-module self-reference uses @xmoon76/pi-tui"
+    "TUI_PACKAGE_NAME native-module self-reference uses @xmoon76/pi-tui",
+    "native/ prebuilds stay unvendored: the upstream-prebuilt assertions in test/native-platform.test.ts skip when the prebuild is absent, and a degradation test asserts getNativeClipboard() fails closed instead of loading another platform's binary"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -2665,21 +2673,22 @@
    "tests": [
     "packages/pi-tui/test/native-module-path.test.ts: renamed package lookup and graceful fallback",
     "pnpm --dir packages/pi-tui build and root bundle build",
-    "scripts/tarball-smoke.mjs package/export checks"
+    "scripts/tarball-smoke.mjs package/export checks",
+    "packages/pi-tui/test/native-platform.test.ts: no-prebuild ELF/X11 packaging tests skip; the Linux clipboard degrades to undefined"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/native-module-path.ts",
      "packages/tui/package.json"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build."
+    "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build. v1.1.0 also ships native/ prebuilds (including the new linux X11 clipboard helper); the fork keeps them unvendored and adapts the upstream prebuild assertions to the degradation contract."
    },
    "retirement": {
     "conditions": [
@@ -2690,7 +2699,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2699,7 +2708,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Non-src packaging divergence was explicitly included in the structured ledger; the source diff gate will continue to ignore it while the ledger gate validates it."
+    "notes": "Non-src packaging divergence was explicitly included in the structured ledger; the source diff gate will continue to ignore it while the ledger gate validates it. Re-verified at v1.1.0 (abe508e1): the package shell and the renamed self-reference are unchanged, and the new native platform module fails closed without prebuilds."
    }
   },
   "X026": {
@@ -2763,8 +2772,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2862,8 +2871,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/autocomplete.ts"
@@ -2880,7 +2889,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2935,7 +2944,7 @@
      "items": [
       "src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, calls clearSearch for jumpLatest and prompt navigation, and wires scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator to the semantic TranscriptWindowController state",
       "src/search-presentation.ts consumes the root matcher export to decorate the host full-history search occurrences (weak/current styles, image lines untouched, visible width and stripped text preserved)",
-       "src/tui-app.ts attaches the exported AltScreenSearchIndex to each live MessageComponentEntry so unchanged rendered lines reuse the native corpus/results cache"
+      "src/tui-app.ts attaches the exported AltScreenSearchIndex to each live MessageComponentEntry so unchanged rendered lines reuse the native corpus/results cache"
      ],
      "notes": "Host wires the callbacks and clearSearch; ScrollView.canScroll is consumed internally by TuiAltScreen as fallback state, not called by the host."
     },
@@ -2956,7 +2965,7 @@
       "jump-latest resets built-in search",
       "the jump-to-end label is host-forced for a virtual-history window and a host-consumed click skips the local scrollToBottom fallback",
       "the exported matcher computes the same occurrence segments as the native fullscreen search (query normalization, ANSI stripping, grapheme-safe columns)",
-       "AltScreenSearchIndex reuses full matches only when rendered lines and the normalized query are unchanged, and rebuilds its corpus when rendered lines change"
+      "AltScreenSearchIndex reuses full matches only when rendered lines and the normalized query are unchanged, and rebuilds its corpus when rendered lines change"
      ],
      "notes": "Restoring upstream can silently consume navigation keys or bypass virtual transcript ownership."
     }
@@ -2966,15 +2975,15 @@
     "packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage",
     "test/home-end-keys.test.ts: bundle Home/End ownership and the fullscreen jump-to-latest indicator",
     "test/transcript-search-presentation.test.ts: host consumes the root matcher (ANSI/CJK/wrap, current vs weak style, width/text preserved)",
-     "packages/pi-tui/test/tui-alt-screen.test.ts: root export constructs AltScreenSearchIndex",
-     "test/transcript-search-performance.test.ts: Host per-message index lookup/result-cache reuse and rendered-line invalidation"
+    "packages/pi-tui/test/tui-alt-screen.test.ts: root export constructs AltScreenSearchIndex",
+    "test/transcript-search-performance.test.ts: Host per-message index lookup/result-cache reuse and rendered-line invalidation"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts",
@@ -2992,7 +3001,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-19",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3068,8 +3077,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3085,7 +3094,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3158,8 +3167,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/index.ts",
@@ -3177,7 +3186,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3251,8 +3260,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/markdown.ts"
@@ -3269,7 +3278,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3342,8 +3351,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -3359,7 +3368,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3433,8 +3442,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts"
@@ -3451,7 +3460,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3524,8 +3533,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3541,7 +3550,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3569,7 +3578,7 @@
    "changedSurface": [
     "previousRawLines and previousLineImageIds caches",
     "value-equality processing fast path",
-    "asciiVisibleWidth and exported SEGMENT_RESET support",
+    "asciiVisibleWidthEarlyExit (renamed from asciiVisibleWidth after upstream v1.1.0 introduced its own private asciiVisibleWidth fast path) and exported SEGMENT_RESET support",
     "cache invalidation on width/state restore"
    ],
    "dependencies": {
@@ -3624,8 +3633,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts",
@@ -3633,7 +3642,7 @@
      "packages/tui/src/tui.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Both the pinned baseline and the audited upstream reference reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract."
+    "semanticDelta": "Both the pinned baseline and the audited upstream reference reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract. Upstream v1.1.0 adds its own private asciiVisibleWidth fast path inside visibleWidth plus a flattenLines call; the fork's earlier exported early-exit helper was renamed asciiVisibleWidthEarlyExit so both coexist, and neither upstream addition replaces the processed-line value reuse."
    },
    "retirement": {
     "conditions": [
@@ -3644,7 +3653,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3653,7 +3662,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "KEEP PERF CONTRACT. The audit corrected the old reference-identity wording: the implementation compares primitive string values, so fresh equal strings also reuse processed output. Performance behavior still requires benchmark evidence rather than host imports alone."
+    "notes": "KEEP PERF CONTRACT. The audit corrected the old reference-identity wording: the implementation compares primitive string values, so fresh equal strings also reuse processed output. Performance behavior still requires benchmark evidence rather than host imports alone. Re-verified at v1.1.0 (abe508e1): the upstream fast path is complementary (visibleWidth measures the whole line; the fork's helper early-exits at the viewport width), so the divergence stays ACTIVE."
    }
   },
   "X036": {
@@ -3718,8 +3727,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -3735,7 +3744,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3763,7 +3772,8 @@
    "changedSurface": [
     "process-global tui.editor.submit binding definition",
     "Editor submit and backslash-enter checks use the editor binding",
-    "X038 physical Enter detection reads the same effective binding"
+    "X038 physical Enter detection reads the same effective binding",
+    "the editor keeps its Ctrl+Home/End bindings (tui.editor.cursorLineStart/cursorLineEnd) that upstream v1.1.0 dropped while moving the viewport shortcuts onto tui.altScreen.top/bottom, so the host's Home/End 'viewport' preset still reaches the editor"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -3810,21 +3820,23 @@
    "tests": [
     "packages/pi-tui/test/editor.test.ts: editor submit binding split",
     "test/keybinding-integration.test.ts: anti-pollution and default restore",
-    "packages/pi-tui/test/keybindings.test.ts: binding registry"
+    "packages/pi-tui/test/keybindings.test.ts: binding registry",
+    "packages/pi-tui/test/keybindings.test.ts: tui.editor.cursorLineStart keeps ctrl+home while tui.altScreen.top moves to ctrl+home (the host Home/End preset contract)",
+    "test/home-end-keys.test.ts: both Home/End presets end to end"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/keybindings.ts",
      "packages/tui/src/components/editor.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream has only tui.input.submit; it cannot express the editor-only binding or its shared physical-submit semantics."
+    "semanticDelta": "Upstream v1.1.0 has only tui.input.submit (no editor-only binding) and moved the viewport shortcuts onto Ctrl+Home/End by dropping tui.editor.cursorLineStart/End's Ctrl+Home/End keys; the fork keeps both the editor-only submit binding and the editor Ctrl+Home/End bindings the host's Home/End 'viewport' preset depends on."
    },
    "retirement": {
     "conditions": [
@@ -3835,7 +3847,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3844,7 +3856,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "KEEP HARD. Cross-audited with X038; both the binding definition and editor call sites are required."
+    "notes": "KEEP HARD. Cross-audited with X038; both the binding definition and editor call sites are required. Re-verified at v1.1.0 (abe508e1): the editor submit split is unchanged upstream, and the upstream Home/End rebinding was reconciled so the host's two presets keep working."
    }
   },
   "X038": {
@@ -3913,8 +3925,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3931,7 +3943,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4003,8 +4015,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/utils.ts"
@@ -4021,7 +4033,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4099,8 +4111,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts",
@@ -4117,7 +4129,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4198,8 +4210,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts",
@@ -4314,8 +4326,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts",
@@ -4340,7 +4352,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4349,7 +4361,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward focus to their active SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child; CURSOR_MARKER regressions cover ThemeSubmenu and ModelPicker, and no IME/cursor path is lost at any wrapper boundary."
+    "notes": "The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass and re-verified for the v1.1.0 re-vendor (abe508e1, where upstream's #10067 mouse-forwarding fix was adopted in dispatchMouseEvent while the fork's focus-forwarding seam stayed): the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward focus to their active SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child; CURSOR_MARKER regressions cover ThemeSubmenu and ModelPicker, and no IME/cursor path is lost at any wrapper boundary."
    }
   },
   "X043": {
@@ -4419,8 +4431,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -4437,7 +4449,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4517,8 +4529,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -4535,7 +4547,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-06",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4612,8 +4624,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -4630,7 +4642,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4705,8 +4717,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -4723,7 +4735,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4800,8 +4812,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/keys.ts",
@@ -4820,7 +4832,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4892,14 +4904,14 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream v0.85.1 (and current upstream main) hardcode event.x - 2 in Input.handleMouse, so custom prompts misplace the cursor; the fork offsets by visibleWidth(this.prompt)."
+    "semanticDelta": "The pinned v1.1.0 baseline (abe508e1) hardcodes event.x - 2 in Input.handleMouse, so custom prompts misplace the cursor; the fork offsets by visibleWidth(this.prompt)."
    },
    "retirement": {
     "conditions": [
@@ -4909,7 +4921,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-08",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4918,7 +4930,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream v0.85.1 and current upstream main both use event.x - 2; the fork fix is a one-line arithmetic change with click-position regressions."
+    "notes": "Confirmed the pinned v1.1.0 baseline still uses event.x - 2; the fork fix is a one-line arithmetic change with click-position regressions."
    }
   },
   "X049": {
@@ -4981,14 +4993,14 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/alt-screen-search.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both lack component-level mouse forwarding for the transcript-search query Input; the fork forwards press events to the private Input with last-painted geometry and wrapper target/focus ownership."
+    "semanticDelta": "The pinned v1.1.0 baseline (abe508e1) lacks component-level mouse forwarding for the transcript-search query Input; the fork forwards press events to the private Input with last-painted geometry and wrapper target/focus ownership."
    },
    "retirement": {
     "conditions": [
@@ -4998,7 +5010,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5007,7 +5019,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream v0.85.1 and current upstream main both lack the query-Input mouse forwarding; the fork fix is component-level forwarding with last-painted geometry and wrapper target/focus ownership."
+    "notes": "Confirmed the pinned v1.1.0 baseline lacks the query-Input mouse forwarding; the fork fix is component-level forwarding with last-painted geometry and wrapper target/focus ownership."
    }
   },
   "X050": {
@@ -5077,14 +5089,14 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both force targetIndex = lastGraphemeIndex for clicks at/after the end of a non-last wrapped segment, and both apply slash-prefix autocomplete completions on click without submitting; the fork keeps the natural end-of-segment position and submits slash completions like the keyboard path."
+    "semanticDelta": "The pinned v1.1.0 baseline (abe508e1) forces targetIndex = lastGraphemeIndex for clicks at/after the end of a non-last wrapped segment, and applies slash-prefix autocomplete completions on click without submitting; the fork keeps the natural end-of-segment position and submits slash completions like the keyboard path."
    },
    "retirement": {
     "conditions": [
@@ -5094,7 +5106,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5103,7 +5115,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream v0.85.1 and current upstream main both keep the decrement and the non-submitting slash onSelect; the fork fixes both editor mouse paths."
+    "notes": "Confirmed the pinned v1.1.0 baseline keeps the decrement and the non-submitting slash onSelect; the fork fixes both editor mouse paths."
    }
   },
   "X051": {
@@ -5179,8 +5191,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -5197,7 +5209,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5273,7 +5285,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5282,7 +5294,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream SelectList (v0.85.1 and current main) still derives the pressed row from the live visible range and latches an array index; the fork fences mouse dispatch to the last-painted rows with item-identity gesture tracking."
+    "notes": "Confirmed the pinned v1.1.0 SelectList still derives the pressed row from the live visible range and latches an array index; the fork fences mouse dispatch to the last-painted rows with item-identity gesture tracking."
    },
    "tests": [
     "packages/pi-tui/test/select-list.test.ts: a press on a painted row resolves to the painted item even when the live visible range moved without a repaint (setSelectedIndex after render)",
@@ -5295,8 +5307,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -5369,8 +5381,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
@@ -5386,7 +5398,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5478,8 +5490,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -5495,7 +5507,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5576,8 +5588,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/scroll-view.ts"
@@ -5593,7 +5605,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-14",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5602,7 +5614,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Checked upstream v0.85.1 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth."
+    "notes": "Checked the pinned v1.1.0 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth."
    }
   },
   "X056": {
@@ -5726,8 +5738,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -5744,7 +5756,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-17",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5820,8 +5832,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -5837,7 +5849,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-29",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5927,8 +5939,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -5945,7 +5957,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-19",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6004,7 +6016,7 @@
      "audited": true,
      "items": [
       "src/tui-app.ts owns the effective state: reconcileTerminalProgress() runs from setTerminalProgress() and from every activity projection (projectActivity), so a wait opening or settling while the main Agent runs moves the pane immediately — including the question FIFO handover, where the phase is unchanged but the new flow's agentInputWait is not.",
-     "Only a wait the main Agent is BLOCKED on pauses the pane: agentInputWait is supplied by the interaction lifecycle that owns the wait (the LIVE foreground Agent question wait and the Agent approval port pass true; a CONTINUED late-answer form whose Agent already continued, the /login authorization prompt and every other Client-local flow stay false), so neither the canonical phase nor the interaction SOURCE alone can claim waiting_input.",
+      "Only a wait the main Agent is BLOCKED on pauses the pane: agentInputWait is supplied by the interaction lifecycle that owns the wait (the LIVE foreground Agent question wait and the Agent approval port pass true; a CONTINUED late-answer form whose Agent already continued, the /login authorization prompt and every other Client-local flow stay false), so neither the canonical phase nor the interaction SOURCE alone can claim waiting_input.",
       "The Tern-only guard keeps the richer method off every non-Tern path (plan §9.2), and a Tern terminal that lacks setProgressState fails soft to the boolean working/clear projection (plan §9.3).",
       "The PR #230 ownership lifecycle is preserved: while the TuiApp does not own the terminal the desired state is only folded, and every screen (re)start re-asserts the CURRENT effective state.",
       "The terminalProgress preference gates only the physical write: setTerminalProgressEnabled(false) asserts one clear and then suppresses active/paused writes while the desired logical state keeps folding; (re)enabling reprojects the current effective state immediately, and an acquisition while disabled asserts clear. It is a presentation gate, never a second Agent-state authority."
@@ -6057,8 +6069,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/terminal.ts"
@@ -6074,7 +6086,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-07",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
