@@ -2342,12 +2342,12 @@ Retired by product decision (post-PR272 DIV retirement plan, PR A). The former p
 
 **Behavioral coupling**
 - None found (audited).
-- Audit note: Deliberate product tradeoff: a directory line that fd prints without a trailing separator is typed as a file again (upstream behavior). The host never used the fd-backed provider path, so the host completion suites are the green evidence here; the restored upstream fd-typing path is fd-gated (the fd @ file suggestions block SKIPS when fd is absent, as in the audited environment) and is not claimed as executed regression coverage.
+- Audit note: Deliberate product tradeoff: upstream types an fd line as a directory only when it carries a trailing separator (fd 10.2.0 does print `dir/`), so a bare directory line types as a file. The host never used the fd-backed provider path, so the host completion suites are the green evidence here. The restored upstream fd typing was also executed fd-enabled (an `fd` shim over the locally installed fdfind 10.2.0): the whole fd @ file suggestions block ran and passed, including the empty-@ directory typing, directory-ordering and symlink-directory cases.
 
 #### Guarding tests
 
 - retired: packages/pi-tui/test/autocomplete.test.ts is upstream v1.1.0 verbatim again (the typeDirectoryOutputLines describe block and its import were deleted rather than left asserting a removed mechanism)
-- fd-gated coverage: the upstream fd @ file suggestion cases in packages/pi-tui/test/autocomplete.test.ts are skipped when fd is absent, so they are listed as fd-gated and not as executed passing evidence
+- fd coverage in both states: the upstream fd @ file suggestions cases skip when no `fd` binary is on PATH (the local binary is `fdfind`, an upstream-owned environment gate that predates this PR) and pass 23/23 when an `fd` shim exposes fd 10.2.0 — including the empty-@ directory typing, directory-before-file ordering, symlink-directory and .git-exclusion cases
 - surviving coverage (host routing): test/file-completion-convergence.test.ts, test/autocomplete-provider.test.ts, test/directory-completion.test.ts, test/image-arg-completion.test.ts, test/client-file-completion.test.ts, test/shell-completion.test.ts
 
 #### Upstream comparison
@@ -2374,7 +2374,7 @@ Retired by product decision (post-PR272 DIV retirement plan, PR A). The former p
 
 - Deletion evidence: typeDirectoryOutputLines and both call sites are removed; the helper name, its import and the retired slicing exception have no live source or test reference.
 - Source evidence: packages/pi-tui/src/autocomplete.ts and packages/pi-tui/test/autocomplete.test.ts match the pinned v1.1.0 blobs (diff empty).
-- Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host completion suites pass with this record retired (the fd-gated fd @ file suggestions block SKIPS when fd is absent and is not part of that evidence).
+- Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host completion suites pass with this record retired; the fd-gated fd @ file suggestions block (skipped by default because the local binary is named fdfind) also passes 23/23 fd-enabled via an `fd` shim over fdfind 10.2.0.
 
 #### Audit record
 
