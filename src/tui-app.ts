@@ -3777,6 +3777,10 @@ export class TuiApp {
     // A stop() before this start (a plain stop/start round-trip) cleared the
     // physical progress indicator; re-assert the desired state (plan §7).
     this.enterTerminalPresentation()
+    // stop() disposed the per-screen scheme registrations: a restarted app must
+    // hear Mode 2031 reports again now that its screens are live (the screens
+    // themselves re-enable the mode in start()).
+    this.refreshSchemeRegistrations()
   }
 
   /**
@@ -6498,7 +6502,10 @@ export class TuiApp {
     // point into the transcript being replaced, so a window/corpus replacement
     // must drop the selection and its multi-click history. Only a replacement
     // resets it — theme/expand re-renders, disclosure toggles and streaming
-    // appends keep the user's selection.
+    // appends keep the user's selection. The trigger is the window DESCRIPTOR
+    // (windowChanged), not a message-corpus comparison: every production
+    // replacement moves it, and an in-place rewrite that keeps the same
+    // descriptor is deliberately treated as the same corpus.
     if (windowChanged) this.fullscreen?.resetTextSelection()
     this.messages = messages
     if (activities !== undefined) this.turnActivities = activities

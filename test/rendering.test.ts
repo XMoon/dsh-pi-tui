@@ -83,6 +83,19 @@ function startAppWithWrites(): { vt: VirtualTerminal; app: TuiApp; writes: strin
   startedApps.add(app)
   return { vt, app, writes }
 }
+/** A started app whose user-activity signal is observable (the input boundary). */
+function startAppWithEvents(): { vt: VirtualTerminal; app: TuiApp; userInputs: () => number } {
+  const vt = new VirtualTerminal(100, 24)
+  let userInputs = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onUserInput: () => { userInputs += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, userInputs: () => userInputs }
+}
 /** Mode 2031 writes, in order (the tracking lifecycle contract). */
 function mode2031Writes(writes: string[]): string[] {
   return writes.filter(data => data === '\x1b[?2031h' || data === '\x1b[?2031l')
@@ -1748,15 +1761,56 @@ test('autoDetectTheme applies the detected theme through the ACTIVE screen in fu
   assert.equal(currentPalette, lightColors, 'fullscreen autodetect must apply the detected palette')
 })
 
-test('autoDetectTheme drops an observation that settles after a screen switch', async () => {
+test('autoDetectTheme drops an observation that resolves before a screen switch', async () => {
   const { vt, app } = startApp()
   setTheme('dark')
   const pending = app.autoDetectTheme()
-  app.setFullscreen(true) // the regular screen's observation is released
-  await viewport(vt)
-  vt.sendInput('\x1b]11;#eeeeee\x07') // an answer for the screen the user left
+  // The observation RESOLVES with a value and the swap happens in the same tick,
+  // before the continuation runs: the result belongs to the screen the user left.
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  app.setFullscreen(true)
   await pending
+  await viewport(vt)
   assert.equal(currentPalette, darkColors, 'a swapped-away screen may not colour the new one')
+})
+
+test('a late background reply across a Main/Fullscreen switch is not user input', async () => {
+  const { vt, app, userInputs } = startAppWithEvents()
+  setTheme('dark')
+  const pending = app.autoDetectTheme() // the observation belongs to the main screen
+  app.setFullscreen(true) // the main screen stops; the alt screen owns the terminal
+  await viewport(vt)
+  vt.sendInput('\x1b]11;#eeeeee\x07') // the main screen's reply arrives at the alt screen
+  await pending
+  assert.equal(userInputs(), 0, 'a terminal protocol reply must never count as user activity')
+  vt.sendInput('x') // control: real typing still counts
+  assert.equal(userInputs(), 1, 'ordinary input must still reach the user-activity signal')
+})
+
+test('a late background reply across a Fullscreen/Main switch is not user input', async () => {
+  const { vt, app, userInputs } = startAppWithEvents()
+  setTheme('dark')
+  app.setFullscreen(true)
+  await viewport(vt)
+  const pending = app.autoDetectTheme() // the observation belongs to the alt screen
+  app.setFullscreen(false) // the alt screen stops; the main screen owns the terminal
+  await viewport(vt)
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await pending
+  assert.equal(userInputs(), 0, 'a terminal protocol reply must never count as user activity')
+  assert.equal(currentPalette, darkColors, 'and it must not colour the screen the user returned to')
+})
+
+test('a full stop/start keeps receiving live scheme reports', async () => {
+  const { vt, app } = startApp()
+  const received: string[] = []
+  app.onTerminalThemeChange((theme) => { received.push(theme) })
+  vt.sendInput('\x1b[?997;2n')
+  assert.deepEqual(received, ['light'], 'a report reaches the listener while the app is running')
+  app.stop()
+  app.start()
+  vt.sendInput('\x1b[?997;1n')
+  assert.deepEqual(received, ['light', 'dark'], 'a restarted app must still receive scheme reports')
 })
 
 test('autoDetectTheme coalesces concurrent calls onto one shared observation', async () => {

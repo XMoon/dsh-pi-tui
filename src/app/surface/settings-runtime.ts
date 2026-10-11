@@ -28,6 +28,7 @@ import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, typ
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
+import { themeOptOut } from '../../client/theme/environment.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { resolveThemeSelection } from './theme-selection.ts'
 import { wheelScrollLinesOf } from '../../domain/display/wheel-scroll.ts'
@@ -496,6 +497,10 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
       shouldApply: () => deps.tuiSettings?.get().theme === 'auto',
     }), { diag: deps.diag })
     deps.surface.app.onTerminalThemeChange((theme) => {
+      // The opt-out owns the palette: a terminal that reports a scheme change
+      // (Mode 2031 is enabled above) must not override NO_COLOR / FORCE_COLOR=0
+      // / CI by switching the user to the light palette.
+      if (themeOptOut()) return
       if (deps.tuiSettings?.get().theme === 'auto') deps.surface.app.applyTheme(theme)
     })
     // Enable Mode 2031 on the screens: the terminal reports live scheme

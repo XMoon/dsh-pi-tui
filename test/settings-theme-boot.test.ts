@@ -13,6 +13,13 @@ import test from 'node:test'
 import { createSettingsRuntime, type SettingsRuntimeDeps } from '../src/app/surface/settings-runtime.ts'
 import type { TuiApp } from '../src/tui-app.ts'
 
+// themeOptOut() skips terminal queries and live scheme reports under NO_COLOR /
+// FORCE_COLOR=0 / CI=true — clear all three so the wiring under test stays live
+// (the opt-out test sets NO_COLOR for its own scope).
+process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+process.env.CI = ''
+
 const noop = (): void => {}
 
 type ThemeHarness = {
@@ -97,6 +104,20 @@ test('a live scheme report only changes the theme while the preference is auto',
   harness.applied.length = 0
   harness.report('light')
   assert.deepEqual(harness.applied, [], 'a manual theme ignores live reports')
+})
+
+test('a live scheme report cannot bypass the colour opt-out', () => {
+  const previous = process.env.NO_COLOR
+  process.env.NO_COLOR = '1'
+  try {
+    const harness = mountThemeRuntime()
+    harness.runtime.applyBootDisplay()
+    harness.report('light')
+    assert.deepEqual(harness.applied, [], 'NO_COLOR must keep the palette untouched')
+  } finally {
+    if (previous === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = previous
+  }
 })
 
 test('a manual persisted theme applies itself and does not track', () => {
