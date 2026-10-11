@@ -385,13 +385,29 @@ or over the editor seat.
   tenant.
 - **The subject is re-validated at every ACTIVE entry.** `revalidateOptionalSeat()`
   runs at the input entry, at the re-projection entry (`mountSeatChild`), at the
-  focus entry (`focusSeatOwner`) and at BOTH screen-swap entries
-  (`setFullscreen`), which also re-sync the SHARED seat mount through
-  `projectSeatOccupant()`. A record whose `isCurrent()` went false is RETIRED
-  there — its caller cleanup runs exactly once, like an explicit close — and the
-  seat re-projects and focuses the live winner, so the physical mount can never
-  keep painting a panel whose session/generation is gone while the fork still
-  dispatches keys to it.
+  focus entry (`focusSeatOwner`), at the protocol fence and at BOTH screen-swap
+  entries (`setFullscreen`), which also re-sync the SHARED seat mount through
+  `projectSeatOccupant()` (a swap projects the live owner BEFORE the new screen
+  takes the keyboard and retires the stale record AFTER the swap is committed,
+  so a throwing cleanup cannot half-swap the surface). A record whose
+  `isCurrent()` went false is RETIRED there — its caller cleanup runs exactly
+  once, like an explicit close — and the seat re-projects and focuses the live
+  winner, so the physical mount can never keep painting a panel whose
+  session/generation is gone while the fork still dispatches keys to it. The
+  focus entry additionally compares the physical keyboard owner BEFORE and AFTER
+  the re-validation: a cleanup callback that synchronously opened a NEWER
+  capturing overlay keeps the keyboard, while the pre-existing fallback
+  semantics are unchanged whenever the re-validation did not move the owner.
+- **A failed park rolls the blocking owner back.** The park of a blocking owner
+  (Question / Save Location / approval) runs the stale tenant's caller cleanup,
+  which may throw. The owner then ROLLS BACK instead of staying half-committed:
+  its intent is cleared, the prompt is released, the seat is re-projected to the
+  live owner and the frame repainted (`Question` / `Save`; the approval clears
+  its active prompt and calls the host's `rollbackApprovalPark`), and the
+  ORIGINAL failure propagates — aggregated with a rollback failure — so the
+  caller's promise rejects and no unpresented owner blocks later requests.
+  Without this, a caller-side cleanup failure would leave an unpresented modal
+  blocking every later request while a retired component stayed painted.
 - **PARK is committed before the blocker's first callback.** A Question commits
   `activeQuestions` and parks the tenant BEFORE the Save Location handoff; an
   approval commits its pending prompt as active BEFORE the park, the Save
@@ -403,7 +419,10 @@ or over the editor seat.
 - **Question → Save Location handoff.** A Question that supersedes a Save
   Location passes its own state into `settleSaveLocation(state, result,
   handoff)`. When that flow is STILL the live active one, the prompt transfers
-  its `suspendedOverlays` to the flow and SKIPS the seat remount, the focus
+  its `suspendedOverlays` INTO the flow's set (a UNION — a callback inside the
+  batch may already have opened a newer overlay that the broker appended to that
+  flow, and those roots must be resumed by its own settle, not stranded) and
+  SKIPS the seat remount, the focus
   fallback and `resumeSuspendedRoots` (the question resumes the graph once, at
   its own final settle). Prompt disposal, the abort-listener cleanup and the
   promise settlement stay independent steps, and the handoff target is re-read
@@ -412,9 +431,11 @@ or over the editor seat.
   replace the superseding flow, so a settle/dead target makes the handoff a
   no-op and the prompt restores normally instead of resurrecting a dead
   presentation. `presentQuestion` fences every one of its own callback windows
-  (the handoff, the broker suspension, the frame focus) with the same live-flow
-  identity test, so a preempted flow never mounts, focuses or publishes its
-  frame.
+  (the optional-tenant park, the activity projection, the handoff, the broker
+  suspension, the frame focus) with the same live-flow identity test, so a
+  preempted flow never mounts, focuses or publishes its frame — and in
+  particular never hides a live overlay root into a dead flow's suspension set,
+  which nothing would ever resume.
 - **Restore only at the LAST blocker.** The Question/Save final settles clear
   their owner first, then call `maybeRestoreOptionalSeat()`; an approval
   restores only after `showNext()` proved the LIVE queue drained (`active ===
@@ -442,15 +463,19 @@ or over the editor seat.
   effective exit key, the unstable raw-capture stage and the terminal protocol
   all keep their own policy. Host-classified protocol chunks (SGR/legacy mouse
   reports, terminal focus reports, Kitty key release/repeat) are additionally
-  stopped from ever being DELIVERED to a tenant: `protocolSinkFence` is the LAST
-  input listener on every screen — for fullscreen it is registered AFTER the alt
-  screen's viewport listener, so FOCUS_OUT still runs that listener's selection
-  cleanup and every mouse event the viewport recognizes stays with it — and it
-  consumes such a chunk only while the tenant owns the keyboard, remaining
-  completely inert otherwise (the pre-existing editor / overlay / viewport
-  routing is unchanged). Bracketed PASTE is user text, not protocol input, and
-  still reaches the focused component. A parked, finalized or stale tenant
-  receives nothing, and the input entry re-validates the subject first.
+  stopped from ever being DELIVERED to a tenant. `protocolSinkFence` is the
+  LAST input listener on every screen — for fullscreen it is registered AFTER
+  the alt screen's viewport listener, so FOCUS_OUT still runs that listener's
+  selection cleanup and every mouse event the viewport recognizes stays with it
+  — and it re-validates the subject FIRST (a stale record is retired and the
+  live owner re-projected even when the chunk never reaches the key ladder,
+  whose mouse / focus-report branches return earlier) and then guards on the
+  PHYSICAL focus fact, so a stale-but-still-focused record can never collect a
+  raw chunk either. It is completely inert otherwise (the pre-existing editor /
+  overlay / viewport routing is unchanged). Bracketed PASTE is user text, not
+  protocol input, and still reaches the focused component. The ordinary-key
+  path re-validates the subject too, so a parked, finalized or stale tenant
+  receives nothing.
 - **Approval mount fence.** `ApprovalRuntime.showNext()` commits `active =
   pending` BEFORE the park / save cancellation / mount, and `mount()`
   re-validates `active === pending && !settled && !isDisposed()` AFTER

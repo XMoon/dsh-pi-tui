@@ -2441,6 +2441,13 @@ export class TuiApp {
     // ... and the tenant may only come back once the WHOLE queue drained (a
     // queued A→B approval must never restore it between the two prompts).
     afterApprovalQueueDrained: () => this.maybeRestoreOptionalSeat(),
+    // Phase 3A / PR-B: a failed approval park abandons the presentation — the
+    // seat must project the live owner again (a retired tenant never stays
+    // painted/focused) and the frame repaints.
+    rollbackApprovalPark: () => {
+      this.mountSeatChild()
+      this.requestRender()
+    },
   })
   /** The active user-questions flow, if any (one on screen at a time). */
   private activeQuestions: QuestionState | undefined
@@ -13670,14 +13677,78 @@ export class TuiApp {
    * listener (which must still observe FOCUS_OUT for its selection cleanup and
    * keeps every mouse event it recognizes). This fence therefore only decides
    * what the FOCUSED COMPONENT would receive: it consumes a host-classified
-   * protocol chunk while a tenant owns the keyboard, and is completely inert
+   * protocol chunk while an optional record physically holds the keyboard
+   * (current OR stale — a stale one is retired first), and is completely inert
    * otherwise, so the pre-existing editor / overlay / viewport routing is
    * unchanged.
    */
   private protocolSinkFence(data: string): TuiInputListenerResult {
-    if (!this.optionalSeatOwnsKeyboard()) return undefined
     if (!isProtocolInputChunk(data)) return undefined
+    // Re-validate FIRST: a stale record is retired here even when the chunk
+    // never reaches the key ladder (the mouse / focus-report branches return
+    // before it), so the live winner is re-projected and focused and the stale
+    // component can neither stay painted nor keep the keyboard.
+    this.revalidateOptionalSeat()
+    if (!this.optionalTenantHoldsFocus()) return undefined
     return { consume: true }
+  }
+
+  /**
+   * Phase 3A / PR-B: whether an optional record — whatever its caller subject —
+   * is the physically focused component of the active screen. This is exactly
+   * the state in which the fork's fall-through would deliver a raw protocol
+   * chunk to it, so the protocol sink fence uses the PHYSICAL focus fact (the
+   * key ladder keeps using the stricter ACTIVE + current predicate).
+   */
+  private optionalTenantHoldsFocus(): boolean {
+    const record = this.optionalSeat
+    return record !== undefined && !record.finalized
+      && this.activeScreen.getFocusedComponent() === record.component
+  }
+
+  /**
+   * Phase 3A / PR-B: roll back the blocking owner of a presentation whose
+   * optional-tenant park threw, then propagate the PRIMARY failure — the
+   * failure is aggregated with a rollback failure, the same contract
+   * `runSyncDisposalSteps` uses. The owner must never stay half-committed: a
+   * stale caller cleanup failure would otherwise leave an unpresented Question
+   * / Save / Approval blocking every later request.
+   * @param primary - the failure that truncated the park.
+   * @param steps - the owner's rollback obligations.
+   */
+  private rollbackBlockingPresentation(primary: unknown, steps: readonly (() => void)[]): never {
+    try {
+      runSyncDisposalSteps('blocking presentation rollback', steps)
+    } catch (rollbackFailure) {
+      const failures = rollbackFailure instanceof AggregateError
+        ? [primary, ...rollbackFailure.errors]
+        : [primary, rollbackFailure]
+      throw new AggregateError(failures, 'blocking presentation rollback')
+    }
+    throw primary
+  }
+
+  /**
+   * Phase 3A / PR-B: park the optional tenant for a blocking owner whose intent
+   * is ALREADY committed, rolling that intent back when the park's stale-tenant
+   * retirement runs a throwing caller cleanup. The seat is re-projected to the
+   * live owner first, so the retired component stops being painted and focused;
+   * the original failure then propagates.
+   */
+  private parkOptionalSeatOrRollback(rollback: () => void): void {
+    try {
+      this.parkOptionalSeat()
+    } catch (error) {
+      // The rollback COMPLETES the independent obligations the park would have
+      // finished — the seat projects the live owner again (the retired tenant
+      // stops being painted/focused) and the frame repaints — before the
+      // original failure propagates.
+      this.rollbackBlockingPresentation(error, [
+        rollback,
+        () => this.mountSeatChild(),
+        () => this.requestRender(),
+      ])
+    }
   }
 
   /**
@@ -16567,7 +16638,14 @@ export class TuiApp {
     // blocker whose frame is not ready yet falls back to the seat editor,
     // exactly like the pre-tenant path (the blocker focuses its own frame
     // right after).
+    const focusedBefore = this.activeScreen.getFocusedComponent()
     this.revalidateOptionalSeat()
+    // The retirement runs the caller's cleanup, which may synchronously hand
+    // the keyboard to a NEWER owner (a capturing overlay): that newer fact
+    // wins, so the fallback must not steal it back. When the re-validation did
+    // NOT change the physical owner, the pre-existing fallback semantics are
+    // unchanged (the broker's suspension/resume paths rely on them).
+    if (this.activeScreen.getFocusedComponent() !== focusedBefore) return
     this.activeScreen.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
   }
 
@@ -19771,7 +19849,11 @@ export class TuiApp {
     // save-settle restore of the tenant) is observable.
     const previousSaveLocation = this.activeSaveLocation
     this.activeQuestions = state
-    this.parkOptionalSeat()
+    // Parking re-projects the seat and may RETIRE a stale tenant, whose caller
+    // cleanup can throw (rolled back below) or synchronously settle/replace
+    // THIS flow: never continue into a suspension/seat mount for a dead flow.
+    this.parkOptionalSeatOrRollback(() => { this.activeQuestions = undefined })
+    if (!this.questionFlowIsLive(state)) return
     // A Host question is authoritative over a Client-local Save Location
     // prompt: presenting a question settles the prompt as cancelled (the
     // caller's owned workflow classifies it and notifies nothing). The save
@@ -19787,6 +19869,7 @@ export class TuiApp {
       if (!this.questionFlowIsLive(state)) return
     }
     this.projectActivity()
+    if (!this.questionFlowIsLive(state)) return
     // A question is a logical capturing modal: the broker directly suspends
     // every visible logical ROOT (hidden, topology intact) until the flow
     // settles. Child topology, focus intent and z-order stay in the broker.
@@ -20076,9 +20159,14 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     this.activeSaveLocation = state
     // Phase 3A / PR-B: the logical blocking intent is already committed above,
-    // so PARK the optional tenant BEFORE the prompt mounts/focuses — the
-    // tenant must never be a keyboard target while the prompt owns the seat.
-    this.parkOptionalSeat()
+    // so PARK the optional tenant BEFORE the prompt mounts/focuses — the tenant
+    // must never be a keyboard target while the prompt owns the seat. A
+    // throwing stale-tenant cleanup rolls the intent back (and releases the
+    // prompt) instead of leaving an unpresented owner behind.
+    this.parkOptionalSeatOrRollback(() => {
+      this.activeSaveLocation = undefined
+      state.prompt.dispose()
+    })
     this.projectActivity()
     // The prompt is a logical capturing modal: the broker directly suspends
     // every visible logical ROOT (topology intact) until it settles.
@@ -20187,7 +20275,11 @@ export class TuiApp {
         if (target === undefined || this.disposed || this.activeQuestions !== target
           || target.settled === true) return
         handoffTaken = true
-        target.suspendedOverlays = state.suspendedOverlays
+        // UNION, never replace: a callback inside this batch (for example the
+        // prompt's completion-abort subscriber) may already have opened a NEWER
+        // overlay that the broker appended to the flow's suspension set — those
+        // roots must be resumed by the flow's own final settle, not stranded.
+        for (const handle of state.suspendedOverlays) target.suspendedOverlays.add(handle)
         state.suspendedOverlays = new Set()
       },
       () => { if (!handoffTaken) this.maybeRestoreOptionalSeat() },

@@ -63,6 +63,12 @@ export interface ApprovalRuntimeHost {
    * restored. A queued A → B approval must never restore it in between.
    */
   afterApprovalQueueDrained(): void
+  /**
+   * Phase 3A / PR-B: abandon a FAILED `beforeApprovalMount` park — re-project
+   * the live seat owner (a retired tenant never stays painted/focused) and
+   * repaint. The approval presentation never happened.
+   */
+  rollbackApprovalPark(): void
 }
 
 /** Live state of one approval prompt. */
@@ -216,7 +222,23 @@ export class ApprovalRuntime {
     // restored (or a Save Location settle can never take its
     // "no approval active" restore path) behind an uncommitted approve.
     this.active = pending
-    this.host.beforeApprovalMount()
+    try {
+      this.host.beforeApprovalMount()
+    } catch (error) {
+      // Phase 3A / PR-B: the park's stale-tenant retirement ran a throwing
+      // caller cleanup. The approval must never stay half-committed (an
+      // unpresented active prompt would block every later approval AND every
+      // optional seat open): clear the active owner, complete the host's
+      // rollback obligations, and propagate the ORIGINAL failure (aggregated
+      // with a rollback failure) so the caller's promise rejects.
+      this.active = undefined
+      try {
+        this.host.rollbackApprovalPark()
+      } catch (rollbackFailure) {
+        throw new AggregateError([error, rollbackFailure], 'approval park rollback')
+      }
+      throw error
+    }
     // A Host approval is authoritative over a Client-local Save Location
     // prompt: showing the approval settles the prompt as cancelled (the
     // caller's owned workflow classifies it and notifies nothing) — the

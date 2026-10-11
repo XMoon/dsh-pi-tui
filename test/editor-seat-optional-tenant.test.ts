@@ -1164,46 +1164,54 @@ function advancedOverlayProbe(text: string): {
   }
 }
 
-test('B-03b: a suspended overlay root is never revealed between two queued Questions', async () => {
+test('B-03b: a suspended overlay root is never revealed or refocused between two queued Questions', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
   openTenant(app, tenant)
   await vt.waitForRender()
-  // A real capturing overlay root is suspended by the question flow.
-  app.openPicker([{ value: 'a', label: 'queued-root' }], () => {}, () => {})
+  // A REAL capturing overlay root with its own focus/blur recorders is
+  // suspended by the question flow.
+  const root = advancedOverlayProbe('queued-root')
+  app.showAdvancedInteractiveOverlay(root.component)
   await vt.waitForRender()
-  assert.ok(viewport(vt).includes('queued-root'), `the picker must be up first:\n${viewport(vt)}`)
+  assert.ok(viewport(vt).includes('queued-root'), `the root must be up first:\n${viewport(vt)}`)
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
 
   const first = app.askQuestions([{ id: 'q1', question: 'first queued?', options: [{ label: 'Yes' }] }])
   const second = app.askQuestions([{ id: 'q2', question: 'second queued?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('first queued?'))
   assert.ok(!viewport(vt).includes('queued-root'), 'the overlay root is suspended under the flow')
+  assert.equal(root.blurCount(), 1, 'the suspension releases the keyboard exactly once')
   const gainsWhileParked = tenant.focusGains()
+  const focusWhileSuspended = root.focusCount()
+  const blurWhileSuspended = root.blurCount()
 
   vt.sendInput('\r')
   vt.sendInput('\r')
   assert.deepEqual(await first, [{ id: 'q1', selected: ['Yes'] }])
   await vt.waitForRender()
   // The FIFO handover: the second flow took the seat directly — the suspended
-  // root must NOT be briefly revealed and the tenant must not regain focus.
+  // root must NOT be briefly revealed and the tenant/root must not regain
+  // focus in the gap.
   assert.ok(viewport(vt).includes('second queued?'), `the second flow must be mounted:\n${viewport(vt)}`)
   assert.ok(!viewport(vt).includes('queued-root'), 'the suspended root must not be revealed between queued flows')
+  assert.equal(root.focusCount(), focusWhileSuspended, 'no transient root focus between queued flows')
+  assert.equal(root.blurCount(), blurWhileSuspended, 'no transient root blur between queued flows')
   assert.equal(tenant.focusGains(), gainsWhileParked, 'the tenant must not regain focus between queued flows')
-  assert.notEqual(app.focusedComponentForTest(), tenant.component)
 
   vt.sendInput('\r')
   vt.sendInput('\r')
   assert.deepEqual(await second, [{ id: 'q2', selected: ['Yes'] }])
   await vt.waitForRender()
   // The root's own focus intent survives the graph: it is restored and
-  // re-focused, and the tenant is ACTIVE again underneath it.
+  // re-focused exactly once, and the tenant is ACTIVE again underneath it.
   assert.ok(viewport(vt).includes('queued-root'), `the root must be restored:\n${viewport(vt)}`)
+  assert.equal(root.focusCount(), focusWhileSuspended + 1, 'the root is refocused once on restore')
+  assert.equal(root.blurCount(), blurWhileSuspended)
   assert.notEqual(app.focusedComponentForTest(), tenant.component)
-  vt.sendInput('\x1b')
-  await vt.waitForRender()
-  assert.equal(app.focusedComponentForTest(), tenant.component, 'closing the root returns the tenant')
+  assert.equal(app.focusSeatForTest(), 'overlay')
   assert.equal(tenant.closeCalls(), 0)
 })
 
@@ -1338,7 +1346,7 @@ test('B-27: a Save Location disposal that cancels the superseding Question never
   assert.equal(app.focusedComponentForTest(), tenant.component, 'the live owner keeps the seat')
   assert.equal(app.focusSeatForTest(), 'editor-panel')
   assert.equal(tenant.closeCalls(), 0)
-  void save
+  assert.deepEqual(await save, { kind: 'cancelled' }, 'the superseded prompt still settles cancelled')
 })
 
 test('B-28: an ACTIVE tenant whose subject goes stale is retired at the input entry', async () => {
@@ -1406,4 +1414,273 @@ test('B-29b: a stale ACTIVE tenant is retired even when a restored overlay keeps
   assert.ok(viewport(vt).includes('swap-root'), `the restored overlay must keep the keyboard:\n${viewport(vt)}`)
   assert.notEqual(app.focusedComponentForTest(), tenant.component)
   assert.equal(app.focusSeatForTest(), 'overlay')
+})
+
+test('B-24c: a stale-but-focused tenant receives no host-classified protocol chunk and is retired', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component)
+  // Stale but still PHYSICALLY focused: the fork's fall-through would deliver
+  // the raw chunk to it, so the protocol fence must cover the physical fact.
+  tenant.setCurrent(false)
+  vt.sendInput('\x1b[<0;5;5M')
+  await vt.waitForRender()
+  assert.deepEqual(tenant.keys, [], 'a stale focused tenant must receive no raw protocol chunk')
+  assert.equal(tenant.closeCalls(), 1, 'the protocol entry retires the stale record exactly once')
+  assert.ok(!viewport(vt).includes('optional-tenant:'), `the stale panel must leave the seat:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component, 'the live owner takes over')
+
+  // The same holds in fullscreen, where the viewport observes the focus report
+  // before the fence runs.
+  const second = makeTenant()
+  openTenant(app, second)
+  await vt.waitForRender()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), second.component)
+  second.setCurrent(false)
+  vt.sendInput('\x1b[I')
+  vt.sendInput('\x1b[O')
+  await vt.waitForRender()
+  assert.deepEqual(second.keys, [], 'a stale focused tenant must receive no focus report')
+  assert.equal(second.closeCalls(), 1, 'the fullscreen protocol entry retires it exactly once')
+  assert.ok(!viewport(vt).includes('optional-tenant:'))
+})
+
+test('B-27b: a stale tenant retired while parking cannot strand the existing overlay roots', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const overlay = advancedOverlayProbe('park-root')
+  app.showAdvancedInteractiveOverlay(overlay.component)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('park-root'), `the root must be up first:\n${viewport(vt)}`)
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  let abortOnClose: (() => void) | undefined
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => { closeCalls += 1; abortOnClose?.() },
+  }))
+  await vt.waitForRender()
+  // The focused capturing overlay outranks the tenant's own projection: the
+  // tenant is ACTIVE but not the keyboard owner here.
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  const controller = new AbortController()
+  tenantIsCurrent = false
+  abortOnClose = () => controller.abort()
+  const dead = app.askQuestions(
+    [{ id: 'q1', question: 'park window?', options: [{ label: 'Yes' }] }],
+    controller.signal,
+  )
+  await assert.rejects(dead)
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the park retires the stale tenant exactly once')
+  assert.ok(!viewport(vt).includes('park window?'), 'a flow cancelled while parking must never mount a frame')
+  assert.ok(!viewport(vt).includes('optional-tenant:'), `the retired tenant must leave the seat:\n${viewport(vt)}`)
+  // The existing root must NOT have been hidden by the dead flow: it stays
+  // painted/focused with UNCHANGED focus/blur counters instead of becoming a
+  // stranded hidden handle.
+  assert.ok(viewport(vt).includes('park-root'), `the existing root must not be stranded:\n${viewport(vt)}`)
+  assert.equal(overlay.focusCount(), 1, 'the existing root was focused once and never refocused')
+  assert.equal(overlay.blurCount(), 0, 'the dead-flow park causes no fabricated blur on the root')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+
+  // The surface is not stuck on the dead flow: a NEW flow suspends and restores
+  // the very same root.
+  const again = app.askQuestions([{ id: 'q2', question: 'second flow?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('second flow?'), 'the surface must accept a new flow')
+  assert.ok(!viewport(vt).includes('park-root'), 'the live flow suspends the root')
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await again, [{ id: 'q2', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('park-root'), `the live flow restores the root:\n${viewport(vt)}`)
+})
+
+test('B-27c: an overlay opened by the completion abort during the handoff is resumed by the question', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const overlay = advancedOverlayProbe('handoff-root')
+  let completionRegistered = false
+  let openOnCompletionAbort: (() => void) | undefined
+  const deps: SaveLocationDeps = {
+    ...saveDeps(),
+    complete: (_raw, signal) => {
+      completionRegistered = true
+      return new Promise((resolve) => {
+        signal.addEventListener('abort', () => {
+          openOnCompletionAbort?.()
+          resolve(null)
+        })
+      })
+    },
+  }
+  const save = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  await vt.waitForRender()
+  await new Promise<void>(resolve => setTimeout(resolve, 30))
+  assert.equal(completionRegistered, true)
+  openOnCompletionAbort = () => { app.showAdvancedInteractiveOverlay(overlay.component) }
+
+  const question = app.askQuestions([{ id: 'q1', question: 'handoff union?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(
+    !viewport(vt).includes('handoff-root'),
+    `the root opened during the handoff is suspended under the flow:\n${viewport(vt)}`,
+  )
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('handoff-root'), `the handoff root must be resumed:\n${viewport(vt)}`)
+  assert.ok(overlay.focusCount() >= 1, 'the resumed root takes its own focus intent')
+  void save
+})
+
+test('B-30: a newer overlay opened by the stale-tenant cleanup during an Approval settle keeps the keyboard', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const overlay = advancedOverlayProbe('approval-tail-root')
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  let openOnClose: (() => void) | undefined
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      const run = openOnClose
+      openOnClose = undefined
+      run?.()
+    },
+  }))
+  await vt.waitForRender()
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'stale under the approval' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('bash'))
+  tenantIsCurrent = false
+  // The approval settle's focus fallback re-validates the PARKED tenant: its
+  // caller cleanup opens a NEWER capturing overlay, which must keep the
+  // keyboard (no fabricated blur/re-focus by the settle tail).
+  openOnClose = () => { app.showAdvancedInteractiveOverlay(overlay.component) }
+  vt.sendInput('y')
+  assert.equal(await approval, 'allowed-once')
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the focus entry retires the stale tenant exactly once')
+  assert.equal(overlay.focusCount(), 1, 'the newer overlay gains focus exactly once')
+  assert.equal(overlay.blurCount(), 0, 'the settle tail must not blur the newer owner')
+  assert.ok(
+    viewport(vt).includes('approval-tail-root'),
+    `the newer owner must stay painted:\n${viewport(vt)}`,
+  )
+  assert.equal(app.focusSeatForTest(), 'overlay')
+})
+
+/** Open one optional tenant whose caller cleanup throws, then park it behind a
+ * real blocking owner; the owner must roll back instead of staying
+ * half-committed. */
+function throwingParkTenant(app: TuiApp): { closeCalls(): number } {
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  tenantIsCurrent = false
+  return { closeCalls: () => closeCalls }
+}
+
+test('B-31: a throwing stale-tenant cleanup while parking rolls the Question owner back', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = throwingParkTenant(app)
+  await vt.waitForRender()
+
+  const question = app.askQuestions([{ id: 'q1', question: 'never presented?', options: [{ label: 'Yes' }] }])
+  await assert.rejects(question, /stale tenant close boom/)
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1, 'the stale tenant is retired exactly once')
+  assert.ok(!viewport(vt).includes('never presented?'), 'the failed presentation must not mount a frame')
+  assert.ok(!viewport(vt).includes('optional-tenant:'), `the retired tenant must not stay painted:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component, 'the live owner keeps the seat')
+  // The blocking owner was ROLLED BACK: a new optional request is accepted
+  // (factory runs) instead of being refused by a half-committed question.
+  let factoryCalls = 0
+  const next = makeTenant()
+  const lease = openOptional(app, () => {
+    factoryCalls += 1
+    return next.spec()
+  })
+  assert.notEqual(lease, undefined, 'no half-committed question may remain')
+  assert.equal(factoryCalls, 1)
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), next.component)
+  // ... and a new question is answerable too.
+  const healthy = app.askQuestions([{ id: 'q2', question: 'healthy?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('healthy?'))
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await healthy, [{ id: 'q2', selected: ['Yes'] }])
+  assert.equal(next.closeCalls(), 0)
+})
+
+test('B-31b: a throwing stale-tenant cleanup while parking rolls the Save Location owner back', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = throwingParkTenant(app)
+  await vt.waitForRender()
+
+  const save = askSave(app)
+  await assert.rejects(save, /stale tenant close boom/)
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1)
+  assert.ok(!viewport(vt).includes('Save session archive'), 'the failed prompt must not be presented')
+  assert.ok(!viewport(vt).includes('optional-tenant:'), `the retired tenant must not stay painted:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  const next = makeTenant()
+  assert.notEqual(openTenant(app, next), undefined, 'no half-committed save prompt may remain')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), next.component)
+})
+
+test('B-31c: a throwing stale-tenant cleanup while parking rolls the Approval owner back', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = throwingParkTenant(app)
+  await vt.waitForRender()
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'never presented' })
+  await assert.rejects(approval, /stale tenant close boom/)
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1)
+  assert.ok(!viewport(vt).includes('bash'), 'the failed approval must not be presented')
+  assert.ok(!viewport(vt).includes('optional-tenant:'), `the retired tenant must not stay painted:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  // The approval runtime is not half-committed: a new approval is answerable.
+  const healthy = app.showApprovalPrompt({ toolName: 'fs', reason: 'healthy' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('fs'))
+  vt.sendInput('y')
+  assert.equal(await healthy, 'allowed-once')
+  const next = makeTenant()
+  assert.notEqual(openTenant(app, next), undefined, 'no half-committed approval may remain')
 })
