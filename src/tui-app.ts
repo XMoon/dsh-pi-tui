@@ -2353,6 +2353,14 @@ export class TuiApp {
   /** The M4 widget zones (extension widgets around the editor seat). */
   private readonly widgetsAbove: Text
   private readonly widgetsBelow: Text
+  /** PR-D: the measured protected pinned chrome height the CURRENT fullscreen
+   * widget grant was derived from (undefined on the regular surface, whose
+   * grants are fixed). A change means the grant is stale — the widget rows
+   * are the lowest-priority pinned decoration, so a live chrome height change
+   * (a multi-line draft, an expanded Todo panel, queue/goal/working rows)
+   * must re-derive the zones before the next paint instead of pushing the
+   * footer out of the viewport. */
+  private lastWidgetBudgetChromeRows: number | undefined
   private readonly events: TuiAppEvents
   /**
    * The approval interaction owner (TS5 §8.3): the FIFO prompt queue, the ONE
@@ -3136,6 +3144,11 @@ export class TuiApp {
         goalHeight: number
         todoHeight: number
         dockHeight: number
+        /** PR-D: the painted footprint of the two widget zones. They are
+         * pinned rows around the seat, so every bottom-anchored hit test
+         * (the seat frame and the Todo/dock block) must subtract them. */
+        widgetAboveHeight: number
+        widgetBelowHeight: number
         scrollTop: number
         viewportHeight: number
         /** The painted transcript projection: per-block semantic identity
@@ -3530,6 +3543,11 @@ export class TuiApp {
       // editor is empty; the editor mutates without going through
       // setStatus, so keep the badge truthful while tasks are active.
       if (this.tasksActive) this.renderFooter()
+      // PR-D (review F1): a live draft height change (the editor grows or
+      // shrinks with its content) never reaches TuiApp.requestRender — the
+      // fork repaints the screen itself — so the fullscreen widget grant is
+      // re-derived from the LIVE chrome height here, before that repaint.
+      this.syncLiveWidgetBudget()
       // The visible editor IS the child draft while a continuable viewer
       // is up: mirror every change into the per-child slot (the runner's
       // restore and stale guards read the slot, not the live component).
@@ -10392,6 +10410,8 @@ export class TuiApp {
       goalHeight: paintedHeight(this.goalLine),
       todoHeight: paintedHeight(this.todoPanel),
       dockHeight: paintedHeight(this.dock),
+      widgetAboveHeight: paintedHeight(this.widgetsAbove),
+      widgetBelowHeight: paintedHeight(this.widgetsBelow),
       scrollTop: scroll?.scrollTop ?? 0,
       viewportHeight: scroll?.viewportHeight ?? 0,
       rows,
@@ -10675,12 +10695,18 @@ export class TuiApp {
   }
 
   /** The current Question frame's screen bounds, using the same footer and
-   * frame rows as the existing Question click path. */
+   * frame rows as the existing Question click path. PR-D: the frame occupies
+   * the shared editor seat, and the below widget zone is a pinned row
+   * BETWEEN that seat and the footer — subtracting only the footer would
+   * shift every option hit by the widget's height and answer the wrong
+   * option. */
   private questionFrameBounds(question: QuestionState): { top: number; bottom: number } | undefined {
     const frame = question.frame
     if (frame === undefined) return undefined
-    const footerHeight = this.footer.render(this.terminal.columns).length
-    const bottom = this.terminal.rows - footerHeight
+    const width = Math.max(1, this.terminal.columns)
+    const footerHeight = this.footer.render(width).length
+    const belowWidgetHeight = this.widgetsBelow.render(width).length
+    const bottom = this.terminal.rows - footerHeight - belowWidgetHeight
     return { top: bottom - frame.rows, bottom }
   }
 
@@ -10779,11 +10805,17 @@ export class TuiApp {
       goalHeight: number
       todoHeight: number
       dockHeight: number
+      widgetAboveHeight: number
+      widgetBelowHeight: number
     },
     y: number,
   ): 'todo:dock' | 'todo:panel' | undefined {
+    // PR-D: the stack order from the screen bottom is footer, below widget
+    // zone, editor seat, above widget zone, working, queue, goal, todo,
+    // dock — so BOTH widget zones are part of the bottom-anchored offset.
     const todoBottom = Math.max(0, Math.min(snapshot.termRows,
-      snapshot.termRows - snapshot.footerHeight - snapshot.editorHeight - snapshot.workingHeight
+      snapshot.termRows - snapshot.footerHeight - snapshot.widgetBelowHeight - snapshot.editorHeight
+      - snapshot.widgetAboveHeight - snapshot.workingHeight
       - snapshot.queueHeight - snapshot.goalHeight))
     const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
     if (snapshot.dockHeight > 0 && y >= todoTop - snapshot.dockHeight && y < todoTop) return 'todo:dock'
@@ -16055,6 +16087,12 @@ export class TuiApp {
       // explicit call on `!widthChanged` to avoid a second identical bake.
       if (heightChanged && !widthChanged && host !== undefined && host.state().surface.width === width
         && host.state().surface.height === height) this.renderWidgets()
+      // PR-D: the fullscreen widget grant is derived from the LIVE protected
+      // pinned chrome height, and that height changes WITHOUT a terminal
+      // resize — a multi-line draft, an expanded Todo panel, a dock summary,
+      // queue rows or the busy indicator. Every app-driven chrome render
+      // ends in a render request, so the fresh height is visible here.
+      this.syncLiveWidgetBudget()
       // The footer recompose runs LAST: the budget is keyed on the
       // MEASURED effective total (surface + geometry + actual chrome
       // heights), so a widget-zone bake, a resize or a mode switch all
@@ -17153,6 +17191,7 @@ export class TuiApp {
   private renderWidgets(): void {
     const host = this.extensionHost
     if (host === undefined) {
+      this.lastWidgetBudgetChromeRows = undefined
       this.widgetsAbove.setText('')
       this.widgetsBelow.setText('')
       this.requestRender()
@@ -17167,10 +17206,7 @@ export class TuiApp {
       // The protected pinned chrome is EXACTLY the set
       // footerPhysicalLineBudget() measures for the same root, minus the
       // widget zones themselves (they are what this budget decides).
-      let fixed = 0
-      for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
-        fixed += chrome.render(width).length
-      }
+      const fixed = this.protectedChromeRows(width)
       // Reserve the FULL supported footer capacity plus the one-row
       // transcript minimum before admitting a widget row (plan §3.1). The
       // reservation is deliberately conservative: the composer still renders
@@ -17196,6 +17232,11 @@ export class TuiApp {
         aboveGrant = Math.min(3, aboveDemand, widgetRoom)
         belowGrant = Math.min(belowMax, belowDemand, Math.max(0, widgetRoom - aboveGrant))
       }
+      // Latch the chrome height this grant was derived from: the geometry
+      // sync re-derives the zones when the LIVE measured height differs.
+      this.lastWidgetBudgetChromeRows = fixed
+    } else {
+      this.lastWidgetBudgetChromeRows = undefined
     }
     // Issue the FINAL grants through the same setters and project the FINAL
     // outlet text (a no-op refresh when the preview grant already matched).
@@ -17204,6 +17245,42 @@ export class TuiApp {
     this.widgetsAbove.setText(host.widgetsAboveText())
     this.widgetsBelow.setText(host.widgetsBelowText())
     this.requestRender()
+  }
+
+  /** The measured pinned chrome rows the FULLSCREEN widget grant is derived
+   * from: the header, viewer subject bar, dock, todo panel, goal line, queue
+   * pane, busy indicator and the editor seat — EXACTLY the protected set the
+   * fullscreen footer budget measures, minus the widget zones themselves
+   * (they are what this budget decides). One source of truth shared by
+   * `renderWidgets()` and the live geometry sync, so the two can never
+   * drift. Cheap: every component renders from its own per-width cache. */
+  private protectedChromeRows(width: number): number {
+    let used = 0
+    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
+      used += chrome.render(width).length
+    }
+    return used
+  }
+
+  /** PR-D (review F1): re-derive the fullscreen widget zones when the LIVE
+   * protected pinned chrome height differs from the one the current grant
+   * was derived from. The chrome height changes WITHOUT a terminal resize —
+   * a multi-line draft, an expanded Todo panel, a dock summary, queue rows
+   * or the busy indicator — and the widget rows are the lowest-priority
+   * pinned decoration: a grant derived from a shorter chrome would push the
+   * footer (and the transcript) out of the viewport.
+   *
+   * Narrow by construction: one integer compare on the steady state, and a
+   * scroll frame cannot change any chrome row, so this never re-budgets on
+   * scroll. It is driven by the two places that own the live chrome: the
+   * editor's own onChange (the live draft height, which never reaches
+   * TuiApp.requestRender) and the geometry sync (every app-driven chrome
+   * render ends in a render request). */
+  private syncLiveWidgetBudget(): void {
+    if (this.fullscreen === undefined || this.extensionHost === undefined) return
+    const width = Math.max(1, this.terminal.columns)
+    if (this.protectedChromeRows(width) === this.lastWidgetBudgetChromeRows) return
+    this.renderWidgets()
   }
 
   /** Footer density presets: full keeps the stats line, compact drops it. */
