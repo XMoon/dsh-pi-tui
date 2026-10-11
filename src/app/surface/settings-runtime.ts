@@ -498,8 +498,9 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     deps.surface.app.onTerminalThemeChange((theme) => {
       if (deps.tuiSettings?.get().theme === 'auto') deps.surface.app.applyTheme(theme)
     })
-    // Ask for DSR 996 once: xterm-class terminals only start reporting
-    // scheme changes after being queried.
+    // Enable Mode 2031 on the screens: the terminal reports live scheme
+    // changes only while the mode is set. The boot sample above is the only
+    // color query — tracking does not sample again.
     deps.surface.app.trackTerminalTheme(true)
   } else if (storedTheme === 'dark' || storedTheme === 'light') {
     deps.surface.app.applyTheme(storedTheme)
