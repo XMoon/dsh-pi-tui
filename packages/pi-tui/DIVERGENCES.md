@@ -1305,7 +1305,7 @@ Repeated measureWidth calls should reuse the maximum visible line width for a co
 
 - packages/pi-tui/test/layout.test.ts: indirect measure and scrollbar layout correctness
 - packages/pi-tui/test/render-churn-bench.ts: total layout/render churn with representative workload
-- Missing direct measure-count/cache-hit, invalidation, and cache-versus-no-cache performance assertion
+- docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_LAYOUT_CACHE, 21 paired rounds per width 80/120/160: paired medians 0.92x-1.05x with sign tests 4/21-13/21 (no robust direction) and the aliased best case only 1.03x-1.10x, so the fixed 5%/10% retirement thresholds are NOT_PROVEN and the verdict is INCONCLUSIVE; instrumented measureWidth counters: host tree 0 calls, extension-shaped auto stack exactly 1 call per (component,width) pair per frame, aliased 3.0/2.0 calls per pair per frame
 
 #### Upstream comparison
 
@@ -2983,7 +2983,7 @@ Steady transcript frames should process only changed rendered line values. The h
 - packages/pi-tui/test/tui-render.test.ts: equal primitive-line frame and steady-frame performance regression
 - packages/pi-tui/test/render-preprocess-bench.ts: 1k-10k line benchmark
 - test/rendering.test.ts: indirect host component-array stability only; it does not prove main-screen cache identity
-- Missing direct cache invalidation, cold/cached equivalence, image-ID alignment, and instrumentation assertions
+- docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_RAW_REUSE, 9 rounds x 11 workloads on the real Regular path (TuiApp -> TuiMainScreen): every real workload is slower without the fast path in 9/9 rounds (paired median 1.78x-176.8x; steady 10k 153.7x, over-wide rows 176.8x, 1% dirty 8.78x, 100%-dirty control 1.00x); the complete terminal write stream is byte-identical across variants for all 11 workloads incl. kitty line moves, append/shrink and width 80<->120<->160; instrumented probe: 10k steady = 10,014 lines processed and 130,000 reused over 14 frames, 0 reused at 100% dirty, asciiVisibleWidthEarlyExit 1-2% of preprocessing time
 
 #### Upstream comparison
 
@@ -3301,7 +3301,7 @@ CJK-heavy host transcripts and width/theme invalidation bursts are intended to b
 
 - packages/pi-tui/test/layout.test.ts and wrap-ansi.test.ts: width correctness
 - packages/pi-tui/test/render-preprocess-bench.ts: X035 render benchmark with incidental CJK workload
-- Missing isolated 4096-vs-512 cache-size assertion and reproducible CJK burst benchmark
+- docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE(4096) vs W512, 7 interleaved rounds: the warm CJK working sets are 1.89x (1024 strings) and 1.96x (4096 strings) slower at 512, plain long CJK 1.78x, wrapped-transcript pass 59.6x (workload-specific), with the insensitive controls ASCII fast path 0.99x and the 8192-string superset 0.97x; instrumented cache counters show 100% warm-pass hits at 4096 vs 0% at 512 for the 1024/4096 working sets
 
 #### Upstream comparison
 
