@@ -6192,7 +6192,15 @@ export class TuiApp {
         // The busy indicator row sits directly above the editor border
         // (pi's statusContainer placement); idle it renders zero rows.
         { component: this.working, shrink: 0 },
+        // PR-D Stable widget parity: the SAME Host-owned widget Texts that
+        // ride the regular document also ride this pinned stack, directly
+        // around the seat (above between working and the seat, below
+        // between the seat and the footer). Their grant comes from
+        // renderWidgets() and may be ZERO — an empty Text occupies no row,
+        // so a compensated fullscreen simply shows no widget zone.
+        { component: this.widgetsAbove, shrink: 0 },
         { component: this.editorSeat, shrink: 0 },
+        { component: this.widgetsBelow, shrink: 0 },
         { component: this.footer, shrink: 0 },
       ])
       alt.setLayoutRoot(root)
@@ -6291,6 +6299,14 @@ export class TuiApp {
     }
     // The surface slice tracks the mode switch (plan §7.1).
     this.extensionHost?.updateSurface({ fullscreen: enabled })
+    // PR-D: the widget zones are mounted on BOTH roots, but the protected
+    // pinned chrome differs per root — re-budget them for the surface that
+    // is now the active physical owner, even when the terminal geometry did
+    // not change. Runs with `this.fullscreen` AND the surface slice already
+    // updated (the outlet refresh can synchronously request a repaint), and
+    // BEFORE the footer/status projection below so the footer is composed
+    // against the FINAL widget row count.
+    this.renderWidgets()
     // M0: the unified status surface section follows the mode switch.
     this.projectSurface({ fullscreen: enabled })
     // The screen swap re-established focus (or re-mounted the approval
@@ -16525,10 +16541,15 @@ export class TuiApp {
     // outlet is bounded by the terminal width inside its own refresh.
     this.renderHeader()
     this.renderViewerSubjectBar()
-    this.renderFooter()
     this.renderDock()
     this.renderGoalLine()
+    // PR-D: the pinned chrome above the footer (header, subject bar, dock,
+    // goal line) is rebuilt FIRST, then the widget zones are budgeted against
+    // it, and only then is the footer composed — its fullscreen physical
+    // budget measures the granted widget rows, so composing it before the
+    // zones would keep a stale (taller) footer on the first paint.
     this.renderWidgets()
+    this.renderFooter()
     this.requestRender()
   }
 
@@ -17111,13 +17132,23 @@ export class TuiApp {
   }
 
   /**
-   * Rebuild the M4 widget zones around the editor seat. The host owns the
-   * row budget (plan §19 — minimum editor usability always wins): the above
-   * zone gets a fixed budget, the below zone gets the remaining rows before
-   * the footer. An empty zone renders NOTHING (the fork's emptied-pane quirk
-   * means an empty Text would keep its old rows — the outlet text is
-   * rewrittten wholesale on every refresh, and an empty text hides the
-   * zone).
+   * Rebuild the M4 widget zones around the editor seat on the ACTIVE
+   * physical root. The host owns the row budget (plan §19 — minimum editor
+   * usability always wins): the above zone gets a fixed budget, the below
+   * zone the rows between the seat and the footer. An empty zone renders
+   * NOTHING (the fork's emptied-pane quirk means an empty Text would keep
+   * its old rows — the outlet text is rewrittten wholesale on every refresh,
+   * and an empty text hides the zone).
+   *
+   * PR-D: the zones are mounted on BOTH roots. The REGULAR document is a
+   * flowing surface, so its grants stay the historical ones. The FULLSCREEN
+   * root is a fixed-height pinned stack whose chrome can clip the editor or
+   * the footer, so there the zones are the LOWEST-priority pinned
+   * decoration: their grant is bounded by the space left after the
+   * protected pinned chrome, the full supported footer capacity and one
+   * transcript row, and it may fall to ZERO. The physical grant is derived
+   * here and nowhere else — the footer keeps its own composer budget
+   * function.
    */
   private renderWidgets(): void {
     const host = this.extensionHost
@@ -17127,18 +17158,51 @@ export class TuiApp {
       this.requestRender()
       return
     }
-    // Host-owned budgets (plan §19): the above zone gets a fixed 3 rows,
-    // the below zone the rows between the seat and the footer (a footer
-    // recovery/status line always survives — the plan's height priority).
-    const width = Math.max(1, this.terminal.columns)
-    const belowBudget = Math.max(1, Math.min(3, Math.max(1, Math.floor(this.terminal.rows / 4))))
-    host.setWidgetRowsAbove(3)
-    host.setWidgetRowsBelow(belowBudget)
-    const above = host.widgetsAboveText()
-    const below = host.widgetsBelowText()
-    this.widgetsAbove.setText(above)
-    this.widgetsBelow.setText(below)
-    void width
+    const rows = Math.max(1, this.terminal.rows)
+    const belowMax = Math.max(1, Math.min(3, Math.max(1, Math.floor(rows / 4))))
+    let aboveGrant = 3
+    let belowGrant = belowMax
+    if (this.fullscreen !== undefined) {
+      const width = Math.max(1, this.terminal.columns)
+      // The protected pinned chrome is EXACTLY the set
+      // footerPhysicalLineBudget() measures for the same root, minus the
+      // widget zones themselves (they are what this budget decides).
+      let fixed = 0
+      for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
+        fixed += chrome.render(width).length
+      }
+      // Reserve the FULL supported footer capacity plus the one-row
+      // transcript minimum before admitting a widget row (plan §3.1). The
+      // reservation is deliberately conservative: the composer still renders
+      // only its actual demand, so an unused reservation simply stays with
+      // the transcript.
+      const widgetRoom = Math.max(0, rows - fixed - FOOTER_MAX_PHYSICAL_LINES - 1)
+      if (widgetRoom === 0) {
+        aboveGrant = 0
+        belowGrant = 0
+      } else {
+        // Two-pass projection (plan §3.2): ask the REAL outlet for its
+        // bounded maximum, measure the PHYSICAL rows it would paint, then
+        // grant only that demand — above first, so a below-only widget still
+        // uses scarce room. `hasWidgets*()` is a visible-text predicate and
+        // is false at a previous ZERO grant: it must never be used to
+        // discover prospective demand (that would strand a hidden widget
+        // after a resize).
+        const widgetRows = (text: string): number => (text === '' ? 0 : text.split('\n').length)
+        host.setWidgetRowsAbove(3)
+        host.setWidgetRowsBelow(belowMax)
+        const aboveDemand = widgetRows(host.widgetsAboveText())
+        const belowDemand = widgetRows(host.widgetsBelowText())
+        aboveGrant = Math.min(3, aboveDemand, widgetRoom)
+        belowGrant = Math.min(belowMax, belowDemand, Math.max(0, widgetRoom - aboveGrant))
+      }
+    }
+    // Issue the FINAL grants through the same setters and project the FINAL
+    // outlet text (a no-op refresh when the preview grant already matched).
+    host.setWidgetRowsAbove(aboveGrant)
+    host.setWidgetRowsBelow(belowGrant)
+    this.widgetsAbove.setText(host.widgetsAboveText())
+    this.widgetsBelow.setText(host.widgetsBelowText())
     this.requestRender()
   }
 
@@ -17371,11 +17435,11 @@ export class TuiApp {
    * - measuring via each component's own `render(width)` is the SAME
    *   pattern the mouse hit-map uses, so the measurement always matches
    *   what the layout actually paints;
-   * - widget zones are fullscreen-inactive and the REGULAR surface is a
-   *   flowing document (overflow enters the terminal scrollback; the
-   *   footer is never viewport-clipped there) — so the regular surface
-   *   always grants the FULL capacity, and only fullscreen's pinned
-   *   chrome rows are measured;
+   * - the REGULAR surface is a flowing document (overflow enters the
+   *   terminal scrollback; the footer is never viewport-clipped there), so
+   *   it always grants the FULL capacity and only fullscreen's pinned chrome
+   *   rows are measured — on fullscreen the widget zones are pinned rows
+   *   above the footer and are measured here too (PR-D);
    * - the command surface consumes the same effective total through
    *   mergeCommandSurface (instruction reserves first, trusted rows keep
    *   the remaining slots in order).
@@ -17391,9 +17455,10 @@ export class TuiApp {
     // (shrink: 0) chrome rows around a shrinkable ScrollView — that is
     // the layout that can clip the footer's own bottom rows, so only it
     // gets a dynamically shrunk budget: terminal height minus every
-    // pinned chrome row ABOVE the footer. The widget zones exist ONLY on
-    // the regular surface (the fullscreen root does not mount them) and
-    // are never measured here.
+    // pinned chrome row ABOVE the footer. The widget zones are mounted on
+    // BOTH roots (PR-D): on fullscreen they are pinned rows directly above
+    // this budget's consumer and MUST be measured here, or a granted
+    // widget row would silently eat into the footer's capacity.
     //
     // The REGULAR surface is a flowing document (sequential Container):
     // overflow pushes into the terminal scrollback and the footer stays
@@ -17404,7 +17469,7 @@ export class TuiApp {
       return { perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW, total: FOOTER_MAX_PHYSICAL_LINES }
     }
     let used = 0
-    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.editorSeat]) {
+    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.widgetsAbove, this.editorSeat, this.widgetsBelow]) {
       used += chrome.render(width).length
     }
     return {
@@ -18890,11 +18955,16 @@ export class TuiApp {
     this.extensionHost?.refreshOutlets()
     this.renderHeader()
     this.renderViewerSubjectBar()
-    this.renderFooter()
     this.renderDock()
     this.renderTodoPanel()
     this.renderGoalLine()
     this.renderQueuePane()
+    // PR-D: the widget zones are budgeted against the chrome ABOVE them, and
+    // the footer's fullscreen physical budget measures the granted widget
+    // rows — recompute the zones after that chrome and compose the footer
+    // LAST (the same order refreshChrome keeps on every invalidation).
+    this.renderWidgets()
+    this.renderFooter()
     this.working.refresh()
     this.editor.invalidate()
     this.requestRender()
