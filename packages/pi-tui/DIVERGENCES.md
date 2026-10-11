@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `c21f490b78ca89e6c0f78a046178bd754229c571`
+- Audited local source commit: `3214e82a76b541b47725483a72e3f24b6df764a4`
 - Branch audited: `chore/pi-tui-v1.1.0-revendor`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
@@ -84,8 +84,8 @@
 
 ## Summary
 
-- Records: 60
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 49, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 2
+- Records: 61
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 49, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 2, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -97,7 +97,7 @@
 | X005 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | PARTIAL |
 | X006 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X007 | ACTIVE | CRITICAL | HARD_HOST_API, PUBLIC_COMPONENT_CONTRACT | NO |
-| X008 | ACTIVE | HIGH | BUGFIX_MISSING_UPSTREAM | NO |
+| X008 | SUPERSEDED | HIGH | BUGFIX_MISSING_UPSTREAM | YES |
 | X009 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X010 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X011 | ABSORBED_UPSTREAM | MEDIUM | BUGFIX_MISSING_UPSTREAM | YES |
@@ -149,6 +149,7 @@
 | X057 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X058 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 | X059 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
+| X060 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -798,9 +799,9 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted. Re-audited after the v0.85.1 mouse-parity pass: the Model/Effort async submenu ownership chain is closed by external disposal. Re-verified for the v1.1.0 re-vendor (abe508e1): the Box/Container/SettingsList disposal seams are untouched upstream and the transplant kept every dispose exactly-once guard.
 
-### X008 — Serialized terminal color queries with late-reply tombstone
+### X008 — Serialized terminal color queries with a late-reply tombstone (retired)
 
-- Status: `ACTIVE`
+- Status: `SUPERSEDED`
 - Category: `BUGFIX_MISSING_UPSTREAM`
 - Risk: `HIGH`
 - Files: `src/tui.ts`
@@ -809,79 +810,80 @@ The host owns timers, callbacks, child components, submenu slots, and overlay le
 
 #### Why it exists
 
-OSC color replies carry no request id, so a reply that arrives after its query timed out cannot be paired by content. Upstream v1.1.0 writes the full OSC 10/11/4 + DA1 burst on every queryTerminalColors call, so a late reply to a timed-out query can be attributed to a later query. The fork writes at most one query at a time: a timed-out query stays the tombstone on the wire until its DA1 sentinel arrives, and only then is the next waiting query written.
+The fork serialized the upstream full color query so a late reply could never be attributed to a later query, and ended each burst with its own sentinel. Both halves are retired: the external review of PR #272 showed the DA1 sentinel shared ProcessTerminal's keyboard-negotiation accounting (X016) and a later DSR 6/CPR sentinel collided with the legacy modified-F3 key encoding. The host never needed the full transaction (it reads only the background), so the serialization, tombstone, sentinels and the DA-debt window were deleted and the whole full-query region of packages/pi-tui/src/tui.ts restored to upstream verbatim; the host uses the narrow OSC 11 observation instead (X060).
 
 #### Changed surface
 
-- queryTerminalColors keeps the upstream mechanism (OSC 10/11/4 burst, FIFO queue, onLateReply, timeout tombstone) but writes the burst only when the wire is free (pumpTerminalColorQueries / terminalColorQueryWritten)
-- the burst is ended by a device status report (DSR 6, `CSI 6 n`) request instead of upstream's DA1 request: ProcessTerminal consumes DA replies for its own keyboard-negotiation accounting (X016), so a DA1 sentinel can be eaten by that layer after a stop/restart and would leave the serialized wire blocked forever
-- a DA1 is therefore always a protocol reply at this layer, never input and never this consumer's sentinel: an unowned one is swallowed instead of forwarded (upstream forwards it, where the Host input path reads it as user activity)
-- a well-formed OSC 10/11/4 reply and the cursor-position report that ends the same burst are swallowed even when this screen has no query pending (a reply for a query issued before a fullscreen swap or stop must never reach the input pipeline as typed input)
-- a query that times out while an earlier query still owns the wire was never written and is dropped from the queue (no stale burst after it settled, and no unbounded pending-query retention on a terminal that never answers the sentinel)
-- a timed-out head query stays the outstanding tombstone until its sentinel arrives; a late reply is delivered to its own query's deliver/onLateReply callback and can never be attributed to a later query
+- retired: queryTerminalColors wrote at most one outstanding burst (terminalColorQueryWritten / pumpTerminalColorQueries)
+- retired: a timed-out head query stayed the outstanding tombstone until its sentinel arrived, and a query that timed out behind it was dropped as never written
+- retired: the burst ended with a fork sentinel (a DA1 request, then a DSR 6 request) instead of upstream's DA1, with DEVICE_ATTRIBUTES_DEBT_TIMEOUT_MS bounding the keyboard-negotiation debt
+- retired: an unowned OSC color reply, a cursor-position report and a DA1 were swallowed at the TUI layer
 
 #### Dependency map
 
 **Vendor internal**
-- TuiBase query queue, timeout callback, response classifier, and reply counter are one protocol state machine.
-- Audit note: Queue and counter order cannot be changed independently.
+- No vendor code calls the retired serialization helpers: pumpTerminalColorQueries/terminalColorQueryWritten were private to TuiBase and were deleted with it.
+- ProcessTerminal keeps upstream's DA1 consumption and stop/restart semantics (X016); the DA-debt deadline that only existed for X008 was deleted with it.
+- Audit note: The retirement removed private helpers only; no vendor-internal consumer remained.
 
 **Inheritance / structural**
-- TuiBase is shared by regular and alternate screens.
-- Audit note: Both screens inherit the protocol handling path.
+- None found (audited).
+- Audit note: The serialization introduced no inheritance edge; TuiMainScreen and TuiAltScreen inherit queryTerminalColors from TuiBase either way.
 
 **Host**
-- src/tui-app.ts TuiApp.runAutoDetect issues OSC 11 background queries
-- src/theme.ts provides palette/detection helpers but does not own the query
-- Audit note: The query is issued by the host app and routed through the active screen; theme.ts is recorded only as a helper boundary.
+- TuiApp no longer calls queryTerminalColors at all: runAutoDetect uses queryTerminalBackgroundColor (X060), and trackTerminalTheme only toggles Mode 2031.
+- Audit note: The host was the only local consumer of the serialized full query; its theme path now uses the narrow seam.
 
 **Public / extension**
-- None found (audited).
-- Audit note: No extension directly owns terminal protocol replies.
+- queryTerminalColors stays public and upstream-verbatim (OSC 10/11/4 + DA1, FIFO attribution, onLateReply); a consumer that needs the foreground or the palette still uses it, now with upstream's semantics instead of the fork's serialized ones.
+- Audit note: The retirement removes a fork-specific guarantee from a public method, not the method or its return shape.
 
 **Behavioral coupling**
-- a sole late timed-out reply is swallowed by its tombstone and never resolves a different query
-- background autodetect remains ordered across retries
-- a terminal that never replies leaves the tombstone in place: every waiting query settles on its own referenced timeout (by-design liveness tradeoff — no future query is sent until the tombstone is consumed)
-- Audit note: Serialization removes the protocol ambiguity (a reply always pairs with the single in-flight query or its tombstone) at the cost of blocking later queries while a timed-out query awaits its late reply; that tradeoff is deliberate and documented.
+- input hygiene for OSC 11 replies is now owned by the narrow seam on screens that use it (X060); other color replies follow upstream again
+- the keyboard-negotiation DA accounting is back to upstream's unbounded count pairing (X016)
+- Audit note: Both behavioral changes are deliberate and are pinned by the X060 tests plus the upstream suite.
 
 #### Guarding tests
 
-- packages/pi-tui/test/osc11-query.test.ts: at most one color query is written while an earlier query is outstanding, and the next query is written only after the DSR 6 sentinel
-- packages/pi-tui/test/osc11-query.test.ts: a late reply is swallowed (never forwarded as input) and is delivered to its own query's onLateReply, never to a later concurrent query
-- packages/pi-tui/test/osc11-query.test.ts: a DA1 never ends a color query, never frees the wire and never reaches the input listeners; a query that times out while an earlier query owns the wire is never written; a stray reply, sentinel or DA1 with no pending query is not forwarded (mutation-checked)
-- packages/pi-tui/test/terminal-colors.test.ts: the queryTerminalColors contract on the fork's sentinel (single burst ending in `CSI 6 n`, DSR 6 completion, incomplete palette dropped, late replies after a timeout)
-- packages/pi-tui/test/terminal.test.ts: ProcessTerminal -> TuiBase cross-layer guard - a lost DA1 from a previous session does not eat the next color-query sentinel, the wire stays free and the query still completes (mutation-checked)
-- test/rendering.test.ts: trackTerminalTheme queries the terminal colors once, derives the scheme from the reported background, and re-queries after disable
-- test/rendering.test.ts: autoDetectTheme applies the detected theme through the ACTIVE screen in fullscreen mode
+- retired: packages/pi-tui/test/terminal-colors.test.ts now runs the upstream v1.1.0 suite verbatim against the restored implementation (no DSR/CPR sentinel, no write serialization)
+- retired: the retired serialization/sentinel tests (osc11-query.test.ts and the DA1 cross-layer describe in terminal.test.ts) were deleted rather than left asserting a mechanism that no longer exists
+- replacement coverage: the host-visible behavior the retirement kept lives in packages/pi-tui/test/terminal-background-query.test.ts (X060) and test/rendering.test.ts (X060)
 
 #### Upstream comparison
 
 - Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
-- Semantic equivalence: `NO`
+- Semantic equivalence: `YES`
 - Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Relevant upstream files:
 - packages/tui/src/tui.ts
+- packages/tui/src/terminal.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream v1.1.0 (abe508e1) writes a full color-query burst per call and attributes replies FIFO to the oldest pending query, so a late reply to a timed-out query can be attributed to a later one; its burst sentinel is a DA1 that ProcessTerminal's keyboard-negotiation accounting (X016) may consume. The fork adds the serialized write and a DSR 6 sentinel that no other layer claims, swallows DA replies instead of forwarding them, and keeps the upstream API, queue and timeout tombstone.
+- Remaining semantic delta: The full-query region of packages/pi-tui/src/tui.ts is upstream v1.1.0 verbatim: one OSC 10 + OSC 11 + OSC 4 x16 burst ending in a DA1 request, FIFO attribution to the oldest pending query, and late replies delivered to onLateReply. Only the narrow background observation (X060) is local, and it never writes the full transaction.
 
 #### Retirement conditions
 
-- Retire only after upstream proves the same timeout, late-reply, per-query attribution, retry, and active-screen ordering semantics with protocol tests.
+- Delete the serialization/sentinel machinery rather than re-tuning it, restoring the upstream tui.ts full-query region and the upstream terminal.ts DA consumption verbatim.
+- Move the host's theme detection onto a narrow OSC 11 observation, so the retired transaction has no local consumer.
+- Keep the upstream full-query tests verbatim and replace the retired-scenario tests with the narrow seam's own tests before changing the status.
 
 #### Replacement mapping
 
-- None recorded.
+- full-query write serialization + fork sentinel -> retired; upstream queryTerminalColors is used verbatim (test: packages/pi-tui/test/terminal-colors.test.ts)
+- host theme detection over the full transaction -> X060 narrow OSC 11 background observation (test: packages/pi-tui/test/terminal-background-query.test.ts and test/rendering.test.ts)
+- keyboard-negotiation DA debt window -> upstream X016 count pairing, unbounded (test: packages/pi-tui/test/terminal.test.ts)
 
 #### Retirement evidence
 
-- None recorded.
+- packages/pi-tui/src/tui.ts full-query region and terminal.ts negotiation handler diff clean against the pinned upstream abe508e1 snapshot
+- fork suite green on the new source (upstream color-query suite included, retired-transaction tests deleted)
+- root bundle typecheck + product suite green with the host on the narrow seam
+- pi-vendor-diff --strict, pi-divergence-ledger and pi-surface-compat gates green on the new source
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Re-audited at v1.1.0 (abe508e1): the mechanism moved from the local serialized OSC 11 API to a serialization guard on the upstream queryTerminalColors mechanism, and the Host migrated to queryTerminalColors. The obsolete queryTerminalBackgroundColor/queryTerminalColorScheme seam is removed (upstream removed it); no removed public API was resurrected. Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used. Round-1/round-2 review follow-ups restored the never-written timed-out query drop, the unmatched-reply swallow and the DA1 swallow. External review follow-up (PR #272, Finding 1): the burst sentinel was decoupled from DA1 to a DSR 6 report because the shared sentinel let a lost or stale keyboard-negotiation DA consume the color wire's end marker; a two-layer ProcessTerminal -> TuiBase guard, a sentinel-format assertion and a 'a DA1 never ends a color query' guard were added (all mutation-checked).
+- Notes: Retired in PR #272 after the external review: the CPR/F3 blocker is closed by deleting the CPR consumption logic, and the DA1 cross-layer blocker by the host no longer issuing a full query. The record is kept as history; it must not be read as a claim that upstream's full query was fixed.
 
 ### X009 — No stray spacer blank on the final row when exiting
 
@@ -5049,3 +5051,88 @@ Tern derives an Agent 'waiting_input' state from OSC 9;4 'paused' (9;4;4), which
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Re-audited the whole OSC 9;4 physical state machine after the heartbeat convergence and the working-encoding change. The three-state LOGICAL projection is unchanged (clear / unknown-progress working / paused); its WORKING physical payload is now OSC 9;4;1;0 instead of 9;4;3, so the boolean contract no longer keeps its exact working bytes (it keeps one write per explicit call, its true->indeterminate / false->clear mapping and the clear payload). The paused state is optional and consumed by the Tern ANSI path only, and the widened lifecycle rule (stop() clearing a physically paused state) is unchanged. The previous universal 1 s active refresh was narrowed to terminals known to expire OSC 9;4 state (Ghostty / Monstar); persistent terminals including Tern are one-shot. The host-side consumer contract is THREE inputs (main-Agent running + canonical RunPhase + the lifecycle-owned agentInputWait) plus the terminalProgress presentation gate: a re-vendor or retirement audit must keep the third input, never collapse it back to the phase alone, and must not let the gate become a second Agent-state authority.
+
+### X060 — Narrow OSC 11 background observation for the host's Theme: auto
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`
+- Last audited: `2026-10-11`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The host decides Dark/Light from the terminal's default BACKGROUND only. Upstream's queryTerminalColors writes a full OSC 10 + OSC 11 + OSC 4 x16 transaction and needs a sentinel to know when a burst ended; the fork instead exposes one narrow OSC 11 observation, so the host never issues the full transaction, never depends on a sentinel that another layer could claim or that a key could imitate, and never leaves a timed-out query holding the wire. Upstream's full API stays available verbatim for consumers that need the foreground or the palette.
+
+#### Changed surface
+
+- TUI.queryTerminalBackgroundColor({ timeoutMs }) (TuiBase implementation) returning Promise<RgbColor | undefined>
+- exactly one OSC 11 query (`ESC ] 11 ; ? BEL`) per observation: no OSC 10, no OSC 4 palette, no DA1 and no DSR request
+- one in-flight observation per screen: a concurrent call shares the same promise instead of writing a second query
+- the timeout resolves undefined, and stop() releases the pending observation and its timer so a stopped screen never applies a late result
+- no request-id correlation: the value is an observation of the CURRENT terminal background, not a reply strictly attributable to one request; callers own the still-relevant guard (screen identity, stopped screen, newer explicit choice)
+- from the first call onward, a well-formed OSC 11 reply (including a stray or late one) is consumed at the TUI layer and can never reach the editor or a raw input listener; a screen that never calls the seam keeps upstream's forwarding behavior
+- the narrow seam is served from the same parse as queryTerminalColors, so a concurrent full query still records the reply
+
+#### Dependency map
+
+**Vendor internal**
+- TuiBase owns the in-flight observation; TuiMainScreen and TuiAltScreen inherit it, and ProcessTerminal is untouched (upstream DA/keyboard semantics, X016).
+- Audit note: No vendor-internal caller exists: the seam is consumed by the host through the TUI interface.
+
+**Inheritance / structural**
+- None found (audited).
+- Audit note: No inheritance edge is introduced or relied on; the seam is a TuiBase method like the rest of the interface.
+
+**Host**
+- TuiApp.runAutoDetect observes the ACTIVE screen and drops the result when the active screen changed while it was in flight; Emoji/themeOptOut and shouldApply guards are unchanged.
+- TuiApp.trackTerminalTheme toggles Mode 2031 only and never samples; the boot wiring keeps autoDetectTheme as the single sample.
+- Audit note: The host is the primary consumer; the narrow seam replaced its use of the full transaction.
+
+**Public / extension**
+- The accessor is part of the public TUI interface (structural types only) and resolves to RgbColor | undefined, so no internal class or terminal object leaks.
+- Audit note: Additive public surface; upstream's queryTerminalColors contract is unchanged.
+
+**Behavioral coupling**
+- one query and one reply per observation; coalesced concurrent calls; bounded timeout; stop() releases the pending resolver and timer
+- OSC 11 replies are consumed on screens that use the seam, while ordinary keys, modified keys (e.g. legacy Shift+F3 `CSI 1;2R`) and other color replies still flow
+- Audit note: The seam intentionally does not implement per-request pairing; that limit is documented on the API and pinned by a test.
+
+#### Guarding tests
+
+- packages/pi-tui/test/terminal-background-query.test.ts: one OSC 11 query and no OSC 10/4/DA1/DSR traffic; coalesced concurrent calls; timeout then a consumed late reply; a late reply after a new observation counts as the current observation; stop() releases the pending observation; ordinary and modified keys plus other color replies still flow; a concurrent full query still records the reply
+- test/rendering.test.ts: Theme auto observes only the OSC 11 background (bright -> light, dark -> dark), COLORFGBG fallback, silent-terminal no-op, the ACTIVE screen in fullscreen, a swapped-away screen's result is dropped, coalescing, shouldApply refusal, a late reply never reaches the editor, the colour opt-out issues no query, and detection still works after returning from fullscreen
+- test/rendering.test.ts: Mode 2031 follows the tracking choice across a Main/Fullscreen switch, and tracking never samples the terminal
+- test/settings-theme-boot.test.ts: the boot wiring samples once through autoDetectTheme, enables tracking without sampling, and a live scheme report only changes the theme while the preference is auto
+- packages/pi-tui/test/terminal-colors.test.ts: the upstream full-query suite stays verbatim and green next to the narrow seam
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- packages/tui/src/tui.ts
+- packages/tui/src/terminal-colors.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream has no background-only accessor: queryTerminalColors writes the OSC 10 + OSC 11 + OSC 4 x16 burst plus a DA1 request, attributes replies FIFO to the oldest pending query, and forwards unowned color replies to the input pipeline. The fork keeps that method verbatim and adds the narrow observation, which writes one OSC 11 query, coalesces per screen, resolves undefined on timeout or stop, and consumes OSC 11 replies on screens that use it.
+
+#### Retirement conditions
+
+- Upstream gains a background-only accessor with the same host-visible guarantees (coalescing, bounded timeout, input isolation).
+- Or the host stops needing terminal background detection.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced in PR #272 as the replacement for the retired X008 serialization. Scope checked against both screens, the host boot/track wiring, the shared TUI color consumer parse order, the upstream full-query suite, and the modified-key input path.
