@@ -16,8 +16,9 @@
  *   pane quirk — an outlet rebuild always rewrites the full text);
  * - a throwing contribution is recorded in the health ledger and omitted
  *   (per-contribution isolation, plan §18);
- * - a theme switch re-bakes (the compiled components read the palette at
- *   render time, and the outlet re-renders on themeRevision change).
+ * - the compiled nodes are reused across refreshes and are recompiled once
+ *   when the theme revision changes (the compiler bakes the palette's ANSI
+ *   at compile time, so a reused tree would keep the OLD theme).
  * @module @xmoon76/dsh-pi-tui/extension/widget-outlet
  */
 
@@ -55,12 +56,14 @@ export class WidgetOutlet {
   private rowBudget = 3
   private textValue = ''
   /** P2-03: compiled nodes cached by contribution IDENTITY — a refresh
-   * (revision/width/theme change) reuses the SAME compiled tree for an
+   * (revision/width change) reuses the SAME compiled tree for an
    * unchanged contribution instead of recompiling every pass (the
    * compiler contract promises reference-stable trees; the cache makes
    * the promise real). Invalidation: the ledger revision bumps on every
    * register/replace/dispose, so a stale identity key never survives a
-   * contribution change. The key is the OWNER-SCOPED identity
+   * contribution change, and a themeRevision change clears the whole map
+   * (the compiled ANSI is palette-baked, so the theme revision is the
+   * tree's validity boundary). The key is the OWNER-SCOPED identity
    * (`owner\0id` — the ledger allows two owners to share a local id, and
    * an id-only key would make them overwrite each other's compiled tree
    * on every refresh; the review's P2). */
@@ -95,10 +98,18 @@ export class WidgetOutlet {
     const snapshot = this.ledger.snapshot<InputWidget>(this.slot)
     if (snapshot.revision === this.revision && themeRevision === this.themeRevision
       && width === this.width && rowBudget === this.rowBudget) return
+    const themeChanged = themeRevision !== this.themeRevision
     this.revision = snapshot.revision
     this.themeRevision = themeRevision
     this.width = width
     this.rowBudget = rowBudget
+    // PR-D: the compiled-view cache is valid WITHIN one themeRevision. The
+    // compiler bakes the palette's ANSI at COMPILE time (its render() only
+    // re-wraps), so reusing a node across a theme switch would keep painting
+    // the old palette. A theme switch therefore drops the tree once and
+    // recompiles it; every other refresh keeps the identity cache, and the
+    // registration lifecycle is untouched (the ledger still owns it).
+    if (themeChanged) this.compiledNodes.clear()
     const contentWidth = Math.max(1, width)
     // Compile (or reuse) each contribution; a throwing compile is recorded
     // and the contribution omitted. P2-03: an unchanged contribution's
@@ -157,7 +168,7 @@ export class WidgetOutlet {
     // importance until the total fits; keep at least one widget; then cap
     // each remaining widget to its declared maxHeight (truncate rows from
     // the BOTTOM so the leading content survives).
-    const budget = Math.max(1, rowBudget)
+    const budget = Math.max(0, rowBudget)
     const totalOf = (list: readonly WidgetEntry[]): number => list.reduce((sum, entry) => sum + entry.height, 0)
     let kept = entries
     // A declared maxHeight is a HARD cap, applied regardless of the row
@@ -169,6 +180,20 @@ export class WidgetOutlet {
         entry.rows = entry.rows.slice(0, entry.maxHeight)
         entry.height = entry.rows.length
       }
+    }
+    // A ZERO (or negative) host grant is an explicit empty physical
+    // projection: the zone retires completely instead of flooring at one
+    // row. The keep-one-widget rule is a POSITIVE-budget rule only — it must
+    // never force a row into a zone the host granted no space on (plan §3.1:
+    // widgets are the lowest-priority pinned decoration and yield before the
+    // editor, the footer and the minimum transcript viewport). The registered
+    // contributions are untouched: the ledger still owns them, and a later
+    // positive grant reappears through the cached compiled nodes measured
+    // above.
+    if (budget <= 0) {
+      this.textValue = ''
+      this.sink.requestRender()
+      return
     }
     if (totalOf(kept) > budget) {
       const byImportance = [...kept].sort((a, b) => a.importance - b.importance)
