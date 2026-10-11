@@ -88,6 +88,22 @@ repository-private imports.
 | Managed overlay | `showOverlay(view, options)` | (always available) | M8 |
 | Editor replacement | `registerEditor(...)` | (always available) | M9 |
 
+**Stable widget layout (M4 / Phase 3A PR-D).** `input.widget.above` /
+`input.widget.below` contributions are passive, display-only rows. The SAME
+registered contribution renders on both the regular document and the
+fullscreen surface, in the same above/below relationship to the editor seat,
+from one `ExtensionLedger` registration — the host mounts one pair of Text
+rows, never a per-screen copy. The host owns the row grant and the widget
+zones are the LOWEST-priority pinned decoration on the fixed-height
+fullscreen layout: their effective grant falls to **zero** before the editor,
+the footer or the minimum one-row transcript viewport loses space. A zero
+grant hides the rows physically; it never removes the registration, so a
+later resize or a taller surface repaints the same contribution without
+re-registering. Widgets never take keyboard focus or mouse targets, keep
+their registered ordering/importance inside the granted zone, and re-bake
+their palette on a theme switch. An empty zone paints no row at all. Public
+signatures are unchanged.
+
 **Keybinding registration contract (M6).** `registerKeybinding` accepts
 a normalized key (never raw terminal bytes) + one of the PUBLIC semantic
 actions (`submit-draft`, `queue-draft`, `steer-draft`,
