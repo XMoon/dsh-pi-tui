@@ -150,17 +150,28 @@ function outlet(host: SurfaceHost, zone: 'above' | 'below'): string {
   return strip(zone === 'above' ? host.widgetsAboveText() : host.widgetsBelowText()).trimEnd()
 }
 
+/** One SGR primary press+release at 1-based screen coordinates (the fork's
+ * fullscreen click path). */
+function click(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}M`)
+  vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
 function rowsWith(lines: readonly string[], needle: string): number[] {
   return lines.map((line, index) => (line.includes(needle) ? index : -1)).filter(index => index !== -1)
 }
 
 /** The row indices of the editor's top and bottom border in the painted
- * viewport. The harness transcript is empty, so the editor border is the only
- * 10-cell `─` run on screen. */
+ * viewport, anchored on the prompt row: the Todo panel draws its OWN border
+ * rule, so a bare "two long `─` runs" search is ambiguous. */
 function editorBounds(lines: readonly string[]): { top: number; bottom: number } {
-  const rows = rowsWith(lines, '─'.repeat(10))
-  assert.equal(rows.length, 2, `expected exactly the editor's two border rows, saw ${rows.length}:\n${lines.join('\n')}`)
-  return { top: rows[0]!, bottom: rows[1]! }
+  const border = '─'.repeat(10)
+  const prompt = lines.findIndex(line => line.includes('❯'))
+  const top = prompt < 0 ? -1 : lines.slice(0, prompt).findLastIndex(line => line.includes(border))
+  const bottom = prompt < 0 ? -1 : lines.findIndex((line, index) => index > prompt && line.includes(border))
+  assert.ok(prompt >= 0 && top >= 0 && bottom > prompt,
+    `the editor's prompt and both borders must be painted:\n${lines.join('\n')}`)
+  return { top, bottom }
 }
 
 function rowAt(lines: readonly string[], index: number): string {
@@ -377,11 +388,20 @@ test('D-T07: a fullscreen 120x40 -> 80x8 -> 200x60 resize sequence retires and r
 
 test('D-T08: a width-only 120 -> 44 resize re-wraps CJK widget content inside the new width', async () => {
   const h = makeHarness(120, 40)
-  registerWidget(h.ledger, 'input.widget.above', 'a1', '上方部件 中文内容 宽度测试 甲')
-  registerRows(h.ledger, 'input.widget.below', 'b1', ['下五行一 中文', '下五行二 中文'])
+  // 120 cells of CJK: ONE physical row at 120 columns and several at 44, so
+  // the outlet row COUNT is the discriminator (a stale 120-column bake would
+  // keep one row).
+  registerWidget(h.ledger, 'input.widget.above', 'a1', '中文部件宽度测试内容'.repeat(6))
+  registerRows(h.ledger, 'input.widget.below', 'b1', ['BELOW-WRAP-ONE', 'BELOW-WRAP-TWO'])
   h.app.setFullscreen(true)
   await settle()
   await h.vt.waitForRender()
+  const cjkRows = (lines: readonly string[]): number[] => lines
+    .map((line, index) => (/[\u4e00-\u9fff]/.test(line) ? index : -1))
+    .filter(index => index !== -1)
+  const wideRows = outlet(h.host, 'above').split('\n')
+  assert.equal(wideRows.length, 1, `the long CJK line must fit one row at 120 columns:\n${wideRows.join('\n')}`)
+  assert.equal(cjkRows(painted(h.vt)).length, 1, 'exactly one painted above widget row at 120 columns')
 
   h.vt.resize(44, 40)
   await settle()
@@ -390,10 +410,15 @@ test('D-T08: a width-only 120 -> 44 resize re-wraps CJK widget content inside th
   for (const line of lines) {
     assert.ok(visibleWidth(line) <= 44, `a painted row exceeded the new width: ${JSON.stringify(line)}`)
   }
-  for (const projected of [outlet(h.host, 'above'), outlet(h.host, 'below')]) {
-    for (const row of projected.split('\n')) {
-      assert.ok(visibleWidth(row) <= 44, `an outlet row exceeded the new width: ${JSON.stringify(row)}`)
-    }
+  const narrowRows = outlet(h.host, 'above').split('\n')
+  assert.ok(narrowRows.length > wideRows.length,
+    `the width change must re-wrap the outlet, saw ${narrowRows.length} rows after ${wideRows.length}:\n${narrowRows.join('\n')}`)
+  for (const row of narrowRows) {
+    assert.ok(visibleWidth(row) <= 44, `an outlet row exceeded the new width: ${JSON.stringify(row)}`)
+  }
+  assert.equal(cjkRows(lines).length, narrowRows.length, 'every re-wrapped row is physically painted')
+  for (const row of outlet(h.host, 'below').split('\n')) {
+    assert.ok(visibleWidth(row) <= 44, `a below outlet row exceeded the new width: ${JSON.stringify(row)}`)
   }
   assert.ok(outlet(h.host, 'above') !== '' && outlet(h.host, 'below') !== '', 'the zones survive the width change')
   editorBounds(lines)
@@ -820,4 +845,127 @@ test('D-T18: the real Stable extension service paints a registered widget on the
       for (const fiber of runtime.fibers) await Promise.resolve(fiber.dispose())
     }
   }
+})
+
+// ── D-T20: LIVE protected-chrome height changes (review F1) ─────────────
+
+test('D-T20: a live multi-line draft re-derives the fullscreen grant instead of clipping the footer', async () => {
+  const h = makeHarness(80, 12)
+  registerRows(h.ledger, 'input.widget.above', 'a1', ['GRANT-ROW-1', 'GRANT-ROW-2', 'GRANT-ROW-3'])
+  registerWidget(h.ledger, 'input.widget.below', 'b1', 'GRANT-BELOW-20')
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'above').split('\n').length, 3, 'the roomy grant starts at three above rows')
+  assertFooterPainted(h, painted(h.vt))
+
+  // A real bracketed paste grows the editor WITHOUT any terminal resize: the
+  // grant derived from the three-row editor is now stale.
+  h.vt.sendInput('\x1b[200~one\ntwo\nthree\nfour\nfive\x1b[201~')
+  await settle()
+  await h.vt.waitForRender()
+  assert.ok(h.app.seatTextForTest().includes('five'), 'the paste reached the editor')
+  assert.equal(outlet(h.host, 'above'), '', 'the above zone yields to the grown editor')
+  assert.equal(outlet(h.host, 'below'), '', 'the below zone yields too')
+  const lines = painted(h.vt)
+  assert.equal(rowsWith(lines, 'GRANT-ROW-1').length, 0, 'no stale widget row survives')
+  const scroll = h.app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.viewportHeight >= 1, `the transcript keeps its minimum row: ${JSON.stringify(scroll)}`)
+  assertFooterPainted(h, lines)
+  assert.equal(h.app.focusSeatForTest(), 'editor')
+
+  // Shrinking the chrome back restores the zones with NO unrelated invalidation.
+  h.app.setEditorText('')
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'above').split('\n').length, 3, 'the grant returns when the chrome shrinks')
+  assert.equal(rowsWith(painted(h.vt), 'GRANT-ROW-3').length, 1, 'the restored grant is physically painted')
+  assertFooterPainted(h, painted(h.vt))
+})
+
+test('D-T20b: a Todo panel expansion in fullscreen re-derives the widget grant', async () => {
+  const h = makeHarness(80, 14)
+  h.app.setTodoSummary([
+    { content: 'first todo', status: 'in_progress' },
+    { content: 'second todo', status: 'pending' },
+  ])
+  registerRows(h.ledger, 'input.widget.above', 'a1', ['PANEL-ROW-1', 'PANEL-ROW-2', 'PANEL-ROW-3'])
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'above').split('\n').length, 3, 'the roomy grant starts at three rows')
+
+  // Opening the panel adds three pinned chrome rows without a resize.
+  assert.equal(h.app.toggleTodoPanel(), true, 'the panel is visible')
+  await settle()
+  await h.vt.waitForRender()
+  const openRows = outlet(h.host, 'above').split('\n').filter(row => row !== '')
+  assert.ok(openRows.length < 3, `the widget zone must yield to the panel, saw ${openRows.length} rows`)
+  assert.equal(rowsWith(painted(h.vt), 'PANEL-ROW-1').length, 1, 'the first granted row is painted')
+  assertFooterPainted(h, painted(h.vt))
+
+  // Closing it restores the roomier grant.
+  assert.equal(h.app.toggleTodoPanel(), false, 'the panel is hidden again')
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(outlet(h.host, 'above').split('\n').length, 3, 'the grant returns when the panel closes')
+  assertFooterPainted(h, painted(h.vt))
+})
+
+// ── D-T21: pointer geometry includes the widget footprint (review F2) ────
+
+test('D-T21: a fullscreen Question option click resolves against the widget footprint', async () => {
+  const h = makeHarness(80, 30)
+  registerWidget(h.ledger, 'input.widget.below', 'b1', 'POINTER-BELOW-21')
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+  const question = h.app.askQuestions([{ id: 'q', question: 'PICK-ONE-21?', options: [{ label: 'OPTION-A' }, { label: 'OPTION-B' }] }])
+  await settle()
+  await h.vt.waitForRender()
+  const lines = painted(h.vt)
+  assert.equal(rowsWith(lines, 'POINTER-BELOW-21').length, 1, `the below widget must be painted:\n${lines.join('\n')}`)
+  const optionRow = rowsWith(lines, 'OPTION-B')[0]
+  assert.ok(optionRow !== undefined && optionRow > 0, `the second option must be painted:\n${lines.join('\n')}`)
+
+  click(h.vt, 10, optionRow + 1)
+  await settle()
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  const answers = await question
+  assert.equal(answers[0]?.selected[0], 'OPTION-B', 'the click selects the option the user pointed at')
+})
+
+test('D-T21b: a widget row is not a fullscreen Todo pointer target', async () => {
+  const h = makeHarness(80, 24)
+  h.app.setTodoSummary([
+    { content: 'first todo', status: 'in_progress' },
+    { content: 'second todo', status: 'pending' },
+  ])
+  assert.equal(h.app.toggleTodoPanel(), true, 'the todo panel is visible')
+  registerWidget(h.ledger, 'input.widget.above', 'a1', 'POINTER-ABOVE-21B')
+  registerWidget(h.ledger, 'input.widget.below', 'b1', 'POINTER-BELOW-21B')
+  h.app.setFullscreen(true)
+  await settle()
+  await h.vt.waitForRender()
+  let lines = painted(h.vt)
+  assert.equal(h.app.isTodoPanelVisible(), true)
+  const widgetRow = rowsWith(lines, 'POINTER-ABOVE-21B')[0]
+  assert.ok(widgetRow !== undefined, `the above widget must be painted:\n${lines.join('\n')}`)
+
+  // Negative: the widget row is passive — it must never resolve to the Todo
+  // target whose (unadjusted) region used to cover it.
+  click(h.vt, 10, widgetRow + 1)
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(h.app.isTodoPanelVisible(), true, `clicking a widget row must not toggle the Todo panel:\n${painted(h.vt).join('\n')}`)
+
+  // Positive control: a real Todo panel row still resolves.
+  lines = painted(h.vt)
+  const todoRows = rowsWith(lines, 'Todo')
+  assert.equal(todoRows.length, 1, `the todo panel title must be painted once:\n${lines.join('\n')}`)
+  click(h.vt, 10, todoRows[0]! + 1)
+  await settle()
+  await h.vt.waitForRender()
+  assert.equal(h.app.isTodoPanelVisible(), false, 'a real Todo panel row still toggles the panel')
 })
