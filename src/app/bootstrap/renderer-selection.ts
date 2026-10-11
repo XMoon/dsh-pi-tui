@@ -32,6 +32,7 @@ export interface RendererSelectionDeps {
   readonly connectTsp: () => Promise<{
     readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
     readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
+    readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
     readonly dispose: () => Promise<void>
@@ -59,6 +60,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
     mount: () => ({
       display: tsp.display,
       composer: tsp.composer,
+      modelPresentation: tsp.modelPresentation,
       interaction: tsp.interaction,
       bindInput: (handlers) => tsp.bindInput(handlers),
       dispose: () => tsp.dispose(),
@@ -91,6 +93,7 @@ export function productionTspConnector(
 ): () => Promise<{
   readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
   readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
+  readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
   readonly dispose: () => Promise<void>

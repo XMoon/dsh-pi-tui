@@ -48,6 +48,7 @@ import type { SessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
+import type { ModelPresentation } from './model-presentation.ts'
 
 /** The catalog capability slice the command surface subscribes to. */
 export interface CommandCatalogCapability {
@@ -119,10 +120,12 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
    * renderer branch no `TuiApp` exists, so this reads `undefined` — never a
    * synthesized placeholder (PR3-B B2-3). The PiTui-only editor/panel sinks
    * below are unreachable there: the post-classification builtin admission
-   * refuses every TUI-owned builtin except the exit pair, so no handler that
-   * dereferences this can run.
+   * refuses PiTui-only builtins. The exit pair and a supported native Model
+   * presenter use their own seams, so no handler that dereferences this runs.
    */
   readonly app: () => TuiApp | undefined
+  /** Only the Model presenter; never an alternate command executor. */
+  readonly modelPresentation?: () => ModelPresentation | undefined
   /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
    *  are background-reachable under a read-only TSP renderer). */
   readonly notify: (text: string, kind?: 'error' | 'info') => void
@@ -667,9 +670,11 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     if (commandsRegistered) return
     commandsRegistered = true
     try {
-      const installed = registerTuiCommands(runner(), initial, {
-        ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }),
-      })
+      const installed = registerTuiCommands(
+        runner(), initial,
+        { ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }) },
+        deps.modelPresentation?.(),
+      )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own
       // registration — later commands still installed. The user sees the

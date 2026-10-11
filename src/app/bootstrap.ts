@@ -1456,6 +1456,7 @@ export function applyRunnerWithRuntime(
       diag,
       signal: lifecycleController.signal,
       app: () => app,
+      modelPresentation: () => surface.modelPresentation,
       // PR3-A: registration/refresh failures are background-reachable under a
       // read-only TSP renderer; the notice goes through the display seam.
       notify: (text, kind) => surface.display.notify(text, kind),
@@ -2179,9 +2180,10 @@ export function applyRunnerWithRuntime(
       // stay available there.
       get supportsLocalShellCards() { return !tspRendererActive },
       // PR3-B B2-3: the TSP renderer has no PiTui builtin panels/pickers, so
-      // a TUI-origin builtin other than /exit//quit is refused at the
-      // post-classification admission. Same live discriminator as above.
+      // Only renderer-supported TUI builtins pass post-classification
+      // admission. The native Model presenter is supplied separately below.
       get supportsTuiBuiltinUi() { return !tspRendererActive },
+      supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       // PR3-B §7.3 (F2): PiTui retains a stale submission's draft restore
       // across a switch (its contract); the TSP renderer's committed switch
       // DROPPED the outgoing draft, so the stale restore is suppressed.

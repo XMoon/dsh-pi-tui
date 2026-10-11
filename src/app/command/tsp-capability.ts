@@ -5,7 +5,7 @@
  * whose implementation is a PiTui panel/picker cannot run there. This module
  * answers exactly ONE question, for ONE already-decided winner:
  *
- *     "is this SELECTED TUI builtin available on the TSP renderer in B?"
+ *     "is this SELECTED TUI builtin available on the mounted TSP renderer?"
  *
  * It is deliberately NOT a parser and NOT a routing authority:
  *
@@ -18,8 +18,8 @@
  *   spelling is never captured here);
  * - it holds no state and performs no IO.
  *
- * The B2 supported set is exactly the two exit builtins; every other
- * TUI-origin builtin is refused with the caller's actionable notice.
+ * The unconditional set is the two exit builtins. PR4 Model additionally
+ * requires the mounted native presenter; other TUI builtins are refused.
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
@@ -42,7 +42,7 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set(['exit', 
 export type TspBuiltinAvailability =
   /** The line is not a TUI-owned builtin: the caller keeps its own routing. */
   | { readonly kind: 'not-a-tui-builtin' }
-  /** A TUI-owned builtin the TSP renderer can run (the exit pair). */
+  /** A TUI-owned builtin supported by the mounted renderer. */
   | { readonly kind: 'available' }
   /** A TUI-owned builtin that needs PiTui UI the TSP renderer lacks. */
   | { readonly kind: 'unsupported' }
@@ -62,6 +62,7 @@ export type TspBuiltinAvailability =
 export function tspBuiltinAvailability(
   classification: CommandLineClassification,
   name: string,
+  supportsModelPicker = false,
 ): TspBuiltinAvailability {
   if (classification.kind !== 'client-command' || classification.source !== 'tui') {
     // Not a TUI builtin: a Host command, an extension contribution, a skill
@@ -69,7 +70,7 @@ export function tspBuiltinAvailability(
     // must branch on this kind — it is the family decision, made once here.
     return { kind: 'not-a-tui-builtin' }
   }
-  return TSP_SUPPORTED_TUI_BUILTINS.has(name)
+  return (TSP_SUPPORTED_TUI_BUILTINS.has(name) || (name === 'model' && supportsModelPicker))
     ? { kind: 'available' }
     : { kind: 'unsupported' }
 }

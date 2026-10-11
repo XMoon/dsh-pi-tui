@@ -200,7 +200,7 @@ interface Harness {
   applied: ModelSelectionDto[]
   closeCount: () => number
   close: () => void
-  hydrate: (directory: ModelDirectoryDto, current?: ModelPickerCurrent, sessionless?: boolean) => void
+  hydrate: (directory: ModelDirectoryDto, current?: ModelPickerCurrent) => void
 }
 
 async function openPicker(options: HarnessOptions): Promise<Harness> {
@@ -213,6 +213,7 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
   let closeCount = 0
   const picker = new ModelPicker({
+    subject: { sessionless: options.sessionless ?? false },
     apply: (selection) => {
       applied.push(selection)
       return options.apply === undefined ? options.outcome ?? 'committed' : options.apply(selection)
@@ -229,7 +230,6 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
     picker.setDirectory({
       directory: options.directory ?? EFFORT_DIRECTORY,
       current: options.current,
-      sessionless: options.sessionless ?? false,
     })
   }
   await vt.waitForRender()
@@ -240,7 +240,7 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
     applied,
     closeCount: () => closeCount,
     close: () => closer(),
-    hydrate: (directory, current, sessionless) => picker.setDirectory({ directory, current, sessionless: sessionless ?? false }),
+    hydrate: (directory, current) => picker.setDirectory({ directory, current }),
   }
 }
 
@@ -814,13 +814,14 @@ test('a fullscreen swap while LOADING hydrates the migrated picker in place', as
 test('mounting a new picker supersedes the previous one (no lingering overlay)', async () => {
   const h = await openPicker({ loading: true })
   const second = new ModelPicker({
+    subject: { sessionless: false },
     apply: () => 'committed',
     requestRender: () => h.app.requestRender(),
     close: () => {},
     runOwned: <T>(_label: string, task: () => T | Promise<T>, _options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => { void task() },
   })
   h.app.openModelPicker(second)
-  second.setDirectory({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' }, sessionless: false })
+  second.setDirectory({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' } })
   await h.vt.waitForRender()
   assert.equal(h.picker.isDisposed(), true, 'the previous picker must be disposed on supersession')
   assert.ok(viewOf(h.vt).includes('Sol'), `the new picker must own the surface:\n${viewOf(h.vt)}`)
