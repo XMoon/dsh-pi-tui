@@ -1327,7 +1327,12 @@ test('action editor: the scrolled choose-binding Leader row keeps its painted or
     assert.notEqual(leaderRow, 4, 'the scrolled window must not assume the fixed row 4')
     assert.ok(editor.handleMouse(mouse('press', 10, leaderRow, 60, 5))?.handled, 'the painted Leader row is clickable')
     editor.handleMouse(mouse('click', 10, leaderRow, 60, 5))
-    assert.match(plain(editor.render(60).join('\n')), /Record shortcut/, 'the painted Leader row must start the leader recorder')
+    // The recorder title is SHARED with the direct recorder, so the
+    // discriminating evidence is the leader-completion copy: a mis-mapped
+    // ordinal would start the direct recorder ('Press a key for Submit draft.').
+    const recording = plain(editor.render(60).join('\n'))
+    assert.match(recording, /Press a key for the leader completion\./, 'the painted Leader row must start the LEADER recorder')
+    assert.match(recording, /This key completes the leader sequence\./)
   } finally {
     editor.dispose()
     manager.dispose()
