@@ -276,7 +276,7 @@ never sent to the model (`shouldConsumeAdvertisedMiss`,
 
 | Gap | Recommended PR | Dependency |
 |---|---|---|
-| No TSP generic command UI: every TUI builtin except the exit pair is refused | 4A | a real non-key event admission + a selection/presenter seam |
+| No TSP command UI: every TUI builtin except the exit pair is refused | 4A | **keyboard route:** a presentation seam over the EXISTING seat/key routing + `commands.execute`. **Pointer route:** a verified scoped non-key event admission (candidate 4A0). These are two different prerequisites — see the 4A0 decision. |
 | No selectable menu / picker surface in TSP | 4A | same |
 | No session/task/viewer panel entry | 4B | 4A's input ownership rules |
 | No attachment/clipboard/editor path in TSP | 4C | proven attachment route + Client-local policy reuse |

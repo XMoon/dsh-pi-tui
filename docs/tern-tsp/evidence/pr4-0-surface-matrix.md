@@ -390,7 +390,8 @@ renderer-capability distinction already exists in the display seam.
 
 | Gap | PR |
 |---|---|
-| No non-key event → scoped intent admission (the common prerequisite) | 4A (see the 4A0 decision in [pr4-0.md](./pr4-0.md#4a0-decision)) |
+| No TSP command/picker UI | 4A — **two routes with different prerequisites:** a keyboard-only closure needs only a presentation seam over the existing seat/key routing (NO 4A0); any pointer-actionable UI additionally needs a verified scoped non-key event admission (candidate 4A0). See the 4A0 decision in [pr4-0.md](./pr4-0.md#4a0-decision). |
+| No non-key event → scoped intent admission | only for the POINTER route of 4A/4B — not a prerequisite of the keyboard-first 4A closure |
 | No TSP menu/picker/selection UI | 4A |
 | No session/task/viewer/plugin panel entries | 4B |
 | No clipboard/image/file/external-editor path | 4C |
