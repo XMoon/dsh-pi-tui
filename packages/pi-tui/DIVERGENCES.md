@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `ed7dafdd45531f29705bc76e163a1b68808c57c9`
+- Audited local source commit: `c21f490b78ca89e6c0f78a046178bd754229c571`
 - Branch audited: `chore/pi-tui-v1.1.0-revendor`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
@@ -849,7 +849,7 @@ OSC color replies carry no request id, so a reply that arrives after its query t
 
 - packages/pi-tui/test/osc11-query.test.ts: at most one color query is written while an earlier query is outstanding, and the next query is written only after the DSR 6 sentinel
 - packages/pi-tui/test/osc11-query.test.ts: a late reply is swallowed (never forwarded as input) and is delivered to its own query's onLateReply, never to a later concurrent query
-- packages/pi-tui/test/osc11-query.test.ts: a DA1 never ends a color query and never frees the wire; a query that times out while an earlier query owns the wire is never written; a stray reply, sentinel or DA1 with no pending query is not forwarded (mutation-checked)
+- packages/pi-tui/test/osc11-query.test.ts: a DA1 never ends a color query, never frees the wire and never reaches the input listeners; a query that times out while an earlier query owns the wire is never written; a stray reply, sentinel or DA1 with no pending query is not forwarded (mutation-checked)
 - packages/pi-tui/test/terminal-colors.test.ts: the queryTerminalColors contract on the fork's sentinel (single burst ending in `CSI 6 n`, DSR 6 completion, incomplete palette dropped, late replies after a timeout)
 - packages/pi-tui/test/terminal.test.ts: ProcessTerminal -> TuiBase cross-layer guard - a lost DA1 from a previous session does not eat the next color-query sentinel, the wire stays free and the query still completes (mutation-checked)
 - test/rendering.test.ts: trackTerminalTheme queries the terminal colors once, derives the scheme from the reported background, and re-queries after disable
@@ -1457,6 +1457,7 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 - test/process-tui-slot.test.ts and fullscreen restart coverage
 - packages/pi-tui/test/terminal.test.ts: a device-attributes reply is no longer treated as owed once its window expires (mutation-checked)
 - packages/pi-tui/test/terminal.test.ts: ProcessTerminal -> TuiBase cross-layer guard - a lost DA1 from an ended session cannot eat the next color-query sentinel
+- packages/pi-tui/test/terminal.test.ts: the reviewer acceptance sequence (steps 1-8: restart without the old DA1, the new DA1 consumed, a color query completing on its own DSR 6 sentinel, the next query written) and step 9 (a stale DA1 from the ended session arriving after the restart is consumed/swallowed, never delivered as input, and neither ends nor blocks the color query)
 
 #### Upstream comparison
 
