@@ -13450,17 +13450,31 @@ export class TuiApp {
   }
 
   /**
-   * The task-browser trigger semantic — ONE definition shared by the ↓
-   * routing gate, the viewer's parent-lock, and the footer's `↓ view`
-   * hint: active jobs/subagents or failure attention, no overlay entries, an EMPTY VISIBLE
-   * seat editor in PROMPT mode. The visible seat decides (a shell-mode
-   * empty body is composing a command; a plugin replacement editor
-   * contributes its own text/mode) — the hidden host editor's draft is
-   * never the gate (a P2 regression once used it and advertised a ↓ the
-   * gate refused).
+   * The task-browser affordance as the FOOTER sees it: the UI projection of
+   * the question the ↓ route already answers through the input ladder (the
+   * `TASKS_OPEN_AFFORDANCE` composition rule, plus the modal owners that
+   * consume keys BEFORE keybinding resolution): active jobs/subagents or
+   * failure attention, NO input-capturing owner, and an EMPTY VISIBLE seat
+   * editor in PROMPT mode. The visible seat decides (a shell-mode empty
+   * body is composing a command; a plugin replacement editor contributes
+   * its own text/mode) — the hidden host editor's draft is never the gate
+   * (a P2 regression once used it and advertised a ↓ the gate refused).
+   *
+   * The capture facts are the ACTIVE OWNERS, not the physical focus: a
+   * Question / Save Location frame owns the editor SEAT (it is not a
+   * managed broker overlay, so `hasFocusedOverlay()` stays false while
+   * `handleInputCore` still consumes every key), and an Approval owns a
+   * managed overlay. Advertising `↓ view` in those states promised a
+   * trigger the input ladder refuses; the counts/attention projections
+   * (`tasksActive`, `?N`, `!N`) are never touched by this gate. This
+   * predicate is a PRESENTATION fact only — routing keeps its single owner
+   * in `handleInputCore`, and the hint may never authorize a route.
    */
   private taskBrowserAvailable(): boolean {
     return this.tasksActive
+      && this.activeQuestions === undefined
+      && !this.approvals.isActive()
+      && this.activeSaveLocation === undefined
       && !this.overlayBroker.hasFocusedOverlay()
       && this.seatEditor().getText().trim() === ''
       && this.seatInputMode() === 'prompt'
@@ -19471,6 +19485,13 @@ export class TuiApp {
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(frame)
     this.setFocusSeat('overlay')
+    // The Save Location capture writes NO ActivityStatus section of its own
+    // (unlike Question/Approval, which project through projectActivity), so
+    // the footer hint refresh is owned HERE: after `activeSaveLocation` and
+    // the seat/focus commit, recompose from the CURRENT state. Never rely on
+    // a focus-seat transition happening to re-render (a seat that is already
+    // 'overlay' would skip it and keep a stale `↓ view`).
+    this.renderFooter()
     screen.requestRender()
   }
 
@@ -19529,6 +19550,13 @@ export class TuiApp {
       () => { (this.fullscreen ?? this.tui).setFocus(this.seatEditor().component) },
       () => this.overlayBroker.resumeSuspendedRoots(state),
       () => this.projectActivity(),
+      // The prompt released the seat: recompose the footer from the restored
+      // state (the Save Location capture has no ActivityStatus section, so
+      // its hint restoration is this explicit obligation — never dependent
+      // on the focus seat happening to change). Runs before the caller's
+      // promise settlement, so a callback that synchronously opens the NEXT
+      // owner paints that owner's live state, never a stale `↓ view`.
+      () => this.renderFooter(),
       () => { (this.fullscreen ?? this.tui).requestRender() },
       () => state.resolve(result),
     ])
