@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `3214e82a76b541b47725483a72e3f24b6df764a4`
+- Audited local source commit: `58ddfbdddc6f9151725be3639e9e0e8220d5ef13`
 - Branch audited: `chore/pi-tui-v1.1.0-revendor`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
@@ -1426,7 +1426,6 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 - destroy previous StdinBuffer and clear negotiation state
 - capture raw state only on first start
 - push Kitty protocol once per start/stop cycle
-- the device-attributes debt that pairs a DA reply with the session that queried it is bounded by a 2 s window: a DA that never arrived inside the negotiation window stops being owed, so it cannot consume unrelated later DA replies (henceforth swallowed by TuiBase, X008) forever
 
 #### Dependency map
 
@@ -1457,9 +1456,6 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 
 - packages/pi-tui/test/terminal.test.ts: repeated resize listener, stdin listener, raw state, and Kitty protocol tests
 - test/process-tui-slot.test.ts and fullscreen restart coverage
-- packages/pi-tui/test/terminal.test.ts: a device-attributes reply is no longer treated as owed once its window expires (mutation-checked)
-- packages/pi-tui/test/terminal.test.ts: ProcessTerminal -> TuiBase cross-layer guard - a lost DA1 from an ended session cannot eat the next color-query sentinel
-- packages/pi-tui/test/terminal.test.ts: the reviewer acceptance sequence (steps 1-8: restart without the old DA1, the new DA1 consumed, a color query completing on its own DSR 6 sentinel, the next query written) and step 9 (a stale DA1 from the ended session arriving after the restart is consumed/swallowed, never delivered as input, and neither ends nor blocks the color query)
 
 #### Upstream comparison
 
@@ -1470,7 +1466,7 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 - packages/tui/src/terminal.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance, and it carries an unfulfilled device-attributes debt across stop/start (and past any window) so a DA that never arrives keeps consuming later DA replies. The fork keeps the count-based pairing inside a bounded window.
+- Remaining semantic delta: Upstream stacks listeners and re-captures state on repeated start; it does not provide the local all-resource swap and negotiation balance.
 
 #### Retirement conditions
 
@@ -1488,7 +1484,7 @@ Restarting ProcessTerminal during fullscreen transitions must replace every owne
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Rechecked the full resource graph, not only the original resize-listener symptom. KEEP HARD. External review follow-up (PR #272, Finding 1): the device-attributes debt is now bounded by a window and the color-query sentinel no longer depends on it (X008 uses a DSR 6 report), so a lost DA across stop/restart can no longer block the serialized color wire; verified with a real two-layer ProcessTerminal -> TuiBase test.
+- Notes: Rechecked the full resource graph, not only the original resize-listener symptom. KEEP HARD.
 
 ### X017 — Regular mode owns no mouse
 
@@ -5072,7 +5068,7 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 - one in-flight observation per screen: a concurrent call shares the same promise instead of writing a second query
 - the timeout resolves undefined, and stop() releases the pending observation and its timer so a stopped screen never applies a late result
 - no request-id correlation: the value is an observation of the CURRENT terminal background, not a reply strictly attributable to one request; callers own the still-relevant guard (screen identity, stopped screen, newer explicit choice)
-- from the first call onward, a well-formed OSC 11 reply (including a stray or late one) is consumed at the TUI layer and can never reach the editor or a raw input listener; a screen that never calls the seam keeps upstream's forwarding behavior
+- once ANY screen in this process has issued an observation, a well-formed OSC 11 reply (a stray, late or cross-screen one included) is consumed at the TUI layer and can never reach the editor or a raw input listener: the physical terminal input chain is shared while an observation belongs to one screen, so forwarding such a reply would surface it as user activity on whichever screen owns the terminal now. A process that only uses upstream's API keeps upstream's forwarding behavior
 - the narrow seam is served from the same parse as queryTerminalColors, so a concurrent full query still records the reply
 
 #### Dependency map
@@ -5087,7 +5083,8 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 
 **Host**
 - TuiApp.runAutoDetect observes the ACTIVE screen and drops the result when the active screen changed while it was in flight; Emoji/themeOptOut and shouldApply guards are unchanged.
-- TuiApp.trackTerminalTheme toggles Mode 2031 only and never samples; the boot wiring keeps autoDetectTheme as the single sample.
+- TuiApp.trackTerminalTheme toggles Mode 2031 only and never samples; the boot wiring keeps autoDetectTheme as the single sample, and the live scheme-report listener respects the colour opt-out now that enabling Mode 2031 makes such reports reachable.
+- TuiApp.start() re-registers the per-screen scheme fan-out, so a full stop/start keeps receiving reports.
 - Audit note: The host is the primary consumer; the narrow seam replaced its use of the full transaction.
 
 **Public / extension**
@@ -5101,10 +5098,10 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 
 #### Guarding tests
 
-- packages/pi-tui/test/terminal-background-query.test.ts: one OSC 11 query and no OSC 10/4/DA1/DSR traffic; coalesced concurrent calls; timeout then a consumed late reply; a late reply after a new observation counts as the current observation; stop() releases the pending observation; ordinary and modified keys plus other color replies still flow; a concurrent full query still records the reply
-- test/rendering.test.ts: Theme auto observes only the OSC 11 background (bright -> light, dark -> dark), COLORFGBG fallback, silent-terminal no-op, the ACTIVE screen in fullscreen, a swapped-away screen's result is dropped, coalescing, shouldApply refusal, a late reply never reaches the editor, the colour opt-out issues no query, and detection still works after returning from fullscreen
+- packages/pi-tui/test/terminal-background-query.test.ts: one OSC 11 query and no OSC 10/4/DA1/DSR traffic; coalesced concurrent calls; timeout then a consumed late reply; a late reply after a new observation counts as the current observation; stop() releases the pending observation; an unowned background reply landing on ANOTHER screen is consumed there; ordinary and modified keys plus other color replies still flow; a concurrent full query still records the reply
+- test/rendering.test.ts: Theme auto observes only the OSC 11 background (bright -> light, dark -> dark), COLORFGBG fallback, silent-terminal no-op, the ACTIVE screen in fullscreen, an observation that resolves before a screen switch is dropped, a late reply across a Main/Fullscreen swap in BOTH directions is never counted as user input, coalescing, shouldApply refusal, a late reply never reaches the editor, the colour opt-out issues no query, detection still works after returning from fullscreen, and a full app stop/start keeps receiving reports
 - test/rendering.test.ts: Mode 2031 follows the tracking choice across a Main/Fullscreen switch, and tracking never samples the terminal
-- test/settings-theme-boot.test.ts: the boot wiring samples once through autoDetectTheme, enables tracking without sampling, and a live scheme report only changes the theme while the preference is auto
+- test/settings-theme-boot.test.ts: the boot wiring samples once through autoDetectTheme, enables tracking without sampling, a live scheme report only changes the theme while the preference is auto, and a live report cannot bypass the colour opt-out
 - packages/pi-tui/test/terminal-colors.test.ts: the upstream full-query suite stays verbatim and green next to the narrow seam
 
 #### Upstream comparison
@@ -5117,7 +5114,7 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 - packages/tui/src/terminal-colors.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream has no background-only accessor: queryTerminalColors writes the OSC 10 + OSC 11 + OSC 4 x16 burst plus a DA1 request, attributes replies FIFO to the oldest pending query, and forwards unowned color replies to the input pipeline. The fork keeps that method verbatim and adds the narrow observation, which writes one OSC 11 query, coalesces per screen, resolves undefined on timeout or stop, and consumes OSC 11 replies on screens that use it.
+- Remaining semantic delta: Upstream has no background-only accessor: queryTerminalColors writes the OSC 10 + OSC 11 + OSC 4 x16 burst plus a DA1 request, attributes replies FIFO to the oldest pending query, and forwards unowned color replies to the input pipeline. The fork keeps that method verbatim and adds the narrow observation, which writes one OSC 11 query, coalesces per screen, resolves undefined on timeout or stop, and consumes OSC 11 replies process-wide once the seam is in use.
 
 #### Retirement conditions
 
@@ -5135,4 +5132,4 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Introduced in PR #272 as the replacement for the retired X008 serialization. Scope checked against both screens, the host boot/track wiring, the shared TUI color consumer parse order, the upstream full-query suite, and the modified-key input path.
+- Notes: Introduced in PR #272 as the replacement for the retired X008 serialization. Scope checked against both screens and the shared terminal input chain (a reply that outlives its observation must not become user activity on the screen that owns the terminal now, including across a Main/Fullscreen swap in either direction), the host boot/track wiring (Mode 2031 enablement must not bypass the colour opt-out), the shared TUI color consumer parse order, the upstream full-query suite, and the modified-key input path.
