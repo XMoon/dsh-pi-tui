@@ -51,6 +51,18 @@ export interface ApprovalRuntimeHost {
   rebindApprovalOverlay(handle: OverlayHandle, frame: ResponsiveOverlayFrame): void
   /** Restore the editor seat as the input fallback beneath the approval. */
   focusEditorSeat(): void
+  /**
+   * Phase 3A / PR-B: the optional editor-seat tenant must be PARKED before the
+   * mount can run a synchronous focus/blur callback. Called AFTER the pending
+   * prompt was committed as the active owner.
+   */
+  beforeApprovalMount(): void
+  /**
+   * Phase 3A / PR-B: the approval queue fully drained (no active prompt and no
+   * queued prompt) — the ONLY point where a parked optional tenant may be
+   * restored. A queued A → B approval must never restore it in between.
+   */
+  afterApprovalQueueDrained(): void
 }
 
 /** Live state of one approval prompt. */
@@ -196,6 +208,15 @@ export class ApprovalRuntime {
       this.settle(pending, 'cancelled')
       return
     }
+    // Phase 3A / PR-B: the LOGICAL input ownership is committed BEFORE any
+    // call below that can synchronously run a plugin/focus callback (the
+    // optional-tenant park, the Save Location cancellation, the overlay
+    // mount). A callback fired by any of them must already observe THIS
+    // approval as the active owner, so the optional tenant can never be
+    // restored (or a Save Location settle can never take its
+    // "no approval active" restore path) behind an uncommitted approve.
+    this.active = pending
+    this.host.beforeApprovalMount()
     // A Host approval is authoritative over a Client-local Save Location
     // prompt: showing the approval settles the prompt as cancelled (the
     // caller's owned workflow classifies it and notifies nothing) — the
@@ -204,7 +225,6 @@ export class ApprovalRuntime {
     this.host.cancelActiveSaveLocation()
     this.host.clearFullscreenPointerGestures()
     this.mount(pending)
-    this.active = pending
     // M6: a capturing surface owns the input now — any pending leader
     // sequence is cancelled (focus-transition cancellation).
     this.host.cancelLeader()
@@ -214,12 +234,27 @@ export class ApprovalRuntime {
   /** Build and mount the approval dialog for one prompt on the active screen. */
   private mount(pending: PendingApproval): void {
     const frame = this.createFrame(pending)
-    pending.responsiveFrame = frame
     // The approval is REMOUNTABLE like every other managed overlay: a
     // fullscreen swap rebinds the SAME logical node (with a fresh surface), so
     // the overlays it suppresses stay suppressed and never get revealed/
     // focused/re-hidden (no fabricated focus transition).
     const handle = this.host.showApprovalOverlay(frame)
+    // Phase 3A / PR-B MOUNT FENCE: the physical mount can synchronously run a
+    // plugin callback (onFocus/onBlur) that settles this prompt, replaces it
+    // with a newer one, or disposes the surface. Only the STILL-current prompt
+    // may publish the handle/frame and register the fullscreen rebind; a losing
+    // mount releases exactly what THIS mount created and never overwrites the
+    // newer prompt. The frame is deliberately NOT published as
+    // `responsiveFrame` before the fence, so a settling callback cannot dispose
+    // it a second time.
+    if (this.active !== pending || pending.settled === true || this.host.isDisposed()) {
+      runSyncDisposalSteps('approval mount fence', [
+        () => handle.hide(),
+        () => frame.dispose(),
+      ])
+      return
+    }
+    pending.responsiveFrame = frame
     pending.handle = handle
     this.host.setOverlayRemount(handle, () => {
       if (this.active !== pending) return
@@ -313,6 +348,14 @@ export class ApprovalRuntime {
       ...steps,
       () => pending.resolve(outcome),
       () => { if (this.active === undefined) this.showNext() },
+      // Phase 3A / PR-B: the notification runs AFTER the handover decision and
+      // reads the LIVE state — a queued approval that just took over keeps the
+      // optional tenant PARKED; only a fully drained queue may restore it.
+      () => {
+        if (this.active === undefined && this.queue.length === 0) {
+          this.host.afterApprovalQueueDrained()
+        }
+      },
     ])
   }
 }
