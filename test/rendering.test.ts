@@ -17,6 +17,9 @@ import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/tui/transcript/tool-presentation.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
+import { KeybindingEditorPanel } from '../src/tui/keybindings/ui/list.ts'
+import { buildKeybindingEditorModel } from '../src/tui/keybindings/ui/model.ts'
 import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import { darkColors, lightColors } from '../src/domain/display/theme.ts'
 import { color, currentPalette, setTheme } from '../src/tui/theme/runtime.ts'
@@ -694,6 +697,51 @@ test('queued question flows transfer the seat and suspension without restoring',
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('Settings row A'), `settings must return after the LAST flow:\n${view}`)
+})
+
+test('standalone keybindings editor keeps the full terminal budget (PR-C standalone control)', async () => {
+  // The nested /settings submenu is capped by the parent overlay grant; the
+  // standalone /keybindings overlay is NOT (it never receives setMaxRows),
+  // so its own whole-terminal budget and navigation must be unchanged.
+  const { vt, app } = startApp(120, 40)
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => app.keybindingEditorMaxRows(),
+  })
+  app.openKeybindingEditor(panel)
+  try {
+    await vt.waitForRender()
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    let lines = vt.getViewport().map(strip)
+    const hintRow = lines.findIndex(line => line.includes('Enter: details'))
+    assert.ok(hintRow > 0, `the standalone operation hint must be painted:\n${lines.join('\n')}`)
+    assert.ok(lines[hintRow]!.includes('│'), 'the hint must be painted INSIDE the frame')
+    assert.ok((lines[hintRow + 1] ?? '').includes('╰'), 'the frame bottom border must follow the hint')
+    assert.equal(panel.render(84).length, 35, 'the standalone editor keeps its own whole-terminal budget')
+    // Search/navigation still works end to end.
+    for (const character of 'submit') {
+      vt.sendInput(character)
+      await vt.waitForRender()
+    }
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Search: submit')), `the query must render:\n${lines.join('\n')}`)
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Keyboard shortcuts › ')), `the detail must open:\n${lines.join('\n')}`)
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Search: submit')), `the query must survive the return:\n${lines.join('\n')}`)
+  } finally {
+    manager.dispose()
+  }
 })
 
 test('a question preempts a visible approval and restores it on settle', async () => {
