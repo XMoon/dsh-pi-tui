@@ -1,8 +1,8 @@
 /**
  * Pending steering long-user disclosure: an ephemeral text-only steering /
  * sending row joins the SAME visual-row compaction as a durable text-only user
- * message — head + compact marker + tail while collapsed, a tail collapse
- * control while expanded, and the status line always visible. The identity is
+ * message — head + compact marker + tail while collapsed, its whole BODY
+ * clickable to collapse while expanded, and the status line always visible. The identity is
  * the stable `rpc:<id>` / `id:<id>` key, so a local echo and its authoritative
  * replacement share the explicit disclosure state, while a stale press can
  * never transfer to a replacement row. None of this state is durable: it is

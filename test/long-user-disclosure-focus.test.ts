@@ -1,8 +1,8 @@
 /**
  * Long-user disclosure inside fullscreen + Focus: the compact marker stays a
  * click-only EXPAND (Ctrl+O owns the Thought-root bulk there), the expanded
- * bubble collapses locally by a plain BODY click (or the click-only tail
- * control) without ever falling through to the Thought-root toggle, and
+ * bubble collapses locally by a plain BODY click without ever falling
+ * through to the Thought-root toggle, and
  * Ctrl+O's existing root precedence is preserved — with an expanded Thought
  * root it collapses the roots AND clears the long-user expansion, and it
  * never routes through the generic user viewport helper (which would fight

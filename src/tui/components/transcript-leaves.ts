@@ -272,8 +272,8 @@ export interface UserBubbleCompactOptions {
   readonly tailRows: number
   readonly compactMarker: UserBubbleCompactMarker
   /** Whether this bubble currently renders EXPANDED (full content) while
-   * still being compact-capable: the caller then owns the tail collapse
-   * control row. */
+   * still being compact-capable: the whole BODY then acts as the local
+   * collapse surface. */
   readonly expanded: boolean
 }
 
@@ -332,9 +332,8 @@ export class UserBubbleComponent implements Component {
   }
 
   /** Whether the current render is an EXPANDED compact-capable bubble: the
-   * visual rows exceed the threshold, so the caller must place a tail
-   * collapse control after the body (the spacer row when one follows, or one
-   * dedicated presentation row for the final block). */
+   * visual rows exceed the threshold, so its whole BODY is the local collapse
+   * surface (a compact marker is painted instead while folded). */
   showsCollapseControl(): boolean {
     return this.lastCollapseEligible
   }

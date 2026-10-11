@@ -920,12 +920,12 @@ test('a pathological always-mutating renderer fails closed instead of trusting a
   app.stop()
 })
 
-// ── Bidirectional fullscreen mouse disclosure (tail collapse control) ────
+// ── Bidirectional fullscreen mouse disclosure (whole-BODY click) ─────────
 //
-// The compact marker EXPANDS; the expanded message tail carries the ONE
-// collapse affordance (reusing the trailing separator row, or one dedicated
-// row for the final block). Every other bubble row stays inert so ordinary
-// user text keeps selection/copy semantics.
+// The compact marker EXPANDS; the expanded message BODY carries the ONE
+// collapse affordance. No tail control row is painted on any surface, and
+// every other bubble row stays inert so ordinary user text keeps
+// selection/copy semantics.
 
 const COLLAPSE_LABEL = '▴ Collapse'
 

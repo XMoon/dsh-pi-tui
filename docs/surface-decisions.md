@@ -1674,11 +1674,11 @@ reveal is not a permanent pin: the next explicit Ctrl+O collapse hides it
 again, and a later search jump reveals it afresh.
 
 The long-user bubble is ONE local disclosure surface in fullscreen: collapsed,
-a plain single click anywhere on the bubble (head text, compact marker, or
-tail text) expands that message; expanded, a plain single click anywhere on
-the bubble collapses it, with the existing tail Collapse row as an explicit
-fallback. The compact marker stays as the visual affordance naming the
-behavior — it is not the only hit target. Every non-bubble row (the pending
+a plain single click anywhere on the bubble (head text, compact marker, or the
+folded tail text) expands that message; expanded, a plain single click anywhere
+on the bubble BODY collapses it. The compact marker stays as the visual
+affordance naming the behavior — it is not the only hit target, and no
+separate collapse row exists on any surface. Every non-bubble row (the pending
 status line included) has an inert hit identity. Drag selection retains
 selection ownership, and the bubble intentionally gives plain single-click to
 disclosure in BOTH states, so double-click word selection is not available on
