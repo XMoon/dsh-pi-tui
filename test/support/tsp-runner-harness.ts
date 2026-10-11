@@ -86,9 +86,12 @@ export async function ownTspBoot(options: {
   readonly createGate?: () => Promise<unknown>
   /** Runs with the owned pane BEFORE the connector can probe it. */
   readonly beforeMount?: (pane: TspPane) => void
+  readonly modelPicker?: boolean
+  /** The existing Direct fixture's persistence boundary, never a second catalog. */
+  readonly saveDefault?: (next: { provider: string; model: string; reasoningEffort?: string }) => Promise<unknown>
 }): Promise<OwnedTspRunner> {
   const { makeHarness, mountRunner, disposeContext } = await import('./runner-harness.ts')
-  const pane = installTspPane()
+  const pane = installTspPane({ modelPicker: options.modelPicker })
   options.beforeMount?.(pane)
   // The resume target: an explicit id wins; a STANDING SET has no single id, so
   // a suite that boots several sessions must name the one to resume.
@@ -107,7 +110,7 @@ export async function ownTspBoot(options: {
     options.home,
     options.session as never,
     undefined,
-    undefined,
+    options.saveDefault,
     options.createGate,
     undefined,
     options.whenIdleGate,

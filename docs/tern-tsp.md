@@ -31,6 +31,11 @@ evidence ledger. Per-PR measurements live under
   owner-QA-confirmed (see the ledger below). All remain experimental. The one
   B4 item the owner explicitly deferred to PR4 — the masked Question's physical
   qualification — is recorded as deferred below and must not be read as done.
+- **PR4 Model candidate:** the original `/model` handler now has PiTui and
+  native TSP presentation adapters. Supported native kinds enable only this
+  additional TUI builtin; the existing model reads/writes and modal seat remain
+  authoritative. See [Model selection](./tern-tsp/model-selection.md) for the
+  behavior, ownership, regression coverage and current UX limits.
 - **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm, a
   runtime `dependencies` entry) against real Tern `0.6.2` (PR1) and `0.7.0` (PR3-B
   real-pane runs). A future SDK or pane version may change any field below.
@@ -225,6 +230,7 @@ and the editor/input authority behind it, are PR3 scope; building a second
 | Live application projection → real Tern pane (product) | PR3-A manual smoke (see evidence); still experimental |
 | Editor/submit input inside TSP | IMPLEMENTED (B1/B2); real-GUI IME / physical paste / physical control keys are B4 qualification items |
 | Question/Approval modals inside TSP | IMPLEMENTED (B3): one official FIFO seat over the real lifecycle (timed → continued → `Alt+Q` → late answer); fail-closed in PR3-A only |
+| Model/effort selection inside TSP | PR4 implementation candidate: native picker/Details/effort over the original handler; supported terminal kinds required. Automated coverage includes live Agent selection and isolated profile persistence/restart; physical input and full-profile qualification remain open. [Model selection](./tern-tsp/model-selection.md) |
 | Search/Reveal/Focus parity inside TSP | PLANNED (PR4–PR5) |
 | ExtensionView / custom renderers over TSP | PLANNED (policy undefined) |
 | SSH, tmux, screen, zellij, `TERN_TSP=0` | Unsupported by the SDK (`connect()` declines) |
@@ -295,6 +301,7 @@ Evidence levels — do not merge these into a stronger claim:
 | PR3-B B0–B3 ([#261](https://github.com/XMoon/dsh-pi-tui/pull/261), [#262](https://github.com/XMoon/dsh-pi-tui/pull/262), [#263](https://github.com/XMoon/dsh-pi-tui/pull/263), [#265](https://github.com/XMoon/dsh-pi-tui/pull/265)) | DONE (merged) | Display seam; shared composer + submission/command admission; the unified official Question/Approval modal seat with its lifecycle (timed/continued/`Alt+Q`/late answer), currentness and settlement rules | Real-GUI IME / physical paste / physical control keys (B4) | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
 | PR3-B B4 | Qualification COMPLETE (owner QA-confirmed) | The §6.4 mandatory cases and the B-01..B-09 gates with evidence tiers (real pane / real SDK+scripted tty / production harness), the fixture manifest, the per-case record digests, the owner's QA confirmation and the independent review record; the automated lanes are green on the frozen artifact | The explicit merge approval (and the reviewer's re-check of this revision). The masked Question's **physical** qualification was deferred by the owner to PR4 and is NOT part of this closure | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
 | PR4-0 capability audit | DONE (`AUDIT_DONE / SPLIT_PROPOSED_NOT_FROZEN`) | The actual reachability ledger: every registered command with its origin/refusal/handler, the panel/keybinding/session/task/viewer/media/extension consumers, the pinned SDK 0.1.0 vs real Tern 0.7.0 event proof, and a proposed (unfrozen) PR4A/B/C split with the owner decision sheet | The PR4A/B/C split and the first command batch are **owner decisions**, not accepted here; the physical/GUI tier is `GUI_BLOCKED`; the early-catalog `/settings` cause is `UNKNOWN` | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
+| PR4 Model | Implementation candidate; UX not finalized | Original handler + native presenter; regression tests cover scoped writes, isolated profile persistence/restart and stale input | Visual refinement, owner UX decisions, physical GUI, full-profile/HMR and clean live-Agent teardown, complete review and stage-final checks | [./tern-tsp/model-selection.md](./tern-tsp/model-selection.md) |
 | PR4+ (feature work) | PLANNED | UI/panel/clipboard parity, exit-confirmation window, native editor chords — scoped by the PR4-0 proposal once the owner freezes the split | — | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
 
 ## Next decisions

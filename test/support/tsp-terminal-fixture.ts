@@ -117,8 +117,9 @@ export interface TspPane {
   restore(): void
 }
 
-/** Install the scripted pane as `process.stdin`/`process.stdout`. */
-export function installTspPane(): TspPane {
+/** Install the scripted pane as `process.stdin`/`process.stdout`.
+ * Model cases opt into native node kinds; the legacy hello stays unchanged. */
+export function installTspPane(options: { readonly modelPicker?: boolean } = {}): TspPane {
   const input = new FakeInput()
   const output = new FakeOutput()
   let probed = false
@@ -131,12 +132,15 @@ export function installTspPane(): TspPane {
   const closeBodies: string[] = []
   const frameList: TspWireFrame[] = []
   let frames = 0
+  const hello = options.modelPicker
+    ? { ...HELLO, ver: '0.7.2', kinds: [...HELLO.kinds, 'picker', 'overlay', 'el'] }
+    : HELLO
 
   const reply = (): void => {
     const pending = queued
     queued = ''
     // ONE chunk: the handshake reply and any queued key bytes.
-    setTimeout(() => input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c${pending}`), 1)
+    setTimeout(() => input.type(`\u001b_tsp;r;${JSON.stringify(hello)}\u001b\\\u001b[?62;52;c${pending}`), 1)
   }
 
   output.onWrite = bytes => {

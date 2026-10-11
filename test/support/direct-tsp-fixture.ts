@@ -6,7 +6,8 @@
  * `mountAgentLoopTestHarness` compose REAL live Agents), the TUI runner boots
  * against them in the Direct branch, and the TSP pane owns the tty. Only the
  * MODEL is synthetic (a scripted streaming `LlmAdapter` registered on the Host
- * `llm` service), exactly the boundary the plan's §6.2 manifesto allows.
+ * `llm` service). The default configuration boundary is described below;
+ * `profileDefault` opts into the official isolated profile composition.
  *
  * PRODUCTION PREREQUISITES REPRODUCED
  * - real Host service composition (agent loop + harness, persistence, storage,
@@ -20,9 +21,19 @@
  * - the scripted streaming LLM adapter (the model endpoint only)
  * - `agentDefaultModel`: the fixed selection stand-in (`scripted` /
  *   `scripted-model`) so the live Agents resolve a model without a
- *   credentials-backed provider; `saveSelection` is a no-op
+ *   credentials-backed provider; `saveSelection` is a no-op. With
+ *   `profileDefault`, this substitution is removed: the real default service,
+ *   Loader profile row, ConfigEditor and SettingsForms are mounted instead
  * - the empty `fileReferences` stand-in (the workspace index)
  * - the scripted tty (the pane)
+ *
+ * DELIBERATELY ABSENT
+ * - a user's profile and full shipped profile composition. The ordinary mode
+ *   has no Loader profile entry/ConfigEditor-backed default persistence; its
+ *   default save proves no configuration write. The optional isolated profile
+ *   mode is manifested in `model-profile-fixture.ts` and qualified separately
+ *   by `tern-tsp-model-profile.test.ts`.
+ * - external provider endpoints and a physical Tern GUI/OS input path
  *
  * @module @xmoon76/dsh-pi-tui/test/support/direct-tsp-fixture
  */
@@ -57,6 +68,7 @@ import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../sr
 import { apply as applyBuiltins } from '../../src/builtins.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { installTspPane, type TspPane } from './tsp-terminal-fixture.ts'
+import { mountModelProfile } from './model-profile-fixture.ts'
 
 export const DIRECT_TSP_MODEL = 'scripted-model'
 export const DIRECT_TSP_PROVIDER = 'scripted'
@@ -196,6 +208,10 @@ export async function createDirectTspFixture(
       readonly handler: () => unknown
     }>
     readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
+    readonly modelPicker?: boolean
+    /** Replace the historical default stand-in with the official isolated
+     * profile/configuration plane for Model persistence qualification. */
+    readonly profileDefault?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
     readonly appExit?: () => void
     /**
      * GENUINE Host commands registered into the REAL command catalog before the
@@ -213,7 +229,7 @@ export async function createDirectTspFixture(
   const workRoot = life.tempDir('dsh-b2-direct-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
-  const pane = installTspPane()
+  const pane = installTspPane({ modelPicker: options.modelPicker })
   // OWNERSHIP, not success-contingency: the pane replaced the PROCESS tty and
   // cleared five env vars the instant it was installed. From this point on,
   // ANY setup failure below must still restore them — the caller's `finally`
@@ -273,15 +289,18 @@ export async function createDirectTspFixture(
       handler: (invocation) => command.handler({ rawInput: invocation.rawInput }) as never,
     })
   }
-  ctx.provide('agentDefaultModel', {
-    currentSelection: () => ({ provider: DIRECT_TSP_PROVIDER, model: DIRECT_TSP_MODEL }),
-    saveSelection: async () => {},
-  })
+  if (options.profileDefault === undefined) {
+    ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: DIRECT_TSP_PROVIDER, model: DIRECT_TSP_MODEL }),
+      saveSelection: async () => {},
+    })
+  }
   const LocalAttachmentStore = (await import('@deepseek-ai/dsh-attachment-local')).default
   await ctx.plugin(LocalAttachmentStore, { dshHome: workRoot })
   ctx.provide('fileReferences', { list: async () => [] })
   await ctx.plugin(UserQuestionService)
   await ctx.plugin(Loader)
+  if (options.profileDefault !== undefined) await mountModelProfile(ctx, workRoot, options.profileDefault)
   await ctx.plugin(AgentPresetRegistry, { default: options.startup?.presetId ?? 'b2-direct-preset' })
   await ctx.get('agentPresets')!.register({
     id: options.startup?.presetId ?? 'b2-direct-preset',
