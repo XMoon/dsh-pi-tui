@@ -36,6 +36,39 @@ type ListEntry =
   | { readonly kind: 'leader'; readonly id: 'leader' }
   | { readonly kind: 'action'; readonly row: KeybindingEditorRow }
 
+/** One assembled row of a budgeted panel frame. A `drop` value is the
+ * removal priority of an OPTIONAL row (lowest first); a row without one is
+ * mandatory and survives every grant. */
+interface BudgetRow {
+  readonly text: string
+  readonly drop?: number
+  readonly hit: KeybindingMouseHit
+}
+
+/**
+ * Fit an assembled frame to the live row grant: optional rows are removed
+ * lowest-priority-first, and a final tail slice keeps the LAST rows when
+ * even the mandatory set exceeds a degenerate grant (the bottom operation
+ * hint is the non-negotiable tail — a head slice would cut it).
+ */
+function trimToGrant(rows: readonly BudgetRow[], limit: number): BudgetRow[] {
+  const kept = [...rows]
+  while (kept.length > limit) {
+    let index = -1
+    let priority = Number.POSITIVE_INFINITY
+    for (let i = 0; i < kept.length; i += 1) {
+      const drop = kept[i]!.drop
+      if (drop !== undefined && drop < priority) {
+        priority = drop
+        index = i
+      }
+    }
+    if (index === -1) break
+    kept.splice(index, 1)
+  }
+  return kept.length > limit ? kept.slice(kept.length - limit) : kept
+}
+
 function commandKey(data: string, key: string): boolean {
   return matchesKey(data, key as KeyId) || (data.length === 1 && data.toLowerCase() === key.toLowerCase())
 }
@@ -120,7 +153,15 @@ export class KeybindingEditorPanel implements Component, Focusable {
   private readonly onModelChange: (model: KeybindingEditorModel) => void
   private readonly onDispose: () => void
   private readonly requestRender: () => void
+  /** The standalone cap (`/keybindings` mounted on its own overlay). */
+  private readonly standaloneRows: () => number
+  /** The EFFECTIVE content-row grant: the standalone cap lowered by the
+   * parent SettingsList's live grant when this panel is a `/settings`
+   * submenu, so a nested panel never claims the whole terminal height. */
   private readonly maxRows: () => number
+  /** Live parent content-row grant (the `SettingsList` `RowBudgetAware`
+   * slot); undefined while the panel is standalone. */
+  private parentContentRows: number | undefined
   /** The shared Input is the ONLY query source of truth (left/right/Home/
    * End/Ctrl+A/E/B/F/delete/kill/undo all work here — the old hand-rolled
    * `query += chunk` string editing could only append and Backspace). */
@@ -158,7 +199,21 @@ export class KeybindingEditorPanel implements Component, Focusable {
     this.onModelChange = options.onModelChange ?? (() => {})
     this.onDispose = options.onDispose ?? (() => {})
     this.requestRender = options.requestRender ?? (() => {})
-    this.maxRows = options.maxRows ?? (() => 18)
+    this.standaloneRows = options.maxRows ?? (() => 18)
+    this.maxRows = () => Math.max(1, Math.min(
+      this.standaloneRows(),
+      this.parentContentRows ?? Number.POSITIVE_INFINITY,
+    ))
+  }
+
+  /** RowBudgetAware seam (the fork's `SettingsList` submenu slot): the
+   * parent forwards its live content-row grant when the submenu opens and
+   * on every later change. ONLY the row grant is updated — the query,
+   * selection, child panels and mutation generation are untouched, so a
+   * nested resize never resets the editor state. */
+  setMaxRows(rows: number): void {
+    this.parentContentRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : undefined
+    this.requestRender()
   }
 
   render(width: number): string[] {
@@ -167,75 +222,99 @@ export class KeybindingEditorPanel implements Component, Focusable {
     if (this.actionEditor !== undefined) return this.actionEditor.render(safeWidth)
     if (this.leaderEditing) return this.renderLeaderEditor(safeWidth)
 
-    const lines: string[] = [
-      color.textStrong('Keyboard shortcuts'),
-      ...(this.model.leader.safeMode
-        ? [
-          color.warning('Safe mode is active. Custom shortcuts are ignored.'),
-          color.textDim('Editing is disabled until safe mode is turned off.'),
-        ]
-        : []),
-      color.textDim(`Search actions, descriptions, IDs, categories, or keys · ${this.model.summary}`),
-      this.searchRow(safeWidth),
-      '',
-    ]
-    const hits: KeybindingMouseHit[] = [
-      { kind: 'inert' },
-      ...(this.model.leader.safeMode ? [{ kind: 'inert' }, { kind: 'inert' }] as KeybindingMouseHit[] : []),
-      { kind: 'inert' },
-      { kind: 'search' },
-      { kind: 'inert' },
-    ]
+    const limit = Math.max(1, this.maxRows())
+    const title = color.textStrong('Keyboard shortcuts')
+    const searchRow = this.searchRow(safeWidth)
+    // The Esc verb follows the two-stage lifecycle: a non-empty query
+    // clears first, an empty query closes the panel.
+    const escVerb = this.query === '' ? 'close' : 'clear'
+    const hint = color.textDim(`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: ${escVerb}`)
+    // Degenerate grants: the bottom operation hint is the non-negotiable
+    // tail. Below four rows the title and the search row take what fits, in
+    // an order that keeps the panel identifiable and the query editable.
+    if (limit === 1) {
+      this.hitMap = [{ kind: 'inert' }]
+      return [hint]
+    }
+    if (limit === 2) {
+      this.hitMap = [{ kind: 'inert' }, { kind: 'inert' }]
+      return [title, hint]
+    }
+    if (limit === 3) {
+      this.hitMap = [{ kind: 'inert' }, { kind: 'search' }, { kind: 'inert' }]
+      return [title, searchRow, hint]
+    }
+
     const entries = this.displayEntries()
     const selectable = this.selectableEntries(entries)
     this.ensureSelection(selectable)
     const selectedDisplayIndex = entries.findIndex(entry => this.isSelectedEntry(entry))
-    // Reserve space for the bottom hint and both possible scroll markers;
-    // the hint must remain visible even when the list is longer than the
-    // terminal viewport.
-    const listBudget = Math.max(1, this.maxRows() - lines.length - 4)
+    // Assemble the ideal frame in its normal order and drop what does not
+    // fit. `drop` is the removal priority (lowest first): the blank
+    // separators and scroll markers yield first, then the optional
+    // description/safe-mode chrome, and the operation hint is mandatory, so
+    // it can never be head-cut off the bottom.
+    const rows: BudgetRow[] = [
+      { text: title, hit: { kind: 'inert' } },
+    ]
+    if (this.model.leader.safeMode) {
+      rows.push(
+        { text: color.warning('Safe mode is active. Custom shortcuts are ignored.'), hit: { kind: 'inert' }, drop: 32 },
+        { text: color.textDim('Editing is disabled until safe mode is turned off.'), hit: { kind: 'inert' }, drop: 31 },
+      )
+    }
+    rows.push({
+      text: color.textDim(`Search actions, descriptions, IDs, categories, or keys · ${this.model.summary}`),
+      hit: { kind: 'inert' },
+      drop: 30,
+    })
+    rows.push({ text: searchRow, hit: { kind: 'search' } })
+    // Rows reserved below the item window: the blank separator after the
+    // search row, both scroll markers, and the trailing blank + hint. The
+    // status line takes one more when present. Reserving the same optional
+    // rows as before keeps the item window (and the whole ample-grant
+    // frame) byte-identical to the previous assembly; the trim below only
+    // removes what genuinely cannot fit.
+    const reservedTail = 5 + (this.message !== undefined ? 1 : 0)
+    const listBudget = Math.max(1, Math.min(
+      Math.max(1, entries.length),
+      limit - rows.length - reservedTail,
+    ))
     const start = Math.max(0, Math.min(
       Math.max(0, selectedDisplayIndex - Math.floor(listBudget / 2)),
       Math.max(0, entries.length - listBudget),
     ))
     const end = Math.min(entries.length, start + listBudget)
+    rows.push({ text: '', hit: { kind: 'inert' }, drop: 10 })
     if (entries.length === 0) {
-      lines.push(color.textDim('No matching shortcuts.'))
-      hits.push({ kind: 'inert' })
+      rows.push({ text: color.textDim('No matching shortcuts.'), hit: { kind: 'inert' } })
     } else {
       for (const entry of entries.slice(start, end)) {
         if (entry.kind === 'header') {
-          lines.push(color.textStrong(entry.label))
-          hits.push({ kind: 'inert' })
+          rows.push({ text: color.textStrong(entry.label), hit: { kind: 'inert' } })
         } else {
           const selectableIndex = selectable.indexOf(entry)
-          lines.push(entry.kind === 'leader'
-            ? renderLeaderRow(this.model, this.selectedId === 'leader', safeWidth)
-            : renderActionRow(entry.row, this.selectedId === entry.row.id, safeWidth))
-          hits.push({ kind: 'select', index: selectableIndex, id: this.entryId(entry) })
+          rows.push({
+            text: entry.kind === 'leader'
+              ? renderLeaderRow(this.model, this.selectedId === 'leader', safeWidth)
+              : renderActionRow(entry.row, this.selectedId === entry.row.id, safeWidth),
+            hit: { kind: 'select', index: selectableIndex, id: this.entryId(entry) },
+          })
         }
       }
-    }
-    if (start > 0) {
-      lines.push(color.textDim(`↑ ${start} more`))
-      hits.push({ kind: 'inert' })
-    }
-    if (end < entries.length) {
-      lines.push(color.textDim(`↓ ${entries.length - end} more`))
-      hits.push({ kind: 'inert' })
+      if (start > 0) rows.push({ text: color.textDim(`↑ ${start} more`), hit: { kind: 'inert' }, drop: 20 })
+      if (end < entries.length) rows.push({ text: color.textDim(`↓ ${entries.length - end} more`), hit: { kind: 'inert' }, drop: 21 })
     }
     if (this.message !== undefined) {
-      lines.push(color.error(truncateToWidth(this.message, safeWidth)))
-      hits.push({ kind: 'inert' })
+      rows.push({ text: color.error(truncateToWidth(this.message, safeWidth)), hit: { kind: 'inert' }, drop: 40 })
     }
-    // The Esc verb follows the two-stage lifecycle: a non-empty query
-    // clears first, an empty query closes the panel.
-    const escVerb = this.query === '' ? 'close' : 'clear'
-    lines.push('', color.textDim(`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: ${escVerb}`))
-    hits.push({ kind: 'inert' }, { kind: 'inert' })
-    const limit = Math.max(1, this.maxRows())
-    this.hitMap = hits.slice(0, limit)
-    return lines.slice(0, limit)
+    rows.push({ text: '', hit: { kind: 'inert' }, drop: 5 })
+    rows.push({ text: hint, hit: { kind: 'inert' } })
+    const kept = trimToGrant(rows, limit)
+    // The hit map is built from the EXACT rows this render returns, so a
+    // click can only act on last-painted geometry.
+    this.hitMap = kept.map(row => row.hit)
+    return kept.map(row => row.text)
   }
 
   /** The search row: the `Search: ` label combined with the shared
@@ -501,24 +580,39 @@ export class KeybindingEditorPanel implements Component, Focusable {
       : this.model.leader.key === undefined
         ? 'Not configured'
         : formatKeyId(this.model.leader.key)
-    const lines = [
-      color.textStrong('Keyboard shortcuts › Leader key'),
-      '',
-      color.text('A leader key prefixes multi-key shortcuts.'),
-      color.textDim(`Current: ${current}`),
+    // Tail priority: the operation row (which carries `Esc: back`) is
+    // mandatory, the in-flight/error status is dropped last among the
+    // optional rows, and the blank spacers yield before the description —
+    // so a short grant never replaces the way back with empty lines.
+    const rows: BudgetRow[] = [
+      { text: color.textStrong('Keyboard shortcuts › Leader key'), hit: { kind: 'inert' }, drop: 15 },
+      { text: '', hit: { kind: 'inert' }, drop: 10 },
+      { text: color.text('A leader key prefixes multi-key shortcuts.'), hit: { kind: 'inert' }, drop: 20 },
+      { text: color.textDim(`Current: ${current}`), hit: { kind: 'inert' }, drop: 25 },
       ...(safeMode
-        ? [color.warning(ignored
-          ? 'Safe mode ignores persisted keyboard shortcuts.'
-          : 'Safe mode disables leader shortcut editing.')]
+        ? [{
+          text: color.warning(ignored
+            ? 'Safe mode ignores persisted keyboard shortcuts.'
+            : 'Safe mode disables leader shortcut editing.'),
+          hit: { kind: 'inert' } as KeybindingMouseHit,
+          drop: 30,
+        }]
         : []),
-      '',
+      { text: '', hit: { kind: 'inert' }, drop: 5 },
       ...(safeMode
-        ? [color.textDim('Esc: back')]
-        : [color.accent('Enter: record a new leader key'), color.textDim('r: reset leader key · Esc: back')]),
+        ? [{ text: color.textDim('Esc: back'), hit: { kind: 'inert' } as KeybindingMouseHit }]
+        : [
+          { text: color.accent('Enter: record a new leader key'), hit: { kind: 'inert' } as KeybindingMouseHit },
+          { text: color.textDim('r: reset leader key · Esc: back'), hit: { kind: 'inert' } as KeybindingMouseHit },
+        ]),
+      ...(this.leaderPending
+        ? [{ text: color.accent('Saving…'), hit: { kind: 'inert' } as KeybindingMouseHit, drop: 40 }]
+        : []),
+      ...(this.message !== undefined
+        ? [{ text: color.error(truncateToWidth(this.message, width)), hit: { kind: 'inert' } as KeybindingMouseHit, drop: 45 }]
+        : []),
     ]
-    if (this.leaderPending) lines.push(color.accent('Saving…'))
-    if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, width)))
-    return lines.slice(0, Math.max(1, this.maxRows()))
+    return trimToGrant(rows, Math.max(1, this.maxRows())).map(row => row.text)
   }
 
   private handleLeaderInput(data: string): void {
@@ -625,18 +719,30 @@ export function keybindingEditorMutationResultMessage(result: KeybindingMutation
 /** A safe submenu fallback when the ConfigPort cannot be read. */
 export class KeybindingEditorUnavailablePanel implements Component {
   private readonly onClose: () => void
+  /** Live parent content-row grant (the `SettingsList` `RowBudgetAware`
+   * slot); undefined while the panel is not nested. */
+  private parentContentRows: number | undefined
 
   constructor(onClose: () => void) {
     this.onClose = onClose
   }
 
+  /** RowBudgetAware seam (mirrors KeybindingEditorPanel): the fixed four-row
+   * fallback is unchanged on an ample grant and keeps `Esc: back` on a
+   * short one. */
+  setMaxRows(rows: number): void {
+    this.parentContentRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : undefined
+  }
+
   render(width: number): string[] {
-    return [
-      truncateToWidth(color.textStrong('Keyboard shortcuts unavailable'), Math.max(1, width)),
-      '',
-      truncateToWidth(color.error('The settings service could not be read.'), Math.max(1, width)),
-      truncateToWidth(color.textDim('Esc: back'), Math.max(1, width)),
+    const rows: BudgetRow[] = [
+      { text: truncateToWidth(color.textStrong('Keyboard shortcuts unavailable'), Math.max(1, width)), hit: { kind: 'inert' }, drop: 15 },
+      { text: '', hit: { kind: 'inert' }, drop: 5 },
+      { text: truncateToWidth(color.error('The settings service could not be read.'), Math.max(1, width)), hit: { kind: 'inert' }, drop: 10 },
+      { text: truncateToWidth(color.textDim('Esc: back'), Math.max(1, width)), hit: { kind: 'inert' } },
     ]
+    if (this.parentContentRows === undefined) return rows.map(row => row.text)
+    return trimToGrant(rows, this.parentContentRows).map(row => row.text)
   }
 
   handleInput(data: string): void {
