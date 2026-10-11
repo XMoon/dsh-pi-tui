@@ -19373,7 +19373,14 @@ export class TuiApp {
     screen.setFocus(frame)
     // The question flow owns the seat (follow-up P1).
     this.setFocusSeat('overlay')
-    screen.requestRender()
+    // PR-D (external review P2): the seat occupant just changed height, so the
+    // fullscreen widget grant and the footer capacity are stale — go through
+    // the HOST render funnel (syncSurfaceGeometry → syncLiveWidgetBudget, then
+    // the footer recompose) instead of painting the raw screen. A capturing
+    // overlay was already focused in the reported sequence, so
+    // setFocusSeat('overlay') above is a no-op and this is the ONLY budget
+    // sync the replacement gets.
+    this.requestRender()
   }
 
   /** Abort one flow (its signal fired). The ACTIVE flow settles rejected
@@ -19475,7 +19482,12 @@ export class TuiApp {
             // effective pane state) must be re-derived here, exactly like the
             // final-restoration branch.
             () => this.projectActivity(),
-            () => { (this.fullscreen ?? this.tui).requestRender() },
+            // PR-D (external review P2): the handover installed a DIFFERENT
+            // QuestionFrame in the seat (its height can differ) while the seat
+            // stays 'overlay', so this is the only place that can re-derive the
+            // widget grant and the footer capacity — through the HOST render
+            // funnel, not the raw screen.
+            () => this.requestRender(),
           ])
         } else {
           // Final restoration: the editor FIRST, then the suspended overlays —
@@ -19498,7 +19510,10 @@ export class TuiApp {
             // focus intent; the previously focused one reclaims the keyboard.
             () => this.overlayBroker.resumeSuspendedRoots(state),
             () => this.projectActivity(),
-            () => { (this.fullscreen ?? this.tui).requestRender() },
+            // PR-D (external review P2): the editor is back in the seat, so the
+            // widget grant may GROW again — re-derive it (and the footer
+            // capacity) through the host render funnel.
+            () => this.requestRender(),
           ])
         }
       },
@@ -19639,7 +19654,11 @@ export class TuiApp {
     // a focus-seat transition happening to re-render (a seat that is already
     // 'overlay' would skip it and keep a stale `↓ view`).
     this.renderFooter()
-    screen.requestRender()
+    // PR-D (external review P2): the seat occupant changed height (a
+    // Save Location frame is not the editor), so the widget grant and the
+    // footer capacity must be re-derived through the HOST render funnel — the
+    // raw screen render would leave both stale. Same rule as presentQuestion.
+    this.requestRender()
   }
 
   /** Abort one prompt (its signal fired): the active prompt settles
@@ -19704,7 +19723,10 @@ export class TuiApp {
       // promise settlement, so a callback that synchronously opens the NEXT
       // owner paints that owner's live state, never a stale `↓ view`.
       () => this.renderFooter(),
-      () => { (this.fullscreen ?? this.tui).requestRender() },
+      // PR-D (external review P2): the editor is back in the seat — re-derive
+      // the widget grant and the footer capacity through the host render funnel
+      // (the raw screen render left both stale after the prompt's taller frame).
+      () => this.requestRender(),
       () => state.resolve(result),
     ])
   }
