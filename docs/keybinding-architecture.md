@@ -75,6 +75,33 @@ binding still works outside it). The config parser warns on such a
 collision (`FIXED_OVERLAY_KEYS`); the overlay never resolves the
 configurable action first (plan §3.3).
 
+### The conditional task affordance vs the actual modal route
+
+The empty-editor `↓` task-browser affordance is a composition rule over
+`app.tasks.open` (`manager.ts`), and the footer's `↓ view` / compact `↓`
+hint asks the SAME question. That hint has ONE input —
+`TuiApp.taskBrowserAvailable()` — shared by the builtin task item's full
+and compact densities and by every custom layout that references the
+item; never two per-mode branches.
+
+The gate must test the ACTIVE input OWNERS, not only physical overlay
+focus: a Question / Save Location frame owns the editor SEAT (it is not a
+managed broker overlay, so `OverlayBroker.hasFocusedOverlay()` stays false
+while `handleInputCore` consumes every key), and an Approval owns a
+managed overlay. A hint derived from overlay focus alone advertised a `↓`
+the ladder refused. `tasksActive`, `?N` (parked attention) and `!N`
+(failure attention) are independent projections: suppressing the hint
+never clears them. Save Location has no `ActivityStatus` section of its
+own, so its present/settle boundaries refresh the footer explicitly
+(`renderFooter()`); Question/Approval ride the status-store notify.
+
+A user binding, or a leader completion, of `app.tasks.open` is another
+TRIGGER of the same action and obeys the same ownership boundary (the
+modal inspection plane refuses non-inspection completions), so it is never
+a way across a modal. `test/surface-modal-affordance.test.ts` locks the
+modal source→route→footer behavior, and the keybinding integration suite
+locks the remap/leader boundary.
+
 ## Key decisions
 
 1. **One canonical physical-key identity.** Every key spelling collapses

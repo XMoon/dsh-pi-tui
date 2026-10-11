@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Session's figures. A scope with no eligible sample is omitted — never
   `0 tok/s`.
 
+### Fixed
+
+- While a Question / Approval / Save Location captures the input, the Footer no
+  longer advertises the Task Center `↓ view` (the narrow-screen `↓`), which
+  could not act there. The hint returns once the modal settles, the editor is
+  empty and the other conditions still hold; the parked `?N` and failure `!N`
+  figures stay visible throughout.
+
 ## [0.5.1] - 2026-10-08
 
 ### Installation and version pairing
