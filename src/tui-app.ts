@@ -10435,8 +10435,9 @@ export class TuiApp {
    * parity): the row's ACTUAL action target, following the click-path
    * priority EXACTLY (long-user disclosure > blank-row escape hatch > Focus
    * activity > PTC sub-call > Workflow > attachment > Focus-secondary/card).
-   * The long-user control wins first because it shares the trailing separator
-   * row with the blank-row escape hatch; a row inside a Workflow card that
+   * The long-user control wins first because the bubble BODY must never fall
+   * through to the blank-row escape hatch or a container owner; a row inside a
+   * Workflow card that
    * matches no hit is INERT (the card consumes every click — it must never
    * fall through to the owner/card branch). Shared by the paint-snapshot
    * commit and the release-click validation so both sides compute the EXACT
@@ -14350,9 +14351,9 @@ export class TuiApp {
       // surface-adaptive disclosure rule) comes from the render-cache
       // identity, so Ctrl+O / a fullscreen marker click rebuilds this
       // component from the canonical full text — the text is never mutated.
-      // An EXPANDED long prompt keeps the same compact-capable bubble so the
-      // caller can place the tail collapse control (the bubble only reports
-      // that it is collapse-eligible). A regular surface with NO effective
+      // An EXPANDED long prompt keeps the same compact-capable bubble: the
+      // bubble only reports that it is collapse-eligible, and its whole BODY
+      // is the local collapse surface. A regular surface with NO effective
       // expand key has no affordance at all (fullscreen keeps the marker
       // click), so it must render the full prompt rather than strand it.
       if (this.userDisclosureAffordanceAvailable() && this.messageFoldDisclosureAvailable()) {

@@ -4786,7 +4786,7 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 
 #### Why it exists
 
-Retired by product decision (post-PR272 DIV retirement plan, PR C). The seam existed so that a selection crossing the host-owned expanded-user tail control (`▴ Collapse · …`) copied the blank separator the row replaced instead of the presentation label. The product decision removed that dedicated tail row entirely: the whole-bubble BODY click is now the only disclosure affordance, no collapse label is painted on any surface, and the final block no longer reserves an extra presentation row. With no chrome inside the copyable transcript content the per-row copy-source override has no consumer, so TuiAltScreenOptions.selectionLineText, its private field, its constructor assignment and the getActiveSelectionText override are deleted; that method is the pinned upstream implementation again (apart from X024 line-head indent normalization), and the host no longer needs the painted-frame copy-blank-row cache (copyBlankRows) or the tail-slot hit bookkeeping.
+Retired by product decision (post-PR272 DIV retirement plan, PR C). The seam existed so that a selection crossing the host-owned expanded-user tail control (`▴ Collapse · …`) copied a blank row instead of the presentation label (the separator row it replaced for a non-final block, or an empty row for the final block, which reserved no separator). The product decision removed that dedicated tail row entirely: the whole-bubble BODY click is now the only disclosure affordance, no collapse label is painted on any surface, and the final block no longer reserves an extra presentation row. With no chrome inside the copyable transcript content the per-row copy-source override has no consumer, so TuiAltScreenOptions.selectionLineText, its private field, its constructor assignment and the getActiveSelectionText override are deleted; that method is the pinned upstream implementation again (apart from X024 line-head indent normalization), and the host no longer needs the painted-frame copy-blank-row cache (copyBlankRows) or the tail-slot hit bookkeeping.
 
 #### Changed surface
 
@@ -4820,7 +4820,7 @@ Retired by product decision (post-PR272 DIV retirement plan, PR C). The seam exi
 
 - retired: the five X057 cases in packages/pi-tui/test/tui-alt-screen.test.ts were deleted (copy-source filter, undefined-override passthrough, word range on the rendered line, non-empty-override range, filtered OSC 52 path); the independent copy/selection/word/double-click cases and the plain copySelection handler content assertions stay
 - replacement coverage (host copy contract): test/long-user-disclosure.test.ts pins that a copy across the expanded message carries no presentation label, that the last user row keeps its own line before the answer, and that selecting the complete expanded message copies its real text verbatim
-- replacement coverage (disclosure): the rewritten long-user and pending disclosure suites pin the whole-bubble BODY click in fullscreen/Focus/compact plus the resize and stale-press fences, and assert that no `▴ Collapse` chrome is painted in any state
+- replacement coverage (disclosure): the rewritten long-user and pending disclosure suites pin the whole-bubble BODY click in fullscreen/Focus/compact plus the resize and stale-press fences, and assert that no `▴ Collapse` chrome is painted in any state (including the separator case that pins exactly one ordinary separator row between two expanded long users)
 
 #### Upstream comparison
 
