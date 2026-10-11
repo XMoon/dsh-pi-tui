@@ -4794,6 +4794,20 @@ test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Qui
   vt.sendInput('\x1b[B') // down
   await vt.waitForRender()
   assert.equal(opened, 1, '↓ must open Quick Tasks under a nonCapturing overlay')
+  // A capturing overlay HOLDS the keyboard: the same ↓ belongs to it, so the
+  // conditional affordance must be refused while it is focused.
+  const capturing = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'modal notice' }] })
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the capturing overlay must own the seat')
+  vt.sendInput('\x1b[B') // down
+  await vt.waitForRender()
+  assert.equal(opened, 1, 'a focused capturing overlay must own ↓')
+  // Releasing it restores the editor's ↓ route.
+  capturing.close()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // down
+  await vt.waitForRender()
+  assert.equal(opened, 2, '↓ must open Quick Tasks again once the capturing overlay closes')
   app.stop()
 })
 
