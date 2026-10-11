@@ -190,9 +190,12 @@ describe("TUI.queryTerminalColors", () => {
 			assert.deepStrictEqual(late, [{ foreground: undefined, background: WHITE, palette: undefined }]);
 			assert.deepStrictEqual(component.inputs, []);
 
-			// With no query pending, color replies are ordinary input again.
+			// With no query pending, a well-formed color reply stays a protocol
+			// response: the fork swallows it instead of forwarding it to the
+			// input pipeline (dsh-pi-tui divergence X008; upstream treats it as
+			// ordinary input).
 			terminal.sendInput("\x1b]11;#ffffff\x07");
-			assert.deepStrictEqual(component.inputs, ["\x1b]11;#ffffff\x07"]);
+			assert.deepStrictEqual(component.inputs, []);
 		} finally {
 			tui.stop();
 		}
