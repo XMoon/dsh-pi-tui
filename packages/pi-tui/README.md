@@ -1,7 +1,7 @@
 # @earendil-works/pi-tui
 
 > **Vendored fork.** This package is `@xmoon76/pi-tui`, a rescoped copy of
-> `@earendil-works/pi-tui` v0.85.1 (see `UPSTREAM.json` for the pinned
+> `@earendil-works/pi-tui` v1.1.0 (see `UPSTREAM.json` for the pinned
 > baseline; the authoritative schema-v2 divergence ledger with guarding tests
 > lives in `vendor-divergences.json` and generates `DIVERGENCES.md`). It is
 > **not** published to npm; the package name in
@@ -84,6 +84,44 @@ tui.requestRender(); // Request a re-render
 
 // Global debug key handler (Shift+Ctrl+D)
 tui.onDebug = () => console.log("Debug triggered");
+```
+
+### Colors and terminal styles
+
+Colors are values that can be converted or mixed before terminal rendering:
+
+```typescript
+import {
+  colorToRgb,
+  foregroundAnsi,
+  getTerminalColorMode,
+  mixColors,
+  parseColor,
+  rgbColor,
+  styleText,
+} from "@earendil-works/pi-tui";
+
+const accent = parseColor("oklch(70% 0.12 220)");
+const background = parseColor("#20242a");
+const foreground = mixColors(accent, background, 0.2);
+
+const text = styleText(
+  "Ready",
+  { fg: foreground, bg: background, bold: true },
+  getTerminalColorMode(),
+);
+```
+
+`Color` is an indexed ANSI color, an sRGB color, or an OKLCH color. Every color converts to sRGB, so color math such as `mixColors()` always works. Indices 0-15 follow the user's terminal palette, so their sRGB values are approximations. `styleText()` converts colors to truecolor or 256-color output based on the requested terminal mode.
+
+`parseColor()` also accepts OKHSL, as in `okhsl(250 60% 55%)`; `okhslColor()` builds it in code and `colorToOkhsl()` reads any color's OKHSL channels. OKHSL saturation is relative to the most the sRGB gamut allows at the hue and lightness, so every value is in gamut and equal saturation looks equally colorful across hues. OKHSL colors are converted to sRGB when created.
+
+Conversions are not cached. OKLCH colors, especially ones outside the sRGB gamut, are more expensive to convert than sRGB or indexed colors. For colors used on every render, convert once and reuse the result:
+
+```typescript
+const { r, g, b } = colorToRgb(mixColors(accent, background, 0.2));
+const foreground = rgbColor(r, g, b); // cheap to render repeatedly
+const foregroundCode = foregroundAnsi(foreground, getTerminalColorMode());
 ```
 
 ### Alternate-screen viewport layouts
@@ -221,7 +259,7 @@ interface Component {
   render(width: number): string[];
   handleInput?(data: string): void;
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
-  invalidate?(): void;
+  invalidate(): void;
 }
 ```
 
@@ -230,7 +268,7 @@ interface Component {
 | `render(width)` | Returns an array of strings, one per line. Each line **must not exceed `width`** or the TUI will error. Use `truncateToWidth()` or manual wrapping to ensure this. |
 | `handleInput?(data)` | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences). |
 | `handleMouse?(event)` | Called by `TuiAltScreen` for normalized pointer input targeted at the component. |
-| `invalidate?()` | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call. |
+| `invalidate()` | Required. Clear any cached render state so the next `render()` starts from scratch. Components without cached render state can use an empty implementation. |
 
 The TUI appends a full SGR reset and OSC 8 reset at the end of each rendered line. Styles do not carry across lines. If you emit multi-line text with styling, reapply styles per line or use `wrapTextWithAnsi()` so styles are preserved for each wrapped line.
 
@@ -288,6 +326,8 @@ class MyInput implements Component, Focusable {
     // Emit marker right before the fake cursor
     return [`> ${beforeCursor}${marker}\x1b[7m${atCursor}\x1b[27m${afterCursor}`];
   }
+
+  invalidate(): void {}
 }
 ```
 
@@ -798,6 +838,8 @@ class MyInteractiveComponent implements Component {
       return truncateToWidth(prefix + item, width);
     });
   }
+
+  invalidate(): void {}
 }
 ```
 
@@ -829,6 +871,8 @@ class MyComponent implements Component {
     // Pad to exact width (optional, for backgrounds)
     return [line + " ".repeat(width - visible)];
   }
+
+  invalidate(): void {}
 }
 ```
 
@@ -886,7 +930,7 @@ See `test/chat-simple.ts` for a complete chat interface example with:
 
 Run it:
 ```bash
-npx tsx test/chat-simple.ts
+node test/chat-simple.ts
 ```
 
 ## Development
@@ -899,7 +943,7 @@ npm install
 npm run check
 
 # Run the demo
-npx tsx test/chat-simple.ts
+node test/chat-simple.ts
 ```
 
 ### Debug logging
@@ -907,5 +951,5 @@ npx tsx test/chat-simple.ts
 Set `PI_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
 
 ```bash
-PI_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx test/chat-simple.ts
+PI_TUI_WRITE_LOG=/tmp/tui-ansi.log node test/chat-simple.ts
 ```

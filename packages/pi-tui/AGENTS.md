@@ -1,7 +1,7 @@
 # pi-tui Agent Guide
 
 `packages/pi-tui` is a vendored copy of pi-tui from the upstream pi-mono
-project, pinned to Earendil `v0.85.1` (see `UPSTREAM.json` — the single
+project, pinned to Earendil `v1.1.0` (see `UPSTREAM.json` — the single
 source of truth for the baseline; generated reports may repeat the pin but
 must not become a second hand-maintained source). It is no longer patched via
 pnpm patches — all local fixes are applied directly to the source. The differential-rendering behavior in `src/tui.ts`
@@ -80,20 +80,36 @@ pnpm gate:pi-vendor-diff --strict       # pinned source coverage, including stal
 
 ## Re-vendor flow
 
+This is a **diff-first** re-vendor: the new upstream tree is the base and the
+local delta is transplanted onto it by hunk. Never re-implement a divergence
+from its ledger prose, and never copy an old local file back over the new
+upstream file.
+
 1. Read `UPSTREAM.json` for the pinned baseline (repository, package, tag,
-   commit).
-2. Fetch the pinned upstream package; copy `src/` and `test/` from the
-   pinned baseline. Merge upstream README content while preserving the local
-   fork/ledger header.
-3. Re-apply each source-active record in
-   `vendor-divergences.json` (never wholesale-copy an old local file back).
-   Historical `ABSORBED_UPSTREAM` and `REMOVED_UNUSED` records stay explicit
-   with evidence but are not re-applied.
-4. Re-verify every dependency class and guarding test. Update the JSON record
+   commit) and freeze the fork base commit. If the fork base drifted from the
+   plan, pin the new full SHA and regenerate the diffs against it.
+2. Produce the three immutable diff artifacts against the OLD pinned baseline
+   `U0` and the new target `U1`: `U0 → L` (the real local delta), `U0 → U1`
+   (upstream evolution), and the `U0 → L` test delta. Build a **hunk-level**
+   conflict matrix that maps every local hunk to its X### owner and its class
+   (`KEEP_AUTO` / `KEEP_RECONCILE` / `RETIRE_CANDIDATE` /
+   `REMOVE_HISTORICAL`). File-level coverage is not a substitute.
+3. Construct the candidate from `U1` as the base (copy `src/` and `test/` from
+   the pinned baseline) and transplant the local hunks with a per-file
+   three-way merge (`git merge-file -p --diff3 U1 U0 L`). Resolve every
+   conflict by hand against the upstream implementation and its callers —
+   never by picking a side wholesale. Merge upstream README content while
+   preserving the local fork/ledger header.
+4. Re-verify each source-active record as a **contract**, not as prose to
+   re-implement: every `ACTIVE` record must map to live source and a guarding
+   test, and no historical record may be resurrected. A record whose local
+   hunk no longer exists is either a deliberate retirement (with evidence) or
+   a merge bug.
+5. Re-verify every dependency class and guarding test. Update the JSON record
    when upstream absorbs a behavior or a retirement audit changes; then run
    `pnpm generate:pi-divergences` to refresh the report. Do not hand-edit
    `DIVERGENCES.md`.
-5. Run the ledger and source hard gates above, then the bundle gates
+6. Run the ledger and source hard gates above, then the bundle gates
    (`pnpm build`, `pnpm typecheck`, `pnpm test:bundle`).
 
 ## Testing
