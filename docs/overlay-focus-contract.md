@@ -231,18 +231,32 @@ that grant instead of the whole terminal height.
 - Assembly rule inside a budgeted panel: mandatory chrome (title, search row,
   operation hint) is placed FIRST in the budget, then the item window, then
   the optional separators/scroll markers/status. Mandatory rows are never
-  head-cut, and the operation hint is the non-negotiable tail ROW, so a
-  `slice(0, limit)`-style trim may not be used for the bottom chrome. At a
-  narrow width the frame's own truncation may still cut the hint's tail text;
-  the row itself stays painted.
-- Degenerate grants: at one row only the operation hint is drawn; at two rows
-  the title joins it; at three the search row joins them. Below the physical
-  floor (a terminal too short for both frame borders plus a hint) the frame
-  degrades by the existing compositor clamp, not by a second geometry
-  authority. Optional rows (blank separators, scroll markers, the description
-  line, the status line) are dropped lowest-priority-first; the status/error
-  line outranks the optional description, and the list keeps at least one
-  actionable row.
+  head-cut, so a `slice(0, limit)`-style trim may not be used for the bottom
+  chrome. At a narrow width the frame's own truncation may still cut a hint's
+  tail text; the row itself stays painted.
+- Bottom-chrome rule per view (the hint does NOT have to be the last row
+  everywhere — only the MAIN list fixes it there):
+  - MAIN shortcut list: the operation hint row
+    (`Enter: details … Esc: close/clear`) is the LAST row of every grant, so
+    every optional row is dropped before it.
+  - LEADER editor: the operation row (`Esc: back`, carried by the
+    record/reset row) must stay painted; its `Saving…` and error/status rows
+    may legitimately follow it (the pre-existing order) and are the last of
+    the optional rows to be dropped.
+  - Binding-choice view (and the action detail): the shared footer-sticky
+    viewport keeps the `Esc: back` hint as the last row, with the two choice
+    rows retaining their painted ordinal.
+  - Unavailable fallback: `Esc: back` is the mandatory tail; a short grant
+    drops its blank spacer first, then the error detail, then the title.
+- Degenerate-grant rules, MAIN LIST ONLY (do not transfer them to the leader
+  editor, the binding choice or the unavailable fallback): at one row only the
+  operation hint is drawn; at two rows the title joins it; at three the search
+  row joins them. Below the physical floor (a terminal too short for both
+  frame borders plus a hint) the frame degrades by the existing compositor
+  clamp, not by a second geometry authority. Optional rows (blank separators,
+  scroll markers, the description line, the status line) are dropped
+  lowest-priority-first; the status/error line outranks the optional
+  description, and the list keeps at least one actionable row.
 - Documented exception: the independent key-recorder view (`KeyRecorder`,
   reached from the leader editor or a binding choice) is NOT a budgeted
   assembly — it renders its fixed view regardless of the panel grant, so on a
