@@ -211,3 +211,45 @@ When you add or change an overlay path, cover the family it belongs to:
   detached from the suspension (the explicit-operation override below).
 - An explicit `show()` / `focus()` during a modal is an ownership override the
   caller is responsible for; the modal does not silently re-hide it.
+
+## 9. Nested row grant = the parent content budget
+
+An overlay that hosts an in-place submenu is a row-budget owner: the live
+geometry decides how many content rows exist, and every nested list consumes
+that grant instead of the whole terminal height.
+
+- Chain: `ResponsiveOverlayFrame` geometry (`geometryOf()` → `onGeometry`) →
+  `SettingsList.setMaxRows(maxHeight - 2)` → the fork's `RowBudgetAware`
+  submenu slot (`forwardBudgetToSubmenu`, on open and on every change) →
+  the submenu component's own budget → its render → the `Frame` → the
+  compositor. The frame border owns two of the overlay rows.
+- Consumer rule: a submenu's EFFECTIVE budget is
+  `min(own standalone cap, parent content grant)`. A panel mounted as its own
+  overlay (`/keybindings`) never receives `setMaxRows` and therefore keeps its
+  standalone cap — nested and standalone happen to share one component, not
+  one geometry authority.
+- Assembly rule inside a budgeted panel: mandatory chrome (title, search row,
+  operation hint) is placed FIRST in the budget, then the item window, then
+  the optional separators/scroll markers/status. Mandatory rows are never
+  head-cut, and the operation hint is the non-negotiable tail row, so a
+  `slice(0, limit)`-style trim may not be used for the bottom chrome.
+- Degenerate grants: at one row only the operation hint is drawn; at two rows
+  the title joins it; at three the search row joins them. Below the physical
+  floor (a terminal too short for both frame borders plus a hint) the frame
+  degrades by the existing compositor clamp, not by a second geometry
+  authority. Optional rows (blank separators, scroll markers, the description
+  line, the status line) are dropped lowest-priority-first; the status/error
+  line outranks the optional description, and the list keeps at least one
+  actionable row.
+- Legacy limits are retained deliberately: `/settings` keeps
+  `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so the nested
+  `Keyboard shortcuts` submenu is bounded by 26 content rows on any terminal
+  taller than 30 rows. This is a viewport/grant fix, NOT the Settings
+  Workspace (Roadmap D-03 / Phase 3B): the fork's SettingsList still lacks
+  filtered-state Home/End paging, and the main settings list still shows at
+  most six visible rows.
+- Evidence: `test/surface-row-grant.test.ts` (real `/settings` command →
+  live geometry → submenu → painted frame, resize, question suppression),
+  `test/theme-picker.test.ts` (Theme submenu grant), `test/rendering.test.ts`
+  (standalone budget and navigation) and `test/keybinding-editor.test.ts`
+  (per-panel grants, degenerate grants, painted mouse hit maps).
