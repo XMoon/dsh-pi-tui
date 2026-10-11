@@ -195,7 +195,13 @@ When you add or change an overlay path, cover the family it belongs to:
   must never flash or receive focus through a rebuild; replaced frames are
   disposed.
 - **Session / teardown**: a child overlay (Job viewer) closes before its parent
-  (Task Browser); callbacks capture the owning session identity.
+  (Task Browser); callbacks capture the owning session identity; a parent that
+  was disposed WITHOUT its closer must still notify its owner (see §10).
+- **A new owner-closing overlay** (viewer / browser family): give it ONE
+  per-open finalizer wired BOTH into the returned closer AND into the frame's
+  fourth `onDispose`; precommit the latch before the user callback runs; keep
+  the physical hide and the owner notification as INDEPENDENT
+  `runSyncDisposalSteps` steps (see §10).
 - **Assertions to add**: `assertOverlayForestForTest()` after reentrant
   operations; focus/blur counts around internal restores; the logical
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
@@ -279,3 +285,54 @@ that grant instead of the whole terminal height.
   close) and `test/keybinding-editor.test.ts` (per-panel grants, degenerate
   grants, painted mouse hit maps including the scrolled choice ordinal, and
   the recorder degradation).
+
+## 10. One-shot closure: output viewer and task browser
+
+A managed overlay that owns an external resource (an OutputViewer's refresh
+timer, a Job viewer's observation subscription, a Task Browser's owner slot) has
+exactly ONE per-open finalizer, and every close route funnels through it:
+
+- **Esc / the returned closer**: mark the close requested, then run the physical
+  hide and the finalizer as INDEPENDENT steps (`runSyncDisposalSteps`), so a
+  throwing hide cannot strand the owner notification and a throwing notification
+  cannot leave the overlay mounted. A repeated call is a no-op.
+- **A physical disposal that never calls the closer** (`TuiApp.dispose`, a
+  fullscreen screen swap, a broker detach): the owning
+  `ResponsiveOverlayFrame.dispose()` fires its FOURTH constructor argument
+  (`onDispose`). That argument is the SAME finalizer — it notifies once whatever
+  removed the frame, and it never touches the overlay handle.
+- **The finalizer latches BEFORE the user callback** (precommit), so a callback
+  that re-enters the closer, opens a newer overlay, or throws can never produce
+  a second notification.
+- **A throwing owned-child `dispose` is independent of the notification**: the
+  frame attempts both and surfaces the collected failure (the exact original
+  value for one failure, an `AggregateError` carrying both for two).
+- **Suppression is not closure.** `setHidden(true)` — including a Job detail
+  hiding its Task Browser — changes visibility and the keyboard owner only; the
+  suppressed instance keeps its state and is restored on the child's Esc. Only
+  `Frame.dispose` is a closure.
+- **The Task Browser owner gets a reason exactly once per open** (`cancel` /
+  `select` / `promote` / `external`). `promote` (Quick → Full) is the ONE reason
+  that preserves the dataset scope; every terminal reason resets it. The retired
+  browser identity is cleared BEFORE the child Job viewer is closed, so a
+  callback that synchronously opens a newer browser wins; a late callback from a
+  retired browser is a strict no-op.
+- **A retired browser's navigation tails are generation-fenced.** The Esc → Quick
+  restore and the Quick → Full promotion close over the monotonic epoch of the
+  browser that opened them, so a browser a synchronous callback opened while the
+  old one was closing (for example a plugin `onFocus` fired by the restore of
+  physical focus) keeps the slot. The retired browser's OWN token cannot express
+  this: its `onRetired` legitimately clears it, so "the token is clear" cannot be
+  told apart from "someone newer owns the slot".
+- **The child closes before the parent's physical hide** on an explicit close;
+  on a physical disposal the child's own frame finalizer releases it. Either way
+  the observer is released exactly once (per-open `releaseOnce`), and a stale
+  finalizer can never clear a newer instance's token or closer.
+- **Instance identity, not the session**: a Job viewer's currentness is its
+  per-open object token; the ownership subject (session + generation) is only the
+  destructive-intent fence. `jobs.read()` — the consuming cursor — is never part
+  of closing.
+
+Evidence: `test/surface-lifecycle-closure.test.ts` (Esc, returned closer, screen
+swap, parent-only close, Quick/Full restore, Job A → B, session reset, final
+dispose, throwing child dispose, Sign-in notice identity).
