@@ -22,6 +22,14 @@ const TERMINAL_PROGRESS_PAUSED_SEQUENCE = "\x1b]9;4;4\x07";
 const NATIVE_SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
 const DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS = 7;
 const KEYBOARD_PROTOCOL_RESPONSE_FRAGMENT_TIMEOUT_MS = 150;
+/**
+ * How long a device-attributes reply stays "owed" to the session that queried
+ * it (X016). The count exists so a DA reply from before a restart is paired
+ * with the query that asked for it; without a bound, a DA that never arrives
+ * would keep consuming later, unrelated DA replies forever. Two seconds is far
+ * beyond any real negotiation round trip while still bounding the debt.
+ */
+const DEVICE_ATTRIBUTES_DEBT_TIMEOUT_MS = 2000;
 const KITTY_KEYBOARD_PROTOCOL_QUERY = `\x1b[>${DESIRED_KITTY_KEYBOARD_PROTOCOL_FLAGS}u\x1b[?u`;
 const DEVICE_ATTRIBUTES_QUERY = "\x1b[c";
 
@@ -202,6 +210,8 @@ export class ProcessTerminal implements Terminal {
 	private keyboardProtocolPushed = false;
 	/** DA1 replies owed to keyboard protocol queries. Later DA1 replies answer other queries and are forwarded. */
 	private pendingKeyboardProtocolDeviceAttributes = 0;
+	/** When the oldest owed DA reply stops being attributable to a query (X016). */
+	private deviceAttributesDeadline = 0;
 	private keyboardProtocolNegotiationBuffer = "";
 	private keyboardProtocolBufferFlushTimer?: ReturnType<typeof setTimeout>;
 	private stdinBuffer?: StdinBuffer;
@@ -376,6 +386,7 @@ export class ProcessTerminal implements Terminal {
 		if (this.keyboardProtocolPushed) return;
 		this.keyboardProtocolPushed = true;
 		this.pendingKeyboardProtocolDeviceAttributes += 1;
+		this.deviceAttributesDeadline = Date.now() + DEVICE_ATTRIBUTES_DEBT_TIMEOUT_MS;
 		this.clearKeyboardProtocolNegotiationBuffer();
 		const programStatusOverride = process.env.PI_PROGRAM_STATUS;
 		this.programStatusSupported = programStatusOverride === "1";
@@ -391,6 +402,16 @@ export class ProcessTerminal implements Terminal {
 		this.clearKeyboardProtocolNegotiationBuffer();
 		if (negotiationSequence.type === "device-attributes") {
 			if (this.pendingKeyboardProtocolDeviceAttributes === 0) return false;
+			if (Date.now() > this.deviceAttributesDeadline) {
+				// The debt expired: a DA that never arrived within the negotiation
+				// window will never answer these queries, and keeping it owed would
+				// let it consume unrelated later DA replies forever. Drop the debt
+				// and forward this reply (TuiBase swallows unowned DA replies, so it
+				// can never surface as user input). (X016.)
+				this.pendingKeyboardProtocolDeviceAttributes = 0;
+				this.programStatusQueryPending = false;
+				return false;
+			}
 			this.pendingKeyboardProtocolDeviceAttributes -= 1;
 			// The last owed DA answers the latest query, which got no program status reply first. Earlier DA
 			// replies belong to queries from before a restart.

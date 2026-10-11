@@ -1755,7 +1755,7 @@ test('trackTerminalTheme queries the terminal colors and derives the scheme idem
       'enabling tracking must query the terminal colors exactly once')
     // Upstream v1.1.0 removed the DSR 996 probe: the reported background decides.
     vt.sendInput('\x1b]11;#eeeeee\x07')
-    vt.sendInput('\x1b[?62;22c') // DA1 ends the color query
+    vt.sendInput('\x1b[12;1R') // the DSR 6 cursor-position report ends the color query
     await viewport(vt)
     assert.deepEqual(received, ['light'], 'the reported background decides the tracked scheme')
     app.trackTerminalTheme(false)
