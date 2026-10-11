@@ -42,8 +42,8 @@ describe("KeybindingsManager", () => {
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.searchNext"), ["enter", "ctrl+g"]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.searchPrevious"), ["shift+enter", "ctrl+shift+g"]);
 		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.searchClose"), ["escape"]);
-		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.top"), ["home"]);
-		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.bottom"), ["end"]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.top"), ["ctrl+home"]);
+		assert.deepStrictEqual(keybindings.getKeys("tui.altScreen.bottom"), ["ctrl+end"]);
 	});
 
 	it("does not evict selector confirm when input submit is rebound", () => {

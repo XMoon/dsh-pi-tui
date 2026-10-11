@@ -107,6 +107,11 @@ export class VirtualTerminal implements Terminal {
 
 	setProgress(_active: boolean): void {}
 
+	/** OSC 7501 program status (upstream v1.1.0 interface): the host never
+	 *  drives it — `TuiApp` owns the single OSC 7501 writer — so the test
+	 *  terminal only satisfies the Terminal contract. */
+	setProgramStatus(): void {}
+
 	/** The richer OSC 9;4 state projection (fork X059): a no-op here so a Tern
 	 *  fixture can observe `paused` instead of falling back to the boolean
 	 *  contract. Tests override it with their own recorder. */
