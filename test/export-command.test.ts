@@ -872,10 +872,8 @@ async function mountRunner(
   return fiber
 }
 
-/** Drive one editor submit through the app's terminal input. The text is
- * sent as ONE chunk (a multi-char read resets the editor's paste-burst
- * tracker — per-character typing past the burst threshold would turn the
- * trailing Enter into a newline instead of a submit). */
+/** Drive one editor submit through the app's terminal input. The text is sent
+ * as ONE input event so the trailing Enter submits the complete draft. */
 function submitText(app: TuiApp, text: string): void {
   const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
   tui.handleTerminalInput(text)

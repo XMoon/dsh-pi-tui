@@ -103,7 +103,7 @@ configurable action first (plan §3.3).
    (convergence §2/§4.3/§4.4).
 3. **Editor-owned submit lives in the unified rule model — winner-aware.**
    `app.input.submit` is `hostResolved: false` — the fork editor's submit
-   path owns paste-burst suppression and the backslash-newline workaround.
+   path owns the backslash-newline workaround.
    Editor-owned rules PARTICIPATE in the winner selection on equal
    footing with host/plugin rules (round 9 finding: the resolver used to
    skip editor rules BEFORE picking a winner, so `submit: ctrl+s`
