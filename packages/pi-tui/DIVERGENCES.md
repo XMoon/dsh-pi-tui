@@ -3202,11 +3202,11 @@ Retired by product decision (post-PR272 DIV retirement plan, PR B). The former f
 
 **Inheritance / structural**
 - None found (audited).
-- Audit note: The retired state lived entirely in Editor; TuiEditor extends Editor and consumed only the setter. No override, super edge or other locally extended component depended on the removed behavior.
+- Audit note: The retired state lived entirely in Editor. src/tui/interaction/tui-editor.ts:150 extends Editor and forwards every keystroke through super.handleInput (line 415) while constructing it without the option (line 175), so the host editor inherited the fallback enabled by default and never called the setter; the inherited behavior is deleted with the implementation, so no super/override edge needs migration.
 
 **Host**
 - None found (audited).
-- Audit note: No host module imported PasteBurst or called setDisablePasteBurst or passed the option (the host drove submit behavior through the editor seat only), so no host path consumed the retired fallback.
+- Audit note: The retired fallback WAS reachable on the host submit path by inheritance: src/tui-app.ts:3454 constructs TuiEditor, which extends Editor and forwards every keystroke through super.handleInput, and the host never passed the disablePasteBurst option, so the fallback was enabled by default. No host module imported PasteBurst or called the setter, but the retirement is a product decision to drop that reachable host behavior (rapid typing followed by Enter now submits), not a no-consumer finding, and no host code needs migration because the implementation is deleted.
 
 **Public / extension**
 - None found (audited).
