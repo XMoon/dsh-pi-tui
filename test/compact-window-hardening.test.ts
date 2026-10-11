@@ -267,3 +267,38 @@ test('9.3 a restored legacy Context window presents safely with no crash', async
   assert.equal(clusterAdjacentAmbientContext([legacyRecall, legacyNotice, unknown]).clusters.length, 0,
     'none of the restored rows may cluster as ambient')
 })
+
+// --- upstream #9311: the replaced transcript drops the selection ----------
+
+test('a window replacement resets the fullscreen selection; ordinary rebuilds keep it', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const screen = (app as unknown as { fullscreen?: { resetTextSelection(): void } }).fullscreen
+  assert.ok(screen, 'the fullscreen screen must be mounted')
+  const original = screen.resetTextSelection.bind(screen)
+  let resets = 0
+  screen.resetTextSelection = () => {
+    resets += 1
+    original()
+  }
+
+  const a = ambient(1, 'ctx-a')
+  const windowA = { mode: 'history' as const, endTurn: 1, firstTurn: 1, lastTurn: 1 }
+  app.setTranscript([a], new Map(), windowA)
+  assert.equal(resets, 1, 'establishing the window is a replacement relative to no window')
+
+  // The same window committed again is an ordinary rebuild: the user's
+  // selection coordinates still point at the same content.
+  app.setTranscript([a], new Map(), windowA)
+  assert.equal(resets, 1, 'a same-window rebuild must not clear the selection')
+
+  // A disclosure toggle re-publishes the transcript with the same window.
+  app.setTranscriptDetailExpanded(true)
+  assert.equal(resets, 1, 'an expand rebuild must not clear the selection')
+
+  // A page change replaces the corpus under the selection coordinates.
+  const c = ambient(9, 'ctx-c')
+  app.setTranscript([c], new Map(), { mode: 'history', endTurn: 9, firstTurn: 9, lastTurn: 9 })
+  assert.equal(resets, 2, 'a window replacement must drop the stale selection')
+})
