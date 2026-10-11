@@ -6209,6 +6209,10 @@ export class TuiApp {
       // gesture) BEFORE start, so a press immediately after re-entry can
       // never resolve against a frame the new surface never drew.
       alt.start()
+      // Mode 2031 is per screen: the freshly started alt screen syncs the
+      // CURRENT tracking choice now that it owns the terminal (writing the mode
+      // before start() would land on the stopped screen and be lost).
+      alt.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
       // The main screen's stop cleared the physical progress indicator;
       // re-assert the desired state on the new alt screen (plan §7).
       this.enterTerminalPresentation()
@@ -18898,25 +18902,24 @@ export class TuiApp {
   }
 
   /**
-   * Query the terminal colors (OSC 10/11/4 through the fork's
-   * `queryTerminalColors` — upstream v1.1.0 replaced the old OSC 11 accessor)
-   * and apply the palette matching the reported BACKGROUND, with the kimi
-   * detection chain: colour-opt-out environments (NO_COLOR / FORCE_COLOR=0 /
-   * CI) stay dark without querying; a terminal that never answers falls back
-   * to COLORFGBG (VT100/xterm convention); a terminal with neither leaves the
-   * current theme untouched.
+   * Observe the terminal's default BACKGROUND (one narrow OSC 11 query through
+   * the screen's `queryTerminalBackgroundColor`) and apply the palette matching
+   * it, with the kimi detection chain: colour-opt-out environments (NO_COLOR /
+   * FORCE_COLOR=0 / CI) stay dark without querying; a terminal that never
+   * answers falls back to COLORFGBG (VT100/xterm convention); a terminal with
+   * neither leaves the current theme untouched.
    *
-   * The query targets the screen that OWNS the terminal input handler (the
-   * alt screen in fullscreen mode): a query on the stopped main screen would
-   * have its reply swallowed by the alt screen's color-query consumer and
-   * time out, silently turning `auto` into a no-op.
+   * The observation targets the screen that OWNS the terminal input handler
+   * (the alt screen in fullscreen mode): a query on the stopped main screen
+   * would have its reply swallowed by the alt screen's consumer and time out,
+   * silently turning `auto` into a no-op.
    *
-   * Concurrent calls COALESCE onto one shared in-flight query. The fork
-   * serializes the physical color queries themselves (dsh-pi-tui divergence
-   * X008): at most one query is outstanding, so replies can never mis-pair.
-   * The LATEST {@link AutoDetectOptions.shouldApply} guard is consulted at
-   * settle time, so a late result can never override a newer explicit theme
-   * choice.
+   * Concurrent calls COALESCE onto one shared in-flight observation, and the
+   * settled result is dropped when the active screen changed while it was in
+   * flight (a Main↔Fullscreen switch must not colour the new screen from the
+   * old one's observation). The LATEST {@link AutoDetectOptions.shouldApply}
+   * guard is consulted at settle time, so a late result can never override a
+   * newer explicit theme choice.
    * @param options.shouldApply - returns false to drop the settled result
    *   instead of applying it (default: always apply).
    */
@@ -18933,11 +18936,16 @@ export class TuiApp {
   }
 
   private async runAutoDetect(): Promise<void> {
-    const colors = await this.activeScreen.queryTerminalColors({ timeoutMs: 800 })
+    const screen = this.activeScreen
+    const background = await screen.queryTerminalBackgroundColor({ timeoutMs: 800 })
     if (this.disposed) return
+    // The observation belongs to the screen that owned the terminal when it was
+    // issued: after a Main↔Fullscreen switch its result is about a screen the
+    // user is no longer looking at, so it must not colour the new one.
+    if (this.activeScreen !== screen) return
     const guard = this.autoDetectGuard
     const apply = (): boolean => guard === undefined || guard()
-    const rgb = colors.background
+    const rgb = background
     if (rgb !== undefined) {
       if (apply()) this.applyTheme(detectThemeFromBackground(rgb))
       return
@@ -18947,26 +18955,21 @@ export class TuiApp {
   }
 
   /**
-   * Follow the terminal's live colour-scheme reports while `following` is
-   * true. Enabling samples the terminal colors once and derives the initial
-   * scheme from the reported background (upstream v1.1.0 removed the DSR 996
-   * probe; the reported background decides everywhere), after which reported
-   * schemes fan out to the {@link onTerminalThemeChange} listeners (which
-   * guard whether to apply, typically against the persisted `auto`
-   * preference). Disabling stops tracking. Idempotent.
-   * @param following - whether to track and apply live scheme reports.
+   * Follow the terminal's live colour-scheme reports while `following` is true:
+   * this only toggles Mode 2031 notifications on both screens (the one that
+   * owns the terminal writes the mode; a stopped screen records the flag so its
+   * next start restores the right mode). The initial sample comes exclusively
+   * from {@link autoDetectTheme}, so enabling tracking never re-queries the
+   * terminal. Reported schemes fan out to the {@link onTerminalThemeChange}
+   * listeners (which guard whether to apply, typically against the persisted
+   * `auto` preference). Idempotent.
+   * @param following - whether reported scheme changes should keep arriving.
    */
   trackTerminalTheme(following: boolean): void {
     if (following === this.followingTerminalTheme) return
     this.followingTerminalTheme = following
-    if (!following) return
-    this.activeScreen.queryTerminalColors({ timeoutMs: 800 })
-      .then((colors) => {
-        const scheme = colors.background === undefined ? undefined : detectThemeFromBackground(colors.background)
-        if (scheme === undefined || !this.followingTerminalTheme) return
-        for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
-      })
-      .catch(() => {})
+    this.tui.setTerminalColorSchemeNotifications(following)
+    this.fullscreen?.setTerminalColorSchemeNotifications(following)
   }
 
   /**

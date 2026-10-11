@@ -1,0 +1,109 @@
+/**
+ * The boot display wiring for `Theme: auto` (settings-runtime).
+ *
+ * The runtime owns the policy: it samples the terminal ONCE through
+ * `autoDetectTheme`, enables Mode 2031 tracking through `trackTerminalTheme`
+ * (which no longer samples), and a live scheme report may only change the
+ * palette while the persisted preference is still `auto`.
+ * @module @xmoon76/dsh-pi-tui/settings-theme-boot.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { createSettingsRuntime, type SettingsRuntimeDeps } from '../src/app/surface/settings-runtime.ts'
+import type { TuiApp } from '../src/tui-app.ts'
+
+const noop = (): void => {}
+
+type ThemeHarness = {
+  runtime: ReturnType<typeof createSettingsRuntime>
+  applied: string[]
+  detectCalls: number[]
+  trackCalls: boolean[]
+  report(scheme: 'dark' | 'light'): void
+  setTheme(theme: string | undefined): void
+}
+
+function mountThemeRuntime(): ThemeHarness {
+  const applied: string[] = []
+  const detectCalls: number[] = []
+  const trackCalls: boolean[] = []
+  let report: ((scheme: 'dark' | 'light') => void) | undefined
+  let theme: string | undefined = 'auto'
+  const app = {
+    setHomeEndMode: noop,
+    setWheelScrollLines: noop,
+    setFullscreen: noop,
+    autoDetectTheme: (): Promise<void> => {
+      detectCalls.push(1)
+      return Promise.resolve()
+    },
+    trackTerminalTheme: (following: boolean): void => {
+      trackCalls.push(following)
+    },
+    onTerminalThemeChange: (listener: (scheme: 'dark' | 'light') => void): (() => void) => {
+      report = listener
+      return noop
+    },
+    applyTheme: (value: string): void => {
+      applied.push(value)
+    },
+  } as unknown as TuiApp
+  const deps: SettingsRuntimeDeps = {
+    surface: {
+      app,
+      status: { snapshot: () => ({}) as never, subscribe: () => noop },
+    },
+    signal: new AbortController().signal,
+    tuiSettings: {
+      get: () => ({
+        theme,
+        homeEndKeys: 'viewport',
+        wheelScrollLines: '1',
+        fullscreen: 'off',
+      }),
+    } as never,
+    settingsForms: undefined,
+    isCleanedUp: () => false,
+    backend: { config: {} } as never,
+    diag: { debug: noop, info: noop, warn: noop, error: noop, dispose: noop } as never,
+    status: { refresh: noop },
+    extensions: () => undefined,
+  }
+  const runtime = createSettingsRuntime(deps)
+  return {
+    runtime,
+    applied,
+    detectCalls,
+    trackCalls,
+    report: (scheme) => report?.(scheme),
+    setTheme: (value) => { theme = value },
+  }
+}
+
+test('the boot wiring samples once through autoDetectTheme and only toggles Mode 2031', () => {
+  const harness = mountThemeRuntime()
+  harness.runtime.applyBootDisplay()
+  assert.equal(harness.detectCalls.length, 1, 'the boot detection is the single sample')
+  assert.deepEqual(harness.trackCalls, [true], 'tracking is enabled without sampling again')
+})
+
+test('a live scheme report only changes the theme while the preference is auto', () => {
+  const harness = mountThemeRuntime()
+  harness.runtime.applyBootDisplay()
+  harness.report('light')
+  assert.deepEqual(harness.applied, ['light'], 'auto follows the reported scheme')
+  harness.setTheme('dark')
+  harness.applied.length = 0
+  harness.report('light')
+  assert.deepEqual(harness.applied, [], 'a manual theme ignores live reports')
+})
+
+test('a manual persisted theme applies itself and does not track', () => {
+  const harness = mountThemeRuntime()
+  harness.setTheme('light')
+  harness.runtime.applyBootDisplay()
+  assert.deepEqual(harness.applied, ['light'], 'the persisted palette is applied')
+  assert.deepEqual(harness.trackCalls, [false], 'a manual theme stops tracking')
+  assert.equal(harness.detectCalls.length, 0, 'a manual theme never samples the terminal')
+})
