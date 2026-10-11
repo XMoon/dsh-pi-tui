@@ -220,20 +220,17 @@ const TERMINAL_PALETTE_SIZE = 16;
 /** OSC 10 and 11 plus OSC 4 for every palette color. */
 const TERMINAL_COLOR_REPLY_COUNT = 2 + TERMINAL_PALETTE_SIZE;
 /**
- * Default colors, palette colors 0-15, and a trailing device status report (DSR 6) request.
- * Every terminal answers DSR 6 with a cursor position report, so it marks the end of the color
- * replies, including for terminals that ignore the color queries. Deliberately NOT a primary
- * device attributes (DA1) request (dsh-pi-tui divergence X008): `ProcessTerminal` consumes DA
- * replies for its own keyboard-negotiation accounting (X016), so a DA1 sentinel can be eaten by
- * that layer after a stop/restart and would leave this serialized wire blocked forever.
+ * Default colors, palette colors 0-15, and a trailing primary device attributes (DA1) request.
+ * Every terminal answers DA1 and terminals answer in order, so the DA1 reply marks the end of
+ * the color replies, including for terminals that ignore the color queries.
  */
 const TERMINAL_COLOR_QUERY = `\x1b]10;?\x07\x1b]11;?\x07${Array.from(
 	{ length: TERMINAL_PALETTE_SIZE },
 	(_, index) => `\x1b]4;${index};?\x07`,
-).join("")}\x1b[6n`;
+).join("")}\x1b[c`;
 const DEVICE_ATTRIBUTES_RESPONSE_PATTERN = /^\x1b\[\?[\d;]*c$/;
-/** Reply to the DSR 6 sentinel that ends a color query burst. */
-const CURSOR_POSITION_REPORT_PATTERN = /^\x1b\[\d+;\d+R$/;
+/** A single OSC 11 background observation (narrow seam; see queryTerminalBackgroundColor). */
+const TERMINAL_BACKGROUND_QUERY = "\x1b]11;?\x07";
 
 /**
  * Interface for components that can receive focus and display a hardware cursor.
@@ -730,6 +727,13 @@ export interface TUI extends Component {
 		timeoutMs: number;
 		onLateReply?: (colors: TerminalColors) => void;
 	}): Promise<TerminalColors>;
+	/**
+	 * Observe the terminal's default background with one narrow OSC 11 query (the Host's
+	 * `Theme: auto` path). Concurrent calls on the same screen share one observation, the
+	 * promise resolves `undefined` on timeout or `stop()`, and the reply never reaches the
+	 * editor or a raw input listener.
+	 */
+	queryTerminalBackgroundColor(options: { timeoutMs: number }): Promise<RgbColor | undefined>;
 }
 
 export const VIEWPORT_TUI = Symbol.for("@earendil-works/pi-tui/viewport");
@@ -765,12 +769,16 @@ export abstract class TuiBase extends Container implements TUI {
 	 * replies belong to the oldest one. Queries stay here after a timeout to collect late replies.
 	 */
 	private pendingTerminalColorQueries: PendingTerminalColorQuery[] = [];
-	/** X008: whether the oldest waiting query has been written to the terminal.
-	 * The fork serializes color queries: at most one query is ever outstanding,
-	 * so a reply always belongs to the query that is actually waiting for it.
-	 * The DA1 sentinel of that query — not its timeout — frees the wire for the
-	 * next waiting query; a timed-out query stays the tombstone until then. */
-	private terminalColorQueryWritten = false;
+	/**
+	 * Whether this screen has issued a narrow OSC 11 observation (see the API below). Only then
+	 * does the screen treat an unowned background reply as its own protocol traffic instead of
+	 * upstream's "color replies are ordinary input again".
+	 */
+	private backgroundProbeOwned = false;
+	/** The single in-flight narrow OSC 11 background observation (see the API below). */
+	private backgroundProbe:
+		| { promise: Promise<RgbColor | undefined>; settle: (background: RgbColor | undefined) => void; timer: NodeJS.Timeout }
+		| undefined;
 	private terminalColorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
 	private terminalColorSchemeNotificationsEnabled = false;
 	/** Directory for debug/crash logs. When undefined, debug logging is disabled and crash dumps fall back to the OS temp directory. */
@@ -1395,6 +1403,9 @@ export abstract class TuiBase extends Container implements TUI {
 	stop(options: TuiStopOptions = {}): void {
 		this.stopped = true;
 		this.cancelRenderTimer();
+		// Release a pending narrow background observation: a stopped screen must
+		// never apply a late OSC 11 result (and its timer must not stay armed).
+		this.settleBackgroundProbe(undefined);
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
@@ -1549,32 +1560,19 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	private consumeTerminalColorResponse(data: string): boolean {
-		// A primary device attributes reply is a terminal protocol response, never
-		// typed input — and never this consumer's sentinel, because the burst ends
-		// with a DSR 6 request instead (X008). ProcessTerminal's keyboard
-		// negotiation accounting owns DA replies (X016); an unowned one reaches
-		// this layer and is swallowed rather than forwarded as user activity.
-		if (DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data)) {
-			return true;
-		}
+		// The narrow OSC 11 observation is served first, from the SAME parse: it is
+		// one observation of the terminal background, so a concurrent full query
+		// still records the reply below. Without a pending full query this branch
+		// also consumes a stray/late background reply, which must never reach the
+		// editor or a raw input listener.
+		const servedBackgroundProbe = this.consumeTerminalBackgroundResponse(data);
 		const query = this.pendingTerminalColorQueries[0];
 		if (!query) {
-			// X008: a well-formed OSC color reply — and the cursor-position report
-			// that ends the same query burst — is a terminal protocol response,
-			// never editor input, even when THIS screen has no query waiting (the
-			// reply belongs to a query issued before a fullscreen swap / stop, or
-			// to a query whose tombstone was already consumed). Upstream forwards
-			// both to the input pipeline; the fork keeps swallowing them.
-			return parseOscColorResponse(data) !== undefined || CURSOR_POSITION_REPORT_PATTERN.test(data);
+			return servedBackgroundProbe;
 		}
-		if (CURSOR_POSITION_REPORT_PATTERN.test(data)) {
+		if (DEVICE_ATTRIBUTES_RESPONSE_PATTERN.test(data)) {
 			this.pendingTerminalColorQueries.shift();
-			// X008: the sentinel ends this query's turn on the wire. Only now may
-			// the next waiting query be written, so the replies that arrive next
-			// can only belong to that next query.
-			this.terminalColorQueryWritten = false;
 			this.completeTerminalColorQuery(query);
-			this.pumpTerminalColorQueries();
 			return true;
 		}
 
@@ -1613,17 +1611,31 @@ export abstract class TuiBase extends Container implements TUI {
 		deliver?.(this.terminalColorQueryResult(query));
 	}
 
-	/**
-	 * Write the color query for the oldest waiting query, unless one is already
-	 * outstanding on the wire (X008). OSC color replies carry no request id, so
-	 * a second concurrently written query would let a late reply to the
-	 * timed-out first query be attributed to the second one. The outstanding
-	 * query's DA1 sentinel frees the wire for the next waiting query.
-	 */
-	private pumpTerminalColorQueries(): void {
-		if (this.terminalColorQueryWritten || this.pendingTerminalColorQueries.length === 0) return;
-		this.terminalColorQueryWritten = true;
-		this.terminal.write(TERMINAL_COLOR_QUERY);
+	/** Serve the narrow OSC 11 observation's in-flight probe, if any. */
+	private consumeTerminalBackgroundResponse(data: string): boolean {
+		const response = parseOscColorResponse(data);
+		if (!response || response.target !== "background") {
+			return false;
+		}
+		const probe = this.backgroundProbe;
+		if (probe !== undefined) {
+			this.backgroundProbe = undefined;
+			clearTimeout(probe.timer);
+			probe.settle(response.rgb);
+			return true;
+		}
+		// A stray or late background reply is consumed on a screen that uses the
+		// narrow seam, so it can never reach the editor or a raw input listener.
+		// A screen that never probes keeps upstream's forwarding behavior.
+		return this.backgroundProbeOwned;
+	}
+
+	private settleBackgroundProbe(background: RgbColor | undefined): void {
+		const probe = this.backgroundProbe;
+		if (probe === undefined) return;
+		this.backgroundProbe = undefined;
+		clearTimeout(probe.timer);
+		probe.settle(background);
 	}
 
 	private consumeTerminalColorSchemeReport(data: string): boolean {
@@ -1946,22 +1958,39 @@ export abstract class TuiBase extends Container implements TUI {
 			query.timer = setTimeout(() => {
 				query.deliver = onLateReply;
 				resolve(this.terminalColorQueryResult(query));
-				// X008: a query that timed out while an EARLIER query still owned the
-				// wire was never written. Drop it so a settled query can never be
-				// sent later as a stale burst, and pending queries cannot accumulate
-				// on a terminal that never answers DA1. The oldest waiting query
-				// stays the tombstone for the replies it may still receive.
-				if (this.pendingTerminalColorQueries[0] !== query) {
-					const index = this.pendingTerminalColorQueries.indexOf(query);
-					if (index !== -1) this.pendingTerminalColorQueries.splice(index, 1);
-				}
 			}, timeoutMs);
-			// X008: the query bytes are written only when the wire is free; the
-			// public timeout still settles the Promise, but a timed-out query
-			// stays the tombstone for replies that can still arrive, so the next
-			// waiting query is written only after this one's DA1 sentinel.
 			this.pendingTerminalColorQueries.push(query);
-			this.pumpTerminalColorQueries();
+			this.terminal.write(TERMINAL_COLOR_QUERY);
 		});
+	}
+
+	/**
+	 * Observe the terminal's default background with ONE OSC 11 query. This is the narrow
+	 * background-only seam the Host uses for `Theme: auto`; the full {@link queryTerminalColors}
+	 * API above stays upstream-verbatim for consumers that need the foreground or the palette.
+	 *
+	 * - one in-flight observation per screen: concurrent calls on the same screen share it;
+	 * - resolves `undefined` on timeout, and on `stop()` (the pending resolver and timer are
+	 *   released, so a stopped screen never applies a late result);
+	 * - from the first call onward, a well-formed OSC 11 reply is consumed at this layer (late and
+	 *   stray ones too) and can never reach the editor or a raw input listener; a screen that never
+	 *   calls this keeps upstream's "an unowned color reply is ordinary input" behavior;
+	 * - OSC 11 carries no request id, so the resolved colour is an observation of the CURRENT
+	 *   terminal background, not a reply strictly attributable to this request. Callers own the
+	 *   "still relevant?" guard (screen identity, screen stopped, a newer explicit theme choice).
+	 * @param options.timeoutMs - observation timeout in milliseconds.
+	 */
+	queryTerminalBackgroundColor({ timeoutMs }: { timeoutMs: number }): Promise<RgbColor | undefined> {
+		const inFlight = this.backgroundProbe;
+		if (inFlight !== undefined) return inFlight.promise;
+		let settle!: (background: RgbColor | undefined) => void;
+		const promise = new Promise<RgbColor | undefined>((resolve) => {
+			settle = resolve;
+		});
+		const timer = setTimeout(() => this.settleBackgroundProbe(undefined), timeoutMs);
+		this.backgroundProbeOwned = true;
+		this.backgroundProbe = { promise, settle, timer };
+		this.terminal.write(TERMINAL_BACKGROUND_QUERY);
+		return promise;
 	}
 }
