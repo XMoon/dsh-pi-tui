@@ -23,6 +23,7 @@ import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { KeybindingEditorPanel } from '../src/tui/keybindings/ui/list.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 
@@ -65,13 +66,26 @@ function paintedFrame(vt: VirtualTerminal, anchor: string): { contentRows: numbe
   return { contentRows, bottomBorder: topBorder && (lines[top + contentRows] ?? '').includes('╰') }
 }
 
-/** The selected (cursor-marked) row of the keyboard shortcut list: the
- * frame content between its own borders (a row composited over a base-screen
- * line must not contribute text). */
+/** The selected (cursor-marked) row: the frame content between its own
+ * borders must START with the cursor marker (a title row may contain a `›`
+ * in its own text, and a row composited over a base-screen line must not
+ * contribute text). */
 function selectedRowText(vt: VirtualTerminal): string {
-  const line = vt.getViewport().map(stripAnsi).find(row => row.includes('›') && row.includes('│'))
+  const content = (line: string): string => line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
+  const line = vt.getViewport().map(stripAnsi).find(row => row.includes('│') && content(row).startsWith('›'))
   assert.ok(line !== undefined, `no selected row painted:\n${viewportText(vt)}`)
-  return line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
+  return content(line)
+}
+
+interface StandaloneState {
+  readonly panel: KeybindingEditorPanel | undefined
+  readonly close: (() => void) | undefined
+  /** Raw `dispose()` invocations (the panel's own Esc teardown AND the
+   * owning frame's disposeOnHide both call it). */
+  readonly disposeCalls: number
+  /** Invocations that actually ran the teardown body (the panel's own
+   * `disposed` guard makes the later owner's call a no-op). */
+  readonly effectiveDisposals: number
 }
 
 interface Harness {
@@ -79,6 +93,7 @@ interface Harness {
   readonly app: TuiApp
   readonly invoke: (name: string) => unknown
   readonly panel: () => KeybindingEditorPanel | undefined
+  readonly standalone: () => StandaloneState
 }
 
 /**
@@ -172,7 +187,40 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
     assert.ok(definition?.handler !== undefined, `${name} must be registered`)
     return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
   }
-  return { vt, app, invoke, panel: () => captured }
+  // Test instrumentation ONLY for the standalone `/keybindings` path:
+  // observe the panel the real command mounts and count EFFECTIVE teardowns.
+  // `dispose()` is reached twice on the Esc path (the panel closes itself,
+  // then the owning FocusForwardingFrame's disposeOnHide releases it); only
+  // the first call may run the teardown body, which the panel's own guard
+  // enforces. The probe reads that guard before delegating to the UNBOUND
+  // original (never a bound receiver).
+  let standalonePanel: KeybindingEditorPanel | undefined
+  let standaloneClose: (() => void) | undefined
+  let disposeCalls = 0
+  let effectiveDisposals = 0
+  const originalOpenKeybindingEditor = app.openKeybindingEditor
+  app.openKeybindingEditor = ((panel: Parameters<TuiApp['openKeybindingEditor']>[0]) => {
+    if (panel instanceof KeybindingEditorPanel) {
+      standalonePanel = panel
+      const originalDispose = panel.dispose
+      panel.dispose = () => {
+        const alreadyDisposed = (panel as unknown as { disposed: boolean }).disposed
+        disposeCalls += 1
+        originalDispose.call(panel)
+        if (!alreadyDisposed) effectiveDisposals += 1
+      }
+    }
+    const close = originalOpenKeybindingEditor.call(app, panel)
+    standaloneClose = close
+    return close
+  }) as TuiApp['openKeybindingEditor']
+  return {
+    vt,
+    app,
+    invoke,
+    panel: () => captured,
+    standalone: () => ({ panel: standalonePanel, close: standaloneClose, disposeCalls, effectiveDisposals }),
+  }
 }
 
 /** `/settings` → filter to the Keyboard shortcuts row → Enter. */
@@ -290,15 +338,28 @@ test('C-T05: the nested binding-choice view keeps its rows, its hint and its nav
   assert.match(view, /Esc: back/)
   let frame = paintedFrame(h.vt, 'Enter: choose')
   assert.ok(frame.bottomBorder, `the choice frame bottom border must be painted:\n${view}`)
+  // Navigation through the REAL chain: Down/Up move the marker between the
+  // two choices, and Enter accepts the selected one (starts its recorder).
+  assert.match(selectedRowText(h.vt), /Direct shortcut/)
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.match(selectedRowText(h.vt), /Leader completion/, 'Down must select the leader choice')
+  h.vt.sendInput('\x1b[A')
+  await h.vt.waitForRender()
+  assert.match(selectedRowText(h.vt), /Direct shortcut/, 'Up must return to the direct choice')
 
   // A short grant: the footer and the selected choice row must survive.
   h.vt.resize(120, 8)
   await h.vt.waitForRender()
   view = viewportText(h.vt)
   assert.match(view, /Esc: back/, 'the binding-choice footer must survive the shrink')
-  assert.match(view, /›/, 'the selected choice row must stay painted')
+  assert.match(selectedRowText(h.vt), /Direct shortcut/, 'the selected choice row must stay painted')
   frame = paintedFrame(h.vt, 'Enter: choose')
   assert.ok(frame.bottomBorder, `the choice frame bottom border must survive the shrink:\n${view}`)
+  // Enter accepts the painted selection even on the short grant.
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.match(viewportText(h.vt), /Record shortcut/, 'Enter must start the selected direct recorder')
 })
 
 test('C-T07: an unavailable settings service keeps its real error, its Esc hint and its Esc path', async () => {
@@ -435,4 +496,109 @@ test('C-T10: the outer settings list keeps its own filter and navigation (baseli
   }
   assert.match(viewportText(h.vt), /> home/, 'the outer settings search must still filter')
   assert.match(marked(), /Home\/End keys/, 'the filtered row must be selectable')
+})
+
+test('C-T08: the bare /keybindings command keeps the whole-terminal budget and disposes its panel once', async () => {
+  for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
+    const h = setup({ columns, rows })
+    h.invoke('keybindings')
+    await h.vt.waitForRender()
+    let view = viewportText(h.vt)
+    const panel = h.standalone().panel
+    assert.ok(panel !== undefined, `${columns}x${rows}: the real command must mount the plugin panel:\n${view}`)
+    // The standalone editor never receives `setMaxRows`: its budget is the
+    // whole-terminal cap (rows - 4), not the nested 26 content rows.
+    const cap = h.app.keybindingEditorMaxRows()
+    assert.equal(cap, rows - 4)
+    const rendered = panel.render(84)
+    assert.equal(rendered.length, cap - 1, `${columns}x${rows}: the standalone editor must use its own budget`)
+    if (rows >= 40) assert.ok(rendered.length > 26, `${columns}x${rows}: the nested cap must not shrink the standalone editor`)
+    const frame = paintedFrame(h.vt, 'Keyboard shortcuts')
+    assert.equal(frame.contentRows, rendered.length, `${columns}x${rows}: painted rows must match the standalone render`)
+    assert.ok(frame.bottomBorder, `${columns}x${rows}: the standalone frame bottom border must be painted:\n${view}`)
+    assert.match(view, /Esc: close/)
+    // Esc (empty query) closes the REAL panel: the base screen returns and
+    // the panel teardown body ran exactly once (the owning frame's later
+    // dispose call is a guarded no-op).
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+    view = viewportText(h.vt)
+    assert.ok(!view.includes('Keyboard shortcuts'), `${columns}x${rows}: Esc must close the standalone editor:\n${view}`)
+    const closed = h.standalone()
+    assert.equal(closed.effectiveDisposals, 1, `${columns}x${rows}: the teardown must run exactly once (raw dispose calls: ${closed.disposeCalls})`)
+    // A repeated close is idempotent.
+    closed.close?.()
+    await h.vt.waitForRender()
+    assert.equal(h.standalone().effectiveDisposals, 1, `${columns}x${rows}: a repeated close must not dispose twice`)
+    h.app.dispose()
+    startedApps.delete(h.app)
+  }
+})
+
+test('C-T11b: an approval suspends the nested submenu and restores its grant and query', async () => {
+  const h = setup({ columns: 120, rows: 40 })
+  await openKeyboardShortcuts(h)
+  for (const character of 'submit') {
+    h.vt.sendInput(character)
+    await h.vt.waitForRender()
+  }
+  const approval = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await h.vt.waitForRender()
+  let view = viewportText(h.vt)
+  assert.match(view, /Approve bash\?/, 'the approval must take the modal front')
+  assert.ok(!view.includes('Search: submit'), `the suspended submenu must be hidden:\n${view}`)
+  h.vt.sendInput('y')
+  assert.equal(await approval, 'allowed-once')
+  await h.vt.waitForRender()
+  view = viewportText(h.vt)
+  assert.match(view, /Search: submit/, 'the submenu query must survive the approval')
+  assert.match(view, /Esc: clear/, 'the submenu grant must survive the approval')
+  assert.ok(paintedFrame(h.vt, 'Keyboard shortcuts').bottomBorder, `the restored frame bottom border must be painted:\n${view}`)
+})
+
+test('C-T12b: a narrow terminal with a wide (CJK) query stays bounded and keeps its painted hit map', async () => {
+  const h = setup({ columns: 44, rows: 12 })
+  // Fullscreen aligns the composited overlay rows with the app layout rows,
+  // so the synthetic SGR cells address what the user sees (see C-T12).
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  await openKeyboardShortcuts(h)
+  // The panel's own copy is ASCII, so the wide (2-cell) content enters
+  // through the query row and the frame truncation it triggers.
+  for (const character of '提交') {
+    h.vt.sendInput(character)
+    await h.vt.waitForRender()
+  }
+  let lines = h.vt.getViewport().map(stripAnsi)
+  assert.deepEqual(lines.filter(line => visibleWidth(line) > h.vt.columns), [], `no painted row may exceed the terminal width:\n${lines.join('\n')}`)
+  const panel = h.panel()
+  assert.ok(panel !== undefined)
+  const frame = paintedFrame(h.vt, 'Search')
+  assert.equal(frame.contentRows, panel.render(40).length, 'the narrow frame must paint the granted rows')
+  assert.ok(frame.bottomBorder, `the narrow CJK frame bottom border must be painted:\n${lines.join('\n')}`)
+  // The hint ROW is mandatory; at 44 columns the frame truncation may cut
+  // its tail text (pre-existing width behavior, not a grant regression).
+  assert.ok(lines.some(line => line.includes('Enter: details')), `the operation hint row must be painted:\n${lines.join('\n')}`)
+  // Clear the wide query, filter to one action and click its PAINTED row.
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  for (const character of 'submit') {
+    h.vt.sendInput(character)
+    await h.vt.waitForRender()
+  }
+  lines = h.vt.getViewport().map(stripAnsi)
+  assert.deepEqual(lines.filter(line => visibleWidth(line) > h.vt.columns), [], `the filtered frame must stay bounded:\n${lines.join('\n')}`)
+  const actionRow = lines.findIndex(line => line.includes('Submit draft'))
+  assert.ok(actionRow >= 0, `the filtered action row must be painted:\n${lines.join('\n')}`)
+  const column = lines[actionRow]!.indexOf('│') + 4
+  h.vt.sendInput(`\x1b[<0;${column};${actionRow + 1}M`)
+  h.vt.sendInput(`\x1b[<0;${column};${actionRow + 1}m`)
+  await h.vt.waitForRender()
+  // At this grant the action detail's own viewport scrolls its title off,
+  // so identify the detail by its footer and then prove the IDENTITY of the
+  // clicked row: Esc returns to the list with the clicked action selected.
+  assert.match(viewportText(h.vt), /Enter: edit · a: add/, 'the narrow painted row must open an action detail')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.match(selectedRowText(h.vt), /Submit draft/, 'the detail must belong to the clicked painted row')
 })

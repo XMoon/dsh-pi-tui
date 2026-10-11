@@ -231,8 +231,10 @@ that grant instead of the whole terminal height.
 - Assembly rule inside a budgeted panel: mandatory chrome (title, search row,
   operation hint) is placed FIRST in the budget, then the item window, then
   the optional separators/scroll markers/status. Mandatory rows are never
-  head-cut, and the operation hint is the non-negotiable tail row, so a
-  `slice(0, limit)`-style trim may not be used for the bottom chrome.
+  head-cut, and the operation hint is the non-negotiable tail ROW, so a
+  `slice(0, limit)`-style trim may not be used for the bottom chrome. At a
+  narrow width the frame's own truncation may still cut the hint's tail text;
+  the row itself stays painted.
 - Degenerate grants: at one row only the operation hint is drawn; at two rows
   the title joins it; at three the search row joins them. Below the physical
   floor (a terminal too short for both frame borders plus a hint) the frame
@@ -241,6 +243,13 @@ that grant instead of the whole terminal height.
   line, the status line) are dropped lowest-priority-first; the status/error
   line outranks the optional description, and the list keeps at least one
   actionable row.
+- Documented exception: the independent key-recorder view (`KeyRecorder`,
+  reached from the leader editor or a binding choice) is NOT a budgeted
+  assembly — it renders its fixed view regardless of the panel grant, so on a
+  grant shorter than that view the compositor clamp applies. This PR keeps
+  that degradation (no second scrollport) and pins it in
+  `test/keybinding-editor.test.ts`; "every render branch fits the grant"
+  holds for the panel's own assemblies, not for the recorder view.
 - Legacy limits are retained deliberately: `/settings` keeps
   `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so the nested
   `Keyboard shortcuts` submenu is bounded by 26 content rows on any terminal
@@ -249,7 +258,10 @@ that grant instead of the whole terminal height.
   filtered-state Home/End paging, and the main settings list still shows at
   most six visible rows.
 - Evidence: `test/surface-row-grant.test.ts` (real `/settings` command →
-  live geometry → submenu → painted frame, resize, question suppression),
-  `test/theme-picker.test.ts` (Theme submenu grant), `test/rendering.test.ts`
-  (standalone budget and navigation) and `test/keybinding-editor.test.ts`
-  (per-panel grants, degenerate grants, painted mouse hit maps).
+  live geometry → submenu → painted frame, resize, question AND approval
+  suspension, the real bare `/keybindings` budget with its teardown count, and
+  a 44-column CJK frame/painted hit map), `test/theme-picker.test.ts` (Theme
+  submenu grant), `test/rendering.test.ts` (standalone budget, navigation and
+  close) and `test/keybinding-editor.test.ts` (per-panel grants, degenerate
+  grants, painted mouse hit maps including the scrolled choice ordinal, and
+  the recorder degradation).
