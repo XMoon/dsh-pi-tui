@@ -13,8 +13,8 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `fd1b7e7790f709816ea8ae3854c7ee9c1b26614b`
-- Branch audited: `chore/div-retire-b-paste-burst`
+- Audited local source commit: `653a2aab4ea00de2e4056f6774d21bd216848917`
+- Branch audited: `chore/div-retire-c-collapse-tail`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Kimi reference snapshot: `MoonshotAI/kimi-code@9e881528a89945a373002b0b229f91735e8f2c4f`
@@ -27,6 +27,7 @@
 - Validated against the immutable source snapshot recorded in verification.auditedSourceCommit.
 - Post-PR272 DIV retirement audit (PR A): X027 and X049 were retired by product decision, their fork hunks deleted and packages/pi-tui/src/autocomplete.ts plus src/alt-screen-search.ts restored to the pinned v1.1.0 blobs byte-for-byte; both records describe the post-retirement reality, including the deliberate loss of the retired local behavior.
 - Post-PR272 DIV retirement audit (PR B): X038 was retired by product decision — src/paste-burst.ts deleted, the Editor paste-burst state/option/setter/feeds and the Enter-suppression branch removed — and the record describes the post-retirement reality, including the deliberate loss of the lost-marker paste fallback; true bracketed paste and X037 submit remapping stay intact.
+- Post-PR272 DIV retirement audit (PR C): X057 was retired by product decision — the dedicated expanded-user tail control row (its hit slot, height rule, mount branch and renderer), the painted-frame copyBlankRows cache and the fork copy-source seam were deleted together — and the record describes the post-retirement reality, including the deliberate loss of the tail label and its copy filter.
 
 ## Audit rules
 
@@ -87,7 +88,7 @@
 ## Summary
 
 - Records: 61
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 46, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 5, `SUPERSEDED`: 3
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 45, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -148,7 +149,7 @@
 | X054 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
 | X055 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM, LOCAL_UX | NO |
 | X056 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT | NO |
-| X057 | ACTIVE | LOW | PUBLIC_COMPONENT_CONTRACT | NO |
+| X057 | REMOVED_UNUSED | LOW | PUBLIC_COMPONENT_CONTRACT | YES |
 | X058 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 | X059 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X060 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
@@ -4774,9 +4775,9 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Confirmed upstream promotes focusOrder unconditionally in both setHidden(false) and focus(); the fork adds the minimal opt-in seam for host internal restores.
 
-### X057 — Copy-source line filter for host presentation chrome
+### X057 — Copy-source line filter for host presentation chrome (retired)
 
-- Status: `ACTIVE`
+- Status: `REMOVED_UNUSED`
 - Category: `PUBLIC_COMPONENT_CONTRACT`
 - Risk: `LOW`
 - Files: `src/tui-alt-screen.ts`
@@ -4785,58 +4786,58 @@ The host temporarily suppresses a set of managed overlays (a Question / Save Loc
 
 #### Why it exists
 
-The host paints presentation-only chrome inside the transcript scroll content (the expanded long-user disclosure tail control). That row must stay visible and clickable, but it is not transcript text: a selection crossing it must copy the blank separator the row replaced, never the label. Upstream derives the copied text directly from the rendered scroll lines with no host hook, so the only way to keep paint, search, mouse hit-testing and word/line selection on the RENDERED line while filtering the clipboard is a narrow copy-source override. The seam is generic (any row, any host reason) and consulted ONLY in getActiveSelectionText; word/line range computation, search and the mouse hit map keep reading the rendered line, so double-click/triple-click and hit-testing semantics are unchanged.
+Retired by product decision (post-PR272 DIV retirement plan, PR C). The seam existed so that a selection crossing the host-owned expanded-user tail control (`▴ Collapse · …`) copied the blank separator the row replaced instead of the presentation label. The product decision removed that dedicated tail row entirely: the whole-bubble BODY click is now the only disclosure affordance, no collapse label is painted on any surface, and the final block no longer reserves an extra presentation row. With no chrome inside the copyable transcript content the per-row copy-source override has no consumer, so TuiAltScreenOptions.selectionLineText, its private field, its constructor assignment and the getActiveSelectionText override are deleted; that method is the pinned upstream implementation again (apart from X024 line-head indent normalization), and the host no longer needs the painted-frame copy-blank-row cache (copyBlankRows) or the tail-slot hit bookkeeping.
 
 #### Changed surface
 
-- TuiAltScreenOptions.selectionLineText?: (context: { row, line, scrollView? }) => string | undefined — replaces that scroll-content row contribution to the copied selection; undefined keeps the rendered line
+- retired: TuiAltScreenOptions.selectionLineText (the optional per-row copy-source override) and its doc
+- retired: the private selectionLineText field plus its constructor assignment
+- retired: the getActiveSelectionText override lookup and the slicing of the override line (the rendered line is sliced again)
 
 #### Dependency map
 
 **Vendor internal**
-- getActiveSelectionText consults this.selectionLineText once per selected row (after resolving sourceLines and before getSelectionColumns/sliceByColumn) and slices the override line; returning undefined keeps the upstream path byte-identical.
-- Audit note: One additive lookup on the copy path; no other fork code reads the field.
+- None found (audited).
+- Audit note: The removed override was the only reader of the field inside getActiveSelectionText; no other fork file referenced selectionLineText, and the surrounding selection helpers (getSelectionBounds, getSelectionColumns, sliceByColumn) are untouched.
 
 **Inheritance / structural**
-- No subclass or structural edge: the option is a plain constructor field on TuiAltScreen.
-- Audit note: None.
+- None found (audited).
+- Audit note: The option was a plain constructor field on TuiAltScreen; no subclass or structural edge consumed it, so no override/super path needs migration.
 
 **Host**
-- src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows userDisclosureHits range geometry (the collapse+tail-slot hit rows); every other row — the whole-bubble body range included — returns undefined.
-- src/tui-app.ts selectionLineText returns undefined unless the context scrollView is the transcript ScrollView, so overlay/editor selections are never filtered.
-- Audit note: The host owns the semantic meaning of its chrome; the fork never learns what the row is.
+- None found (audited).
+- Audit note: The host DID consume the seam: src/tui-app.ts passed selectionLineText and returned an empty string for the expanded tail-control rows derived from its own messageRows hit geometry. That tail row and its copyBlankRows cache are retired in the same change, so the host paints no chrome inside the copyable transcript content any more and no host code needs migration — the retirement is a recorded product decision, not a no-consumer finding.
 
 **Public / extension**
-- TuiAltScreenOptions is a public type; the new field is optional and additive, so existing consumers compile and behave unchanged.
-- Audit note: No behavioural change when the option is absent.
+- None found (audited).
+- Audit note: TuiAltScreenOptions is a public type, so removing an optional field is an intentional public API deletion for @xmoon76/pi-tui consumers; the published @xmoon76/dsh-pi-tui extension entries use their own structural types and never exposed this option, so no published extension contract loses a promise.
 
 **Behavioral coupling**
-- A row whose override is a string copies that string (an empty string copies as the blank separator); rows returning undefined copy the rendered line.
-- The paint, the word/line selection ranges, the search corpus/highlight and the mouse hit map are unaffected.
-- With no handler (or one returning undefined) the copied text is identical to the pinned upstream behavior.
-- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X057) plus the host tail-control clipboard regression in test/long-user-disclosure.test.ts.
+- None found (audited).
+- Audit note: Deliberate product tradeoff: a selection crossing the former tail location now copies the real rendered rows (there is no presentation row left to filter); word/line range computation, search and the mouse hit map keep reading the rendered line exactly as before.
 
 #### Guarding tests
 
-- packages/pi-tui/test/tui-alt-screen.test.ts: filters only the copy source of a row via selectionLineText (X057)
-- packages/pi-tui/test/tui-alt-screen.test.ts: keeps the copied text unchanged when selectionLineText returns undefined (X057)
-- packages/pi-tui/test/tui-alt-screen.test.ts: computes word selection on the rendered line but copies the override (X057)
-- test/long-user-disclosure.test.ts: the tail control chrome never reaches the clipboard
+- retired: the five X057 cases in packages/pi-tui/test/tui-alt-screen.test.ts were deleted (copy-source filter, undefined-override passthrough, word range on the rendered line, non-empty-override range, filtered OSC 52 path); the independent copy/selection/word/double-click cases and the plain copySelection handler content assertions stay
+- replacement coverage (host copy contract): test/long-user-disclosure.test.ts pins that a copy across the expanded message carries no presentation label, that the last user row keeps its own line before the answer, and that selecting the complete expanded message copies its real text verbatim
+- replacement coverage (disclosure): the rewritten long-user and pending disclosure suites pin the whole-bubble BODY click in fullscreen/Focus/compact plus the resize and stale-press fences, and assert that no `▴ Collapse` chrome is painted in any state
 
 #### Upstream comparison
 
 - Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
-- Semantic equivalence: `NO`
+- Semantic equivalence: `YES`
 - Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
 - Relevant upstream files:
 - packages/tui/src/tui-alt-screen.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream copies selected scroll-content rows verbatim; the fork adds an optional per-row copy-source override consulted only when building the copied text. Default behavior is unchanged.
+- Remaining semantic delta: getActiveSelectionText is the pinned v1.1.0 implementation again: each selected row contributes its rendered line, sliced by the rendered column range and trimmed. The other local divergences that share this file (X024 indent normalization, X018/X028/X054 seams) are untouched, so the comparison is region-scoped.
 
 #### Retirement conditions
 
-- Retire when upstream exposes a host hook for non-copyable presentation rows (or the host stops painting chrome inside the copyable transcript content), then run the X057 copy regressions.
+- Product decision: no dedicated tail control row and no copy-source override; do not re-add a substitute label or a second disclosure affordance.
+- The whole-bubble BODY click and Ctrl+O remain the disclosure owners, and the copy path stays upstream-verbatim.
+- Recheck only if a future host surface paints presentation chrome inside copyable transcript content and upstream still exposes no hook for it.
 
 #### Replacement mapping
 
@@ -4844,12 +4845,14 @@ The host paints presentation-only chrome inside the transcript scroll content (t
 
 #### Retirement evidence
 
-- None recorded.
+- Deletion evidence: selectionLineText, its field, its constructor assignment and the getActiveSelectionText override lookup are removed, and the host tail row, its height rule, its mount branch, userCollapseControlText, the copyBlankRows snapshot field and the selectionLineText wiring have no live source, test or documentation reference.
+- Source evidence: packages/pi-tui/src/tui-alt-screen.ts getActiveSelectionText matches the pinned v1.1.0 implementation apart from the X024 indent rule, and the fork test file no longer contains a selectionLineText reference.
+- Gate evidence: fork typecheck, the fork alt-screen suite, the rewritten disclosure suites, gate:pi-vendor-diff --strict and gate:pi-divergence-ledger pass with this record retired.
 
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only. 2026-09-29: host dependency re-verified after PR #197 moved the host hit geometry to plural userDisclosureHits ranges — the override still targets only the tail-slot collapse rows.
+- Notes: Retirement audit for the post-PR272 DIV retirement plan PR C. The seam was genuinely consumed by the host tail control; this retirement is a recorded product decision that removed that control, and the whole-bubble BODY click replaces the affordance.
 
 ### X058 — Viewport passthrough for a focused capturing overlay
 
