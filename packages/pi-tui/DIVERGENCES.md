@@ -13,7 +13,7 @@
 
 ## Audit snapshot
 
-- Audited local source commit: `58ddfbdddc6f9151725be3639e9e0e8220d5ef13`
+- Audited local source commit: `e80d5bff8e4c3cc58a6a3fc07d56c98f93802230`
 - Branch audited: `chore/pi-tui-v1.1.0-revendor`
 - Audit date: `2026-10-11`
 - Upstream reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
@@ -5084,7 +5084,7 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 **Host**
 - TuiApp.runAutoDetect observes the ACTIVE screen and drops the result when the active screen changed while it was in flight; Emoji/themeOptOut and shouldApply guards are unchanged.
 - TuiApp.trackTerminalTheme toggles Mode 2031 only and never samples; the boot wiring keeps autoDetectTheme as the single sample, and the live scheme-report listener respects the colour opt-out now that enabling Mode 2031 makes such reports reachable.
-- TuiApp.start() re-registers the per-screen scheme fan-out, so a full stop/start keeps receiving reports.
+- TuiApp.start() re-registers the per-screen scheme fan-out, so a full stop/start keeps receiving reports, and the live-report listener is registered once for every persisted theme, so a runtime switch to auto (which enables Mode 2031) is heard as well.
 - Audit note: The host is the primary consumer; the narrow seam replaced its use of the full transaction.
 
 **Public / extension**
@@ -5101,7 +5101,7 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 - packages/pi-tui/test/terminal-background-query.test.ts: one OSC 11 query and no OSC 10/4/DA1/DSR traffic; coalesced concurrent calls; timeout then a consumed late reply; a late reply after a new observation counts as the current observation; stop() releases the pending observation; an unowned background reply landing on ANOTHER screen is consumed there; ordinary and modified keys plus other color replies still flow; a concurrent full query still records the reply
 - test/rendering.test.ts: Theme auto observes only the OSC 11 background (bright -> light, dark -> dark), COLORFGBG fallback, silent-terminal no-op, the ACTIVE screen in fullscreen, an observation that resolves before a screen switch is dropped, a late reply across a Main/Fullscreen swap in BOTH directions is never counted as user input, coalescing, shouldApply refusal, a late reply never reaches the editor, the colour opt-out issues no query, detection still works after returning from fullscreen, and a full app stop/start keeps receiving reports
 - test/rendering.test.ts: Mode 2031 follows the tracking choice across a Main/Fullscreen switch, and tracking never samples the terminal
-- test/settings-theme-boot.test.ts: the boot wiring samples once through autoDetectTheme, enables tracking without sampling, a live scheme report only changes the theme while the preference is auto, and a live report cannot bypass the colour opt-out
+- test/settings-theme-boot.test.ts: the boot wiring samples once through autoDetectTheme, enables tracking without sampling, a live scheme report only changes the theme while the preference is auto (a runtime switch from a manual theme to auto included), and a live report cannot bypass the colour opt-out
 - packages/pi-tui/test/terminal-colors.test.ts: the upstream full-query suite stays verbatim and green next to the narrow seam
 
 #### Upstream comparison
