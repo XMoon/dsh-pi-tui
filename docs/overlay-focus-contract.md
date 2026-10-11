@@ -209,6 +209,13 @@ When you add or change an overlay path, cover the family it belongs to:
 
 ## 8. By-design boundaries
 
+- An editor-seat modal (Question / Save Location) is **not** a managed
+  overlay: while it captures the seat, `hasFocusedOverlay()` stays false
+  (the physical focus belongs to the flow's seat frame) even though
+  `handleInputCore` consumes every key. A consumer asking "is an overlay
+  owning the keyboard?" must therefore test the seat-modal ownership
+  separately (e.g. the footer's `↓ view` gate in
+  `TuiApp.taskBrowserAvailable()`).
 - A non-remountable overlay does **not** survive a fullscreen swap (its raw and
   its callbacks die with the screen); this matches the baseline behavior.
 - A Question / Save Location settle restores **visibility only** for the roots
