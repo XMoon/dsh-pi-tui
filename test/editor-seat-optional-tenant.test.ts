@@ -30,6 +30,7 @@ import { afterEach, test } from 'node:test'
 import { initialStatusSnapshot } from '../src/domain/status/snapshot.ts'
 import type { StatusStore } from '../src/domain/status/store.ts'
 import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
+import type { AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
 import type { EditorHost, ExtensionEditor, ExtensionView } from '../src/extension/public-types.ts'
 import type { SaveLocationDeps, SaveLocationResult } from '../src/tui/interaction/save-location.ts'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
@@ -88,17 +89,19 @@ interface Tenant {
   spec(): TestOptionalSeatSpec
 }
 
-function makeTenant(seed = '', onFocusLost?: () => void): Tenant {
+function makeTenant(seed = '', onFocusLost?: () => void, onFocusGained?: () => void): Tenant {
   const state = { current: true, closes: 0, keys: [] as string[], draft: seed, focused: false, gains: 0 }
   const component: Component & Focusable = {
     get focused(): boolean {
       return state.focused
     },
     set focused(value: boolean) {
-      if (value && !state.focused) state.gains += 1
+      const gained = value && !state.focused
       const lost = !value && state.focused
+      if (gained) state.gains += 1
       state.focused = value
       if (lost) onFocusLost?.()
+      if (gained) onFocusGained?.()
     },
     render: () => [`optional-tenant:${state.draft}`],
     invalidate: () => {},
@@ -146,6 +149,7 @@ interface AppHarness {
   app: TuiApp
   submissions: string[]
   steers: string[]
+  focusReports: boolean[]
   exits(): number
 }
 
@@ -153,12 +157,14 @@ function startApp(registry?: EditorRegistry): AppHarness {
   const vt = new VirtualTerminal(100, 30)
   const submissions: string[] = []
   const steers: string[] = []
+  const focusReports: boolean[] = []
   let exitCount = 0
-  const harness = { vt, submissions, steers, exits: () => exitCount } as AppHarness
+  const harness = { vt, submissions, steers, focusReports, exits: () => exitCount } as AppHarness
   const app = new TuiApp(vt, {
     onSubmit: (text) => { submissions.push(text) },
     onExit: () => { exitCount += 1 },
     onSteer: (text) => { steers.push(text) },
+    onTerminalFocus: (focused) => { focusReports.push(focused) },
   }, registry === undefined ? {} : { editorRegistry: registry })
   app.start()
   harness.app = app
@@ -420,7 +426,7 @@ test('B-02: a Question parks the tenant; the SAME instance and its own state ret
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-03: two queued Questions never reveal a suspended overlay or refocus the tenant in between', async () => {
+test('B-03: two queued Questions never refocus or re-project the tenant in between', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1130,4 +1136,274 @@ test('sizes: a resize cycle keeps the tenant projected and focused at every targ
   assert.equal(tenant.draft(), 'abcccc', 'the tenant keeps its own state across every resize')
   lease?.close()
   assert.equal(tenant.closeCalls(), 1)
+})
+
+// ---------------------------------------------------------------------------
+// Round-1 review fixes: protocol delivery, settle-tail focus, dead-flow fence,
+// ACTIVE-stale re-projection, and the real suspended-root FIFO control
+// ---------------------------------------------------------------------------
+
+/** A minimal ADVANCED interactive overlay probe: the real public host mount
+ * (`showAdvancedInteractiveOverlay`) with focus/blur counters as the sink. */
+function advancedOverlayProbe(text: string): {
+  component: AdvancedInteractiveComponent
+  focusCount(): number
+  blurCount(): number
+} {
+  const state = { focus: 0, blur: 0 }
+  return {
+    component: {
+      render: () => ({ kind: 'text', spans: [{ text }] }),
+      handleInput: () => false,
+      onFocus: () => { state.focus += 1 },
+      onBlur: () => { state.blur += 1 },
+      dispose: () => {},
+    },
+    focusCount: () => state.focus,
+    blurCount: () => state.blur,
+  }
+}
+
+test('B-03b: a suspended overlay root is never revealed between two queued Questions', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  // A real capturing overlay root is suspended by the question flow.
+  app.openPicker([{ value: 'a', label: 'queued-root' }], () => {}, () => {})
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('queued-root'), `the picker must be up first:\n${viewport(vt)}`)
+
+  const first = app.askQuestions([{ id: 'q1', question: 'first queued?', options: [{ label: 'Yes' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'second queued?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('first queued?'))
+  assert.ok(!viewport(vt).includes('queued-root'), 'the overlay root is suspended under the flow')
+  const gainsWhileParked = tenant.focusGains()
+
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await first, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  // The FIFO handover: the second flow took the seat directly — the suspended
+  // root must NOT be briefly revealed and the tenant must not regain focus.
+  assert.ok(viewport(vt).includes('second queued?'), `the second flow must be mounted:\n${viewport(vt)}`)
+  assert.ok(!viewport(vt).includes('queued-root'), 'the suspended root must not be revealed between queued flows')
+  assert.equal(tenant.focusGains(), gainsWhileParked, 'the tenant must not regain focus between queued flows')
+  assert.notEqual(app.focusedComponentForTest(), tenant.component)
+
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await second, [{ id: 'q2', selected: ['Yes'] }])
+  await vt.waitForRender()
+  // The root's own focus intent survives the graph: it is restored and
+  // re-focused, and the tenant is ACTIVE again underneath it.
+  assert.ok(viewport(vt).includes('queued-root'), `the root must be restored:\n${viewport(vt)}`)
+  assert.notEqual(app.focusedComponentForTest(), tenant.component)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component, 'closing the root returns the tenant')
+  assert.equal(tenant.closeCalls(), 0)
+})
+
+test('B-24b: host-classified protocol chunks never reach the tenant on either screen', async () => {
+  const { vt, app, focusReports } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  const protocolChunks = ['\x1b[<0;5;5M', '\x1b[<64;5;5M', '\x1b[M !!', '\x1b[97;1:3u']
+  for (const chunk of protocolChunks) vt.sendInput(chunk)
+  assert.deepEqual(tenant.keys, [], 'no host-classified protocol chunk may reach the tenant (regular screen)')
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  for (const chunk of [...protocolChunks, '\x1b[I', '\x1b[O']) vt.sendInput(chunk)
+  assert.deepEqual(tenant.keys, [], 'no host-classified protocol chunk may reach the tenant (fullscreen)')
+  assert.deepEqual(
+    focusReports,
+    [true, false],
+    'the host focus decoder must still observe both focus reports',
+  )
+
+  // Ordinary keys stay the tenant's on the swapped screen...
+  vt.sendInput('x')
+  assert.deepEqual(tenant.keys, ['x'], 'ordinary keys still reach the tenant in fullscreen')
+  // ...and a bracketed PASTE is user TEXT, not protocol: it still reaches the
+  // focused component, exactly as it does for the host editor.
+  vt.sendInput('\x1b[200~hi\x1b[201~')
+  assert.deepEqual(tenant.keys, ['x', '\x1b[200~hi\x1b[201~'], 'paste text is not protocol input')
+  assert.equal(tenant.closeCalls(), 0)
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component)
+})
+
+test('B-26: a capturing overlay opened by the tenant focus callback during the Question restore keeps the keyboard', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const overlay = advancedOverlayProbe('newer overlay')
+  let arm: (() => void) | undefined
+  const tenant = makeTenant('', undefined, () => {
+    const run = arm
+    arm = undefined
+    run?.()
+  })
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'restore tail?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  // Arm: the NEXT tenant focus gain (the restore) synchronously mounts a
+  // capturing overlay — the newer owner of the keyboard.
+  arm = () => { app.showAdvancedInteractiveOverlay(overlay.component) }
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.equal(overlay.focusCount(), 1, 'the newer overlay gains focus exactly once')
+  assert.equal(overlay.blurCount(), 0, 'the settle tail must not blur the newer owner')
+  assert.ok(viewport(vt).includes('newer overlay'), `the newer owner must stay painted:\n${viewport(vt)}`)
+  assert.equal(tenant.closeCalls(), 0)
+})
+
+test('B-26b: a capturing overlay opened during the Save Location restore keeps the keyboard', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const overlay = advancedOverlayProbe('save-tail overlay')
+  let arm: (() => void) | undefined
+  const tenant = makeTenant('', undefined, () => {
+    const run = arm
+    arm = undefined
+    run?.()
+  })
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  const save = askSave(app)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('Save session archive'))
+  arm = () => { app.showAdvancedInteractiveOverlay(overlay.component) }
+  vt.sendInput('\x1b')
+  assert.deepEqual(await save, { kind: 'cancelled' })
+  await vt.waitForRender()
+  assert.equal(overlay.focusCount(), 1, 'the newer overlay gains focus exactly once')
+  assert.equal(overlay.blurCount(), 0, 'the save settle tail must not blur the newer owner')
+  assert.ok(viewport(vt).includes('save-tail overlay'), `the newer owner must stay painted:\n${viewport(vt)}`)
+  assert.equal(tenant.closeCalls(), 0)
+})
+
+test('B-27: a Save Location disposal that cancels the superseding Question never mounts a dead frame', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+
+  const questionController = new AbortController()
+  let completionRegistered = false
+  let cancelQuestionOnCompletionAbort: (() => void) | undefined
+  const deps: SaveLocationDeps = {
+    ...saveDeps(),
+    // A REAL completion subscriber that reacts to the prompt's disposal by
+    // cancelling the flow that superseded the prompt.
+    complete: (_raw, signal) => {
+      completionRegistered = true
+      return new Promise((resolve) => {
+        signal.addEventListener('abort', () => {
+          cancelQuestionOnCompletionAbort?.()
+          resolve(null)
+        })
+      })
+    },
+  }
+  const save = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  await vt.waitForRender()
+  await new Promise<void>(resolve => setTimeout(resolve, 30))
+  assert.equal(completionRegistered, true, 'the prompt must have issued its initial completion')
+  assert.ok(viewport(vt).includes('Save session archive'))
+
+  cancelQuestionOnCompletionAbort = () => questionController.abort()
+  const question = app.askQuestions(
+    [{ id: 'q1', question: 'dead frame?', options: [{ label: 'Yes' }] }],
+    questionController.signal,
+  )
+  // The preemption settles the save, whose disposal aborts the new flow: the
+  // flow promise must settle (never hang) and its frame must never mount.
+  await assert.rejects(question)
+  await vt.waitForRender()
+  assert.ok(!viewport(vt).includes('dead frame?'), `a cancelled flow must never mount a frame:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), tenant.component, 'the live owner keeps the seat')
+  assert.equal(app.focusSeatForTest(), 'editor-panel')
+  assert.equal(tenant.closeCalls(), 0)
+  void save
+})
+
+test('B-28: an ACTIVE tenant whose subject goes stale is retired at the input entry', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component)
+  tenant.setCurrent(false)
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.deepEqual(tenant.keys, [], 'a stale tenant must receive no key')
+  assert.equal(tenant.closeCalls(), 1, 'the stale ACTIVE tenant is retired exactly once')
+  assert.ok(!viewport(vt).includes('optional-tenant:'), `the stale panel must leave the seat:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component, 'the live owner takes over')
+  assert.equal(app.focusSeatForTest(), 'editor')
+})
+
+test('B-29: an ACTIVE tenant whose subject goes stale is retired and re-projected at a screen swap', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component)
+  tenant.setCurrent(false)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1, 'the swap retires the stale ACTIVE tenant exactly once')
+  assert.ok(!viewport(vt).includes('optional-tenant:'), `the stale panel must not survive the swap:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+  assert.equal(app.focusSeatForTest(), 'editor')
+
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1, 'the retirement is exactly once across both swaps')
+  assert.ok(!viewport(vt).includes('optional-tenant:'))
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
+})
+
+test('B-29b: a stale ACTIVE tenant is retired even when a restored overlay keeps the keyboard across the swap', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  // A REMOUNTABLE capturing overlay: it survives the swap and reclaims the
+  // keyboard, so the swap's own re-projection — not a focus-restore entry — is
+  // what has to retire the stale tenant.
+  const overlay = advancedOverlayProbe('swap-root')
+  app.showAdvancedInteractiveOverlay(overlay.component)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('swap-root'), `the overlay must be up first:\n${viewport(vt)}`)
+  tenant.setCurrent(false)
+
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1, 'the swap retires the stale ACTIVE tenant exactly once')
+  assert.ok(
+    !viewport(vt).includes('optional-tenant:'),
+    `the stale panel must not survive the swap even behind an overlay:\n${viewport(vt)}`,
+  )
+  assert.ok(viewport(vt).includes('swap-root'), `the restored overlay must keep the keyboard:\n${viewport(vt)}`)
+  assert.notEqual(app.focusedComponentForTest(), tenant.component)
+  assert.equal(app.focusSeatForTest(), 'overlay')
 })

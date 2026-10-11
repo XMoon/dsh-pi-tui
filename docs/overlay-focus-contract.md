@@ -208,8 +208,10 @@ When you add or change an overlay path, cover the family it belongs to:
   to observe an unblocked seat (see §11).
 - **A private optional seat tenant**: one record, one per-open token, one
   caller-owned `close`; REFUSE before the factory; restore only at the LAST
-  blocker and only while `isCurrent()` holds; never let the tenant become a
-  second focus/currentness authority (see §11).
+  blocker; re-validate `isCurrent()` at every ACTIVE input / re-projection /
+  focus / screen-swap entry and re-project the live winner; give it no
+  host-classified protocol delivery; never let the tenant become a second
+  focus/currentness authority (see §11).
 - **Assertions to add**: `assertOverlayForestForTest()` after reentrant
   operations; focus/blur counts around internal restores; the logical
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
@@ -381,6 +383,15 @@ or over the editor seat.
   focus fallbacks and the plugin `viewSwap` guard all read that ONE derivation;
   physical focus is never inferred from, and never rewritten by, a parked
   tenant.
+- **The subject is re-validated at every ACTIVE entry.** `revalidateOptionalSeat()`
+  runs at the input entry, at the re-projection entry (`mountSeatChild`), at the
+  focus entry (`focusSeatOwner`) and at BOTH screen-swap entries
+  (`setFullscreen`), which also re-sync the SHARED seat mount through
+  `projectSeatOccupant()`. A record whose `isCurrent()` went false is RETIRED
+  there — its caller cleanup runs exactly once, like an explicit close — and the
+  seat re-projects and focuses the live winner, so the physical mount can never
+  keep painting a panel whose session/generation is gone while the fork still
+  dispatches keys to it.
 - **PARK is committed before the blocker's first callback.** A Question commits
   `activeQuestions` and parks the tenant BEFORE the Save Location handoff; an
   approval commits its pending prompt as active BEFORE the park, the Save
@@ -395,15 +406,25 @@ or over the editor seat.
   its `suspendedOverlays` to the flow and SKIPS the seat remount, the focus
   fallback and `resumeSuspendedRoots` (the question resumes the graph once, at
   its own final settle). Prompt disposal, the abort-listener cleanup and the
-  promise settlement stay independent steps. A callback that invalidated the
-  flow first makes the handoff a no-op, so the settle restores normally instead
-  of resurrecting a settled target.
+  promise settlement stay independent steps, and the handoff target is re-read
+  INSIDE the batch AFTER those cleanup callbacks: `prompt.dispose()` aborts the
+  prompt's completion port, whose subscribers can synchronously cancel or
+  replace the superseding flow, so a settle/dead target makes the handoff a
+  no-op and the prompt restores normally instead of resurrecting a dead
+  presentation. `presentQuestion` fences every one of its own callback windows
+  (the handoff, the broker suspension, the frame focus) with the same live-flow
+  identity test, so a preempted flow never mounts, focuses or publishes its
+  frame.
 - **Restore only at the LAST blocker.** The Question/Save final settles clear
   their owner first, then call `maybeRestoreOptionalSeat()`; an approval
   restores only after `showNext()` proved the LIVE queue drained (`active ===
   undefined && queue.length === 0`), so a queued A → B approval keeps the tenant
   PARKED between the two prompts. The restore re-reads `isCurrent()` and the
-  live blocker set; a stale subject is retired instead of restored.
+  live blocker set; a stale subject is retired instead of restored. The
+  focus fallback that follows a settle (`focusSeatFallback`) re-reads the live
+  owner too: a capturing overlay that a callback of the SAME batch opened (or
+  another blocking owner that appeared) keeps the keyboard instead of being
+  blurred by a pre-settle snapshot and re-focused by the broker afterwards.
 - **Exactly-once identity.** `retireOptionalSeat(token)` drops the identity
   FIRST, latches `finalized` BEFORE the caller's `close()`, and attempts the
   cleanup and the fallback projection as INDEPENDENT `runSyncDisposalSteps`
@@ -418,9 +439,18 @@ or over the editor seat.
   submit / steer / queue / task actions, the leader machine and the
   plugin-editor Enter forward must never fire behind it. Host-RESERVED input
   keeps its owner: physical Esc (the interrupt/exit lifecycle seam), the
-  effective exit key, the terminal protocol (focus reports, key release/repeat,
-  mouse) and the unstable raw-capture stage all run outside this path. A parked
-  or stale tenant receives nothing.
+  effective exit key, the unstable raw-capture stage and the terminal protocol
+  all keep their own policy. Host-classified protocol chunks (SGR/legacy mouse
+  reports, terminal focus reports, Kitty key release/repeat) are additionally
+  stopped from ever being DELIVERED to a tenant: `protocolSinkFence` is the LAST
+  input listener on every screen — for fullscreen it is registered AFTER the alt
+  screen's viewport listener, so FOCUS_OUT still runs that listener's selection
+  cleanup and every mouse event the viewport recognizes stays with it — and it
+  consumes such a chunk only while the tenant owns the keyboard, remaining
+  completely inert otherwise (the pre-existing editor / overlay / viewport
+  routing is unchanged). Bracketed PASTE is user text, not protocol input, and
+  still reaches the focused component. A parked, finalized or stale tenant
+  receives nothing, and the input entry re-validates the subject first.
 - **Approval mount fence.** `ApprovalRuntime.showNext()` commits `active =
   pending` BEFORE the park / save cancellation / mount, and `mount()`
   re-validates `active === pending && !settled && !isDisposed()` AFTER
@@ -439,10 +469,14 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-25: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-29: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
-and Approval including both FIFOs, replacement and re-entrant-close identity,
-a stale subject, a plugin editor HMR while parked, regular↔fullscreen, final
-disposal, throwing-cleanup aggregation, Save preemption by a Question and by an
-Approval, an Approval + Question overlap, a capturing-overlay handoff, the
-untouched History overlay, and input routing).
+and Approval including both FIFOs with a REAL suspended overlay root, the
+host-classified protocol fence on both screens, a capturing overlay opened from
+a restore callback, a completion-abort that cancels the superseding flow, an
+ACTIVE stale subject at the input and at both screen-swap entries, replacement
+and re-entrant-close identity, a plugin editor HMR while parked,
+regular↔fullscreen, resize cycles, final disposal, throwing-cleanup
+aggregation, Save preemption by a Question and by an Approval, an Approval +
+Question overlap, a capturing-overlay handoff, the untouched History overlay,
+and input routing).
