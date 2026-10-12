@@ -259,9 +259,12 @@ the draft and creating no Session, the native panel over the real
 `agent-presets` registry roster, sessionless staging without a Session, the
 started-Session refusal for both the bare and the typed path, the typed verbs
 keeping their original routes and never opening a picker, a Host-owned `preset`
-keeping its route, and the default write through the real configuration plane
-(the picker's action and the typed verb write the same profile document, and a
-fresh Context reads the persisted default back). Both suites carry the
+keeping its route, the blank live-Session switch over a REAL persisted Session
+resumed through the official persistence seam (one durable `agent-preset/selected`,
+the authority reread, the locked negative, a clean teardown), and the default
+write through the real configuration plane (the picker's action and the typed
+verb write the same profile document, and a fresh Context reads the persisted
+default back). Both suites carry the
 disabled-action admission refusal (a synthetic event naming a disabled action
 writes nothing and never dismisses the panel); the presenter suite additionally
 carries the lifecycle fences — a settlement after the captured subject moved
