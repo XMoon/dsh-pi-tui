@@ -5,39 +5,47 @@
  * state and never writes. Admission (scope/phase/revision/zone) and the state
  * transition itself belong to the presenter, so this module is the whole K2
  * keyboard contract in one testable place.
+ *
+ * The layout is an explicit INPUT ({@link ModelPickerLayout}) instead of a
+ * hidden guess: which regions are painted decides which regions Tab may reach
+ * and what `Enter` on the model list does, never what may be written.
  * @module tui/tsp/model-picker-intents
  */
 import type { Key } from '@stencil-hq/tern'
 import {
+  applyOffered,
+  detailCardOffered,
+  detailFactItems,
   draftedEffort,
+  inlineEffortOffered,
+  overviewItems,
   pickerActions,
   highlightedModel,
   modelChoices,
   modelRowId,
-  moreRowAction,
-  secondaryActions,
-  MORE_CHIP_ID,
-  effortValue,
   scopeProviderId,
-  stripChips,
   visibleModels,
+  type ModelPickerLayout,
   type ModelPickerPanel,
-  type ModelPickerPage,
   type ModelPickerScope,
   type ModelPickerZone,
 } from './model-picker-state.ts'
 
 export type ModelPickerIntent =
   | { readonly kind: 'close' }
-  | { readonly kind: 'page'; readonly page: ModelPickerPage }
-  | { readonly kind: 'zone'; readonly zone: ModelPickerZone; readonly page?: ModelPickerPage }
+  | { readonly kind: 'zone'; readonly zone: ModelPickerZone }
+  | { readonly kind: 'back' }
   | { readonly kind: 'scope'; readonly scope: ModelPickerScope }
   | { readonly kind: 'browse-model'; readonly rowId: string }
+  | { readonly kind: 'open-overview'; readonly rowId?: string }
+  | { readonly kind: 'open-details' }
   | { readonly kind: 'browse-effort'; readonly value: string }
-  | { readonly kind: 'query'; readonly query: string; readonly cursor: number }
+  | { readonly kind: 'overview-cursor'; readonly delta: -1 | 1 }
+  | { readonly kind: 'overview-select'; readonly item: string }
+  | { readonly kind: 'activate-overview' }
   | { readonly kind: 'fact-cursor'; readonly delta: -1 | 1 }
-  | { readonly kind: 'more-cursor'; readonly delta: -1 | 1 }
-  | { readonly kind: 'activate-more' }
+  | { readonly kind: 'fact-select'; readonly item: string }
+  | { readonly kind: 'query'; readonly query: string; readonly cursor: number }
   | { readonly kind: 'action-focus'; readonly delta: -1 | 1 }
   | { readonly kind: 'activate-action' }
   | { readonly kind: 'retry' }
@@ -83,7 +91,7 @@ function stepModel(panel: ModelPickerPanel, delta: -1 | 1): ModelPickerIntent | 
   return next === undefined ? undefined : { kind: 'browse-model', rowId: next }
 }
 
-/** Step the highlighted model's effort DRAFT (wide right pane / compact page). */
+/** Step the highlighted model's effort DRAFT (the wide inline selector). */
 function stepEffort(panel: ModelPickerPanel, delta: -1 | 1): ModelPickerIntent | undefined {
   const row = highlightedModel(panel)
   const choices = modelChoices(row)
@@ -94,32 +102,30 @@ function stepEffort(panel: ModelPickerPanel, delta: -1 | 1): ModelPickerIntent |
 }
 
 /** The frozen Tab/Shift+Tab cycle across the zones this page really paints. */
-function tabZone(panel: ModelPickerPanel, direction: -1 | 1): ModelPickerZone {
+function tabZone(panel: ModelPickerPanel, layout: ModelPickerLayout, direction: -1 | 1): ModelPickerZone {
   // A failed read has exactly ONE operable region — its action bar (Retry /
   // Cancel). The stale model list keeps its rows on screen for context, but the
   // phase browses neither the list nor the search box and refuses Enter, so
   // Tab/Shift+Tab must never move the keyboard there: both stay in the bar,
   // where ←→ switches between Retry and the always-enabled Cancel.
   if (panel.phase === 'error') return 'primary-action'
-  // The effort selector exists only while the phase admits BROWSING. A failed (or
-  // running) read keeps the previous rows and their effort metadata for context, but
-  // its bar offers nothing but Retry/Cancel, so Tab must reach that bar instead of
-  // parking the keyboard in an inert effort zone the phase cannot operate.
-  const browsable = panel.phase === 'ready'
-  const hasChoices = browsable && modelChoices(highlightedModel(panel)).length > 0
-  // The static content pages have exactly two regions: their list and the bar.
-  if (panel.page === 'details' || panel.page === 'more') {
+  // The read-only Full details page and the model's Overview are CONTENT pages:
+  // their main list plus the action bar. Neither renders a side region.
+  if (panel.page !== 'models') {
     return panel.zone === 'primary-action' ? 'models' : 'primary-action'
   }
-  // Every other page cycles the zones it really renders. The strip comes FIRST
-  // after the list because it exists only on the model list page: leaving the
-  // list for the effort zone can move the panel onto the effort PAGE, where the
-  // strip has no chip at all, so a later stop would be unreachable. The inline
-  // effort selector follows, and only while the highlighted model advertises
-  // efforts.
+  // The model list cycles the regions the wide shell really paints. The Model
+  // Details card comes FIRST after the list because that is the ring's own
+  // forward order; the inline effort selector follows it, and only while the
+  // wide column provably shows every candidate.
   const ring: ModelPickerZone[] = ['models']
-  if (browsable && stripChips(panel).length > 0) ring.push('strip')
-  if (hasChoices) ring.push('effort')
+  // The wide column only paints an actionable Model Details card while a model
+  // is really highlighted (otherwise it is the inert "no model matches" text),
+  // so an empty search must not park the keyboard on a card that cannot act.
+  if (detailCardOffered(layout) && highlightedModel(panel) !== undefined) {
+    ring.push('detail-card')
+    if (panel.phase === 'ready' && inlineEffortOffered(panel, layout)) ring.push('effort')
+  }
   ring.push('primary-action')
   const at = Math.max(ring.indexOf(panel.zone), 0)
   return ring[(at + direction + ring.length) % ring.length]!
@@ -148,32 +154,32 @@ function queryIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent | und
  * Returns `undefined` for a key the panel does not consume — the orchestrator
  * then leaves it to the original composer owner.
  */
-export function keyIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent | undefined {
+export function keyIntent(
+  panel: ModelPickerPanel,
+  key: Key,
+  layout: ModelPickerLayout,
+): ModelPickerIntent | undefined {
   // The original application cancel owner keeps Ctrl+C in every state.
   if (key.ctrl === true && key.name === 'c') return undefined
   if (key.name === 'escape') {
     // Esc is NEVER swallowed. An admitted write, a running (re-)read and a failed
     // read all leave the close action as the only reachable one, and in the failed
-    // read the
-    // zone/page Esc would return to is inert (`tabZone` keeps the keyboard in the
-    // bar for exactly that reason), so all three close instead of parking the
-    // keyboard where no key acts.
+    // read the zone/page Esc would return to is inert (`tabZone` keeps the keyboard
+    // in the bar for exactly that reason), so all three close instead of parking
+    // the keyboard where no key acts.
     if (panel.phase === 'pending' || panel.phase === 'loading' || panel.phase === 'error') {
       return { kind: 'close' }
     }
-    // The action bar returns to the zone it was entered FROM (a details page's
+    // The action bar returns to the region it was entered FROM (a details page's
     // Primary must not teleport the user into the effort selector).
-    if (panel.zone === 'primary-action') {
-      // Esc keeps the page the bar was used on (a details page stays a details
-      // page) and returns to the zone the bar was entered from.
-      return { kind: 'zone', zone: panel.previousZone ?? 'models', page: panel.page }
+    if (panel.zone === 'primary-action') return { kind: 'zone', zone: panel.previousZone ?? 'models' }
+    // The side regions belong to the model list: Esc leaves them for the list.
+    if (panel.zone === 'detail-card' || panel.zone === 'effort') {
+      return { kind: 'zone', zone: 'models' }
     }
-    if (panel.zone === 'effort') {
-      return { kind: 'zone', zone: 'models', page: panel.previousPage ?? 'models' }
-    }
-    // The strip is a side region of the model list: Esc leaves it for the list.
-    if (panel.zone === 'strip') return { kind: 'zone', zone: 'models' }
-    if (panel.page === 'details' || panel.page === 'more') return { kind: 'page', page: 'models' }
+    // A content page's Esc is its own `Back`, so the visible action and the key
+    // can never disagree.
+    if (panel.page === 'details' || panel.page === 'overview') return { kind: 'back' }
     return { kind: 'close' }
   }
   // While the read runs the query stays editable (frozen §4.5) and every other
@@ -182,7 +188,7 @@ export function keyIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent 
     return panel.page === 'models' ? queryIntent(panel, key) : undefined
   }
   if (panel.phase === 'pending') return undefined
-  if (key.name === 'tab') return { kind: 'zone', zone: tabZone(panel, key.shift === true ? -1 : 1) }
+  if (key.name === 'tab') return { kind: 'zone', zone: tabZone(panel, layout, key.shift === true ? -1 : 1) }
   // The action bar owns Enter and the bar-internal focus movement. Enter only
   // ever activates the FOCUSED action; the Primary Action remains the sole write.
   if (panel.zone === 'primary-action') {
@@ -191,75 +197,77 @@ export function keyIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent 
     }
     return key.name === 'enter' ? { kind: 'activate-action' } : undefined
   }
-  // The strip carries exactly one chip: Enter opens it, its arrows do nothing.
-  if (panel.zone === 'strip') {
-    return key.name === 'enter' ? { kind: 'page', page: 'more' } : undefined
-  }
   // A failed read owns no browsable list: only the action bar (Tab) is live.
   if (panel.phase === 'error') return undefined
-  // The More page is a menu of secondary operations: its arrows move the
-  // presentation cursor and Enter runs the selected one — never a write.
-  if (panel.page === 'more') {
+  // The Overview's main list is the model's own page: its arrows move the ROW
+  // cursor (over every identity continuation line, the details entry and the
+  // effort candidates) and Enter acts on the row it is really on. Enter on a
+  // static identity row is inert; on an effort row it drafts; on the details
+  // entry it opens the read-only page.
+  if (panel.page === 'overview') {
     if (key.name === 'up' || key.name === 'down') {
-      return { kind: 'more-cursor', delta: key.name === 'up' ? -1 : 1 }
+      return { kind: 'overview-cursor', delta: key.name === 'up' ? -1 : 1 }
     }
-    return key.name === 'enter' ? { kind: 'activate-more' } : undefined
-  }
-  if (key.name === 'enter') {
-    if (panel.zone === 'models') {
-      // Static detail fields never commit; the model list moves to the effort
-      // selector, or straight to the explicit Confirm when there is none.
-      if (panel.page === 'details') return undefined
-      return {
-        kind: 'zone',
-        zone: modelChoices(highlightedModel(panel)).length === 0 ? 'primary-action' : 'effort',
-      }
-    }
-    // Confirming a draft moves to the explicit Confirm; it never writes.
-    return { kind: 'zone', zone: 'primary-action' }
-  }
-  if (panel.zone === 'effort' && (key.name === 'up' || key.name === 'down')) {
-    // The effort page lists the candidates, so its arrows browse them.
-    return stepEffort(panel, key.name === 'up' ? -1 : 1)
+    return key.name === 'enter' ? { kind: 'activate-overview' } : undefined
   }
   // The details page's rows are inert FACTS, so its arrows only keep the native
   // list scrolled to the row being read (a long description must stay
-  // reachable); they never change the browsed model.
-  if (panel.page === 'details' && key.name === 'up' || panel.page === 'details' && key.name === 'down') {
-    return { kind: 'fact-cursor', delta: key.name === 'up' ? -1 : 1 }
+  // reachable); they never change the browsed model and never write.
+  if (panel.page === 'details') {
+    if (key.name === 'up' || key.name === 'down') {
+      return { kind: 'fact-cursor', delta: key.name === 'up' ? -1 : 1 }
+    }
+    return undefined
   }
-  // Only the model list page browses the model list or edits the search box.
-  if (panel.zone !== 'models' || panel.page !== 'models') return undefined
+  // The wide Model Details card is the model list's `detail-card` zone, and its
+  // Enter must open exactly what its own label and its own pointer target open:
+  // the FULL card (head = the model name + `›`) opens the read-only Full details
+  // page, while the BOUNDED card (head = `Open model & effort ›`) opens the
+  // model's Overview — the page that carries every candidate the column could not
+  // present. Its arrows do nothing (the card is a single region, not a list).
+  if (panel.zone === 'detail-card') {
+    if (key.name !== 'enter') return undefined
+    return { kind: layout.previewFull ? 'open-details' : 'open-overview' }
+  }
+  // The wide inline effort selector: its arrows change the DRAFT and Enter
+  // confirms it onto the explicit Primary Action — never a write.
+  if (panel.zone === 'effort') {
+    if (key.name === 'up' || key.name === 'down') return stepEffort(panel, key.name === 'up' ? -1 : 1)
+    return key.name === 'enter' ? { kind: 'zone', zone: 'primary-action' } : undefined
+  }
+  // Zone `models` on the model list: Enter never writes. The full wide column IS
+  // the selector, so Enter moves the keyboard onto the details card; a bounded
+  // column (and every compact width) has no inline selector, so Enter opens the
+  // model's Overview — the page that carries the identity, the details entry and
+  // every effort candidate.
+  if (key.name === 'enter') {
+    if (layout.wide && layout.previewFull) return { kind: 'zone', zone: 'detail-card' }
+    return panel.selected === undefined ? undefined : { kind: 'open-overview', rowId: panel.selected }
+  }
   if (key.name === 'up' || key.name === 'down') return stepModel(panel, key.name === 'up' ? -1 : 1)
   return queryIntent(panel, key)
 }
 
-/** One SDK action event as an intent (the action bar AND the scope column). The
- *  panel decides where a page-relative action returns, so Back and Esc can never
- *  disagree. */
 /**
  * The action ids the CURRENT page really offers on the SDK's action channel: the
- * bar's own entries plus, on the More page, the secondary operations its list
- * renders. An id outside this set is not merely absent from the screen — it must
- * be refused ON THE WIRE too, or a stale or forged receiver could reach the one
- * writer (or the close and paging actions) from a page whose bar never offered
- * them. The scope column and the strip have their own namespaces and their own
- * live checks instead.
+ * bar's own entries. An id outside this set is not merely absent from the
+ * screen — it must be refused ON THE WIRE too, or a stale or forged receiver
+ * could reach the one writer (or the close, paging and read actions) from a page
+ * whose bar never offered them. The scope column has its own namespace and its
+ * own live check instead.
  */
-function offeredActionIds(panel: ModelPickerPanel): Set<string> {
-  const ids = new Set(pickerActions(panel).map((action) => action.id))
-  if (panel.page === 'more') {
-    for (const action of secondaryActions(panel)) ids.add(action.id)
-  }
-  return ids
+function offeredActionIds(panel: ModelPickerPanel, layout: ModelPickerLayout): Set<string> {
+  return new Set(pickerActions(panel, layout).map((action) => action.id))
 }
 
+/** One SDK action event as an intent (the action bar AND the scope column). */
 export function actionIntent(
   panel: ModelPickerPanel,
   act: string,
   value: string | undefined,
+  layout: ModelPickerLayout,
 ): ModelPickerIntent | undefined {
-  if (act !== 'scope' && act !== 'strip' && !offeredActionIds(panel).has(act)) return undefined
+  if (act !== 'scope' && !offeredActionIds(panel, layout).has(act)) return undefined
   switch (act) {
     case 'close':
       return { kind: 'close' }
@@ -275,73 +283,64 @@ export function actionIntent(
       // `null` is the every-provider entry.
       return { kind: 'scope', scope: provider ?? undefined }
     }
-    case 'strip':
-      // The strip's chips arrive on this same channel with their own ids, so a
-      // strip click can never be mistaken for a bar action or a scope — and, like
-      // the bar, only a chip the CURRENT page really renders is admitted.
-      return value !== undefined && stripChips(panel).some((chip) => chip.id === value)
-        ? { kind: 'page', page: 'more' }
-        : undefined
     case 'back':
-      // The effort page was opened FROM a page, so its Back is that page (the
-      // same target its Esc uses); every other page backs out to the model list.
-      return panel.page === 'effort'
-        ? { kind: 'zone', zone: 'models', page: panel.previousPage ?? 'models' }
-        : { kind: 'page', page: 'models' }
-    case 'details':
-      return { kind: 'page', page: 'details' }
-    case 'effort-page':
-      // The drill-down effort page is reachable in EVERY layout (the Owner's
-      // path that keeps every candidate readable/selectable when the
-      // environment's font or zoom makes the wide column's own fit unsure), so
-      // the page is explicit rather than derived from the paged layout.
-      return { kind: 'zone', zone: 'effort', page: 'effort' }
+      // The visible Back and the page's own Esc are the same intent, so they can
+      // never disagree about where a content page returns.
+      return { kind: 'back' }
     case 'retry':
       return { kind: 'retry' }
     case 'apply':
-      return { kind: 'apply' }
+      // Defense in depth behind `offeredActionIds`: the write exists only where
+      // the CURRENT page really carries it.
+      return applyOffered(panel, layout) ? { kind: 'apply' } : undefined
     default:
       return undefined
   }
 }
 
 /**
- * One SDK ROW activation (a model row, an effort candidate row, or a row of the
- * More page).
+ * One SDK ROW event (a model row, an Overview row, or a details fact row).
  *
- * A candidate row carries its OWN wire namespace ({@link effortValue}), and that is
- * the only place a candidate value is read: the SDK delivers the scope column's ids
- * and the page's row ids on the same channel, so a candidate whose value looks like a
- * scope id (or IS the every-provider id) still changes the draft.
+ * The event KIND (`select` / `activate`) carries no distinct intent here: the
+ * SDK sends `activate` for a click on the row that is already selected, and the
+ * frozen contract makes both shapes idempotent on every page — highlighting at
+ * the wide model list, entering the model's Overview at a compact width,
+ * activating the Overview row it really names, and only moving the read cursor
+ * on the details page. The event's `item` is the routing authority in every
+ * case, never the previous cursor.
  *
- * A scope id arriving here is NOT a filter request: the scope column speaks on the
- * `action` channel ({@link actionIntent}), so accepting its shape here as well would
- * leave a second, unfrozen way into the browse filter. Only the model list browses a
- * model; the More page's rows are the secondary operations it lists.
+ * A candidate row carries its OWN wire namespace ({@link
+ * model-picker-state.effortItemId}), and that is the only place a candidate
+ * value is read. A scope id arriving here is NOT a filter request: the scope
+ * column speaks on the `action` channel, so accepting its shape here as well
+ * would leave a second, unfrozen way into the browse filter.
  */
-export function rowIntent(panel: ModelPickerPanel, item: string): ModelPickerIntent | undefined {
-  if (panel.page === 'more') {
-    // A More page row runs a SECONDARY operation, so it must be one the page
-    // really offers RIGHT NOW: the ids are just strings on the wire, and an
-    // unoffered one (`more:apply`, `more:close`) would otherwise resolve into the
-    // one writer or the close action from a page whose bar has neither.
-    const action = moreRowAction(item)
-    if (action === undefined) return undefined
-    return secondaryActions(panel).some((entry) => entry.id === action)
-      ? actionIntent(panel, action, undefined)
+export function rowIntent(
+  panel: ModelPickerPanel,
+  item: string,
+  layout: ModelPickerLayout,
+): ModelPickerIntent | undefined {
+  if (panel.page === 'overview') {
+    // The Overview's rows are the REAL rows of the page the user is looking at:
+    // only an id that row set currently carries may act, so a stale or forged
+    // row can neither draft an effort nor open the details page.
+    return overviewItems(panel, layout.wide).some((row) => row.id === item)
+      ? { kind: 'overview-select', item }
       : undefined
   }
-  if (panel.page === 'effort') {
-    const value = effortValue(item)
-    if (value !== undefined) {
-      const choices = modelChoices(highlightedModel(panel))
-      return choices.some((choice) => choice.value === value)
-        ? { kind: 'browse-effort', value }
-        : undefined
-    }
+  if (panel.page === 'details') {
+    const row = highlightedModel(panel)
+    if (row === undefined) return undefined
+    return detailFactItems(panel, row, layout.wide).some((fact) => fact.id === item)
+      ? { kind: 'fact-select', item }
+      : undefined
   }
   if (panel.page !== 'models') return undefined
-  return visibleModels(panel).some((row) => modelRowId(row) === item)
-    ? { kind: 'browse-model', rowId: item }
-    : undefined
+  // A model row is validated against the VISIBLE rows, so a scope-shaped id can
+  // never be read as a model (or the reverse).
+  if (!visibleModels(panel).some((row) => modelRowId(row) === item)) return undefined
+  // A compact model-list row opens THAT row's Overview; at the wide model list
+  // the side column already describes the model, so the row only highlights it
+  // (clicking an already-selected row must not page the surface away).
+  return layout.wide ? { kind: 'browse-model', rowId: item } : { kind: 'open-overview', rowId: item }
 }

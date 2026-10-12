@@ -21,8 +21,6 @@ import {
 } from '../pickers/model-directory.ts'
 import {
   clampColumns,
-  displayWidth,
-  factLineColumns,
   factRowItems,
   oneLine,
   PICKER_GLYPH_PX,
@@ -32,13 +30,33 @@ import {
 /** The read/write lifecycle of the panel. `pending` is an ADMITTED write. */
 export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
 
-/** The visible page. `models` is the selector; the other pages are content. */
-export type ModelPickerPage = 'models' | 'details' | 'effort' | 'more'
+/** The visible page: the model list, one model's Overview, or its read-only
+ *  Full details. The Overview is the model's OWN page, never a global menu. */
+export type ModelPickerPage = 'models' | 'overview' | 'details'
 
 /** K2: the logical regions Tab moves between. Only `primary-action` may ever
- *  commit a write, and only when it is visible and enabled. `strip` exists only
- *  while the strip really carries a chip (the main page's `More actions…`). */
-export type ModelPickerZone = 'models' | 'effort' | 'strip' | 'primary-action'
+ *  commit a write, and only when it is visible and enabled. `detail-card` is
+ *  the wide shell's Model Details card; `effort` is the wide shell's inline
+ *  Reasoning Effort selector. Both exist only where the wide shell paints
+ *  them (see {@link ModelPickerLayout}). */
+export type ModelPickerZone = 'models' | 'detail-card' | 'effort' | 'primary-action'
+
+/**
+ * The layout the panel is currently rendered in. It is a PRESENTATION fact
+ * owned by the presenter (columns + the measured preview budget), passed into
+ * the pure modules explicitly so no selector has to guess it from the panel:
+ *
+ *  - `wide` — the `lg` shell (provider scopes + model list + a details column);
+ *  - `previewFull` — the column provably presents the WHOLE details card and
+ *    every advertised effort, so the inline selector and its K2 zone exist.
+ *
+ * It decides which regions are PAINTED (and therefore which regions K2 may
+ * reach); it never decides business permission.
+ */
+export interface ModelPickerLayout {
+  readonly wide: boolean
+  readonly previewFull: boolean
+}
 
 export interface ModelPickerPanel {
   /** The presenter serial: an event bound to another panel can never act here. */
@@ -59,15 +77,16 @@ export interface ModelPickerPanel {
   /**
    * Which action bar entry owns Enter while the keyboard is in the action zone.
    * `undefined` (and any id the current page no longer offers) resolves to the
-   * Primary Action, so entering the zone always lands on the frozen default.
+   * last enabled action, so entering the zone always lands on a live entry.
    */
   actionFocus: string | undefined
   /** The zone the keyboard came from when it entered the action bar (Esc returns
-   *  there instead of guessing between the effort selector and the list). */
+   *  there instead of guessing between the side regions and the list). */
   previousZone: ModelPickerZone | undefined
-  /** The page the effort selector was opened FROM (frozen §4.4: a compact Esc
-   *  returns to the previous page, not always to the model list). */
-  previousPage: ModelPickerPage | undefined
+  /** Where the read-only Full details page returns: the model list when it was
+   *  opened from the wide details card, the Overview when it was opened from the
+   *  Overview's own details entry. */
+  detailsReturn: 'models' | 'overview'
   /** The single local notice (a read error or the last write outcome). */
   notice: string
   directory: ModelPickerDirectory | undefined
@@ -79,10 +98,13 @@ export interface ModelPickerPanel {
    * long description's tail stays reachable from the keyboard.
    */
   factCursor: number
-  /** The More page's presentation cursor (an index into its secondary actions):
-   *  the same pattern as `factCursor`, so the secondary entries stay reachable
-   *  from the keyboard instead of being pointer-only. */
-  moreCursor: number
+  /**
+   * The Overview page's presentation cursor: an index into the MAIN LIST rows
+   * (identity fact continuations, the details entry and the effort candidates).
+   * It is the ROW the keyboard/pointer is on and is never itself a business
+   * candidate: only activating an effort row changes that model's draft.
+   */
+  overviewCursor: number
   /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
   efforts: Map<string, string>
 }
@@ -125,13 +147,14 @@ export function scopeProviderId(id: string): string | null | undefined {
 /* -------------------------------------------------------------- candidates */
 
 /**
- * The wire id of one effort CANDIDATE row on the effort page. Candidates get their
- * OWN namespace, because the SDK delivers the scope column's ids and the page's row
- * ids on the same channel: with a shared namespace a candidate value that happened
- * to look like a scope id (or WAS the every-provider id) could not be told apart from
- * the scope entry. The first token differs by construction, so the two directions
- * are independent — a candidate named like a scope still drafts, and the real scope
- * entry still filters, even side by side.
+ * The wire id of one effort CANDIDATE row (the Overview's candidate rows and the
+ * wide inline selector's own item ids). Candidates get their OWN namespace,
+ * because the SDK delivers the scope column's ids and the page's row ids on the
+ * same channel: with a shared namespace a candidate value that happened to look
+ * like a scope id (or WAS the every-provider id) could not be told apart from
+ * the scope entry. The first token differs by construction, so the two
+ * directions are independent — a candidate named like a scope still drafts, and
+ * the real scope entry still filters, even side by side.
  */
 const EFFORT_PREFIX = 'effort:'
 
@@ -140,8 +163,9 @@ export function effortItemId(value: string): string {
   return EFFORT_PREFIX + value
 }
 
-/** The candidate value of an effort page row, or `undefined` when the id is not a
- *  candidate row at all (a scope id, a model row, a fact row). */
+/** The candidate value of an effort row, or `undefined` when the id is not a
+ *  candidate row at all (a scope id, a model row, a fact row, the details
+ *  entry). */
 export function effortValue(item: string): string | undefined {
   return item.startsWith(EFFORT_PREFIX) ? item.slice(EFFORT_PREFIX.length) : undefined
 }
@@ -194,8 +218,7 @@ export function draftedEffort(
  * strings are kept SHORT on purpose: at the 400px minimum supported pane the
  * compact strip gives its label 40% of the sheet (a measured 120px), so a longer
  * sentence would be ellipsized there — the subject must stay completely visible
- * at every supported width (real-pane check: its rendered advance stays inside
- * the font's own band instead of stopping at the cap).
+ * at every supported width.
  */
 export function subjectLine(panel: ModelPickerPanel): string {
   return panel.request.subject.sessionless ? 'Default model' : 'Session model'
@@ -225,9 +248,9 @@ const factValue = (selection: { provider: string; model: string; reasoningEffort
   `${selection.provider}/${selection.model}${selection.reasoningEffort === undefined ? '' : `/${selection.reasoningEffort}`}`
 
 /**
- * The configured-selection facts shown in the details area, in ONE place each:
- * `Current` only for a live Session (never for a sessionless subject) and
- * `Default` from `directory.default` — including its own effort, which the
+ * The configured-selection facts shown wherever the panel lists a model's
+ * identity: `Current` only for a live Session (never for a sessionless subject)
+ * and `Default` from `directory.default` — including its own effort, which the
  * row-level projection cannot carry when the default is not the current model.
  */
 export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFact[] {
@@ -256,248 +279,225 @@ export function actionKeyboardLive(panel: ModelPickerPanel): boolean {
   return panel.phase === 'ready' || panel.phase === 'error'
 }
 
+/* ------------------------------------------------------------- side regions */
+
 /**
- * The single-line keyboard hint of the current zone (rendered by the model list
- * page's details column only, and counted by the layout budget, so the two can
- * never disagree).
+ * Whether the wide shell's Model Details CARD is painted: it is, in both the
+ * full and the bounded form, exactly when the wide shell is. The card is what
+ * opens the read-only Full details page (a click, or Enter from the
+ * `detail-card` zone).
+ */
+export function detailCardOffered(layout: ModelPickerLayout): boolean {
+  return layout.wide
+}
+
+/**
+ * Whether the wide shell's INLINE Reasoning Effort selector is painted. The
+ * `effort` K2 zone exists only while it is: a bounded column shows a summary
+ * instead of the radio rows, so operating an invisible candidate would change a
+ * draft the user cannot see.
+ */
+export function inlineEffortOffered(
+  panel: ModelPickerPanel,
+  layout: ModelPickerLayout,
+): boolean {
+  return layout.wide && layout.previewFull && modelChoices(highlightedModel(panel)).length > 0
+}
+
+/**
+ * The single-line keyboard hint of the wide details column (counted by the
+ * layout budget, so the hint and the budget can never disagree).
  *
  * It never names a BUSINESS action: in the action bar `Enter` runs whichever
  * action that bar has FOCUSED — the `▸ label` cue says which — so the hint only
  * explains how the bar is driven instead of claiming Enter applies. In the list
- * the hint names the zone `Tab` reaches NEXT, which is the effort selector
- * whenever the highlighted model advertises efforts (mirrors the frozen
- * `tabZone` cycle). The drill-down pages render no column, so they carry no hint
- * at all. Every hint stays inside one worst-case line so it never eats the
- * layout budget.
+ * the hint names the zone `Tab` reaches NEXT (the wide shell's Model Details
+ * card), and inside that card it names what `Enter` opens. Every hint stays
+ * inside one worst-case line so it never eats the layout budget.
  */
-export function zoneHintText(panel: ModelPickerPanel): string {
+export function zoneHintText(panel: ModelPickerPanel, layout: ModelPickerLayout): string {
   if (panel.phase === 'pending') return 'Selecting…'
   // A running (re-)read answers the keyboard with at most the search box, so the
   // hint names the READ instead of promising a Tab/←→ the phase will refuse.
   if (panel.phase === 'loading') return 'Reading…'
   if (panel.phase === 'error') return 'Retry first'
   if (panel.zone === 'effort') return '↑↓ draft'
-  if (panel.zone === 'strip') return 'Enter: more'
+  // The card's own hint states what ITS label states: the full card opens the
+  // read-only Full details page, the bounded `Open model & effort ›` card opens
+  // the Overview. The pointer target and the key can therefore never disagree.
+  if (panel.zone === 'detail-card') return layout.previewFull ? 'Enter: details' : 'Enter: overview'
   if (panel.zone === 'primary-action') return '←→ · Enter'
-  // The hint names the zone `Tab` reaches NEXT, so it follows the ring's own
-  // order: the strip comes first (it exists only on this page), then the effort
-  // selector, then the action bar.
-  return stripChips(panel).length > 0
-    ? 'Tab: more'
-    : modelChoices(highlightedModel(panel)).length > 0 ? 'Tab: effort' : 'Tab: actions'
+  // The hint names the zone `Tab` reaches NEXT: the wide shell's details card.
+  return detailCardOffered(layout) ? 'Tab: details' : 'Tab: actions'
 }
 
-/* ------------------------------------------------------------ secondary page */
+/* ------------------------------------------------------------ overview page */
+
+/** The wire id of the Overview's single operation row (the read-only Full
+ *  details entry). It is deliberately not an effort candidate id, so the two
+ *  row kinds can never be confused. */
+export const OVERVIEW_DETAILS_ID = 'overview-details'
+
+/** The inert row a model with no advertised effort metadata gets, so the
+ *  Overview's effort section is never silently missing. Its id is routed
+ *  nowhere: activating it changes nothing. */
+export const OVERVIEW_NO_EFFORT_ID = 'overview-no-effort'
 
 /**
- * The wire id of the single `More actions…` STRIP chip. The SDK delivers a strip
- * click on the action channel as `act:'strip', value:<item id>`, so the chip needs
- * its own id namespace next to the scope ids, the model row ids and the effort
- * candidate ids.
- */
-export const MORE_CHIP_ID = 'strip-more'
-
-const MORE_ROW_PREFIX = 'more:'
-
-/** The wire id of one row on the More page (the id of the action it runs). */
-export function moreRowId(actionId: string): string {
-  return MORE_ROW_PREFIX + actionId
-}
-
-/** The action id a More-page row carries, or `undefined` for any other row. */
-export function moreRowAction(item: string): string | undefined {
-  return item.startsWith(MORE_ROW_PREFIX) ? item.slice(MORE_ROW_PREFIX.length) : undefined
-}
-
-/**
- * The secondary operations of the CURRENT state, in display order. They live on
- * the More page (and, as a single chip, on the model list's strip) instead of the
- * action bar, because the bar lays its buttons on one line and the five-entry
- * details bar was already clipping the one write action at narrow panes. Only the
- * entries that can really act right now are offered.
- */
-export function secondaryActions(panel: ModelPickerPanel): readonly PickerAction[] {
-  if (panel.phase !== 'ready') return []
-  const row = highlightedModel(panel)
-  const actions: PickerAction[] = []
-  // `Full model details…` renders THAT model's own facts, so without a
-  // highlighted model it would open an empty page: it is offered only while there
-  // is a model to describe (the same rule the details entry had while it lived in
-  // the bar). `Retry failed providers (N)` and `Back to models` stay reachable.
-  if (row !== undefined) actions.push({ id: 'details', label: 'Full model details…' })
-  if (modelChoices(row).length > 0) {
-    actions.push({ id: 'effort-page', label: 'All reasoning effort levels…' })
-  }
-  if (panel.failures.length > 0) {
-    actions.push({ id: 'retry', label: `Retry failed providers (${panel.failures.length})` })
-  }
-  actions.push({ id: 'back', label: 'Back to models' })
-  return actions
-}
-
-/** The strip's chips: the one `More actions…` entry, on the model list only. */
-export function stripChips(panel: ModelPickerPanel): readonly { id: string; label: string }[] {
-  return panel.page === 'models' && secondaryActions(panel).length > 0
-    ? [{ id: MORE_CHIP_ID, label: 'More actions…' }]
-    : []
-}
-
-/** The More page's cursor, clamped to the rows it currently offers. */
-export function moreCursor(panel: ModelPickerPanel): number {
-  const count = secondaryActions(panel).length
-  return Math.min(Math.max(panel.moreCursor, 0), Math.max(0, count - 1))
-}
-
-/** The More page's selected row (its native list selection). */
-export function moreSelected(panel: ModelPickerPanel): string | undefined {
-  const action = secondaryActions(panel)[moreCursor(panel)]
-  return action === undefined ? undefined : moreRowId(action.id)
-}
-
-/* --------------------------------------------------------- operation block */
-
-/** The complete business name of the one operation (the button shows the short
- *  form: `Confirm` / `Retry` / `Selecting…`). */
-export function operationName(panel: ModelPickerPanel): string {
-  if (panel.phase === 'error') return 'Retry loading models'
-  if (panel.phase === 'pending') return 'Selecting…'
-  return panel.request.subject.sessionless ? 'Choose & Save as Default' : 'Switch Model'
-}
-
-/**
- * The OPERATION BLOCK: the one place per page that states, in full, what the
- * short `Confirm` will do and to which target — the model, its drafted reasoning
- * effort, the complete operation name, and one plain sentence of consequence.
+ * The Overview page's MAIN LIST rows, in order: the model's complete identity
+ * facts (wrapped into continuation rows by the shared
+ * {@link factRowItems} rule, so a long provider/ID is never readable only
+ * through an ellipsis), the single `View full model details ›` operation row,
+ * and the model's advertised effort candidates — or one inert
+ * `Reasoning effort Not available` row when the model advertises none.
  *
- * It is rendered into the picker's own preview region, which the verified client
- * places BELOW the list (between the list and the strip/action bar) and wraps
- * naturally, so the button never has to carry a long frozen sentence. The same
- * client HIDES that region entirely at the narrowest panes (`pv-hide` at a
- * 400px-wide pane), where the block is therefore absent: a recorded
- * client limitation, reported rather than worked around by shortening the
- * meaning or by a self-drawn region.
+ * The Overview is the model's OWN page at every width (`preview: 'none'`), so
+ * everything a user has to act on lives in this native list instead of a
+ * preview region the client may hide.
  */
-/**
- * The operation block is rendered into the preview region only where that region
- * is the WRAPPING one below the list (`md`), never into the wide side column: a
- * four-line block whose sentence is 80 characters long wraps into eight to twelve
- * lines at the side column's own 248px text slot, which alone exceeds the 374px
- * budget the wide column shares with the details card and the effort radios.
- * Pricing it there would evict the inline Rational Effort selector at every pane.
- * The wide page therefore states the same operation through its strip label
- * instead, and the side column keeps its action-first structure unchanged.
- */
-
-export function operationBlock(panel: ModelPickerPanel): readonly string[] {
+export function overviewItems(panel: ModelPickerPanel, wide: boolean): PickerItem[] {
   const row = highlightedModel(panel)
   if (row === undefined) return []
-  const effort = modelChoices(row).find((choice) => choice.value === draftedEffort(panel, row))?.label
+  const draft = draftedEffort(panel, row)
+  const choices = modelChoices(row)
   return [
-    `Selected model: ${row.providerName} / ${row.modelName}`,
-    ...(effort === undefined ? [] : [`Reasoning effort: ${effort}`]),
-    `Action: ${operationName(panel)}`,
-    panel.phase === 'error'
-      ? 'The model list could not be read; retry to load it again.'
-      : panel.request.subject.sessionless
-        ? 'Confirming will select this model and save it as the default for future sessions.'
-        : "Confirming will switch this Session's model.",
+    ...factRowItems('overview-model', 'Model', row.modelName, wide),
+    ...factRowItems('overview-provider', 'Provider', `${row.providerName} (${row.providerId})`, wide),
+    ...factRowItems('overview-id', 'ID', row.modelId, wide),
+    ...configuredFacts(panel).flatMap((fact) => factRowItems(fact.id, fact.label, fact.detail, wide)),
+    { id: OVERVIEW_DETAILS_ID, label: 'View full model details ›' },
+    ...(choices.length === 0
+      ? [{ id: OVERVIEW_NO_EFFORT_ID, label: 'Reasoning effort', detail: 'Not available' }]
+      : choices.map((choice) => ({
+          id: effortItemId(choice.value),
+          label: choice.label,
+          detail: 'draft',
+          mark: choice.value === draft ? { text: '●' } : { text: '○' },
+        }))),
   ]
+}
+
+/** The Overview cursor, clamped to the rows the page currently offers. */
+export function overviewCursorIndex(panel: ModelPickerPanel, wide: boolean): number {
+  const count = overviewItems(panel, wide).length
+  return Math.min(Math.max(panel.overviewCursor, 0), Math.max(0, count - 1))
+}
+
+/** The row the Overview's native list has selected: the REAL row at the cursor,
+ *  never a fixed draft item, so the keyboard can read every continuation line. */
+export function overviewSelected(panel: ModelPickerPanel, wide: boolean): string | undefined {
+  return overviewItems(panel, wide)[overviewCursorIndex(panel, wide)]?.id
 }
 
 /* --------------------------------------------------------------- action bar */
 
-/** The single visible Primary Action of the current phase. Only this action may
- *  ever commit; while the directory read failed it IS the read-only Retry.
- *
- *  The label is short ON PURPOSE (`Confirm`), because the native action bar lays
- *  its buttons on one line and clips the rightmost one at narrow panes: a long
- *  frozen sentence as the button text pushed the ONE write action out of the sheet
- *  at the 400px width floor and at enlarged UI fonts. The COMPLETE business meaning
- *  is carried once per page by the operation block next to the list
- *  ({@link operationBlock}); the button only has to confirm it. The one writer and
- *  the one operation are unchanged. */
+/**
+ * Whether the CURRENT page carries the explicit write action. The compact model
+ * list and the read-only Full details page have NO write: a narrow-pane user
+ * enters the model's Overview and commits from there, so the write is never a
+ * blind one and the details page can never submit anything.
+ */
+export function applyOffered(panel: ModelPickerPanel, layout: ModelPickerLayout): boolean {
+  if (panel.page === 'overview') return true
+  return panel.page === 'models' && layout.wide
+}
+
+/** The short, explicit label of the one write: what it really does. */
+function primaryLabel(panel: ModelPickerPanel): string {
+  return panel.request.subject.sessionless ? 'Save default' : 'Switch'
+}
+
+/** The single visible Primary Action of the current page and phase. */
 function primaryAction(panel: ModelPickerPanel): PickerAction {
-  if (panel.phase === 'pending') {
-    return { id: 'apply', label: 'Selecting…', primary: true, disabled: true }
-  }
-  const label = panel.phase === 'error' ? 'Retry' : 'Confirm'
   return {
     id: 'apply',
-    label,
+    label: panel.phase === 'pending' ? 'Selecting…' : primaryLabel(panel),
     primary: true,
-    // Loading admits no write, so the action must LOOK unavailable rather than
-    // silently refusing a click (a Retry keeps the previous rows selectable).
-    disabled: panel.phase === 'loading'
-      || (panel.phase !== 'error' && highlightedModel(panel) === undefined)
+    // A phase that admits no write (a running read, an admitted write) and a
+    // page with no selectable model must LOOK unavailable rather than silently
+    // refusing a click.
+    disabled: panel.phase === 'loading' || panel.phase === 'pending' || highlightedModel(panel) === undefined
       ? true
       : undefined,
   }
 }
 
 /**
- * The ACTION BAR for the CURRENT phase and page: short, fixed, and never wider
- * than `Cancel` + one more entry.
+ * The ACTION BAR for the CURRENT page and phase: short, fixed, and never wider
+ * than the page's own two or three entries. The write appears only where the
+ * page really offers it ({@link applyOffered}); `Retry` appears only on the
+ * model list, and only while part of the directory failed.
  *
- * `Confirm` is the only write. `Back` is the content pages' way out (the details
- * and effort pages return to the page they came from) and the More page's only
- * entry. The secondary operations never enter this bar: they live on the More
- * page, reached from the model list's `More actions…` strip chip or the `strip`
- * K2 zone, so a failure's `Retry failed providers` can no longer push the one
- * write action outside the sheet.
- *
- * The view renders exactly this list and the key map moves the keyboard focus
- * across it, so a visible action can never be unreachable or a no-op.
+ * `Switch` / `Save default` is the only write. `Back` is the content pages' way
+ * out (the Overview and the read-only Full details page). The view renders
+ * exactly this list and the key map moves the keyboard focus across it, so a
+ * visible action can never be unreachable or a no-op.
  */
-export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
+export function pickerActions(panel: ModelPickerPanel, layout: ModelPickerLayout): PickerAction[] {
   // The visible label follows what the action really does: while a write is
   // admitted, closing the panel does NOT cancel the operation that is already
   // with the Host, so that phase keeps the honest `Close` instead of the `Cancel`
   // a user would read as "undo the write".
   const actions: PickerAction[] = [{ id: 'close', label: panel.phase === 'pending' ? 'Close' : 'Cancel', end: true }]
+  // A failed read admits exactly one operation — the read-only Retry — so the
+  // bar never offers a browse or a write the phase would refuse.
+  if (panel.phase === 'error') {
+    actions.push({ id: 'retry', label: 'Retry', primary: true })
+    return actions
+  }
   // Only `ready` admits browsing: a loading panel admits the search box and
-  // Cancel, an admitted write admits Cancel, and a failed read admits only the
-  // action bar's Retry. Rendering a browse action the phase refuses would make
-  // it a visible no-op (and a keyboard focus target that cannot act).
+  // Cancel, and an admitted write admits Cancel.
   if (panel.phase !== 'ready') {
     actions.push(primaryAction(panel))
     return actions
   }
-  // The More page is a menu: no write belongs on it, only its way back.
-  if (panel.page === 'more') {
+  // The read-only Full details page has no write, only its way back.
+  if (panel.page === 'details') {
     actions.push({ id: 'back', label: 'Back' })
     return actions
   }
-  if (panel.page !== 'models') actions.push({ id: 'back', label: 'Back' })
-  actions.push(primaryAction(panel))
+  // The Overview is the model's own actionable page: it owns the one write.
+  if (panel.page === 'overview') {
+    actions.push({ id: 'back', label: 'Back' })
+    actions.push(primaryAction(panel))
+    return actions
+  }
+  // The model list: the partial-failure Retry is a read, never a write, and the
+  // compact list commits nothing (the Overview does).
+  if (panel.failures.length > 0) actions.push({ id: 'retry', label: 'Retry' })
+  if (applyOffered(panel, layout)) actions.push(primaryAction(panel))
   return actions
 }
 
 /** The action that owns Enter right now.
  *
- *  The frozen default is the Primary Action (an explicit bar focus outside the
- *  current phase or page falls back to it), but a DISABLED action owns no Enter and
- *  shows no cue: when the Primary cannot act — a read that failed, a directory with
- *  no selectable model, a search with no match — focus falls back to the last action
- *  that CAN act (`Cancel` is always enabled), instead of parking the keyboard on a dead
- *  entry that no `▸` marks and Enter does nothing with. */
-export function focusedAction(panel: ModelPickerPanel): PickerAction {
-  const actions = pickerActions(panel)
+ *  The frozen default is the last ENABLED entry, but a DISABLED action owns no
+ *  Enter and shows no cue: when the Primary cannot act — a read that failed, a
+ *  directory with no selectable model, a search with no match — focus falls back
+ *  to an action that CAN act (`Cancel` is always enabled), instead of parking the
+ *  keyboard on a dead entry that no `▸` marks and Enter does nothing with. */
+export function focusedAction(panel: ModelPickerPanel, layout: ModelPickerLayout): PickerAction {
+  const actions = pickerActions(panel, layout)
   const enabled = (action: PickerAction): boolean => action.disabled !== true
   const explicit = actions.find((action) => action.id === panel.actionFocus && enabled(action))
   return explicit ?? actions.filter(enabled).at(-1) ?? actions[actions.length - 1]!
 }
 
 /** The next ENABLED action in the bar, wrapping in `delta`'s direction. */
-export function stepActionFocus(panel: ModelPickerPanel, delta: -1 | 1): string {
-  const offered = pickerActions(panel).filter((action) => action.disabled !== true)
-  const at = offered.findIndex((action) => action.id === focusedAction(panel).id)
+export function stepActionFocus(
+  panel: ModelPickerPanel,
+  layout: ModelPickerLayout,
+  delta: -1 | 1,
+): string {
+  const offered = pickerActions(panel, layout).filter((action) => action.disabled !== true)
+  const at = offered.findIndex((action) => action.id === focusedAction(panel, layout).id)
   const next = offered[(Math.max(at, 0) + delta + offered.length) % offered.length]
-  return next?.id ?? focusedAction(panel).id
+  return next?.id ?? focusedAction(panel, layout).id
 }
 
 /* ------------------------------------------------------------- details page */
 
-/** The model-details page's inert fact rows (a compact or wide-list page).
+/** The model-details page's inert fact rows (compact or wide).
  *
  *  EVERY fact value goes through {@link factRowItems}: a row renders ONE line and
  *  ellipsizes what does not fit, so a long name/provider/ID/configured value can
@@ -586,16 +586,18 @@ const WIDE_CARD_PAD_PX = 10
  */
 const WIDE_USABLE_HEIGHT_PX = 374
 
-/** The identity fields the action-first column shows, each on at most this many
- *  pre-wrapped lines (the complete value stays readable in the Details page). */
+/** The identity fields the details column shows, each on at most this many
+ *  pre-wrapped lines (the complete value stays readable on the Full details
+ *  page and in the Overview's own continuation rows). */
 const WIDE_IDENTITY_MAX_LINES = 2
 
 /**
  * The wide details column is ACTION-FIRST: it shows the model identity
- * (name head, provider, ID) pre-wrapped to at most {@link WIDE_IDENTITY_MAX_LINES}
- * provable lines per field, and gives the vertical space to the Reasoning Effort
- * radio rows. The complete description and the extended facts live in the Details
- * page, so a long description can never decide whether the effort stays inline.
+ * (provider, ID) pre-wrapped to at most {@link WIDE_IDENTITY_MAX_LINES} provable
+ * lines per field, and gives the vertical space to the Reasoning Effort radio
+ * rows. The complete description and the extended facts live in the Full details
+ * page and the Overview's continuation rows, so a long description can never
+ * decide whether the effort stays inline.
  */
 export function wideIdentityLines(row: ModelPickerModelRow): readonly string[] {
   const field = (text: string): string[] => {
@@ -616,14 +618,14 @@ export function wideIdentityLines(row: ModelPickerModelRow): readonly string[] {
  * Whether the wide side preview provably presents the WHOLE details card and
  * EVERY advertised effort. When it cannot, the wide shell is KEPT (provider
  * scopes + model list + the details column) and only the current model's full
- * details/effort move into the same picker's drill-down pages.
+ * details/effort move into the Overview's own list.
  *
  * It prices every rendered field and every effort LABEL at the measured
  * widest-glyph advance (an upper bound for any glyph mix, unlike a terminal
  * column count), then compares the resulting height against the fixed floor of
  * the shortest SUPPORTED wide pane. Anything that does not fit switches the same
- * picker to the bounded column + drill-down pages, so a candidate can never be
- * selected while it sits outside the preview.
+ * picker to the bounded column + the Overview's complete list, so a candidate
+ * can never be selected while it sits outside the preview.
  */
 export function widePreviewFits(
   panel: ModelPickerPanel,
@@ -636,16 +638,26 @@ export function widePreviewFits(
 }
 
 /**
- * The details card's head: the model name folded to ONE provable line. The
- * complete name stays readable in the model list row and on the Details page.
+ * The FULL details card's head: the model name folded to ONE provable line plus
+ * the app-rendered `›` shape cue, which marks the card as the thing a click or
+ * `Enter` opens (the side column's ONLY affordance; the SDK has no focus outline
+ * for a card). The complete name stays readable in the model list row and on the
+ * Full details page.
  */
-export function modelHeadLine(row: ModelPickerModelRow): string {
-  return clampColumns(oneLine(row.modelName), WIDE_TEXT_COLUMNS)
+export function detailsCardHead(row: ModelPickerModelRow): string {
+  return `${clampColumns(oneLine(row.modelName), WIDE_TEXT_COLUMNS - 2)} ›`
 }
 
 /**
- * The single one-line summary of the action-first column: the transient notice
- * when there is one (its complete text is the Details page's `Status` fact),
+ * The BOUNDED column's card head: it is not the full details card but the
+ * single entry into the model's Overview (identity + every effort), which is
+ * what the column can no longer present in full.
+ */
+export const OVERVIEW_ENTRY_HEAD = 'Open model & effort ›'
+
+/**
+ * The single one-line summary of the details column: the transient notice when
+ * there is one (its complete text is the Full details page's `Status` fact),
  * otherwise a one-line description summary. It is ALWAYS exactly one rendered
  * line, so a long description is never a reason to drill down.
  */
@@ -660,8 +672,8 @@ export function wideSummaryLine(
 }
 
 /**
- * The single OPTIONAL line of the action-first column: shown only while the
- * budget still has room for exactly one more measured line.
+ * The single OPTIONAL line of the details column: shown only while the budget
+ * still has room for exactly one more measured line.
  */
 export function widePreviewOptionalLine(
   panel: ModelPickerPanel,

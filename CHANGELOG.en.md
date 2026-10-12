@@ -88,19 +88,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local paging, while the main session and a viewed child each show their own
   Session's figures. A scope with no eligible sample is omitted — never
   `0 tok/s`.
-- The experimental TSP renderer's `/model` tightens its information hierarchy: the
-  footer is now short and fixed — `Cancel` (`Close` while a write is admitted,
-  since closing does not cancel it) plus at most one short entry
-  besides the page's own `Back` (`Confirm` / `Retry`) — while the complete business meaning moves into an
-  `Operation` block next to the list (target model, reasoning effort, the full
-  action name and one sentence of consequence, wrapped automatically). The
-  secondary operations (`Full model details…`, `All reasoning effort levels…`,
-  `Retry failed providers (N)`) move to a `More actions` page opened from the
-  model list's `More actions…` strip chip, so they can no longer take width from
-  the one write action. The write is still the same single business operation. At
-  the 400px width floor the native client hides that explanation region
-  (`pv-hide`): that width guarantees the short footer is complete, the target is
-  identifiable and mouse and keyboard both work, and the full explanation text is
+- The experimental TSP renderer's `/model` becomes a three-page task flow: choose a
+  model, look at that model, commit explicitly. At `cols >= 120` the shell stays
+  "provider scopes + model list + details column": the Model Details card head
+  carries a `›` and the card node carries the app's own pointer target, while
+  focusing the card with `Tab` and pressing `Enter` opens the read-only Full
+  details page; the column's inline Reasoning
+  Effort radio rows change only the local draft. When the column cannot present
+  everything, that same card turns into ONE `Open model & effort ›` entry whose
+  `Enter` opens the model's own **Overview**; at compact widths the model list does
+  the same (selecting a row or pressing `Enter` opens that row's Overview) and
+  carries no write at
+  all. The Overview lists the complete identity on its native main list, the
+  `View full model details ›` entry and every effort candidate — arrow keys read
+  every continuation line, `Enter` on an identity row is inert, on an effort row it
+  drafts, and on the details entry it opens the read-only page. Only the
+  explicitly named `Switch` (live session) or `Save default` (sessionless) commits,
+  once. The footer is short and fixed — `Cancel` (`Close` while a write is
+  admitted, since closing does not cancel it), `Retry` only on the model list while
+  a provider read failed, and `Back` on the content pages; the details page never
+  writes, and a forged submit from it or from the compact model list is refused.
+  The former `More actions` page, `Action: …` strip, `Operation` block, strip zone
+  and the vague `Confirm` verb are all removed. The write is still the same single
+  business operation and the read still has the same single owner.
+  This revision was not re-verified in a real Tern pane, so two things are
+  recorded as NOT VERIFIED rather than as passing: whether a click landing on a
+  details card's nested BODY TEXT node is dispatched to the card itself (the
+  keyboard `Tab`/`Enter` path does not depend on it), and the full visibility of
+  the new button labels at the 400px width floor and under enlarged UI fonts — see
+  the not-verified list in `docs/tern-tsp/model-selection.md`. The native
+  client's truncation at the 400px width floor and under enlarged UI fonts stays
   recorded as a known client limitation.
 
 ### Fixed

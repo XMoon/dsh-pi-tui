@@ -125,6 +125,15 @@ export function rowNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PR
   return node
 }
 
+/** A Card the SDK dispatches its own `onClick` on (the wide details card). The
+ *  card is found by a fragment of its key; its `head` is a PROP, so a test can
+ *  assert the affordance text without reaching into renderer state. */
+export function cardNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): WireNode {
+  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'card' && entry.id.includes(fragment))
+  assert.ok(node, `no card matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
+  return node
+}
+
 /** Wait until the model picker is mounted and in one exact state. */
 export async function waitForPicker(
   label: string,
@@ -168,6 +177,16 @@ export function sendSelect(pane: TspPane, item: string, id = pickerNode(pane)?.i
   // See `sendAction`: the default receiver is the `/model` layer's picker.
   assert.ok(id, 'the picker must be mounted to send a selection')
   pane.event({ ev: 'select', sf: sf(pane), id, item })
+}
+
+/**
+ * Send one ROW ACTIVATION. The SDK uses this shape for a click on the row that is
+ * already selected (and for a double click), so a test can drive it separately
+ * from {@link sendSelect} and prove the two shapes resolve the same intent.
+ */
+export function sendActivate(pane: TspPane, item: string, id = pickerNode(pane)?.id): void {
+  assert.ok(id, 'the picker must be mounted to send an activation')
+  pane.event({ ev: 'activate', sf: sf(pane), id, item })
 }
 
 /** Click a node the way the pane does: an action whose `act` is the node's own

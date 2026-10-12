@@ -18,7 +18,9 @@
 
 The Owner revised the B2 Model UX in a follow-up PR. The body of this file is kept
 as the historical PR4-A record; where it disagrees with
-[../model-selection.md](../model-selection.md), the revision below wins.
+[../model-selection.md](../model-selection.md), the revision below wins. A LATER
+revision (§0.3) restructured the pages again and supersedes parts of this table
+too.
 
 | B2 statement (still in the body) | Current contract |
 |---|---|
@@ -165,6 +167,31 @@ negative shapes (a scope-shaped row `select`, an unknown or failed provider, a
 missing value, a drill-down page, the `loading` / `pending` / `error` phases),
 the page-by-page footer, the `Back` target per entry page, and the K2 write
 admission.
+
+### 0.3 Successor revision: the Models → Overview → Full details restructuring
+
+A later revision restructured the Model UX again. The body of this file and
+[§0](#0-owner-revision-superseding-four-b2-statements-below) remain the
+historical PR4-A record; where they disagree with
+[../model-selection.md](../model-selection.md), the restructuring wins.
+
+| Statement still in §§0–0.2 | Current contract |
+|---|---|
+| The short footer's write reads `Switch Model` / `Choose & Save as Default` | The write reads `Switch` / `Save default`; the same one `apply` action and the same one business operation. |
+| The `Operation` block carries the complete business meaning, and the wide strip states `Action: <name>` | Both are REMOVED. No page renders an operation block, an `Action:` strip, a `More actions…` chip or a `More actions` page. |
+| The complete effort list lives on the `Reasoning Effort` page, reached through the `More actions` page (or the compact `Enter` shortcut) | The `Reasoning Effort` page is REMOVED. Every candidate lives in the model's own **Overview** main list, entered from a compact model-list row and from the wide bounded column; the wide inline radio rows stay the selector exactly while `widePreviewFits` proves they fit. |
+| The details/effort pages are the drill-downs, opened from the More page | `ModelPickerPage` is now `models \| overview \| details`; the wide details CARD and the Overview's own `View full model details ›` row open the read-only Full details page, whose return page is `models` or `overview` respectively. |
+| The `strip` K2 zone and its chip | REMOVED. The zones are `models`, `detail-card` (the wide card), `effort` (the wide inline rows) and `primary-action`. |
+| A failed read's Primary Action is the read-only Retry under the `apply` id | `retry` is its OWN action id; a forged `apply` on the details page or the compact model list is refused on the wire. |
+
+The restructuring changes no business authority: the same one handler,
+catalog/read owner, writer, default-intent tracker, admission point and SDK tty
+owner remain, and the write payload rules are untouched. What is covered
+headlessly (the full page/zone/action matrix and the retained invariants) is
+described in [../model-selection.md](../model-selection.md); the restructured
+surface's physical-pane pointer hit area and bar containment are recorded there
+as `NOT_VERIFIED`, so none of the measured guarantees in §0.1/§0.1b is inherited
+by the new pages.
 
 ## 1. What PR4-A adds
 
