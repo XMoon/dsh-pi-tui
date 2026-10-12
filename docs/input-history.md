@@ -210,37 +210,41 @@ task (`runDetached` invokes its factory synchronously and `appendFileSync` runs
 there); the ORDERING between the submission body and the reseed is what races,
 never the append.
 
-`TuiApp` therefore keeps the open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS,
-and the hydration reseed reconciles them:
+`TuiApp` therefore keeps the open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS as
+the scope's TRUE submission sequence (newest first), and the hydration reseed
+reconciles them:
 
-- the scope is open from construction: the SESSIONLESS POOL is a real scope (a
+- the scope is OPEN FROM CONSTRUCTION: the SESSIONLESS POOL is a real scope (a
   deferred start, and the Remote startup resume whose `remote.read` await leaves
-  the terminal accepting input), and the first published owner ADOPTS its
-  entries — that submission's row is written under the new Session, so the
-  snapshot cannot carry it yet;
-- `beginInputHistoryScope(owner)` runs at the synchronous publication seam of
-  the ordinary transition, the fork adoption and the first-session creation.
-  A REPLACED owner's pending entries are dropped with it, so Session A's input
-  can never cross into Session B's recall (the resume publication needs no call:
-  the pool is already open and its reseed closes it);
-- `rememberInput()` records an accepted input while the scope is open, using the
-  SCOPE's own newest entry as its consecutive-duplicate anchor (the mirror still
-  holds the outgoing Session's rows, whose head must not swallow the new
-  Session's first identical input); an emptied scope has no predecessor, so an
-  input identical to the outgoing Session's last row is still recorded. The
-  mirror keeps its own, unchanged duplicate rule, and `shouldRememberInput`
-  refusals (attachment-bearing placeholders) never enter the scope;
+  the terminal accepting input). The first published owner ADOPTS the pool's
+  entries — a pool submission's row is written under the new Session, so the
+  snapshot cannot carry it yet — and the resume publication needs no call at all
+  (the pool is already open; that owner's reseed commits it);
+- `beginInputHistoryScope(owner)` runs at the synchronous publication seam of the
+  ordinary transition, the fork adoption and the first-session creation. A
+  REPLACED owner's entries are dropped with the scope, so Session A's input can
+  never cross into Session B's recall;
+- `rememberInput()` appends every accepted input to the scope while it is open,
+  using the scope's OWN newest accepted entry as its consecutive-duplicate
+  anchor. The mirror keeps its own, unchanged duplicate rule, so an input
+  identical to the outgoing Session's last row is still recalled after the
+  reseed;
 - `settleScopeInput(owner, text)` — called by the write owner from the SAME
-  synchronous stack as a SUCCESSFUL append — removes exactly that occurrence, so
-  the reseed never merges a row the snapshot already carries. A row the write
-  policy SKIPPED emits no settlement and stays in the recall: the CWD-level
-  dedupe governs the FILE, and the UI recall does not silently drop an input the
+  synchronous stack as a SUCCESSFUL append — MARKS exactly that occurrence with
+  the session id its row carries. The sequence is never re-ordered or shrunk, so
+  the predecessor and the interleaving of written / policy-skipped / still-pending
+  submissions stay exact. A row the write policy SKIPPED (the CWD-level
+  consecutive dedupe) emits no settlement and stays in the recall: the file
+  policy governs the FILE, and the UI recall never silently drops an input the
   user really submitted;
-- `resetInputHistory(entries, owner)` commits the owner's reseed: the remaining
-  scope entries ride in front of the snapshot in submission order (occurrence
-  counts intact — `a → b → a` survives), then the scope closes and ordinary
-  submissions use the plain in-memory path again. The sessionless boot seed
-  passes no owner: it only seeds the pool and leaves the scope open.
+- `resetInputHistory(entries, owner)` commits that owner's reseed: the recall is
+  the scope's submission order, where an occurrence written under THIS owner
+  consumes one of the snapshot's newest rows (append order = submission order)
+  and an occurrence written under another identity (a sessionless pool row) is
+  dropped without consuming one; the snapshot rows left over are the earlier
+  windows' rows and follow. Occurrence counts and non-consecutive repeats
+  survive (`a → b → a` stays intact). The sessionless boot seed passes no owner:
+  it only seeds the pool and leaves the scope open.
 
 While a reseed is still pending, the outgoing Session's rows remain recallable
 (`resetForGeneration` is an invalidation signal, not a confirmed switch); they
