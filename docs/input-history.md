@@ -229,26 +229,35 @@ reconciles them:
   anchor. The mirror keeps its own, unchanged duplicate rule, so an input
   identical to the outgoing Session's last row is still recalled after the
   reseed;
-- every accepted Enter gets an internal OCCURRENCE TOKEN that rides its submission
-  into the persistence record. The token — never the text — is what attributes a
-  settlement to exactly one occurrence, so repeated identical submissions stay
-  distinguishable (`a → b → a` keeps both `a`s);
+- EVERY accepted Enter — each editor seat, a sessionless or local command, a
+  `!`/`!!` shell line — becomes an occurrence with its own internal OCCURRENCE
+  TOKEN that rides its submission into the persistence record. The token — never
+  the text — is what attributes a settlement to exactly one occurrence, so
+  repeated identical submissions stay distinguishable (`a → b → a` keeps both
+  `a`s), and no occurrence is discarded before the final seed compresses
+  adjacent duplicates;
 - the write owner reports EVERY settled submission, in APPEND ORDER, through
   `settleScopeInput({ token?, owner, outcome, text })` — a successful append and a
   policy SKIP alike, from the SAME synchronous stack that performed it. The
   append order is the file's row order, and a skipped submission still occupies
-  its position there. Writers that never pass `rememberInput` (a raw Ctrl+S
-  steer, the editor steer action, an application extension steer, a shell line,
-  a sessionless command) simply report no token: their row is kept where the disk
-  put it and is never claimed by a scope occurrence;
-- `resetInputHistory(entries, owner)` commits that owner's reseed from the
-  settlement stream alone: the snapshot's newest written-count rows ARE those
-  appends, in reverse (a count watermark, never text matching), so each written
-  occurrence is emitted exactly once; a skipped occurrence is inserted at its own
-  settlement position; and an occurrence the owner never settled keeps its rank
-  in the scope's submission order — a settled submission always precedes an
-  unsettled one among the writers that share the submit turn, so it stays in
-  front of their rows. An occurrence written under another identity (a
+  its position there. The only session-history writers that report NO token are
+  the steers that never pass `rememberInput` (a raw Ctrl+S steer, the editor steer
+  action, an application extension steer): their row is kept where the disk put
+  it and is never claimed by a scope occurrence;
+- the settled FACT of an occurrence is kept per token, independently of the
+  session id its row carries and of the bounded settlement queue: a pool
+  occurrence written sessionless is settled but is not part of the new Session's
+  projection (it adds nothing), and a settlement the queue's cap evicted still
+  leaves its occurrence settled — the evicted ones are strictly older than every
+  retained append, so an evicted SKIP expires behind the whole window instead of
+  being promoted to the newest end;
+- `resetInputHistory(entries, owner)` commits that owner's reseed from that
+  evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
+  occurrence token → rank is built once, the snapshot's newest written-count rows
+  ARE the owner's appends in reverse (a count watermark, never text matching), and
+  a single ordered cursor interleaves the occurrences the window does not carry —
+  a never-settled one is NEWER than every settled submission of the writers that
+  share the submit turn, so it stays in front of their rows. An occurrence written under another identity (a
   sessionless pool row) is not part of this Session's projection and adds
   nothing, and a written row older than the recall window (the 100-row cap) is not
   in the projection at all. The seed then performs the adjacent-duplicate
