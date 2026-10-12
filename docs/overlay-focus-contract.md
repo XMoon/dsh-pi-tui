@@ -399,12 +399,15 @@ or over the editor seat.
   winner, so the physical mount can never keep painting a panel whose
   session/generation is gone while the fork still dispatches keys to it. The
   focus entry protects a NEWER owner that the retirement's cleanup established:
-  when a stale record was retired in that call AND a managed overlay holds the
-  keyboard afterwards, the fallback is skipped — comparing the focused
-  component's identity is NOT enough, because the cleanup may re-focus an overlay
-  that was already focused. Whenever nothing was retired the pre-existing
-  fallback semantics are unchanged (the broker's suspension/resume paths rely on
-  them).
+  it samples the broker's monotonic focus-INTENT revision around the
+  re-validation and skips its fallback only when that revision moved DURING the
+  call (a capturing overlay focused itself, or an already focused one
+  re-requested focus — comparing the focused component's identity would miss
+  both). An owner the broker is RELEASING right now moved its revision before the
+  call and therefore never vetoes the fallback — which is exactly what keeps the
+  fork's own unfocus fallback from restoring the `preFocus` of a just-retired
+  component. Whenever nothing was retired the pre-existing fallback semantics are
+  unchanged (the broker's suspension/resume paths rely on them).
 - **A failed park rolls the blocking owner back.** The park of a blocking owner
   (Question / Save Location / approval) runs the stale tenant's caller cleanup,
   which may throw. The owner then ROLLS BACK instead of staying half-committed,
@@ -421,12 +424,17 @@ or over the editor seat.
   rollback failure, both kept BY IDENTITY (a user-thrown `AggregateError` is ONE
   entry and is never flattened into its `.errors`), so the caller's promise
   rejects and no unpresented owner blocks later requests. An abandoned
-  presentation also hands back any suspension roots it acquired
-  (`releaseAbandonedSuspension`): a callback inside its window can open a newer
-  overlay that the broker appended to its set, and dropping the state without
-  resuming them would strand live roots hidden with nobody left to restore them.
-  Without all of this, a caller-side cleanup failure would leave an unpresented
-  modal blocking every later request while a retired component stayed painted.
+  presentation also (a) advances its FIFO successor through the EXISTING queue
+  authority — a Question's handover with the same suspension transfer and focus
+  order, an approval's `showNext()` — so a flow a cleanup legally queued while the
+  failing one still owned the seat is presented instead of staying pending
+  forever, and (b) when nothing is queued, hands back any suspension roots it
+  acquired (`releaseAbandonedSuspension`): a callback inside its window can open a
+  newer overlay that the broker appended to its set, and dropping the state
+  without resuming them would strand live roots hidden with nobody left to
+  restore them. Without all of this, a caller-side cleanup failure would leave an
+  unpresented modal blocking every later request while a retired component stayed
+  painted.
 - **PARK is committed before the blocker's first callback.** A Question commits
   `activeQuestions` and parks the tenant BEFORE the Save Location handoff; an
   approval commits its pending prompt as active BEFORE the park, the Save
@@ -517,7 +525,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-36: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-40b: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -532,5 +540,7 @@ handover refusing a fresh opener, a callback-created root handed back, the
 rollback's independent repaint and seat publish with identity-preserving
 aggregation, Save preemption by a Question and by an Approval, an Approval +
 Question overlap, a capturing-overlay handoff, the untouched History overlay, the
-`↓ view` affordance withheld while an ACTIVE tenant owns the seat, and input
-routing).
+`↓ view` affordance withheld while an ACTIVE tenant owns the seat, a broker
+release that must not resurrect a just-retired tenant, a failed presentation that
+advances a QUEUED successor (Question handover and approval `showNext`), and
+input routing).

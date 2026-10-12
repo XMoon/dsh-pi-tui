@@ -2126,3 +2126,115 @@ test('B-38: a root a throwing cleanup acquired while the owner was live is hande
     `the root the cleanup acquired must be handed back, never stranded hidden:\n${viewport(vt)}`,
   )
 })
+
+test('B-39: the broker releasing an old overlay never leaves a retired tenant with the keyboard', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => { closeCalls += 1 },
+  }))
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component, 'the tenant owns the keyboard first')
+
+  const root = advancedOverlayProbe('covering-root')
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.notEqual(app.focusedComponentForTest(), tenant.component, 'the newer overlay covers the tenant')
+  assert.equal(root.focusCount(), 1)
+
+  // The broker RELEASES the old overlay it holds: no newer operation exists, so
+  // the seat fallback must run — the fork's own unfocus fallback would otherwise
+  // restore its preFocus (the now retired tenant).
+  tenantIsCurrent = false
+  rootLease.blur()
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the focus entry retires the stale tenant exactly once')
+  assert.notEqual(
+    app.focusedComponentForTest(),
+    tenant.component,
+    'a RETIRED tenant must never get the keyboard back from the fork preFocus fallback',
+  )
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component, 'the live seat owner takes it')
+  assert.equal(app.focusSeatForTest(), 'editor')
+  const keysBefore = tenant.keys.length
+  vt.sendInput('x')
+  assert.equal(tenant.keys.length, keysBefore, 'a retired tenant receives no key')
+})
+
+test('B-40: a failed Question presentation advances its QUEUED successor', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let tenantIsCurrent = true
+  let queued: Promise<unknown> | undefined
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      // A legally QUEUED successor: requested while the failing flow still owns
+      // the seat, and the failing flow is NOT aborted first.
+      queued = app.askQuestions([{ id: 'q-next', question: 'queued successor?', options: [{ label: 'Yes' }] }])
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  tenantIsCurrent = false
+
+  const failed = app.askQuestions([{ id: 'q-fail', question: 'failing flow?', options: [{ label: 'Yes' }] }])
+  await assert.rejects(failed, /stale tenant close boom/)
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the stale tenant is retired exactly once')
+  assert.ok(!viewport(vt).includes('failing flow?'), 'the failed flow must never mount')
+  assert.ok(
+    viewport(vt).includes('queued successor?'),
+    `the queued successor must take the seat through the queue authority:\n${viewport(vt)}`,
+  )
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await settleOrTimeout(queued!), [{ id: 'q-next', selected: ['Yes'] }])
+})
+
+test('B-40b: a failed Approval presentation advances its QUEUED successor', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let tenantIsCurrent = true
+  let queued: Promise<unknown> | undefined
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      queued = app.showApprovalPrompt({ toolName: 'fs', reason: 'queued approval' })
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  tenantIsCurrent = false
+
+  const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'failing approval' })
+  let caught: unknown
+  try {
+    await settleOrTimeout(failed)
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught instanceof Error, `the failed approval must reject: ${String(caught)}`)
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the stale tenant is retired exactly once')
+  assert.ok(!viewport(vt).includes('bash'), 'the failed approval must never be presented')
+  assert.ok(
+    viewport(vt).includes('fs'),
+    `the queued successor must be presented through showNext:\n${viewport(vt)}`,
+  )
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(queued!), 'allowed-once', 'the queued successor must be answerable')
+})
