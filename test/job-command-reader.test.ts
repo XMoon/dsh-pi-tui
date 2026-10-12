@@ -519,11 +519,16 @@ interface TaskHarness {
 /** The REAL Task Runtime over the real `/tasks` selection path. `port`
  *  replaces only the selected-Job observation adapter (the Direct L6 case drives
  *  the PRODUCTION `DirectJobObservationPort` this way). */
-function attachTasks(app: TuiApp, jobIds: readonly string[], port?: JobObservationPort): TaskHarness {
+function attachTasks(
+  app: TuiApp,
+  jobIds: readonly string[],
+  port?: JobObservationPort,
+  rosterLabel?: string,
+): TaskHarness {
   const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => ({
     id,
     kind: 'bash',
-    label: `job ${id}`,
+    label: rosterLabel ?? `job ${id}`,
     status: 'running',
     startedAt: 1_000 + index,
   }))
@@ -577,6 +582,7 @@ function startApp(
   rows = 24,
   jobIds: readonly string[] = ['job-a'],
   port?: JobObservationPort,
+  rosterLabel?: string,
 ): AppHarness {
   const vt = new VirtualTerminal(columns, rows)
   const copied: string[] = []
@@ -601,7 +607,7 @@ function startApp(
   })
   app.start()
   startedApps.add(app)
-  const tasks = attachTasks(app, jobIds, port)
+  const tasks = attachTasks(app, jobIds, port, rosterLabel)
   // The notice text is the app's ONE transient notice authority.
   const originalNotify = app.notify.bind(app)
   app.notify = (text: string, kind?: 'info' | 'error'): void => {
@@ -1311,4 +1317,33 @@ test('C-18 the compact header keeps the GAP/ERROR fact text non-interactive', ()
   assert.match(paint(harness, 44).join('\n'), /Command reader · \[Copy All\]/,
     'the Command summary itself still opens it')
   harness.panel.dispose()
+})
+
+test('C-10 a hostile ROSTER label is sanitized in the workspace notice row (Stop settlement)', async () => {
+  // The Stop settlement interpolates the BROWSER row label (not the observed
+  // one), so BOTH are hostile here: the notice row is the other workspace chrome
+  // row that paints Host-supplied Job text.
+  const hostile = `\u001b]52;c;${Buffer.from('PWNED').toString('base64')}\u0007echo ok\u001b[2J`
+  const harness = startApp(120, 40, ['job-a'], undefined, hostile)
+  await openFirstJob(harness)
+  harness.tasks.observation.latest()!.emit({ label: hostile, text: 'tail' })
+  await harness.vt.waitForRender()
+  await flush(2)
+  const rawWritten: string[] = []
+  const originalWrite = harness.vt.write.bind(harness.vt)
+  harness.vt.write = (data: string) => {
+    rawWritten.push(data)
+    originalWrite(data)
+  }
+  // The advertised Stop on the Output page drives the settlement notice.
+  harness.vt.sendInput('s')
+  await flush(6)
+  assert.deepEqual(harness.tasks.observation.stops, ['job-a'], 'the advertised Stop really dispatched')
+  const stream = rawWritten.join('')
+  assert.ok(!stream.includes(']52;c;'), 'the roster label OSC 52 never reaches the terminal from the notice row')
+  assert.ok(!stream.includes('UFdORUQ='), 'its clipboard payload never reaches the terminal')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal')
+  const painted = view(harness.vt)
+  assert.match(painted, /stopping echo ok/, `the notice shows the SANITIZED settlement:\n${painted}`)
+  assert.ok(!/]52;c;|\[2J/.test(painted), 'no escape payload text leaks into the painted notice')
 })
