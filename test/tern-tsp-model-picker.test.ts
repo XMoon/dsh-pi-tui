@@ -1235,7 +1235,10 @@ test('native Model: a phase whose bar no key can run carries no Enter cue', asyn
   await waitUntil('bar focused on the primary', () => focused('apply'))
   pane.key('\r')
   await waitUntil('pending', () => actionOf(pane, 'apply')?.label === 'Selecting…')
-  assert.equal(actionOf(pane, 'close')?.label, 'Cancel', 'an admitted write marks no action: no key can run one')
+  // While the write is admitted, closing the panel cannot cancel the operation
+  // that is already with the Host, so that phase labels the action `Close`
+  // instead of a `Cancel` a user would read as "undo the write".
+  assert.equal(actionOf(pane, 'close')?.label, 'Close', 'an admitted write marks no action: no key can run one')
   assert.ok(!focused('apply'), 'the disabled Selecting… entry never carries the cue')
   assert.ok(!sheetText(pane).includes('←→ · Enter'), 'the hint never promises the keys the write refuses')
   pane.key('\u001b[D')

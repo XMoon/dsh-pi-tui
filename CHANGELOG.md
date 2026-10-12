@@ -18,6 +18,7 @@
   同源，重连与本地分页不再影响数值；主会话与查看中的子会话各自显示自己 Session
   的数值。某个范围没有合格样本时不再显示 `0 tok/s`，而是省略该数值。
 - TSP 实验渲染器的 `/model` 收敛信息层级：底部按钮改为短而固定——`Cancel`
+  （写入进行中时显示为 `Close`，因为关闭面板并不撤销已提交的写入）
   加至多一个短动作（`Confirm` / `Retry`；页面自身返回用的 `Back` 除外），完整业务含义由列表旁的
   「Operation」说明块给出（目标模型、Reasoning Effort、完整动作名与一句后果
   说明，自动折行）；`Full model details…`、`All reasoning effort levels…`、

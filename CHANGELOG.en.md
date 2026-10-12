@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Session's figures. A scope with no eligible sample is omitted — never
   `0 tok/s`.
 - The experimental TSP renderer's `/model` tightens its information hierarchy: the
-  footer is now short and fixed — `Cancel` plus at most one short entry
+  footer is now short and fixed — `Cancel` (`Close` while a write is admitted,
+  since closing does not cancel it) plus at most one short entry
   besides the page's own `Back` (`Confirm` / `Retry`) — while the complete business meaning moves into an
   `Operation` block next to the list (target model, reasoning effort, the full
   action name and one sentence of consequence, wrapped automatically). The
