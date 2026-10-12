@@ -5340,6 +5340,137 @@ test('observational: the CWD-level skip spans Sessions while the recall window k
     `the recall window still shows every input the user really submitted: ${JSON.stringify(hydrationCommits[0]?.recall)}`)
 })
 
+test('F2-R4 case 1: a policy-skipped occurrence keeps the rank its settlement gave it', async (t) => {
+  // A CWD anchor `a`; inside the fresh window the Enter `a` is SKIPPED by the
+  // policy and a later Ctrl+S `z` writes a row. The skip settles BEFORE the
+  // steer's append, so the steer's row is newer and the recall must be
+  // ['z','a'] — the old implementation inlined the skipped text at the front.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-f2r4-skip-rank-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'f2r4-skip-session-a', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'f2r4-skip-session-a' })
+  const file = historyFilePath(home, home)
+  // Session A owns the cwd anchor (`a`).
+  mounted.app.setDraft('a')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => loadHistoryRecords(file)
+    .some(row => row.content === 'a' && row.sessionId === 'f2r4-skip-session-a'), 10_000), true,
+  'session A owns the cwd dedupe anchor')
+  const hydrationCommits = probeRecallCommits(mounted.app)
+  const settlements: { readonly outcome: string; readonly token?: number; readonly text: string }[] = []
+  const originalSettle = mounted.app.settleScopeInput.bind(mounted.app)
+  mounted.app.settleScopeInput = ((settlement: never) => {
+    settlements.push(settlement)
+    originalSettle(settlement)
+  }) as typeof mounted.app.settleScopeInput
+  let releaseNewWhenIdle!: () => void
+  const newWhenIdle = new Promise<void>(resolve => { releaseNewWhenIdle = resolve })
+  harness.onCreateSession(() => { harness.host.whenIdleGate = newWhenIdle })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  try {
+    void (newHandler as () => Promise<unknown>)()
+    assert.equal(await drainUntil(() => harness.host.cancelCalls >= 1, 5_000), true,
+      'the fresh session is published and its hydration is still pending')
+    // The Enter `a` is a policy skip: it settles without a row.
+    mounted.app.setDraft('a')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    // The Ctrl+S steer writes a row and no scope occurrence exists for it.
+    mounted.app.setDraft('z')
+    ;(mounted.app as unknown as {
+      actionDispatcher: { dispatch(action: string, data?: string): boolean }
+    }).actionDispatcher.dispatch('app.input.steer')
+    assert.equal(await drainUntil(() => loadHistoryRecords(file)
+      .some(row => row.content === 'z' && row.sessionId === harness.createdSessionIds[0]), 10_000), true,
+    'the steer row is appended for the fresh session')
+  } finally {
+    releaseNewWhenIdle()
+  }
+  assert.equal(await drainUntil(() => hydrationCommits.length > 0, 5_000), true,
+    'the fresh session hydration committed')
+  // The settlement stream proves the skip occupies a position BEFORE the steer's
+  // append — that order is what ranks the skipped occurrence after the row.
+  assert.deepEqual(settlements.map(entry => [entry.text, entry.outcome, entry.token === undefined]),
+    [['a', 'skipped', false], ['z', 'written', true]],
+    `the policy skip settles in order, with its occurrence token: ${JSON.stringify(settlements)}`)
+  const commit = hydrationCommits[0]!
+  assert.deepEqual(commit.entries, ['z'], `the snapshot carries the steer row only: ${JSON.stringify(commit.entries)}`)
+  assert.deepEqual(commit.recall, ['z', 'a'],
+    `the skipped occurrence keeps the rank its settlement gave it: ${JSON.stringify(commit.recall)}`)
+  assert.equal(settlements[0]?.token !== undefined, true, 'the skipped occurrence is identified by token, never by text')
+})
+
+test('F2-R4 case 2: repeated identical submissions settle by token and keep every rank', async (t) => {
+  // CWD anchor `a`; in the fresh window: Enter a (skip) → Enter b (write) →
+  // Enter a (write) → Ctrl+S z (write, no occurrence). The token — not the
+  // text — attributes each settlement to its own occurrence, so the recall is
+  // ['z','a','b','a'] with both `a` occurrences preserved at their ranks.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-f2r4-repeat-rank-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'f2r4-repeat-session-a', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'f2r4-repeat-session-a' })
+  const file = historyFilePath(home, home)
+  mounted.app.setDraft('a')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => loadHistoryRecords(file)
+    .some(row => row.content === 'a' && row.sessionId === 'f2r4-repeat-session-a'), 10_000), true,
+  'session A owns the cwd dedupe anchor')
+  const hydrationCommits = probeRecallCommits(mounted.app)
+  let releaseNewWhenIdle!: () => void
+  const newWhenIdle = new Promise<void>(resolve => { releaseNewWhenIdle = resolve })
+  harness.onCreateSession(() => { harness.host.whenIdleGate = newWhenIdle })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  try {
+    void (newHandler as () => Promise<unknown>)()
+    assert.equal(await drainUntil(() => harness.host.cancelCalls >= 1, 5_000), true,
+      'the fresh session is published and its hydration is still pending')
+    const freshSessionId = harness.createdSessionIds[0]
+    assert.ok(freshSessionId !== undefined, 'the fresh session id is known')
+    const submit = async (text: string): Promise<void> => {
+      mounted.app.setDraft(text)
+      ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+      await drainUntil(() => loadHistoryRecords(file).some(row => row.content === text && row.sessionId === freshSessionId)
+        || text === 'a', 10_000)
+    }
+    await submit('a')        // skipped by the cwd anchor
+    await submit('b')        // written
+    await submit('a')        // written: the anchor moved on
+    mounted.app.setDraft('z')
+    ;(mounted.app as unknown as {
+      actionDispatcher: { dispatch(action: string, data?: string): boolean }
+    }).actionDispatcher.dispatch('app.input.steer')
+    assert.equal(await drainUntil(() => loadHistoryRecords(file)
+      .some(row => row.content === 'z' && row.sessionId === freshSessionId), 10_000), true,
+    'the steer row is appended for the fresh session')
+  } finally {
+    releaseNewWhenIdle()
+  }
+  assert.equal(await drainUntil(() => hydrationCommits.length > 0, 5_000), true,
+    'the fresh session hydration committed')
+  const commit = hydrationCommits[0]!
+  assert.deepEqual(commit.entries, ['z', 'a', 'b'],
+    `the snapshot carries the three appended rows, newest first: ${JSON.stringify(commit.entries)}`)
+  assert.deepEqual(commit.recall, ['z', 'a', 'b', 'a'],
+    `both identical occurrences survive with their own rank: ${JSON.stringify(commit.recall)}`)
+})
+
 test('after /new fully settles, an ordinary submission is recalled by ↑ exactly once (STABLE control)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-new-stable-history-')

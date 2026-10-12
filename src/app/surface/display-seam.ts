@@ -162,12 +162,18 @@ export interface SurfaceDisplaySeam {
    * (scope-bound temporary submissions) instead of dropping them. A read-only
    * renderer records nothing. */
   beginInputHistoryScope(owner: string | undefined): void
-  /** Settle ONE scope-bound temporary submission with written-row evidence:
-   * called from the SAME synchronous stack as the successful append of the
-   * row that carries the submission (and never for a row the write policy
-   * skipped), so the hydration reconcile stops merging that occurrence.
-   * @param owner - the session id the appended row carries. */
-  settleScopeInput(owner: string | undefined, text: string): void
+  /** Record ONE settlement of the open editor-recall scope, IN APPEND ORDER:
+   * called from the SAME synchronous stack as the append (or from the policy
+   * skip that settled without a row). The occurrence token attributes the
+   * settlement to exactly one accepted submission; the order is the file's row
+   * order, which is what the following {@link resetInputHistory} maps.
+   * @param settlement - the settled occurrence's facts. */
+  settleScopeInput(settlement: {
+    readonly token?: number
+    readonly owner: string | undefined
+    readonly outcome: 'written' | 'skipped'
+    readonly text: string
+  }): void
   /** Clear the search result readout (chrome-only; harmless on TSP). */
   setSearchResult(index: number, count: number): void
 

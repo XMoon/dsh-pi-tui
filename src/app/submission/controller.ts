@@ -285,7 +285,7 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
 /** The submission controller as the rest of the application consumes it. */
 export interface SubmissionController {
   /** Submit one user input end to end. */
-  submit(text: string, request?: ComposerSubmitRequest): void
+  submit(text: string, request?: ComposerSubmitRequest, scopeToken?: number): void
   /** Steer one draft into the running turn.
    *  `consumeDraft: true` makes THIS owner clear the editor after snapshotting
    *  the persist facts; the caller leaves it unset when it already consumed the
@@ -1472,7 +1472,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * @param request - the request the submission was raised by.
    */
   
-  const dispatchUserInput = (text: string, request: ComposerSubmitRequest = 'enter'): void => {
+  const dispatchUserInput = (
+    text: string,
+    request: ComposerSubmitRequest = 'enter',
+    scopeToken?: number,
+  ): void => {
     // P0 (empty-submission semantics): an EMPTY serialized wire form is
     // a silent no-op — no history write, no session creation, no
     // followup/steer, no attachment admission, no queue mutation. Judged on
@@ -1535,7 +1539,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
      * input-history owner's write policy.
      */
     const persistHistory = (sessionId: string | undefined): void => {
-      deps.history.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
+      deps.history.persist({
+        text,
+        sessionId,
+        hasAttachments: historyHasAttachments,
+        timestamp: historyTs,
+        ...(scopeToken === undefined ? {} : { scopeToken }),
+      })
     }
     // `!` runs the command on the Host and submits the completed
     // command+output to the session (kimi parity); `!!` runs on the Host
@@ -1961,7 +1971,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     }
 
 
-  const submit = (text: string, request: ComposerSubmitRequest = 'enter'): void => dispatchUserInput(text, request)
+  const submit = (text: string, request: ComposerSubmitRequest = 'enter', scopeToken?: number): void =>
+    dispatchUserInput(text, request, scopeToken)
   /**
    * The surface steer entry (Ctrl+S / steer-draft): snapshot the persist facts
    * BEFORE the draft is consumed, then steer the draft only (explicitly queued
