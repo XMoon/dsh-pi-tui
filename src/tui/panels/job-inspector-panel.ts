@@ -931,7 +931,6 @@ export class JobInspectorPanel extends VStack {
     this.headerTop = this.intents.paintedBox(this.header)?.y ?? 0
     this.paintedTargets = this.header.hits()
     if (this.readState.view === 'command') {
-      if (this.commandReader.onFramePainted(this.chrome.width)) this.intents.requestRender()
       if (this.commandReader.search.mode !== 'inactive' && this.chrome.plan.searchRows === 0) {
         this.exitSearch()
         return
