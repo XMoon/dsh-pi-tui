@@ -108,6 +108,16 @@ export class ApprovalRuntime {
     return this.active !== undefined
   }
 
+  /** Whether an approval owns OR is WAITING FOR the input stage: an active
+   * prompt or a queued one. The optional seat tenant must neither open nor be
+   * restored while ANY approval is pending — between a settle clearing `active`
+   * and the next `showNext()`, a synchronous callback (for example a restored
+   * overlay's `onFocus`) must still observe the handover as pending (Phase 3A /
+   * PR-B). */
+  hasPending(): boolean {
+    return this.active !== undefined || this.queue.length > 0
+  }
+
   /** Whether the approval that owns the input stage is one the main Agent is
    * blocked on: only then may it be projected as the pane's `waiting_input`. */
   activeAgentInputWait(): boolean {
@@ -226,12 +236,21 @@ export class ApprovalRuntime {
       this.host.beforeApprovalMount()
     } catch (error) {
       // Phase 3A / PR-B: the park's stale-tenant retirement ran a throwing
-      // caller cleanup. The approval must never stay half-committed (an
-      // unpresented active prompt would block every later approval AND every
-      // optional seat open): clear the active owner, complete the host's
-      // rollback obligations, and propagate the ORIGINAL failure (aggregated
-      // with a rollback failure) so the caller's promise rejects.
-      this.active = undefined
+      // caller cleanup. The approval must never stay half-committed, but the
+      // rollback is IDENTITY FENCED and releases THIS prompt's own bindings as
+      // independent obligations: this prompt is latched settled and its abort
+      // listener is removed (it leaves every owner slot here, so nothing else
+      // would ever unbind the caller's signal), the active slot is cleared only
+      // while THIS prompt still owns it (a cleanup that synchronously settled
+      // this prompt and opened a NEWER approval keeps its ownership, or 'y'/'n'
+      // could no longer settle the newer prompt), the host completes the
+      // abandoned presentation's seat/publish/render obligations, and the
+      // ORIGINAL failure propagates (aggregated with a rollback failure).
+      pending.settled = true
+      if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
+        pending.request.signal.removeEventListener('abort', pending.onAbort)
+      }
+      if (this.active === pending) this.active = undefined
       try {
         this.host.rollbackApprovalPark()
       } catch (rollbackFailure) {

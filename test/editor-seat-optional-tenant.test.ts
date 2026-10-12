@@ -26,6 +26,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { getEventListeners } from 'node:events'
 import { afterEach, test } from 'node:test'
 import { initialStatusSnapshot } from '../src/domain/status/snapshot.ts'
 import type { StatusStore } from '../src/domain/status/store.ts'
@@ -151,6 +152,7 @@ interface AppHarness {
   steers: string[]
   focusReports: boolean[]
   exits(): number
+  openTasks(): number
 }
 
 function startApp(registry?: EditorRegistry): AppHarness {
@@ -159,12 +161,18 @@ function startApp(registry?: EditorRegistry): AppHarness {
   const steers: string[] = []
   const focusReports: boolean[] = []
   let exitCount = 0
-  const harness = { vt, submissions, steers, focusReports, exits: () => exitCount } as AppHarness
+  let openTaskCalls = 0
+  const harness = {
+    vt, submissions, steers, focusReports,
+    exits: () => exitCount,
+    openTasks: () => openTaskCalls,
+  } as AppHarness
   const app = new TuiApp(vt, {
     onSubmit: (text) => { submissions.push(text) },
     onExit: () => { exitCount += 1 },
     onSteer: (text) => { steers.push(text) },
     onTerminalFocus: (focused) => { focusReports.push(focused) },
+    onOpenTasks: () => { openTaskCalls += 1 },
   }, registry === undefined ? {} : { editorRegistry: registry })
   app.start()
   harness.app = app
@@ -1145,7 +1153,7 @@ test('sizes: a resize cycle keeps the tenant projected and focused at every targ
 
 /** A minimal ADVANCED interactive overlay probe: the real public host mount
  * (`showAdvancedInteractiveOverlay`) with focus/blur counters as the sink. */
-function advancedOverlayProbe(text: string): {
+function advancedOverlayProbe(text: string, onFocused?: () => void): {
   component: AdvancedInteractiveComponent
   focusCount(): number
   blurCount(): number
@@ -1155,7 +1163,10 @@ function advancedOverlayProbe(text: string): {
     component: {
       render: () => ({ kind: 'text', spans: [{ text }] }),
       handleInput: () => false,
-      onFocus: () => { state.focus += 1 },
+      onFocus: () => {
+        state.focus += 1
+        onFocused?.()
+      },
       onBlur: () => { state.blur += 1 },
       dispose: () => {},
     },
@@ -1545,7 +1556,7 @@ test('B-27c: an overlay opened by the completion abort during the handoff is res
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('handoff-root'), `the handoff root must be resumed:\n${viewport(vt)}`)
   assert.ok(overlay.focusCount() >= 1, 'the resumed root takes its own focus intent')
-  void save
+  assert.deepEqual(await save, { kind: 'cancelled' }, 'the superseded prompt still settles cancelled')
 })
 
 test('B-30: a newer overlay opened by the stale-tenant cleanup during an Approval settle keeps the keyboard', async () => {
@@ -1614,8 +1625,17 @@ test('B-31: a throwing stale-tenant cleanup while parking rolls the Question own
   const tenant = throwingParkTenant(app)
   await vt.waitForRender()
 
-  const question = app.askQuestions([{ id: 'q1', question: 'never presented?', options: [{ label: 'Yes' }] }])
+  const controller = new AbortController()
+  const question = app.askQuestions(
+    [{ id: 'q1', question: 'never presented?', options: [{ label: 'Yes' }] }],
+    controller.signal,
+  )
   await assert.rejects(question, /stale tenant close boom/)
+  assert.equal(
+    getEventListeners(controller.signal, 'abort').length,
+    0,
+    'the failed state must release its abort binding (nothing else can unbind it)',
+  )
   await vt.waitForRender()
   assert.equal(tenant.closeCalls(), 1, 'the stale tenant is retired exactly once')
   assert.ok(!viewport(vt).includes('never presented?'), 'the failed presentation must not mount a frame')
@@ -1649,8 +1669,18 @@ test('B-31b: a throwing stale-tenant cleanup while parking rolls the Save Locati
   const tenant = throwingParkTenant(app)
   await vt.waitForRender()
 
-  const save = askSave(app)
+  const saveController = new AbortController()
+  const save = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    saveDeps(),
+    saveController.signal,
+  )
   await assert.rejects(save, /stale tenant close boom/)
+  assert.equal(
+    getEventListeners(saveController.signal, 'abort').length,
+    0,
+    'the failed prompt must release its abort binding',
+  )
   await vt.waitForRender()
   assert.equal(tenant.closeCalls(), 1)
   assert.ok(!viewport(vt).includes('Save session archive'), 'the failed prompt must not be presented')
@@ -1668,8 +1698,16 @@ test('B-31c: a throwing stale-tenant cleanup while parking rolls the Approval ow
   const tenant = throwingParkTenant(app)
   await vt.waitForRender()
 
-  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'never presented' })
+  const approvalController = new AbortController()
+  const approval = app.showApprovalPrompt(
+    { toolName: 'bash', reason: 'never presented', signal: approvalController.signal },
+  )
   await assert.rejects(approval, /stale tenant close boom/)
+  assert.equal(
+    getEventListeners(approvalController.signal, 'abort').length,
+    0,
+    'the failed approval must release its abort binding',
+  )
   await vt.waitForRender()
   assert.equal(tenant.closeCalls(), 1)
   assert.ok(!viewport(vt).includes('bash'), 'the failed approval must not be presented')
@@ -1683,4 +1721,408 @@ test('B-31c: a throwing stale-tenant cleanup while parking rolls the Approval ow
   assert.equal(await healthy, 'allowed-once')
   const next = makeTenant()
   assert.notEqual(openTenant(app, next), undefined, 'no half-committed approval may remain')
+})
+
+// ---------------------------------------------------------------------------
+// Round-2 review fixes: preempting cleanup, failed-state release, Save live
+// fence, Approval FIFO gap, abandoned suspension, rollback repaint + the
+// PR-E affordance integration
+// ---------------------------------------------------------------------------
+
+/** Open one optional tenant whose ONE cleanup synchronously runs `onClose` and
+ * THEN throws — the shape of a caller cleanup that preempts the presentation it
+ * is retiring (abort the old modal, open a NEWER same-type modal, throw). */
+function preemptingCloseTenant(app: TuiApp, onClose: () => void): { closeCalls(): number } {
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      onClose()
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  tenantIsCurrent = false
+  return { closeCalls: () => closeCalls }
+}
+
+/** Await a promise a regression could leave forever pending (the failure mode
+ * under test is exactly "the newer owner no longer settles"). */
+async function settleOrTimeout<T>(promise: Promise<T>, ms = 300): Promise<T | 'TIMEOUT'> {
+  return Promise.race([
+    promise,
+    new Promise<'TIMEOUT'>(resolve => { setTimeout(() => resolve('TIMEOUT'), ms) }),
+  ])
+}
+
+test('B-31d: a NEWER Question opened by the throwing cleanup keeps its owner', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const presentedController = new AbortController()
+  let newer: Promise<unknown> | undefined
+  const tenant = preemptingCloseTenant(app, () => {
+    presentedController.abort()
+    newer = app.askQuestions([{ id: 'q-new', question: 'newer question?', options: [{ label: 'Yes' }] }])
+  })
+  await vt.waitForRender()
+
+  const preempted = app.askQuestions(
+    [{ id: 'q-old', question: 'preempted question?', options: [{ label: 'Yes' }] }],
+    presentedController.signal,
+  )
+  await assert.rejects(preempted)
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1, 'the stale tenant is retired exactly once')
+  assert.ok(!viewport(vt).includes('preempted question?'), 'the preempted flow must never mount')
+  assert.ok(viewport(vt).includes('newer question?'), `the newer flow must keep its owner:\n${viewport(vt)}`)
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await settleOrTimeout(newer!), [{ id: 'q-new', selected: ['Yes'] }])
+})
+
+test('B-31e: a NEWER Save Location opened by the throwing cleanup keeps its owner', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const presentedController = new AbortController()
+  let newer: Promise<unknown> | undefined
+  const tenant = preemptingCloseTenant(app, () => {
+    presentedController.abort()
+    newer = app.askSaveLocation(
+      { title: 'Save session archive', filename: 'dsh-session-new.zip', initialDirectory: './' },
+      saveDeps(),
+    )
+  })
+  await vt.waitForRender()
+
+  const preempted = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-old.zip', initialDirectory: './' },
+    saveDeps(),
+    presentedController.signal,
+  )
+  assert.deepEqual(await preempted, { kind: 'cancelled' }, 'the aborted prompt settles cancelled')
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1)
+  assert.ok(!viewport(vt).includes('dsh-session-old.zip'), 'the preempted prompt must never mount')
+  assert.ok(viewport(vt).includes('dsh-session-new.zip'), `the newer prompt must keep its owner:\n${viewport(vt)}`)
+  vt.sendInput('\x1b')
+  assert.deepEqual(await newer, { kind: 'cancelled' }, 'the newer prompt must stay answerable')
+})
+
+test('B-31f: a NEWER Approval opened by the throwing cleanup keeps its owner', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const presentedController = new AbortController()
+  let newer: Promise<unknown> | undefined
+  const tenant = preemptingCloseTenant(app, () => {
+    presentedController.abort()
+    newer = app.showApprovalPrompt({ toolName: 'fs', reason: 'newer approval' })
+  })
+  await vt.waitForRender()
+
+  const preempted = app.showApprovalPrompt({
+    toolName: 'bash',
+    reason: 'preempted approval',
+    signal: presentedController.signal,
+  })
+  assert.equal(await preempted, 'cancelled', 'the aborted approval settles cancelled')
+  await vt.waitForRender()
+  assert.equal(tenant.closeCalls(), 1)
+  assert.ok(!viewport(vt).includes('bash'), 'the preempted approval must never be presented')
+  assert.ok(viewport(vt).includes('fs'), `the newer approval must keep its owner:\n${viewport(vt)}`)
+  vt.sendInput('y')
+  assert.equal(
+    await settleOrTimeout(newer!),
+    'allowed-once',
+    'the newer approval must still be answerable (its active owner may not be cleared)',
+  )
+})
+
+test('B-32: a stale close that only cancels the new Save keeps the dead frame out and the live root visible', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const root = advancedOverlayProbe('save-live-root')
+  app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('save-live-root'))
+
+  const controller = new AbortController()
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      // Aborts the prompt that is being presented, WITHOUT throwing.
+      controller.abort()
+    },
+  }))
+  tenantIsCurrent = false
+
+  const save = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    saveDeps(),
+    controller.signal,
+  )
+  assert.deepEqual(await save, { kind: 'cancelled' })
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the stale tenant is retired exactly once')
+  assert.ok(
+    !viewport(vt).includes('Save session archive'),
+    `a cancelled presentation must not mount a dead frame:\n${viewport(vt)}`,
+  )
+  assert.ok(
+    viewport(vt).includes('save-live-root'),
+    `the live overlay root must not be hidden by the dead presentation:\n${viewport(vt)}`,
+  )
+  assert.notEqual(app.focusedComponentForTest(), null)
+})
+
+test('B-33: the Approval A→B handover window refuses a fresh optional opener', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let arm = false
+  let attempts = 0
+  let factoryCalls = 0
+  let tenantLease: { close(): void } | undefined
+  const late = makeTenant('LATE')
+  const root = advancedOverlayProbe('fifo-root', () => {
+    if (!arm) return
+    arm = false
+    attempts += 1
+    tenantLease = openOptional(app, () => {
+      factoryCalls += 1
+      return late.spec()
+    })
+  })
+  app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'A' })
+  const second = app.showApprovalPrompt({ toolName: 'fs', reason: 'B' })
+  await vt.waitForRender()
+  arm = true
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(first), 'allowed-once')
+  await vt.waitForRender()
+  assert.equal(attempts, 1, 'the restored root focus callback must have attempted the open')
+  assert.equal(factoryCalls, 0, 'the REFUSE gate must not run the factory during the A→B window')
+  assert.equal(tenantLease, undefined, 'no tenant may be installed between two queued approvals')
+  assert.notEqual(app.focusSeatForTest(), 'editor-panel', 'no intermediate tenant seat')
+  assert.ok(viewport(vt).includes('fs'), `the second approval must own the screen:\n${viewport(vt)}`)
+
+  vt.sendInput('n')
+  assert.equal(await settleOrTimeout(second), 'rejected')
+  await vt.waitForRender()
+  // After the WHOLE queue drained the opener succeeds (the factory runs).
+  const lateLease = openOptional(app, () => {
+    factoryCalls += 1
+    return late.spec()
+  })
+  assert.notEqual(lateLease, undefined, 'the drained queue releases the tenant slot')
+  assert.equal(factoryCalls, 1)
+  assert.equal(late.closeCalls(), 0)
+  lateLease?.close()
+})
+
+test('B-34: a root opened by a cleanup during an abandoned presentation is handed back', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const late = advancedOverlayProbe('late-root')
+  const controller = new AbortController()
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  let abortOnClose: (() => void) | undefined
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      abortOnClose?.()
+    },
+  }))
+  await vt.waitForRender()
+  tenantIsCurrent = false
+  abortOnClose = () => {
+    controller.abort()
+    // The cleanup opens a NEWER overlay while the (now dead) question still owns
+    // the seat: the broker appends it to that dead state's suspension set.
+    app.showAdvancedInteractiveOverlay(late.component)
+  }
+
+  const dead = app.askQuestions(
+    [{ id: 'q1', question: 'abandoned?', options: [{ label: 'Yes' }] }],
+    controller.signal,
+  )
+  await assert.rejects(dead)
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1)
+  assert.ok(!viewport(vt).includes('abandoned?'), 'the dead presentation must not mount a frame')
+  assert.ok(
+    viewport(vt).includes('late-root'),
+    `the callback-created root must be handed back, never stranded hidden:\n${viewport(vt)}`,
+  )
+  assert.ok(late.focusCount() >= 1, 'the handed-back root takes its focus intent')
+})
+
+test('B-35: the approval rollback still attempts the repaint and re-publishes the live seat', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'editor-panel', 'the tenant owns the derived seat first')
+  tenant.setCurrent(false)
+
+  const mountProto = TuiApp.prototype as unknown as { mountSeatChild(): void }
+  const renderProto = TuiApp.prototype as unknown as { requestRender(force?: boolean): void }
+  const originalMount = mountProto.mountSeatChild
+  const originalRender = renderProto.requestRender
+  let renderCalls = 0
+  // A throwing mount/focus step must not truncate the rollback's independent
+  // obligations (seat publish + repaint).
+  mountProto.mountSeatChild = () => { throw new Error('rollback mount boom') }
+  renderProto.requestRender = function (this: unknown, force?: boolean): void {
+    renderCalls += 1
+    originalRender.call(this, force)
+  }
+  let caught: unknown
+  try {
+    const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'rollback truncation' })
+    try {
+      caught = await settleOrTimeout(approval)
+    } catch (error) {
+      caught = error
+    }
+  } finally {
+    mountProto.mountSeatChild = originalMount
+    renderProto.requestRender = originalRender
+  }
+  assert.ok(
+    caught instanceof AggregateError && caught.errors.length === 2,
+    `the primary and the rollback failure must both surface by identity: ${String(caught)}`,
+  )
+  await vt.waitForRender()
+  assert.ok(renderCalls >= 1, 'the rollback must still attempt the independent repaint')
+  assert.notEqual(
+    app.focusSeatForTest(),
+    'editor-panel',
+    'the derived seat must be re-published, never left on the stale tenant value',
+  )
+  // (The patched mount throws before the park's re-validation could retire the
+  // tenant, so the caller cleanup is not part of THIS scenario: the assertion
+  // above is the seat-publish obligation and `renderCalls` the repaint one.)
+  void tenant
+})
+
+test('B-37: the ↓ view affordance is withheld while an ACTIVE tenant owns the seat', async () => {
+  const { vt, app, openTasks } = startApp()
+  app.setTasks([{ id: 'job-1', label: 'pnpm build', status: 'running', kind: 'job' }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('↓ view'), `the idle footer must advertise the affordance:\n${viewport(vt)}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(openTasks(), 1, 'the empty-editor ↓ must reach the task-browser sink')
+
+  const tenant = makeTenant()
+  const lease = openTenant(app, tenant)
+  await vt.waitForRender()
+  assert.ok(
+    !viewport(vt).includes('↓ view'),
+    `an ACTIVE optional tenant captures the seat and must withhold the ↓ hint:\n${viewport(vt)}`,
+  )
+  assert.ok(viewport(vt).includes('task running'), 'the task badge itself must survive')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(openTasks(), 1, 'the tenant consumes ↓ — no task-browser dispatch')
+  assert.ok(tenant.keys.includes('\x1b[B'), 'the ↓ key belongs to the tenant')
+
+  lease?.close()
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('↓ view'), 'closing the tenant restores the affordance')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(openTasks(), 2, 'the restored ↓ reaches the sink again')
+})
+
+test('B-36: a user-thrown AggregateError from a caller cleanup stays ONE rollback entry', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const primary = new Error('primary close boom')
+  const secondary = new AggregateError([new Error('one'), new Error('two')], 'secondary')
+  let tenantIsCurrent = true
+  // The tenant's focus-loss setter throws a user AggregateError.
+  const tenant = makeTenant('', () => { throw secondary })
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => { throw primary },
+  }))
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component, 'the tenant holds the keyboard first')
+  tenantIsCurrent = false
+
+  const controller = new AbortController()
+  const save = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    saveDeps(),
+    controller.signal,
+  )
+  let caught: unknown
+  try {
+    await settleOrTimeout(save)
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught instanceof AggregateError, `expected an AggregateError, got ${String(caught)}`)
+  assert.equal(
+    (caught as AggregateError).errors.length,
+    2,
+    'the rollback failure must stay ONE thrown value (never flattened into its .errors)',
+  )
+  assert.equal(
+    (caught as AggregateError).errors[0],
+    primary,
+    'the primary failure keeps its identity',
+  )
+  assert.equal(
+    (caught as AggregateError).errors[1],
+    secondary,
+    'the user-thrown aggregate keeps its identity as the second entry',
+  )
+})
+
+test('B-38: a root a throwing cleanup acquired while the owner was live is handed back', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const late = advancedOverlayProbe('rolling-root')
+  let tenantIsCurrent = true
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      // While the question STILL owns the seat: the broker appends this root to
+      // that state's suspension set (hidden, topology intact).
+      app.showAdvancedInteractiveOverlay(late.component)
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component)
+  tenantIsCurrent = false
+
+  const question = app.askQuestions([{ id: 'q-roll', question: 'rolling back?', options: [{ label: 'Yes' }] }])
+  await assert.rejects(question)
+  await vt.waitForRender()
+  assert.ok(!viewport(vt).includes('rolling back?'), 'the failed presentation must mount no frame')
+  assert.ok(
+    viewport(vt).includes('rolling-root'),
+    `the root the cleanup acquired must be handed back, never stranded hidden:\n${viewport(vt)}`,
+  )
 })
