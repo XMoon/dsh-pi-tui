@@ -2704,6 +2704,19 @@ export class TuiApp {
    * `isJobOpen` boolean can disagree with the physical owner.
    */
   private jobWorkspace: JobWorkspaceRecord | undefined
+  /**
+   * Nesting depth of the windows that refuse a NEW Job workspace screen lease
+   * even though the surface is not disposed. Two kinds of window push it: a
+   * stop/suspend transition (the surface is between that stop and its paired
+   * start, and a lease opened by a synchronous callback would outlive the stop),
+   * and a blocking owner's (Question/Approval/Save) own commit window (it
+   * abandons a workspace FIRST, and a lease opened by a callback during that
+   * abandonment would coexist with the blocking owner — the workspace itself
+   * refuses to lease while a blocking modal is active). A DEPTH, not a latch, so
+   * an inner window (a stop raised inside an `$EDITOR` suspend) cannot release an
+   * outer one. It never claims the physical owner; it only withholds NEW leases.
+   */
+  private jobLeaseFreezeDepth = 0
   /** The fullscreen mouse-wheel step (transcript lines per wheel event).
    * A Client runtime preference: the fork's `wheelScrollLines` is a
    * constructor-time alt-screen option, so this value feeds the NEXT
@@ -4055,7 +4068,10 @@ export class TuiApp {
     // A Job workspace leases its OWN terminal screen: $EDITOR must never take
     // the PTY over while the Job screen is still the physical owner. Leave the
     // workspace first (the SAME close path Esc uses, restoring the surface the
-    // user was in), then suspend that surface.
+    // user was in), then suspend that surface. The lease admission is frozen for
+    // the WHOLE suspend window, so a callback it runs cannot mint a screen that
+    // would outlive the suspend.
+    this.jobLeaseFreezeDepth += 1
     this.jobWorkspace?.close()
     this.keybindings.cancelLeader()
     this.clearExitConfirmation()
@@ -4087,6 +4103,8 @@ export class TuiApp {
    * break a live question's modal focus and IME anchor.
    */
   private resumeFromExternalEditor(): void {
+    // The paired suspend's lease freeze ends here: the surface presents again.
+    this.jobLeaseFreezeDepth -= 1
     if (this.fullscreen !== undefined) {
       this.fullscreen.start()
       this.fullscreen.requestRender(true)
@@ -4106,6 +4124,12 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * tui/process-slot.ts). */
   stop(): void {
+    // The stop is a terminal-ownership transition: NEW workspace leases are
+    // refused for its whole duration, so a synchronous callback run by the
+    // workspace close below cannot mint a screen that would outlive the stop. The
+    // latch is cleared by the LAST step of the batch, so a throwing sibling can
+    // never leave the surface permanently unable to lease.
+    this.jobLeaseFreezeDepth += 1
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
     this.leaveTerminalPresentation()
@@ -4160,6 +4184,9 @@ export class TuiApp {
       // live record can never outlive it). Independent cleanup above is never
       // truncated; a no-op when nothing re-acquired.
       () => this.leaveTerminalPresentation(),
+      // The transition is over (the batch attempted every sibling even when one
+      // threw): a later start()/round-trip may lease a workspace again.
+      () => { this.jobLeaseFreezeDepth -= 1 },
     ])
   }
 
@@ -5033,6 +5060,43 @@ export class TuiApp {
           return this.dispatchResolvedAction(
             'app.exit.request', data, resolution.key, undefined, resolution.source,
           ) ? { consume: true } : undefined
+        }
+      }
+      // The effective exit may also be LEADER-bound (the user bound
+      // `app.exit.request` to a `<leader>x` sequence). The prefix arms the ONE
+      // pending sequence so it can complete; only an exit-bound completing key is
+      // fed through to the machine (which runs the same host exit admission),
+      // every OTHER leader action is cancelled WITHOUT being dispatched, and
+      // physical Escape keeps the ladder's documented meaning: with a sequence
+      // pending it cancels that sequence (consumed) and only a non-pending Escape
+      // closes the workspace. The confirmation discipline matches the ladder: a
+      // DIFFERENT action's sequence disarms a pending exit confirmation, while the
+      // SAME leader sequence leaves it armed for its confirming completion.
+      const leader = this.keybindings.leaderMachine()
+      if (leader !== undefined) {
+        const physicalEscape = matchesKey(data, 'escape')
+        const armPrefix = !physicalEscape && leader.leaderKey !== undefined && matchesKey(data, leader.leaderKey)
+        const exitCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
+          binding => binding.action === 'app.exit.request' && matchesKey(data, binding.key),
+        )
+        if (exitCompletion) {
+          const outcome = leader.feed(data)
+          return outcome.kind === 'activated' && !outcome.consumed ? undefined : { consume: true }
+        }
+        if (leader.pending || armPrefix) {
+          if (leader.pending && !physicalEscape
+            && leader.leaderBindings.some(binding => matchesKey(data, binding.key))) {
+            // A NON-exit leader completion: the workspace blocks it — the sequence
+            // is cancelled without dispatching anything.
+            leader.cancel()
+          } else {
+            // The prefix arms; Escape cancels (consumed); typing cancels and passes.
+            leader.feed(data)
+          }
+          const sameLeader = this.exitConfirmTrigger?.leaderKey !== undefined
+            && this.exitConfirmTrigger.leaderKey === leader.leaderKey
+          if (!sameLeader) this.clearExitConfirmation()
+          return { consume: true }
         }
       }
       this.clearExitConfirmation()
@@ -19658,6 +19722,12 @@ export class TuiApp {
    */
   openJobInspector(options: JobInspectorOpenOptions): JobInspectorHandle {
     if (this.disposed) throw new Error('cannot lease a Job workspace screen on a disposed surface')
+    // A lifecycle transition (stop/suspend) or a blocking owner's commit window
+    // owns the surface right now: a lease opened here would outlive the stop or
+    // coexist with the blocking owner, so it is refused.
+    if (this.jobLeaseFreezeDepth > 0) {
+      throw new Error('cannot lease a Job workspace screen while the surface is completing a transition')
+    }
     if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
     // A blocking owner outranks the Job view: refuse the lease and leave the
     // current keyboard owner untouched (the opener releases its observation).
@@ -19800,6 +19870,30 @@ export class TuiApp {
     this.enterTerminalPresentation()
     this.refreshSchemeRegistrations()
     this.requestRender(true)
+  }
+
+  /**
+   * Abandon a leased Job workspace because a BLOCKING owner (Question/Approval/
+   * Save Location) is arriving. NEW workspace leases are refused across the whole
+   * abandonment, so a synchronous callback it runs can never lease a workspace
+   * that would then coexist with the blocking owner (the workspace itself refuses
+   * to lease while a blocking modal is active). The abandonment failure is
+   * REPORTED through the failure channel instead of propagating: the blocking
+   * owner's own commit is an independent obligation and must never be stranded by
+   * a throwing close (a failing screen stop, panel release or owner
+   * notification). A no-op when nothing is leased.
+   */
+  private abandonWorkspaceForBlockingOwner(): void {
+    if (this.jobWorkspace === undefined) return
+    const freezeDepthBefore = this.jobLeaseFreezeDepth
+    this.jobLeaseFreezeDepth = freezeDepthBefore + 1
+    try {
+      this.jobWorkspace.close()
+    } catch (error) {
+      this.routeTerminalSettlementFailure('job workspace abandonment', error)
+    } finally {
+      this.jobLeaseFreezeDepth = freezeDepthBefore
+    }
   }
 
   /**
@@ -20118,9 +20212,11 @@ export class TuiApp {
     // Phase 3B / B1-A modal precedence: the blocking owner ARRIVES — leave the
     // Job workspace BEFORE the approval claims the seat, so the restored surface
     // is the one the approval mounts on and no second keyboard owner can exist.
-    // A synchronous closer that starts a newer blocking owner is rejected by the
-    // existing owner identity fences below, not by this line.
-    this.jobWorkspace?.close()
+    // The abandonment refuses NEW workspace leases across its callbacks, so a
+    // callback can never lease a screen that would coexist with this approval; a
+    // newer blocking owner started by a callback is rejected by the approval
+    // owner's own stage fence, not by this line.
+    this.abandonWorkspaceForBlockingOwner()
     return this.approvals.showPrompt(request, agentInputWait)
   }
 
@@ -20306,8 +20402,11 @@ export class TuiApp {
     // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
     // question claims the seat (`activeQuestions` below), so the flow mounts and
     // focuses on the restored surface — never on a screen the workspace still
-    // owns, and never with the Job swallowing the user's answer keys.
-    this.jobWorkspace?.close()
+    // owns, and never with the Job swallowing the user's answer keys. The
+    // abandonment refuses NEW workspace leases across its callbacks, so a
+    // callback can never lease a screen the question would then be invisible
+    // behind.
+    this.abandonWorkspaceForBlockingOwner()
     // The abandonment above runs the workspace's owner callback, which can
     // synchronously present a NEWER Question. That newer flow already owns the
     // seat, and a callback's newer operation always wins: this OLDER request
@@ -20693,8 +20792,11 @@ export class TuiApp {
       }
       // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
       // prompt state (and its frame) exists, so the Save Location prompt mounts
-      // on the restored surface and the workspace can never swallow its keys.
-      this.jobWorkspace?.close()
+      // on the restored surface and the workspace can never swallow its keys. The
+      // abandonment refuses NEW workspace leases across its callbacks, so a
+      // callback can never lease a screen the prompt would then be invisible
+      // behind.
+      this.abandonWorkspaceForBlockingOwner()
       if (this.disposed) {
         // The abandonment disposed the surface: the caller must never hang.
         reject(cancellationError('save location cancelled'))

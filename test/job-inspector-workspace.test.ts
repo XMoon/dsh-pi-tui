@@ -26,6 +26,7 @@ import { createTaskRuntime, type JobInspectorState, type TaskRuntime, type TaskS
 import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
 import type { SessionSubject } from '../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from './support/display-seam-stub.ts'
@@ -47,13 +48,15 @@ afterEach(() => {
  *  preference callback, a keyboard-exit counter) — never a later patch. */
 function startApp(
   options: Record<string, unknown> = {},
-  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit'>> = {},
+  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'onOpenTasks' | 'runOwned'>> = {},
 ): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => events.onExit?.() ?? undefined,
     ...(events.onFullscreenChange === undefined ? {} : { onFullscreenChange: events.onFullscreenChange }),
+    ...(events.onOpenTasks === undefined ? {} : { onOpenTasks: events.onOpenTasks }),
+    ...(events.runOwned === undefined ? {} : { runOwned: events.runOwned }),
   }, options)
   app.start()
   startedApps.add(app)
@@ -1047,6 +1050,178 @@ test('A-09g a throwing workspace close never truncates the stop teardown', async
   } finally {
     TuiMainScreen.prototype.stop = originalStop
   }
+})
+
+test('A-09h a workspace leased BY the close callback during stop() is refused: no lease, no observer and no input owner survives', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  const stops: TuiMainScreen[] = []
+  const originalStop = TuiMainScreen.prototype.stop
+  TuiMainScreen.prototype.stop = function (this: TuiMainScreen, options?: Parameters<typeof originalStop>[0]): void {
+    stops.push(this)
+    originalStop.call(this, options)
+  }
+  const originalOpen = app.openJobInspector
+  let reentered = false
+  app.openJobInspector = function (this: TuiApp, options: Parameters<typeof originalOpen>[0]) {
+    const inner = options.onClose
+    return originalOpen.call(this, {
+      ...options,
+      onClose: () => {
+        inner()
+        if (!reentered) {
+          reentered = true
+          // The callback synchronously selects ANOTHER Job while the stop is
+          // abandoning this one.
+          harness.tasks.openJobView('job-b')
+        }
+      },
+    })
+  }
+  try {
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+    const stopsBefore = stops.length
+    assert.throws(() => app.stop(), /completing a transition/,
+      'the refused reentrant lease is surfaced by the stop batch, never swallowed')
+    assert.equal(reentered, true, 'the callback really attempted a newer lease')
+    // The refused lease never kept a screen, an observer or the keyboard.
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false, 'no workspace survives the stop')
+    assert.deepEqual(harness.observation.forJob('job-b'), [1],
+      'the refused lease released its observation exactly once')
+    assert.ok(stops.length > stopsBefore, 'the terminal transition really ran')
+    // The latch is not stuck: a normal round-trip can lease again.
+    app.start()
+    await vt.waitForRender()
+    const reopened = app.openJobInspector({
+      initial: openingRow('job-b'),
+      canStop: () => false,
+      onStop: () => {},
+      onClose: () => {},
+    })
+    await vt.waitForRender()
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+    reopened.close()
+    await vt.waitForRender()
+  } finally {
+    app.openJobInspector = originalOpen
+    TuiMainScreen.prototype.stop = originalStop
+  }
+  harness.tasks.disposeTaskBrowser()
+  app.stop()
+})
+
+test('A-09i a workspace leased BY the abandonment callback while a blocking owner arrives is refused: the Question is visible and owns the keyboard', async () => {
+  const failures: unknown[] = []
+  const { vt, app } = startApp({}, {
+    // The failure channel of `routeTerminalSettlementFailure`: the abandonment
+    // failure is REPORTED, never swallowed and never propagated into the
+    // blocking owner's commit.
+    runOwned: (<T>(_label: string, run: () => T | Promise<T>, options?: {
+      onResult?: (result: T) => void | Promise<void>
+      onError?: (error: unknown) => void
+    }): void => {
+      try {
+        options?.onResult?.(run() as T)
+      } catch (error) {
+        failures.push(error)
+        options?.onError?.(error)
+      }
+    }) as TuiAppEvents['runOwned'],
+  })
+  const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  const originalOpen = app.openJobInspector
+  let reentered = false
+  app.openJobInspector = function (this: TuiApp, options: Parameters<typeof originalOpen>[0]) {
+    const inner = options.onClose
+    return originalOpen.call(this, {
+      ...options,
+      onClose: () => {
+        inner()
+        if (!reentered) {
+          reentered = true
+          harness.tasks.openJobView('job-b')
+        }
+      },
+    })
+  }
+  try {
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+
+    const question = app.askQuestions([{ id: 'q1', question: 'blocking question?', options: [{ label: 'Yes' }] }])
+    await vt.waitForRender()
+    assert.equal(reentered, true, 'the abandonment callback really attempted a newer lease')
+    // The newer lease was refused: the blocking owner is VISIBLE on the restored
+    // surface and really owns the keyboard — never an invisible frame over a Job.
+    const painted = view(vt)
+    assert.match(painted, /blocking question\?/, `the blocking owner must be visible:\n${painted}`)
+    assert.ok(!/Job job-a · bash/.test(painted), 'no Job screen may remain behind the blocking owner')
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
+    assert.deepEqual(harness.observation.forJob('job-b'), [1],
+      'the refused lease released its observation exactly once')
+    assert.equal(failures.length, 1, 'the abandonment failure was reported, never swallowed')
+    assert.match(String(failures[0]), /completing a transition/)
+    vt.sendInput('\r')
+    vt.sendInput('\r')
+    const answer = await question
+    assert.deepEqual(answer, [{ id: 'q1', selected: ['Yes'] }], 'the question really received its keys')
+  } finally {
+    app.openJobInspector = originalOpen
+  }
+  harness.tasks.disposeTaskBrowser()
+  app.stop()
+})
+
+test('A-09j a leader-bound effective exit still leaves the TUI while every other leader action stays blocked', async () => {
+  let exits = 0
+  let tasksOpened = 0
+  const { vt, app } = startApp({}, { onExit: () => { exits += 1 }, onOpenTasks: () => { tasksOpened += 1 } })
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.exit.request': '<leader>x', 'app.tasks.open': '<leader>t' },
+  }))
+  const handle = app.openJobInspector({
+    initial: openingRow(),
+    canStop: () => false,
+    onStop: () => {},
+    onClose: () => {},
+  })
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+
+  // A NON-exit leader action is cancelled inside the workspace, never dispatched.
+  vt.sendInput('\x18') // leader prefix
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'a leader-bound background action must stay blocked inside the workspace')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true, 'the workspace keeps the keyboard')
+
+  // The leader-bound EXIT needs its same-key second completion, exactly like the
+  // direct exit key.
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(exits, 0, 'the first leader completion only arms the confirmation')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.equal(exits, 1, 'the confirmed leader-bound exit really leaves the TUI')
+  handle.close()
+  await vt.waitForRender()
+  app.stop()
 })
 
 // ── A-10: read-only workspace ───────────────────────────────────────────────
