@@ -703,10 +703,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // query while it loads. The PiTui adapter keeps its ORIGINAL settlement:
         // the read is awaited inside this handler, so its own success text, its
         // thrown read failure and the command path's draft disposition are
-        // unchanged. The roster read runs as owned background
-        // work, so the user gets instant feedback and may type a query while it
-        // loads (PiTui keeps its own "open when the rows are known" behaviour —
-        // its `setLoading` is a no-op).
+        // unchanged.
         // The write subject is captured BEFORE the first read and is fixed for
         // the panel's whole life: the read never re-derives the subject from a
         // later, possibly different Session.
