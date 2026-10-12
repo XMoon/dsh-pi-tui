@@ -65,7 +65,8 @@ import type { RemoteApplicationOverride } from '../src/app/application-runtime.t
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
 import { testPromptSerializer, waitFor } from './support/remote-application-fixture.ts'
-import { historyFilePath, loadHistoryRecords } from '../src/client/history/store.ts'
+import { appendHistoryRecord, historyFilePath, loadHistoryRecords } from '../src/client/history/store.ts'
+import { dshHome } from '../src/runtime/process/diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -422,6 +423,15 @@ test('L6: the resumed Remote startup keeps input accepted while its hydration re
     host,
     productionSerializer: true,
     beforeRunnerMount: (presentation) => {
+      // The boot recall reads the CLIENT cwd's history file (the launch cwd), not
+      // the Host workspace's: a FOREIGN Session's row is already there, and a live
+      // owner IS current (the resume published before this mount), so ↑ must never
+      // be seeded with other Sessions' rows.
+      appendHistoryRecord(
+        historyFilePath(dshHome(process.env), process.cwd()),
+        { v: 2, content: 'foreign client-cwd prompt', cwd: process.cwd(), ts: Date.now(), sessionId: 'session-foreign-earlier' },
+        undefined,
+      )
       const reader = presentation.presentationReader as unknown as {
         read(sessionId: string, signal?: AbortSignal): Promise<unknown>
       }
@@ -452,6 +462,8 @@ test('L6: the resumed Remote startup keeps input accepted while its hydration re
     resetInputHistory(entries: readonly string[], owner?: string): void
   }
   // Capture what the resumed Session's hydration reseed commits.
+  assert.ok(!editor.getInputHistory().includes('foreign client-cwd prompt'),
+    `the boot recall of the client cwd must not back a live owner: ${JSON.stringify(editor.getInputHistory())}`)
   const commits: { readonly entries: readonly string[]; readonly recall: readonly string[] }[] = []
   const originalReset = editor.resetInputHistory.bind(editor)
   editor.resetInputHistory = ((entries: readonly string[], owner?: string) => {
