@@ -335,7 +335,7 @@ Overview lists every candidate in EVERY layout (it is entered from the compact
 model list, and from the wide column whenever the budget cannot prove the inline
 selector), and the wide inline rows are the selector exactly while
 `widePreviewFits` proves they all fit. The restructured Overview's own row cursor
-is covered headlessly (the real-pane run above measured page/footer/pointer
+is covered headlessly (the real-pane run below measured page/footer/pointer
 behaviour, not a per-width cursor walk on that page). The run does NOT certify
 enlarged UI fonts
 at the wide layout, IME, themes or the Remote path: those stay `NOT_VERIFIED`.
@@ -350,7 +350,7 @@ scroll port of its own, so a bar whose buttons do not fit its `pk-bar` is cut at
 that edge. That is why the bar is short and fixed: at most the page's own `Back`
 plus the failed-read `Retry` plus the ONE short write (`Switch` / `Save default`),
 and the restructured bars are MEASURED at both supported extremes — see the
-containment rows of "Real-pane verification" above: at 1280x800 `pk-bar` x
+containment rows of "Real-pane verification" below: at 1280x800 `pk-bar` x
 80..1200 holds `Cancel` [1047.6,728,60.5,28] and `Switch` [1120,726,68,32]
 (right edge 1188), and at 400x600 `pk-bar` x 30..370 holds `Back`
 [40,533,43.8,28] and `Switch` [294.1,531,68,32] (right edge 362.1). The earlier
