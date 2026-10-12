@@ -2428,8 +2428,11 @@ export class TuiApp {
     cancelLeader: () => this.keybindings.cancelLeader(),
     projectActivity: () => this.projectActivity(),
     terminalSize: () => ({ columns: this.terminal.columns, rows: this.terminal.rows }),
-    showApprovalOverlay: (frame) => this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' }, { remountable: true }),
-    setOverlayRemount: (handle, remount) => this.registerOverlayRemount(handle, remount),
+    showApprovalOverlay: (frame, remount) => this.showOverlayOnHost(
+      frame,
+      { width: '100%', maxHeight: '100%' },
+      { remountable: true, remount },
+    ),
     clearOverlayRemount: (handle) => { this.overlayRemounts.delete(handle) },
     rebindApprovalOverlay: (handle, frame) => this.rebindOverlayRaw(handle, frame, { width: '100%', maxHeight: '100%' }),
     focusEditorSeat: () => this.focusSeatOwner(),
@@ -2798,21 +2801,17 @@ export class TuiApp {
   /**
    * The ONE registration authority for a remountable overlay's remount callback
    * (Phase 3A / PR-B). Registering it is not enough when the node's projection was
-   * already detached: a fullscreen swap that ran INSIDE that node's own mount (a
-   * plugin focus/blur callback) completed BEFORE this callback existed, so the
-   * swap's remount pass skipped the node and left it logically alive but
-   * INVISIBLE on the new screen. The host therefore finishes what that pass would
-   * have done — create the projection through the callback, then let the broker
-   * install the pre-swap keyboard owner (`restoreFocusAfterSwap()`), which only
-   * does so while no NEWER operation claimed the keyboard in the meantime.
+   * already detached. A fullscreen swap that runs INSIDE a node's own mount (a
+   * plugin focus/blur callback) must therefore already SEE that node's remount
+   * callback: `showOverlayOnHost` registers it from the ownership parameter
+   * (`remount`) right after `prepareMount` minted the stable logical handle and
+   * BEFORE the fork's physical mount, so the swap's own back→front remount pass
+   * re-creates the projection in the CURRENT logical order. Recovering after the
+   * fact is not equivalent: a projection created later can only be appended on
+   * top of the overlays that are logically above it.
    */
   private registerOverlayRemount(handle: OverlayHandle, remount: () => void): void {
     this.overlayRemounts.set(handle, remount)
-    if (this.overlayBroker.hasProjection(handle)) return
-    runSyncDisposalSteps('late overlay remount', [
-      remount,
-      () => this.overlayBroker.restoreFocusAfterSwap(),
-    ])
   }
   /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
    * resize so the plugin's render(ctx) sees the new geometry). */
@@ -5877,7 +5876,19 @@ export class TuiApp {
   private showOverlayOnHost(
     component: Component,
     options: OverlayOptions,
-    ownership: { remountable?: boolean } = {},
+    ownership: {
+      remountable?: boolean
+      /**
+       * The remount callback for a REMOUNTABLE node, built from the stable
+       * logical handle. It is registered BEFORE the fork's physical mount: the
+       * mount's focus transition can synchronously run a plugin callback that
+       * starts a fullscreen swap, and that swap's remount pass must already find
+       * this node — registering after the mount would leave the node unprojected
+       * on the new screen (and a post-hoc re-creation can only be appended on top
+       * of the overlays that are logically above it).
+       */
+      remount?: (handle: OverlayHandle) => void
+    } = {},
   ): OverlayHandle {
     // P1-09: never mount on a finally-disposed surface (the plugin lease
     // path guards earlier; this is the last-chance guard for every other
@@ -5910,6 +5921,13 @@ export class TuiApp {
       nonCapturing: options?.nonCapturing === true,
       remountable: ownership.remountable === true,
     })
+    // The logical handle exists from `prepareMount` on: publish the remount
+    // capability NOW, before the fork's physical mount and its focus transition,
+    // so a swap started by a callback INSIDE that transition already re-creates
+    // this node's projection in the current logical order (see `remount` above).
+    if (ownership.remount !== undefined) {
+      this.registerOverlayRemount(prepared.node.wrapper, () => ownership.remount!(prepared.node.wrapper))
+    }
     // FAIL CLOSED: the physical mount can throw at two distinct stages, and a
     // mount that throws never returns a handle to its caller, so nothing else
     // could release what it created.
@@ -5939,6 +5957,7 @@ export class TuiApp {
     } catch (error) {
       runSyncDisposalStepsWithPrimary('overlay mount unwind', error, [
         () => { if (!rawReturned) screen.hideOverlay() },
+        () => { this.overlayRemounts.delete(prepared.node.wrapper) },
         () => this.overlayBroker.close(prepared.node.wrapper),
       ])
     }
@@ -6638,15 +6657,17 @@ export class TuiApp {
     const handle = this.showOverlayOnHost(
       frame,
       { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } },
-      { remountable: true },
+      {
+        remountable: true,
+        remount: (logical) => {
+          if (this.historyPanel !== panel) return
+          const next = this.createHistoryFrame(panel)
+          this.historyResponsiveFrame = next
+          this.rebindOverlayRaw(logical, next, { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } })
+        },
+      },
     )
     this.historyOverlay = handle
-    this.registerOverlayRemount(handle, () => {
-      if (this.historyPanel !== panel || this.historyOverlay !== handle) return
-      const next = this.createHistoryFrame(panel)
-      this.historyResponsiveFrame = next
-      this.rebindOverlayRaw(handle, next, { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } })
-    })
   }
 
   private createHistoryFrame(panel: HistoryPanel): ResponsiveOverlayFrame {
@@ -12759,18 +12780,17 @@ export class TuiApp {
     // projection the broker rebinds after a screen swap.
     let handle: OverlayHandle | undefined
     let closed = false
-    const remount = (): void => {
-      if (closed || handle === undefined) return
+    const remount = (logical: OverlayHandle): void => {
+      if (closed) return
       const compiled = compileView(view)
       const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
-      this.rebindOverlayRaw(handle, component, mountOptions)
+      this.rebindOverlayRaw(logical, component, mountOptions)
     }
     const mount = (): void => {
       if (closed || handle !== undefined) return
       const compiled = compileView(view)
       const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
-      handle = this.showOverlayOnHost(component, mountOptions, { remountable: true })
-      this.registerOverlayRemount(handle, remount)
+      handle = this.showOverlayOnHost(component, mountOptions, { remountable: true, remount })
     }
     mount()
     const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void } = {
@@ -12794,7 +12814,7 @@ export class TuiApp {
       },
       // Host-internal: re-create the raw projection on the CURRENT active
       // screen after a fullscreen swap (the broker keeps the logical node).
-      _remount: remount,
+      _remount: () => { if (handle !== undefined) remount(handle) },
     }
     // The surface's dispose closes every still-owned lease: track it.
     this.extensionOverlayLeases.add(lease)
@@ -12873,21 +12893,20 @@ export class TuiApp {
         () => this.advancedRenderContext(),
         (message: string) => this.notify(`advanced overlay: ${message}`, 'error'),
       )
-    const remount = (): void => {
-      if (closed || handle === undefined) return
+    const remount = (logical: OverlayHandle): void => {
+      if (closed) return
       if (wrapper !== undefined) this.advancedOverlayWrappers.delete(wrapper)
       const created = createWrapper()
       wrapper = created
       this.advancedOverlayWrappers.add(created)
-      this.rebindOverlayRaw(handle, created, mountOptions)
+      this.rebindOverlayRaw(logical, created, mountOptions)
     }
     const mount = (): void => {
       if (closed || handle !== undefined) return
       const created = createWrapper()
       wrapper = created
       this.advancedOverlayWrappers.add(created)
-      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      this.registerOverlayRemount(handle, remount)
+      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true, remount })
     }
     mount()
     const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
@@ -12937,7 +12956,7 @@ export class TuiApp {
       },
       // Host-internal: re-create the raw projection on the CURRENT active
       // screen after a fullscreen swap (the broker keeps the logical node).
-      _remount: remount,
+      _remount: () => { if (handle !== undefined) remount(handle) },
       // Host-internal: recompile the plugin's render() output (terminal
       // resize — the plugin's render(ctx) must see the new geometry).
       _recompile: () => {
@@ -13089,21 +13108,20 @@ export class TuiApp {
         component,
         (message: string) => this.notify(`unstable mount: ${message}`, 'error'),
       )
-    const remount = (): void => {
-      if (closed || handle === undefined) return
+    const remount = (logical: OverlayHandle): void => {
+      if (closed) return
       if (adapter !== undefined) this.unstableMountAdapters.delete(adapter)
       const created = createAdapter()
       adapter = created
       this.unstableMountAdapters.add(created)
-      this.rebindOverlayRaw(handle, created, mountOptions)
+      this.rebindOverlayRaw(logical, created, mountOptions)
     }
     const mount = (): void => {
       if (closed || handle !== undefined) return
       const created = createAdapter()
       adapter = created
       this.unstableMountAdapters.add(created)
-      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      this.registerOverlayRemount(handle, remount)
+      handle = this.showOverlayOnHost(created, mountOptions, { remountable: true, remount })
     }
     mount()
     const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
@@ -13149,7 +13167,7 @@ export class TuiApp {
       },
       // Host-internal: re-create the raw projection on the CURRENT active
       // screen after a fullscreen swap (the broker keeps the logical node).
-      _remount: remount,
+      _remount: () => { if (handle !== undefined) remount(handle) },
     }
     this.unstableMountLeases.add(lease)
     return lease
@@ -19217,15 +19235,17 @@ export class TuiApp {
     const handle = this.showOverlayOnHost(
       frame,
       { width: 72, maxHeight: 28 },
-      { remountable: true },
+      {
+        remountable: true,
+        remount: (logical) => {
+          if (this.modelPickerComponent !== component) return
+          const next = this.createModelPickerFrame(component)
+          this.modelPickerFrame = next
+          this.rebindOverlayRaw(logical, next, { width: 72, maxHeight: 28 })
+        },
+      },
     )
     this.modelPickerOverlay = handle
-    this.registerOverlayRemount(handle, () => {
-      if (this.modelPickerComponent !== component || this.modelPickerOverlay !== handle) return
-      const next = this.createModelPickerFrame(component)
-      this.modelPickerFrame = next
-      this.rebindOverlayRaw(handle, next, { width: 72, maxHeight: 28 })
-    })
   }
 
   private createModelPickerFrame(component: Component & RowBudgetAware): ResponsiveOverlayFrame {

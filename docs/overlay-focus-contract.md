@@ -190,9 +190,10 @@ When you add or change an overlay path, cover the family it belongs to:
 - **Fullscreen lifecycle**: the logical graph, visibility intent, focus intent,
   z-order and modal suspensions survive; non-remountable overlays are closed
   first; the owner is derived from logical intent (physical focus can be
-  overwritten by the outer `setFocus(editor)`); a swap that interleaves with an
-  overlay's own mount must still leave that overlay projected and, when it was the
-  pre-swap keyboard owner, focused (see §11).
+  overwritten by the outer `setFocus(editor)`); a swap that interleaves an
+  overlay's own mount must still leave that overlay projected IN LOGICAL ORDER —
+  register the remount capability before the physical mount, never append it
+  afterwards — and, when it was the pre-swap keyboard owner, focused (see §11).
 - **Approval**: it is a remountable logical node; the overlays it suppresses
   must never flash or receive focus through a rebuild; replaced frames are
   disposed; the stage identity is re-read after the park hook, after the Save
@@ -586,21 +587,22 @@ or over the editor seat.
   never received a handle can never survive as a ghost modal, a half-committed,
   keyboard-owning suppressor, or a cleanup that removes somebody else's entry.
   The SYMMETRIC window (no throw) is the same mount interleaved with a fullscreen
-  swap that a plugin callback started: the swap's remount pass runs BEFORE this
-  node's remount callback exists, so registering late must CREATE that projection
-  immediately and finish the swap's keyboard restore. The broker keeps a pre-swap
-  keyboard owner whose remountable projection is not back yet PENDING across its
-  restore pass, so such a mount ends as a visible, focused, answerable Approval
-  instead of an invisible active owner whose keyboard silently went to the editor.
-  `registerOverlayRemount` is the ONE authority for that recovery and EVERY
-  remountable registration goes through it (the approval, the Advanced/unstable
-  plugin leases, the search overlay), so no consumer can be left with a node the
-  swap pass skipped. The pending pre-swap owner is only installed while NO newer
-  keyboard handoff happened since the swap sampled it (the broker's focus-intent
-  revision): a callback's NEWER explicit `focus()` — or a capturing overlay it
-  mounted in the same window — wins and keeps the keyboard, and an owner whose
-  projection exists but is hidden (suppressed under a modal) is never treated as
-  pending.
+  swap that a plugin callback started. It is closed STRUCTURALLY: the remount
+  callback is registered BEFORE the fork's physical mount — `showOverlayOnHost`
+  takes it as an ownership capability and publishes it from `prepareMount`'s
+  stable logical handle — so the swap's own back→front remount pass already
+  re-creates that node's projection, in the CURRENT logical order, and the mount
+  ends visible, focused and answerable instead of as an invisible active owner.
+  Recovering after the fact is NOT equivalent: `showOverlay` can only APPEND a
+  physical entry, so a projection created later sits above the overlays that are
+  logically above it and the broker's logical z-order diverges from the paint and
+  pointer-hit order. `registerOverlayRemount` is the ONE authority every
+  remountable registration goes through (the approval, the three
+  Advanced/unstable plugin leases, the history search overlay and the model
+  picker), so no consumer can miss the pass. `restoreFocusAfterSwap()` then
+  re-applies the pre-swap keyboard owner only while no NEWER owner holds the
+  keyboard at that moment: a newer explicit `focus()`, or a capturing overlay a
+  callback mounted, wins and keeps the keyboard.
 - **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
   rides the caller's `close()` as the FIRST independent step of the `tui
   dispose` batch, so a throwing tenant cleanup neither skips the
@@ -613,7 +615,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-58: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-60: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -651,5 +653,7 @@ Approval mount itself (the dialog stays physically mounted, focused and answerab
 on the new screen while the suppressed root stays suppressed), a callback's NEWER
 focus (and a capturing overlay it mounted) inside that swap window keeping the
 keyboard against the pre-swap snapshot, an Advanced lease whose OWN mount
-interleaved a swap being re-projected through the one registration authority, and
-input routing).
+interleaved a swap being re-projected in logical order through the one
+registration authority, the newer covering overlay staying VISUALLY on top of the
+late-projected Approval, a newer owner that leaves inside the window still handing
+the keyboard to the live Approval, and input routing).
