@@ -327,9 +327,10 @@ A real Tern pane smoke is documented in
 The generic real-pane harness — headless `tern serve` + `tern ctl`, real pointer
 and key input, the real node tree, PNG captures and the clipping/click oracle —
 is `scripts/tern-pane-drive.mjs` with the pure `scripts/tern-pane-geometry.mjs`
-oracle; a flow module mounts the surface under test. See
-[`tern-pane-harness.md`](./tern-pane-harness.md). It is operator-run (it needs the
-external Tern CLI) and is deliberately not part of `pnpm test`.
+oracle; a flow module mounts the surface under test, and
+`scripts/tern-pane-smoke.mjs` is the committed end-to-end smoke of the instrument
+itself. See [`tern-pane-harness.md`](./tern-pane-harness.md). It is operator-run
+(it needs the external Tern CLI) and is deliberately not part of `pnpm test`.
 
 Evidence levels — do not merge these into a stronger claim:
 
