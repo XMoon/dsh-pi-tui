@@ -2588,6 +2588,52 @@ test('resetInputHistory replaces the recall history wholesale (session switch)',
   app.stop()
 })
 
+test('the publication recall scope reconciles transient submissions and never crosses into a newer owner', async () => {
+  const { vt, app, submitted } = startApp()
+  const submit = async (text: string): Promise<void> => {
+    app.setDraft('')
+    vt.sendInput(text)
+    vt.sendInput('\r')
+    await vt.waitForRender()
+  }
+  // Scope: the owner was PUBLISHED and its hydration reseed has not committed.
+  app.beginInputHistoryScope()
+  await submit('a')
+  await submit('b')
+  await submit('c')
+  assert.deepEqual(submitted, ['a', 'b', 'c'])
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'], 'accepted inputs are recalled immediately')
+  // The hydration snapshot carries the two OLDER rows: they are covered by the
+  // disk authority, the newer one stays in front, nothing is doubled.
+  app.resetInputHistory(['b', 'a'])
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'],
+    'the covered rows are not doubled and the unpersisted one is kept')
+  // A NEW scope whose snapshot already holds the same text from an EARLIER
+  // window: the fresh submission is not swallowed (no text-level dedupe).
+  app.beginInputHistoryScope()
+  await submit('a')
+  app.resetInputHistory(['b', 'a'])
+  assert.deepEqual(app.getInputHistory(), ['a', 'b', 'a'],
+    'a legitimate non-consecutive repeat survives the reconcile')
+  // A newer owner publishes before the previous scope's hydration ever
+  // committed: the previous scope's temporary submissions never cross.
+  app.beginInputHistoryScope()
+  await submit('transient entry')
+  app.beginInputHistoryScope()
+  app.resetInputHistory(['new owner row'])
+  assert.deepEqual(app.getInputHistory(), ['new owner row'],
+    'the replaced scope inherits nothing into the new owner')
+  // The window is closed after the reseed: ordinary submissions and ↑ use the
+  // plain in-memory path again.
+  await submit('settled entry')
+  assert.deepEqual(app.getInputHistory(), ['settled entry', 'new owner row'])
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'settled entry', '↑ recalls the settled submission')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)

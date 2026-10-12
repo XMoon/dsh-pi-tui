@@ -194,6 +194,7 @@ function harness() {
     reportSwitch: (from, to) => { events.push(`switch:${from ?? '(none)'}->${services.owners.sessionId(to)}`) },
     clearUnpinnedDrafts: () => {},
     dropOutgoingActiveDraft: () => { events.push('dropDraft') },
+    beginInputHistoryScope: () => { events.push('inputHistoryScope') },
     withdrawReplacedPresentation: () => { events.push('withdrawReplacedPresentation') },
     reportSwitchFailure: (sessionId, message) => { events.push(`switchfail:${sessionId}:${message}`) },
     launchComposition: async () => ({ composition: {} }),
@@ -344,6 +345,12 @@ test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE 
     `the drop precedes the new session's init (drop@${dropIndex}, init@${initIndex})`)
   assert.ok(catalogIndex !== -1 && dropIndex < catalogIndex,
     `the drop precedes the new session's catalog refresh (drop@${dropIndex}, catalog@${catalogIndex})`)
+  // The editor-recall scope of the PUBLISHED owner opens at the SAME commit:
+  // the new session's hydration reseeds ↕ recall afterwards, and an input
+  // accepted in between must survive that reseed.
+  const scopeIndex = h.events.indexOf('inputHistoryScope')
+  assert.ok(scopeIndex !== -1 && scopeIndex < initIndex,
+    `the editor-recall scope opens before the new session's hydration (scope@${scopeIndex}, init@${initIndex})`)
 })
 
 test('PR3-B §7.3 (F1 atomicity): a THROWING drop seam is a pre-publication failure — OLD owner/draft stand, NEW is released', async () => {
@@ -672,6 +679,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
     dropOutgoingActiveDraft: () => {},
+    beginInputHistoryScope: () => {},
     withdrawReplacedPresentation: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
@@ -818,6 +826,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
     dropOutgoingActiveDraft: () => {},
+    beginInputHistoryScope: () => {},
     withdrawReplacedPresentation: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
@@ -931,6 +940,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
     dropOutgoingActiveDraft: () => {},
+    beginInputHistoryScope: () => {},
     withdrawReplacedPresentation: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
@@ -1014,6 +1024,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       reportSwitch: () => {},
       clearUnpinnedDrafts: () => {},
     dropOutgoingActiveDraft: () => {},
+    beginInputHistoryScope: () => {},
     withdrawReplacedPresentation: () => {},
       reportSwitchFailure: () => {},
       launchComposition: async () => ({ composition: {} }),
