@@ -125,14 +125,16 @@ which are what a user changes most often.
 The column therefore shows, in this order: the model name (the card head, folded
 to one clamped line), the provider and the model ID (each pre-wrapped to at most
 two provable lines, the complete value readable in the Details page), the
-keyboard hint, the Reasoning Effort card, and then a SINGLE optional line
-carrying a transient notice or a one-line description summary when room is left.
+keyboard hint and — inside that same details card, while room is left — a SINGLE
+optional line carrying a transient notice or a one-line description summary; the
+Reasoning Effort card follows it.
 When the effort rows cannot be inline, the SAME column becomes the bounded
 summary and stays action-first: the bounded identity, the keyboard hint, the one
 optional line and only then the configured Current/Default facts, capped at a
-line count the budget proves. A long description, a long identity or the extended
-Current/Default facts never decide whether the effort selector stays inline — the
-complete description, every fact and every effort candidate that does not fit are
+line count the budget proves. The description's full text and the extended
+Current/Default facts never decide whether the effort selector stays inline; the
+identity's own bounded lines ARE priced, so a longer identity can move the effort
+rows to the Effort page — never the shell itself. Whatever does not fit is
 one `Details` / `Choose effort` action away in the same picker's pages, which the
 action bar always offers.
 
@@ -181,8 +183,9 @@ against measured geometry (28.2px per line, 22.2px per single-line radio row,
 the usable height of the SHORTEST supported wide pane — 374px, measured at
 1280x600 (1100x640 gives 414px, 1200x700 gives 474px, 1280x800 gives 574px).
 
-374px is a LAYOUT BUDGET, not an SDK guarantee. `SessionCaps` carries only
-`cols`/`cell` and the resize event only `cols`/`cell`/`visible`, so the presenter
+374px is a LAYOUT BUDGET, not an SDK guarantee. Of the SDK's capability fields
+(`Capabilities` / `session.caps`), only `cols` and `cell` describe geometry, and the
+resize event only `cols`/`cell`/`visible`, so the presenter
 cannot detect a shorter pane and cannot degrade further below the floor. The
 supported envelope is a wide pane whose usable height is at least 374px (about
 600px of pane height at the measured 226px of chrome) whose width is at least
