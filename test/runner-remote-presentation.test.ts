@@ -65,6 +65,7 @@ import type { RemoteApplicationOverride } from '../src/app/application-runtime.t
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
 import { testPromptSerializer, waitFor } from './support/remote-application-fixture.ts'
+import { historyFilePath, loadHistoryRecords } from '../src/client/history/store.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -209,6 +210,10 @@ export async function mountRemoteRunner(
     /** Extra preset ids registered on the Host roster (PR5 §3.5 needs a
      *  second selectable preset). */
     extraPresetIds?: readonly string[]
+    /** Invoked with the Remote presentation bundle BEFORE the runner fiber
+     *  mounts: a suite that must hold the startup hydration wraps the
+     *  presentation reader here (the runner reads it lazily at call time). */
+    beforeRunnerMount?: (presentation: RemoteApplicationOverride['presentation']) => void
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -270,6 +275,7 @@ export async function mountRemoteRunner(
     return originalStart.call(this)
   }
   life.defer(() => { TuiApp.prototype.start = originalStart })
+  options.beforeRunnerMount?.(override.presentation)
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
     applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never), override)
   })
@@ -371,6 +377,129 @@ test('L6: a Remote resumed session hydrates the real transcript and status throu
   // duplicate identity (the local-echo ledger never ran: no submit happened).
   assert.equal(frame.includes('hello remote'), true, 'the resumed user row is rendered')
   assert.equal(frame.includes('remote answer one'), true, 'the resumed assistant row is rendered')
+})
+
+test('L6: the resumed Remote startup keeps input accepted while its hydration read is held', async (t) => {
+  // The Remote startup resume awaits `remote.read` AFTER the terminal is already
+  // accepting input. A submission accepted in that window is owned by the
+  // resumed Session, and its own persistence is ordered behind the hydration
+  // continuation — so the reseed provably reads a snapshot WITHOUT it. The
+  // editor-recall scope must keep it, while the submission that did persist is
+  // never doubled, and the late row must land under the SAME Session.
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-remote-startup-window'
+  const hostPreset = 'm3-4-pr2-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    }
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('user/message', {
+      id: 'u-1', role: 'user', content: [{ type: 'text', text: 'earlier remote turn' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: 'a-1', role: 'assistant',
+        content: [{ type: 'text', text: 'earlier remote answer' }],
+        source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+      },
+      stream: [], usage: { inputTokens: 4, outputTokens: 2 },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+  let enterRead!: () => void
+  const readEntered = new Promise<void>(resolve => { enterRead = resolve })
+  let releaseRead!: () => void
+  const readGate = new Promise<void>(resolve => { releaseRead = resolve })
+  let gated = false
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: (presentation) => {
+      const reader = presentation.presentationReader as unknown as {
+        read(sessionId: string, signal?: AbortSignal): Promise<unknown>
+      }
+      const real = reader.read
+      reader.read = async function gatedRead(sessionId: string, signal?: AbortSignal): Promise<unknown> {
+        if (gated) return real.call(reader, sessionId, signal)
+        gated = true
+        // The REAL read completes first (its wire round trip is exactly what
+        // production awaits); the gate then holds its RESULT, so releasing it
+        // resumes the hydration continuation immediately — the same
+        // "hydration still pending while the terminal accepts input" window a
+        // slow production read produces.
+        const captured = await real.call(reader, sessionId, signal)
+        enterRead()
+        await readGate
+        return captured
+      }
+    },
+  })
+  await readEntered
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    submitDraft(): void
+    getDraft(): string
+    getInputHistory(): readonly string[]
+    resetInputHistory(entries: readonly string[], owner?: string): void
+  }
+  // Capture what the resumed Session's hydration reseed commits.
+  const commits: { readonly entries: readonly string[]; readonly recall: readonly string[] }[] = []
+  const originalReset = editor.resetInputHistory.bind(editor)
+  editor.resetInputHistory = ((entries: readonly string[], owner?: string) => {
+    originalReset(entries, owner)
+    // The recall EXACTLY as this commit left it: the decisive moment, before
+    // any later append can repair it.
+    commits.push({ entries: [...entries], recall: [...editor.getInputHistory()] })
+  }) as typeof editor.resetInputHistory
+  const historyFile = historyFilePath(host.workRoot, host.anchorDir)
+  const ownersOf = (text: string): readonly (string | undefined)[] => loadHistoryRecords(historyFile)
+    .filter(row => row.content === text).map(row => row.sessionId)
+
+  // The first submission persists BEFORE the held hydration commits.
+  editor.setDraft('first remote prompt')
+  editor.submitDraft()
+  await waitFor('the first submission persisted under the resumed Session', () =>
+    ownersOf('first remote prompt').includes(mainId), 20_000)
+
+  // Release the hydration and accept the second submission in the SAME
+  // synchronous stack: its persistence continuation is queued BEHIND the
+  // released hydration continuation.
+  releaseRead()
+  editor.setDraft('pending remote prompt')
+  editor.submitDraft()
+  await waitFor('the resumed hydration committed', () => commits.length > 0, 20_000)
+  // The reseed that commits while the second submission's row is still absent
+  // from the file: its snapshot carries the persisted submission only …
+  const first = commits[0]!
+  assert.deepEqual(first.entries, ['first remote prompt'],
+    `the snapshot carries the persisted submission only: ${JSON.stringify(first.entries)}`)
+  assert.equal(first.entries.includes('pending remote prompt'), false,
+    'the accepted-but-unpersisted submission is NOT in the snapshot')
+  // … and the recall it commits still holds that input, at its submission rank.
+  assert.deepEqual(first.recall, ['pending remote prompt', 'first remote prompt'],
+    `the hydration reconcile keeps the pending submission: ${JSON.stringify(first.recall)}`)
+  assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
+    'the hydration reconcile keeps the pending submission and never doubles the persisted one')
+
+  // The late append lands under the SAME Session after the reseed, and the
+  // recall is unchanged by it (its occurrence is already represented).
+  await waitFor('the pending submission persists after the reseed', () =>
+    ownersOf('pending remote prompt').includes(mainId), 20_000)
+  assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
+    'the late append never re-adds an already-recalled occurrence')
+
+  // The REAL ↑ sink recalls the input accepted during the held read.
+  fixture.vt.sendInput('\x1b[A')
+  await waitFor('↑ recalls the input accepted during the held read', () =>
+    editor.getDraft() === 'pending remote prompt', 5_000)
 })
 
 test('L6: the Remote branch performs zero Direct graph construction', async (t) => {

@@ -2596,7 +2596,7 @@ async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: strin
   await vt.waitForRender()
 }
 
-test('the recall scope reconciles settled and pending submissions and never crosses into a newer owner', async () => {
+test('the recall scope reconciles written, skipped and pending submissions in submission order', async () => {
   const { vt, app, submitted } = startApp()
   const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
   // A hydration commit for a real Session closes the sessionless pool.
@@ -2608,16 +2608,15 @@ test('the recall scope reconciles settled and pending submissions and never cros
   await submit('c')
   assert.deepEqual(submitted, ['a', 'b', 'c'])
   assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a', 'a old row'])
-  // The OLDEST submission's row was SKIPPED by the write policy (the CWD-level
-  // consecutive dedupe), so its scope entry stays — the disk does not carry it,
-  // and the UI recall never drops an input the user really submitted. The NEXT
-  // one was WRITTEN: its occurrence is settled out, so the snapshot row is not
-  // doubled.
+  // `a` was SKIPPED by the CWD-level write policy (no settlement, no row);
+  // `b` was WRITTEN, so its occurrence is settled and the snapshot's row must
+  // not be doubled; `c` is still pending. The reseed keeps the scope's
+  // submission order: c, then the written b, then the skipped a.
   app.settleScopeInput('session-b', 'b')
   app.resetInputHistory(['b'], 'session-b')
-  assert.deepEqual(app.getInputHistory(), ['c', 'a', 'b'],
-    'the written occurrence is not doubled and the skipped one is kept')
-  assert.equal(app.getInputHistory().filter(entry => entry === 'b').length, 1, 'exactly one occurrence')
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'],
+    'written/skipped/pending occurrences interleave in submission order, never reordered')
+  assert.equal(app.getInputHistory().filter(entry => entry === 'b').length, 1, 'exactly one b occurrence')
   // The window is closed: ordinary submissions and ↑ use the plain path again.
   await submit('settled entry')
   app.setDraft('')
@@ -2632,6 +2631,27 @@ test('the recall scope reconciles settled and pending submissions and never cros
   app.resetInputHistory(['new owner row'], 'session-d')
   assert.deepEqual(app.getInputHistory(), ['new owner row'],
     'the replaced scope inherits nothing into the new owner')
+  app.stop()
+})
+
+test('a repeated submission inside the scope keeps its own occurrence and predecessor', async () => {
+  // a (skipped by the CWD policy) → b (written) → a (written). The scope's
+  // predecessor must stay the TRUE submission sequence (b), so the later `a` is
+  // not mistaken for a consecutive duplicate of the older skipped one, and the
+  // reseed must yield three occurrences.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['old'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('a')
+  await submit('b')
+  app.settleScopeInput('session-b', 'b')
+  await submit('a')
+  app.settleScopeInput('session-b', 'a')
+  assert.deepEqual(submitted, ['a', 'b', 'a'])
+  app.resetInputHistory(['a', 'b'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['a', 'b', 'a'],
+    'every occurrence survives: the skipped a, the written b and the written a')
   app.stop()
 })
 

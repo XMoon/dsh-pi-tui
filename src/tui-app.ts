@@ -2256,6 +2256,18 @@ type FocusLiveHeightState = {
   height: number
 }
 
+/**
+ * One accepted submission of the OPEN editor-recall scope (see
+ * {@link TuiApp.pendingScopeInputs}): the owner it was accepted for, its
+ * trimmed text, and — once its append succeeded — the session id the written
+ * row carries (`undefined` = a sessionless row).
+ */
+interface ScopeSubmission {
+  readonly owner: string | undefined
+  readonly text: string
+  written?: { readonly owner: string | undefined }
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   /** The extension surface host (M2), when the runner attached one. */
@@ -2577,17 +2589,22 @@ export class TuiApp {
   /** Submitted input history (newest first), mirrored for persistence. */
   private readonly inputHistory: string[] = []
   /**
-   * The SCOPE-BOUND TEMPORARY SUBMISSIONS of the OPEN editor-recall scope
-   * (newest first): one entry per input `rememberInput` accepted for the
-   * scope's owner whose durable row has not been written yet. A Session's
-   * hydration reseeds ↕ recall from the session-scoped JSONL rows, while a
-   * submission's own append is ordered behind the session transition (the
-   * submit FIFO turn and `ensureSession()`), so a submission accepted inside
-   * the publication→hydration window is absent from the snapshot and would be
-   * wiped by the reseed. Entries are removed by exact written-row evidence
-   * (`settleScopeInput`) or when the scope is replaced/adopted.
+   * The SCOPE-BOUND TEMPORARY SUBMISSIONS of the OPEN editor-recall scope, in
+   * submission order (newest first): one entry per input `rememberInput`
+   * accepted for the scope's owner. A Session's hydration reseeds ↕ recall from
+   * the session-scoped JSONL rows, while a submission's own append is ordered
+   * behind the session transition (the submit FIFO turn and `ensureSession()`),
+   * so a submission accepted inside the publication→hydration window is absent
+   * from the snapshot and would be wiped by the reseed.
+   *
+   * The list is the scope's TRUE submission sequence and is never re-ordered or
+   * shrunk by a settle: `settleScopeInput` only MARKS the occurrence whose row
+   * the disk now carries, so both the consecutive-duplicate predecessor and the
+   * interleaving of written / policy-skipped / still-pending submissions stay
+   * exact. The whole list is dropped only when the scope is replaced (or
+   * consumed by its owner's reseed / the pool's adoption).
    */
-  private readonly pendingScopeInputs: { readonly owner: string | undefined; readonly text: string }[] = []
+  private readonly pendingScopeInputs: ScopeSubmission[] = []
   /**
    * The owner the OPEN scope's entries were accepted for (`undefined` = the
    * sessionless pool). The pool is a real scope: a deferred start and the
@@ -6278,29 +6295,31 @@ export class TuiApp {
   }
 
   /**
-   * Settle ONE scope-bound temporary submission with written-row evidence: the
+   * MARK one scope-bound temporary submission with written-row evidence: the
    * input-history owner calls this from the SAME synchronous stack as the
    * successful append of that submission's row (the detached task's factory is
    * invoked synchronously), so a later hydration reseed provably reads the row
-   * from the snapshot and the entry must not be merged on top of it. A row the
-   * write policy SKIPPED (empty / consecutive repeat / attachment) emits no
-   * settlement: the disk does not carry it, and the UI recall never silently
-   * drops an input the user really submitted.
+   * from the snapshot and must consume the matching snapshot row instead of
+   * inlining the submission again. A row the write policy SKIPPED (empty /
+   * consecutive repeat / attachment) emits no settlement: the disk does not
+   * carry it, and the UI recall never silently drops an input the user really
+   * submitted. The scope's submission order and its consecutive-duplicate
+   * predecessor are never touched — only the occurrence's representation.
    * @param owner - the session id the appended row carries (`undefined` = the
    *   row is sessionless).
    * @param text - the submitted text (the owner's trimmed row content).
    */
   settleScopeInput(owner: string | undefined, text: string): void {
     if (!this.scopeOpen) return
-    // Oldest first: the entries of one text are interchangeable, and consuming
-    // one occurrence keeps the history's occurrence count exact.
+    // Oldest first: the appends run in submission order, so the oldest
+    // unmarked occurrence of this text is the one this write produced.
     for (let index = this.pendingScopeInputs.length - 1; index >= 0; index -= 1) {
       const entry = this.pendingScopeInputs[index]!
-      if (entry.text !== text) continue
+      if (entry.text !== text || entry.written !== undefined) continue
       // A pool entry's row is written under whatever identity its session
       // resolution produced — the owner is only known at persist time.
       if (entry.owner !== undefined && entry.owner !== owner) continue
-      this.pendingScopeInputs.splice(index, 1)
+      entry.written = { owner }
       return
     }
   }
@@ -6356,7 +6375,25 @@ export class TuiApp {
       this.seedInputHistory(entries)
       return
     }
-    this.seedInputHistory([...this.pendingScopeInputs.map(entry => entry.text), ...entries])
+    // Every scope submission is NEWER than any snapshot row from an earlier
+    // window, so the recall is the scope's own submission order, with the
+    // snapshot rows the written submissions already own consumed from its
+    // newest end (append order = submission order). An occurrence written under
+    // ANOTHER identity (a sessionless pool row) is not part of this Session's
+    // projection and is dropped without consuming a row.
+    const merged: string[] = []
+    let covered = 0
+    for (const entry of this.pendingScopeInputs) {
+      const written = entry.written
+      if (written === undefined) {
+        merged.push(entry.text)
+        continue
+      }
+      if (written.owner !== owner) continue
+      merged.push(entry.text)
+      covered += 1
+    }
+    this.seedInputHistory([...merged, ...entries.slice(covered)])
     this.pendingScopeInputs.length = 0
     this.scopeOpen = false
     this.scopeOwner = owner
