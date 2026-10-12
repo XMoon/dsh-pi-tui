@@ -1647,19 +1647,28 @@ rendered row count and every visible width are unchanged. The first `Esc` leaves
 only the search (keeping the paused viewport next to the still-open Job, with its
 query remembered for the next `Ctrl+F`); the next `Esc` is the existing Back to
 the Task Browser. `End` while a result view is up leaves the search and returns to
-the tail as well.
+the tail as well — and the physical focus returns from the hidden Search row to
+the workspace root. While a Find owns the ordinary keys the Action Bar does not
+advertise Stop: the Search row consumes ordinary letters while editing and the
+read-only result view keeps them inert, so advertising `s stop` there would promise
+a key that cannot act; leaving the search restores it.
 
 The retained window is the ONLY source any of this may read. When the port's
 bounded tail evicts old bytes, a paused viewport is re-anchored onto the longest
-provable surviving rendered-row run (and clamped to the new window when no overlap
-can be proven) instead of jumping to the tail or fabricating a `GAP`; `[GAP]`
+provable surviving rendered-row run — compared by ANSI-stripped visible content —
+(and clamped to the new window when no overlap can be proven, or when an
+intermediate snapshot never reached a frame and therefore has no rendered rows of
+its own: the viewport then keeps its last proven offset, which may drift forward
+but never backward) instead of jumping to the tail or fabricating a `GAP`; `[GAP]`
 still comes only from the official `gapBefore` fact, `[ERROR]` from the
 observation error and `[SETTLED]` from the official settlement, and they remain
 independently co-visible. The Action Bar's `rows a-b/N` is the position inside
 THIS retained preview, never a Job-history line number, and it yields to the
 disclosure when the row is narrow. Search indexes are rebuilt for the current
 window/width/query only; a match that left the window cannot leave a stale
-highlight or `i/N` behind.
+highlight or `i/N` behind, and when the current match itself cannot be proven in
+the new window the selection falls back to the nearest PROVABLE match at or after
+the visible anchor rather than to an old ordinal.
 
 Not yet claimed: the clickable Command reader with exact selection/copy and the
 Output copy action (B1-C). Search, follow and the retention anchor above are

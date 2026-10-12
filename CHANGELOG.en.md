@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every hit is highlighted with the current one emphasised, `i/N` and
   `0/0 · No matches` are shown, `Enter` switches to result navigation where
   `n`/`N` cycle the hits, the first `Esc` leaves only the search (the Job stays
-  open and follow stays paused) and the second `Esc` returns to the Task Center.
+  open and follow stays paused) and the second `Esc` returns to the Task Center;
+  while a search owns the ordinary keys the bottom row no longer advertises Stop,
+  because that key belongs to the query there.
   When the retained window is truncated, a paused view keeps the same
   still-present row where it can, the bottom row number is a position inside this
   retained preview only, and `[GAP]` still comes only from the official fact.

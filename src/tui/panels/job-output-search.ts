@@ -19,6 +19,7 @@
 import {
   AltScreenSearchIndex,
   Input,
+  stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
   type AltScreenSearchMatch,
@@ -64,20 +65,24 @@ type PendingSelection = 'none' | 'query' | 'next' | 'previous'
 
 /** The longest run of trailing lines of `previous` that equals the leading run
  *  of `next` (KMP prefix function, O(previous + next)). Zero when no line can be
- *  proven to survive the new bounded window. */
+ *  proven to survive the new bounded window. Lines are compared by their
+ *  ANSI-STRIPPED content (DECISION-03): a pure style/reset difference on the
+ *  same visible row is not a different row. */
 function longestLineOverlap(previous: readonly string[], next: readonly string[]): number {
   if (previous.length === 0 || next.length === 0) return 0
-  const prefix = new Array<number>(next.length).fill(0)
-  for (let index = 1; index < next.length; index += 1) {
+  const strippedNext = next.map(line => stripTerminalSequences(line))
+  const strippedPrevious = previous.map(line => stripTerminalSequences(line))
+  const prefix = new Array<number>(strippedNext.length).fill(0)
+  for (let index = 1; index < strippedNext.length; index += 1) {
     let matched = prefix[index - 1]!
-    while (matched > 0 && next[index] !== next[matched]) matched = prefix[matched - 1]!
-    if (next[index] === next[matched]) matched += 1
+    while (matched > 0 && strippedNext[index] !== strippedNext[matched]) matched = prefix[matched - 1]!
+    if (strippedNext[index] === strippedNext[matched]) matched += 1
     prefix[index] = matched
   }
   let matched = 0
-  for (let index = 0; index < previous.length; index += 1) {
-    while (matched > 0 && previous[index] !== next[matched]) matched = prefix[matched - 1]!
-    if (matched < next.length && previous[index] === next[matched]) matched += 1
+  for (let index = 0; index < strippedPrevious.length; index += 1) {
+    while (matched > 0 && strippedPrevious[index] !== strippedNext[matched]) matched = prefix[matched - 1]!
+    if (matched < strippedNext.length && strippedPrevious[index] === strippedNext[matched]) matched += 1
   }
   return matched
 }
@@ -168,6 +173,9 @@ export class JobOutputSearch {
   private sourceTextValue = ''
   private searchableValue = false
   private anchorRow = 0
+  /** The viewport top the panel last painted: the fallback anchor when the
+   *  previous selection cannot be proven in the new retained window. */
+  private visibleAnchor = 0
   private pendingSelection: PendingSelection = 'none'
   private epoch: JobOutputSearchEpoch | undefined
   private revealPending = false
@@ -196,11 +204,6 @@ export class JobOutputSearch {
     return this.sourceTextValue
   }
 
-  /** Whether the current body is a searchable official retained text. */
-  get searchable(): boolean {
-    return this.searchableValue
-  }
-
   /** The rendered width of the last measured epoch (undefined before the first
    *  Output render). The retention rebase reuses it to compare rendered rows. */
   get renderedWidth(): number | undefined {
@@ -220,15 +223,24 @@ export class JobOutputSearch {
     this.sourceKeyValue = key
     this.sourceTextValue = searchable ? text : ''
     this.searchableValue = searchable
-    // A new bounded window invalidates a pending reveal; the rebuild keeps the
-    // selection by its UI-local match key when the occurrence survived.
-    this.revealPending = false
+    // The recorded epoch describes the PREVIOUS source: it must never be paired
+    // with the new one (a two-snapshot interval would otherwise rebase against
+    // the wrong rendered lines). The next render rebuilds it. A pending reveal
+    // SURVIVES the replacement: it is consumed against the current epoch, so a
+    // push landing between the keypress and the paint cannot swallow it.
+    this.epoch = undefined
+  }
+
+  /** Record the viewport top the panel last painted. */
+  setVisibleAnchor(row: number): void {
+    this.visibleAnchor = Math.max(0, row)
   }
 
   /** Open (or re-open) EDIT over the existing query. The caller has already
    *  proved a SearchRow is visible this frame. */
   openFind(scrollTop: number): void {
     this.anchorRow = Math.max(0, scrollTop)
+    this.visibleAnchor = this.anchorRow
     this.pendingSelection = 'query'
     this.modeValue = 'edit'
     this.revealPending = false
@@ -331,30 +343,36 @@ export class JobOutputSearch {
     if (reusable && this.pendingSelection === 'none') return this.epoch!
     const lines = reusable ? this.epoch!.lines : this.searchableValue ? this.text.render(width) : []
     const matches = this.index.search(lines, this.query).matches
-    const previousIndex = this.epoch?.selectedIndex ?? -1
+    // The first match at/after the given row, else the first match (the fork's
+    // own search geometry): the SELECTION is always provable from a row that
+    // exists in the NEW window, never from an old ordinal or a lost key.
+    const nearestIndex = (row: number): number => {
+      let low = 0
+      let high = matches.length
+      while (low < high) {
+        const middle = low + Math.floor((high - low) / 2)
+        if ((matches[middle]!.segments[0]?.row ?? 0) < row) low = middle + 1
+        else high = middle
+      }
+      return low < matches.length ? low : 0
+    }
     let selectedIndex = -1
     if (matches.length > 0) {
       const exactIndex = this.epoch?.selectedKey === undefined
         ? -1
         : matches.findIndex(match => matchKey(match) === this.epoch!.selectedKey)
       if (this.pendingSelection === 'query') {
-        // The first match at/after the opening anchor, else the first match.
-        let low = 0
-        let high = matches.length
-        while (low < high) {
-          const middle = low + Math.floor((high - low) / 2)
-          if ((matches[middle]!.segments[0]?.row ?? 0) < this.anchorRow) low = middle + 1
-          else high = middle
-        }
-        selectedIndex = low < matches.length ? low : 0
+        selectedIndex = nearestIndex(this.anchorRow)
       } else if (this.pendingSelection === 'next') {
-        const base = exactIndex >= 0 ? exactIndex : Math.min(Math.max(0, previousIndex), matches.length - 1)
-        selectedIndex = base < 0 ? 0 : (base + 1) % matches.length
+        const base = exactIndex >= 0 ? exactIndex : nearestIndex(this.visibleAnchor)
+        selectedIndex = (base + 1) % matches.length
       } else if (this.pendingSelection === 'previous') {
-        const base = exactIndex >= 0 ? exactIndex : Math.min(Math.max(0, previousIndex), matches.length - 1)
-        selectedIndex = base < 0 ? matches.length - 1 : (base - 1 + matches.length) % matches.length
+        const base = exactIndex >= 0 ? exactIndex : nearestIndex(this.visibleAnchor)
+        selectedIndex = (base - 1 + matches.length) % matches.length
       } else {
-        selectedIndex = exactIndex >= 0 ? exactIndex : Math.min(Math.max(0, previousIndex), matches.length - 1)
+        // A lost current hit falls back to the nearest PROVABLE match at/after
+        // the visible anchor (DECISION-03), never to a stale ordinal.
+        selectedIndex = exactIndex >= 0 ? exactIndex : nearestIndex(this.visibleAnchor)
       }
     }
     this.pendingSelection = 'none'

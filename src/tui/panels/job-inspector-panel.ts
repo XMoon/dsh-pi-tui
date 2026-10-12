@@ -336,6 +336,10 @@ interface JobOutputStatusFacts {
   readonly follow: boolean
   readonly gap: boolean
   readonly findHint: string
+  /** Whether a Find owns the ordinary keys this frame: the Stop segment is then
+   *  NOT advertised, because the SearchRow consumes ordinary letters (EDIT) and
+   *  keeps the Job output read-only in NAVIGATE (`tasks.stop` is inert there). */
+  readonly searchActive: boolean
   readonly position: { readonly start: number; readonly end: number; readonly total: number }
 }
 
@@ -361,7 +365,7 @@ class JobInspectorActionBar implements Component {
     const segments: Array<{ text: string; priority: number; short?: string }> = []
     segments.push({ text: 'Esc back', priority: 7 })
     const stopKey = componentKeymap.keyHint('tasks.stop')
-    if (this.canStop() && stopKey !== '') {
+    if (!facts.searchActive && this.canStop() && stopKey !== '') {
       // B1-A's own compaction: when both effective Stop keys are advertised and
       // the row is tight, the primary key alone still names the real action.
       const primaryKey = componentKeymap.keysFor('tasks.stop')[0]
@@ -469,8 +473,14 @@ export class JobInspectorPanel extends VStack {
   private readonly scrollView: JobOutputScrollView
   private readonly intents: JobInspectorPanelIntents
   /** One frame plan shared by every fixed child and rewritten once per render,
-   *  plus the frame width and the live view the Action Bar reads. */
-  private readonly chrome: { plan: JobInspectorChromePlan; width: number; view: JobInspectorView }
+   *  plus the frame width, the live view the Action Bar reads and the viewport
+   *  the position fact was last measured against. */
+  private readonly chrome: {
+    plan: JobInspectorChromePlan
+    width: number
+    view: JobInspectorView
+    positionViewportHeight: number
+  }
   private disposed = false
 
   constructor(initial: JobInspectorState, intents: JobInspectorPanelIntents) {
@@ -480,10 +490,19 @@ export class JobInspectorPanel extends VStack {
      *  fixed child's render boundary from the SAME live inputs and recorded
      *  here; every child of one frame therefore agrees, and the last committed
      *  plan/width are what the frame-painted boundary reads. */
-    const chrome: { plan: JobInspectorChromePlan; width: number; view: JobInspectorView } = {
+    const chrome: {
+      plan: JobInspectorChromePlan
+      width: number
+      view: JobInspectorView
+      /** The viewport height the Action Bar's position was measured against in
+       *  the LAST render pass (the layout commits the real viewport only after
+       *  every fixed child is measured, so the first frame must self-correct). */
+      positionViewportHeight: number
+    } = {
       plan: planChrome(0, intents.rows(), intents.notice() !== undefined, false),
       width: 0,
       view,
+      positionViewportHeight: -1,
     }
     const plan = (width: number): JobInspectorChromePlan => {
       const next = planChrome(
@@ -505,12 +524,16 @@ export class JobInspectorPanel extends VStack {
       primary: true,
       scrollbar: 'auto',
     })
-    const bar = new JobInspectorActionBar(intents.canStop, (width) => ({
-      follow: scrollView.isFollowRequested,
-      gap: chrome.view.gapBefore,
-      findHint: intents.findHint(),
-      position: positionFacts(search, scrollView, width),
-    }))
+    const bar = new JobInspectorActionBar(intents.canStop, (width) => {
+      chrome.positionViewportHeight = scrollView.viewportHeight
+      return {
+        follow: scrollView.isFollowRequested,
+        gap: chrome.view.gapBefore,
+        findHint: intents.findHint(),
+        searchActive: search.mode !== 'inactive',
+        position: positionFacts(search, scrollView, width),
+      }
+    })
     super([
       // Every fixed child renders AT MOST the rows the plan granted it (zero
       // included), so the pinned Action Bar can never be pushed off the screen;
@@ -529,6 +552,11 @@ export class JobInspectorPanel extends VStack {
     this.scrollView = scrollView
     this.intents = intents
     this.chrome = chrome
+    // The opener may ALREADY carry an observed snapshot (an observation port is
+    // allowed to emit its first snapshot synchronously inside `open()`), so the
+    // searchable source and the position fact are seeded from the initial state
+    // exactly like the body text — never left empty until a later push.
+    this.search.setSource(view.retainedText, view.phase === 'observed' && view.retainedText !== '')
   }
 
   /** Replace the whole frozen projection with the latest captured state and
@@ -556,6 +584,9 @@ export class JobInspectorPanel extends VStack {
       })
       this.scrollView.rebaseTo(target)
     }
+    // The anchor the next frame paints is the ANCHOR REBASE result, so a lost
+    // current match can fall back to a match provable from what the user sees.
+    this.search.setVisibleAnchor(this.scrollView.scrollTop)
     this.search.setSource(view.retainedText, searchable)
     this.invalidate()
     this.intents.requestRender()
@@ -575,9 +606,19 @@ export class JobInspectorPanel extends VStack {
       this.scrollView.viewportHeight,
       this.chrome.width,
     )
-    if (target === undefined) return
-    this.scrollView.scrollTo(target)
-    this.intents.requestRender()
+    if (target !== undefined) {
+      this.scrollView.scrollTo(target)
+      this.intents.requestRender()
+    }
+    // The fixed chrome is measured BEFORE the layout commits this frame's real
+    // viewport, so a frame whose position fact was derived from a stale viewport
+    // repaints ONCE with the committed geometry and keeps the Action Bar's
+    // `rows a-b/N` truthful from the first visible frame — no second geometry
+    // authority, and the guard converges after one extra frame.
+    if (this.chrome.positionViewportHeight !== this.scrollView.viewportHeight) {
+      this.chrome.positionViewportHeight = this.scrollView.viewportHeight
+      this.intents.requestRender()
+    }
   }
 
   /** The Job workspace's ONE input owner. `Esc`/`tasks.stop` are the B1-A
@@ -618,9 +659,10 @@ export class JobInspectorPanel extends VStack {
       return
     }
     if (matchesKey(data, 'end')) {
-      // Physical End is the ONLY follow re-arm; a live result view is left at the
-      // same time, so the tail is not locked by a stale selection.
-      if (search.mode === 'navigate') search.exit()
+      // Physical End is the ONLY follow re-arm; a live result view is left
+      // through the ONE exit path (physical focus returns to the panel) so the
+      // tail is not locked by a stale selection.
+      if (search.mode === 'navigate') this.exitSearch()
       this.scrollView.resumeFollow()
       this.intents.requestRender()
       return
@@ -665,10 +707,10 @@ export class JobInspectorPanel extends VStack {
     if (search.mode === 'navigate') {
       // NAVIGATE: only the result navigation keys act; ordinary printing is
       // inert — the Job is read-only and never leaks into the editor.
-      if (data === 'n') {
+      if (matchesKey(data, 'n')) {
         search.step(1)
         this.intents.requestRender()
-      } else if (data === 'N') {
+      } else if (matchesKey(data, 'shift+n')) {
         search.step(-1)
         this.intents.requestRender()
       }

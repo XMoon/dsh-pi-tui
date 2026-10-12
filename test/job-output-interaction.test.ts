@@ -61,6 +61,22 @@ function startApp(
 const rawView = (vt: VirtualTerminal): string[] => vt.getViewport().map(stripTerminalSequences)
 const view = (vt: VirtualTerminal): string => rawView(vt).join('\n')
 
+/** Paint until the predicate holds (bounded): a UI transition whose last step is
+ *  a requestRender-scheduled frame (a reveal, a chrome re-measure) needs one
+ *  more committed frame than a single `waitForRender()` is guaranteed to span. */
+async function paintedWhen(
+  vt: VirtualTerminal,
+  predicate: (painted: string) => boolean,
+  rounds = 12,
+): Promise<string> {
+  let painted = view(vt)
+  for (let index = 0; index < rounds && !predicate(painted); index += 1) {
+    await vt.waitForRender()
+    painted = view(vt)
+  }
+  return painted
+}
+
 async function flush(rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
@@ -312,6 +328,15 @@ test('B-01b rebaseRetainedAnchor: a pure append keeps the row, an eviction shift
     previousText: 'old window', nextText: 'new window',
     previousRenderedLines: old, nextRenderedLines: ['d', 'e'], oldScrollTop: 0,
   }), 0)
+  // DECISION-03 compares the ANSI-STRIPPED per-line content: a pure style/reset
+  // difference on the same visible rows is not a different row, so the overlap
+  // (and therefore the anchor) is still proven.
+  assert.equal(rebaseRetainedAnchor({
+    previousText: 'old window', nextText: 'new window',
+    previousRenderedLines: ['\x1b[31ma\x1b[39m', '\x1b[31mb\x1b[39m', '\x1b[31mc\x1b[39m'],
+    nextRenderedLines: ['b', 'c', 'd'],
+    oldScrollTop: 2,
+  }), 1, 'the SGR-only difference must not defeat the retention overlap')
 })
 
 // ── B-02: the real Job screen, keyboard scroll and the strict follow ─────────
@@ -487,6 +512,80 @@ test('B-05 the effective Find opens the JOB Find over the retained body and neve
   app.stop()
 })
 
+// ── B-05b: the initial (already observed) snapshot is searchable at open ───
+
+test('B-05b a Job opened with an ALREADY observed retained snapshot is searchable and positioned before any push', async () => {
+  // The observation port is allowed to emit its first snapshot synchronously
+  // inside `open()` (the Remote adapter does), so the opener's `initial` state
+  // may already carry `observed.text` — the workspace must project it into the
+  // search source and the position fact immediately, never wait for a later
+  // push (a settled/quiet Job never sends one).
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  await vt.waitForRender()
+  assert.equal(harness.observation.records.length, 1, 'the sync first snapshot opened exactly ONE observer')
+  assert.match(view(vt), /retained job-a/, 'the first snapshot really reached the body')
+  assert.match(view(vt), /rows 1-1\/1/, 'the position fact is live on the FIRST frame, not after a push')
+
+  // No further snapshot is emitted: Find must work on the initial state alone.
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('retained')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output: retained/)
+  assert.match(view(vt), /1\/1/, 'the initial retained text is searchable without a later push')
+  app.stop()
+})
+
+// ── B-05c: Stop is not advertised while a Find owns the ordinary keys ──────
+
+test('B-05c the Action Bar stops advertising Stop while a Find is active and restores it after Esc', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: 'retained job-a' })
+  await vt.waitForRender()
+  const bar = (): string => rawView(vt).at(-1) ?? ''
+  assert.match(bar(), /stop/, 'a running Job advertises Stop in the normal state')
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  assert.ok(!bar().includes('stop'),
+    `the Action Bar must not advertise Stop while the SearchRow consumes ordinary keys:\n${bar()}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.match(bar(), /stop/, 'leaving the search restores the Stop advertisement')
+  app.stop()
+})
+
+// ── B-05d: the fork's own search key never opens a second overlay ──────────
+
+test('B-05d Ctrl+Shift+F (the fork search chord) opens the Job Find, never the fork search overlay', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: 'needle in the retained body' })
+  await vt.waitForRender()
+  const originalStart = app.startTranscriptSearch
+  let transcriptSearches = 0
+  app.startTranscriptSearch = function (this: TuiApp): void {
+    transcriptSearches += 1
+    originalStart.call(this)
+  }
+  vt.sendInput('\x1b[102;6u') // Kitty CSI-u Ctrl+Shift+F
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /Find Output:/, 'the Job Find owns the chord')
+  assert.ok(!/Find in transcript/.test(painted), 'the fork built-in search overlay never opened')
+  assert.equal(transcriptSearches, 0)
+  app.stop()
+})
+
 // ── B-06: EDIT vs NAVIGATE and n/N ─────────────────────────────────────────
 
 test('B-06 EDIT types n/N as query text, Enter enters result navigation, n/N cycle, and 0 hits stay 0/0', async () => {
@@ -531,6 +630,45 @@ test('B-06 EDIT types n/N as query text, Enter enters result navigation, n/N cyc
   await vt.waitForRender()
   assert.match(view(vt), /3\/3/)
   assert.equal(app.hostEditorTextForTest(), '')
+  // Semantic key matching: the Kitty CSI-u form of `n` and the
+  // modifyOtherKeys form of Shift+N reach the SAME navigation (a raw byte
+  // comparison would silently dead-key them on those terminals).
+  vt.sendInput('\x1b[110u')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/, 'a CSI-u n really navigates')
+  vt.sendInput('\x1b[27;2;78~')
+  await vt.waitForRender()
+  assert.match(view(vt), /3\/3/, 'a modifyOtherKeys Shift+N really navigates backwards')
+  app.stop()
+})
+
+// ── B-06b: End in the query editor stays in the Input ──────────────────────
+
+test('B-06b End while EDITING the query stays in the Input and never resumes follow', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  const anchorTop = bodyTop(vt)
+  assert.match(view(vt), /Follow PAUSED/)
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('line 05')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output: line 05/)
+  vt.sendInput('\x1b[H') // Home in EDIT: the Input's own line-start, not the viewport
+  vt.sendInput('\x1b[F') // End in EDIT: the Input's own line-end, never a follow re-arm
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /Find Output: line 05/, 'the query editor keeps the search open')
+  assert.match(painted, /1\/10/, 'the query and its count are unchanged')
+  assert.match(painted, /Follow PAUSED/, 'End inside the query NEVER re-arms follow')
+  assert.equal(bodyTop(vt), anchorTop, 'End moved the Input cursor, never the Output viewport')
   app.stop()
 })
 
@@ -573,6 +711,8 @@ test('B-07 the first Esc leaves only the search (still PAUSED in the same Job) a
   assert.ok(!/Find Output:/.test(tail), 'End leaves the result view')
   assert.match(tail, /Follow ON/)
   assert.match(tail, /line 099/)
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true,
+    'End restores the physical focus from the now-hidden SearchRow')
 
   // The second Esc returns to the SAME browser instance.
   vt.sendInput('\x1b')
@@ -758,6 +898,105 @@ test('B-10 a truncated retained window rebases a provable anchor, never fabricat
   await vt.waitForRender()
   assert.equal(bodyTop(vt), 'line 120', 'the evicted anchor clamps to the earliest surviving row')
   assert.match(view(vt), /Follow PAUSED/)
+  app.stop()
+})
+
+// ── B-10b: a source change between frames never falsifies the anchor ───────
+
+test('B-10b an intermediate snapshot that never reached a frame never moves the retained anchor backward', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  const observation = harness.observation
+  observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 130')
+  // The first eviction is rendered (and is provably rebased)...
+  observation.latest()!.emit({ text: numberedLines(5, 199) })
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 130', 'the single-snapshot rebase preserves the row')
+  // ...then TWO windows land before the next frame: the second one has no
+  // rendered lines of its own, so the workspace must keep the last PROVEN
+  // offset (it may drift forward by the unprovable eviction) and must never
+  // subtract the wrong eviction count (which would show an EARLIER row).
+  observation.latest()!.emit({ text: numberedLines(10, 199) })
+  await vt.waitForRender()
+  const topIndex = Number(bodyTop(vt).split(' ')[1])
+  assert.ok(topIndex >= 130,
+    `a snapshot without a rendered epoch must never move the anchor BACKWARD (top=${topIndex})`)
+  assert.match(view(vt), /Follow PAUSED/)
+  assert.ok(!/\[GAP\]/.test(view(vt)), 'no fabricated GAP')
+  app.stop()
+})
+
+// ── B-10c: a pending reveal survives a snapshot landing before the paint ───
+
+test('B-10c a pending result reveal survives a snapshot that lands between the keypress and the paint', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+  assert.match(view(vt), /line 199/)
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('line 05')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/10/)
+  // Enter arms the reveal, and the newest retained window arrives BEFORE the
+  // frame paints: the reveal must still happen against the new epoch.
+  vt.sendInput('\r')
+  harness.observation.latest()!.emit({ text: numberedLines(0, 219) })
+  const painted = await paintedWhen(vt, current => /line 05[0-9]/.test(current))
+  assert.match(painted, /Find Output: line 05/)
+  assert.match(painted, /1\/10/, 'the selection survived the push')
+  assert.match(painted, /line 05[0-9]/, `the selected match is really revealed:\n${painted}`)
+  assert.match(painted, /Follow PAUSED/)
+  app.stop()
+})
+
+// ── B-10d: a lost current match falls back to the visible anchor ───────────
+
+test('B-10d after a truncation loses the current match, the selection falls back to the nearest provable match at the visible anchor', async () => {
+  const lines = Array.from({ length: 200 }, (_, index) => `line ${String(index).padStart(3, '0')}`)
+  lines[10] = 'needle alpha'
+  lines[190] = 'needle beta'
+  lines[195] = 'needle gamma'
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: lines.join('\n') })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H') // top: the opening anchor is the window top
+  await vt.waitForRender()
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /2\/3/)
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /3\/3/)
+
+  // The window now keeps ONLY the two tail matches; the selected one's row key
+  // is gone and the viewport clamps near the new top, so the fallback must be
+  // the FIRST match at/after that anchor — never the clamped old ordinal.
+  harness.observation.latest()!.emit({ text: numberedLines(150, 199).replace('line 190', 'needle beta').replace('line 195', 'needle gamma') })
+  const painted = await paintedWhen(vt, current => /1\/2/.test(current))
+  assert.match(painted, /1\/2/, `the nearest provable match from the visible anchor is selected:\n${painted}`)
+  assert.match(painted, /Follow PAUSED/)
+  assert.ok(!/\[GAP\]/.test(painted))
   app.stop()
 })
 
