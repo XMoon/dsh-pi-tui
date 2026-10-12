@@ -1767,15 +1767,25 @@ Command body as the ScrollView's only child, returns `capture: true` on a left
 press, and resolves every press/drag/release against the LAST PAINTED viewport
 geometry (read at the frame-painted boundary) plus the live scroll position —
 never the press-time captured origin, which goes stale as soon as an edge scroll
-moves the viewport. Press anchors at the grapheme's start; the later endpoint of
-the range is inclusive of the grapheme under the pointer, so a drag is the same
-range forwards and backwards, and a same-cell click selects nothing and copies
-nothing. The wheel is deliberately left UNHANDLED so the fork's own routing
-scrolls the active viewport, and the scrollbar keeps the fork's existing
-interaction. Holding the pointer past the body's top/bottom edge starts a
-temporary 50 ms timer that scrolls one row and grows the selection over the rows
-that scroll in; the timer belongs to the gesture alone and is released on
-release, page switch, resize, blur, workspace exit and dispose.
+moves the viewport. The range is SYMMETRIC and inclusive at both ends: the
+document-order earlier endpoint aligns to its grapheme's start and the later one
+to its grapheme's end, whichever end the user pressed first, so `a → c` and
+`c → a` over the same line copy identical bytes and the pressed grapheme is never
+dropped. A same-cell click selects nothing and copies nothing. The wheel is
+deliberately left UNHANDLED so the fork's own routing scrolls the active
+viewport, and the scrollbar keeps the fork's existing interaction.
+
+Auto-scroll follows the fork's own gesture feel: a PRESS only anchors (it never
+starts a timer), and once the gesture has really dragged, reaching the body's
+visible FIRST or LAST row — or leaving the body entirely, which keeps the clamp —
+starts a temporary 50 ms timer that scrolls one row and grows the selection over
+the rows that scroll in. A one-row viewport has no distinct edges, so the same
+cell never implies both directions: it scrolls only when the pointer clearly
+leaves the body. The timer stops as soon as the real document boundary cannot
+move the viewport any further, and it belongs to the gesture alone — it is
+released on release, page switch, resize, blur, label change, workspace exit and
+dispose. Only the Command viewport moves; the Output page's follow intent and
+scroll position are untouched by any of it.
 
 Both Copy verbs capture the payload SYNCHRONOUSLY and only then hand it to the
 app, so a snapshot arriving while the promise is in flight can never rewrite what
@@ -1786,21 +1796,42 @@ strategy only proves the bytes were EMITTED (OSC52 has no clipboard ACK), so the
 notice reads `Copy sent` and never claims the system clipboard received them; a
 `false` result and a rejection both read `Copy failed`, and a composition that
 does not wire the owned-task entry reports the same failure instead of looking
-inert. An empty or not-yet-observed retained Output never writes the clipboard:
-the panel still reports the EMPTY payload it captured, and the app answers
-`Nothing to copy` — never a false `Copy sent`. A Command page that cannot be
-entered makes no request at all, and an empty gesture (a click, or a drag that
-covers no cell) is not a copy intent: neither produces a request or a notice.
+inert.
+
+An intent with NO payload is answered by the reason the panel captured, never by
+a generic silence and never by a clipboard write: an observed-but-empty retained
+Output reads `Nothing to copy`, a not-yet-observed (or refused-observation)
+Output reads `Output unavailable`, and a Command copy that lost its eligibility
+reads `Command unavailable`. The workspace does not guess and does not reshuffle
+the sources: a Command page that cannot be entered makes no request at all, and
+an empty gesture (a click, or a drag that covers no cell) is not a copy intent, so
+neither produces a request or a notice.
 
 The header's Command summary and its `[Copy All]` are plain painted cells, so
 they route through the alt screen's existing press/click callbacks against a hit
 map produced by the LAST PAINTED header frame (the header's own painted top row
-included). The release must re-prove the SAME action, the SAME page and the SAME
-Command source identity the press named, so a repaint between press and release —
-another Job, a re-flowed header row, a narrowed button — can never fire a ghost
-open or a copy of different bytes. Both verbs also have their fixed Job-local
-keyboard fallbacks (`v` on Output, `C` on either page), so nothing is
-mouse-only.
+included), and the region is exactly the painted text — a click on the row's
+trailing blank space is inert. The release must re-prove the SAME action, the
+SAME page and the SAME Command source identity the press named, so a repaint
+between press and release — another Job, a re-flowed header row, a narrowed
+button — can never fire a ghost open or a copy of different bytes. Both verbs also
+have their fixed Job-local keyboard fallbacks (`v` on Output, `C` on either
+page), so nothing is mouse-only. The keyboard and the pointer are separate
+intents: while a Command Find owns the ordinary keys a plain `C` types into the
+query (or stays inert in result navigation) and neither state advertises a
+keyboard Copy, yet the still-painted `[Copy All]` remains clickable — one click
+copies only the official original label, and it never touches the query, the
+current hit, the search mode or the search input's focus.
+
+The Action Bar keeps B1-A/B's retention order and simply appends the two
+read-only verbs at the LOWEST priority, so a narrow row drops `C copy output`
+before `V command` and both before any pre-existing truth (`Esc back`, Stop,
+Follow, `[GAP]`, the retained/full disclosure, the position fact and the Find
+hint). At 80 columns that means the verbs are usually not advertised at all while
+their KEYS stay fully functional: no half-painted affordance is ever shown, no
+action that cannot execute is advertised, and a `[Copy All]` the frame could not
+paint leaves no click target behind. Long-term discoverability of these entries
+belongs to the B1-D tab/action design, not to a Footer redesign here.
 
 ## Long user messages collapse at the presentation layer only
 

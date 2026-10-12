@@ -280,7 +280,9 @@ export class JobCommandReader {
       this.gestureActive = true
       this.anchor = pointer
       this.focus = pointer
-      this.updateAutoScroll(viewport, layout.rows.length)
+      // A press only anchors: the edge timer starts once the gesture has really
+      // dragged (plan §6 rule 1).
+      this.stopAutoScroll()
       this.intents.requestRender()
       return { handled: true, capture: true, render: false }
     }
@@ -323,27 +325,46 @@ export class JobCommandReader {
     return Math.max(0, Math.min(contentWidth - 1, screenX - viewport.x))
   }
 
-  /** Start/stop/redirect the edge auto-scroll timer for the current pointer
-   *  position. The timer re-resolves the pointer against the CURRENT scrollTop
-   *  after every step, so the selection keeps advancing exactly as the content
-   *  moves under it. */
+  /** Start/stop/redirect the ONE edge auto-scroll timer (plan §6): a press only
+   *  anchors (it never starts a timer), and once the gesture has really DRAGGED,
+   *  reaching the body's visible FIRST or LAST row — or leaving the body
+   *  entirely — starts the matching direction. The timer re-resolves the pointer
+   *  against the CURRENT scrollTop after every step, stops as soon as the
+   *  viewport cannot move further, and belongs to this gesture alone. */
   private updateAutoScroll(viewport: CommandPaintedBox, rowCount: number): void {
+    const height = Math.max(1, viewport.height)
     const above = this.pointerY < viewport.y
-    const below = this.pointerY >= viewport.y + Math.max(1, viewport.height)
-    if (!above && !below) {
+    const below = this.pointerY >= viewport.y + height
+    let direction: -1 | 1 | undefined
+    if (above) direction = -1
+    else if (below) direction = 1
+    else if (height > 1) {
+      // Inside the body only the extreme VISIBLE rows are edges. A one-row
+      // viewport has no distinct edges, so the same cell can never imply both
+      // directions: it scrolls only when the pointer clearly leaves the body.
+      const row = this.pointerY - viewport.y
+      if (row <= 0) direction = -1
+      else if (row >= height - 1) direction = 1
+    }
+    if (direction === undefined) {
       this.stopAutoScroll()
       return
     }
-    const direction: -1 | 1 = above ? -1 : 1
     if (this.autoScrollTimer !== undefined && this.autoScrollDirection === direction) return
     this.stopAutoScroll()
     this.autoScrollDirection = direction
+    const step = direction
     const timer = setInterval(() => {
       if (this.disposedValue || !this.gestureActive) {
         this.stopAutoScroll()
         return
       }
-      this.scrollView.scrollBy(direction)
+      // A tick that cannot move the real viewport must stop the timer instead of
+      // looping forever at the document boundary.
+      if (this.scrollView.scrollBy(step) !== 0) {
+        this.stopAutoScroll()
+        return
+      }
       // The painted viewport may have moved (a chrome row appeared): re-read it
       // instead of trusting the box captured when the drag started.
       const fresh = this.intents.paintedBox(this.scrollView) ?? viewport

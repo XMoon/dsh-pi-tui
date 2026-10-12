@@ -66,12 +66,19 @@ export type JobReadView = 'output' | 'command'
 /** The three copy sources of the workspace (plan §1.2). */
 export type JobCopySource = 'output' | 'command-all' | 'command-selection'
 
+/** Why ONE copy intent has no payload (plan §3). The workspace never guesses:
+ *  it names the exact source state, and the app answers with the fixed notice
+ *  instead of a clipboard write. */
+export type JobCopyUnavailable = 'output-empty' | 'output-unavailable' | 'command-unavailable'
+
 /** ONE copy intent: the payload is captured SYNCHRONOUSLY by the panel, so the
  *  app's asynchronous clipboard settlement never recomputes it from newer
- *  state. */
+ *  state. `unavailable` is set INSTEAD of a payload when the intent cannot
+ *  execute: the app then writes nothing and reports the named reason. */
 export interface JobCopyRequest {
   readonly source: JobCopySource
   readonly text: string
+  readonly unavailable?: JobCopyUnavailable
 }
 
 /** One clickable region of the LAST PAINTED header frame. `row` is relative to
@@ -1218,22 +1225,33 @@ export class JobInspectorPanel extends VStack {
     this.intents.focusComponent(this)
   }
 
-  /** `C` on the Command page: the ORIGINAL observed label, captured now. */
+  /** `C` on the Command page: the ORIGINAL observed label, captured now. An
+   *  ineligible Command (a lost-eligibility race: the page switches back on the
+   *  next frame) reports its own reason instead of failing silently. */
   private copyCommandAll(): void {
-    if (this.disposed || !commandEligible(this.chrome.view)) return
-    const text = this.commandReader.source
-    if (text === '') return
-    this.intents.onCopy({ source: 'command-all', text })
+    if (this.disposed) return
+    if (!commandEligible(this.chrome.view)) {
+      this.intents.onCopy({ source: 'command-all', text: '', unavailable: 'command-unavailable' })
+      return
+    }
+    this.intents.onCopy({ source: 'command-all', text: this.commandReader.source })
   }
 
   /** `C` on the Output page: the retained snapshot text, captured now, with no
    *  trim/strip/replace shaping of any kind. A phase with no observed snapshot
-   *  and an observed-but-empty body BOTH report an EMPTY payload: the app then
-   *  refuses the clipboard write and shows the honest "nothing to copy"
-   *  feedback instead of a false success (plan §1.2). */
+   *  and an observed-but-empty body report DIFFERENT reasons (plan §3), so the
+   *  user learns which state they are looking at instead of a generic silence. */
   private copyOutput(): void {
     const view = this.chrome.view
-    this.intents.onCopy({ source: 'output', text: view.phase === 'observed' ? view.retainedText : '' })
+    if (view.phase !== 'observed') {
+      this.intents.onCopy({ source: 'output', text: '', unavailable: 'output-unavailable' })
+      return
+    }
+    if (view.retainedText === '') {
+      this.intents.onCopy({ source: 'output', text: '', unavailable: 'output-empty' })
+      return
+    }
+    this.intents.onCopy({ source: 'output', text: view.retainedText })
   }
 
   private exitSearch(): void {
