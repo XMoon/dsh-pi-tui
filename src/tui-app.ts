@@ -5084,6 +5084,7 @@ export class TuiApp {
           return outcome.kind === 'activated' && !outcome.consumed ? undefined : { consume: true }
         }
         if (leader.pending || armPrefix) {
+          let reArmedPrefix = false
           if (leader.pending && !physicalEscape
             && leader.leaderBindings.some(binding => matchesKey(data, binding.key))) {
             // A NON-exit leader completion: the workspace blocks it — the sequence
@@ -5091,10 +5092,15 @@ export class TuiApp {
             leader.cancel()
           } else {
             // The prefix arms; Escape cancels (consumed); typing cancels and passes.
-            leader.feed(data)
+            const outcome = leader.feed(data)
+            reArmedPrefix = outcome.kind === 'consumed' && leader.pending
           }
-          const sameLeader = this.exitConfirmTrigger?.leaderKey !== undefined
-            && this.exitConfirmTrigger.leaderKey === leader.leaderKey
+          // Mirror the ladder's confirmation discipline EXACTLY: ONLY a real
+          // PREFIX press that left the machine pending on the same leader keeps an
+          // armed exit confirmation. Every other outcome — a cancelled sequence, a
+          // BLOCKED non-exit completion, typing — is an intervening action and
+          // disarms it, so a later exit completion can never confirm a stale arm.
+          const sameLeader = reArmedPrefix && this.exitConfirmTrigger?.leaderKey === leader.leaderKey
           if (!sameLeader) this.clearExitConfirmation()
           return { consume: true }
         }

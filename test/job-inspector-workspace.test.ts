@@ -1197,28 +1197,49 @@ test('A-09j a leader-bound effective exit still leaves the TUI while every other
   })
   await vt.waitForRender()
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  const press = async (key: string): Promise<void> => {
+    vt.sendInput('\x18') // leader prefix
+    await vt.waitForRender()
+    vt.sendInput(key)
+    await vt.waitForRender()
+  }
 
-  // A NON-exit leader action is cancelled inside the workspace, never dispatched.
-  vt.sendInput('\x18') // leader prefix
-  await vt.waitForRender()
-  vt.sendInput('t')
-  await vt.waitForRender()
+  // Phase 1: a NON-exit leader action is cancelled inside the workspace (never
+  // dispatched), and the leader-bound EXIT needs its same-sequence second
+  // completion, exactly like the direct exit key.
+  await press('t')
   assert.equal(tasksOpened, 0, 'a leader-bound background action must stay blocked inside the workspace')
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true, 'the workspace keeps the keyboard')
-
-  // The leader-bound EXIT needs its same-key second completion, exactly like the
-  // direct exit key.
-  vt.sendInput('\x18')
-  await vt.waitForRender()
-  vt.sendInput('x')
-  await vt.waitForRender()
+  await press('x')
   assert.equal(exits, 0, 'the first leader completion only arms the confirmation')
-  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  await press('x')
+  assert.equal(exits, 1, 'the same leader sequence confirms and really leaves the TUI')
+
+  // Phase 2: a BLOCKED non-exit completion is an intervening action — it must
+  // disarm the pending exit confirmation, so a fresh exit sequence only arms.
+  await press('x')
+  assert.equal(exits, 1)
+  await press('t')
+  assert.equal(tasksOpened, 0)
+  await press('x')
+  assert.equal(exits, 1, 'a blocked leader action must disarm the pending exit confirmation')
+  await press('x')
+  assert.equal(exits, 2, 'the re-armed same leader sequence confirms')
+
+  // Phase 3: a pending sequence cancelled by Escape disarms it too, and the
+  // Escape itself only cancels the sequence (the workspace stays open).
+  await press('x')
+  assert.equal(exits, 2)
   vt.sendInput('\x18')
   await vt.waitForRender()
-  vt.sendInput('x')
+  vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.equal(exits, 1, 'the confirmed leader-bound exit really leaves the TUI')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true,
+    'a pending-sequence Escape only cancels the sequence')
+  await press('x')
+  assert.equal(exits, 2, 'a cancelled sequence must disarm the pending exit confirmation')
+  await press('x')
+  assert.equal(exits, 3, 'the confirmed leader-bound exit really leaves the TUI')
   handle.close()
   await vt.waitForRender()
   app.stop()
@@ -1402,6 +1423,55 @@ test('A-12d a REAL failing Job screen start unwinds: the observation is released
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.deepEqual(harness.observation.forJob('job-b'), [1])
+  harness.tasks.disposeTaskBrowser()
+  app.stop()
+})
+
+test('A-12e a REAL failing Job screen stop never strands the panel, the return surface or the observation', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  const focusBefore = app.focusedComponentForTest()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  const panelDisposals: number[] = []
+  const originalPanelDispose = JobInspectorPanel.prototype.dispose
+  JobInspectorPanel.prototype.dispose = function (this: JobInspectorPanel): void {
+    panelDisposals.push(1)
+    originalPanelDispose.call(this)
+  }
+  const originalAltStop = TuiAltScreen.prototype.stop
+  TuiAltScreen.prototype.stop = function (this: TuiAltScreen, options?: Parameters<typeof originalAltStop>[0]): void {
+    originalAltStop.call(this, options)
+    throw new Error('job screen stop failed')
+  }
+  try {
+    // The workspace close really fails at the physical screen stop.
+    assert.throws(() => vt.sendInput('\x1b'), /job screen stop failed/, 'the real failure propagates')
+    await vt.waitForRender()
+    // The INDEPENDENT obligations still ran: the panel (its ScrollView/body) was
+    // released exactly once, the observation was released exactly once, the
+    // return surface and its focus owner were restored, and no lease survives.
+    assert.equal(panelDisposals.length, 1, 'the panel is released exactly once despite the failing screen stop')
+    assert.deepEqual(harness.observation.forJob('job-a'), [1], 'the observer is released exactly once')
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false, 'no lease survives')
+    assert.equal(app.focusedComponentForTest(), focusBefore, 'the return surface and its focus owner were restored')
+    // The restored surface really owns the terminal input again.
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true,
+      'the restored browser is interactive after the failed stop')
+    assert.deepEqual(harness.observation.forJob('job-a'), [1, 0])
+  } finally {
+    TuiAltScreen.prototype.stop = originalAltStop
+    JobInspectorPanel.prototype.dispose = originalPanelDispose
+  }
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.deepEqual(harness.observation.forJob('job-a'), [1, 1])
   harness.tasks.disposeTaskBrowser()
   app.stop()
 })
