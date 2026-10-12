@@ -136,7 +136,7 @@ inside a button.
 | Full model details | `Cancel`, `Back`, `Confirm` |
 | Reasoning Effort | `Cancel`, `Back`, `Confirm` |
 | More actions | `Cancel`, `Back` (this page never writes) |
-| `loading` / `pending` / `error` | `Cancel`, Primary (a disabled `Confirm` while loading, a disabled `Selecting…` while the write is admitted, the read-only `Retry` while the directory read failed) |
+| `loading` / `pending` / `error` | `Cancel`, Primary (a disabled `Confirm` while loading, a disabled `Selecting…` while the write is admitted, the read-only `Retry` while the directory read failed). While the write is ADMITTED that first entry is labelled `Close`, not `Cancel`: closing the panel does not cancel an operation that is already with the Host, and the label must not promise an undo the contract does not offer. |
 
 `Confirm` is the visible label of the same stable `apply` action: the live write
 still switches the Session's model and the sessionless write still confirms the
@@ -169,8 +169,9 @@ model list's single strip chip `More actions…`, which the SDK delivers as
 `action { act: 'strip', value: 'strip-more' }` on the same channel as the bar
 actions, and from the keyboard through the `strip` zone.
 
-`Cancel` is the visible label of the same stable `close` action, so its backdrop
-and `Esc` behavior are unchanged. The action **ids** are the routing authority and
+`Cancel` is the visible label of the same stable `close` action (labelled `Close`
+while a write is admitted, for the reason above), so its backdrop and `Esc`
+behavior are unchanged. The action **ids** are the routing authority and
 stay stable (`close`, `details`, `effort-page`, `back`, `retry`, `apply`), the
 More page's rows carry the `more:` prefix of the action they run, and the strip
 chip carries `strip-more`; the key map and the row router act on those ids, never
@@ -419,7 +420,9 @@ layout class instead:
   lines and pushed the consequence sentence past its bottom edge);
 - `lg` shows the complete business action NAME in the strip and keeps the side
   column's Model Details and its inline Reasoning Effort, with no multi-line
-  explanation added;
+  explanation added (the More page, which offers no Primary Action, leaves
+  that line empty instead of naming an operation it cannot run — the subject
+  already has its own slot and is never duplicated);
 - the 400px floor does not show the complete consequence explanation, per the
   `KNOWN_CLIENT_LIMITATION` above — but the TARGET stays identifiable there by
   another means: the highlighted model's own row states its drafted effort

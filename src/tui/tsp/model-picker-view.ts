@@ -374,8 +374,14 @@ function modelListPicker(
           // At `lg` the subject owns the subtitle, so the strip's own line states
           // the complete operation name instead — the same thing the `md` block
           // states, in the one line this layout can afford beside the inline
-          // effort radios the side column must keep.
-          strip: { label: `Action: ${operationName(panel)}`, items: stripChips(panel) },
+          // effort radios the side column must keep. The More menu offers no
+          // Primary Action, so naming one there would be a lie AND repeating the
+          // subject would duplicate a slot the contract shows once: that page
+          // leaves the line empty.
+          strip: {
+            label: panel.page === 'more' ? undefined : `Action: ${operationName(panel)}`,
+            items: stripChips(panel),
+          },
         }
       // The compact subject gets its own complete line instead of a truncated
       // title; the banned B2F form concatenated the subject, current value and

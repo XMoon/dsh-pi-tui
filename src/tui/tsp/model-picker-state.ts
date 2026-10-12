@@ -449,7 +449,11 @@ function primaryAction(panel: ModelPickerPanel): PickerAction {
  * across it, so a visible action can never be unreachable or a no-op.
  */
 export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
-  const actions: PickerAction[] = [{ id: 'close', label: 'Cancel', end: true }]
+  // The visible label follows what the action really does: while a write is
+  // admitted, closing the panel does NOT cancel the operation that is already
+  // with the Host, so that phase keeps the honest `Close` instead of the `Cancel`
+  // a user would read as "undo the write".
+  const actions: PickerAction[] = [{ id: 'close', label: panel.phase === 'pending' ? 'Close' : 'Cancel', end: true }]
   // Only `ready` admits browsing: a loading panel admits the search box and
   // Cancel, an admitted write admits Cancel, and a failed read admits only the
   // action bar's Retry. Rendering a browse action the phase refuses would make
