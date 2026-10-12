@@ -47,16 +47,26 @@
 - 性能统计改由 TUI 自有的 Host `piTuiPerformance` 投影提供：Direct 与 Remote
   同源，重连与本地分页不再影响数值；主会话与查看中的子会话各自显示自己 Session
   的数值。某个范围没有合格样本时不再显示 `0 tok/s`，而是省略该数值。
-- TSP 实验渲染器的 `/model` 收敛信息层级：底部按钮改为短而固定——`Cancel`
-  （写入进行中时显示为 `Close`，因为关闭面板并不撤销已提交的写入）
-  加至多一个短动作（`Confirm` / `Retry`；页面自身返回用的 `Back` 除外），完整业务含义由列表旁的
-  「Operation」说明块给出（目标模型、Reasoning Effort、完整动作名与一句后果
-  说明，自动折行）；`Full model details…`、`All reasoning effort levels…`、
-  `Retry failed providers (N)` 等次级操作移入 `More actions` 页，由模型列表
-  strip 上的 `More actions…` 打开，不再挤占写入按钮的宽度。写入仍是同一次业务
-  提交。原生客户端在 400px 宽度下限会隐藏该说明区（`pv-hide`），该宽度只保证
-  短按钮完整可读、目标可辨认、鼠标与键盘均可操作；完整说明文字记为
-  已知客户端限制。
+- TSP 实验渲染器的 `/model` 改成「选模型 → 看该模型 → 显式提交」的三级任务流。
+  宽屏（`cols >= 120`）仍是「Provider 作用域 + 模型列表 + 模型细节栏」三栏：细节卡片
+  标题带 `›` 并绑定了卡片自身的点击目标，`Tab` 聚焦该卡后按 `Enter` 打开只读的完整
+  详情页；栏内 Reasoning Effort 单选项点一下只改本地草稿。侧栏放不下整份内容时，
+  同一张卡改成 `Open model & effort ›` 入口，`Tab` 聚焦后按 `Enter` 打开该模型自己
+  的**概览**页；普通分屏/窄屏也一样——模型列表本身不含写入按钮，`Enter`（或选中该行）
+  进入该行模型的概览，概览用
+  原生主列表列出完整身份、`View full model details ›` 入口和全部 Effort 候选，
+  身份续行可逐行阅读，静态行按 `Enter` 无动作，Effort 行只改草稿，最后只有明确命名
+  的 `Switch`（会话）或 `Save default`（无会话）提交一次。`Cancel`（写入进行中显示
+  `Close`，因为关闭并不撤销已提交的写入）+ `Retry`（仅有 Provider 读取失败时，且只
+  出现在模型列表）+ `Back`（概览/详情页）构成短而固定的底部按钮；详情页永不写入，
+  在详情页或窄屏模型列表上伪造提交会被直接拒绝。原先的 `More actions` 页、
+  `Action: …` 条、`Operation` 说明块、strip 与 `Confirm` 模糊动词全部移除。写入仍是
+  同一次业务提交，读取仍只有同一个 owner。
+  本次未在真实 Tern 面板复验，因此有两项明确记为**未验证**而非已通过：点击细节卡片
+  **正文文本子节点**时客户端是否把该点击派发到卡片自身（键盘 `Tab`/`Enter` 路径不受
+  影响），以及 400px 宽度下限/放大字体下新按钮标签的完整可见性；细节见
+  `docs/tern-tsp/model-selection.md` 的未验证清单。原生客户端在 400px 宽度下限及放大
+  字体下的截断仍记为已知客户端限制。
 
 ### 修复
 

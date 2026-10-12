@@ -36,11 +36,17 @@ evidence ledger. Per-PR measurements live under
   explorer, compact drill-down, K2 keyboard, explicit-apply-only writes, native
   components only). The required native kinds enable only this additional TUI
   builtin; the existing model reads/writes and modal seat remain authoritative.
-  The Owner's follow-up revisions — the scope-column click protocol, the
-  short `Cancel`/`Confirm` footer with the complete meaning in an `Operation`
-  block, the secondary operations moved to a `More actions` page reached from the
-  strip chip, and the drill-down details and Effort pages — are part of the same
-  UX.
+  The Owner's earlier follow-up revisions added the scope-column click protocol
+  and the then-drill-down details/Effort pages, and the Model-UX restructuring
+  revision SUPERSEDED that footer and those pages: it removed the global
+  `Operation` block, the `Action:` strip, the `More actions` page and the vague
+  `Confirm` verb, and replaced them with the three-page
+  **Models → Overview → Full details** flow: the wide side column edits one model
+  in place (or becomes ONE `Open model & effort ›` entry), every other layout
+  opens that model's own Overview — which now carries every Reasoning Effort
+  candidate, so the former `Reasoning Effort` page no longer exists — the Full
+  details page is read-only, and only the explicitly labelled `Switch` /
+  `Save default` action writes.
   See [Model selection](./tern-tsp/model-selection.md) for the behavior,
   ownership, regression coverage and qualification limits, and
   [PR4-A evidence](./tern-tsp/evidence/pr4-a.md) for the durable summary of what is
@@ -271,7 +277,7 @@ composition root (table above); the caution is kept here because it is why no se
 | Editor/submit input inside TSP | IMPLEMENTED (B1/B2); real-GUI IME / physical paste / physical control keys are B4 qualification items |
 | Question/Approval modals inside TSP | IMPLEMENTED (B3): one official FIFO seat over the real lifecycle (timed → continued → `Alt+Q` → late answer); fail-closed in PR3-A only |
 | Preset inspection and selection inside TSP | PR4-A implementation: Owner-frozen native UI over the original command family (Built-in/Custom rows, Current/Next-session/default/Draft facts, read-only Details page, two-zone K2, explicit-action-only `Use`/`Set new-session default`); `picker` required. Automated coverage includes the real Direct registry roster, the started-Session refusal, the typed verbs and the new-session-default write through the real ConfigEditor/Loader profile document plus a fresh-Context reload, and the blank-live-Session switch over a REAL persisted Session resumed through the official persistence seam (durable `agent-preset/selected`, authority reread, locked negative, clean teardown); Remote TSP, the shipped full profile/HMR and physical input remain open. [Preset selection](./tern-tsp/preset-selection.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
-| Model/effort selection inside TSP | PR4-A implementation: Owner-frozen B2/compact native UI over the original handler (radio-row draft, a short `Cancel`/`Confirm` footer whose full meaning an `Operation` block carries, secondary operations on a `More actions` page reached from the strip, K2 keyboard, one read owner with Retry, scope-column and strip clicks on the SDK's own `action` channel); `picker`/`row`/`card` required. Automated coverage includes live Agent selection, isolated profile persistence/restart and real-pane headless layout; physical input and full-profile qualification remain open. [Model selection](./tern-tsp/model-selection.md) · [PR4-A evidence](./tern-tsp/evidence/pr4-a.md) |
+| Model/effort selection inside TSP | PR4-A implementation + Model-UX restructuring: Owner-frozen native **Models → Overview → Full details** flow over the original handler (radio-row draft in the wide side column, that model's Overview as the compact/bounded path, a read-only Full details page, a short `Cancel` / `Back` / `Retry` / `Switch` / `Save default` footer, K2 keyboard, one read owner with Retry, scope clicks on the SDK's own `action` channel); `picker`/`row`/`card` required. Automated coverage includes live Agent selection, isolated profile persistence/restart and the full K2/wire matrix; the restructured surface's physical-pane pointer/containment qualification is recorded as NOT_VERIFIED. [Model selection](./tern-tsp/model-selection.md) · [PR4-A evidence](./tern-tsp/evidence/pr4-a.md) |
 
 | Search/Reveal/Focus parity inside TSP | PLANNED (PR4–PR5) |
 | ExtensionView / custom renderers over TSP | PLANNED (policy undefined) |
