@@ -395,12 +395,19 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
   return actions
 }
 
-/** The action that owns Enter right now. */
+/** The action that owns Enter right now.
+ *
+ *  The frozen default is the Primary Action (an explicit bar focus outside the
+ *  current phase or page falls back to it), but a DISABLED action owns no Enter and
+ *  shows no cue: when the Primary cannot act — a read that failed, a directory with
+ *  no selectable model, a search with no match — focus falls back to the last action
+ *  that CAN act (`Close` is always enabled), instead of parking the keyboard on a dead
+ *  entry that no `▸` marks and Enter does nothing with. */
 export function focusedAction(panel: ModelPickerPanel): PickerAction {
   const actions = pickerActions(panel)
-  const explicit = actions.find((action) => action.id === panel.actionFocus && action.disabled !== true)
-  // `pickerActions` always ends with the Primary Action.
-  return explicit ?? actions[actions.length - 1]!
+  const enabled = (action: PickerAction): boolean => action.disabled !== true
+  const explicit = actions.find((action) => action.id === panel.actionFocus && enabled(action))
+  return explicit ?? actions.filter(enabled).at(-1) ?? actions[actions.length - 1]!
 }
 
 /** The next ENABLED action in the bar, wrapping in `delta`'s direction. */

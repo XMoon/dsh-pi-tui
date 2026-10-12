@@ -1432,6 +1432,101 @@ test('native Model: the keyboard hint names where the keyboard goes, never a gue
   detailsPane.handle.close()
 })
 
+test('native Model: the bar never parks its focus on a disabled action', async (t) => {
+  // A search with NO match disables the Primary Action: the bar must fall back to an
+  // action that can really act (`Close` in a clean catalogue), never to the disabled
+  // Primary, which owns no Enter and shows no cue.
+  const m = await mounted(t)
+  await resize(m.pane, 1280)
+  await m.ready({
+    current: { provider: 'a', model: 'same' },
+    directory: {
+      default: { provider: 'a', model: 'same' },
+      routableProviders: ['a'],
+      groups: [{ id: 'a', name: 'A', models: [{ id: 'same', name: 'Twin' }] }],
+      failures: [],
+    },
+  })
+  for (const char of 'zzzz') {
+    m.pane.key(char)
+    await settle(10)
+  }
+  await waitUntil('no match', () => (props(m.pane).items as unknown[]).length === 0)
+  assert.equal(actionOf(m.pane, 'apply')?.disabled, true, 'the Primary Action is disabled')
+  m.pane.key('\u001b[Z')
+  await waitUntil('bar focused on an action that can act',
+    () => String(actionOf(m.pane, 'close')?.label).startsWith('▸'))
+  assert.ok(
+    !String(actionOf(m.pane, 'apply')?.label).startsWith('▸'),
+    'a disabled action never carries the focus cue',
+  )
+  m.pane.key('\r')
+  await waitUntil('Enter ran that available Close', () => picker(m.pane) === undefined)
+  // An EMPTY directory is the same boundary: nothing selectable, so the bar's focus is
+  // an action that can act.
+  const empty = await mounted(t)
+  await resize(empty.pane, 1280)
+  await empty.ready({
+    current: undefined,
+    directory: {
+      default: { provider: 'a', model: 'same' },
+      routableProviders: ['a'],
+      groups: [],
+      failures: [],
+    },
+  })
+  assert.equal(actionOf(empty.pane, 'apply')?.disabled, true, 'no directory means no write')
+  empty.pane.key('\u001b[Z')
+  await waitUntil('empty directory: the bar focused a live action',
+    () => String(actionOf(empty.pane, 'close')?.label).startsWith('▸'))
+  assert.ok(
+    !String(actionOf(empty.pane, 'apply')?.label).startsWith('▸'),
+    'the empty-directory bar never cues the disabled Primary',
+  )
+  empty.pane.key('\r')
+  await waitUntil('empty directory: Enter closes', () => picker(empty.pane) === undefined)
+})
+
+test('native Model: a failed READ keeps Tab out of an inert effort zone', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  // Partial success: one provider failed, the highlighted model still carries its
+  // effort metadata (kept for context when the read later fails for good).
+  await m.ready()
+  action(pane, 'retry')
+  await waitUntil('the re-read starts', () => props(pane).state === 'loading')
+  m.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the read failed', () => props(pane).state === 'error')
+  assert.equal(m.retries(), 1, 'the first Retry really re-read through the one read owner')
+  // ONE Tab must reach the only operable action (Retry), never the stale effort zone;
+  // the old rows are still on screen, so this is about the keyboard path, not data.
+  pane.key('\t')
+  await waitUntil('the barrier went straight to Retry',
+    () => String(actionOf(pane, 'apply')?.label).startsWith('▸')
+      && String(actionOf(pane, 'apply')?.label).includes('Retry'))
+  pane.key('\r')
+  await waitUntil('Enter ran that Retry again', () => m.retries() === 2)
+  // The symmetric path: the details page is entered while the read is HEALTHY, then the
+  // read fails under it — its bar offers only Retry/Close, and one Tab reaches them (a
+  // failed read cannot open a page, so the page must be reached before the failure).
+  const details = await mounted(t)
+  await resize(details.pane, 1280)
+  await details.ready()
+  action(details.pane, 'details')
+  await waitUntil('details page', () => props(details.pane).title === 'Model details')
+  details.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the read failed under the details page', () => props(details.pane).state === 'error')
+  for (const id of ['details', 'effort-page', 'back']) {
+    assert.equal(actionOf(details.pane, id), undefined, `${id} is not offered by a failed read`)
+  }
+  details.pane.key('\t')
+  await waitUntil('the details bar focused Retry',
+    () => String(actionOf(details.pane, 'apply')?.label).startsWith('▸'))
+  details.pane.key('\r')
+  await waitUntil('the details page Retry ran too', () => details.retries() === 1)
+  details.handle.close()
+})
+
 test('native Model: the paged wide column keeps the bounded identity and the hint', async (t) => {
   const m = await mounted(t, { sessionless: false })
   // A long configured selection plus eight widest-glyph labels: the effort rows
