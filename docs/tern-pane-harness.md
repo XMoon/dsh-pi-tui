@@ -52,9 +52,10 @@ node scripts/tern-pane-drive.mjs <flow.mjs> [--out <dir>]
 Artifacts land in `<repo>/temp/tern-pane` by default (gitignored); `--out` or
 `TERN_PANE_OUT` moves them. **The run directory is wiped at start**, so the driver
 only takes over a directory that is absent, empty, or already carries its own
-marker (`tern-pane-run.json`). It refuses the repository, its ancestors, the
-working directory, home, and any other non-empty directory it does not own —
-point `--out` at a fresh or harness-owned path:
+marker (`tern-pane-run.json`) *whose run is no longer alive* — a second harness
+cannot take over a directory another run is using. It refuses the repository, its
+ancestors, the working directory, home, and any other non-empty directory it does
+not own — point `--out` at a fresh or harness-owned path:
 
 ```sh
 mkdir -p /tmp/not-ours && touch /tmp/not-ours/keep.txt
@@ -100,12 +101,8 @@ The subject is any program that mounts into a real pane through the SDK's
 the marker you name. Follow the three conventions of `-smoke-subject.mts`: read the
 run directory from `process.env.TERN_PANE_DIR`, record what actually happened there
 so the flow can read it back as its positive control, and exit on F10.
-```
 
-The subject owns its own artifacts (here, nothing; the harness owns the rest).
-Write them under `process.env.TERN_PANE_DIR` and the flow can read them back —
-that is how the example proves the click really ran the handler, instead of
-inferring it from a redraw.
+The subject owns its own artifacts (in the smoke, its event record).
 
 ## The harness handle
 
@@ -119,7 +116,8 @@ inferring it from a redraw.
 | `key` / `resize` / `css` / `clickAt` / `click` | Real input to the pane |
 | `capture(name, note)` | Node-tree dump + PNG + layout under one id |
 | `shot(id)` | Raw `shot` reply |
-| `ctl(...)` | An inspection or idempotent command (`stats`, `pick`, `dump`, …); a real input sent here is refused |
+| `ctl(...)` | A read or an idempotent set (`tree`, `stats`, `pick`, bare `a11y`, `perf since`, `shot`, `resize`, `css`); anything else is refused here — send it with `send` |
+| `send(...)` | Any command, delivered exactly ONCE and never retried: `click`, `key`, `run`, `a11y <action>`, `perf on\|off\|reset\|mark` |
 | `check(label, ok, detail)` / `measure(label, detail)` | Record an assertion / a measurement |
 | `finish(extra)` | Write `assertions.json`, print the summary, return the exit code |
 | `log` / `sleep` / `root` / `repo` | Run log, delay, run directory, repo root |
@@ -149,6 +147,17 @@ inferring it from a redraw.
   ancestors: nest the measured node inside the box that clips it. A line that
   fits horizontally and falls past its region's bottom is the case that has
   produced a wrong "readable" claim before.
+- **The oracle treats every sized ancestor as a clip — a deliberate, measured
+  over-approximation.** Clipping really is style-driven, so a child can legally
+  overflow an ancestor: on the eight real `/model` acceptance dumps, 200 of 10027
+  ancestor relations had a child outside a sized ancestor (all of them the client's
+  own window chrome, e.g. a `tn-pip-g` at x=-11 inside a parent at x=3). None of the
+  80 real click targets was over-refused: the only two that fail full containment are
+  genuinely clipped by the list scroller (22px of a 36px row survives) and still get
+  a click point inside that fragment. The approximation errs towards refusing a
+  click, which a flow reports as a failed assertion, never towards a false pass. If a
+  flow must drive an intentionally overflowing child, identify the real clip from
+  `ctl('layers')`, which reports `clip` per layer, instead of relaxing the oracle.
 - **Click the fragment the client shows, on BOTH axes.** `harness.click(chains,
   node)` clicks the centre of the surviving fragment and returns `false` when
   less than 4px of it survive on either axis. A node's own centre can fall inside
@@ -166,9 +175,27 @@ inferring it from a redraw.
 - **A real input is delivered exactly once.** `click`, `key` and the subject
   launch are never retried — a repeat would be a SECOND real input while the run
   still claimed "exactly one", so an unacknowledged send aborts the run instead.
-  Reads and idempotent sets (`tree`, `shot`, `resize`, `css`) may be retried,
-  because a lost reply costs nothing. Read the subject's own record back when you
-  claim a count: it is the positive control that the input really arrived.
+  Reads and idempotent sets may be retried, because a lost reply costs nothing.
+  The split is on the WHOLE command shape, not the name: a bare `a11y` reads the
+  accessibility tree, while `a11y click`/`a11y increment` act, and
+  `perf on|off|reset|mark` restarts the collection. Read the subject's own record
+  back when you claim a count: it is the positive control that the input arrived.
+- **The launcher is one path-shaped token.** `run` takes exactly one argument and
+  resolves it against the SERVER's cwd, so the driver starts `tern serve` inside
+  the run directory and sends `./launch.sh`. Measured against the real client: a
+  spaced absolute path is refused (`expected run <command>`), and double-quoting
+  one is *accepted but starts nothing* — so a run directory containing spaces or
+  quotes works only through the relative token. `css` is the opposite: its paths
+  are split on whitespace and cannot contain spaces.
+- **A run directory is owned, and held.** Ownership is the marker
+  (`tern-pane-run.json`); exclusivity is the pid inside it. A second harness pointed
+  at a directory whose marker process is still alive is refused, so two concurrent
+  runs cannot wipe each other's evidence or fight over the control socket. A stale
+  marker (the process is gone) is taken over normally. The check is liveness alone,
+  so a pid the operating system has since reused by an unrelated process reads as a
+  live holder: the refusal names that pid and never wipes anything on the way out,
+  and the way back is a fresh `--out` or deleting that whole run directory (deleting
+  the marker alone leaves a non-empty directory this driver does not own).
 - **`shot` is software rendering at the client's scale.** A 400x600 viewport
   produces an 800x1200 PNG (scale 2); compare geometry from `layout.json` or the
   tree, not from pixel offsets in the PNG.

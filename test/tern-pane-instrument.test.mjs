@@ -16,9 +16,14 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { RUN_MARKER, isRepeatableCommand, runDirectoryVerdict, shellQuote } from '../scripts/tern-pane-instrument.mjs'
+import { testLifecycle } from './support/temp-lifecycle.ts'
+
+const DRIVER = fileURLToPath(new URL('../scripts/tern-pane-drive.mjs', import.meta.url))
 
 const REPO = '/home/dev/project/dsh-pi-tui'
 const CWD = '/home/dev/project/dsh-pi-tui/scripts'
@@ -62,12 +67,58 @@ test('a non-empty directory this driver does not own is refused, whatever it hol
 })
 
 test('only reads and idempotent sets may be repeated; a real input may not', () => {
-  for (const command of ['tree', 'dump', 'stats', 'pick', 'shot', 'resize', 'css']) {
-    assert.equal(isRepeatableCommand(command), true, `${command} is safe to repeat`)
+  for (const args of [['tree'], ['dump'], ['stats'], ['pick', '10', '20'], ['shot', 'one'], ['resize', '400', '600'], ['css', 'tux']]) {
+    assert.equal(isRepeatableCommand(args), true, `${args.join(' ')} is safe to repeat`)
   }
-  for (const command of ['click', 'key', 'run', 'quit']) {
-    assert.equal(isRepeatableCommand(command), false, `${command} must be delivered exactly once`)
+  for (const args of [['click', '1', '2'], ['key', 'a'], ['run', '/tmp/launch.sh'], ['quit']]) {
+    assert.equal(isRepeatableCommand(args), false, `${args.join(' ')} must be delivered exactly once`)
   }
+})
+
+test('a command that only LOOKS like a read is classified by its full shape', () => {
+  // `a11y` alone reads the tree; with an action it clicks or edits a control.
+  assert.equal(isRepeatableCommand(['a11y']), true, 'the bare tree read is repeatable')
+  for (const args of [['a11y', 'click', '#pick'], ['a11y', 'increment', '#stepper']]) {
+    assert.equal(isRepeatableCommand(args), false, `${args.join(' ')} changes state`)
+  }
+  // `perf since` reads a finished collection; the rest restart it.
+  assert.equal(isRepeatableCommand(['perf']), true)
+  assert.equal(isRepeatableCommand(['perf', 'since']), true)
+  for (const args of [['perf', 'on'], ['perf', 'off'], ['perf', 'reset'], ['perf', 'mark']]) {
+    assert.equal(isRepeatableCommand(args), false, `${args.join(' ')} restarts the collection`)
+  }
+})
+
+test('a run directory held by a LIVE run is refused, a stale one is taken over', () => {
+  const held = { root: '/tmp/tern-pane', repo: REPO, cwd: CWD, home: HOME, entries: [RUN_MARKER], holder: { pid: 4242 } }
+  const live = runDirectoryVerdict({ ...held, isAlive: (pid) => pid === 4242 })
+  assert.equal(live.ok, false, 'two harnesses must not share one run directory')
+  assert.match(live.reason, /live run \(pid 4242\)/)
+  assert.deepEqual(
+    runDirectoryVerdict({ ...held, isAlive: () => false }),
+    { ok: true },
+    'the run that left the marker is gone, so its directory is ours again',
+  )
+})
+
+test('the DRIVER applies that rule: a live holder is refused and its directory is untouched', (t) => {
+  // The wiring is what this covers. A driver that reads its own marker wrongly
+  // still passes the pure verdict test above, so run the real entry point with a
+  // TERN_BIN that needs no Tern: the refusal must happen before anything spawns.
+  const dir = testLifecycle(t).tempDir('tern-pane-refusal-')
+  const evidence = join(dir, 'evidence.txt')
+  writeFileSync(evidence, 'the previous run wrote this\n')
+  writeFileSync(join(dir, RUN_MARKER), JSON.stringify({ driver: 'tern-pane-drive', pid: process.pid }))
+  const flow = join(dir, 'flow.mjs')
+  writeFileSync(flow, 'export default async function () {}\n')
+
+  const refused = spawnSync(process.execPath, [DRIVER, flow, '--out', dir], {
+    encoding: 'utf8',
+    env: { ...process.env, TERN_BIN: process.execPath },
+  })
+  assert.notEqual(refused.status, 0, `the driver must not take over a held directory:\n${refused.stdout}${refused.stderr}`)
+  assert.match(refused.stderr, /held by a live run/, 'and it must say which run holds it')
+  assert.equal(readFileSync(evidence, 'utf8'), 'the previous run wrote this\n', 'a refused run directory is never wiped')
 })
 
 test('a path written into the generated launch script survives spaces and quotes', () => {
