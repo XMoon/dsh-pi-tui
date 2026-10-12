@@ -3023,6 +3023,25 @@ test('the first publication never re-seeds an occurrence another identity alread
   app.stop()
 })
 
+test('a skipped sessionless occurrence is not re-seeded into the new Session either', async () => {
+  // The sessionless identity decides cross-Session visibility, not whether a row
+  // happened to be written: `/help` skipped by the CWD-level dedupe is as foreign
+  // as a written sessionless row, and must not appear in the new Session's recall
+  // even before hydration replaces the mirror.
+  const { vt, app, settleAt } = startApp()
+  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, 'first prompt')
+  settleAt(0, undefined, 'written')    // a sessionless row
+  settleAt(0, undefined, 'skipped')    // (idempotent: the durable fact stays sessionless)
+  app.beginInputHistoryScope('B')
+  assert.deepEqual(app.getInputHistory(), ['first prompt'],
+    'only the occurrence this owner can still own is re-seeded')
+  app.resetInputHistory([], 'B')
+  assert.deepEqual(app.getInputHistory(), ['first prompt'],
+    'hydration agrees with the publication: the sessionless occurrence adds nothing')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)

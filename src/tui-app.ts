@@ -6650,7 +6650,10 @@ export class TuiApp {
     this.seedInputHistory(this.scopeInputs
       .filter(entry => {
         const settled = this.scopeSettled.get(entry.token)
-        return settled === undefined || settled.owner === owner || settled.outcome !== 'written'
+        // Cross-Session visibility follows the SETTLEMENT's identity, never
+        // whether a row happened to be written: a sessionless occurrence the
+        // policy skipped is just as foreign as a sessionless row.
+        return settled === undefined || settled.owner === owner
       })
       .map(entry => entry.text))
     this.scopeOwner = owner
