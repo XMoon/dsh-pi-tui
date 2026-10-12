@@ -1822,11 +1822,18 @@ export function registerTuiCommands(
     const view = runner.listScopedCommands()
     for (const command of view) if (!owned.has(command.name)) taken.add(command.name)
     for (const name of scopedNames) taken.add(name)
-    // §D3: the AUTHORITATIVE Host catalog participates in the collision
+    // §D3: the GENUINE HOST-ORIGIN names participate in the collision
     // baseline — a skill wrapper must never register over a live Host
     // command name (on Remote, `listScopedCommands()` is the Client
     // registry's view, which does NOT carry the Host descriptors).
-    for (const command of authoritativeHostCatalog) taken.add(command.name)
+    // The raw catalog is NOT the authority here (§1C-3): on Direct it carries
+    // this surface's OWN global compatibility mirrors, so a wrapper would
+    // collide with the mirror of ITSELF and disappear on the next refresh.
+    // `hostOriginDescriptors` already answers the exact question — the
+    // EFFECTIVE winner per name, excluding this surface's mirrors by exact
+    // `definitionId` provenance — so a genuine same-name Host command (global
+    // or Agent-scoped, before or after the mirror) keeps blocking the wrapper.
+    for (const name of hostOriginDescriptors.keys()) taken.add(name)
     for (const dispose of skillDisposers.values()) dispose()
     skillDisposers.clear()
     let count = 0

@@ -408,6 +408,78 @@ test('a scoped override blocks a same-name skill wrapper; the effective command 
   app.stop()
 })
 
+/** One frozen effective-catalog snapshot with explicit command rows (the
+ * mirror-provenance cases need a `definitionId` the shorthands never carry). */
+function snapshotWithCommands(
+  commands: readonly { name: string; description: string; definitionId?: string }[],
+  skills: readonly { name: string; description: string }[],
+): SurfaceCatalogSnapshot {
+  return Object.freeze({
+    commands: Object.freeze(commands.map(command => Object.freeze({ ...command }))),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze(skills.map(skill => Object.freeze({ ...skill }))),
+    issues: Object.freeze([]),
+  })
+}
+
+test('the TUI\'s OWN Direct mirror never self-collides with its own skill wrapper (exact definitionId provenance)', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const { installSnapshot, wasAdvertised, isSkillWrapper } = registerTuiCommandsWithDirectSeams(
+    stubRunner(ctx, app, { agent: undefined }),
+    { snapshot: snapshotOf({ skills: [{ name: 'wf', description: 'a workflow skill' }] }) },
+  )
+  assert.equal(isSkillWrapper('wf'), true, 'the wrapper installs')
+  // The NEXT effective Host catalog read still carries this surface's OWN global
+  // compatibility mirror — stamped with the EXACT definitionId it registered.
+  // The skill must not collide with the mirror of ITSELF.
+  installSnapshot(snapshotWithCommands(
+    [
+      { name: 'alpha', description: 'alpha' },
+      { name: 'wf', description: '[skill] a workflow skill', definitionId: '@xmoon76/dsh-pi-tui/mirror/wf' },
+    ],
+    [{ name: 'wf', description: 'a workflow skill' }],
+  ))
+  assert.deepEqual(services.registered.filter(name => name === 'wf'), ['wf'],
+    'the TUI mirror is not genuine Host authority: the wrapper must survive its own refresh')
+  assert.equal(isSkillWrapper('wf'), true, 'the live wrapper stays a live wrapper')
+  assert.equal(wasAdvertised('wf'), true, 'the wrapper stays advertised after the refresh')
+})
+
+test('a GENUINE same-name Host command still blocks the skill wrapper (the mirror exclusion is not a bypass)', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  // The genuine command is LIVE in the global layer …
+  services.commands.register({ name: 'wf', description: 'the genuine Host wf' })
+  const { wasAdvertised, isSkillWrapper } = registerTuiCommandsWithDirectSeams(
+    stubRunner(ctx, app, { agent: undefined }),
+    // … and the effective read carries ITS OWN provenance, never this
+    // surface's mirror id.
+    { snapshot: snapshotWithCommands(
+      [
+        { name: 'alpha', description: 'alpha' },
+        { name: 'wf', description: 'the genuine Host wf', definitionId: '@host/genuine/wf' },
+      ],
+      [{ name: 'wf', description: 'a workflow skill' }],
+    ) },
+  )
+  assert.equal(isSkillWrapper('wf'), false,
+    'a genuine Host same-name winner keeps the name: the wrapper never registers')
+  assert.equal(wasAdvertised('wf'), true, 'the genuine Host command stays advertised')
+})
+
 test('a commands/change event re-merges completions without re-probing and without losing the saved scoped overrides', () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
