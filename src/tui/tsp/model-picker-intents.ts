@@ -260,6 +260,20 @@ function offeredActionIds(panel: ModelPickerPanel, layout: ModelPickerLayout): S
   return new Set(pickerActions(panel, layout).map((action) => action.id))
 }
 
+/**
+ * Whether one action id this page may receive at all. `scope` is the scope
+ * column's own channel; `close` is the panel's DISMISSAL authority — the same
+ * intent `Esc` uses and the one the client's own backdrop gesture sends — so it
+ * is admitted on every page even where the frozen footer deliberately renders no
+ * `Cancel` (the Overview and the read-only Full details page). Every page
+ * OPERATION (`back`, `retry`, `apply`) still has to be really rendered by the
+ * current bar, so a stale or forged receiver cannot reach a write, a page change
+ * or a re-read from a page that never offered it.
+ */
+function admissibleAction(panel: ModelPickerPanel, layout: ModelPickerLayout, act: string): boolean {
+  return act === 'scope' || act === 'close' || offeredActionIds(panel, layout).has(act)
+}
+
 /** One SDK action event as an intent (the action bar AND the scope column). */
 export function actionIntent(
   panel: ModelPickerPanel,
@@ -267,7 +281,7 @@ export function actionIntent(
   value: string | undefined,
   layout: ModelPickerLayout,
 ): ModelPickerIntent | undefined {
-  if (act !== 'scope' && !offeredActionIds(panel, layout).has(act)) return undefined
+  if (!admissibleAction(panel, layout, act)) return undefined
   switch (act) {
     case 'close':
       return { kind: 'close' }

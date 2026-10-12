@@ -89,21 +89,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every continuation line, `Enter` on an identity row is inert, on an effort row it
   drafts, and on the details entry it opens the read-only page. Only the
   explicitly named `Switch` (live session) or `Save default` (sessionless) commits,
-  once. The footer is short and fixed — `Cancel` (`Close` while a write is
-  admitted, since closing does not cancel it), `Retry` only on the model list while
-  a provider read failed, and `Back` on the content pages; the details page never
+  once. The footer is capped per page: the model list is `Cancel` + `Retry` (only
+  while a provider read failed) + the one write; the **Overview is `Back` + the one
+  write and the read-only details page is `Back` alone** — those pages no longer
+  show `Cancel`, so a user returns to the model list to cancel (the panel's own
+  `Esc`/backdrop dismissal still works, it just no longer takes a footer button);
+  the details page never
   writes, and a forged submit from it or from the compact model list is refused.
   The former `More actions` page, `Action: …` strip, `Operation` block, strip zone
   and the vague `Confirm` verb are all removed. The write is still the same single
   business operation and the read still has the same single owner.
-  This revision was not re-verified in a real Tern pane, so two things are
-  recorded as NOT VERIFIED rather than as passing: whether a click landing on a
-  details card's nested BODY TEXT node is dispatched to the card itself (the
-  keyboard `Tab`/`Enter` path does not depend on it), and the full visibility of
-  the new button labels at the 400px width floor and under enlarged UI fonts — see
-  the not-verified list in `docs/tern-tsp/model-selection.md`. The native
-  client's truncation at the 400px width floor and under enlarged UI fonts stays
-  recorded as a known client limitation.
+  This revision was re-verified in a real Tern pane (0.8.2, `tern serve` + `ctl`
+  with real key and pointer input): clicking a details card's HEAD, a BODY TEXT
+  line and the card's blank area each opens the read-only details page; a model
+  row's first click sends `select` and a repeat/double click sends `activate`, and
+  the wide list only highlights without writing; at 400x600 and 1280x800 every
+  footer button is fully inside its bar, the 400x600 Overview shows `Back`/`Switch`
+  and the compact list shows `Cancel` only, and clicking `Switch` writes exactly
+  once. Still NOT verified: the 400px floor and the wide layout under +25% / +50%
+  enlarged UI fonts (the pre-existing Owner-accepted limitation), plus wheel/IME,
+  themes and the Remote path — see the real-pane and not-verified sections of
+  `docs/tern-tsp/model-selection.md`.
 
 ### Fixed
 
