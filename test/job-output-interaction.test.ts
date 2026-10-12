@@ -215,12 +215,18 @@ async function openFirstJob(vt: VirtualTerminal, harness: TaskHarness): Promise<
 const numberedLines = (from: number, to: number, prefix = 'line'): string =>
   Array.from({ length: to - from + 1 }, (_, index) => `${prefix} ${String(from + index).padStart(3, '0')}`).join('\n')
 
-/** The FIRST retained-body row of the painted frame. It is located by content
+/** The FIRST retained-body row of the painted frame, located by CONTENT
  *  (`line NNN`) rather than a fixed row index, so a header that gains the GAP
- *  fact row (or a SearchRow) never shifts the read. A transient auto scrollbar
- *  paints over the last column after a manual scroll and is stripped. */
-const bodyTop = (vt: VirtualTerminal): string =>
-  rawView(vt).map(row => row.trim().replace(/[\s│┃|]+$/, '')).find(row => /^line \d{3}$/.test(row)) ?? ''
+ *  fact row (or a SearchRow) never shifts the read and a transient auto
+ *  scrollbar glyph (`│` track / `█` thumb) painted over a row's last column can
+ *  never defeat the match. */
+const bodyTop = (vt: VirtualTerminal): string => {
+  for (const row of rawView(vt)) {
+    const match = /^(line \d{3})\b/.exec(row.trim())
+    if (match !== null) return match[1]!
+  }
+  return ''
+}
 
 // ── B-01: the strict follow owner (pure/component) ──────────────────────────
 
@@ -461,6 +467,57 @@ test('B-04 a real alt-screen wheel pauses follow, and a later append is not foll
   await vt.waitForRender()
   assert.match(view(vt), /Follow PAUSED/)
   assert.ok(!/line 219/.test(view(vt)), 'a newer tail is not followed after manual browsing')
+  app.stop()
+})
+
+// ── B-04b: the real scrollbar thumb press/drag/release ──────────────────────
+
+test('B-04b a real scrollbar press, drag and release move the Output, keep it paused and never re-arm follow', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow ON/)
+  // A wheel reveals the transient auto scrollbar (and pauses follow); the press
+  // below targets the hidden-auto track directly.
+  vt.sendInput('\x1b[<64;40;12M')
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow PAUSED/)
+  const topIndex = (): number => Number(bodyTop(vt).split(' ')[1])
+  assert.equal(topIndex(), 178, 'one wheel notch above the tail')
+
+  // Press near the TRACK TOP (not on the thumb, which sits at the bottom): the
+  // fork jumps the track and starts the drag through the overridden `scrollTo`.
+  vt.sendInput('\x1b[<0;80;4M')
+  await vt.waitForRender()
+  assert.equal(topIndex(), 0, 'the scrollbar press jumped to the top')
+  assert.match(view(vt), /Follow PAUSED/)
+
+  // Drag the thumb down the track, then release.
+  vt.sendInput('\x1b[<32;80;13M')
+  await vt.waitForRender()
+  const midway = topIndex()
+  assert.ok(midway > 80 && midway < 110, `the drag really moved the viewport (top=${midway})`)
+  vt.sendInput('\x1b[<32;80;21M')
+  await vt.waitForRender()
+  const bottom = topIndex()
+  assert.ok(bottom >= 160, `dragging to the bottom really scrolled (top=${bottom})`)
+  vt.sendInput('\x1b[<0;80;21m')
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow PAUSED/, 'a scrollbar gesture is browsing, never a re-arm')
+
+  // A newer tail must not be followed after the drag.
+  harness.observation.latest()!.emit({ text: numberedLines(0, 219) })
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /Follow PAUSED/)
+  assert.ok(!/line 219/.test(painted), 'a newer tail is not followed after a scrollbar drag')
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow ON/)
+  assert.match(view(vt), /line 219/)
   app.stop()
 })
 
@@ -939,7 +996,7 @@ test('B-10 a truncated retained window rebases a provable anchor, never fabricat
 
 // ── B-10b: a source change between frames never falsifies the anchor ───────
 
-test('B-10b an intermediate snapshot that never reached a frame never moves the retained anchor backward', async () => {
+test('B-10b several snapshots before the next frame keep the anchor on the same provable row', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -949,19 +1006,31 @@ test('B-10b an intermediate snapshot that never reached a frame never moves the 
   await vt.waitForRender()
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130')
-  // TWO windows land BEFORE the next frame (no render in between): only the
-  // first has the rendered lines of its own revision, so only its 5-row eviction
-  // is provable. The workspace must keep that last PROVEN offset — the visible
-  // top drifts FORWARD by the one unprovable eviction and must never subtract
-  // the wrong one (which would show the EARLIER `line 125`).
+  assert.equal(bodyTop(vt), 'line 130', 'the DRAWN baseline (line 130) is the anchor')
+
+  // THREE windows land BEFORE the next frame (no render in between). The anchor
+  // is compared against the last DRAWN window and moved by the TOTAL proven
+  // eviction (5 + 5 + 5), so `line 130` — still present in the newest window —
+  // stays visible. Rebasing each undrawn hop separately (or re-applying an
+  // eviction) would drift to `line 145`.
   observation.latest()!.emit({ text: numberedLines(5, 199) })
   observation.latest()!.emit({ text: numberedLines(10, 199) })
+  observation.latest()!.emit({ text: numberedLines(15, 199) })
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 135',
-    'an unrendered intermediate window must not be rebased against another revision')
+  assert.equal(bodyTop(vt), 'line 130',
+    'the total proven eviction against the drawn baseline preserves the row')
   assert.match(view(vt), /Follow PAUSED/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'no fabricated GAP')
+
+  // A window with NO provable overlap clamps instead of guessing: the 40 brand
+  // new rows cannot be aligned with the drawn baseline, so the offset stays and
+  // the viewport clamps it into the new (shorter) window.
+  observation.latest()!.emit({ text: Array.from({ length: 40 }, (_, index) => `fresh ${String(index).padStart(3, '0')}`).join('\n') })
+  await vt.waitForRender()
+  assert.match((rawView(vt)[2] ?? '').trim(), /^fresh 003/,
+    'an unprovable window safely clamps the offset into the new window')
+  assert.match(view(vt), /Follow PAUSED/)
+  assert.ok(!/\[GAP\]/.test(view(vt)), 'a clamp never fabricates a GAP')
   app.stop()
 })
 
@@ -1002,6 +1071,57 @@ test('B-10b2 the current result survives a newer retained window when its row is
   app.stop()
 })
 
+// ── B-10b3: a hit is carried through its PROVEN row mapping, not coordinates ──
+
+test('B-10b3 a truncated window never transfers the current hit to another occurrence that reuses its old coordinates', async () => {
+  // Three identical-geometry hits at rows 100/110/120. Evicting ten rows lands
+  // `needle C` exactly on the old row/column coordinates of the selected
+  // `needle B`; a coordinate key would silently inherit C, while the proven
+  // eviction maps B to its new row.
+  const lines = Array.from({ length: 200 }, (_, index) => `line ${String(index).padStart(3, '0')}`)
+  lines[100] = 'needle A'
+  lines[110] = 'needle B'
+  lines[120] = 'needle C'
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: lines.join('\n') })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /2\/3/, 'needle B is current')
+  const currentHitRow = (): string => {
+    const rows = rawView(vt)
+    const highlighted = rows.findIndex((_, row) => {
+      for (let column = 0; column < 80; column += 1) {
+        if (vt.getCellBgRgb(row, column) !== undefined) return true
+      }
+      return false
+    })
+    return highlighted < 0 ? '' : rows[highlighted]!.trim()
+  }
+  assert.match(currentHitRow(), /needle B/, 'the strong highlight is on the selected hit')
+
+  // Evict ten rows: B moves to row 100 while C lands on B's old row 110.
+  harness.observation.latest()!.emit({ text: lines.slice(10).join('\n') })
+  await vt.waitForRender()
+  assert.match(view(vt), /2\/3/, 'the same occurrence stays current')
+  assert.match(currentHitRow(), /needle B/,
+    'the hit follows the PROVEN row mapping, never the old coordinates')
+  assert.ok(!/needle C/.test(currentHitRow()), 'needle C must not inherit the selection')
+  app.stop()
+})
+
 // ── B-10c: a pending reveal survives a snapshot landing before the paint ───
 
 test('B-10c a pending result reveal survives a snapshot that lands between the keypress and the paint', async () => {
@@ -1032,7 +1152,7 @@ test('B-10c a pending result reveal survives a snapshot that lands between the k
 
 // ── B-10d: a lost current match falls back to the visible anchor ───────────
 
-test('B-10d after a truncation loses the current match, the selection falls back to the nearest provable match at the visible anchor', async () => {
+test('B-10d a truncation that EVICTS the current match falls back to the nearest provable match at the visible anchor', async () => {
   const lines = Array.from({ length: 200 }, (_, index) => `line ${String(index).padStart(3, '0')}`)
   lines[10] = 'needle alpha'
   lines[190] = 'needle beta'
@@ -1052,19 +1172,18 @@ test('B-10d after a truncation loses the current match, the selection falls back
   assert.match(view(vt), /1\/3/)
   vt.sendInput('\r')
   await vt.waitForRender()
-  vt.sendInput('n')
-  await vt.waitForRender()
-  assert.match(view(vt), /2\/3/)
-  vt.sendInput('n')
-  await vt.waitForRender()
-  assert.match(view(vt), /3\/3/)
+  assert.match(view(vt), /1\/3/, 'the first hit (row 10) is current after the reveal')
 
-  // The window now keeps ONLY the two tail matches; the selected one's row key
-  // is gone and the viewport clamps near the new top, so the fallback must be
-  // the FIRST match at/after that anchor — never the clamped old ordinal.
+  // The new window evicts rows 0-149, so the current occurrence itself is GONE
+  // (its predicted row is negative) while two other matches survive. With no
+  // provable survivor the selection must fall back to the FIRST match at/after
+  // the visible anchor — never to the clamped old ordinal (which would pick the
+  // LAST surviving match). The "same occurrence survives the eviction" case is
+  // B-10b3's.
   harness.observation.latest()!.emit({ text: numberedLines(150, 199).replace('line 190', 'needle beta').replace('line 195', 'needle gamma') })
   const painted = await paintedWhen(vt, current => /1\/2/.test(current))
   assert.match(painted, /1\/2/, `the nearest provable match from the visible anchor is selected:\n${painted}`)
+  assert.match(painted, /Find Output: needle/)
   assert.match(painted, /Follow PAUSED/)
   assert.ok(!/\[GAP\]/.test(painted))
   app.stop()
