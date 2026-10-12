@@ -77,7 +77,7 @@ import {
   type TerminalProgressMode,
   type TerminalProgressOutcome,
 } from './domain/terminal-progress/settings.ts'
-import { runSyncDisposalSteps } from './runtime/process/disposal.ts'
+import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from './runtime/process/disposal.ts'
 import { Frame, FocusForwardingFrame, ResponsiveOverlayFrame, type ResponsiveOverlayGeometry } from './tui/components/frame.ts'
 // The generic overlay frame now lives in the TUI component layer; the stable
 // facade export stays here for existing consumers (TS4 plan §19).
@@ -13728,16 +13728,7 @@ export class TuiApp {
     // primary failure and every rollback value by IDENTITY. A user-thrown
     // `AggregateError` is a single thrown value and is never flattened into its
     // `.errors` (that would replace what the caller actually threw).
-    let rollbackFailure: unknown
-    let failed = false
-    try {
-      runSyncDisposalSteps('blocking presentation rollback', steps)
-    } catch (error) {
-      rollbackFailure = error
-      failed = true
-    }
-    if (failed) throw new AggregateError([primary, rollbackFailure], 'blocking presentation rollback')
-    throw primary
+    runSyncDisposalStepsWithPrimary('blocking presentation rollback', primary, steps)
   }
 
   /**
@@ -19941,17 +19932,38 @@ export class TuiApp {
     // save-settle restore of the tenant) is observable.
     const previousSaveLocation = this.activeSaveLocation
     this.activeQuestions = state
+    // Whether THIS presentation still owns the seat when its park fails. A
+    // cleanup callback may already have settled it through the normal abort path,
+    // which handed the seat — and with it the queue authority — to a NEWER
+    // successor: that successor's own release owns the FIFO advance, so this
+    // rollback must never dequeue a queued flow over it.
+    let ownsSeatAtRollback = false
     // Parking re-projects the seat and may RETIRE a stale tenant, whose caller
     // cleanup can throw (rolled back below) or synchronously settle/replace
     // THIS flow: never continue into a suspension/seat mount for a dead flow.
     this.parkOptionalSeatOrRollback(
       // A legally queued successor takes the seat through the ONE queue authority;
-      // only without one are the roots this state acquired handed back.
-      () => { if (!this.advanceQuestionQueue(state)) this.releaseAbandonedSuspension(state) },
+      // only without one are the roots this state acquired handed back. The
+      // successor is dequeued and handed over in ONE rollback step, and the
+      // handover's own initial suspension is owned by `handOverQuestion` (this
+      // presentation never reached its suspension).
+      () => {
+        if (!ownsSeatAtRollback) return
+        const next = this.shiftLiveQuestion()
+        if (next === undefined) this.releaseAbandonedSuspension(state)
+        else this.handOverQuestion(state, next)
+      },
       [
         () => { state.settled = true },
         () => this.releaseAbortBinding(state),
-        () => { if (this.activeQuestions === state) this.activeQuestions = undefined },
+        // The identity fenced slot clear — and the ONE fact the abandonment
+        // decision above reads: whether this flow was still the seat owner when
+        // its park failed (a callback that already handed over to a newer
+        // successor leaves that successor's slot untouched).
+        () => {
+          ownsSeatAtRollback = this.activeQuestions === state
+          if (ownsSeatAtRollback) this.activeQuestions = undefined
+        },
       ],
     )
     if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
@@ -20040,21 +20052,21 @@ export class TuiApp {
   }
 
   /**
-   * Phase 3A / PR-B: advance the Question FIFO past already-settled entries and
-   * hand the seat to the next live flow. This is the ONE queue authority: the
-   * normal settlement AND a failed presentation's rollback use it, so a legally
-   * queued flow can never be stranded by a caller cleanup failure.
-   * @param settled - the flow that is releasing the seat.
-   * @returns whether a queued flow became the active one.
+   * Phase 3A / PR-B: take the next LIVE queued Question flow, skipping entries a
+   * callback already settled. Together with `handOverQuestion` this is the ONE
+   * queue authority: the normal settlement AND a failed presentation's rollback
+   * use it, so a legally queued flow can never be stranded by a caller cleanup
+   * failure. The DEQUEUE and the handover are deliberately separate steps: every
+   * caller commits the successor fact BEFORE the handover runs, so a throwing
+   * handover (which has already installed that successor) can never be mistaken
+   * for "there was no successor".
    */
-  private advanceQuestionQueue(settled: QuestionState): boolean {
+  private shiftLiveQuestion(): QuestionState | undefined {
     let next: QuestionState | undefined
     do {
       next = this.questionQueue.shift()
     } while (next !== undefined && next.settled === true)
-    if (next === undefined) return false
-    this.handOverQuestion(settled, next)
-    return true
+    return next
   }
 
   /**
@@ -20068,10 +20080,25 @@ export class TuiApp {
     // next flow directly — the editor and the overlays are NEVER restored
     // between two queued flows (a restore would flash the editor row and
     // reveal overlays that must stay hidden under the question).
+    // Whether the successor INHERITS the suspension graph instead of taking its
+    // own (see the first step below).
+    let inheritedSuspension = false
     runSyncDisposalSteps('question settlement handover', [
-      () => { target.suspendedOverlays = settled.suspendedOverlays },
+      // The successor inherits the graph only when the predecessor actually ran
+      // its initial suspension — `frame` is installed right after it in
+      // `presentQuestion`. A FAILED initial presentation (its park threw before
+      // that line) owns no graph over the pre-existing visible roots, so the
+      // successor must take its OWN initial suspension below, exactly as its own
+      // `presentQuestion` would, or it would be a capturing modal over
+      // still-visible roots. Roots the predecessor's window already acquired (the
+      // broker hides a newly mounted overlay while a modal owns the seat and
+      // appends it to that set) travel with the set either way — never dropped.
+      () => {
+        inheritedSuspension = settled.frame !== undefined
+        target.suspendedOverlays = settled.suspendedOverlays
+        settled.suspendedOverlays = new Set()
+      },
       () => { target.flow.setStatus(target.status) },
-      () => { settled.suspendedOverlays = new Set() },
       () => {
         const frame = new QuestionFrame(target.flow, () => this.terminal.rows)
         target.frame = frame
@@ -20082,6 +20109,11 @@ export class TuiApp {
         this.editorSeat.replace(frame)
       },
       () => { this.activeQuestions = target },
+      // The successor's OWN initial suspension when the predecessor never
+      // presented one. It runs AFTER the successor is committed as the live
+      // owner, so a callback it fires (the seat-owner focus transition) observes
+      // the successor, never the abandoned predecessor.
+      () => { if (!inheritedSuspension) this.overlayBroker.suspendVisibleRoots(target) },
       () => { (this.fullscreen ?? this.tui).setFocus(target.frame!) },
       // The next queued flow owns the seat (follow-up P1).
       () => this.setFocusSeat('overlay'),
@@ -20104,7 +20136,8 @@ export class TuiApp {
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state || state.settled === true) return
     state.settled = true
-    let advanced = false
+    // The successor the LIVE queue yielded, recorded BEFORE the handover runs.
+    let handover: QuestionState | undefined
     // M3-6 PR3: the pre-handover presentation cleanup is NON-TRUNCATING; the
     // handover decision reads the LIVE queue AFTER those callbacks (so a queued
     // request synchronously cancelled/enqueued by a callback is respected and
@@ -20123,13 +20156,20 @@ export class TuiApp {
           state.signal.removeEventListener('abort', state.onAbort)
         }
       },
-      // LIVE handover decision. A queued request whose signal was synchronously
-      // aborted by a callback above is already settled (its abort listener
-      // fired) — skip it instead of mounting a cancelled flow the seat could
-      // never settle again.
-      () => { advanced = this.advanceQuestionQueue(state) },
+      // LIVE handover decision: the queue is read AFTER the cleanup callbacks
+      // above, so a request they synchronously enqueued (or cancelled) is
+      // respected. A queued request whose signal was synchronously aborted by one
+      // of them is already settled (its abort listener fired) — skipped instead
+      // of mounting a cancelled flow the seat could never settle again.
+      () => { handover = this.shiftLiveQuestion() },
+      // The successor fact is committed BEFORE the handover runs: a throwing
+      // handover step (a focus/onBlur callback, the render funnel) has already
+      // installed and logically committed that successor, so "the handover
+      // returned normally" must never be the discriminator — the restoration
+      // below would otherwise clear the live successor and strand its promise.
+      () => { if (handover !== undefined) this.handOverQuestion(state, handover) },
       () => {
-        if (advanced) return
+        if (handover !== undefined) return
           // Final restoration: the editor FIRST, then the suspended overlays —
           // a restored capturing overlay focuses itself through
           // setHidden(false), so the editor must not be re-focused afterwards.
