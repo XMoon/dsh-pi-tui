@@ -50,12 +50,13 @@ node scripts/tern-pane-drive.mjs <flow.mjs> [--out <dir>]
 ```
 
 Artifacts land in `<repo>/temp/tern-pane` by default (gitignored); `--out` or
-`TERN_PANE_OUT` moves them. **The run directory is wiped at start**, so the driver
-only takes over a directory that is absent, empty, or already carries its own
-marker (`tern-pane-run.json`) *whose run is no longer alive* — a second harness
-cannot take over a directory another run is using. It refuses the repository, its
-ancestors, the working directory, home, and any other non-empty directory it does
-not own — point `--out` at a fresh or harness-owned path:
+`TERN_PANE_OUT` moves them. The path is **normalized first**, so `.` and `..`
+cannot disguise a protected directory (the check compares paths while the delete
+resolves them). **The run directory is wiped at start**, so the driver only takes
+over a directory that is absent, empty, or carries a marker it can read that
+identifies this driver *and* whose run is no longer alive. It refuses the
+repository, its ancestors, the working directory, home, and any other non-empty
+directory it does not own — point `--out` at a fresh or harness-owned path:
 
 ```sh
 mkdir -p /tmp/not-ours && touch /tmp/not-ours/keep.txt
@@ -187,15 +188,19 @@ The subject owns its own artifacts (in the smoke, its event record).
   one is *accepted but starts nothing* — so a run directory containing spaces or
   quotes works only through the relative token. `css` is the opposite: its paths
   are split on whitespace and cannot contain spaces.
-- **A run directory is owned, and held.** Ownership is the marker
-  (`tern-pane-run.json`); exclusivity is the pid inside it. A second harness pointed
-  at a directory whose marker process is still alive is refused, so two concurrent
-  runs cannot wipe each other's evidence or fight over the control socket. A stale
-  marker (the process is gone) is taken over normally. The check is liveness alone,
-  so a pid the operating system has since reused by an unrelated process reads as a
-  live holder: the refusal names that pid and never wipes anything on the way out,
-  and the way back is a fresh `--out` or deleting that whole run directory (deleting
-  the marker alone leaves a non-empty directory this driver does not own).
+- **A run directory is owned, and held.** Ownership is a marker
+  (`tern-pane-run.json`) that parses, names this driver and carries a pid — a file
+  with that NAME proves nothing, and a directory whose marker cannot be read is
+  refused rather than wiped. Exclusivity has two parts: a marker whose process is
+  still alive refuses a second run, and the marker is created with an
+  exclusive-create (`wx`), so two runs starting at the same moment cannot both win —
+  the loser re-reads the marker, finds someone else's pid, and backs off. A stale
+  marker (the process is gone) is taken over normally. Liveness alone cannot tell a
+  recycled pid apart from a live run, so the refusal names that pid and never wipes
+  anything on the way out; the way back is a fresh `--out` or deleting that whole run
+  directory (deleting the marker alone leaves a non-empty directory this driver does
+  not own). A `--out` that is a symlink is safe for the same reason the guard
+  exists: the delete removes the link, not the directory it points at.
 - **`shot` is software rendering at the client's scale.** A 400x600 viewport
   produces an 800x1200 PNG (scale 2); compare geometry from `layout.json` or the
   tree, not from pixel offsets in the PNG.
