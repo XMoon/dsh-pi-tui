@@ -25,16 +25,20 @@
  * This driver is NOT part of `pnpm test` or CI: it needs the external Tern CLI
  * and it takes minutes. See `docs/tern-pane-harness.md`.
  *
+ * Every run creates its OWN directory and deletes nothing: the default is a fresh
+ * `<repo>/temp/tern-pane-XXXXXX`, `--out` must name a directory that does not
+ * exist yet, and the evidence stays until the operator removes it.
+ *
  * env: TERN_BIN=<path>       the Tern CLI to drive (default: `tern` on PATH)
- *      TERN_PANE_OUT=<path>  artifact directory (default: <repo>/temp/tern-pane)
+ *      TERN_PANE_OUT=<path>  the directory THIS run creates (default: a fresh
+ *                            <repo>/temp/tern-pane-XXXXXX)
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { index, rect, visiblePoint } from './tern-pane-geometry.mjs'
-import { DRIVER_ID, RUN_MARKER, isRepeatableCommand, markerOwnership, runDirectoryVerdict, shellQuote } from './tern-pane-instrument.mjs'
+import { isRepeatableCommand, shellQuote } from './tern-pane-instrument.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '..')
@@ -56,62 +60,36 @@ function usage(exitCode) {
   console.log('  node scripts/tern-pane-drive.mjs <flow.mjs> [--out <dir>]')
   console.log('')
   console.log('  <flow.mjs>            module default-exporting `async (harness) => {}`')
-  console.log('  --out <dir>           artifact directory (default: <repo>/temp/tern-pane)')
+  console.log('  --out <dir>           the directory THIS run creates, which must not exist')
   console.log('  TERN_BIN=<path>       Tern CLI to drive (default: `tern` on PATH)')
   console.log('  TERN_PANE_OUT=<path>  same as --out')
   process.exit(exitCode)
 }
 
-/** A previous run's marker text, or `undefined` when there is no marker file. */
-function readMarkerFile(path) {
+/**
+ * Create this run's own directory. A run never reuses, takes over or cleans up
+ * another one: either the default unique directory is created, or `--out` names a
+ * directory that does not exist yet. Nothing is ever deleted here, so a mistake
+ * costs an error message instead of someone else's data.
+ */
+function createRunDirectory(requested) {
+  if (requested === undefined) {
+    const parent = join(repo, 'temp')
+    mkdirSync(parent, { recursive: true })
+    return mkdtempSync(join(parent, 'tern-pane-'))
+  }
+  const target = resolve(requested)
   try {
-    return readFileSync(path, 'utf8')
+    // Without `recursive`: an existing directory (or file) fails, and a missing
+    // parent stays the caller's to create.
+    mkdirSync(target)
   } catch (error) {
-    // A missing marker is not a claim. Anything else is a bug in this file, and
-    // swallowing it here would silently disable the guard below.
-    if (error?.code === 'ENOENT') return undefined
+    if (error?.code === 'EEXIST') {
+      throw new Error(`${target} already exists; --out must name a directory this run creates`)
+    }
     throw error
   }
-}
-
-/** `kill(pid, 0)` only probes: `ESRCH` means the run is gone, `EPERM` means it is alive. */
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
-}
-
-const markerText = () => JSON.stringify({ driver: DRIVER_ID, pid: process.pid, started: new Date().toISOString() }, null, 1)
-
-/**
- * Claim the run directory atomically. The marker is created with `wx` — one
- * creator wins — and the winner re-reads it, because a run that stole a dead
- * marker at the same moment would otherwise leave both of us believing we own
- * the directory. A pid check alone cannot close that race, a create-only-if-absent
- * can.
- */
-function claimRunDirectory(root) {
-  const markerPath = join(root, RUN_MARKER)
-  mkdirSync(root, { recursive: true })
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      writeFileSync(markerPath, markerText(), { flag: 'wx' })
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error
-      const holder = markerOwnership(readMarkerFile(markerPath))
-      if (holder.valid && processIsAlive(holder.pid)) {
-        return { ok: false, reason: `${root} is held by a live run (pid ${holder.pid})` }
-      }
-      rmSync(markerPath, { force: true })
-      continue
-    }
-    const mine = markerOwnership(readMarkerFile(markerPath))
-    if (mine.valid && mine.pid === process.pid) return { ok: true }
-  }
-  return { ok: false, reason: `${root} was claimed by another run` }
+  return target
 }
 
 /**
@@ -121,30 +99,8 @@ function claimRunDirectory(root) {
  * server that has not opened its socket yet.
  */
 async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
-  // The run directory is wiped on every start: take it over only when it is
-  // empty, absent, or carries a marker that identifies this driver and whose run
-  // is gone.
-  const verdict = runDirectoryVerdict({
-    root,
-    repo,
-    cwd: process.cwd(),
-    home: homedir(),
-    entries: existsSync(root) ? readdirSync(root) : [],
-    marker: markerOwnership(readMarkerFile(join(root, RUN_MARKER))),
-    isAlive: processIsAlive,
-  })
-  if (!verdict.ok) {
-    throw new Error(`${verdict.reason}; point --out at a fresh directory, or delete the whole ${root} if that run is really gone`)
-  }
-  const claim = claimRunDirectory(root)
-  if (!claim.ok) {
-    throw new Error(`${claim.reason}; point --out at a fresh directory, or delete the whole ${root} if that run is really gone`)
-  }
-  // The marker is the claim we now hold; every other entry is this run's to replace.
-  for (const name of readdirSync(root)) {
-    if (name !== RUN_MARKER) rmSync(join(root, name), { recursive: true, force: true })
-  }
-  mkdirSync(join(root, 'shots'), { recursive: true })
+  // The directory is fresh and empty: this run writes into it and keeps it.
+  mkdirSync(join(root, 'shots'))
   const endpoint = join(root, socket)
   const log = (line) => appendFileSync(join(root, 'run.log'), `${line}\n`)
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -391,16 +347,15 @@ if (probed.status !== 0) {
 const ternVersion = String(probed.stdout).trim()
 
 const out = outFlag ?? process.env.TERN_PANE_OUT
-// Normalize BEFORE anything looks at it: `rmSync` resolves `.` and `..` on the way
-// to the filesystem, so a raw `/repo/../repo` would pass an identity comparison and
-// then delete the repository.
-const root = resolve(out === undefined ? join(repo, 'temp', 'tern-pane') : out)
 const flow = await import(pathToFileURL(flowPath).href)
 if (typeof flow.default !== 'function') {
   console.error(`flow must default-export a function: ${flowPath}`)
   process.exit(2)
 }
 
+// This run's own directory: a fresh unique one by default, or the `--out` the
+// caller names — which must not exist yet.
+const root = createRunDirectory(out)
 const harness = await createHarness({ ternBin, root })
 harness.log(`TERN ${ternBin} :: ${ternVersion}`)
 harness.log(`ARGV ${process.argv.slice(2).join(' ')}`)
