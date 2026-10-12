@@ -356,17 +356,48 @@ test('B2/Direct: a registered extension contribution runs (never refused by the 
 
 // ── The advertised-miss path (a name the standing catalog promised) ─────────
 
-test('B2/Direct: an advertised name missing from the created session is consumed as an advertised-miss, not a TSP refusal', async (t) => {
+test('B2/Direct: an advertised Skill that is gone at execution is consumed with an explicit error, never a plain message or a TSP refusal', async (t) => {
   const { testLifecycle } = await import('./support/temp-lifecycle.ts')
   const life = testLifecycle(t)
-  // A fixture skill provider makes the name visible to the STANDING catalog
-  // (it is advertised to the composer), while the session-scoped catalog this
-  // fixture composes does not resolve it after the session is created — the
-  // exact advertised-miss shape. The gate under test is that the EXISTING
-  // advertised-miss consumption owns the line (with its own truthful notice)
-  // and it is never mislabelled as an unsupported TSP TUI builtin.
+  // The GENUINE "advertised at submit, missing at execution" shape: the provider
+  // still ADVERTISES the name to the composer (`list()`), while `get()` can no
+  // longer resolve it once the Session is created. The TUI keeps its own wrapper
+  // for an advertised Skill (it no longer collides with the Direct self-mirror),
+  // so the wrapper owns the line and reports the truthful failure itself: the
+  // submitted line is consumed — never re-sent to the model as a plain message —
+  // and never mislabelled as an unsupported TSP TUI builtin. The advertised-miss
+  // notice route belongs to names the TUI's own catalog does not own and stays
+  // covered by `test/submit-hot-path.test.ts`.
   const fixture = await createDirectTspFixture(life, {
     deltas: ['UNUSED'],
+    skills: [{ name: 'fixture-skill', description: 'A fixture skill', body: 'Do the fixture thing.', unresolved: true }],
+  })
+  try {
+    await directSettle(4_000)
+    fixture.pane.input.type('/fixture-skill')
+    await directSettle()
+    fixture.pane.input.type('\r')
+    await waitFor('the explicit error for the vanished Skill', () =>
+      fixture.pane.output.text().includes('unknown skill'), 25_000)
+    const wire = fixture.pane.output.text()
+    assert.ok(wire.includes('fixture-skill'), 'the error names the submitted line')
+    assert.ok(!wire.includes('UNUSED'),
+      'the consumed line never reaches the model as a plain user message')
+    assert.ok(!wire.includes('not available in TSP'),
+      'a vanished advertised Skill is never mislabelled as an unsupported TSP TUI builtin')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('B2/Direct: a Skill the created session resolves is never consumed as an advertised miss', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  // The SAME advertised name from a provider that CAN resolve it for the created
+  // session: the wrapper survives, the line is an ordinary skill invocation and
+  // the model turn proves it — the advertised-miss consumption must never own it.
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['skill turn ran'],
     skills: [{ name: 'fixture-skill', description: 'A fixture skill', body: 'Do the fixture thing.' }],
   })
   try {
@@ -374,13 +405,12 @@ test('B2/Direct: an advertised name missing from the created session is consumed
     fixture.pane.input.type('/fixture-skill')
     await directSettle()
     fixture.pane.input.type('\r')
-    await waitFor('the advertised-miss notice', () =>
-      fixture.pane.output.text().includes('is not available in the created session'), 25_000)
+    await waitFor('the skill invocation to reach the model', () =>
+      fixture.pane.output.text().includes('skill turn ran'), 25_000)
     const wire = fixture.pane.output.text()
-    assert.ok(wire.includes('is not available in the created session'),
-      'the existing advertised-miss path consumed the line with its own notice')
-    assert.ok(!wire.includes('not available in TSP'),
-      'an advertised-miss is never mislabelled as an unsupported TSP TUI builtin')
+    assert.ok(!wire.includes('unknown skill'), 'the resolvable Skill must not fail')
+    assert.ok(!wire.includes('is not available in the created session'),
+      'a Skill the created session executes is never consumed as an advertised miss')
   } finally {
     await fixture.settle()
   }

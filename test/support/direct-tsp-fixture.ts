@@ -203,8 +203,17 @@ export async function createDirectTspFixture(
      *  test is the real configured one. */
     readonly tuiConfig?: Record<string, unknown>
     /** SKILLS served by a fixture provider on the REAL `dsh-skill` registry
-     *  (the `skill-invocation` family — agent-facing input). */
-    readonly skills?: ReadonlyArray<{ readonly name: string; readonly description: string; readonly body: string }>
+     *  (the `skill-invocation` family — agent-facing input). `unresolved` models
+     *  the genuine advertised-miss shape: the provider still ADVERTISES the Skill
+     *  to the composer (`list()`) while it can no longer RESOLVE it once the
+     *  Session is created (`get()`), exactly as a provider that lost its
+     *  availability between the submit-time claim and the execution. */
+    readonly skills?: ReadonlyArray<{
+      readonly name: string
+      readonly description: string
+      readonly body: string
+      readonly unresolved?: boolean
+    }>
     /** CLIENT-EXTENSION command contributions registered through the REAL
      *  extension service (the `client-command`/`extension` family). */
     readonly extensionCommands?: ReadonlyArray<{
@@ -400,7 +409,7 @@ export async function createDirectTspFixture(
       })),
       get: async (candidate: { locator: { name: string } }) => {
         const skill = skills.find(entry => entry.name === candidate.locator.name)
-        return skill === undefined ? undefined : {
+        return skill === undefined || skill.unresolved === true ? undefined : {
           name: skill.name,
           description: skill.description,
           invocation: { modelInvocable: true, userInvocable: true },
