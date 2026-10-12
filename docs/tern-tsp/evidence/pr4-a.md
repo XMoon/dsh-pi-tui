@@ -22,10 +22,10 @@ as the historical PR4-A record; where it disagrees with
 
 | B2 statement (still in the body) | Current contract |
 |---|---|
-| §1/§2: an "always-available `Choose effort` page", and the write labels `Apply` / `Save default` | The MAIN footer no longer carries an effort entry; the complete list is the details page's `All effort levels…`. The one Primary Action reads `Switch Model` (live) or `Choose & Save as Default` (sessionless); `Cancel` replaces the visible `Close`. |
+| §1/§2: an "always-available `Choose effort` page", and the write labels `Apply` / `Save default` | The MAIN footer no longer carries an effort entry; the complete list is the `More actions` page's `All reasoning effort levels…` (or the compact model list's `Enter` shortcut). The one Primary Action reads `Switch Model` (live) or `Choose & Save as Default` (sessionless); `Cancel` replaces the visible `Close`. |
 | §2: "the wide shell (`cols >= 120`) never collapses: provider scopes + model list + details column" | The three-column shell belongs to the model LIST page. The details and effort pages are content pages: `preview: 'none'`, no `scope`/`scopes` props, no side summary. |
 | §2: a provider scope click is described together with row activations | A scope click is the SDK's own `action { act: 'scope', value }` channel; a scope-shaped row `select` is not a scope click, and a scope action on a drill-down page or outside `ready` fails closed. |
-| §3/§4: reachability is stated as the always-offered wide `Choose effort` page | Reachability is the `Full details…` → `All effort levels…` path in every layout, plus the compact model list's own `Enter` shortcut to the effort page. |
+| §3/§4: reachability is stated as the always-offered wide `Choose effort` page | Reachability is the `More actions…` → `All reasoning effort levels…` path in every layout, plus the compact model list's own `Enter` shortcut to the effort page. |
 
 The revision changes no business authority: the same one handler, catalog/read
 owner, writer, default-intent tracker, admission point and SDK tty owner remain.
@@ -33,6 +33,14 @@ Its own scope-action root cause, tests, real-pane evidence and remaining limits
 are recorded in the pull request that carries it.
 
 ### 0.1 Real-pane verification of the revision
+
+> **Superseded in part by §0.1b.** This subsection measures the FIRST revision of
+> the footer (four or five entries in the action bar, including the whole
+> `Choose & Save as Default` sentence as the write button). The Owner replaced
+> that footer design after those measurements, so the clipping table and the
+> `KNOWN_CLIENT_LIMITATION` below describe THAT revision; §0.1b records the
+> short-bar revision that replaced it. The scope-column click protocol, the
+> drill-down pages and the write authority measured here are unchanged.
 
 Measured in a real Tern pane (`tern serve`, real Tern 0.8.0 with the locked
 `@stencil-hq/tern@0.1.0`, software rendering) driving the PRODUCTION
@@ -58,7 +66,7 @@ captured PNG. An unproven path is recorded as `NOT_VERIFIED`, never as a PASS.
 | The action bar at 560x640 | the model-list and effort bars fit; the FIVE-button DETAILS bar does NOT — its Primary box is 463–634px inside a 500px-wide bar, so only 67px of 171px is visible and the label is cut to `Choose &` |
 | Details -> complete Effort list -> step -> Back, per configuration | verified by KEYBOARD at 900x640 and 560x640 in the client font, AND at 400x600 in the client font, +25% and +50% (widths and fonts are two separate sweeps, not a full cross product): the list opens, a candidate step really moves the selection, and `Esc` returns to the details page and then to the model list |
 
-#### Measured limitations of the action bar (reported, not repaired)
+#### Measured limitations of the FIRST revision's action bar (superseded by §0.1b)
 
 The action bar lays its buttons on ONE line and does not wrap, and it has no
 scroll port of its own, so a bar cut at its own edge loses the rightmost buttons.
@@ -99,6 +107,53 @@ plan's §8 condition), not a silent PASS and not a reason to change the frozen U
 here. Physical IME, focus/theme behavior, full-profile/HMR, enlarged UI fonts at
 the WIDE layout and the Remote TSP Model success path remain `NOT_VERIFIED`
 exactly as recorded in §5.
+
+### 0.1b Owner footer revision: the short bar, the operation block and the More page
+
+A second real-pane measurement round (same environment: real Tern 0.8.0, locked
+`@stencil-hq/tern@0.1.0`, the production presenter in a real pane) found that the
+previous revision's action bar could not present its one write action at narrow
+panes, and the Owner therefore replaced that part of the design: the bar is now
+`Cancel` + exactly one short entry, the complete business meaning moved into a
+wrapping OPERATION BLOCK, and the secondary operations moved to a `More actions`
+page reached from a strip chip.
+
+| Verified | Result |
+|---|---|
+| The strip's chip really speaks | a real pointer click on `More actions…` is delivered as `action { act: 'strip', value: 'strip-more' }` on the action channel, so the chip needs no second event path |
+| The operation block's region | the picker's preview region renders the block BELOW the list at `md`; measured at 900x640 the list ends at y=378, the block's four lines sit at y=399 / 421 / 443 / 465 (each 20.16 tall, EVERY one fully inside the region on both axes), the strip starts at y=510 and the bar at y=558 — so the complete explanation is really readable there, which is why the block is rendered as a headless column: a card head cost one of the region's few lines and pushed the consequence sentence past the region's bottom edge. A long sentence WRAPS naturally (two lines at a 400px-wide pane). At `lg` that region is the side column, where the block's own wrapped height (8–12 lines at the 248px text slot) would exceed the column's 374px budget and evict the inline effort radios, so the wide page states the operation in the strip's own `Action: <name>` line and the column's budget is UNCHANGED |
+| The 400x600 ENLARGED-FONT configurations (+25% and +50%) | `KNOWN_UI_LIMITATION` / `OWNER_ACCEPTED` (Owner decision "Model Picker 400px Font Scaling"): the native client truncates the selected model/provider/effort text there (at +25% the highlighted row renders only `Reasoning Model` and `Default`), so the target is not readable while `Confirm` stays enabled; the Owner accepts the limitation, adds no geometry-based write guard, and keeps the explicit-apply and writer semantics. NOT claimed as a visual-acceptance pass; the waiver does not cover the default-font 400x600 layout, the normal supported widths, a wrong selection or a duplicate write. |
+| The block at the 400px floor | the client marks the picker `pv-hide` at a 400x600 pane and DROPS the whole preview region, so the block is absent there — recorded as `KNOWN_CLIENT_LIMITATION`. The TARGET still stays identifiable there: the HIGHLIGHTED model's own row states its drafted effort (`<provider> · <effort label>`, measured: `provider p · High`), so the width keeps the short footer's completeness, target identifiability and interaction reachability |
+| The More page's offered set | with a no-match search `secondaryActions` lists neither `Full model details…` (it renders THAT model's facts, so without a highlighted model it would open an empty page) nor `All reasoning effort levels…`, while `Retry failed providers (N)` and `Back to models` stay reachable; the wire gate refuses every unoffered id (`more:apply`, `more:close`, a forged `more:<id>`) |
+| The wide block | its own wrapped height would exceed the side column's whole 374px budget, so `lg` states `Action: <complete name>` in the strip instead and keeps the inline effort radios; the Owner RATIFIED this per-layout acceptance ("Owner decision — Model Picker Responsive Action Explanation": the "560px and above everywhere" requirement is cancelled; `md` keeps the full explanation, `lg` keeps the name, the floor keeps the client limitation, and every layout must still have a fully visible primary button, an identifiable target, explicit-confirmation-only writes, keyboard/mouse parity and no blind write) |
+| The bar's new requirement | `Cancel` (54px) + `Confirm` (68px) plus the bar's own padding need about 200px of pane, against ~680px for the previous five-entry details bar |
+
+Measured bar containment (every button's box inside its own `pk-bar` — a node's own
+rect is not a visibility proof). The final driver artifact of this revision is 46
+assertions, 0 failures, 3 recorded measurements (the earlier 44-assertion run
+predates the two later checks and is superseded):
+
+| Pane / page | bar box | buttons | result |
+|---|---|---|---|
+| 400x600 client font, model list | 30–370px | `Cancel`, `Confirm` | both contained |
+| 400x600 +25% UI font, model list | 30–370px | `Cancel`, `Confirm` | both contained |
+| 400x600 +50% UI font, model list | 30–370px | `Cancel`, `Confirm` | both contained |
+| 400x600 client font, More page | 30–370px | `Cancel`, `Back` | both contained |
+| 900x640 model list / details | 110–790px | `Cancel`,`Confirm` / `Cancel`,`Back`,`Confirm` | all contained |
+| 560x640 details (the previous design clipped its write action here) | 30–530px | `Cancel`, `Back`, `Confirm` | all contained |
+| 1280x800 model list | 80–1200px | `Cancel`, `Confirm` | both contained |
+
+Other verified facts of the revision: a real pointer click on the strip chip is
+delivered as `action { act:'strip', value:'strip-more' }` and opens the `More
+actions` page, whose rows are `Full model details…`, `All reasoning effort
+levels…`, `Retry failed providers (1)` and `Back to models` with a
+`Cancel`/`Back` bar and zero writes; the keyboard reaches the strip with ONE Tab
+from the model list (`models -> strip -> effort -> action bar`), Enter opens the
+More page, one ArrowDown moves the native selection onto the next row and Enter
+runs it; the operation block is PRESENT at 900x640 with `Action: Choose & Save as
+Default`, its four lines at y=399/421/443/465 all fully inside the region between
+the list (bottom y=378) and the strip (top y=510), and ABSENT at the 400x600 floor
+at the client font and at +25%/+50% (the client's `pv-hide`).
 
 ### 0.2 What the revision's automated lanes cover
 
