@@ -26,6 +26,7 @@ import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import { historyFilePath, loadHistoryRecords } from '../src/client/history/store.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -4878,3 +4879,35 @@ test('collision recovery clears only the COMMAND health record, never a same-id 
   theme.dispose()
   void mounted
 })
+
+// ── `/new` skill-wrapper survival ──────────────────────────────────────────
+// The `/new` regression: the fresh session's catalog refresh must keep a
+// same-name skill wrapper whenever the only Host row carrying that name is the
+// TUI's OWN Direct compatibility mirror (exact `definitionId` provenance).
+
+test('a fresh /new session keeps the same-name skill wrapper alive (its own Direct mirror is not a Host collision)', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    skills: true,
+  })
+  await waitForSkillWrapper(harness, 'grilling')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  await (newHandler as () => Promise<unknown>)()
+  assert.equal(harness.createdSessionIds.length, 1, 'the fresh session must be created')
+  // The /new handler AWAITS the fresh owner's catalog refresh, so by here the
+  // new session's effective catalog (the TUI mirror included) was installed.
+  assert.ok((harness.commands as { list(): readonly { name: string }[] })
+    .list().some(def => def.name === 'grilling'),
+  'the skill wrapper must be re-installed for the fresh session: the only Host row with this name is the TUI mirror')
+  mounted.app.setDraft('/grilling topic')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  await waitForCommand(harness)
+  assert.equal(harness.executed.at(-1)?.line, '/grilling topic',
+    `the skill wrapper must own its argued line after /new: ${JSON.stringify(harness.executed)}`)
+  assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a plain model prompt')
+  assert.match(mounted.app.notifyTextForTest(), /^$/,
+    'no advertised-miss notice for a skill the fresh session really provides')
+})
+
