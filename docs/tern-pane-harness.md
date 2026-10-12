@@ -130,8 +130,9 @@ inferring it from a redraw.
 
 | Path (under the run directory) | What |
 |---|---|
-| `run.log` | Every `tern` exchange, assertion, measurement and capture, in order |
+| `run.log` | The command line, the Tern version, every `tern` exchange, assertion, measurement and capture, in order |
 | `assertions.json` | The ledger plus the Tern version and flow path; `failed` counts assertions only |
+| `flow.<ext>` / `subject.<ext>` | Copies of the flow and of the subject this run used |
 | `<id>.tree.json` | The node tree at capture time |
 | `shots/serve/<id>.png` | The rendered pane — the human check |
 | `shots/serve/<id>.layout.json` | Element paths, boxes and computed geometry for that frame |
@@ -149,13 +150,17 @@ inferring it from a redraw.
   ancestors: nest the measured node inside the box that clips it. A line that
   fits horizontally and falls past its region's bottom is the case that has
   produced a wrong "readable" claim before.
-- **Click the fragment the client shows.** `harness.click(chains, node)` clicks
-  the centre of the surviving fragment and returns `false` when less than 4px of
-  it survive; clicking a node's own centre can land on whatever covers it.
-- **Commands sent before the server is listening are dropped.** The handle
-  resolves only after the server answers, so this cannot silently skip your first
-  `resize`. After that a failed command logs `CTL-FAIL` and returns `{ ok: false }`
-  — assert the effect on the tree, not the command.
+- **Click the fragment the client shows, on BOTH axes.** `harness.click(chains,
+  node)` clicks the centre of the surviving fragment and returns `false` when
+  less than 4px of it survive on either axis. A node's own centre can fall inside
+  the clipped-away part — above or below the region — and land on whatever covers
+  it, or be off screen entirely while the node still has width.
+- **A command that did not run fails the run.** Commands sent before the server
+  listens are dropped, so the handle resolves only after the server answers, and
+  that cannot silently skip your first `resize`. A command that still fails logs
+  `CTL-FAIL` and throws: a failed `tree` would otherwise read as an empty tree,
+  and an empty tree makes "the control is absent" or "nothing was written" pass
+  vacuously.
 - **`shot` is software rendering at the client's scale.** A 400x600 viewport
   produces an 800x1200 PNG (scale 2); compare geometry from `layout.json` or the
   tree, not from pixel offsets in the PNG.
@@ -168,6 +173,8 @@ inferring it from a redraw.
   end-to-end. Writes are whatever your subject does at the seam it was given, so
   "nothing wrote" means nothing reached that seam.
 - One pane, one subject per run.
+- The run directory keeps a copy of the flow and of the subject it launched, so a
+  run can be audited later; any other module they import is not copied.
 - Client-side behaviour that no node exposes (physical IME, window chrome,
   theme resolution) is out of scope; see
   [`tmux-testing.md`](./tmux-testing.md) for the terminal-side complement.

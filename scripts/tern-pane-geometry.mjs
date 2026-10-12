@@ -34,21 +34,25 @@ const edge = (box, axis) => (axis === 'x' ? box[0] : box[1])
 const extent = (box, axis) => (axis === 'x' ? box[2] : box[3])
 
 /**
- * The span on `axis` that the clip ancestors still let through. A zero-sized
- * ancestor cannot clip: the client gives it no box to clip at.
+ * The slice of `node` that survives every clipping ancestor on `axis`. A
+ * zero-sized ancestor cannot clip: the client gives it no box to clip at.
  */
-export function visibleSpan(chains, node, axis = 'x') {
+function surviving(chains, node, axis) {
   const box = rect(node)
-  let low = edge(box, axis)
-  let high = low + extent(box, axis)
+  const low = edge(box, axis)
+  let start = low
+  let end = low + extent(box, axis)
   for (const ancestor of ancestorsOf(chains, node)) {
     const ar = rect(ancestor)
     if (extent(ar, axis) === 0) continue
-    low = Math.max(low, edge(ar, axis))
-    high = Math.min(high, edge(ar, axis) + extent(ar, axis))
+    start = Math.max(start, edge(ar, axis))
+    end = Math.min(end, edge(ar, axis) + extent(ar, axis))
   }
-  return Math.max(0, high - low)
+  return { start, span: Math.max(0, end - start) }
 }
+
+/** The surviving span on `axis` (`'x'` unless asked otherwise). */
+export const visibleSpan = (chains, node, axis = 'x') => surviving(chains, node, axis).span
 
 /** Every clipping ancestor on `axis` contains this node (0.5px rounding slack). */
 const within = (chains, node, axis) => {
@@ -74,20 +78,15 @@ export const containedX = (chains, node) => within(chains, node, 'x')
 export const containedXY = (chains, node) => within(chains, node, 'x') && within(chains, node, 'y')
 
 /**
- * The midpoint of the fragment the client actually shows, or `undefined` when
- * less than `minSpan` pixels of it survive: clicking a node's own centre would
- * click whatever sits on top of the clipped part, which is how a "reachable"
- * claim passes while the user cannot reach it.
+ * The centre of the fragment the client actually shows, or `undefined` when
+ * less than `minSpan` pixels of it survive on EITHER axis. Both axes matter:
+ * a node's own centre can fall outside the part that is on screen — into a
+ * region clipped away above or below it — so a click aimed there lands on
+ * whatever covers it (or on nothing) while a "reachable" claim passes.
  */
 export function visiblePoint(chains, node, minSpan = 4) {
-  const box = rect(node)
-  const width = visibleSpan(chains, node, 'x')
-  if (width < minSpan) return undefined
-  let left = box[0]
-  for (const ancestor of ancestorsOf(chains, node)) {
-    const ar = rect(ancestor)
-    if (extent(ar, 'x') === 0) continue
-    left = Math.max(left, ar[0])
-  }
-  return { x: left + width / 2, y: box[1] + box[3] / 2 }
+  const x = surviving(chains, node, 'x')
+  const y = surviving(chains, node, 'y')
+  if (x.span < minSpan || y.span < minSpan) return undefined
+  return { x: x.start + x.span / 2, y: y.start + y.span / 2 }
 }
