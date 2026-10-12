@@ -1259,9 +1259,16 @@ export function executeHostCommandSubmission(
         deps.settleSubmitAck('submit consumed by a command', { token: submitAckToken, terminal: true })
       }
       // An advertised command the real session's catalog lacks: consume the
-      // slash input with an explicit error — never a plain model message.
+      // slash input with an explicit error — never a plain model message. The
+      // refusal is a DETERMINED non-execution (the plane owned the line and the
+      // handler never ran), so it hands the COMPLETE submitted line back to the
+      // editor, attachments or not: swallowing a plain-text line loses the
+      // user's words with no recovery path (the editor is already cleared).
+      // `restoreSubmissionDraft` merges, so a draft the user typed meanwhile
+      // survives below the refused line, and the handoff pin is still held
+      // here — it is released on the way out.
       if (deps.shouldConsumeAdvertisedMiss(execution, planeAdvertised)) {
-        if (deps.draftHasAttachments(text)) deps.restoreSubmissionDraft(text)
+        deps.restoreSubmissionDraft(text)
         deps.notify(`/${input.parsedName ?? '?'} is not available in the created session`, 'error')
         deps.settleLocalSubmission(submitRequestId)
         deps.settleSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
