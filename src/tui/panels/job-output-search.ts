@@ -39,15 +39,15 @@ export interface JobOutputSearchCounts {
   readonly total: number
 }
 
-/** One retained-window render epoch: the rendered Output rows and the query's
- *  provable matches inside them, kept only while width + source + query hold. */
+/** One retained-window RENDER epoch: the rendered Output rows and the query's
+ *  provable matches inside them, kept only while width + source + query hold.
+ *  The SELECTION identity is deliberately NOT part of it — it survives a source
+ *  replacement (see {@link JobOutputSearch.selectedKeyValue}). */
 interface JobOutputSearchEpoch {
   readonly sourceKey: string
   readonly width: number
   readonly lines: readonly string[]
   readonly matches: readonly AltScreenSearchMatch[]
-  readonly selectedIndex: number
-  readonly selectedKey: string | undefined
 }
 
 /** The UI-local identity of one rendered match (`AltScreenSearchIndex` result).
@@ -179,6 +179,12 @@ export class JobOutputSearch {
   private pendingSelection: PendingSelection = 'none'
   private epoch: JobOutputSearchEpoch | undefined
   private revealPending = false
+  /** The selected hit's UI-local identity, carried ACROSS source replacements:
+   *  a pure append keeps the rendered rows, so the same occurrence is still
+   *  provable by its key and MUST stay current. Only a hit that genuinely cannot
+   *  be proven in the new window falls back to the visible anchor. */
+  private selectedKeyValue: string | undefined
+  private selectedIndexValue = -1
 
   constructor(text: Text, visible: (width: number) => boolean) {
     this.text = text
@@ -223,11 +229,13 @@ export class JobOutputSearch {
     this.sourceKeyValue = key
     this.sourceTextValue = searchable ? text : ''
     this.searchableValue = searchable
-    // The recorded epoch describes the PREVIOUS source: it must never be paired
-    // with the new one (a two-snapshot interval would otherwise rebase against
-    // the wrong rendered lines). The next render rebuilds it. A pending reveal
-    // SURVIVES the replacement: it is consumed against the current epoch, so a
-    // push landing between the keypress and the paint cannot swallow it.
+    // The recorded RENDER epoch describes the PREVIOUS source: it must never be
+    // paired with the new one (a two-snapshot interval would otherwise rebase
+    // against the wrong rendered lines), so the next render rebuilds it. The
+    // SELECTION identity is NOT dropped: a surviving occurrence stays current
+    // across a pure append. A pending reveal SURVIVES the replacement too — it
+    // is consumed against the current epoch, so a push landing between the
+    // keypress and the paint cannot swallow it.
     this.epoch = undefined
   }
 
@@ -297,7 +305,7 @@ export class JobOutputSearch {
   /** The `i / N` facts of the current epoch. */
   countsFor(width: number): JobOutputSearchCounts {
     const epoch = this.ensureEpoch(width)
-    return { selected: epoch.selectedIndex, total: epoch.matches.length }
+    return { selected: this.selectedIndexValue, total: epoch.matches.length }
   }
 
   /** The number of retained visual rows this epoch may scroll (0 when the body
@@ -315,7 +323,7 @@ export class JobOutputSearch {
     const epoch = this.ensureEpoch(width)
     return highlightSearchLines(lines, {
       matches: epoch.matches,
-      selectedIndex: epoch.selectedIndex,
+      selectedIndex: this.selectedIndexValue,
       selectedRow: undefined,
       exact: true,
     })
@@ -328,7 +336,7 @@ export class JobOutputSearch {
     this.revealPending = false
     if (viewportHeight <= 0) return undefined
     const epoch = this.ensureEpoch(width)
-    const selected = epoch.matches[epoch.selectedIndex]
+    const selected = epoch.matches[this.selectedIndexValue]
     const first = selected?.segments[0]
     const last = selected?.segments[selected.segments.length - 1]
     if (first === undefined || last === undefined) return undefined
@@ -358,9 +366,9 @@ export class JobOutputSearch {
     }
     let selectedIndex = -1
     if (matches.length > 0) {
-      const exactIndex = this.epoch?.selectedKey === undefined
+      const exactIndex = this.selectedKeyValue === undefined
         ? -1
-        : matches.findIndex(match => matchKey(match) === this.epoch!.selectedKey)
+        : matches.findIndex(match => matchKey(match) === this.selectedKeyValue)
       if (this.pendingSelection === 'query') {
         selectedIndex = nearestIndex(this.anchorRow)
       } else if (this.pendingSelection === 'next') {
@@ -376,13 +384,13 @@ export class JobOutputSearch {
       }
     }
     this.pendingSelection = 'none'
+    this.selectedIndexValue = selectedIndex
+    this.selectedKeyValue = selectedIndex >= 0 ? matchKey(matches[selectedIndex]!) : undefined
     this.epoch = {
       sourceKey: this.sourceKeyValue,
       width,
       lines,
       matches,
-      selectedIndex,
-      selectedKey: selectedIndex >= 0 ? matchKey(matches[selectedIndex]!) : undefined,
     }
     return this.epoch
   }

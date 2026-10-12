@@ -340,6 +340,9 @@ interface JobOutputStatusFacts {
    *  NOT advertised, because the SearchRow consumes ordinary letters (EDIT) and
    *  keeps the Job output read-only in NAVIGATE (`tasks.stop` is inert there). */
   readonly searchActive: boolean
+  /** Whether that Find is EDITING its query: `End` then belongs to the Input's
+   *  line edit, so the bar must not promise `End resume` nor a Find re-entry. */
+  readonly searchEditing: boolean
   readonly position: { readonly start: number; readonly end: number; readonly total: number }
 }
 
@@ -374,7 +377,9 @@ class JobInspectorActionBar implements Component {
     }
     segments.push(facts.follow
       ? { text: 'Follow ON', priority: 5 }
-      : { text: 'Follow PAUSED · End resume', short: 'Follow PAUSED', priority: 5 })
+      : facts.searchEditing
+        ? { text: 'Follow PAUSED', priority: 5 }
+        : { text: 'Follow PAUSED · End resume', short: 'Follow PAUSED', priority: 5 })
     if (facts.gap) segments.push({ text: '[GAP]', priority: 4 })
     segments.push({ text: RETAINED_NOTE, priority: 3 })
     if (facts.position.total > 0) {
@@ -383,7 +388,9 @@ class JobInspectorActionBar implements Component {
         priority: 2,
       })
     }
-    segments.push({ text: facts.findHint === '' ? 'Find /' : `Find ${facts.findHint} /`, priority: 1 })
+    if (!facts.searchEditing) {
+      segments.push({ text: facts.findHint === '' ? 'Find /' : `Find ${facts.findHint} /`, priority: 1 })
+    }
     for (;;) {
       const line = segments.map(segment => segment.text).join(' | ')
       if (visibleWidth(line) <= width || segments.length <= 1) {
@@ -531,6 +538,7 @@ export class JobInspectorPanel extends VStack {
         gap: chrome.view.gapBefore,
         findHint: intents.findHint(),
         searchActive: search.mode !== 'inactive',
+        searchEditing: search.mode === 'edit',
         position: positionFacts(search, scrollView, width),
       }
     })
