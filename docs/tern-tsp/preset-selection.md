@@ -276,15 +276,17 @@ write through the real configuration plane (the picker's action and the typed
 verb write the same profile document, and a fresh Context reads the persisted
 default back). Both suites carry the
 disabled-action admission refusal (a synthetic event naming a disabled action
-writes nothing and never dismisses the panel) and the notice fence (a settled
-write whose surface was replaced notifies nobody, with a positive control on the
-same seam); the presenter suite additionally carries the lifecycle fences — a settlement after the captured subject moved
+writes nothing and never dismisses the panel); the RUNNER suite additionally
+carries the notice fence (a settled write whose surface was replaced notifies
+nobody, with a positive control on the same seam), and `test/preset-command.test.ts`
+carries the standing-notice fence. The presenter suite additionally carries the
+lifecycle fences — a settlement after the captured subject moved
 commits no frame and takes no close decision, a settlement from a panel a newer
 invocation replaced never touches the new panel on either the apply or the
 new-session-default path, and a late read never hydrates a moved subject. `test/preset-command.test.ts` also keeps the PiTui
-command settlement (the empty-roster success text, the roster-failure rejection
-and the standing-notice fence); `test/preset.test.ts` keeps the PiTui preset port
-behavior and the shipped display copy; `test/tern-tsp-command-admission.test.ts` keeps the
+command settlement (the empty-roster success text and the roster-failure
+rejection); `test/preset.test.ts` keeps the PiTui preset port behavior and the
+shipped display copy; `test/tern-tsp-command-admission.test.ts` keeps the
 post-classification admission predicate.
 
 ## Qualification limits
