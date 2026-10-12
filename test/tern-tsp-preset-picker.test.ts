@@ -706,6 +706,31 @@ test('native Preset: a late settlement never touches the panel that replaced it'
   assert.equal(props(pane).state, 'ready')
 })
 
+test('native Preset: a late default-write settlement never touches the replaced panel', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  // Admit a default write on the FIRST panel (a row that is not already the
+  // recorded default, so its own default action is enabled), then replace that
+  // panel with a newer invocation while the write is still in flight.
+  select(pane, 'reviewer')
+  await waitUntil('default action available', () => props(pane).selected === 'preset:reviewer'
+    && action(pane, 'set-default')?.disabled !== true)
+  writeDefault(pane)
+  await waitUntil('the default write was admitted', () => m.defaults.length === 1)
+  const second = m.open()
+  second.setRoster(roster({ pendingId: 'reviewer' }))
+  await waitUntil('the new panel is ready', () => props(pane).state === 'ready'
+    && props(pane).selected === 'preset:reviewer')
+  const newPanel = node(pane)!.id
+  // The retired panel's default settlement owns no dismiss and no repaint.
+  m.settleDefault({ kind: 'saved', preset: 'ptc' })
+  await settle(300)
+  assert.equal(node(pane)?.id, newPanel, 'the newer panel is still the mounted one')
+  assert.equal(props(pane).selected, 'preset:reviewer', 'and it kept its own browse target')
+  assert.equal(props(pane).state, 'ready')
+})
+
 test('native Preset: a late read never hydrates a moved subject', async (t) => {
   const m = await mounted(t)
   const { pane } = m
