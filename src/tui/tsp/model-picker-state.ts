@@ -184,6 +184,30 @@ export function scopeProviderId(id: string): string | null | undefined {
   return id.startsWith(SCOPE_PREFIX) ? id.slice(SCOPE_PREFIX.length) : undefined
 }
 
+/* -------------------------------------------------------------- candidates */
+
+/**
+ * The wire id of one effort CANDIDATE row on the effort page. Candidates get their
+ * OWN namespace, because the SDK delivers the scope column's ids and the page's row
+ * ids on the same channel: with a shared namespace a candidate value that happened
+ * to look like a scope id (or WAS the every-provider id) could not be told apart from
+ * the scope entry. The first token differs by construction, so the two directions
+ * are independent — a candidate named like a scope still drafts, and the real scope
+ * entry still filters, even side by side.
+ */
+const EFFORT_PREFIX = 'effort:'
+
+/** The wire id of one effort candidate row (see {@link EFFORT_PREFIX}). */
+export function effortItemId(value: string): string {
+  return EFFORT_PREFIX + value
+}
+
+/** The candidate value of an effort page row, or `undefined` when the id is not a
+ *  candidate row at all (a scope id, a model row, a fact row). */
+export function effortValue(item: string): string | undefined {
+  return item.startsWith(EFFORT_PREFIX) ? item.slice(EFFORT_PREFIX.length) : undefined
+}
+
 /* --------------------------------------------------------------------- rows */
 
 /** The stable wire/local id of one model row. JSON keeps provider and model
@@ -296,6 +320,9 @@ export function zoneHintText(panel: ModelPickerPanel): string {
   if (panel.phase === 'error') return 'Retry first'
   if (panel.zone === 'effort') return '↑↓ draft'
   if (panel.zone === 'primary-action') return '←→ · Enter'
+  // The details page's static facts have NO effort zone to reach, so Tab goes
+  // straight to the action bar there (mirrors the frozen `tabZone` cycle).
+  if (panel.page === 'details') return 'Tab: actions'
   return modelChoices(highlightedModel(panel)).length > 0 ? 'Tab: effort' : 'Tab: actions'
 }
 

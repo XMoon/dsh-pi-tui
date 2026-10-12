@@ -12,7 +12,12 @@ import { connect } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 // The fact-row readability rule (the assertion reads the wire's own values and
 // only the bound from the implementation).
-import { ALL_SCOPES_ID, displayWidth, factLineColumns } from '../src/tui/tsp/model-picker-state.ts'
+import {
+  ALL_SCOPES_ID,
+  displayWidth,
+  effortItemId,
+  factLineColumns,
+} from '../src/tui/tsp/model-picker-state.ts'
 import { runOwned } from '../src/runtime/process/tasks.ts'
 import type {
   ModelApplyOutcome,
@@ -350,7 +355,7 @@ test('native Model: resize keeps the panel and the compact pages stay reachable'
   action(pane, 'effort-page')
   await waitUntil('effort page', () => String(props(pane).title).startsWith('Reasoning Effort'))
   pane.key('\u001b[B')
-  await waitUntil('draft moved', () => props(pane).selected === '\u0000provider-default')
+  await waitUntil('draft moved', () => props(pane).selected === effortItemId('\u0000provider-default'))
   assert.equal(m.writes.length, 0, 'choosing a draft never writes')
   pane.key('\r')
   await waitUntil('primary zone shape cue', () => actionOf(pane, 'apply')?.label === '▸ Save default')
@@ -627,9 +632,9 @@ test('native Model: a resize into compact keeps the effort zone on a VISIBLE sel
   await waitUntil('compact effort page', () =>
     props(pane).size === 'md' && String(props(pane).title).startsWith('Reasoning Effort'))
   assert.equal((props(pane).strip as { label?: string } | undefined)?.label, 'Default model')
-  await waitUntil('the draft is visible on the effort page', () => props(pane).selected === 'high')
+  await waitUntil('the draft is visible on the effort page', () => props(pane).selected === effortItemId('high'))
   pane.key('\u001b[B')
-  await waitUntil('visible draft change', () => props(pane).selected === '\u0000provider-default')
+  await waitUntil('visible draft change', () => props(pane).selected === effortItemId('\u0000provider-default'))
   assert.equal(m.writes.length, 0, 'changing a draft never writes')
 })
 
@@ -1227,10 +1232,10 @@ test('native Model: the wide inline selector always keeps the full drill-down', 
   await waitUntil('effort page', () => props(m.pane).title === 'Reasoning Effort')
   assert.deepEqual(
     (props(m.pane).items as Array<Record<string, unknown>>).map((item) => String(item.id)),
-    ['e1', 'e2', 'e3'],
+    ['e1', 'e2', 'e3'].map(effortItemId),
     'every advertised candidate is listed',
   )
-  assert.equal(props(m.pane).selected, 'e1', 'the page shows the same draft the column shows')
+  assert.equal(props(m.pane).selected, effortItemId('e1'), 'the page shows the same draft the column shows')
   // Returnable: Esc puts the model list (and its inline rows) back.
   m.pane.key('\u001b')
   await waitUntil('back on the model list', () => props(m.pane).title === 'Models')
@@ -1240,7 +1245,7 @@ test('native Model: the wide inline selector always keeps the full drill-down', 
   action(m.pane, 'effort-page')
   await waitUntil('effort page again', () => props(m.pane).title === 'Reasoning Effort')
   m.pane.key('\u001b[B')
-  await waitUntil('draft stepped', () => props(m.pane).selected === 'e2')
+  await waitUntil('draft stepped', () => props(m.pane).selected === effortItemId('e2'))
   m.pane.key('\r')
   await waitUntil('primary action focused', () => String(actionOf(m.pane, 'apply')?.label).startsWith('▸'))
   m.pane.key('\r')
@@ -1347,17 +1352,32 @@ test('native Model: a provider called all and a scope-shaped effort id stay unam
   assert.equal(m.writes.length, 0, 'a scope click is never a write')
   browse(pane, ALL_SCOPES_ID)
   await waitUntil('every provider again', () => props(pane).scope === ALL_SCOPES_ID)
-  // On the EFFORT page the row is a candidate first: both scope-shaped ids really
-  // change the draft instead of filtering providers.
+  // On the EFFORT page a candidate row carries its OWN namespace: a candidate whose
+  // value looks like a scope id — even the every-provider id — takes the draft.
   action(pane, 'effort-page')
   await waitUntil('effort page', () => props(pane).title === 'Reasoning Effort')
-  browse(pane, ALL_SCOPES_ID)
+  browse(pane, effortItemId(ALL_SCOPES_ID))
   await waitUntil('the every-provider-shaped candidate takes the draft',
-    () => props(pane).selected === ALL_SCOPES_ID)
+    () => props(pane).selected === effortItemId(ALL_SCOPES_ID))
   assert.equal(props(pane).scope, ALL_SCOPES_ID, 'the page never turned it into a provider filter')
-  browse(pane, 'scope:other')
-  await waitUntil('the prefixed candidate takes the draft', () => props(pane).selected === 'scope:other')
+  browse(pane, effortItemId('scope:other'))
+  await waitUntil('the prefixed candidate takes the draft',
+    () => props(pane).selected === effortItemId('scope:other'))
   assert.equal(m.writes.length, 0, 'a candidate row is never a write')
+  // ...and the SCOPE column stays live ON the same page: clicking the every-provider
+  // scope really clears the filter even while a candidate is named exactly like it,
+  // because the two wire namespaces are independent.
+  browse(pane, 'scope:all')
+  await waitUntil('the `all` provider filters from the effort page', () => props(pane).scope === 'scope:all')
+  const draftBeforeScopeClick = props(pane).selected
+  // The page is ALREADY the effort page, so no further mutation: the scope entry
+  // itself is the next event (a frame-triggering no-op would invalidate the
+  // receiver id the harness sends from).
+  browse(pane, ALL_SCOPES_ID)
+  await waitUntil('the scope entry clears the filter from the effort page',
+    () => props(pane).scope === ALL_SCOPES_ID)
+  assert.equal(props(pane).selected, draftBeforeScopeClick, 'the scope entry never touched the draft')
+  assert.equal(props(pane).selected, draftBeforeScopeClick, 'the scope entry never touched the draft')
   m.handle.close()
 })
 
@@ -1398,6 +1418,18 @@ test('native Model: the keyboard hint names where the keyboard goes, never a gue
   })
   assert.ok(sheetText(plain.pane).includes('Tab: actions'), sheetText(plain.pane).slice(0, 160))
   plain.handle.close()
+  // The hint also follows the PAGE: the details page's static facts have no effort
+  // zone to reach, so Tab goes straight to the action bar there even though the
+  // highlighted model advertises efforts.
+  const detailsPane = await mounted(t)
+  await resize(detailsPane.pane, 1280)
+  await detailsPane.ready()
+  action(detailsPane.pane, 'details')
+  await waitUntil('details page', () => props(detailsPane.pane).title === 'Model details')
+  const detailsText = sheetText(detailsPane.pane)
+  assert.ok(detailsText.includes('Tab: actions'), `the details page hints the action bar: ${detailsText.slice(0, 160)}`)
+  assert.ok(!detailsText.includes('Tab: effort'), 'the details page never promises an effort zone')
+  detailsPane.handle.close()
 })
 
 test('native Model: the paged wide column keeps the bounded identity and the hint', async (t) => {

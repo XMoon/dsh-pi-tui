@@ -19,6 +19,7 @@ import {
   ALL_SCOPES_ID,
   detailCursor,
   detailFactItems,
+  effortItemId,
   wideIdentityLines,
   widePreviewOptionalLine,
   wideSummaryLine,
@@ -267,20 +268,23 @@ function modelListPicker(
 ): Node {
   const row = highlightedModel(panel)
   const page = panel.page
+  const draft = draftedEffort(panel, row)
   const items = page === 'models'
     ? modelItems(panel, !deps.wide)
     : page === 'effort'
       ? modelChoices(row).map((choice) => ({
-          id: choice.value,
+          // Candidates carry their OWN wire namespace, so a candidate value can
+          // never be confused with a scope id (see `effortItemId`).
+          id: effortItemId(choice.value),
           label: choice.label,
           detail: 'draft',
-          mark: choice.value === draftedEffort(panel, row) ? { text: '●' } : { text: '○' },
+          mark: choice.value === draft ? { text: '●' } : { text: '○' },
         }))
       : row === undefined
         ? []
         : detailFactItems(panel, row, deps.wide)
   const selected = page === 'effort'
-    ? draftedEffort(panel, row)
+    ? (draft === undefined ? undefined : effortItemId(draft))
     : page === 'models'
       ? panel.selected
       : row === undefined
