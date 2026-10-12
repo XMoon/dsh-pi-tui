@@ -55,6 +55,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arrives on Tern's native `action(scope)` channel instead of being ignored as a
   model-row selection). Model rows, effort rows and provider choices can no
   longer be confused, and no click ever writes the model.
+- A skill's slash command no longer disappears after a new or switched Session
+  (`/new`, `/resume`, `/fork`): the catalog refresh no longer treats the TUI's
+  own compatibility mirror as a genuine Host command, so the skill stays in the
+  completion list and `/name args` still runs as a skill. A genuine same-name
+  Host command keeps winning the name.
+- A command that was offered by the completion list but the target Session does
+  not actually provide now returns the COMPLETE original input (staged
+  attachments included) to the editor when it is refused — the submitted words
+  are never swallowed, and a draft typed while the refusal settles stays below.
+- Input submitted after a Session switch but before its recall history is
+  reloaded no longer vanishes from ↑: the reload merges the inputs the Session
+  already accepted with its disk rows, in order and without duplicates, and the
+  previous Session's entries still never appear in the new Session's history.
 - While a Question / Approval / Save Location captures the input, the Footer no
   longer advertises the Task Center `↓ view` (the narrow-screen `↓`), which
   could not act there. The hint returns once the modal settles, the editor is
