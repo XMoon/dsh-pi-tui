@@ -329,13 +329,15 @@ CSS is explicitly not done.
 What has to hold in every environment is reachability, not a pixel promise: a long
 fact value must have a complete reading path (its wrapped rows plus the native
 list's own scrolling — the HISTORICAL PR4-A real-pane run checks exactly that by
-walking the presentation cursor per width on the surfaces it measured; the
-restructured Overview's row cursor is headless-only, see the NOT_VERIFIED list
-below), and every Effort candidate must have a reachable path — the
+walking the presentation cursor per width on the surfaces it measured), and every
+Effort candidate must have a reachable path — the
 Overview lists every candidate in EVERY layout (it is entered from the compact
 model list, and from the wide column whenever the budget cannot prove the inline
 selector), and the wide inline rows are the selector exactly while
-`widePreviewFits` proves they all fit. The run does NOT certify enlarged UI fonts
+`widePreviewFits` proves they all fit. The restructured Overview's own row cursor
+is covered headlessly (the real-pane run above measured page/footer/pointer
+behaviour, not a per-width cursor walk on that page). The run does NOT certify
+enlarged UI fonts
 at the wide layout, IME, themes or the Remote path: those stay `NOT_VERIFIED`.
 Row granularity is therefore a COMPATIBILITY measure for the one-line native row —
 a wrapped value is readable on its own rows — never a layout system of its own,
@@ -346,14 +348,14 @@ and it is not lowered further to paper over geometry the presenter cannot see.
 The action bar lays its buttons on ONE line and does not wrap them, and it has no
 scroll port of its own, so a bar whose buttons do not fit its `pk-bar` is cut at
 that edge. That is why the bar is short and fixed: at most the page's own `Back`
-plus the failed-read `Retry` plus the ONE short write (`Switch` / `Save default`).
-The measured containment of the earlier two-entry bar (`Cancel` + `Confirm`, a
-30–370px box at a 400x600 pane, both fully contained at the client font) is
-historical evidence for that shape; the `Retry`-widened model list bar and the
-`Back`-widened Overview bar are SHORTER in total label width than the earlier
-five-entry details bar that was measured to clip, and their containment at the
-400px floor is carried by the bar rule rather than by a new pixel measurement in
-this revision.
+plus the failed-read `Retry` plus the ONE short write (`Switch` / `Save default`),
+and the restructured bars are MEASURED at both supported extremes — see the
+containment rows of "Real-pane verification" above: at 1280x800 `pk-bar` x
+80..1200 holds `Cancel` [1047.6,728,60.5,28] and `Switch` [1120,726,68,32]
+(right edge 1188), and at 400x600 `pk-bar` x 30..370 holds `Back`
+[40,533,43.8,28] and `Switch` [294.1,531,68,32] (right edge 362.1). The earlier
+five-entry details bar that was measured to clip is what the frozen two-entry caps
+replace.
 
 **Owner decision — 400px enlarged-font scaling (`KNOWN_UI_LIMITATION` /
 `OWNER_ACCEPTED`).** At a 400x600 pane with an ENLARGED UI font — both +25% and
