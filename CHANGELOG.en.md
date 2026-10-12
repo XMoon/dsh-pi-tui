@@ -99,8 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The former `More actions` page, `Action: …` strip, `Operation` block, strip zone
   and the vague `Confirm` verb are all removed. The write is still the same single
   business operation and the read still has the same single owner.
-  This revision was re-verified in a real Tern pane (0.8.2, `tern serve` + `ctl`
-  with real key and pointer input): clicking a details card's HEAD, a BODY TEXT
+  This revision was re-verified in a real Tern pane (0.8.2, real key and pointer
+  input): clicking a details card's HEAD, a BODY TEXT
   line and the card's blank area each opens the read-only details page; a model
   row's first click sends `select` and a repeat/double click sends `activate`, and
   the wide list only highlights without writing; at 400x600 and 1280x800 every

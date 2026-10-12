@@ -403,6 +403,10 @@ node scripts/run-with-temp-root.mjs node --test \
   test/model-picker.test.ts \
   test/tern-tsp-model-picker.test.ts \
   test/tern-tsp-model-profile.test.ts
+
+# The acceptance lane headless tests cannot cover: the client's own pointer hit
+# areas, real event shapes, and footer containment (not part of `pnpm test`/CI).
+node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs
 ```
 
 The native Model suite drives the real runner, classifier, command handler and
@@ -435,23 +439,35 @@ recovery through a fresh Context.
 
 ## Real-pane verification of the restructured surface
 
-The restructuring revision was driven in a real Tern pane (real Tern `0.8.2`,
-`tern serve` + `tern ctl`, software rendering, the locked `@stencil-hq/tern@0.1.0`)
-with the PRODUCTION `TspModelPicker` mounted over one official SDK inline surface
-and REAL input: `ctl key` (real key events) and `ctl click <selector>` (real
-pointer clicks). Measurements are quoted as the client's own element boxes
-(CSS px at `deviceScaleFactor` 2), and the PNG/tree captures stay outside Git with
-the review package.
+The restructuring revision is driven in a real Tern pane by the repository's own
+harness, and the run is REPRODUCIBLE:
 
-| Verified | Result |
+```sh
+node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs
+```
+
+`scripts/tern-pane-model-ux.mjs` (flow) + `scripts/tern-pane-model-ux-subject.mts`
+(subject) mount the PRODUCTION `TspModelPicker` over one official SDK inline
+surface in a headless `tern serve` pane and send REAL input; every containment
+claim goes through the visibility oracle (`scripts/tern-pane-geometry.mjs`), so a
+node's own rect is never mistaken for a visibility proof, and the ledger separates
+`check` (a claim the run must prove) from `measure` (informational). The run
+directory keeps `assertions.json`, `run.log`, the node trees, the PNGs and copies
+of the flow and subject — see
+[the harness guide](../tern-pane-harness.md); the capturing run recorded
+`tern 0.8.2 (44c7f76)` and 28 assertions + 4 measurements with **0 failures**.
+
+| Verified (all as harness `check`s) | Result |
 |---|---|
-| real row gestures | clicking a NOT-selected model row sends `select {item}`; a double click sends `select` and then `activate` on the NEXT frame, and the wide list only highlights (no page change, no write); clicking the already-selected row sends `activate` |
-| real keys | `Enter` on the model list opens the model's Overview (a real `enter` key event); `Esc` on the read-only page returns to the model list (`Back`, not close); `Tab` on the Overview renders the app's `▸ Switch` focus cue |
-| the wide details card's pointer hit | a real click on the card HEAD (`.sf-card-head`), on a BODY TEXT line (`.sf-card-body .sf-text`) and on the card slot wrapper (`.pk-pv-slot`) each opened the read-only Full details page — the client attributes body-text clicks to the CARD node, so the `onClick` hit area is not limited to the header |
-| the frozen footer caps | at 1280x800 the models footer is `Cancel` + `Switch`; at 400x600 the compact models footer is `Cancel` ALONE (no write) and the Overview footer is `Back` + `Switch`; the read-only page is `Back` alone (no `Cancel` anywhere on a content page) |
-| footer containment | 1280x800: `pk-bar` x 80..1200 holds `Cancel` [1047.6,728,60.5,28] and `Switch` [1120,726,68,32] (right edge 1188); 400x600: `pk-bar` x 30..370 holds `Back` [40,533,43.8,28] and `Switch` [294.1,531,68,32] (right edge 362.1) — every button is fully inside its bar at both sizes |
-| pointer operability of the one write | at 400x600 a real click on the primary button sent `action {act:'apply'}`, the panel showed `Close` + a disabled `Selecting…`, and exactly ONE `apply({provider,model,reasoningEffort})` reached the writer; the refusal path left the Overview usable with its buttons restored |
-| resize | the real `resize` event drives the layout (400px ⇒ `cols` 47 ⇒ compact, `preview: 'none'`, no side column), and no resize paged or committed on its own |
+| boot + shell | the production picker mounts in a real pane; the wide shell renders the subject and asks for the native `pv-side` preview |
+| the wide column | the Model Details card head reads `Budget Mod… ›`; the footer is exactly `Cancel` + `Switch`; the inline selector renders all FOUR candidate rows (`○Default ●e1 ○e2 ○e3` — three advertised efforts plus the provider-default sentinel) |
+| the wide card's pointer hit | a real click on the card HEAD *and* on a nested BODY TEXT line (`sf-card-body > sf-text`, clicked at the centre of the fragment the client really shows) each opened the read-only page, whose footer is `Back` ALONE — the client attributes body-text clicks to the CARD node |
+| real `select` / `activate` | a click on a NOT-selected row sends `select {item:"[\"shortp\",\"m2\"]"}`; clicking the now-selected row sends `activate`; the wide list only highlights (no page change, no write in either case) |
+| the compact list at 400x600 | its footer renders `Cancel` alone (frames `Models:close`), i.e. no write from the list |
+| the Overview at 400x600 | `Enter` opens it; its footer is `Back` + `Switch` (frame `{title:"Model overview", actions:[back, apply]}`) — no `Cancel` |
+| footer containment (oracle) | 1280x800: bar `80,718,1120,48` holds `Cancel@1047.6,728,60.5,28` and `Switch@1120,726,68,32`; 400x600: bar `30,524,340,46` holds `Back@40,533,43.8,28 span=43.84` and `Switch@294,531,68,32 span=67.95` — every button lies fully inside its bar on both axes, and each visible span equals its full width (nothing clipped) |
+| the one write | one real click on `Switch` produced exactly one `apply({provider:"shortp",model:"m",reasoningEffort:"e1"})` at the subject's writer seam; the admitted frame rendered `Close` + a disabled `Selecting…`; the (deliberately refused) outcome left the Overview usable with `[Back, Switch]` restored |
+| the bounded column | with a model whose column cannot fit, the column offers the one `Open model & effort` entry, renders NO inline effort rows, and its BODY-text click and its `Tab`+`Enter` both open the same Overview |
 
 What remains `NOT_VERIFIED` and is NOT claimed as passing:
 
@@ -459,7 +475,9 @@ What remains `NOT_VERIFIED` and is NOT claimed as passing:
   layout — the pre-existing Owner-accepted limitation above;
 - physical wheel/trackpad, IME, OS focus, dark themes, screen readers, terminal
   scaling, directories beyond the scripted sizes, the shipped full-profile/HMR and
-  the Remote TSP application success path.
+  the Remote TSP application success path. The harness is a headless client: it
+  says nothing about OS-level input methods, window focus or desktop font
+  resolution.
 
 A resolved write outcome is reported by the existing dock notice on any page that
 cannot host a picker `message`.
