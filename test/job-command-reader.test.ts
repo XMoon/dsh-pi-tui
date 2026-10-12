@@ -178,10 +178,13 @@ interface PanelHarness {
   readonly copies: JobCopyRequest[]
   readonly closed: () => number
   readonly rows: { value: number }
+  /** Every native copy-on-select request the panel made, in order. */
+  readonly nativeCopy: boolean[]
 }
 
 function makePanel(state: JobInspectorState, overrides: Partial<JobInspectorPanelIntents> = {}): PanelHarness {
   const copies: JobCopyRequest[] = []
+  const nativeCopy: boolean[] = []
   let closes = 0
   const rows = { value: 24 }
   const panel = new JobInspectorPanel(state, {
@@ -193,12 +196,13 @@ function makePanel(state: JobInspectorState, overrides: Partial<JobInspectorPane
     onStop: () => {},
     onCopy: (request) => copies.push(request),
     paintedBox: () => undefined,
+    setNativeCopyOnSelect: (enabled) => nativeCopy.push(enabled),
     isFindKey: () => false,
     findHint: () => '',
     focusComponent: () => {},
     ...overrides,
   })
-  return { panel, copies, closed: () => closes, rows }
+  return { panel, copies, closed: () => closes, rows, nativeCopy }
 }
 
 /** Render one committed frame (so `onFramePainted` sees this frame's targets). */
@@ -303,6 +307,11 @@ test('C-15 the two pages own independent Find state, and `C` in EDIT never copie
   harness.panel.handleInput('\x1b')
   harness.panel.openFind()
   assert.match(paint(harness).join('\n'), /Find Output: beta/)
+  harness.panel.handleInput('\x1b')
+  // The fork's native copy-on-select follows the SAME page switch: suspended on
+  // the Command page (its exact copy must not race a word selection), restored
+  // on Output.
+  assert.deepEqual(harness.nativeCopy, [false, true], 'the native copy flag follows the reading page')
   harness.panel.dispose()
 })
 
@@ -1214,4 +1223,92 @@ test('C-06 a >10,000-character / 1,200-line Command scrolls locally and keeps ON
   assert.equal(firstRowMatching(harness.vt, /^line-\d{4}/), scrolledTop,
     'the Command scrollTop survives the round trip')
   assert.equal(harness.tasks.observation.records.length, 1, 'ONE observer for the whole document')
+})
+
+test('C-10 a hostile OSC/CSI label is sanitized at the Header boundary and never reaches the terminal', async () => {
+  const harness = startApp()
+  await openFirstJob(harness)
+  // Capture the RAW stream the app writes to the terminal from here on.
+  const rawWritten: string[] = []
+  const originalWrite = harness.vt.write.bind(harness.vt)
+  harness.vt.write = (data: string) => {
+    rawWritten.push(data)
+    originalWrite(data)
+  }
+  const hostile = `\u001b]52;c;${Buffer.from('PWNED').toString('base64')}\u0007echo ok\u001b[2J`
+  harness.tasks.observation.latest()!.emit({ label: hostile, text: 'retained job-a' })
+  await harness.vt.waitForRender()
+  await flush(2)
+  const stream = rawWritten.join('')
+  assert.ok(!stream.includes(']52;c;'), 'the label OSC 52 never reaches the terminal stream')
+  // The BEL terminator alone would be a false positive (the app's OWN OSC
+  // sequences legitimately end in BEL), so the decisive witness is the label's
+  // clipboard PAYLOAD, which can only come from the unsanitized label.
+  assert.ok(!stream.includes('UFdORUQ='), 'the label clipboard payload never reaches the terminal stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal stream')
+  const painted = view(harness.vt)
+  assert.match(painted, /Command: echo ok/, `the header shows the SANITIZED summary:\n${painted}`)
+  assert.ok(!/]52;c;|\[2J/.test(painted), 'no escape payload text leaks into the painted header')
+  // The display boundary never touches the official bytes: the Command page
+  // still copies the ORIGINAL label verbatim.
+  await openCommand(harness)
+  harness.vt.sendInput('C')
+  await flush(4)
+  assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
+})
+
+test('C-01 a rapid double click on [Copy All] cannot overwrite the command copy with a word', async () => {
+  const harness = startApp()
+  await openFirstJob(harness)
+  const label = 'echo hello\nworld'
+  harness.tasks.observation.latest()!.emit({ label })
+  await harness.vt.waitForRender()
+  await flush(2)
+  await openCommand(harness)
+  const buttonRow = bodyRow(harness.vt, '[Copy All]')
+  const buttonCol = rawView(harness.vt)[buttonRow]!.indexOf('[Copy All]')
+  // Two same-cell clicks INSIDE the fork's 500 ms window: the second is
+  // classified as a word selection, so it must not reach the clipboard.
+  press(harness.vt, buttonRow, buttonCol + 2)
+  release(harness.vt, buttonRow, buttonCol + 2)
+  press(harness.vt, buttonRow, buttonCol + 2)
+  release(harness.vt, buttonRow, buttonCol + 2)
+  await flush(6)
+  assert.deepEqual(harness.copied, [label], 'the clipboard holds ONLY the original label after a double click')
+  assert.ok(!harness.copied.some(text => text === 'Copy' || text === 'All'), 'the native word selection never runs')
+  assert.match(view(harness.vt), /Command reader · \[Copy All\]/, 'the page never changed')
+
+  // Back on Output the screen's OWN copy-on-select is restored: a native drag
+  // over the retained body still copies screen text (pre-existing B1-A behavior).
+  harness.vt.sendInput('\x1b')
+  await harness.vt.waitForRender()
+  await flush(2)
+  harness.copied.length = 0
+  const bodyRowIndex = bodyRow(harness.vt, 'retained job-a')
+  press(harness.vt, bodyRowIndex, 0)
+  drag(harness.vt, bodyRowIndex, 6)
+  release(harness.vt, bodyRowIndex, 6)
+  await flush(4)
+  assert.ok(harness.copied.length > 0, 'the Output page keeps the fork native selection copy')
+  assert.notDeepEqual(harness.copied, [label], 'that native copy is screen text, not the command')
+})
+
+test('C-18 the compact header keeps the GAP/ERROR fact text non-interactive', () => {
+  const harness = makePanel(observedState({ label: 'ls', gapBefore: true }))
+  const lines = paint(harness, 44)
+  const row = lines.findIndex(line => line.includes('Earlier output evicted'))
+  assert.ok(row >= 0, `the compact row carries the fact text:\n${lines.join('\n')}`)
+  const painted = lines[row]!
+  assert.match(painted, /Command: ls/, 'the same row carries the Command summary')
+  const factsCol = painted.indexOf('Earlier output evicted')
+  harness.panel.onHeaderPress(factsCol + 2, row)
+  harness.panel.onHeaderClick(factsCol + 2, row)
+  assert.ok(!/Command reader/.test(paint(harness, 44).join('\n')),
+    'clicking the GAP fact text never opens the Command page')
+  const summaryCol = painted.indexOf('Command: ls')
+  harness.panel.onHeaderPress(summaryCol + 1, row)
+  harness.panel.onHeaderClick(summaryCol + 1, row)
+  assert.match(paint(harness, 44).join('\n'), /Command reader · \[Copy All\]/,
+    'the Command summary itself still opens it')
+  harness.panel.dispose()
 })

@@ -20224,6 +20224,10 @@ export class TuiApp {
       // The alt screen's OWN last-painted geometry (X054): the Command reader
       // resolves a drag against the frame the user really saw.
       paintedBox: (component) => screen.getPaintedBox(component),
+      // The Command page suspends the fork's own copy-on-select so a rapid
+      // second click on its exact-copy button cannot be re-read as a word
+      // selection; the Output page restores whatever this screen started with.
+      setNativeCopyOnSelect: (enabled) => screen.setCopyOnSelect(enabled ? nativeCopyOnSelect : false),
       // Phase 3B / B1-B: the EFFECTIVE Find binding is scoped to the Job's own
       // Output. The panel decides from the LIVE resolution, so a remap, a
       // disable or a conflict moves the key for the Job too — never a static
@@ -20261,6 +20265,7 @@ export class TuiApp {
       onCellPress: (x, y) => panel.onHeaderPress(x, y),
       onCellClick: (x, y) => panel.onHeaderClick(x, y),
     })
+    const nativeCopyOnSelect = screen.getCopyOnSelect()
     screen.setLayoutRoot(panel)
     // Registration order IS dispatch order (X043): the host router first, then
     // the viewport listener (wheel/selection), then the protocol sink fence —

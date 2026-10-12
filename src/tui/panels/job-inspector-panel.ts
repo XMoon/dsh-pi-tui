@@ -39,6 +39,7 @@
 import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import { JobCommandReader, type CommandPaintedBox } from './job-command-reader.ts'
 import { JobOutputScrollView } from './job-output-scroll-view.ts'
@@ -272,11 +273,21 @@ export interface JobInspectorPanelIntents {
   /** Move the physical keyboard focus between the panel root and the visible
    *  SearchRow (the opener's ONE screen owns it). */
   readonly focusComponent: (component: Component) => void
+  /** Whether the fork's OWN copy-on-select may run on this screen (the opener
+   *  owns the screen's real setting). The Command page owns an EXACT copy
+   *  affordance, so the native word/line selection copy is suspended while it is
+   *  shown — otherwise a rapid second click on `[Copy All]` would be classified
+   *  as a word selection and overwrite the just-copied command. The Output page
+   *  keeps whatever the screen started with. */
+  readonly setNativeCopyOnSelect: (enabled: boolean) => void
 }
 
 /** A raw `label`/`detail`/`error` is shown on ONE row: hard line breaks become
- *  spaces for DISPLAY only (the `View` keeps the original text). */
-const oneLine = (text: string): string => text.replace(/\r?\n/g, ' ')
+ *  spaces for DISPLAY only, and COMPLETE terminal escape sequences plus any
+ *  remaining C0/C1 control byte are removed at this ONE display boundary: the
+ *  official raw `label`/`detail`/`progress` stay untouched in the `View`, the
+ *  Command document and every copy payload. */
+const headerText = (text: string): string => sanitizedPhysicalLine(text)
 
 /** The bracketed fact markers of one view, in priority order: independent and
  *  co-visible, never a mutually exclusive status switch. */
@@ -293,7 +304,7 @@ const flagMarkers = (view: JobInspectorView): string => markerTokens(view).join(
  *  the eviction note and the follow-stream error text. */
 const flagTexts = (view: JobInspectorView): string => [
   ...(view.gapBefore ? ['Earlier output evicted'] : []),
-  ...(view.observationError === undefined ? [] : [`error: ${oneLine(view.observationError)}`]),
+  ...(view.observationError === undefined ? [] : [`error: ${headerText(view.observationError)}`]),
 ].join('   ')
 
 /** `${reserved}   ${flexText}` with the RESERVED head's room claimed FIRST, so a
@@ -353,8 +364,8 @@ class JobInspectorHeader implements Component {
       return []
     }
     const kind = COMMAND_KINDS.has(view.kind) ? 'Command' : 'Label'
-    const identity = `Job ${view.jobId} · ${view.kind}`
-    const command = `${kind}: ${oneLine(view.label)}`
+    const identity = headerText(`Job ${view.jobId} · ${view.kind}`)
+    const command = `${kind}: ${headerText(view.label)}`
     const lines: string[] = []
     if (compact) {
       // TWO rows at most, in PRIORITY order. Row one carries the STATUS and every
@@ -363,7 +374,7 @@ class JobInspectorHeader implements Component {
       // row still has room for it — so the summary can never be displaced by a
       // GAP/ERROR description, and the identity prefix is kept only when it fits
       // beside the status.
-      let head = view.status
+      let head = headerText(view.status)
       for (const marker of markerTokens(view)) {
         if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
       }
@@ -374,9 +385,9 @@ class JobInspectorHeader implements Component {
     } else {
       // The identity never pushes the status out of its row, and the markers
       // never push the (unbounded) fact text out of theirs.
-      lines.push(withReservedStatus(identity, view.status, width))
-      if (view.progress !== undefined) lines.push(`progress: ${oneLine(view.progress)}`)
-      if (view.detail !== undefined) lines.push(`detail: ${oneLine(view.detail)}`)
+      lines.push(withReservedStatus(identity, headerText(view.status), width))
+      if (view.progress !== undefined) lines.push(`progress: ${headerText(view.progress)}`)
+      if (view.detail !== undefined) lines.push(`detail: ${headerText(view.detail)}`)
       const markers = flagMarkers(view)
       if (markers !== '') {
         const facts = flagTexts(view)
@@ -388,7 +399,7 @@ class JobInspectorHeader implements Component {
     // must describe the truncated text the frame really painted.
     const commandRow = lines.length - 1
     const truncated = lines.slice(0, headerRows).map(line => truncateToWidth(line, width, '…', true))
-    this.hitTargets = this.observedTarget(commandRow, lines, truncated, width)
+    this.hitTargets = this.observedTarget(commandRow, command, truncated, width)
     return truncated
   }
 
@@ -402,18 +413,18 @@ class JobInspectorHeader implements Component {
       this.hitTargets = []
       return []
     }
-    const identity = `Job ${view.jobId} · ${view.kind}`
+    const identity = headerText(`Job ${view.jobId} · ${view.kind}`)
     // The markers are appended to the status row when they fit, because the
     // Command page reserves its last row for the reader identity: a finger/ERROR
     // fact must never be the price of the Copy All affordance.
-    let head = view.status
+    let head = headerText(view.status)
     for (const marker of markerTokens(view)) {
       if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
     }
     const withIdentity = `${identity} · ${head}`
     const middle: string[] = []
-    if (view.progress !== undefined) middle.push(`progress: ${oneLine(view.progress)}`)
-    if (view.detail !== undefined) middle.push(`detail: ${oneLine(view.detail)}`)
+    if (view.progress !== undefined) middle.push(`progress: ${headerText(view.progress)}`)
+    if (view.detail !== undefined) middle.push(`detail: ${headerText(view.detail)}`)
     const markers = flagMarkers(view)
     if (markers !== '') {
       const facts = flagTexts(view)
@@ -446,20 +457,18 @@ class JobInspectorHeader implements Component {
 
   /** The Command summary hit region of the Output page, only while a shell
    *  Command is really observed AND the painted row survived the truncation.
-   *  The region is the summary's OWN visible text — never the blank padding
-   *  `truncateToWidth(..., true)` appends to the row — so a click on the empty
-   *  right-hand space of the header is inert. */
+   *  The region is the `Command: …` / `Label: …` summary ITSELF: neither the
+   *  GAP/ERROR fact text that shares the compact row nor the blank padding
+   *  `truncateToWidth(..., true)` appends may become clickable. */
   private observedTarget(
     commandRow: number,
-    lines: readonly string[],
+    summary: string,
     truncated: readonly string[],
     width: number,
   ): JobHeaderHitTarget[] {
     if (!this.commandAvailable) return []
-    const painted = truncated[commandRow]
-    const raw = lines[commandRow]
-    if (painted === undefined || raw === undefined) return []
-    const summaryWidth = Math.min(width, visibleWidth(raw))
+    if (truncated[commandRow] === undefined) return []
+    const summaryWidth = Math.min(width, visibleWidth(summary))
     if (summaryWidth === 0) return []
     return [{
       row: commandRow,
@@ -881,6 +890,7 @@ export class JobInspectorPanel extends VStack {
     }
     this.readState.view = nextView
     this.header.setState(view, nextView, eligible)
+    if (nextView !== previousView) this.intents.setNativeCopyOnSelect(nextView === 'output')
     this.chrome.view = view
     this.body.setText(bodyText(view))
     let selectionEviction: number | undefined
@@ -1206,6 +1216,8 @@ export class JobInspectorPanel extends VStack {
     this.search.exit()
     this.readState.view = 'command'
     this.header.setState(this.chrome.view, 'command', true)
+    // The Command page's exact copy must not race the fork's word selection.
+    this.intents.setNativeCopyOnSelect(false)
     this.pressedTarget = undefined
     this.intents.focusComponent(this)
     this.intents.requestRender()
@@ -1220,6 +1232,7 @@ export class JobInspectorPanel extends VStack {
     this.commandReader.cancelSelection()
     this.readState.view = 'output'
     this.header.setState(this.chrome.view, 'output', commandEligible(this.chrome.view))
+    this.intents.setNativeCopyOnSelect(true)
     this.pressedTarget = undefined
     this.intents.focusComponent(this)
   }

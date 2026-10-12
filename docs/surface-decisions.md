@@ -1748,6 +1748,16 @@ introduced.
 - **Command drag selection** sends `label.slice(start, end)` for the half-open
   UTF-16 range the gesture covered.
 
+Every DYNAMIC field the workspace header paints (Job identity, kind, status,
+progress, detail, the Command/Label summary and the follow-stream error) crosses
+ONE display boundary that strips complete CSI/OSC/APC/DCS sequences and drops any
+remaining C0/C1 control byte, because the header is Host-supplied metadata on a
+screen the fork also uses for its own terminal control. The OFFICIAL bytes are
+never rewritten: the `View`, the Command document and every copy payload keep the
+raw `label`/`detail`/`progress`, and the Command body shows control bytes as
+visible escapes rather than executing them. A `label` carrying its own OSC 52 is
+therefore painted as plain text and can never reach the terminal stream.
+
 The Command page renders a dedicated document model rather than the vendored
 `Text` renderer, because `Text` expands TAB to three spaces, word-wraps and
 `trimEnd()`s every wrapped row — round-tripping those rows could never reproduce
@@ -1810,8 +1820,9 @@ neither produces a request or a notice.
 The header's Command summary and its `[Copy All]` are plain painted cells, so
 they route through the alt screen's existing press/click callbacks against a hit
 map produced by the LAST PAINTED header frame (the header's own painted top row
-included), and the region is exactly the painted text — a click on the row's
-trailing blank space is inert. The release must re-prove the SAME action, the
+included), and the region is exactly the `Command: …` / `Label: …` summary — a
+click on the row's trailing blank space stays inert, and so does the GAP/ERROR
+fact text that shares the compact row. The release must re-prove the SAME action, the
 SAME page and the SAME Command source identity the press named, so a repaint
 between press and release — another Job, a re-flowed header row, a narrowed
 button — can never fire a ghost open or a copy of different bytes. Both verbs also
@@ -1833,14 +1844,17 @@ action that cannot execute is advertised, and a `[Copy All]` the frame could not
 paint leaves no click target behind. Long-term discoverability of these entries
 belongs to the B1-D tab/action design, not to a Footer redesign here.
 
-One KNOWN PRE-EXISTING interaction is deliberately not changed: this screen has
-the fork's copy-on-select enabled (B1-A never disabled it), so a SECOND click on
-the same cell inside the fork's 500 ms double-click window is classified as a word
-selection rather than a header click, and the fork copies the word under the
-pointer through its own trimmed screen-text path instead of the official label. A
-single click always behaves exactly as documented here; suppressing the double
-click would require either a pi-tui fork change or a gesture/copy-on-select change
-that is outside B1-C's authority.
+The Command page therefore suspends the fork's OWN copy-on-select while it is
+shown (and restores whatever the screen started with on Output), because that
+native path classifies a SECOND click inside the fork's 500 ms double-click window
+as a word selection and would copy the word under the pointer through its own
+trimmed screen-text path — overwriting the exact command copy the button just
+made. The Command body's precise drag selection does not depend on it: it is the
+`MouseRegion` path above. The Output page keeps B1-A's native selection copy on
+purpose (dragging the retained body still copies screen text), which also means a
+rapid double click on the Output page's `Command:` summary copies a screen word
+instead of opening the Command page — the pre-existing screen-wide behaviour, not
+a B1-C regression; a single click always opens the page as documented.
 
 ## Long user messages collapse at the presentation layer only
 
