@@ -1784,9 +1784,13 @@ may notify: a copy that lands after the user left that Job — or after a
 replacement viewer opened — is dropped silently. `true` from the clipboard
 strategy only proves the bytes were EMITTED (OSC52 has no clipboard ACK), so the
 notice reads `Copy sent` and never claims the system clipboard received them; a
-`false` result and a rejection both read `Copy failed`, and an empty Output, an
-unobserved Output, an unavailable Command or an empty selection writes nothing
-and reports nothing.
+`false` result and a rejection both read `Copy failed`, and a composition that
+does not wire the owned-task entry reports the same failure instead of looking
+inert. An empty or not-yet-observed retained Output never writes the clipboard:
+the panel still reports the EMPTY payload it captured, and the app answers
+`Nothing to copy` — never a false `Copy sent`. A Command page that cannot be
+entered makes no request at all, and an empty gesture (a click, or a drag that
+covers no cell) is not a copy intent: neither produces a request or a notice.
 
 The header's Command summary and its `[Copy All]` are plain painted cells, so
 they route through the alt screen's existing press/click callbacks against a hit
