@@ -13,16 +13,18 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { OwnedRunner } from '../src/tui-app.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { JobInspectorPanel, type JobCopyRequest, type JobInspectorPanelIntents } from '../src/tui/panels/job-inspector-panel.ts'
 import {
   buildCommandVisualLayout,
+  commandPointOffset,
   commandRowSelectionColumns,
   commandSelectionRange,
 } from '../src/tui/panels/job-command-document.ts'
 import { createTaskRuntime, type JobInspectorState, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
+import { DirectJobObservationPort } from '../src/runtime/direct/job-observation-direct.ts'
 import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
 import type { SessionSubject } from '../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
@@ -137,7 +139,7 @@ test('C-05 the pure layout never exceeds the grant and pads nothing into the sou
       const layout = buildCommandVisualLayout(source, width)
       assert.ok(layout.rows.length >= 1, 'a document always has at least one visual row')
       for (const row of layout.rows) {
-        assert.ok(row.rendered.length <= width * 2, `row display is bounded at width ${width}`)
+        assert.ok(visibleWidth(row.rendered) <= width, `row display fits the grant at width ${width}`)
         for (const run of row.runs) {
           assert.ok(run.startCol < width && run.endCol <= width, 'no run may exceed the grant')
           assert.ok(run.sourceStart <= run.sourceEnd, 'a run maps a forward source range')
@@ -231,7 +233,8 @@ test('C-04 the opening row is never a Command source: only the observed label op
   opening.panel.handleInput('v')
   assert.ok(!/Command reader/.test(paint(opening, 120).join('\n')), 'no Command page before the first observation')
   opening.panel.handleInput('C')
-  assert.equal(opening.copies.length, 0, 'no Output copy without observed retained text')
+  assert.deepEqual(opening.copies, [{ source: 'output', text: '' }],
+    'no Output copy without observed retained text: an EMPTY payload is reported so the app can say so')
   opening.panel.dispose()
 
   // The SAME instance becomes eligible once the observation arrives.
@@ -262,7 +265,7 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
     assert.ok(!/Follow ON|Follow PAUSED/.test(painted), 'the Command page never claims a Follow state')
     assert.ok(!/Retained preview/.test(painted), 'the Command page never claims a retained preview')
     assert.match(painted, /Full command/)
-    assert.equal(lines.at(-1), lines.at(-1), 'the Action Bar is the last row')
+    assert.match(lines.at(-1)!, /Esc output/, 'the Action Bar is the last row')
     harness.panel.handleInput('\x1b')
     assert.match(paint(harness, budget.width).join('\n'), /Esc back/, 'Esc returns to Output')
     harness.panel.dispose()
@@ -307,7 +310,8 @@ test('C-14 an empty Output or an empty Command never writes a clipboard or claim
   const empty = makePanel(observedState({ text: '' }))
   paint(empty)
   empty.panel.handleInput('C')
-  assert.equal(empty.copies.length, 0, 'no copy for an empty retained Output')
+  assert.deepEqual(empty.copies, [{ source: 'output', text: '' }],
+    'an empty retained Output reports an EMPTY payload: the app refuses the write and says so')
   empty.panel.dispose()
 
   const emptyLabel = makePanel(observedState({ label: '', text: '' }))
@@ -315,7 +319,7 @@ test('C-14 an empty Output or an empty Command never writes a clipboard or claim
   emptyLabel.panel.handleInput('v')
   assert.ok(!/Command reader/.test(paint(emptyLabel).join('\n')), 'an empty label is not a Command')
   emptyLabel.panel.handleInput('C')
-  assert.equal(emptyLabel.copies.length, 0, 'nothing is copyable')
+  assert.deepEqual(emptyLabel.copies, [{ source: 'output', text: '' }], 'nothing is copyable')
   emptyLabel.panel.dispose()
 })
 
@@ -464,8 +468,10 @@ interface TaskHarness {
   readonly observation: JobObservationDouble
 }
 
-/** The REAL Task Runtime over the real `/tasks` selection path. */
-function attachTasks(app: TuiApp, jobIds: readonly string[]): TaskHarness {
+/** The REAL Task Runtime over the real `/tasks` selection path. `port`
+ *  replaces only the selected-Job observation adapter (the Direct L6 case drives
+ *  the PRODUCTION `DirectJobObservationPort` this way). */
+function attachTasks(app: TuiApp, jobIds: readonly string[], port?: JobObservationPort): TaskHarness {
   const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => ({
     id,
     kind: 'bash',
@@ -484,7 +490,7 @@ function attachTasks(app: TuiApp, jobIds: readonly string[]): TaskHarness {
     rowSelectionDisposition: (row, jobDetail) => row === undefined || row.kind === 'job' ? jobDetail : 'close',
     subagentJobTranscriptId: () => undefined,
     subagentJobViewHint: status => status,
-    jobObservation: observation,
+    jobObservation: port ?? observation,
     jobs: { list: () => jobSnapshots(), subscribe: () => () => {} },
     taskRead: {
       currentKey: () => 'g1:sess-main',
@@ -518,7 +524,12 @@ interface AppHarness {
 
 /** Start the REAL app with a recording clipboard capability and an OWNED runner
  *  that really executes the task (so the payload chain stays real). */
-function startApp(columns = 80, rows = 24, jobIds: readonly string[] = ['job-a']): AppHarness {
+function startApp(
+  columns = 80,
+  rows = 24,
+  jobIds: readonly string[] = ['job-a'],
+  port?: JobObservationPort,
+): AppHarness {
   const vt = new VirtualTerminal(columns, rows)
   const copied: string[] = []
   const notices: string[] = []
@@ -542,7 +553,7 @@ function startApp(columns = 80, rows = 24, jobIds: readonly string[] = ['job-a']
   })
   app.start()
   startedApps.add(app)
-  const tasks = attachTasks(app, jobIds)
+  const tasks = attachTasks(app, jobIds, port)
   // The notice text is the app's ONE transient notice authority.
   const originalNotify = app.notify.bind(app)
   app.notify = (text: string, kind?: 'info' | 'error'): void => {
@@ -571,6 +582,15 @@ const bodyRow = (vt: VirtualTerminal, needle: string): number => {
   const row = rowOf(vt, needle)
   assert.ok(row >= 0, `the painted frame must contain ${JSON.stringify(needle)}:\n${view(vt)}`)
   return row
+}
+
+/** The FIRST painted row matching a pattern (the Command document locator). */
+const firstRowMatching = (vt: VirtualTerminal, pattern: RegExp): string => {
+  for (const row of rawView(vt)) {
+    const match = pattern.exec(row.trim())
+    if (match !== null) return match[0]
+  }
+  return ''
 }
 
 /** The FIRST retained-body row of the painted frame, located by CONTENT
@@ -824,4 +844,196 @@ test('C-16 an Output Follow (tail) survives a round trip through the Command pag
   await harness.vt.waitForRender()
   await flush(2)
   assert.ok(bodyRow(harness.vt, 'line 080') >= 0, 'Follow ON still tracks the newest retained rows')
+})
+
+test('C-08 zero-width graphemes belong to their base cell and never break the painted row', () => {
+  const cases = ['\u0301b', '\u0301bc', 'a\t\u0301b', '\u0301', 'x\n\u0301y']
+  for (const source of cases) {
+    for (const width of [1, 5, 80]) {
+      const layout = buildCommandVisualLayout(source, width)
+      for (const row of layout.rows) {
+        assert.equal(row.runs.map(run => run.display).join(''), row.rendered,
+          `runs reproduce the painted row for ${JSON.stringify(source)} at ${width}`)
+        for (const run of row.runs) {
+          assert.ok(run.startCol <= run.endCol && run.endCol <= width, 'no run exceeds the grant')
+        }
+      }
+      // Every painted cell of a row maps to a real offset in that row's own
+      // source range (a zero-width-only row included).
+      for (const [rowIndex, row] of layout.rows.entries()) {
+        for (let col = 0; col < Math.max(1, width); col += 1) {
+          const offset = commandPointOffset(layout, { row: rowIndex, col }, 'start')
+          if (offset === undefined) continue
+          assert.ok(offset >= row.sourceStart && offset <= row.sourceEnd,
+            `column ${col} of row ${rowIndex} maps inside its own range (${JSON.stringify(source)})`)
+        }
+      }
+    }
+  }
+  // A LEADING zero-width grapheme rides on the first base character: a gesture
+  // anchored on its cell carries the mark with it.
+  assert.equal(sliceSelection('\u0301bc', 80, [0, 0], [0, 1]), '\u0301bc')
+  assert.equal(sliceSelection('a\t\u0301b', 80, [0, 0], [0, 2]), 'a\t\u0301')
+  // A row made ONLY of zero-width graphemes still resolves its own column.
+  const solo = buildCommandVisualLayout('\u0301', 80)
+  assert.equal(solo.rows.length, 1)
+  assert.equal(commandPointOffset(solo, { row: 0, col: 0 }, 'start'), 0)
+  assert.equal(commandPointOffset(solo, { row: 0, col: 0 }, 'end'), 1)
+})
+
+test('C-09 hardBreakEnd carries the real newline offsets and equals sourceEnd on a soft wrap', () => {
+  const lf = buildCommandVisualLayout('ab\ncd', 80)
+  assert.equal(lf.rows[0]!.sourceEnd, 2)
+  assert.equal(lf.rows[0]!.hardBreakEnd, 3, 'LF belongs to the break, not to the row content')
+  assert.equal(lf.rows[1]!.hardBreakEnd, 5)
+  const crlf = buildCommandVisualLayout('ab\r\ncd', 80)
+  assert.equal(crlf.rows[0]!.sourceEnd, 2)
+  assert.equal(crlf.rows[0]!.hardBreakEnd, 4, 'CRLF is one hard-break token')
+  const wrapped = buildCommandVisualLayout('abcdef', 3)
+  for (const row of wrapped.rows) {
+    assert.equal(row.hardBreakEnd, row.sourceEnd, 'a soft wrap inserts no break into the source')
+  }
+  const trailing = buildCommandVisualLayout('abc\n', 80)
+  assert.equal(trailing.rows[0]!.hardBreakEnd, 4)
+  assert.equal(trailing.rows[1]!.sourceStart, 4, 'a trailing LF still opens its own (empty) row')
+  for (const source of ['ab\ncd', 'ab\r\ncd', 'abcdef', 'abc\n', 'a\tb', '']) {
+    for (const row of buildCommandVisualLayout(source, 80).rows) {
+      assert.ok(row.hardBreakEnd >= row.sourceEnd && row.hardBreakEnd <= source.length,
+        `hardBreakEnd is a real source offset for ${JSON.stringify(source)}`)
+    }
+  }
+})
+
+test('C-18 the header hit map covers ONLY painted text: blank padding has no click target', () => {
+  // The Command page button region is exactly `[Copy All]`.
+  const harness = makePanel(observedState({ label: 'echo one' }))
+  harness.panel.handleInput('v')
+  const commandLines = paint(harness, 80)
+  const readerRow = commandLines.findIndex(line => line.includes('[Copy All]'))
+  assert.ok(readerRow >= 0)
+  const buttonCol = 'Command reader · '.length
+  harness.panel.onHeaderPress(buttonCol + 2, readerRow)
+  harness.panel.onHeaderClick(buttonCol + 2, readerRow)
+  assert.deepEqual(harness.copies, [{ source: 'command-all', text: 'echo one' }], 'the button itself copies')
+  harness.copies.length = 0
+  harness.panel.onHeaderPress(79, readerRow)
+  harness.panel.onHeaderClick(79, readerRow)
+  assert.deepEqual(harness.copies, [], 'the blank space right of the button is inert')
+  harness.panel.dispose()
+
+  // The Output summary region is its own visible text only.
+  const output = makePanel(observedState({ label: 'echo one' }))
+  const outputLines = paint(output, 80)
+  const summaryRow = outputLines.findIndex(line => line.includes('Command: echo one'))
+  assert.ok(summaryRow >= 0)
+  output.panel.onHeaderPress(79, summaryRow)
+  output.panel.onHeaderClick(79, summaryRow)
+  assert.ok(!/Command reader/.test(paint(output, 80).join('\n')), 'the header padding never opens the page')
+  output.panel.onHeaderPress(5, summaryRow)
+  output.panel.onHeaderClick(5, summaryRow)
+  assert.match(paint(output, 80).join('\n'), /Command reader · \[Copy All\]/, 'the summary text does open it')
+  output.panel.dispose()
+})
+
+test('C-05 the two read-only verbs are advertised with a deterministic drop order', () => {
+  const harness = makePanel(observedState({ label: 'echo one', text: 'tail' }))
+  // The two verbs carry DIFFERENT priorities, so the drop order is a decision
+  // and not an array-order accident: the copy verb always yields first, i.e. it
+  // can never appear alone.
+  let sawBoth = false
+  let sawCommandOnly = false
+  for (let width = 60; width <= 200; width += 4) {
+    const bar = paint(harness, width).at(-1)!
+    const hasCopy = /C copy output/.test(bar)
+    const hasCommand = /V command/.test(bar)
+    assert.ok(!hasCopy || hasCommand, `the copy verb never survives alone at ${width} columns`)
+    if (hasCopy) sawBoth = true
+    if (hasCommand && !hasCopy) sawCommandOnly = true
+  }
+  assert.ok(sawBoth, 'there is a row wide enough to advertise BOTH verbs')
+  assert.ok(sawCommandOnly, 'there is a row where only the higher-priority Command verb survives')
+  const tight = paint(harness, 80).at(-1)!
+  assert.ok(!/V command/.test(tight), 'a tight row yields the Command verb too')
+  assert.ok(!/C copy output/.test(tight), 'a tight row yields the copy verb')
+  assert.match(tight, /Retained preview · not full history/, 'the pre-existing disclosure is never the price')
+  harness.panel.dispose()
+})
+
+test('C-14 an empty retained Output is refused with honest feedback, never a false Copy sent', async () => {
+  const harness = startApp()
+  await openFirstJob(harness)
+  harness.tasks.observation.latest()!.emit({ label: 'echo hello', text: '' })
+  await harness.vt.waitForRender()
+  await flush(2)
+  harness.vt.sendInput('C')
+  await flush(4)
+  assert.deepEqual(harness.copied, [], 'nothing is written for an empty retained Output')
+  assert.equal(harness.notices.at(-1), 'Nothing to copy', 'the user learns why C did nothing')
+})
+
+test('C-01 Direct L6: the official bash args.command label crosses the PRODUCTION Direct adapter into the Command copy', async () => {
+  const command = '  pnpm build\t--filter "a b"  \n    echo second-line   \n'
+  let aborted = false
+  const controller = {
+    follow: (_request: unknown, signal: AbortSignal) => (async function* () {
+      if (signal.aborted) { aborted = true; return }
+      yield {
+        type: 'opened',
+        job: { id: 'job-direct', kind: 'bash', label: command, status: 'running', output: { earliest: 0, total: 0 } },
+        from: 0,
+      }
+      yield { type: 'output', chunks: [{ text: 'direct retained\n' }], next: 16 }
+    })(),
+  }
+  const port = new DirectJobObservationPort(
+    { get: name => (name === 'jobController' ? controller : undefined) },
+    createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  )
+  const harness = startApp(120, 40, ['job-direct'], port)
+  await openFirstJob(harness)
+  await flush(12)
+  assert.equal(aborted, false, 'the adapter stream stays open while the viewer observes')
+  const painted = view(harness.vt)
+  assert.ok(!/Retained output unavailable/.test(painted), `the Direct observation really opened:\n${painted}`)
+  assert.match(painted, /Command:   pnpm build/, 'the observed label IS the official args.command')
+  assert.match(painted, /direct retained/, 'the retained output came through the same adapter')
+  await openCommand(harness)
+  harness.vt.sendInput('C')
+  await flush(6)
+  assert.deepEqual(harness.copied, [command], 'the Direct path delivers the ORIGINAL command byte for byte')
+  assert.equal(harness.notices.at(-1), 'Copy sent')
+})
+
+test('C-06 a >10,000-character / 1,200-line Command scrolls locally and keeps ONE observer', async () => {
+  const harness = startApp(80, 24)
+  await openFirstJob(harness)
+  const big = Array.from({ length: 1_200 }, (_, index) => `line-${String(index).padStart(4, '0')}  ${'x'.repeat(8)}`).join('\n')
+  assert.ok(big.length > 10_000, `the fixture really is plan scale (${big.length} chars)`)
+  harness.tasks.observation.latest()!.emit({ label: big })
+  await harness.vt.waitForRender()
+  await flush(2)
+  await openCommand(harness)
+  const barRow = bodyRow(harness.vt, 'Esc output')
+  assert.match(rawView(harness.vt)[barRow]!, /rows 1-\d+\/1200/, 'the position fact counts all 1,200 visual rows')
+  const headerBefore = rawView(harness.vt)[0]
+  const commandTop = firstRowMatching(harness.vt, /^line-\d{4}/)
+  assert.notEqual(commandTop, '', 'the Command body paints rows')
+  harness.vt.sendInput('\x1b[6~')
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.equal(rawView(harness.vt)[0], headerBefore, 'the header never scrolls with the body')
+  const scrolledTop = firstRowMatching(harness.vt, /^line-\d{4}/)
+  assert.notEqual(scrolledTop, commandTop, 'PageDown really moved the Command viewport')
+  harness.vt.sendInput('C')
+  await flush(6)
+  assert.deepEqual(harness.copied, [big], 'Copy All still delivers the WHOLE original document')
+  // Round trip to Output and back: the Command viewport survives, one observer.
+  harness.vt.sendInput('\x1b')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput('v')
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.equal(firstRowMatching(harness.vt, /^line-\d{4}/), scrolledTop,
+    'the Command scrollTop survives the round trip')
+  assert.equal(harness.tasks.observation.records.length, 1, 'ONE observer for the whole document')
 })

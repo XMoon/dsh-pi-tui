@@ -381,7 +381,7 @@ class JobInspectorHeader implements Component {
     // must describe the truncated text the frame really painted.
     const commandRow = lines.length - 1
     const truncated = lines.slice(0, headerRows).map(line => truncateToWidth(line, width, '…', true))
-    this.hitTargets = this.observedTarget(commandRow, truncated)
+    this.hitTargets = this.observedTarget(commandRow, lines, truncated, width)
     return truncated
   }
 
@@ -420,12 +420,15 @@ class JobInspectorHeader implements Component {
     }
     const truncated = lines.slice(0, headerRows).map(line => truncateToWidth(line, width, '…', true))
     const row = truncated.length - 1
-    const visible = truncated[row]
-    this.hitTargets = truncated.length >= 2 && visible !== undefined && visibleWidth(readerRow) <= width
+    // The clickable region is exactly the PAINTED BUTTON, never the blank
+    // padding `truncateToWidth(..., true)` appends to the row: a click on the
+    // header's trailing space must not write the clipboard.
+    const buttonEnd = visibleWidth(COMMAND_READER_PREFIX) + visibleWidth(COMMAND_COPY_ALL)
+    this.hitTargets = truncated.length >= 2 && visibleWidth(readerRow) <= width
       ? [{
           row,
           startCol: visibleWidth(COMMAND_READER_PREFIX),
-          endCol: visibleWidth(visible),
+          endCol: buttonEnd,
           action: 'copy-command-all',
           documentKey: this.documentKey(),
           view: 'command',
@@ -435,17 +438,26 @@ class JobInspectorHeader implements Component {
   }
 
   /** The Command summary hit region of the Output page, only while a shell
-   *  Command is really observed AND the painted row survived the truncation. */
-  private observedTarget(commandRow: number, truncated: readonly string[]): JobHeaderHitTarget[] {
+   *  Command is really observed AND the painted row survived the truncation.
+   *  The region is the summary's OWN visible text — never the blank padding
+   *  `truncateToWidth(..., true)` appends to the row — so a click on the empty
+   *  right-hand space of the header is inert. */
+  private observedTarget(
+    commandRow: number,
+    lines: readonly string[],
+    truncated: readonly string[],
+    width: number,
+  ): JobHeaderHitTarget[] {
     if (!this.commandAvailable) return []
-    const line = truncated[commandRow]
-    if (line === undefined) return []
-    const width = visibleWidth(line)
-    if (width === 0) return []
+    const painted = truncated[commandRow]
+    const raw = lines[commandRow]
+    if (painted === undefined || raw === undefined) return []
+    const summaryWidth = Math.min(width, visibleWidth(raw))
+    if (summaryWidth === 0) return []
     return [{
       row: commandRow,
       startCol: 0,
-      endCol: width,
+      endCol: summaryWidth,
       action: 'open-command',
       documentKey: this.documentKey(),
       view: 'output',
@@ -609,10 +621,14 @@ class JobInspectorActionBar implements Component {
     }
     // Neither verb is advertised while a Job Find owns the ordinary keys
     // (`v`/`C` are inert in EDIT and NAVIGATE), nor when the action itself
-    // cannot execute this frame.
+    // cannot execute this frame. Both yield BEFORE every pre-existing segment
+    // (B1-B's Follow/GAP/disclosure/position/Find truth is unchanged), and their
+    // two DIFFERENT priorities make the drop order deliberate rather than
+    // array-order-dependent: the Command entry outranks the Output copy verb, so
+    // a row wide enough for one verb advertises the read-only page entry.
     if (!facts.searchActive) {
-      if (facts.canCopyOutput) segments.push({ text: 'C copy output', priority: 0 })
-      if (facts.canViewCommand) segments.push({ text: 'V command', priority: 0 })
+      if (facts.canCopyOutput) segments.push({ text: 'C copy output', priority: 0.5 })
+      if (facts.canViewCommand) segments.push({ text: 'V command', priority: 0.6 })
     }
     return [renderActionBarRow(segments, width)]
   }
@@ -1211,11 +1227,13 @@ export class JobInspectorPanel extends VStack {
   }
 
   /** `C` on the Output page: the retained snapshot text, captured now, with no
-   *  trim/strip/replace shaping of any kind. */
+   *  trim/strip/replace shaping of any kind. A phase with no observed snapshot
+   *  and an observed-but-empty body BOTH report an EMPTY payload: the app then
+   *  refuses the clipboard write and shows the honest "nothing to copy"
+   *  feedback instead of a false success (plan §1.2). */
   private copyOutput(): void {
     const view = this.chrome.view
-    if (view.phase !== 'observed' || view.retainedText === '') return
-    this.intents.onCopy({ source: 'output', text: view.retainedText })
+    this.intents.onCopy({ source: 'output', text: view.phase === 'observed' ? view.retainedText : '' })
   }
 
   private exitSearch(): void {

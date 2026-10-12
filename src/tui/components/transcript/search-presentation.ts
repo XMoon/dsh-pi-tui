@@ -302,7 +302,6 @@ export function highlightColumnRanges(
       output += styleVisibleText(highlighted, highlight.style)
       cursor = endCol
     }
-    if (cursor === 0) continue
     if (cursor < lineWidth) output += sliceByColumn(line, cursor, lineWidth - cursor, true)
     const trailing = trailingZeroWidthSequences(line)
     if (trailing !== '' && !output.endsWith(trailing)) output += trailing
