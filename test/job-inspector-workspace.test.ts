@@ -19,13 +19,14 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences, TuiAltScreen, TuiMainScreen, visibleWidth } from '@xmoon76/pi-tui'
-import type { TaskBrowserHandle } from '../src/tui-app.ts'
+import type { TaskBrowserHandle, TuiAppEvents } from '../src/tui-app.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { JobInspectorPanel, deriveJobInspectorView } from '../src/tui/panels/job-inspector-panel.ts'
 import { createTaskRuntime, type JobInspectorState, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
 import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
 import type { SessionSubject } from '../src/app/session/subject.ts'
 import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
+import type { TranscriptMessage } from '../src/transcript.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from './support/display-seam-stub.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -42,9 +43,18 @@ afterEach(() => {
   }
 })
 
-function startApp(options: Record<string, unknown> = {}): { vt: VirtualTerminal; app: TuiApp } {
+/** Start the real surface with the caller's REAL event sinks (a fullscreen
+ *  preference callback, a keyboard-exit counter) — never a later patch. */
+function startApp(
+  options: Record<string, unknown> = {},
+  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit'>> = {},
+): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, options)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => events.onExit?.() ?? undefined,
+    ...(events.onFullscreenChange === undefined ? {} : { onFullscreenChange: events.onFullscreenChange }),
+  }, options)
   app.start()
   startedApps.add(app)
   return { vt, app }
@@ -393,8 +403,39 @@ test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capabil
   panel.dispose()
 })
 
-// ── A-02: the real Task Browser → Job workspace → same browser ─────────────
+test('A-01d a long Job identity and a long error text never hide the status or the independent markers', () => {
+  const longId = `job-${'x'.repeat(120)}`
+  const panel = new JobInspectorPanel(
+    {
+      opening: { jobId: longId, kind: 'bash', label: 'long', status: 'failed' },
+      observed: {
+        jobId: longId, kind: 'bash', label: 'pnpm build --watch', status: 'failed',
+        progress: 'p'.repeat(200), detail: 'd'.repeat(200),
+        text: 'tail', gapBefore: true, settled: true, error: 'E'.repeat(180),
+      },
+    },
+    {
+      rows: () => 24,
+      requestRender: () => {},
+      onClose: () => {},
+      canStop: () => false,
+      onStop: () => {},
+    },
+  )
+  const lines = panel.render(80)
+  const painted = lines.join('\n')
+  assert.match(painted, /failed/, `the status must survive a long identity:\n${painted}`)
+  assert.match(painted, /\[GAP\]/, `the gap marker must survive:\n${painted}`)
+  assert.match(painted, /\[ERROR\]/, `the error marker must survive:\n${painted}`)
+  assert.match(painted, /\[SETTLED\]/, `the settled marker must survive a long error text:\n${painted}`)
+  assert.match(painted, /Earlier output evicted/, `the gap fact must survive:\n${painted}`)
+  for (const line of lines) {
+    assert.ok(visibleWidth(line) <= 80, `no line may exceed the row width: ${JSON.stringify(line)}`)
+  }
+  panel.dispose()
+})
 
+// ── A-02: the real Task Browser → Job workspace → same browser ─────────────
 test('A-02 selecting a Job in the real Task Browser opens the fullscreen Job workspace and Esc returns to the SAME browser', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
@@ -443,15 +484,22 @@ test('A-02 selecting a Job in the real Task Browser opens the fullscreen Job wor
 
 // ── A-03/A-04: the paused return surface and the user's display mode ────────
 
-test('A-03 regular → Job → regular: the SAME main screen restarts, the draft and the browser selection survive, and no display preference is written', async () => {
-  const { vt, app } = startApp()
-  const screens = recordScreenStarts()
+test('A-03 regular → Job → regular: the SAME main screen restarts, the draft/cursor and the browser selection survive, and no display preference is written', async () => {
   let fullscreenChanges = 0
+  const { vt, app } = startApp({}, { onFullscreenChange: () => { fullscreenChanges += 1 } })
+  const screens = recordScreenStarts()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
+  // A real draft + cursor typed into the ORIGINAL editor must survive the round
+  // trip (a rebuilt editor would come back empty at offset 0).
+  vt.sendInput('kept draft text')
+  await vt.waitForRender()
+  assert.equal(app.hostEditorTextForTest(), 'kept draft text')
+  const cursorBefore = app.seatEditorForTest().getCursor()
+  assert.equal(cursorBefore, 'kept draft text'.length, 'the cursor really sits after the draft')
+
   harness.tasks.openTasksBrowser('full')
   await vt.waitForRender()
-  // A draft typed into the ORIGINAL editor must survive the round trip.
   const browserBefore = harness.lastBrowser()!
   const selectionBefore = browserBefore.getViewState!().selectedId
   vt.sendInput('\r')
@@ -465,25 +513,42 @@ test('A-03 regular → Job → regular: the SAME main screen restarts, the draft
   // the product display mode was never reported as changed.
   assert.equal(screens.main.at(-1), screens.main[0], 'the original main screen instance restarted')
   assert.ok(screens.main.length > mainStartsDuring, 'the pause was a real stop/start of the same screen')
+  assert.equal(app.hostEditorTextForTest(), 'kept draft text', 'the original draft survived the Job round trip')
+  assert.equal(app.seatEditorForTest().getCursor(), cursorBefore, 'the original cursor offset survived')
   assert.equal(harness.lastBrowser(), browserBefore, 'no second browser was constructed')
   assert.equal(harness.lastBrowser()!.getViewState!().selectedId, selectionBefore, 'the selected row survived')
-  assert.equal(fullscreenChanges, 0)
+  assert.equal(fullscreenChanges, 0, 'the Job round trip never wrote the user display preference')
   screens.restore()
   app.stop()
 })
 
-test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen restarts with its scroll state, and the user preference changes exactly once', async () => {
-  const { vt, app } = startApp()
+test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen restarts with its NON-DEFAULT scroll state, and the user preference changes exactly once', async () => {
+  let fullscreenChanges = 0
+  const { vt, app } = startApp({}, { onFullscreenChange: () => { fullscreenChanges += 1 } })
   const screens = recordScreenStarts()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
+  // A real transcript taller than the viewport, scrolled to a NON-DEFAULT
+  // position: a rebuilt screen/ScrollView would come back following the end.
+  const lines: TranscriptMessage[] = [{
+    kind: 'assistant',
+    turn: 1,
+    text: Array.from({ length: 160 }, (_, index) => `transcript line ${index}`).join('\n'),
+  }]
+  app.setTranscript(lines)
   app.setFullscreen(true)
   await vt.waitForRender()
   assert.equal(app.isFullscreen(), true)
+  assert.equal(fullscreenChanges, 1, 'the explicit toggle is the ONE reported display change')
+  vt.sendInput('\x1b[5~') // PageUp through the alt screen's viewport listener
+  await vt.waitForRender()
   const altInstance = screens.alt.at(-1)!
   const scrollBefore = app.fullscreenScrollForTest()
   assert.ok(scrollBefore !== undefined, 'the transcript alt screen owns its ScrollView')
+  assert.equal(scrollBefore.isFollowingEnd, false, 'the transcript really left the live tail')
+  assert.ok(scrollBefore.scrollTop > 0, `the transcript really scrolled (${scrollBefore.scrollTop})`)
   const altStartsBefore = screens.alt.length
+  const contentBefore = app.transcriptContentHeightForTest()
 
   harness.tasks.openTasksBrowser('full')
   await vt.waitForRender()
@@ -494,6 +559,7 @@ test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen res
   assert.equal(app.isFullscreen(), true, 'the user transcript mode survives the Job view')
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
   const altDuring = screens.alt.length
+  assert.equal(fullscreenChanges, 1, 'opening the workspace reports no display change')
 
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -502,7 +568,10 @@ test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen res
   assert.ok(screens.alt.length > altDuring, 'the transcript screen was paused, not rebuilt')
   assert.ok(screens.alt.length > altStartsBefore)
   const scrollAfter = app.fullscreenScrollForTest()
-  assert.equal(scrollAfter?.isFollowingEnd, scrollBefore?.isFollowingEnd, 'the follow state survived')
+  assert.equal(scrollAfter?.isFollowingEnd, false, 'the off-tail follow state survived')
+  assert.equal(scrollAfter?.scrollTop, scrollBefore.scrollTop, 'the exact scroll offset survived')
+  assert.equal(app.transcriptContentHeightForTest(), contentBefore, 'the transcript content was not rebuilt')
+  assert.equal(fullscreenChanges, 1, 'closing the workspace reports no display change')
   harness.lastBrowser()!.close()
   await vt.waitForRender()
   screens.restore()
@@ -555,7 +624,8 @@ test('A-05b a failed observation open still opens the workspace with the reason 
   vt.sendInput('\r')
   await vt.waitForRender()
   const painted = view(vt)
-  assert.match(painted, /\[ERROR\] no job controller/, `the reason must stay visible:\n${painted}`)
+  assert.match(painted, /\[ERROR\]/, `the error marker must stay visible:\n${painted}`)
+  assert.match(painted, /error: no job controller/, `the reason must stay visible:\n${painted}`)
   assert.match(painted, /Retained output unavailable/)
   assert.equal(harness.observation.records.length, 0)
   vt.sendInput('\x1b')
@@ -783,6 +853,202 @@ test('A-09 a Question / Approval / Save request arriving while the Job is open l
   app.stop()
 })
 
+test('A-09b an Approval arriving while the Job is open leaves the workspace and really receives the keys', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run the build' })
+  await vt.waitForRender()
+  assert.deepEqual(harness.observation.forJob('job-a'), [1], 'the workspace releases its observer on pre-emption')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
+  const painted = view(vt)
+  assert.match(painted, /run the build/, `the approval must be painted:\n${painted}`)
+  assert.ok(!/Job job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the approval')
+  // The approval owns the keyboard: its own approve key reaches it.
+  vt.sendInput('y')
+  const outcome = await approval
+  assert.equal(outcome, 'allowed-once')
+  await vt.waitForRender()
+  harness.tasks.disposeTaskBrowser()
+  app.stop()
+})
+
+test('A-09c a Save Location prompt arriving while the Job is open leaves the workspace and really receives the keys', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+
+  const save = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    {
+      resolveDirectory: input => input,
+      isDirectory: () => true,
+      targetExists: () => false,
+      complete: async () => null,
+    },
+  )
+  await vt.waitForRender()
+  assert.deepEqual(harness.observation.forJob('job-a'), [1], 'the workspace releases its observer on pre-emption')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
+  const painted = view(vt)
+  assert.match(painted, /Save session archive/, `the Save prompt must be painted:\n${painted}`)
+  assert.ok(!/Job job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the prompt')
+  // The prompt owns the keyboard: Esc cancels it through its own contract.
+  vt.sendInput('\x1b')
+  const result = await save
+  assert.equal(result.kind, 'cancelled', 'the prompt really received its cancel key')
+  await vt.waitForRender()
+  harness.tasks.disposeTaskBrowser()
+  app.stop()
+})
+
+test('A-09d a Question presented BY the workspace close callback queues the older request instead of overwriting it', async () => {
+  const { vt, app } = startApp()
+  let innerQuestion: Promise<unknown> | undefined
+  let reentered = false
+  const handle = app.openJobInspector({
+    initial: openingRow(),
+    canStop: () => false,
+    onStop: () => {},
+    onClose: () => {
+      if (reentered) return
+      reentered = true
+      innerQuestion = app.askQuestions([{ id: 'inner', question: 'inner question?', options: [{ label: 'Yes' }] }])
+    },
+  })
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+
+  // The OUTER question is requested while the workspace is open: its
+  // abandonment callback presents the NEWER inner question, which must keep the
+  // seat (a callback's newer operation wins) while the outer stays queued with a
+  // live owner.
+  const outerQuestion = app.askQuestions([{ id: 'outer', question: 'outer question?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.equal(handle !== undefined, true)
+  const painted = view(vt)
+  assert.match(painted, /inner question\?/, `the newer question must own the seat:\n${painted}`)
+  assert.ok(!/outer question\?/.test(painted), `the older request must be queued, not mounted:\n${painted}`)
+  // Answer the inner flow: the queued outer request is handed the seat and can
+  // still be answered — neither promise is orphaned.
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  const innerAnswer = await innerQuestion
+  assert.deepEqual(innerAnswer, [{ id: 'inner', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.match(view(vt), /outer question\?/, 'the queued older request takes the seat when the newer one settles')
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  const outerAnswer = await outerQuestion
+  assert.deepEqual(outerAnswer, [{ id: 'outer', selected: ['Yes'] }])
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('A-09e a Save Location request whose abandonment callback presents a Question is REFUSED, never mounted over it', async () => {
+  const { vt, app } = startApp()
+  let innerQuestion: Promise<unknown> | undefined
+  let reentered = false
+  app.openJobInspector({
+    initial: openingRow(),
+    canStop: () => false,
+    onStop: () => {},
+    onClose: () => {
+      if (reentered) return
+      reentered = true
+      innerQuestion = app.askQuestions([{ id: 'inner', question: 'newer question?', options: [{ label: 'Yes' }] }])
+    },
+  })
+  await vt.waitForRender()
+  const save = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    {
+      resolveDirectory: input => input,
+      isDirectory: () => true,
+      targetExists: () => false,
+      complete: async () => null,
+    },
+  )
+  const result = await save.catch((error: unknown) => error)
+  assert.ok(result instanceof Error, 'the prompt is refused, never constructed behind the newer owner')
+  assert.match(result.message, /a host question or approval is active/)
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /newer question\?/, `the newer question keeps the seat:\n${painted}`)
+  assert.ok(!/Save session archive/.test(painted), 'no Save prompt may be mounted over the newer owner')
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  await innerQuestion
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('A-09f the effective exit request keeps its Host admission inside the workspace', async () => {
+  let exits = 0
+  const { vt, app } = startApp({}, { onExit: () => { exits += 1 } })
+  const handle = app.openJobInspector({
+    initial: openingRow(),
+    canStop: () => false,
+    onStop: () => {},
+    onClose: () => {},
+  })
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  assert.equal(exits, 0)
+  // The default exit keys are Ctrl+C / Ctrl+D and require a same-key second
+  // press: the workspace must not swallow either one.
+  vt.sendInput('\x04')
+  await vt.waitForRender()
+  assert.equal(exits, 0, 'the first press only arms the confirmation')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true, 'the workspace stays open')
+  vt.sendInput('\x04')
+  await vt.waitForRender()
+  assert.equal(exits, 1, 'the second effective exit press really exits even while the workspace is open')
+  handle.close()
+  await vt.waitForRender()
+  app.stop()
+})
+
+test('A-09g a throwing workspace close never truncates the stop teardown', async () => {
+  const { vt, app } = startApp()
+  const stops: TuiMainScreen[] = []
+  const originalStop = TuiMainScreen.prototype.stop
+  TuiMainScreen.prototype.stop = function (this: TuiMainScreen, options?: Parameters<typeof originalStop>[0]): void {
+    stops.push(this)
+    originalStop.call(this, options)
+  }
+  try {
+    app.openJobInspector({
+      initial: openingRow(),
+      canStop: () => false,
+      onStop: () => {},
+      onClose: () => { throw new Error('owner notification failed') },
+    })
+    await vt.waitForRender()
+    const stopsBefore = stops.length
+    assert.throws(() => app.stop(), /owner notification failed/,
+      'the real failure is still reported')
+    // The independent teardown obligations ran regardless: the main screen (the
+    // return surface) was really stopped and the surface is not left owning the
+    // terminal.
+    assert.ok(stops.length > stopsBefore, 'the main screen stop must still run under a throwing workspace close')
+    assert.equal(app.isDisposed(), false, 'stop() is not dispose()')
+  } finally {
+    TuiMainScreen.prototype.stop = originalStop
+  }
+})
+
 // ── A-10: read-only workspace ───────────────────────────────────────────────
 
 test('A-10 ordinary keys and host shortcuts are inert inside the workspace and never touch the editor, transcript or browser', async () => {
@@ -852,6 +1118,8 @@ test('A-12 a throwing workspace open releases the observation once, retires the 
   await vt.waitForRender()
   const originalOpen = app.openJobInspector
   try {
+    // The RUNTIME seam failure (the app-level mount refusing/throwing before any
+    // physical step). The REAL screen start/stop unwind is covered by A-12d.
     app.openJobInspector = function (): never {
       throw new Error('screen start failed')
     }
@@ -909,6 +1177,57 @@ test('A-12b a throwing workspace onClose still releases the screen and panel onc
     JobInspectorPanel.prototype.dispose = originalDispose
     screens.restore()
   }
+  app.stop()
+})
+
+test('A-12d a REAL failing Job screen start unwinds: the observation is released once, the return surface is restarted and the terminal owner is restored', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  const focusBefore = app.focusedComponentForTest()
+  const originalAltStart = TuiAltScreen.prototype.start
+  let failing = true
+  TuiAltScreen.prototype.start = function (this: TuiAltScreen): void {
+    if (failing) {
+      failing = false
+      // The mount really fails at the physical step: the return screen is
+      // already stopped and the Job screen never takes the terminal.
+      throw new Error('screen start failed')
+    }
+    originalAltStart.call(this)
+  }
+  try {
+    assert.throws(() => harness.tasks.openJobView('job-a'), /screen start failed/,
+      'the physical start failure is relayed, never a silent "no output"')
+    await vt.waitForRender()
+    assert.deepEqual(harness.observation.forJob('job-a'), [1], 'the failed mount releases its observer exactly once')
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false, 'no Job screen survives')
+    assert.equal(app.focusedComponentForTest(), focusBefore, 'the paused surface and its focus owner were restored')
+    // The restored surface really owns the terminal input again: the SAME
+    // browser answers Enter and a Job opens through the real runtime path.
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true,
+      'the restored browser is interactive after the failed mount')
+    assert.deepEqual(harness.observation.forJob('job-a'), [1, 0],
+      'the restored browser re-acquires the observer through the real runtime path')
+  } finally {
+    TuiAltScreen.prototype.start = originalAltStart
+  }
+  // The lease was unwound: the surface is fully usable afterwards.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.deepEqual(harness.observation.forJob('job-a'), [1, 1])
+  harness.tasks.openJobView('job-b')
+  await vt.waitForRender()
+  assert.match(view(vt), /Job job-b · bash · running/)
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.deepEqual(harness.observation.forJob('job-b'), [1])
+  harness.tasks.disposeTaskBrowser()
   app.stop()
 })
 
