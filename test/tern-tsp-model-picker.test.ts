@@ -963,6 +963,55 @@ test('native Model: the action bar never offers an action the phase refuses', as
   assert.ok(actionOf(m.pane, 'close'))
 })
 
+test('native Model: a phase whose bar no key can run carries no Enter cue', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  await m.ready()
+  const focused = (id: string) => String(actionOf(pane, id)?.label).startsWith('▸')
+  // PENDING: the admitted write refuses every key but Esc, so the enabled fallback
+  // must NOT mark `Close` — the cue is a promise about Enter, and Enter here runs
+  // nothing at all (the old fallback marked Close and then swallowed the Enter).
+  pane.key('\t')
+  await waitUntil('effort zone', () => props(pane).focus === 'preview')
+  pane.key('\t')
+  await waitUntil('bar focused on the primary', () => focused('apply'))
+  pane.key('\r')
+  await waitUntil('pending', () => actionOf(pane, 'apply')?.label === 'Selecting…')
+  assert.equal(actionOf(pane, 'close')?.label, 'Close', 'an admitted write marks no action: no key can run one')
+  assert.ok(!focused('apply'), 'the disabled Selecting… entry never carries the cue')
+  assert.ok(!sheetText(pane).includes('←→ · Enter'), 'the hint never promises the keys the write refuses')
+  pane.key('\u001b[D')
+  pane.key('\r')
+  await settle(30)
+  assert.ok(picker(pane), 'Enter ran nothing: the panel is still open')
+  assert.equal(m.writes.length, 1, 'a cued Enter must never become a second write')
+  pane.key('\u001b')
+  await waitUntil('Esc still closes an admitted write', () => picker(pane) === undefined)
+  // LOADING: reached from the bar's own Retry, so the keyboard really is in the
+  // action bar while the re-read runs — the same rule, and the hint names the read
+  // instead of promising a Tab/←→ this phase refuses.
+  const l = await mounted(t)
+  await l.ready()
+  l.pane.key('\u001b[Z')
+  await waitUntil('bar focused on the primary', () => String(actionOf(l.pane, 'apply')?.label).startsWith('▸'))
+  l.pane.key('\u001b[D')
+  await waitUntil('the Retry is focused', () => String(actionOf(l.pane, 'retry')?.label).startsWith('▸'))
+  l.pane.key('\r')
+  await waitUntil('the re-read runs', () => props(l.pane).state === 'loading')
+  assert.equal(l.retries(), 1)
+  assert.equal(actionOf(l.pane, 'close')?.label, 'Close', 'a running re-read marks no action either')
+  const hint = sheetText(l.pane)
+  assert.ok(hint.includes('Reading…'), `the hint names the read: ${hint.slice(0, 160)}`)
+  assert.ok(!hint.includes('←→ · Enter') && !hint.includes('Tab: effort'),
+    'a running re-read promises no key it refuses')
+  l.pane.key('\r')
+  await settle(30)
+  assert.ok(picker(l.pane), 'Enter ran nothing while the read runs')
+  assert.equal(l.retries(), 1, 'no refused key can re-read twice')
+  l.pane.key('\u001b')
+  await waitUntil('Esc still closes a running re-read', () => picker(l.pane) === undefined)
+})
+
 /** One fixture whose wide overview provably cannot hold everything: long effort
  *  labels, a very long provider name, or a critical number of short efforts. */
 function budgetDirectory(options: {
@@ -1524,6 +1573,61 @@ test('native Model: a failed READ keeps Tab out of an inert effort zone', async 
     () => String(actionOf(details.pane, 'apply')?.label).startsWith('▸'))
   details.pane.key('\r')
   await waitUntil('the details page Retry ran too', () => details.retries() === 1)
+  details.handle.close()
+})
+
+test('native Model: a failed read keeps the keyboard in the one bar it can operate', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  const focused = (id: string) => String(actionOf(pane, id)?.label).startsWith('▸')
+  await m.ready()
+  // The bar's OWN Retry re-reads; the re-read then FAILS while the keyboard is in
+  // the bar. The stale rows stay on screen for context, but the phase browses
+  // neither the list nor the search box and refuses Enter: the list is inert now.
+  pane.key('\u001b[Z')
+  await waitUntil('bar focused', () => focused('apply'))
+  pane.key('\u001b[D')
+  await waitUntil('Retry focused', () => focused('retry'))
+  pane.key('\r')
+  await waitUntil('the re-read runs', () => props(pane).state === 'loading')
+  m.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the re-read failed', () => props(pane).state === 'error')
+  assert.equal(m.retries(), 1)
+  // Tab AND Shift+Tab keep the cue on the operable bar instead of walking the
+  // keyboard into the inert list, where no key acts and the cue disappears. Each
+  // step waits for ITS OWN committed frame: a predicate can still read the
+  // pre-Tab frame and pass on the wrong state.
+  for (const [name, key] of [['Tab', '\t'], ['Shift+Tab', '\u001b[Z']] as const) {
+    const before = picker(pane)?.id
+    pane.key(key)
+    await waitUntil(`${name} commits its own frame`, () => picker(pane)?.id !== before)
+    assert.ok(focused('apply') || focused('close'),
+      `${name} must not drop the cue into the inert list`)
+  }
+  // ←→ still move across Retry/Close in that zone (each step its own frame).
+  const barFrame = picker(pane)?.id
+  pane.key('\u001b[D')
+  await waitUntil('Close focused', () => picker(pane)?.id !== barFrame && focused('close'))
+  const closeFrame = picker(pane)?.id
+  pane.key('\u001b[C')
+  await waitUntil('Retry focused again', () => picker(pane)?.id !== closeFrame && focused('apply'))
+  // Esc is never swallowed: the failed read has no operable zone to return to, so
+  // it closes instead of parking the keyboard in the inert list.
+  pane.key('\u001b')
+  await waitUntil('Esc closes a failed read', () => picker(pane) === undefined)
+  // The symmetric page path: a details page under a failed read. Its page intent
+  // cannot be honoured by the phase either (that would land the keyboard in the
+  // inert list), so Esc closes instead of being dropped on the floor.
+  const details = await mounted(t)
+  await resize(details.pane, 1280)
+  await details.ready()
+  action(details.pane, 'details')
+  await waitUntil('details page', () => props(details.pane).title === 'Model details')
+  details.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the read failed under the details page', () => props(details.pane).state === 'error')
+  details.pane.key('\u001b')
+  await waitUntil('Esc closes the failed details page instead of being dropped',
+    () => picker(details.pane) === undefined)
   details.handle.close()
 })
 

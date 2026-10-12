@@ -88,6 +88,12 @@ function stepEffort(panel: ModelPickerPanel, delta: -1 | 1): ModelPickerIntent |
 
 /** The frozen Tab/Shift+Tab cycle across the three K2 zones. */
 function tabZone(panel: ModelPickerPanel, direction: -1 | 1): ModelPickerZone {
+  // A failed read has exactly ONE operable region — its action bar (Retry /
+  // Close). The stale model list keeps its rows on screen for context, but the
+  // phase browses neither the list nor the search box and refuses Enter, so
+  // Tab/Shift+Tab must never move the keyboard there: both stay in the bar,
+  // where ←→ switches between Retry and the always-enabled Close.
+  if (panel.phase === 'error') return 'primary-action'
   // The effort selector exists only while the phase admits BROWSING. A failed (or
   // running) read keeps the previous rows and their effort metadata for context, but
   // its bar offers nothing but Retry/Close, so Tab must reach that bar instead of
@@ -134,9 +140,14 @@ export function keyIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent 
   // The original application cancel owner keeps Ctrl+C in every state.
   if (key.ctrl === true && key.name === 'c') return undefined
   if (key.name === 'escape') {
-    // Esc is NEVER swallowed: an admitted write and a running (re-)read leave
-    // Close as the only reachable action, whatever zone the keyboard was in.
-    if (panel.phase === 'pending' || panel.phase === 'loading') return { kind: 'close' }
+    // Esc is NEVER swallowed. An admitted write, a running (re-)read and a failed
+    // read all leave Close as the only reachable action, and in the failed read the
+    // zone/page Esc would return to is inert (`tabZone` keeps the keyboard in the
+    // bar for exactly that reason), so all three close instead of parking the
+    // keyboard where no key acts.
+    if (panel.phase === 'pending' || panel.phase === 'loading' || panel.phase === 'error') {
+      return { kind: 'close' }
+    }
     // The action bar returns to the zone it was entered FROM (a details page's
     // Primary must not teleport the user into the effort selector).
     if (panel.zone === 'primary-action') {

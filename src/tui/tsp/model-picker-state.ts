@@ -304,6 +304,21 @@ export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFa
 }
 
 /**
+ * Whether the current phase lets the KEYBOARD run the action bar at all.
+ *
+ * The bar is rendered in every phase, but an admitted write (`pending`) and a
+ * running (re-)read (`loading`) refuse every key except Esc — plus the search box
+ * on the model list — so no action there can be activated from the keyboard. The
+ * `▸` cue is a promise about Enter and `focusedAction`'s fallback is a statement
+ * about which action Enter runs, so BOTH are meaningful only where this holds:
+ * everywhere else the bar must read as having no keyboard focus instead of
+ * marking `Close` and then swallowing the Enter that cue announced.
+ */
+export function actionKeyboardLive(panel: ModelPickerPanel): boolean {
+  return panel.phase === 'ready' || panel.phase === 'error'
+}
+
+/**
  * The single-line keyboard hint of the current zone (rendered by the view and
  * counted by the layout budget, so the two can never disagree).
  *
@@ -317,6 +332,9 @@ export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFa
  */
 export function zoneHintText(panel: ModelPickerPanel): string {
   if (panel.phase === 'pending') return 'Selecting…'
+  // A running (re-)read answers the keyboard with at most the search box, so the
+  // hint names the READ instead of promising a Tab/←→ the phase will refuse.
+  if (panel.phase === 'loading') return 'Reading…'
   if (panel.phase === 'error') return 'Retry first'
   if (panel.zone === 'effort') return '↑↓ draft'
   if (panel.zone === 'primary-action') return '←→ · Enter'

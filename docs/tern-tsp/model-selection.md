@@ -61,7 +61,7 @@ share Tab; `zone` is presentation-local and is never business authority.
 |---|---|---|---|---|
 | model list | browse models (search box text stays editable) | → effort (only when the model advertises efforts), else → Primary Action / reverse | → effort, else focus the Primary Action — **never writes** | close |
 | effort | change the draft | → Primary Action / ← model list | confirm the draft, focus the Primary Action — **never writes** | back to the model list (keeps the draft) |
-| Primary Action | — | → model list / ← effort | **the only key that writes**, once, when the action is enabled | back to the previous zone |
+| Primary Action | — | → model list / ← effort | **the only key that writes**, once, when the action is enabled | back to the previous zone (a failed read closes: see below) |
 
 The effort zone is visibly focused through the SDK's own `focus: preview` (the
 compact effort page through `focus: list`); the model-list zone through
@@ -73,24 +73,35 @@ Within the action zone `←→`/`↑↓` move the focused action and `Enter` act
 exactly that action through the same intent path the pointer uses — so every
 visible action (including `Details`, `Back`, `Choose effort` and the
 partial-failure `Retry`) is keyboard reachable, and only the Primary Action
-resolves to a write. A disabled action never carries the cue. `Esc` returns to
-the zone and page the action bar was entered from (a details page stays a details
-page), and the compact effort page's `Esc` returns to the page it was opened
-from, keeping the draft. While a write is pending, `Esc` closes. `Ctrl+C` always
-remains the original application cancel owner, and a Question/Approval modal owns
-the keyboard before the Model panel.
+resolves to a write. A disabled action never carries the cue, and neither does an
+action the current phase cannot run from the keyboard at all (`pending`,
+`loading`): the cue is a promise about `Enter`, so a phase that refuses `Enter`
+marks nothing and shows no bar hint. `Esc` returns to the zone and page the
+action bar was entered from (a details page stays a details page), and the compact
+effort page's `Esc` returns to the page it was opened from, keeping the draft.
+While a write is pending, `Esc` closes; a running (re-)read and a failed read
+close too, because at that point the bar is the only region any key can run.
+`Ctrl+C` always remains the original application cancel owner, and a
+Question/Approval modal owns the keyboard before the Model panel.
 
 ### Loading, errors and retry
 
 While the directory is loading the panel still admits the search box (frozen
 §4.5: the query stays editable) and always admits `Esc`; every other key is
 refused and the Primary Action renders disabled, so a loading panel can neither
-be mutated nor left unable to close. The command's single directory-read owner
+be mutated nor left unable to close. The hint names the phase (`Selecting…` for
+an admitted write, `Reading…` for a running read) rather than promising a
+`Tab`/`←→` this phase refuses. The command's single directory-read owner
 serves both the first read and every Retry: one in-flight read at a time, the
 same `runOwned` task, captured scope, signal, presentation token and supersession
 semantics. A read failure shows the
 native error state with one message and makes the Primary Action the read-only
-`Retry` (reachable from the keyboard). A partial failure keeps the reached
+`Retry` (reachable from the keyboard). A failed read has exactly ONE operable
+region — that bar: the stale rows stay on screen for context, but the phase
+browses neither the list nor the search box and refuses `Enter`, so `Tab` and
+`Shift+Tab` both stay in the bar (where `←→` moves between `Retry` and the
+always-enabled `Close`) instead of walking the keyboard into an inert list, and
+its hint is `Retry first`. A partial failure keeps the reached
 providers usable, lists the failed provider as an inert row (compact) or an
 error-dot scope (wide), and offers an explicit `Retry failed providers` action.
 Retry repairs the same mounted panel and preserves the query and every draft the
