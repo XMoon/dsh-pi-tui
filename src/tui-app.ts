@@ -2429,21 +2429,7 @@ export class TuiApp {
     projectActivity: () => this.projectActivity(),
     terminalSize: () => ({ columns: this.terminal.columns, rows: this.terminal.rows }),
     showApprovalOverlay: (frame) => this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' }, { remountable: true }),
-    setOverlayRemount: (handle, remount) => {
-      this.overlayRemounts.set(handle, remount)
-      // Phase 3A / PR-B: a fullscreen swap that runs INSIDE this overlay's own
-      // mount (a plugin focus/blur callback) completes BEFORE this callback
-      // exists, so the swap's remount pass skipped this logical node and left its
-      // projection detached — the node would stay active but invisible on the new
-      // screen. Create that projection now and finish the swap's focus restore,
-      // exactly as its own pass would have (the broker kept the pre-swap owner
-      // pending for this case).
-      if (this.overlayBroker.hasProjection(handle)) return
-      runSyncDisposalSteps('late overlay remount', [
-        remount,
-        () => this.overlayBroker.restoreFocusAfterSwap(),
-      ])
-    },
+    setOverlayRemount: (handle, remount) => this.registerOverlayRemount(handle, remount),
     clearOverlayRemount: (handle) => { this.overlayRemounts.delete(handle) },
     rebindApprovalOverlay: (handle, frame) => this.rebindOverlayRaw(handle, frame, { width: '100%', maxHeight: '100%' }),
     focusEditorSeat: () => this.focusSeatOwner(),
@@ -2808,6 +2794,26 @@ export class TuiApp {
    * comes from the broker's CURRENT logical z-order, never a creation
    * ordinal. */
   private readonly overlayRemounts = new Map<OverlayHandle, () => void>()
+
+  /**
+   * The ONE registration authority for a remountable overlay's remount callback
+   * (Phase 3A / PR-B). Registering it is not enough when the node's projection was
+   * already detached: a fullscreen swap that ran INSIDE that node's own mount (a
+   * plugin focus/blur callback) completed BEFORE this callback existed, so the
+   * swap's remount pass skipped the node and left it logically alive but
+   * INVISIBLE on the new screen. The host therefore finishes what that pass would
+   * have done — create the projection through the callback, then let the broker
+   * install the pre-swap keyboard owner (`restoreFocusAfterSwap()`), which only
+   * does so while no NEWER operation claimed the keyboard in the meantime.
+   */
+  private registerOverlayRemount(handle: OverlayHandle, remount: () => void): void {
+    this.overlayRemounts.set(handle, remount)
+    if (this.overlayBroker.hasProjection(handle)) return
+    runSyncDisposalSteps('late overlay remount', [
+      remount,
+      () => this.overlayBroker.restoreFocusAfterSwap(),
+    ])
+  }
   /** Phase 2: the live ADVANCED overlay wrappers (recompiled on terminal
    * resize so the plugin's render(ctx) sees the new geometry). */
   private readonly advancedOverlayWrappers = new Set<import('./extension/internal/advanced-overlay.ts').AdvancedOverlayComponent>()
@@ -6635,7 +6641,7 @@ export class TuiApp {
       { remountable: true },
     )
     this.historyOverlay = handle
-    this.overlayRemounts.set(handle, () => {
+    this.registerOverlayRemount(handle, () => {
       if (this.historyPanel !== panel || this.historyOverlay !== handle) return
       const next = this.createHistoryFrame(panel)
       this.historyResponsiveFrame = next
@@ -12764,7 +12770,7 @@ export class TuiApp {
       const compiled = compileView(view)
       const component = compiled.isEmpty ? new Text('', 0, 0) : compiled.component
       handle = this.showOverlayOnHost(component, mountOptions, { remountable: true })
-      this.overlayRemounts.set(handle, remount)
+      this.registerOverlayRemount(handle, remount)
     }
     mount()
     const lease: import('./extension/public-types.ts').TuiOverlayHandle & { _remount(): void } = {
@@ -12881,7 +12887,7 @@ export class TuiApp {
       wrapper = created
       this.advancedOverlayWrappers.add(created)
       handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      this.overlayRemounts.set(handle, remount)
+      this.registerOverlayRemount(handle, remount)
     }
     mount()
     const lease: import('./extension/advanced-types.ts').AdvancedOverlayLease & { _remount(): void; _recompile(): void } = {
@@ -13097,7 +13103,7 @@ export class TuiApp {
       adapter = created
       this.unstableMountAdapters.add(created)
       handle = this.showOverlayOnHost(created, mountOptions, { remountable: true })
-      this.overlayRemounts.set(handle, remount)
+      this.registerOverlayRemount(handle, remount)
     }
     mount()
     const lease: import('./extension/unstable-types.ts').UnstableMountLease & { _remount(): void } = {
@@ -19214,7 +19220,7 @@ export class TuiApp {
       { remountable: true },
     )
     this.modelPickerOverlay = handle
-    this.overlayRemounts.set(handle, () => {
+    this.registerOverlayRemount(handle, () => {
       if (this.modelPickerComponent !== component || this.modelPickerOverlay !== handle) return
       const next = this.createModelPickerFrame(component)
       this.modelPickerFrame = next

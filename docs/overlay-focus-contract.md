@@ -592,6 +592,15 @@ or over the editor seat.
   keyboard owner whose remountable projection is not back yet PENDING across its
   restore pass, so such a mount ends as a visible, focused, answerable Approval
   instead of an invisible active owner whose keyboard silently went to the editor.
+  `registerOverlayRemount` is the ONE authority for that recovery and EVERY
+  remountable registration goes through it (the approval, the Advanced/unstable
+  plugin leases, the search overlay), so no consumer can be left with a node the
+  swap pass skipped. The pending pre-swap owner is only installed while NO newer
+  keyboard handoff happened since the swap sampled it (the broker's focus-intent
+  revision): a callback's NEWER explicit `focus()` — or a capturing overlay it
+  mounted in the same window — wins and keeps the keyboard, and an owner whose
+  projection exists but is hidden (suppressed under a modal) is never treated as
+  pending.
 - **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
   rides the caller's `close()` as the FIRST independent step of the `tui
   dispose` batch, so a throwing tenant cleanup neither skips the
@@ -604,7 +613,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-56: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-58: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -639,4 +648,8 @@ its own promise instead of waiting forever, a re-entrant fullscreen swap inside 
 failed mount (the failed Approval unwound on the swapped screen while the
 re-mounted surviving root is never popped as a ghost), a swap interleaved with the
 Approval mount itself (the dialog stays physically mounted, focused and answerable
-on the new screen while the suppressed root stays suppressed), and input routing).
+on the new screen while the suppressed root stays suppressed), a callback's NEWER
+focus (and a capturing overlay it mounted) inside that swap window keeping the
+keyboard against the pre-swap snapshot, an Advanced lease whose OWN mount
+interleaved a swap being re-projected through the one registration authority, and
+input routing).
