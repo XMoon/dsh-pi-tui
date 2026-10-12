@@ -49,19 +49,27 @@ and it takes minutes. Run it deliberately, for acceptance evidence.
 node scripts/tern-pane-drive.mjs <flow.mjs> [--out <dir>]
 ```
 
-Artifacts land in `<repo>/temp/tern-pane` by default (gitignored); `--out` or
-`TERN_PANE_OUT` moves them. The path is **normalized first**, so `.` and `..`
-cannot disguise a protected directory (the check compares paths while the delete
-resolves them). **The run directory is wiped at start**, so the driver only takes
-over a directory that is absent, empty, or carries a marker it can read that
-identifies this driver *and* whose run is no longer alive. It refuses the
-repository, its ancestors, the working directory, home, and any other non-empty
-directory it does not own — point `--out` at a fresh or harness-owned path:
+Artifacts land in a **fresh** directory of their own under `<repo>/temp/`
+(gitignored), named `tern-pane-XXXXXX`; `--out` or `TERN_PANE_OUT` names one
+instead.
+
+**Every run creates its own directory and deletes nothing.**
+
+- By default the driver makes a new unique directory, so two runs never share one.
+- `--out <dir>` names the directory *this* run creates: it must not exist yet, the
+  parent must exist, and an existing path is refused (a missing parent is not
+  filled in for you).
+- The evidence — `assertions.json`, `run.log`, the node trees, the PNGs, the flow
+  and subject copies — is **kept** after the run, on success and on failure alike.
+  The driver never removes a run directory, and there is no `--force`, `--reuse`,
+  `--clean` or takeover mode.
+- Cleaning up old `temp/tern-pane-*` directories is the operator's call. They are
+  not collected automatically: the disk space is the price of keeping the evidence.
 
 ```sh
 mkdir -p /tmp/not-ours && touch /tmp/not-ours/keep.txt
 node scripts/tern-pane-drive.mjs scripts/tern-pane-smoke.mjs --out /tmp/not-ours
-# refuses, exits 1, and leaves keep.txt in place
+# refuses, exits non-zero, and leaves keep.txt untouched
 ```
 
 ## Run the committed smoke first
@@ -99,7 +107,7 @@ export default async function (h) {
 
 The subject is any program that mounts into a real pane through the SDK's
 `connect()` and `surface.render`; the driver only runs it with `tsx` and waits for
-the marker you name. Follow the three conventions of `-smoke-subject.mts`: read the
+the ready text you name. Follow the three conventions of `-smoke-subject.mts`: read the
 run directory from `process.env.TERN_PANE_DIR`, record what actually happened there
 so the flow can read it back as its positive control, and exit on F10.
 
@@ -112,7 +120,7 @@ The subject owns its own artifacts (in the smoke, its event record).
 | `snapshot()` | The REAL node tree, indexed: `{ nodes, chains }`. `chains` maps a node to its ancestor chain |
 | `vis` / `texts` / `has` / `textNode` / `classNodes` / `descendantsText` | Tree queries |
 | `waitFor(text)` | Poll until text appears (subject readiness) |
-| `launch(subject, { ready })` | Start the subject and wait for its marker |
+| `launch(subject, { ready })` | Start the subject and wait for its ready text |
 | `ready` | Whether the control server answered; the driver refuses to run a flow without it |
 | `key` / `resize` / `css` / `clickAt` / `click` | Real input to the pane |
 | `capture(name, note)` | Node-tree dump + PNG + layout under one id |
@@ -130,7 +138,6 @@ The subject owns its own artifacts (in the smoke, its event record).
 | `run.log` | The command line, the Tern version, every control command with its outcome (`CTL ok` / `SEND ok` / `CTL-RETRY` / `CTL-FAIL`), every assertion, measurement and capture, in order |
 | `assertions.json` | The ledger plus the Tern version and flow path; `failed` counts assertions only |
 | `flow.<ext>` / `subject.<ext>` | Copies of the flow and of the subject this run used |
-| `tern-pane-run.json` | The ownership marker that makes this directory safe to wipe on the next run |
 | `<id>.tree.json` | The node tree at capture time |
 | `shots/serve/<id>.png` | The rendered pane — the human check |
 | `shots/serve/<id>.layout.json` | Element paths, boxes and computed geometry for that frame |
@@ -188,19 +195,6 @@ The subject owns its own artifacts (in the smoke, its event record).
   one is *accepted but starts nothing* — so a run directory containing spaces or
   quotes works only through the relative token. `css` is the opposite: its paths
   are split on whitespace and cannot contain spaces.
-- **A run directory is owned, and held.** Ownership is a marker
-  (`tern-pane-run.json`) that parses, names this driver and carries a pid — a file
-  with that NAME proves nothing, and a directory whose marker cannot be read is
-  refused rather than wiped. Exclusivity has two parts: a marker whose process is
-  still alive refuses a second run, and the marker is created with an
-  exclusive-create (`wx`), so two runs starting at the same moment cannot both win —
-  the loser re-reads the marker, finds someone else's pid, and backs off. A stale
-  marker (the process is gone) is taken over normally. Liveness alone cannot tell a
-  recycled pid apart from a live run, so the refusal names that pid and never wipes
-  anything on the way out; the way back is a fresh `--out` or deleting that whole run
-  directory (deleting the marker alone leaves a non-empty directory this driver does
-  not own). A `--out` that is a symlink is safe for the same reason the guard
-  exists: the delete removes the link, not the directory it points at.
 - **`shot` is software rendering at the client's scale.** A 400x600 viewport
   produces an 800x1200 PNG (scale 2); compare geometry from `layout.json` or the
   tree, not from pixel offsets in the PNG.
@@ -216,7 +210,9 @@ The subject owns its own artifacts (in the smoke, its event record).
   control logic, not a mock, but it is not a desktop window. A green run says
   nothing about OS-level input methods, window focus or the fonts a desktop
   session resolves.
-- One pane, one subject per run.
+- One pane, one subject per run, and one run per directory.
+- Run directories are never reclaimed automatically, so a long acceptance session
+  accumulates them under `temp/`; deleting them is the operator's decision.
 - The run directory keeps a copy of the flow and of the subject it launched, so a
   run can be audited later; any other module they import is not copied.
 - Client-side behaviour that no node exposes (physical IME, window chrome,
