@@ -1576,10 +1576,9 @@ execution-history list. Invariants (DSH `0.1.7` JobRegistry contract):
 Opening a Job row (`bash`/`pwsh`/`other`, or a `subagent` Job without a stable
 child id) leaves the Task Center for a dedicated fullscreen Job workspace: a
 typed header (Job identity, status, progress, the independent gap/error/settled
-facts, and one `Command:`/`Label:` identity row), a retained-output body, and a
-pinned bottom Action Bar (`<tasks.stop key> stop · Esc back`, degrading to
-`Esc back` alone when the row cannot carry more). Between the body and that bar
-a TRANSIENT notice row renders the app's own live notice while the workspace owns
+facts, and one `Command:`/`Label:` identity row), a retained-output body with its
+own Find row, and a pinned bottom Action Bar. Between the body and that bar a
+TRANSIENT notice row renders the app's own live notice while the workspace owns
 the terminal, so a Stop settlement (a refused or unproven stop in particular) is
 visible without leaving the Job view; it reuses the single app notice and its
 lifetime rather than a second Stop state.
@@ -1587,15 +1586,20 @@ lifetime rather than a second Stop state.
 One chrome plan budgets every fixed row from the live terminal grant, in a fixed
 priority: the Action Bar first (it is NEVER budgeted away), then the header — the
 status and every gap/error/settled marker, then the `Command:`/`Label:` summary —
-then the descriptive fact text, then the notice. Below 80×10 the header therefore
-stays within TWO rows, with the fact text riding on the Command row only while
-that row has room. A live notice takes its own row only when the header can still
-have its own AND at least one Output row remains: a transient notice never
-squeezes the last output row away. The workspace is its own
-screen, so the main transcript, the original editor and the footer never take
-part in its layout, and the previous screen (regular or transcript fullscreen)
-is paused with the Task Browser kept alive underneath — `Esc` returns to the
-SAME browser instance, its selected row and the original draft/scroll state.
+then the descriptive fact text, then the Search row, then the notice. Below 80×10
+the header therefore stays within TWO rows, with the fact text riding on the
+Command row only while that row has room, and on the four-row floor the compact
+header gives up its second row so `[status, search, output, Action Bar]` still
+fits. A live notice takes its own row only when the header AND the Search row can
+still have their own AND at least one Output row remains: a transient notice
+never squeezes the last output row away. A Search row is only granted from four
+rows up, so a shorter frame cannot enter Find at all, and a resize that takes the
+row away leaves the search (keeping the paused viewport and its anchor) instead of
+pointing the physical focus at a hidden editor. The workspace is its own screen,
+so the main transcript, the original editor and the footer never take part in its
+layout, and the previous screen (regular or transcript fullscreen) is paused with
+the Task Browser kept alive underneath — `Esc` returns to the SAME browser
+instance, its selected row and the original draft/scroll state.
 
 Facts stay separated by construction: the workspace presents ONE captured
 `JobInspectorState` (the opening row plus the latest detached observation), and
@@ -1606,13 +1610,60 @@ retained) and `Retained output unavailable` (the observation port refused). A
 `subagent` Job shows `Label:` instead of pretending to be a shell command, and
 the bottom row always discloses `Retained preview · not full history` — the
 tail is bounded and is not the Job's archive. `Esc` and the `tasks.stop`
-component action are the only intents; the Stop write stays the existing
-capability-gated `jobObservation.stop`, and ordinary typing never reaches the
-background editor or transcript.
+component action remain the only write intents; the Stop write stays the
+existing capability-gated `jobObservation.stop`, and ordinary typing never
+reaches the background editor or transcript.
 
-Not yet claimed: in-workspace search and an explicit follow/scroll state
-machine (B1-B), and the clickable Command reader with exact selection/copy
-(B1-C). The layout reserves those slots; the buttons do not exist yet.
+## Job Output follow is End-only, and Find is Job-local
+
+The Job Output is the ONE scrollable region of the workspace: `PgUp`/`PgDn`,
+`↑`/`↓`, `Home` and the real terminal wheel (and an equivalent scrollbar jump)
+move only that viewport, never the background transcript or Task Browser, and
+never submit editor input. Follow is an explicit client-local intent owned by the
+Job's own viewport, deliberately NOT the fork's automatic end-follow: opening a
+Job follows the retained tail, ANY manual browse — paging, one line, `Home`, a
+wheel notch, a scrollbar drag, or landing a search hit — pauses it, and `End` is
+the ONLY key that resumes it. Reaching the last row by hand, a content shrink, a
+viewport growth (terminal resize or a chrome row appearing/disappearing), a newer
+snapshot and leaving the search all leave the intent paused, so the Action Bar's
+`Follow ON` / `Follow PAUSED · End resume` text is the user's truth rather than a
+`scrollTop` coincidence. `Ctrl+Home`/`Ctrl+End` stay pure browsing aliases (they
+pause), and `End` is honoured even after the Job settled: it means "show the
+newest retained tail", never a claim that new Job output appeared.
+
+`Ctrl+F` (or whatever the live keymap really resolves `app.transcript.search`
+to, leader sequences included) and the non-configurable `/` alias open a Find
+over the CURRENT retained Output only: the header, the `Command:`/`Label:`
+summary, the notice and the background transcript are never searchable, and an
+empty/unavailable body reports `0/0 · No matches` instead of inventing a hit. The
+binding is scoped to the Job — the Transcript search handler and the fork's
+built-in search overlay are never entered from inside the workspace — while a
+Find that is disabled or rebound stops advertising the old key. `Enter` moves
+from editing to result navigation, where `n`/`N` cycle the matches; in the editor
+those letters are query text, and in navigation every other printable key is
+inert. The Search row shows its own `i/N` fact, the current match is strongly
+highlighted while the other visible matches stay weak-underlined, and the
+rendered row count and every visible width are unchanged. The first `Esc` leaves
+only the search (keeping the paused viewport next to the still-open Job, with its
+query remembered for the next `Ctrl+F`); the next `Esc` is the existing Back to
+the Task Browser. `End` while a result view is up leaves the search and returns to
+the tail as well.
+
+The retained window is the ONLY source any of this may read. When the port's
+bounded tail evicts old bytes, a paused viewport is re-anchored onto the longest
+provable surviving rendered-row run (and clamped to the new window when no overlap
+can be proven) instead of jumping to the tail or fabricating a `GAP`; `[GAP]`
+still comes only from the official `gapBefore` fact, `[ERROR]` from the
+observation error and `[SETTLED]` from the official settlement, and they remain
+independently co-visible. The Action Bar's `rows a-b/N` is the position inside
+THIS retained preview, never a Job-history line number, and it yields to the
+disclosure when the row is narrow. Search indexes are rebuilt for the current
+window/width/query only; a match that left the window cannot leave a stale
+highlight or `i/N` behind.
+
+Not yet claimed: the clickable Command reader with exact selection/copy and the
+Output copy action (B1-C). Search, follow and the retention anchor above are
+B1-B.
 
 ## Long user messages collapse at the presentation layer only
 

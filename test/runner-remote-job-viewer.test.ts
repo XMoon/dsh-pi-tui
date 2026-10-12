@@ -324,6 +324,12 @@ function viewerStopHint(): string {
   return hint
 }
 
+/** The Stop SEGMENT of the B1-B Action Bar: the primary effective `tasks.stop`
+ *  key, whichever compaction the live row width chose. */
+function viewerStopSegment(): string {
+  return `${viewerStopHint().split(' / ')[0]} stop`
+}
+
 /** The Job workspace is a dedicated temporary SCREEN (Phase 3B / B1-A): its
  *  pinned bottom disclosure is the user-visible physical-ownership signal the
  *  Task Browser never paints, so these waits never depend on an overlay handle
@@ -413,11 +419,52 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
     'the viewer path must never consume model `job_output` (`ctx.jobs.read`)')
   assert.equal(fx.hostReadCalls(), 0, 'no `ctx.jobs.read` may run on the Remote application path')
 
+  // ── B1-B (§15 extension): the Remote-backed retained Output really supports
+  // the Job Find, the strict pause and the explicit End over the SAME
+  // observation stream — no second observation, no Host read.
+  let bulk = ''
+  for (let index = 0; index < 80; index += 1) bulk += `pr3-one bulk ${index}\n`
+  job.handle().append(bulk)
+  await waitFor('the bulk retained tail converged', () =>
+    fx.observedText(job.id).includes('pr3-one bulk 79'), 20_000)
+  const observesBeforeInteraction = fx.observeAcquires()
+  const readsBeforeInteraction = fx.hostReadCalls()
+
+  fx.fixture.vt.sendInput('\x06')
+  await waitFor('the Job Find row opened over the Remote-backed Output', () =>
+    view().includes('Find Output:'), 10_000)
+  fx.fixture.vt.sendInput('bulk 42')
+  await waitFor('the Remote retained body is searchable in the Job', () => /1\/1/u.test(view()), 10_000)
+  assert.equal(fx.hostReadCalls(), readsBeforeInteraction,
+    'the Job Find never consumes `ctx.jobs.read`')
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the search closed while the Job stayed open', () =>
+    !view().includes('Find Output:') && view().includes(JOB_ONE_LABEL), 10_000)
+
+  fx.fixture.vt.sendInput('\x1b[5~')
+  await waitFor('the manual browse paused follow', () => view().includes('Follow PAUSED'), 10_000)
+  job.handle().append('pr3-one newest tail\n')
+  await waitFor('the newest Remote line converged into the observation', () =>
+    fx.observedText(job.id).includes('pr3-one newest tail'), 20_000)
+  await fx.fixture.vt.waitForRender()
+  const paused = view()
+  assert.ok(!paused.includes('pr3-one newest tail'),
+    `a PAUSED Job viewport must not follow a newer Remote tail:\n${paused}`)
+  assert.equal(fx.observeAcquires(), observesBeforeInteraction,
+    'the search/scroll interaction never opens a second observation')
+  assert.equal(fx.hostReadCalls(), readsBeforeInteraction,
+    'the search/scroll interaction never consumes `ctx.jobs.read`')
+  fx.fixture.vt.sendInput('\x1b[F')
+  await waitFor('End returned to the newest Remote tail', () =>
+    view().includes('pr3-one newest tail'), 10_000)
+  assert.match(view(), /Follow ON/u, 'End restored follow over the Remote stream')
+
   // ── §15 step 7: the viewer advertises the stop hint and the REAL Stop key
   // dispatches through the semantic port.
   const key = stopKey(app)
-  assert.ok(view().includes(`${viewerStopHint()} stop · Esc back`),
+  assert.ok(view().includes(viewerStopSegment()),
     `the workspace must advertise the component keymap's tasks.stop hint before Stop:\n${view()}`)
+  assert.ok(view().includes('Esc back'), `the Action Bar must keep Esc back:\n${view()}`)
 
   // ── Negative control (c): a PROVEN `requested` admission that never reaches
   // the Host (the settled path is injected as requested) must still not be
@@ -431,7 +478,7 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   assert.equal(fx.rosterStatus(job.id), 'running',
     'a requested admission must not optimistically rewrite the official roster')
   assert.match(view(), /running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
-  assert.ok(view().includes(`${viewerStopHint()} stop · Esc back`),
+  assert.ok(view().includes(viewerStopSegment()),
     'canStop must follow the latest OBSERVED status, not the local request')
 
   // ── Negative control: an INDETERMINATE kill is never auto-retried and never
@@ -449,7 +496,7 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   assert.equal(fx.rosterStatus(job.id), 'running',
     'the injected indeterminate kill must not change the official roster')
   assert.match(view(), /running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
-  assert.ok(view().includes(`${viewerStopHint()} stop · Esc back`),
+  assert.ok(view().includes(viewerStopSegment()),
     'canStop must stay advertised while the latest OBSERVED status is active')
 
   // ── §15 step 8: the REAL Stop converges through the official roster/follow.
@@ -459,7 +506,7 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
     fx.rosterStatus(job.id) === 'killed', 20_000)
   await waitFor('the viewer rendered the terminal status', () => view().includes('killed'), 20_000)
   await waitFor('the viewer Stop capability disappeared after settlement', () =>
-    !view().includes(`${viewerStopHint()} stop`), 10_000)
+    !view().includes(viewerStopSegment()), 10_000)
   await waitFor('the observation stream settled', () =>
     fx.clientJobs.state.getSnapshot().observed[String(job.id)]?.streaming === false, 20_000)
   await waitFor('the settled body rendered its detail and dropped the live progress', () =>

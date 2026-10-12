@@ -348,6 +348,9 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
         onClose: () => {},
         canStop: () => true,
         onStop: () => { stops += 1 },
+        isFindKey: () => false,
+        findHint: () => '',
+        focusComponent: () => {},
       },
     )
     const lines = panel.render(budget.width)
@@ -405,6 +408,9 @@ test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capabil
     onClose: () => { closes += 1 },
     canStop: () => live,
     onStop: () => {},
+    isFindKey: () => false,
+    findHint: () => '',
+    focusComponent: () => {},
   })
   assert.match(panel.render(100).at(-1)!, /stop/)
   assert.match(panel.render(100).at(-1)!, /Esc back/)
@@ -438,6 +444,9 @@ test('A-01d a long Job identity and a long error text never hide the status or t
       onClose: () => {},
       canStop: () => false,
       onStop: () => {},
+      isFindKey: () => false,
+      findHint: () => '',
+      focusComponent: () => {},
     },
   )
   const lines = panel.render(80)
@@ -469,6 +478,9 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
     onClose: () => {},
     canStop: () => false,
     onStop: () => {},
+    isFindKey: () => false,
+    findHint: () => '',
+    focusComponent: () => {},
   })
 
   // 44×8 with GAP/ERROR: the compact header is TWO rows at most, the Command and
@@ -1415,7 +1427,7 @@ test('A-09j a leader-bound effective exit still leaves the TUI while every other
 
 // ── A-10: read-only workspace ───────────────────────────────────────────────
 
-test('A-10 ordinary keys and host shortcuts are inert inside the workspace and never touch the editor, transcript or browser', async () => {
+test('A-10 ordinary keys and host shortcuts are inert inside the workspace and never touch the editor, transcript or browser; the effective Find opens ONLY the Job Find', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1427,8 +1439,16 @@ test('A-10 ordinary keys and host shortcuts are inert inside the workspace and n
   await vt.waitForRender()
   const draftBefore = app.hostEditorTextForTest()
   const overlayBefore = app.overlayGraphState().handles
+  // Patch the LIVE app's production Transcript-search entry (receiver preserved)
+  // so "B1-B never enters the background search" is a real call count.
+  const originalStartTranscriptSearch = app.startTranscriptSearch
+  let transcriptSearches = 0
+  app.startTranscriptSearch = function (this: TuiApp): void {
+    transcriptSearches += 1
+    originalStartTranscriptSearch.call(this)
+  }
 
-  for (const chunk of ['x', '\r', '\x06', '\x0f', '\x1b[B', '\x1b[A', '1']) {
+  for (const chunk of ['x', '\r', '\x0f', '\x1b[B', '\x1b[A', '1']) {
     vt.sendInput(chunk)
     await vt.waitForRender()
   }
@@ -1436,6 +1456,25 @@ test('A-10 ordinary keys and host shortcuts are inert inside the workspace and n
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true, 'the workspace keeps the keyboard')
   assert.equal(app.overlayGraphState().handles, overlayBefore, 'no search/overlay was opened from inside the Job')
   assert.equal(browserBefore.getViewState!().selectedId, selectedBefore, 'the browser selection never moved')
+  assert.equal(transcriptSearches, 0)
+
+  // B1-B: the effective Find binding opens the JOB's own Find — not the
+  // Transcript search handler and not any overlay.
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/, 'the Job Find really opened in the workspace')
+  assert.equal(transcriptSearches, 0, 'the Transcript search handler was never entered')
+  assert.equal(app.overlayGraphState().handles, overlayBefore, 'the Job Find is a layout row, never an overlay')
+  assert.equal(app.hostEditorTextForTest(), draftBefore, 'Find never types into the editor')
+  vt.sendInput('job-a')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output: job-a/)
+  assert.equal(app.hostEditorTextForTest(), draftBefore)
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true, 'the first Esc leaves only the search')
+  assert.ok(!/Find Output:/.test(view(vt)))
 
   vt.sendInput('\x1b')
   await vt.waitForRender()
