@@ -259,9 +259,14 @@ the draft and creating no Session, the native panel over the real
 `agent-presets` registry roster, sessionless staging without a Session, the
 started-Session refusal for both the bare and the typed path, the typed verbs
 keeping their original routes and never opening a picker, a Host-owned `preset`
-keeping its route, and the default write driving exactly the settings mutation
-the typed verb drives. `test/preset.test.ts` keeps the PiTui preset behavior and
-the shipped display copy; `test/tern-tsp-command-admission.test.ts` keeps the
+keeping its route, and the default write through the real configuration plane
+(the picker's action and the typed verb write the same profile document, and a
+fresh Context reads the persisted default back). Both suites also cover the
+admission and lifecycle fences: a synthetic event naming a disabled action is
+refused, a settlement after the subject moved commits no frame, a late settlement
+never touches the panel a newer invocation opened, and a late read never hydrates
+a moved subject. `test/preset.test.ts` keeps the PiTui preset behavior and the
+shipped display copy; `test/tern-tsp-command-admission.test.ts` keeps the
 post-classification admission predicate.
 
 ## Qualification limits
