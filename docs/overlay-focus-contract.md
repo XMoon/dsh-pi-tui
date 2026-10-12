@@ -215,9 +215,10 @@ When you add or change an overlay path, cover the family it belongs to:
 - **A failed blocking presentation**: keep the rollback steps, the FIFO advance
   and the caller's promise settlement INDEPENDENT (a throwing step surfaces
   aggregated, never truncating); commit the successor fact BEFORE the handover
-  runs; gate the advance on the failed state still owning the seat; and give a
-  successor handed over from a never-presented flow its OWN initial suspension
-  (see §11).
+  runs; gate the advance on the failed state still owning the seat; a successor
+  UNIONS the inherited suspension set and then takes its own suspension over the
+  still-visible roots; and fence the handover tail after that suspension on the
+  successor still being the live owner (see §11).
 - **Assertions to add**: `assertOverlayForestForTest()` after reentrant
   operations; focus/blur counts around internal restores; the logical
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
@@ -455,13 +456,21 @@ or over the editor seat.
   then `handOverQuestion`): a throwing handover step has already installed and
   logically committed its successor, so "the handover returned normally" must
   never decide whether the settlement's restoration runs — that would clear the
-  live successor's owner slot and strand its promise. The handover transfers the
-  predecessor's suspension graph only when that predecessor actually PRESENTED it
-  (`frame` is installed immediately after its initial suspension); a FAILED
-  initial presentation (its park threw before that line) owns no graph over the
-  already visible roots, so the successor takes its OWN `suspendVisibleRoots`
-  once it is committed as the live owner, while every root the predecessor's
-  window did acquire travels with the set and is never dropped.
+  live successor's owner slot and strand its promise. The handover UNIONS the
+  predecessor's suspension set into the successor's (never dropped) and then
+  ALWAYS takes its own `suspendVisibleRoots` over whatever is still visible, once
+  it is committed as the live owner: "has a frame" is NOT the same fact as "its
+  initial suspension completed" — a predecessor can be superseded by a root's
+  `onBlur` WHILE that suspension is running, leaving its frame installed and its
+  roots neither hidden nor resumed, and the superseded suspension then skips its
+  remaining hides because the set was handed over. Re-suspending closes both:
+  already hidden roots are filtered by visibility (no re-suspension, no focus
+  move), and a root a callback re-showed while the modal owned the seat is hidden
+  exactly like at a fresh presentation. Because that suspension is a NEW callback
+  window, the handover mirrors `presentQuestion`'s fences: only a still-live
+  successor focuses its frame and publishes its seat, while a superseded one hands
+  back the suspension it still owns (its successor already took the graph) and
+  never re-focuses its retired frame over the newer owner.
   Without all of this, a caller-side cleanup failure would leave an
   unpresented modal blocking every later request while a retired component stayed
   painted.
@@ -555,7 +564,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-45: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-46: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -577,4 +586,6 @@ DOUBLY-failing approval park that still presents its queued successor, a throwin
 handover step that cannot clear the successor it installed, a failed
 presentation that cannot dequeue over the newer successor that preempted it, a
 successor that takes its own initial suspension, an auto-focused overlay that
-keeps the keyboard against the seat fallback, and input routing).
+keeps the keyboard against the seat fallback, a successor superseded INSIDE its
+own initial suspension (the inherited roots stay hidden and the live frame keeps
+the keyboard), and input routing).

@@ -20080,22 +20080,21 @@ export class TuiApp {
     // next flow directly — the editor and the overlays are NEVER restored
     // between two queued flows (a restore would flash the editor row and
     // reveal overlays that must stay hidden under the question).
-    // Whether the successor INHERITS the suspension graph instead of taking its
-    // own (see the first step below).
-    let inheritedSuspension = false
     runSyncDisposalSteps('question settlement handover', [
-      // The successor inherits the graph only when the predecessor actually ran
-      // its initial suspension — `frame` is installed right after it in
-      // `presentQuestion`. A FAILED initial presentation (its park threw before
-      // that line) owns no graph over the pre-existing visible roots, so the
-      // successor must take its OWN initial suspension below, exactly as its own
-      // `presentQuestion` would, or it would be a capturing modal over
-      // still-visible roots. Roots the predecessor's window already acquired (the
-      // broker hides a newly mounted overlay while a modal owns the seat and
-      // appends it to that set) travel with the set either way — never dropped.
+      // The successor inherits every root the predecessor's modal already owns
+      // (UNION in place, never dropped) and then takes its OWN suspension below
+      // over whatever is STILL visible. "Has a frame" is NOT the same fact as "its
+      // initial suspension completed": a predecessor can be superseded WHILE its
+      // suspension is running (a root's `onBlur` aborts it), by which time its
+      // frame exists but its roots are neither hidden nor resumed — a successor
+      // that trusted that frame would leave them painted under itself, and the
+      // superseded suspension skips its remaining hides once the set was handed
+      // over. Re-suspending the visible set here closes both: already hidden roots
+      // are filtered by visibility (no re-suspension, no focus move), and a root a
+      // callback re-showed while the modal owned the seat is hidden exactly like
+      // at a fresh presentation.
       () => {
-        inheritedSuspension = settled.frame !== undefined
-        target.suspendedOverlays = settled.suspendedOverlays
+        for (const handle of settled.suspendedOverlays) target.suspendedOverlays.add(handle)
         settled.suspendedOverlays = new Set()
       },
       () => { target.flow.setStatus(target.status) },
@@ -20109,14 +20108,21 @@ export class TuiApp {
         this.editorSeat.replace(frame)
       },
       () => { this.activeQuestions = target },
-      // The successor's OWN initial suspension when the predecessor never
-      // presented one. It runs AFTER the successor is committed as the live
-      // owner, so a callback it fires (the seat-owner focus transition) observes
-      // the successor, never the abandoned predecessor.
-      () => { if (!inheritedSuspension) this.overlayBroker.suspendVisibleRoots(target) },
-      () => { (this.fullscreen ?? this.tui).setFocus(target.frame!) },
+      // The successor's OWN initial suspension over the still-visible roots. It
+      // runs AFTER the successor is committed as the live owner, so a callback it
+      // fires (the seat-owner focus transition) observes the successor, never the
+      // abandoned predecessor.
+      () => this.overlayBroker.suspendVisibleRoots(target),
+      // That suspension hands the keyboard to the seat owner and may fire a focus
+      // / blur callback that settles or replaces THIS successor — the same window
+      // `presentQuestion` fences after its own suspension. Only a STILL-live
+      // successor may take the keyboard and publish its own seat: a superseded one
+      // hands back the suspension it still owns (its successor already took the
+      // graph) and must never re-focus its retired frame over the newer owner.
+      () => { this.abandonIfDead(this.questionFlowIsLive(target), target) },
+      () => { if (this.questionFlowIsLive(target)) (this.fullscreen ?? this.tui).setFocus(target.frame!) },
       // The next queued flow owns the seat (follow-up P1).
-      () => this.setFocusSeat('overlay'),
+      () => { if (this.questionFlowIsLive(target)) this.setFocusSeat('overlay') },
       // The wait that owns the surface CHANGED — a different flow, possibly
       // with a different `agentInputWait` — while the phase stays
       // `waiting-question`, so the activity projection (and with it the
