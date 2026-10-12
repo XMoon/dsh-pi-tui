@@ -13,6 +13,7 @@ import {
   highlightedModel,
   modelChoices,
   modelRowId,
+  effortValue,
   scopeProviderId,
   visibleModels,
   type ModelPickerPanel,
@@ -224,19 +225,25 @@ export function actionIntent(
 }
 
 /**
- * One SDK row/scope activation. The CURRENT PAGE decides what a row means first:
- * on the effort page a row is an advertised candidate and changes the draft, so
- * a candidate whose id merely looks like a scope id (even the every-provider id)
- * can never be misread as a provider filter. Only then is a scope id treated as
- * the provider scope column's filter, and only on the model/details pages is a row
- * id a model highlight. Anything else is not an intent this panel accepts.
+ * One SDK row/scope activation.
+ *
+ * A candidate row carries its OWN wire namespace ({@link effortValue}), and that is
+ * the only place a candidate value is read: the SDK delivers the scope column's ids
+ * and the page's row ids on the same channel, so a candidate whose value looks like a
+ * scope id (or IS the every-provider id) still changes the draft, and the scope
+ * column's ids still filter — including ON the effort page, where the scopes stay
+ * live. Only on the model/details pages is a row id a model highlight.
  */
 export function rowIntent(panel: ModelPickerPanel, item: string): ModelPickerIntent | undefined {
   if (panel.page === 'effort') {
-    const choices = modelChoices(highlightedModel(panel))
-    if (choices.some((choice) => choice.value === item)) return { kind: 'browse-effort', value: item }
-    // Not a candidate: fall through, because the scope column stays live on this
-    // page too (an unknown item simply is not a scope id).
+    const value = effortValue(item)
+    if (value !== undefined) {
+      const choices = modelChoices(highlightedModel(panel))
+      return choices.some((choice) => choice.value === value)
+        ? { kind: 'browse-effort', value }
+        : undefined
+    }
+    // Not a candidate row: fall through, because the scope entries are live here.
   }
   const scope = scopeProviderId(item)
   // `null` is the every-provider entry: it maps to the absence of a provider.
