@@ -1748,15 +1748,20 @@ introduced.
 - **Command drag selection** sends `label.slice(start, end)` for the half-open
   UTF-16 range the gesture covered.
 
-Every DYNAMIC field the workspace header paints (Job identity, kind, status,
-progress, detail, the Command/Label summary and the follow-stream error) crosses
-ONE display boundary that strips complete CSI/OSC/APC/DCS sequences and drops any
-remaining C0/C1 control byte, because the header is Host-supplied metadata on a
-screen the fork also uses for its own terminal control. The OFFICIAL bytes are
+Every DYNAMIC field the workspace CHROME paints crosses ONE display boundary that
+strips complete CSI/OSC/APC/DCS sequences and drops any remaining C0/C1/DEL byte:
+the header rows (Job identity, kind, status, progress, detail, the Command/Label
+summary and the follow-stream error) AND the transient notice row, which embeds
+the Job label in a Stop settlement. Both rows carry Host-supplied metadata on a
+screen the fork also uses for its own terminal control, and the theme's own
+styling is applied AFTER that projection, so it is never stripped with it. The OFFICIAL bytes are
 never rewritten: the `View`, the Command document and every copy payload keep the
 raw `label`/`detail`/`progress`, and the Command body shows control bytes as
 visible escapes rather than executing them. A `label` carrying its own OSC 52 is
-therefore painted as plain text and can never reach the terminal stream.
+therefore painted as plain text and can never reach the terminal stream from
+either row. (The Task Browser's own stop notices interpolate the roster label the
+same way; that pre-existing sibling is outside B1-C and is reported, not changed
+here.)
 
 The Command page renders a dedicated document model rather than the vendored
 `Text` renderer, because `Text` expands TAB to three spaces, word-wraps and

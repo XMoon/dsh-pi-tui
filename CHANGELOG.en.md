@@ -53,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unavailable one answers `Output unavailable`: neither writes the clipboard and
   neither reports a false success. Terminal control sequences inside the Job
   metadata (`label`/`detail`/`progress`) are only ever shown as sanitized text in
-  the header and are never passed to the terminal, and the Command page suspends
+  the workspace header and notice row (a Stop settlement embeds the Job label
+  there) and are never passed to the terminal from those rows, and the Command page suspends
   the terminal's native copy-on-select while it is shown, so a rapid double click
   on `[Copy All]` cannot overwrite the full command with a screen word.
   When the retained window is truncated, a paused view keeps the same

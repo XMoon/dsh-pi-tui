@@ -284,10 +284,13 @@ export interface JobInspectorPanelIntents {
 
 /** A raw `label`/`detail`/`error` is shown on ONE row: hard line breaks become
  *  spaces for DISPLAY only, and COMPLETE terminal escape sequences plus any
- *  remaining C0/C1 control byte are removed at this ONE display boundary: the
- *  official raw `label`/`detail`/`progress` stay untouched in the `View`, the
- *  Command document and every copy payload. */
-const headerText = (text: string): string => sanitizedPhysicalLine(text)
+ *  remaining C0/C1 control byte are removed at this ONE workspace-chrome display
+ *  boundary — the SAME projection guards the header rows AND the transient notice
+ *  row, because both paint Host-supplied Job text (`label`, `detail`, `progress`,
+ *  a stop settlement's label). The official raw bytes stay untouched in the
+ *  `View`, the Command document and every copy payload. Styling is applied AFTER
+ *  this projection, so the theme's own colors are never stripped with it. */
+const chromeText = (text: string): string => sanitizedPhysicalLine(text)
 
 /** The bracketed fact markers of one view, in priority order: independent and
  *  co-visible, never a mutually exclusive status switch. */
@@ -304,7 +307,7 @@ const flagMarkers = (view: JobInspectorView): string => markerTokens(view).join(
  *  the eviction note and the follow-stream error text. */
 const flagTexts = (view: JobInspectorView): string => [
   ...(view.gapBefore ? ['Earlier output evicted'] : []),
-  ...(view.observationError === undefined ? [] : [`error: ${headerText(view.observationError)}`]),
+  ...(view.observationError === undefined ? [] : [`error: ${chromeText(view.observationError)}`]),
 ].join('   ')
 
 /** `${reserved}   ${flexText}` with the RESERVED head's room claimed FIRST, so a
@@ -364,8 +367,8 @@ class JobInspectorHeader implements Component {
       return []
     }
     const kind = COMMAND_KINDS.has(view.kind) ? 'Command' : 'Label'
-    const identity = headerText(`Job ${view.jobId} · ${view.kind}`)
-    const command = `${kind}: ${headerText(view.label)}`
+    const identity = chromeText(`Job ${view.jobId} · ${view.kind}`)
+    const command = `${kind}: ${chromeText(view.label)}`
     const lines: string[] = []
     if (compact) {
       // TWO rows at most, in PRIORITY order. Row one carries the STATUS and every
@@ -374,7 +377,7 @@ class JobInspectorHeader implements Component {
       // row still has room for it — so the summary can never be displaced by a
       // GAP/ERROR description, and the identity prefix is kept only when it fits
       // beside the status.
-      let head = headerText(view.status)
+      let head = chromeText(view.status)
       for (const marker of markerTokens(view)) {
         if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
       }
@@ -385,9 +388,9 @@ class JobInspectorHeader implements Component {
     } else {
       // The identity never pushes the status out of its row, and the markers
       // never push the (unbounded) fact text out of theirs.
-      lines.push(withReservedStatus(identity, headerText(view.status), width))
-      if (view.progress !== undefined) lines.push(`progress: ${headerText(view.progress)}`)
-      if (view.detail !== undefined) lines.push(`detail: ${headerText(view.detail)}`)
+      lines.push(withReservedStatus(identity, chromeText(view.status), width))
+      if (view.progress !== undefined) lines.push(`progress: ${chromeText(view.progress)}`)
+      if (view.detail !== undefined) lines.push(`detail: ${chromeText(view.detail)}`)
       const markers = flagMarkers(view)
       if (markers !== '') {
         const facts = flagTexts(view)
@@ -413,18 +416,18 @@ class JobInspectorHeader implements Component {
       this.hitTargets = []
       return []
     }
-    const identity = headerText(`Job ${view.jobId} · ${view.kind}`)
+    const identity = chromeText(`Job ${view.jobId} · ${view.kind}`)
     // The markers are appended to the status row when they fit, because the
     // Command page reserves its last row for the reader identity: a finger/ERROR
     // fact must never be the price of the Copy All affordance.
-    let head = headerText(view.status)
+    let head = chromeText(view.status)
     for (const marker of markerTokens(view)) {
       if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
     }
     const withIdentity = `${identity} · ${head}`
     const middle: string[] = []
-    if (view.progress !== undefined) middle.push(`progress: ${headerText(view.progress)}`)
-    if (view.detail !== undefined) middle.push(`detail: ${headerText(view.detail)}`)
+    if (view.progress !== undefined) middle.push(`progress: ${chromeText(view.progress)}`)
+    if (view.detail !== undefined) middle.push(`detail: ${chromeText(view.detail)}`)
     const markers = flagMarkers(view)
     if (markers !== '') {
       const facts = flagTexts(view)
@@ -673,7 +676,11 @@ class JobInspectorNoticeRow implements Component {
   render(width: number): string[] {
     const live = this.notice()
     if (live === undefined || this.plan(width).noticeRows === 0) return []
-    const line = live.kind === 'info' ? color.textDim(`ℹ ${live.text}`) : color.error(`✗ ${live.text}`)
+    // The notice text is Host-supplied (a Stop settlement embeds the Job label),
+    // so it crosses the SAME display boundary as the header BEFORE the theme's
+    // own styling is applied.
+    const text = chromeText(live.text)
+    const line = live.kind === 'info' ? color.textDim(`ℹ ${text}`) : color.error(`✗ ${text}`)
     return [truncateToWidth(line, width, '…', true)]
   }
 
