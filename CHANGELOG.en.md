@@ -63,7 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A command that was offered by the completion list but the target Session does
   not actually provide now returns the COMPLETE original input (staged
   attachments included) to the editor when it is refused — the submitted words
-  are never swallowed, and a draft typed while the refusal settles stays below.
+  are never swallowed, and a draft typed while the refusal settles stays ABOVE
+  the restored text.
 - Input submitted after a Session switch but before its recall history is
   reloaded no longer vanishes from ↑: the reload merges the inputs the Session
   already accepted with its disk rows, in order and without duplicates, and the

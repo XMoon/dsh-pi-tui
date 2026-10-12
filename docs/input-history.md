@@ -195,34 +195,56 @@ broader search (its `Current directory` / `All directories` scopes cover
 legacy rows; `Current session` filters to the live session exactly like
 the editor recall).
 
-### Publication→hydration window (trap: the reseed races the DETACHED append)
+### Publication→hydration window (trap: the reseed races the submission's OWN write)
 
 A Session publication (ordinary `/new` / switch, `/fork` adoption, the
 first-session creation) makes the new owner current BEFORE its hydration
 reseeds ↑/↓ from the session-scoped JSONL rows. A submission accepted inside
-that window is already owned by the NEW Session, but its persistence is a
-DETACHED append (`runDetached`, never a synchronous write), so the row can land
-AFTER the snapshot read: it is on disk under the new `sessionId` (and Ctrl+R
-`Current session` / `Current directory` find it) while the reseed does not see
-it and would otherwise drop it from ↑.
+that window is already owned by the NEW Session, but its own persistence is
+ordered behind the transition — the submit FIFO turn and `ensureSession()`
+(`persistAfterSession`) — so the write can run AFTER the snapshot read: the row
+lands on disk under the new `sessionId` (and Ctrl+R `Current session` /
+`Current directory` find it) while the reseed does not see it and would
+otherwise drop it from ↑. The append itself is synchronous inside the detached
+task (`runDetached` invokes its factory synchronously and `appendFileSync` runs
+there); the ORDERING between the submission body and the reseed is what races,
+never the append.
 
-`TuiApp` therefore keeps the window's SCOPE-BOUND TEMPORARY SUBMISSIONS, and
-the hydration reseed reconciles them:
+`TuiApp` therefore keeps the open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS,
+and the hydration reseed reconciles them:
 
-- `beginInputHistoryScope()` runs at the publication seam of every commit shape
-  and clears the overlay, so Session A's entries can never cross into Session
-  B's recall;
-- `rememberInput()` records an accepted input in the overlay while the window
-  is open (same consecutive-duplicate rule and 100-entry cap as the mirror);
-  `shouldRememberInput` refusals (attachment-bearing placeholders) never enter
-  it;
-- `resetInputHistory()` merges the overlay with the disk snapshot: the covered
-  subset is matched POSITIONALLY (the append-only appends run in submission
-  order, so the overlay's oldest entries are the snapshot's newest rows, in
-  reverse order) — never by text, so a legitimate non-consecutive repeat stays
-  intact and multiplicity is preserved;
-- the commit closes the window; ordinary submissions then use the plain
-  in-memory path again, and ↑ never reads the disk.
+- the scope is open from construction: the SESSIONLESS POOL is a real scope (a
+  deferred start, and the Remote startup resume whose `remote.read` await leaves
+  the terminal accepting input), and the first published owner ADOPTS its
+  entries — that submission's row is written under the new Session, so the
+  snapshot cannot carry it yet;
+- `beginInputHistoryScope(owner)` runs at the synchronous publication seam of
+  the ordinary transition, the fork adoption and the first-session creation.
+  A REPLACED owner's pending entries are dropped with it, so Session A's input
+  can never cross into Session B's recall (the resume publication needs no call:
+  the pool is already open and its reseed closes it);
+- `rememberInput()` records an accepted input while the scope is open, using the
+  SCOPE's own newest entry as its consecutive-duplicate anchor (the mirror still
+  holds the outgoing Session's rows, whose head must not swallow the new
+  Session's first identical input); an emptied scope has no predecessor, so an
+  input identical to the outgoing Session's last row is still recorded. The
+  mirror keeps its own, unchanged duplicate rule, and `shouldRememberInput`
+  refusals (attachment-bearing placeholders) never enter the scope;
+- `settleScopeInput(owner, text)` — called by the write owner from the SAME
+  synchronous stack as a SUCCESSFUL append — removes exactly that occurrence, so
+  the reseed never merges a row the snapshot already carries. A row the write
+  policy SKIPPED emits no settlement and stays in the recall: the CWD-level
+  dedupe governs the FILE, and the UI recall does not silently drop an input the
+  user really submitted;
+- `resetInputHistory(entries, owner)` commits the owner's reseed: the remaining
+  scope entries ride in front of the snapshot in submission order (occurrence
+  counts intact — `a → b → a` survives), then the scope closes and ordinary
+  submissions use the plain in-memory path again. The sessionless boot seed
+  passes no owner: it only seeds the pool and leaves the scope open.
+
+While a reseed is still pending, the outgoing Session's rows remain recallable
+(`resetForGeneration` is an invalidation signal, not a confirmed switch); they
+are replaced by the new owner's projection at the commit above.
 
 No second history authority is created: the per-cwd JSONL stays the snapshot
 authority, and the write policy (trim, empty / consecutive-repeat / attachment

@@ -1265,8 +1265,9 @@ export function executeHostCommandSubmission(
       // editor, attachments or not: swallowing a plain-text line loses the
       // user's words with no recovery path (the editor is already cleared).
       // `restoreSubmissionDraft` merges, so a draft the user typed meanwhile
-      // survives below the refused line, and the handoff pin is still held
-      // here — it is released on the way out.
+      // stays ABOVE the restored line (`mergeDraft` = current + blank line +
+      // submitted), and the handoff pin is still held here — it is released on
+      // the way out.
       if (deps.shouldConsumeAdvertisedMiss(execution, planeAdvertised)) {
         deps.restoreSubmissionDraft(text)
         deps.notify(`/${input.parsedName ?? '?'} is not available in the created session`, 'error')
