@@ -1629,7 +1629,13 @@ snapshot and leaving the search all leave the intent paused, so the Action Bar's
 `Follow ON` / `Follow PAUSED · End resume` text is the user's truth rather than a
 `scrollTop` coincidence. `Ctrl+Home`/`Ctrl+End` stay pure browsing aliases (they
 pause), and `End` is honoured even after the Job settled: it means "show the
-newest retained tail", never a claim that new Job output appeared.
+newest retained tail", never a claim that new Job output appeared. The physical
+`Home`/`End` viewport keys are RESERVED to the workspace: they are matched before
+any Find binding, so a user who remaps the effective Find onto one of them still
+gets End as the only follow re-arm (and Home as the preview top), while `/` —
+never reserved — remains the Job-local Find entry; the Action Bar's Find hint
+drops such a reserved binding rather than promising a key the workspace
+consumes.
 
 `Ctrl+F` (or whatever the live keymap really resolves `app.transcript.search`
 to, leader sequences included) and the non-configurable `/` alias open a Find
@@ -1682,7 +1688,9 @@ occurrence. A width change has no such mapping at all (the rows are re-wrapped),
 so the carried identity is dropped there rather than compared across widths. Only
 when the current match itself cannot be proven in the new window does the
 selection fall back to the nearest PROVABLE match at or after the visible anchor
-rather than to an old ordinal.
+rather than to an old ordinal, and that visible anchor is the viewport the frame
+ACTUALLY painted — synchronised at every frame commit, so a plain scroll moves it
+even when no Job output arrived.
 
 Not yet claimed: the clickable Command reader with exact selection/copy and the
 Output copy action (B1-C). Search, follow and the retention anchor above are

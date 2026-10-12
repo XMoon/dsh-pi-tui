@@ -897,6 +897,48 @@ test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable a
   app.stop()
 })
 
+// ── B-08b: a Find remap onto a reserved viewport key cannot shadow End ─────
+
+test('B-08b a Find binding remapped onto the reserved physical End cannot shadow the only follow re-arm or be advertised', async () => {
+  // A wide frame so the LOWEST-priority Find hint really fits: with the reserved
+  // key filtered out the segment is `Find /`, and without the filter it would
+  // advertise the inert `End`.
+  const { vt, app } = startApp({}, {}, 200, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow PAUSED/)
+  const bar = (): string => rawView(vt).at(-1) ?? ''
+  assert.match(bar(), /Find Ctrl\+F \//)
+
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    bindings: { 'app.transcript.search': 'end' },
+  }))
+  await vt.waitForRender()
+  assert.match(bar(), /Follow PAUSED · End resume/, 'End still really resumes follow')
+  assert.match(bar(), /Find \//, 'the Job-local `/` alias is the only live Find entry')
+  assert.ok(!/Find End/.test(bar()),
+    `a Find binding the Job reserves must never be advertised as usable:\n${bar()}`)
+
+  // Physical End keeps its reserved meaning: resume follow and show the tail.
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /Follow ON/, 'physical End is still the ONLY follow re-arm')
+  assert.match(painted, /line 199/, 'End really returned to the retained tail')
+  assert.ok(!/Find Output:/.test(painted), 'the reserved End never opens the Job Find')
+
+  // `/` remains the Job-local Find alias for the remapped action.
+  vt.sendInput('/')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  app.stop()
+})
+
 // ── B-09: CJK / wrapping / ANSI ────────────────────────────────────────────
 
 test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and visible width, and highlights the hit', async () => {
@@ -1157,13 +1199,13 @@ test('B-10b4 a resize re-wrap drops the unprovable hit identity instead of handi
   assert.match(view(vt), /2\/2/, 'NEED c is current')
   assert.match(highlightedRowText(vt), /NEED c/)
 
-  // Park the viewport on the current hit's row and let one no-op snapshot record
-  // that visible anchor (the fallback re-selects from it after the resize).
+  // Park the viewport on the current hit's row with plain scrolling and NO Job
+  // output update at all: the frame-painted boundary is what records the visible
+  // anchor the post-resize fallback must re-select from.
   for (let step = 0; step < 11; step += 1) vt.sendInput('\x1b[B')
   await vt.waitForRender()
-  harness.observation.latest()!.emit({ text })
-  await vt.waitForRender()
-  assert.match(view(vt), /2\/2/, 'the hit survives the no-op snapshot')
+  assert.equal(bodyTop(vt), 'line 011')
+  assert.match(view(vt), /2\/2/, 'the hit is still current after plain scrolling')
 
   // Shrink: the re-wrap has NO proven row mapping, so the carried identity is
   // dropped and the VISIBLE ANCHOR (row 11) decides. `NEED c` moved to row 11 and

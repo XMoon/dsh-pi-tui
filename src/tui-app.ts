@@ -20180,7 +20180,18 @@ export class TuiApp {
         const resolution = this.keybindings.resolve(data, this.keybindingContext())
         return resolution !== undefined && resolution.action === 'app.transcript.search'
       },
-      findHint: () => this.keybindings.keyHint('app.transcript.search'),
+      // The Job reserves the physical Home/End viewport keys (plan §5.1), so a
+      // Find binding remapped onto one of them can never open the Job Find and
+      // must never be advertised as if it could. `/` stays the always-available
+      // alias. Leader-bound Find is unaffected (a sequence is not a reserved
+      // physical key).
+      findHint: () => {
+        const direct = this.keybindings.keysFor('app.transcript.search')
+          .filter(key => key !== 'home' && key !== 'end')
+        const leader = this.keybindings.leaderKeysFor('app.transcript.search')
+        if (direct.length === 0 && leader.length === 0) return ''
+        return [...direct.map(formatKeyId), ...leader.map(formatLeaderSequence)].join(' / ')
+      },
       focusComponent: (component) => screen.setFocus(component),
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {

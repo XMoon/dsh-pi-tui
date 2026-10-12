@@ -619,6 +619,11 @@ export class JobInspectorPanel extends VStack {
    *  frame could no longer show. Never mutates the layout from `render()`. */
   onFramePainted(): void {
     if (this.disposed) return
+    // The viewport this frame ACTUALLY painted is the ONE visible anchor a lost
+    // search hit falls back to: a plain scroll (arrow/wheel) that never touches
+    // the Job output must still move it, or a later resize would re-select from
+    // a stale position.
+    this.search.setVisibleAnchor(this.scrollView.scrollTop)
     // The frame is committed: the window it painted becomes the ONE baseline
     // every later snapshot is mapped against. A placeholder phase has no
     // baseline at all.
@@ -679,6 +684,25 @@ export class JobInspectorPanel extends VStack {
       if (search.editKey(data)) this.intents.requestRender()
       return
     }
+    // Physical End/Home are the Job's RESERVED viewport keys (plan §5.1): the
+    // owner handles them FIRST so a Find binding remapped onto one of them can
+    // never shadow the ONLY follow re-arm (End) or the retained-preview top
+    // (Home). The Action Bar's Find hint drops such a reserved binding, and `/`
+    // stays the always-available Job-local Find alias.
+    if (matchesKey(data, 'end')) {
+      // Physical End is the ONLY follow re-arm; a live result view is left
+      // through the ONE exit path (physical focus returns to the panel) so the
+      // tail is not locked by a stale selection.
+      if (search.mode === 'navigate') this.exitSearch()
+      this.scrollView.resumeFollow()
+      this.intents.requestRender()
+      return
+    }
+    if (matchesKey(data, 'home')) {
+      this.scrollView.scrollToStart()
+      this.intents.requestRender()
+      return
+    }
     // `/` is the Job-local alias and the effective Find binding is scoped to the
     // Job: both open EDIT here and never reach the Transcript search.
     if (matchesKey(data, '/') || this.intents.isFindKey(data)) {
@@ -692,20 +716,6 @@ export class JobInspectorPanel extends VStack {
         return
       }
       this.intents.onClose()
-      return
-    }
-    if (matchesKey(data, 'end')) {
-      // Physical End is the ONLY follow re-arm; a live result view is left
-      // through the ONE exit path (physical focus returns to the panel) so the
-      // tail is not locked by a stale selection.
-      if (search.mode === 'navigate') this.exitSearch()
-      this.scrollView.resumeFollow()
-      this.intents.requestRender()
-      return
-    }
-    if (matchesKey(data, 'home')) {
-      this.scrollView.scrollToStart()
-      this.intents.requestRender()
       return
     }
     if (matchesKey(data, 'pageUp')) {
