@@ -195,6 +195,39 @@ broader search (its `Current directory` / `All directories` scopes cover
 legacy rows; `Current session` filters to the live session exactly like
 the editor recall).
 
+### Publication→hydration window (trap: the reseed races the DETACHED append)
+
+A Session publication (ordinary `/new` / switch, `/fork` adoption, the
+first-session creation) makes the new owner current BEFORE its hydration
+reseeds ↑/↓ from the session-scoped JSONL rows. A submission accepted inside
+that window is already owned by the NEW Session, but its persistence is a
+DETACHED append (`runDetached`, never a synchronous write), so the row can land
+AFTER the snapshot read: it is on disk under the new `sessionId` (and Ctrl+R
+`Current session` / `Current directory` find it) while the reseed does not see
+it and would otherwise drop it from ↑.
+
+`TuiApp` therefore keeps the window's SCOPE-BOUND TEMPORARY SUBMISSIONS, and
+the hydration reseed reconciles them:
+
+- `beginInputHistoryScope()` runs at the publication seam of every commit shape
+  and clears the overlay, so Session A's entries can never cross into Session
+  B's recall;
+- `rememberInput()` records an accepted input in the overlay while the window
+  is open (same consecutive-duplicate rule and 100-entry cap as the mirror);
+  `shouldRememberInput` refusals (attachment-bearing placeholders) never enter
+  it;
+- `resetInputHistory()` merges the overlay with the disk snapshot: the covered
+  subset is matched POSITIONALLY (the append-only appends run in submission
+  order, so the overlay's oldest entries are the snapshot's newest rows, in
+  reverse order) — never by text, so a legitimate non-consecutive repeat stays
+  intact and multiplicity is preserved;
+- the commit closes the window; ordinary submissions then use the plain
+  in-memory path again, and ↑ never reads the disk.
+
+No second history authority is created: the per-cwd JSONL stays the snapshot
+authority, and the write policy (trim, empty / consecutive-repeat / attachment
+skips, cwd `lastHistoryContent`, the `sessionId` field) is unchanged.
+
 ## Migration
 
 One-time, at boot: the legacy `history` map inside the `dsh-pi-tui`

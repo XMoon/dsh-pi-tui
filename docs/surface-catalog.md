@@ -123,6 +123,15 @@ ownership:
      rows, claims and transition behavior.
    - This PR does NOT migrate or retire them; they keep their own
      completion/claim path.
+   - **Collision authority**: a wrapper never registers over a name a GENUINE
+     Host command owns. The authority is the effective winner per name with
+     this surface's OWN Direct compatibility mirrors subtracted by exact
+     `definitionId` provenance (`hostOriginDescriptors`) — never the raw Host
+     catalog, which on Direct also carries the mirror this surface just
+     registered. A mirror is execution compatibility, never Host origin, so a
+     wrapper colliding with its own mirror would simply disappear on the next
+     refresh; a genuine same-name Host command (global or Agent-scoped,
+     installed before or after the mirror) keeps winning the name.
 
 2. **Inline skill reference lexicon** (`currentSkillReferences` in
    `src/commands.ts`, fed into `MentionProvider`)
@@ -168,7 +177,10 @@ same-target refresh:
 6. **Claims** — the completion list IS the advertised set. The dispatch
    captures `wasAdvertised` BEFORE any session creation; an advertised
    command missing from the real session is consumed with an explicit error
-   and never sent to the model as a plain message (`shouldConsumeAdvertisedMiss`).
+   and never sent to the model as a plain message (`shouldConsumeAdvertisedMiss`),
+   and that DETERMINED non-execution returns the COMPLETE submitted line
+   (staged attachments included) to the editor — a refusal never eats the
+   user's words.
 7. **Transitions** — on a target change, scoped previews clear and old
    skill wrappers become `[skill: revalidating]` transition commands whose
    handler re-fetches from the current agent. A submitted skill name can
