@@ -215,11 +215,11 @@ const paint = (harness: PanelHarness, width = 80): string[] => {
 test('C-03 a non-shell kind never grows a Command page or a Command Copy verb', () => {
   const harness = makePanel(observedState({ kind: 'subagent', label: 'echo one' }))
   const painted = paint(harness, 120).join('\n')
-  assert.match(painted, /Label: echo one/, 'a non-shell label is shown as a Label')
+  assert.match(painted, /Label {2}echo one/, 'a non-shell label is shown as a Label')
   assert.ok(!/V command/.test(painted), 'no Command entry is advertised')
   harness.panel.handleInput('v')
   const after = paint(harness, 120).join('\n')
-  assert.ok(!/Command reader/.test(after), '`v` cannot open a Command page')
+  assert.ok(!/Copy All \[C\]/.test(after), '`v` cannot open a Command page')
   // `C` on the Output page is the INDEPENDENT retained-Output copy: a non-shell
   // Job still copies its retained text, never a fabricated command.
   harness.panel.handleInput('C')
@@ -232,10 +232,10 @@ test('C-04 the opening row is never a Command source: only the observed label op
   // the Command page and Copy All must not become true early.
   const opening = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
   const before = paint(opening, 120).join('\n')
-  assert.match(before, /Command: pnpm build/)
+  assert.match(before, /Command {2}pnpm build/)
   assert.ok(!/V command/.test(before), 'the opening row alone does not advertise V')
   opening.panel.handleInput('v')
-  assert.ok(!/Command reader/.test(paint(opening, 120).join('\n')), 'no Command page before the first observation')
+  assert.ok(!/Copy All \[C\]/.test(paint(opening, 120).join('\n')), 'no Command page before the first observation')
   opening.panel.handleInput('C')
   assert.deepEqual(opening.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
     'no Output copy without an observation: the UNAVAILABLE reason is reported so the app can say so')
@@ -247,7 +247,7 @@ test('C-04 the opening row is never a Command source: only the observed label op
   assert.match(paint(live, 120).join('\n'), /V command/, 'a wide Output bar advertises the Command entry')
   live.panel.handleInput('v')
   const command = paint(live, 120).join('\n')
-  assert.match(command, /Command reader · \[Copy All\]/)
+  assert.match(command, /Copy All \[C\]/)
   assert.match(command, /Esc output/)
   live.panel.handleInput('C')
   assert.deepEqual(live.copies, [{ source: 'command-all', text: 'pnpm build --watch' }])
@@ -347,7 +347,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   const emptyLabel = makePanel(observedState({ label: '', text: '' }))
   paint(emptyLabel)
   emptyLabel.panel.handleInput('v')
-  assert.ok(!/Command reader/.test(paint(emptyLabel).join('\n')), 'an empty label is not a Command')
+  assert.ok(!/Copy All \[C\]/.test(paint(emptyLabel).join('\n')), 'an empty label is not a Command')
   emptyLabel.panel.handleInput('C')
   assert.deepEqual(emptyLabel.copies, [{ source: 'output', text: '', unavailable: 'output-empty' }],
     'nothing is copyable, and the reason is the empty body')
@@ -359,9 +359,9 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   const lost = makePanel(observedState({ label: 'echo one' }))
   paint(lost)
   lost.panel.handleInput('v')
-  assert.match(paint(lost).join('\n'), /Command reader/)
+  assert.match(paint(lost).join('\n'), /Copy All \[C\]/)
   lost.panel.update({ opening: { jobId: 'job-a', kind: 'bash', label: 'echo one', status: 'running' } })
-  assert.ok(!/Command reader/.test(paint(lost).join('\n')), 'a lost Command eligibility returns to Output')
+  assert.ok(!/Copy All \[C\]/.test(paint(lost).join('\n')), 'a lost Command eligibility returns to Output')
   lost.panel.handleInput('C')
   assert.deepEqual(lost.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
     'the copy intent now belongs to the Output page, with its own reason')
@@ -406,7 +406,7 @@ test('C-16/C-06 an Output Follow/PAUSED position survives a round trip through t
 test('C-18 the header click must re-prove the same painted target; a narrowed button has no target', () => {
   const harness = makePanel(observedState({ label: 'echo one' }))
   const lines = paint(harness)
-  const commandRow = lines.findIndex(line => line.includes('Command: echo one'))
+  const commandRow = lines.findIndex(line => line.includes('Command  echo one'))
   assert.ok(commandRow >= 0)
   // Press on the summary, repaint with ANOTHER label, release on the same cell:
   // the document key changed, so the click must not open the old Command page.
@@ -414,26 +414,44 @@ test('C-18 the header click must re-prove the same painted target; a narrowed bu
   harness.panel.update(observedState({ label: 'echo two' }))
   paint(harness)
   harness.panel.onHeaderClick(2, commandRow)
-  assert.ok(!/Command reader/.test(paint(harness).join('\n')), 'a ghost click must not open a Command page')
+  assert.ok(!/Copy All \[C\]/.test(paint(harness).join('\n')), 'a ghost click must not open a Command page')
   // Press + release on the SAME painted target DOES open it.
   harness.panel.onHeaderPress(2, commandRow)
   harness.panel.onHeaderClick(2, commandRow)
   const command = paint(harness).join('\n')
-  assert.match(command, /Command reader · \[Copy All\]/)
+  assert.match(command, /Copy All \[C\]/)
   harness.panel.dispose()
 
-  // A too-narrow frame cannot paint the Copy All button: it must not create a
-  // click target there, while the `C` key stays reachable.
+  // A frame with no summary grant cannot paint the Copy All button: it must not
+  // create a click target there, while the `C` key stays reachable. Four rows is
+  // below the summary/tabs floor (plan B1-D §3.2), so the Command page shows only
+  // status + body + Action Bar.
   const narrow = makePanel(observedState({ label: 'echo one' }))
+  narrow.rows.value = 4
   narrow.panel.handleInput('v')
-  const narrowLines = paint(narrow, 20).join('\n')
-  assert.ok(!/\[Copy All\]/.test(narrowLines), 'the button is not painted on a narrow frame')
+  const narrowLines = paint(narrow, 80).join('\n')
+  assert.ok(!/Copy All \[C\]/.test(narrowLines), 'the button is not painted without its row')
   narrow.panel.onHeaderPress(1, 1)
   narrow.panel.onHeaderClick(1, 1)
   assert.equal(narrow.copies.length, 0, 'an unpainted button has no click target')
   narrow.panel.handleInput('C')
   assert.deepEqual(narrow.copies, [{ source: 'command-all', text: 'echo one' }], '`C` remains the reachable path')
   narrow.panel.dispose()
+
+  // A granted summary row that is still too narrow for the button paints the
+  // title ONLY: the clip leaves no partial/ghost target behind.
+  const clipped = makePanel(observedState({ label: 'echo one' }))
+  clipped.panel.handleInput('v')
+  const clippedLines = paint(clipped, 12)
+  assert.ok(!/Copy All \[C\]/.test(clippedLines.join('\n')), 'the button is not painted at 12 columns')
+  const titleRow = clippedLines.findIndex(line => /Full command/.test(line))
+  assert.ok(titleRow >= 0, 'the title row is still granted')
+  clipped.panel.onHeaderPress(5, titleRow)
+  clipped.panel.onHeaderClick(5, titleRow)
+  assert.deepEqual(clipped.copies, [], 'the clipped affordance leaves no click target')
+  clipped.panel.handleInput('C')
+  assert.deepEqual(clipped.copies, [{ source: 'command-all', text: 'echo one' }], '`C` stays reachable')
+  clipped.panel.dispose()
 })
 
 test('C-12 a changed label or a resize cancels the gesture instead of copying stale offsets', async () => {
@@ -638,6 +656,13 @@ const bodyRow = (vt: VirtualTerminal, needle: string): number => {
   return row
 }
 
+/** The terminal-CELL column of the first painted occurrence of `needle` on ONE
+ *  plain (ANSI-stripped) row: wide graphemes must not be counted as one cell. */
+const cellIndexOf = (plain: string, needle: string): number => {
+  const index = plain.indexOf(needle)
+  return index < 0 ? -1 : visibleWidth(plain.slice(0, index))
+}
+
 /** The FIRST painted row matching a pattern (the Command document locator). */
 const firstRowMatching = (vt: VirtualTerminal, pattern: RegExp): string => {
   for (const row of rawView(vt)) {
@@ -689,7 +714,7 @@ test('C-01 the official Bash label reaches the Command page and Copy All copies 
 
   // Reachable by the FIXED `v` key.
   await openCommand(harness)
-  assert.match(view(harness.vt), /Command reader · \[Copy All\]/)
+  assert.match(view(harness.vt), /Copy All \[C\]/)
 
   harness.vt.sendInput('C')
   await flush(4)
@@ -706,21 +731,21 @@ test('C-01 the header Command summary click opens the Command page, and Copy All
   harness.tasks.observation.latest()!.emit({ label })
   await harness.vt.waitForRender()
   await flush(2)
-  const commandRow = bodyRow(harness.vt, 'Command: echo hello')
+  const commandRow = bodyRow(harness.vt, 'Command  echo hello')
   // A REAL same-cell click through the native SGR path.
   press(harness.vt, commandRow, 4)
   release(harness.vt, commandRow, 4)
   await harness.vt.waitForRender()
   await flush(2)
-  assert.match(view(harness.vt), /Command reader · \[Copy All\]/, 'the header click opens the Command page')
-  // Click the painted [Copy All] button itself.
-  const buttonRow = bodyRow(harness.vt, '[Copy All]')
-  const buttonCol = rawView(harness.vt)[buttonRow]!.indexOf('[Copy All]')
+  assert.match(view(harness.vt), /Copy All \[C\]/, 'the header click opens the Command page')
+  // Click the painted `Copy All [C]` button itself.
+  const buttonRow = bodyRow(harness.vt, 'Copy All [C]')
+  const buttonCol = rawView(harness.vt)[buttonRow]!.indexOf('Copy All [C]')
   press(harness.vt, buttonRow, buttonCol + 2)
   release(harness.vt, buttonRow, buttonCol + 2)
   await flush(4)
   assert.deepEqual(harness.copied, [label], 'the painted button copies the ORIGINAL label')
-  // plan §5: a REAL visible [Copy All] stays clickable while a Find owns the
+  // plan §5: a REAL visible `Copy All [C]` stays clickable while a Find owns the
   // keyboard, and the click changes nothing about the search.
   harness.copied.length = 0
   // Leave the fork's 500 ms double-click window: a second click on the same cell
@@ -739,7 +764,7 @@ test('C-01 the header Command summary click opens the Command page, and Copy All
   assert.deepEqual(harness.copied, [label], 'the button copies the ORIGINAL label, never the query or a hit')
   const editing = view(harness.vt)
   assert.match(editing, /Find Command: hello/, 'the query is unchanged by the click')
-  assert.match(editing, /Command reader · \[Copy All\]/, 'the click never switched pages')
+  assert.match(editing, /Copy All \[C\]/, 'the click never switched pages')
   // The Search Input still owns the keyboard: the next character edits the query.
   harness.vt.sendInput('!')
   await harness.vt.waitForRender()
@@ -846,7 +871,8 @@ test('C-11 edge auto-scroll follows the fork gesture: drag to the visible edge r
   await openCommand(harness)
   const barRow = bodyRow(harness.vt, 'Esc output')
   const topRow = bodyRow(harness.vt, 'cmd-000')
-  assert.ok(bodyRow(harness.vt, 'cmd-020') > 0, 'the initially visible bottom row was located')
+  assert.equal(lastRowMatching(harness.vt, /^cmd-\d{3}/), 'cmd-019',
+    'the initially visible bottom row was located (the B1-D chrome leaves 20 body rows)')
   // plan §6 rule 1: a press only anchors. Holding a press on the last visible
   // row must NOT start the timer.
   press(harness.vt, barRow - 1, 0)
@@ -1075,33 +1101,47 @@ test('C-09 hardBreakEnd carries the real newline offsets and equals sourceEnd on
 })
 
 test('C-18 the header hit map covers ONLY painted text: blank padding has no click target', () => {
-  // The Command page button region is exactly `[Copy All]`.
+  // The Command page button region is exactly the painted `Copy All [C]`.
   const harness = makePanel(observedState({ label: 'echo one' }))
   harness.panel.handleInput('v')
   const commandLines = paint(harness, 80)
-  const readerRow = commandLines.findIndex(line => line.includes('[Copy All]'))
+  const readerRow = commandLines.findIndex(line => line.includes('Copy All [C]'))
   assert.ok(readerRow >= 0)
-  const buttonCol = 'Command reader · '.length
+  const buttonCol = cellIndexOf(stripTerminalSequences(commandLines[readerRow]!), 'Copy All [C]')
   harness.panel.onHeaderPress(buttonCol + 2, readerRow)
   harness.panel.onHeaderClick(buttonCol + 2, readerRow)
   assert.deepEqual(harness.copies, [{ source: 'command-all', text: 'echo one' }], 'the button itself copies')
   harness.copies.length = 0
-  harness.panel.onHeaderPress(79, readerRow)
-  harness.panel.onHeaderClick(79, readerRow)
-  assert.deepEqual(harness.copies, [], 'the blank space right of the button is inert')
+  // The `Full command` title is painted but is NOT the button.
+  harness.panel.onHeaderPress(2, readerRow)
+  harness.panel.onHeaderClick(2, readerRow)
+  assert.deepEqual(harness.copies, [], 'the Full command title is inert')
+  // The padding between the title and the right-aligned button is inert too.
+  harness.panel.onHeaderPress(40, readerRow)
+  harness.panel.onHeaderClick(40, readerRow)
+  assert.deepEqual(harness.copies, [], 'the blank space left of the button is inert')
   harness.panel.dispose()
 
-  // The Output summary region is its own visible text only.
+  // The Output summary region is its own visible summary text AND the `↗ Command`
+  // entry — never the padding between them.
   const output = makePanel(observedState({ label: 'echo one' }))
   const outputLines = paint(output, 80)
-  const summaryRow = outputLines.findIndex(line => line.includes('Command: echo one'))
+  const summaryRow = outputLines.findIndex(line => line.includes('Command  echo one'))
   assert.ok(summaryRow >= 0)
-  output.panel.onHeaderPress(79, summaryRow)
-  output.panel.onHeaderClick(79, summaryRow)
-  assert.ok(!/Command reader/.test(paint(output, 80).join('\n')), 'the header padding never opens the page')
+  output.panel.onHeaderPress(40, summaryRow)
+  output.panel.onHeaderClick(40, summaryRow)
+  assert.ok(!/Copy All \[C\]/.test(paint(output, 80).join('\n')), 'the header padding never opens the page')
   output.panel.onHeaderPress(5, summaryRow)
   output.panel.onHeaderClick(5, summaryRow)
-  assert.match(paint(output, 80).join('\n'), /Command reader · \[Copy All\]/, 'the summary text does open it')
+  assert.match(paint(output, 80).join('\n'), /Copy All \[C\]/, 'the summary text does open it')
+  // The painted `↗ Command` entry carries the SAME intent.
+  output.panel.handleInput('\x1b')
+  assert.ok(!/Copy All \[C\]/.test(paint(output, 80).join('\n')), 'Esc returns to Output')
+  const entryCol = cellIndexOf(stripTerminalSequences(outputLines[summaryRow]!), '↗ Command')
+  assert.ok(entryCol > 0, 'the entry is painted on the summary row')
+  output.panel.onHeaderPress(entryCol + 1, summaryRow)
+  output.panel.onHeaderClick(entryCol + 1, summaryRow)
+  assert.match(paint(output, 80).join('\n'), /Copy All \[C\]/, 'the painted entry opens the page too')
   output.panel.dispose()
 })
 
@@ -1112,14 +1152,22 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
   // can never appear alone.
   let sawBoth = false
   let sawCommandOnly = false
-  for (let width = 60; width <= 200; width += 4) {
-    const bar = paint(harness, width).at(-1)!
-    const hasCopy = /C copy output/.test(bar)
-    const hasCommand = /V command/.test(bar)
-    assert.ok(!hasCopy || hasCommand, `the copy verb never survives alone at ${width} columns`)
-    if (hasCopy) sawBoth = true
-    if (hasCommand && !hasCopy) sawCommandOnly = true
+  // Two heights: on a standard frame the DEDICATED reading-facts row takes the
+  // disclosure and the position off the Action Bar (plan B1-D §3.3), which frees
+  // the width both verbs need; on a compact frame the bar keeps them, so the
+  // narrow window where only the higher-priority verb fits is observable.
+  for (const rows of [24, 8]) {
+    harness.rows.value = rows
+    for (let width = 60; width <= 200; width += 1) {
+      const bar = paint(harness, width).at(-1)!
+      const hasCopy = /C copy output/.test(bar)
+      const hasCommand = /V command/.test(bar)
+      assert.ok(!hasCopy || hasCommand, `the copy verb never survives alone at ${width}x${rows}`)
+      if (hasCopy) sawBoth = true
+      if (hasCommand && !hasCopy) sawCommandOnly = true
+    }
   }
+  harness.rows.value = 24
   assert.ok(sawBoth, 'there is a row wide enough to advertise BOTH verbs')
   assert.ok(sawCommandOnly, 'there is a row where only the higher-priority Command verb survives')
   const tight = paint(harness, 80).at(-1)!
@@ -1188,7 +1236,7 @@ test('C-01 Direct L6: the official bash args.command label crosses the PRODUCTIO
   assert.equal(aborted, false, 'the adapter stream stays open while the viewer observes')
   const painted = view(harness.vt)
   assert.ok(!/Retained output unavailable/.test(painted), `the Direct observation really opened:\n${painted}`)
-  assert.match(painted, /Command:   pnpm build/, 'the observed label IS the official args.command')
+  assert.match(painted, /Command {4}pnpm build/, 'the observed label IS the official args.command')
   assert.match(painted, /direct retained/, 'the retained output came through the same adapter')
   await openCommand(harness)
   harness.vt.sendInput('C')
@@ -1253,7 +1301,7 @@ test('C-10 a hostile OSC/CSI label is sanitized at the Header boundary and never
   assert.ok(!stream.includes('UFdORUQ='), 'the label clipboard payload never reaches the terminal stream')
   assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal stream')
   const painted = view(harness.vt)
-  assert.match(painted, /Command: echo ok/, `the header shows the SANITIZED summary:\n${painted}`)
+  assert.match(painted, /Command {2}echo ok/, `the header shows the SANITIZED summary:\n${painted}`)
   assert.ok(!/]52;c;|\[2J/.test(painted), 'no escape payload text leaks into the painted header')
   // The display boundary never touches the official bytes: the Command page
   // still copies the ORIGINAL label verbatim.
@@ -1263,7 +1311,7 @@ test('C-10 a hostile OSC/CSI label is sanitized at the Header boundary and never
   assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
 })
 
-test('C-01 a rapid double click on [Copy All] cannot overwrite the command copy with a word', async () => {
+test('C-01 a rapid double click on Copy All [C] cannot overwrite the command copy with a word', async () => {
   const harness = startApp()
   await openFirstJob(harness)
   const label = 'echo hello\nworld'
@@ -1271,8 +1319,8 @@ test('C-01 a rapid double click on [Copy All] cannot overwrite the command copy 
   await harness.vt.waitForRender()
   await flush(2)
   await openCommand(harness)
-  const buttonRow = bodyRow(harness.vt, '[Copy All]')
-  const buttonCol = rawView(harness.vt)[buttonRow]!.indexOf('[Copy All]')
+  const buttonRow = bodyRow(harness.vt, 'Copy All [C]')
+  const buttonCol = rawView(harness.vt)[buttonRow]!.indexOf('Copy All [C]')
   // Two same-cell clicks INSIDE the fork's 500 ms window: the second is
   // classified as a word selection, so it must not reach the clipboard.
   press(harness.vt, buttonRow, buttonCol + 2)
@@ -1282,7 +1330,7 @@ test('C-01 a rapid double click on [Copy All] cannot overwrite the command copy 
   await flush(6)
   assert.deepEqual(harness.copied, [label], 'the clipboard holds ONLY the original label after a double click')
   assert.ok(!harness.copied.some(text => text === 'Copy' || text === 'All'), 'the native word selection never runs')
-  assert.match(view(harness.vt), /Command reader · \[Copy All\]/, 'the page never changed')
+  assert.match(view(harness.vt), /Copy All \[C\]/, 'the page never changed')
 
   // Back on Output the screen's OWN copy-on-select is restored: a native drag
   // over the retained body still copies screen text (pre-existing B1-A behavior).
@@ -1299,22 +1347,29 @@ test('C-01 a rapid double click on [Copy All] cannot overwrite the command copy 
   assert.notDeepEqual(harness.copied, [label], 'that native copy is screen text, not the command')
 })
 
-test('C-18 the compact header keeps the GAP/ERROR fact text non-interactive', () => {
+test('C-18 the compact header keeps the fact markers and the summary padding non-interactive', () => {
   const harness = makePanel(observedState({ label: 'ls', gapBefore: true }))
   const lines = paint(harness, 44)
-  const row = lines.findIndex(line => line.includes('Earlier output evicted'))
-  assert.ok(row >= 0, `the compact row carries the fact text:\n${lines.join('\n')}`)
-  const painted = lines[row]!
-  assert.match(painted, /Command: ls/, 'the same row carries the Command summary')
-  const factsCol = painted.indexOf('Earlier output evicted')
-  harness.panel.onHeaderPress(factsCol + 2, row)
-  harness.panel.onHeaderClick(factsCol + 2, row)
-  assert.ok(!/Command reader/.test(paint(harness, 44).join('\n')),
-    'clicking the GAP fact text never opens the Command page')
-  const summaryCol = painted.indexOf('Command: ls')
-  harness.panel.onHeaderPress(summaryCol + 1, row)
-  harness.panel.onHeaderClick(summaryCol + 1, row)
-  assert.match(paint(harness, 44).join('\n'), /Command reader · \[Copy All\]/,
+  // A compact frame spends no row on metadata (plan B1-D §3.2 grants it only from
+  // standard size): the GAP fact is the BRACKETED marker on the status row, and
+  // the summary row is the only clickable one.
+  const statusRow = lines.findIndex(line => line.includes('[GAP]'))
+  assert.ok(statusRow >= 0, `the status row carries the fact marker:\n${lines.join('\n')}`)
+  harness.panel.onHeaderPress(2, statusRow)
+  harness.panel.onHeaderClick(2, statusRow)
+  assert.ok(!/Copy All \[C\]/.test(paint(harness, 44).join('\n')),
+    'clicking the status row never opens the Command page')
+  const summaryRow = lines.findIndex(line => line.includes('Command  ls'))
+  assert.ok(summaryRow >= 0, `the summary row is painted:\n${lines.join('\n')}`)
+  // The padding between the summary and the right-aligned `↗ Command` is inert.
+  harness.panel.onHeaderPress(25, summaryRow)
+  harness.panel.onHeaderClick(25, summaryRow)
+  assert.ok(!/Copy All \[C\]/.test(paint(harness, 44).join('\n')),
+    'the summary padding never opens the Command page')
+  const summaryCol = cellIndexOf(stripTerminalSequences(lines[summaryRow]!), 'Command  ls')
+  harness.panel.onHeaderPress(summaryCol + 1, summaryRow)
+  harness.panel.onHeaderClick(summaryCol + 1, summaryRow)
+  assert.match(paint(harness, 44).join('\n'), /Copy All \[C\]/,
     'the Command summary itself still opens it')
   harness.panel.dispose()
 })
@@ -1323,7 +1378,10 @@ test('C-10 a hostile ROSTER label is sanitized in the workspace notice row (Stop
   // The Stop settlement interpolates the BROWSER row label (not the observed
   // one), so BOTH are hostile here: the notice row is the other workspace chrome
   // row that paints Host-supplied Job text.
-  const hostile = `\u001b]52;c;${Buffer.from('PWNED').toString('base64')}\u0007echo ok\u001b[2J`
+  // A raw 8-bit CSI (C1) plus DEL ride the SAME roster label: neither has an ESC
+  // prefix, so only the control-byte strip can keep them off the terminal.
+  const hostile = `\u001b]52;c;${Buffer.from('PWNED').toString('base64')}\u0007echo ok\u001b[2J\u009b31m\u007f`
+  assert.ok(hostile.includes('\u009b') && hostile.includes('\u007f'), 'the fixture really carries raw C1/DEL bytes')
   const harness = startApp(120, 40, ['job-a'], undefined, hostile)
   await openFirstJob(harness)
   harness.tasks.observation.latest()!.emit({ label: hostile, text: 'tail' })
