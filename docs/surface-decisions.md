@@ -1589,8 +1589,9 @@ priority: the Action Bar first (it is NEVER budgeted away), then the header — 
 status and every gap/error/settled marker, then the `Command:`/`Label:` summary —
 then the descriptive fact text, then the notice. Below 80×10 the header therefore
 stays within TWO rows, with the fact text riding on the Command row only while
-that row has room; a live notice takes its own row only when the header can still
-have its own. The workspace is its own
+that row has room. A live notice takes its own row only when the header can still
+have its own AND at least one Output row remains: a transient notice never
+squeezes the last output row away. The workspace is its own
 screen, so the main transcript, the original editor and the footer never take
 part in its layout, and the previous screen (regular or transcript fullscreen)
 is paused with the Task Browser kept alive underneath — `Esc` returns to the

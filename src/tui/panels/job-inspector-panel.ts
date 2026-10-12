@@ -84,9 +84,11 @@ const planChrome = (
   const compact = width < COMPACT_WIDTH || safeRows < COMPACT_ROWS
   const budget = Math.max(0, safeRows - ACTION_BAR_ROWS)
   const headerMax = Math.min(compact ? COMPACT_HEADER_MAX_ROWS : FULL_HEADER_MAX_ROWS, budget)
-  // The notice yields to the header and, together with everything else, to the
-  // Action Bar: it only takes a row when the header can still have its own.
-  const noticeRows = noticeLive && budget - headerMax >= 1 ? 1 : 0
+  // The notice yields to the header, to the Action Bar and to the Output itself:
+  // it only takes a row once the header can have its own AND at least ONE body row
+  // still remains — the workspace's whole point is the readable retained output,
+  // so an optional transient notice never squeezes the last output row away.
+  const noticeRows = noticeLive && budget - headerMax >= 2 ? 1 : 0
   return { compact, headerRows: Math.max(0, Math.min(headerMax, budget - noticeRows)), noticeRows }
 }
 
