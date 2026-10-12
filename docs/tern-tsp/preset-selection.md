@@ -148,7 +148,11 @@ frame and takes no close decision — the fence retires that panel on its next
 touch, and the rendered layer is dropped by the renderer's own hydration frame.
 A settlement from a panel a newer invocation already replaced never closes or
 repaints the new one, and a late roster read (or a late read failure) never
-hydrates a moved subject.
+hydrates a moved subject. NOTICES are fenced by the same two markers: the
+operation token owns the write's settlement and the presentation token owns the
+display, so a write the operation token still owns contributes no line — not even
+the standing-catalog notice it may carry — once a newer `/preset` has taken the
+surface. Closing a panel never cancels the admitted write.
 
 ### Loading, errors and retry
 
@@ -190,7 +194,13 @@ and calls the original `applyPresetSelection` / default writer.
 `src/tui/pickers/preset-presentation-pitui.ts` keeps the original PiTui
 behavior: the roster overlay opens only once the rows are known, rows keep their
 exact original fields and wording, Enter on a row applies it in one step, and no
-Retry/Details/Set-default action appears out of nowhere.
+Retry/Details/Set-default action appears out of nowhere. The PiTui path also
+keeps its ORIGINAL command settlement: the roster read is awaited inside the
+handler there, so an empty roster is still the successful command carrying
+`no agent presets configured`, and a real read failure is still rethrown to the
+command path — which owns the failure notice, the health record and the draft
+restore. Only the native TSP path mounts the panel immediately and reads the
+roster as owned background work; both paths use the SAME read owner.
 
 The native presenter is split by responsibility inside `src/tui/tsp/`:
 `preset-picker.ts` owns panel lifecycle, interaction admission and coordination;
@@ -266,12 +276,15 @@ write through the real configuration plane (the picker's action and the typed
 verb write the same profile document, and a fresh Context reads the persisted
 default back). Both suites carry the
 disabled-action admission refusal (a synthetic event naming a disabled action
-writes nothing and never dismisses the panel); the presenter suite additionally
-carries the lifecycle fences — a settlement after the captured subject moved
+writes nothing and never dismisses the panel) and the notice fence (a settled
+write whose surface was replaced notifies nobody, with a positive control on the
+same seam); the presenter suite additionally carries the lifecycle fences — a settlement after the captured subject moved
 commits no frame and takes no close decision, a settlement from a panel a newer
 invocation replaced never touches the new panel on either the apply or the
-new-session-default path, and a late read never hydrates a moved subject. `test/preset.test.ts` keeps the PiTui preset behavior and the
-shipped display copy; `test/tern-tsp-command-admission.test.ts` keeps the
+new-session-default path, and a late read never hydrates a moved subject. `test/preset-command.test.ts` also keeps the PiTui
+command settlement (the empty-roster success text, the roster-failure rejection
+and the standing-notice fence); `test/preset.test.ts` keeps the PiTui preset port
+behavior and the shipped display copy; `test/tern-tsp-command-admission.test.ts` keeps the
 post-classification admission predicate.
 
 ## Qualification limits
