@@ -1339,7 +1339,11 @@ test('native Model: a provider called all and a scope-shaped effort id stay unam
   assert.equal(props(pane).scope, ALL_SCOPES_ID, 'the panel starts on every provider')
   browse(pane, 'scope:all')
   await waitUntil('the `all` provider filters', () => props(pane).scope === 'scope:all')
-  assert.equal(props(pane).items.length, 1, 'the `all` provider keeps exactly its own rows')
+  assert.equal(
+    (props(pane).items as Array<Record<string, unknown>>).length,
+    1,
+    'the `all` provider keeps exactly its own rows',
+  )
   assert.equal(m.writes.length, 0, 'a scope click is never a write')
   browse(pane, ALL_SCOPES_ID)
   await waitUntil('every provider again', () => props(pane).scope === ALL_SCOPES_ID)
