@@ -2576,3 +2576,159 @@ test('B-46: a successor superseded INSIDE its own initial suspension hides the r
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('reentrant-root'), `the root must be restored afterwards:\n${viewport(vt)}`)
 })
+
+test('B-47: a settled Approval never cancels the Save Location its own cleanup opened', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let tenantIsCurrent = true
+  const controller = new AbortController()
+  let save: Promise<SaveLocationResult> | undefined
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      // No throw: the stale cleanup aborts the approval being presented and opens
+      // a NEWER Save Location prompt in the same call — the approval's own release
+      // clears its active slot, so the tail that follows must be inert.
+      controller.abort()
+      save = askSave(app)
+    },
+  }))
+  await vt.waitForRender()
+  tenantIsCurrent = false
+
+  const approval = app.showApprovalPrompt({
+    toolName: 'bash',
+    reason: 'stale approval tail',
+    signal: controller.signal,
+  })
+  assert.equal(await settleOrTimeout(approval), 'cancelled', 'the aborted approval settles cancelled')
+  await vt.waitForRender()
+  assert.ok(
+    viewport(vt).includes('dsh-session-abc.zip'),
+    `the Save Location opened by the cleanup must survive the settled approval's tail:\n${viewport(vt)}`,
+  )
+  vt.sendInput('\x1b')
+  assert.deepEqual(
+    await settleOrTimeout(save!),
+    { kind: 'cancelled' },
+    'the newer prompt must stay answerable',
+  )
+})
+
+test('B-48: a throwing physical mount releases the failed Approval and its queue', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // The physical overlay mount is the ONE funnel every overlay goes through. A
+  // throwing step there (the mount runs plugin focus/blur callbacks; the Advanced
+  // tier routes those to `notify`, a first-party/Cordis throw reaches the caller)
+  // is injected RECEIVER-PRESERVINGLY, once, so the assertion below is about the
+  // failure window, not about the injected identity.
+  const proto = TuiApp.prototype as unknown as {
+    showOverlayOnHost(component: unknown, options: unknown, ownership?: unknown): unknown
+  }
+  const original = proto.showOverlayOnHost
+  let armed = false
+  proto.showOverlayOnHost = function (
+    this: unknown,
+    component: unknown,
+    options: unknown,
+    ownership?: unknown,
+  ): unknown {
+    if (armed) {
+      armed = false
+      throw new Error('overlay mount boom')
+    }
+    return original.call(this, component, options, ownership)
+  }
+  try {
+    armed = true
+    const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'throwing mount' })
+    let caught: unknown
+    try {
+      await settleOrTimeout(failed)
+    } catch (error) {
+      caught = error
+    }
+    const primary = caught instanceof AggregateError ? caught.errors[0] : caught
+    assert.ok(
+      primary instanceof Error && primary.message === 'overlay mount boom',
+      `the mount failure must surface by identity as the primary failure: ${String(caught)}`,
+    )
+
+    // The failed mount may not latch the input stage: a NEW approval is presentable
+    // and answerable, and the optional seat can open again.
+    const healthy = app.showApprovalPrompt({ toolName: 'fs', reason: 'healthy after mount failure' })
+    vt.sendInput('y')
+    assert.equal(
+      await settleOrTimeout(healthy),
+      'allowed-once',
+      'a failed mount must not leave a half-committed approval blocking the stage',
+    )
+    const next = makeTenant()
+    assert.notEqual(openTenant(app, next), undefined, 'no half-committed approval may remain')
+    await vt.waitForRender()
+    assert.equal(app.focusedComponentForTest(), next.component)
+  } finally {
+    proto.showOverlayOnHost = original
+  }
+})
+
+test('B-49: multiple rollback failures sit FLAT behind the primary failure', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const mountProto = TuiApp.prototype as unknown as { mountSeatChild(): void }
+  const publishProto = TuiApp.prototype as unknown as { publishFocusSeat(): void }
+  const originalMount = mountProto.mountSeatChild
+  const originalPublish = publishProto.publishFocusSeat
+  // Armed by the stale tenant's cleanup: the park's OWN mount call has already
+  // run by then, so only the ROLLBACK's two steps throw.
+  let armRollback = false
+  let closeCalls = 0
+  let tenantIsCurrent = true;
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      armRollback = true
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  tenantIsCurrent = false
+  mountProto.mountSeatChild = function (this: unknown): void {
+    if (armRollback) throw new Error('rollback mount boom')
+    originalMount.call(this)
+  }
+  publishProto.publishFocusSeat = function (this: unknown): void {
+    if (armRollback) throw new Error('rollback publish boom')
+    originalPublish.call(this)
+  }
+  let caught: unknown
+  try {
+    const failed = app.askQuestions([{ id: 'q-flat', question: 'flat aggregation?', options: [{ label: 'Yes' }] }])
+    try {
+      await settleOrTimeout(failed)
+    } catch (error) {
+      caught = error
+    }
+  } finally {
+    armRollback = false
+    mountProto.mountSeatChild = originalMount
+    publishProto.publishFocusSeat = originalPublish
+  }
+  assert.ok(caught instanceof AggregateError, `expected an AggregateError, got ${String(caught)}`)
+  const errors = (caught as AggregateError).errors
+  assert.equal(
+    errors.length,
+    3,
+    'the primary failure and BOTH rollback failures must stay FLAT entries (never nested)',
+  )
+  assert.equal((errors[0] as Error).message, 'stale tenant close boom', 'the primary failure comes first')
+  assert.equal((errors[1] as Error).message, 'rollback mount boom', 'rollback failures keep step order')
+  assert.equal((errors[2] as Error).message, 'rollback publish boom')
+  assert.equal(closeCalls, 1, 'the stale tenant is retired exactly once')
+})

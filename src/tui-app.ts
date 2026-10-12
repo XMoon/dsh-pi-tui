@@ -5890,8 +5890,21 @@ export class TuiApp {
       nonCapturing: options?.nonCapturing === true,
       remountable: ownership.remountable === true,
     })
-    const raw = this.activeScreen.showOverlay(component, { ...merged, initialFocus: false })
-    return this.overlayBroker.commitMount(prepared, raw)
+    // FAIL CLOSED: the physical mount can run a synchronous plugin focus/blur
+    // callback that throws — either inside the fork's own showOverlay, or in the
+    // broker's physical transition, which registers the logical node BEFORE it
+    // hands over the keyboard. A mount that throws never returns a handle to its
+    // caller, so nothing else could release that node: unwinding it here (by
+    // identity; a no-op when it was never registered) is the ONE overlay mount
+    // funnel's contract. The caller still owns its component/frame lifetime.
+    try {
+      const raw = this.activeScreen.showOverlay(component, { ...merged, initialFocus: false })
+      return this.overlayBroker.commitMount(prepared, raw)
+    } catch (error) {
+      runSyncDisposalStepsWithPrimary('overlay mount unwind', error, [
+        () => this.overlayBroker.close(prepared.node.wrapper),
+      ])
+    }
   }
 
   /** Mount a fresh PHYSICAL projection for an existing logical node during a
