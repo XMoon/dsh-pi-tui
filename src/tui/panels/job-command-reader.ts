@@ -111,13 +111,10 @@ export class JobCommandReader {
   private pointerY = 0
   private autoScrollTimer: NodeJS.Timeout | undefined
   private autoScrollDirection: -1 | 1 = 1
-  /** The panel width of the last frame-painted boundary: a resize has no
-   *  proven column mapping, so it cancels the selection instead of re-mapping
-   *  stale coordinates (plan §4.1 rule 6). */
-  private frameWidth = 0
   /** The width the CURRENT layout was built at — the ScrollView's own render
-   *  width, so the painted rows and every offset resolution agree exactly. */
-  private layoutWidth = 1
+   *  width, so the painted rows, the offset resolution and the resize fact all
+   *  read the SAME number (0 = no frame laid out yet). */
+  private layoutWidth = 0
   private disposedValue = false
 
   constructor(intents: JobCommandReaderIntents) {
@@ -181,25 +178,15 @@ export class JobCommandReader {
     this.searchModel.setSource('', false)
   }
 
-  /**
-   * The frame is committed and painted: a width change has no proven column
-   * mapping, so the selection is dropped instead of re-mapped. Returns whether
-   * the caller must repaint (the highlight disappeared with it).
-   */
-  onFramePainted(width: number): boolean {
-    if (this.disposedValue) return false
-    const safeWidth = Math.max(1, Math.floor(width))
-    const changed = this.frameWidth !== 0 && this.frameWidth !== safeWidth
-    this.frameWidth = safeWidth
-    if (!changed) return false
-    return this.cancelSelection()
-  }
-
   /** The rendered Command rows of one frame: the document, search-highlighted,
    *  then the selection presentation. Never changes row count or visible
    *  width. */
   bodyLines(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width))
+    // A width change re-wraps every row: no old column/offset mapping survives, so
+    // the selection is dropped BEFORE this frame's rows are built — the frame that
+    // notices the change is already the frame that paints the cleared highlight.
+    if (this.layoutWidth !== 0 && this.layoutWidth !== safeWidth) this.cancelSelection()
     this.layoutWidth = safeWidth
     const layout = this.document.layoutAt(safeWidth)
     const lines = this.searchModel.bodyLines(safeWidth)
@@ -269,7 +256,6 @@ export class JobCommandReader {
     if (event.type === 'press' && event.button !== 'left') return undefined
     if (event.type !== 'press' && !this.gestureActive) return { handled: true, render: false }
     const layout = this.layout()
-    if (layout.rows.length === 0) return undefined
     const pointer = {
       row: this.contentRow(event.screenY, viewport, layout.rows.length),
       col: this.contentColumn(event.screenX, viewport),

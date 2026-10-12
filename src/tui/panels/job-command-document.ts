@@ -29,7 +29,7 @@ import { getGraphemeSegmenter, visibleWidth, type Component } from '@xmoon76/pi-
  *  grapheme (or one control/TAB token). `startCol`/`endCol` are display cells
  *  within the visual row, `sourceStart`/`sourceEnd` the original UTF-16
  *  half-open range. */
-export interface CommandVisualCellRun {
+interface CommandVisualCellRun {
   readonly startCol: number
   readonly endCol: number
   readonly sourceStart: number
@@ -40,7 +40,7 @@ export interface CommandVisualCellRun {
 /** One visual row of the Command document. `sourceEnd` is the CONTENT end
  *  (the hard break is excluded); `hardBreakEnd` includes the original LF/CRLF
  *  when this row ended on a real newline, otherwise it equals `sourceEnd`. */
-export interface CommandVisualRow {
+interface CommandVisualRow {
   readonly sourceStart: number
   readonly sourceEnd: number
   readonly hardBreakEnd: number
@@ -73,15 +73,10 @@ const TAB_CELLS = 3
  *  is one code unit, so the display is always longer than the source). A lone
  *  CR gets the readable `\r` spelling (plan §4.1 rule 4): it is NOT a hard
  *  break, so it must never move the cursor. */
-function controlDisplay(segment: string): string {
-  let display = ''
-  for (const character of segment) {
-    const code = character.codePointAt(0)!
-    if (code === 0x0d) display += '\\r'
-    else if (code <= 0xff) display += `\\x${code.toString(16).padStart(2, '0')}`
-    else display += `\\u{${code.toString(16)}}`
-  }
-  return display
+function controlDisplay(control: string): string {
+  const code = control.codePointAt(0)!
+  if (code === 0x0d) return '\\r'
+  return `\\x${code.toString(16).padStart(2, '0')}`
 }
 
 /** Whether one grapheme starts with a control code that must NEVER be written
@@ -307,12 +302,6 @@ export class JobCommandDocument implements Component {
       this.renderedLines = this.layoutValue.rows.map(row => row.rendered)
     }
     return this.layoutValue
-  }
-
-  /** The number of visual rows at the last laid-out width (0 before the first
-   *  layout). */
-  get rowCount(): number {
-    return this.layoutValue?.rows.length ?? 0
   }
 
   render(width: number): string[] {
