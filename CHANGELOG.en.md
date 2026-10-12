@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A Job opened from the Task Center now renders in its own fullscreen workspace:
+  the Job status, progress, output gaps, observation errors, terminal state and
+  the retained output are presented as separate regions instead of one joined
+  block, with a pinned bottom row (`Esc back` plus Stop only while it can act)
+  and a disclosure that the retained output is a preview, not the full history.
+  `Esc` returns to the same Task Center with its selected row, draft and scroll
+  state, and the surface that was showing before (regular or fullscreen) is
+  restored unchanged — leaving the workspace never rewrites the user's display
+  preference.
 - The Footer's Performance item gains the whole-Session rate and shows both
   scopes in the default layout: the speed placement now defaults to
   `speed-both` (`R5 116 · All 44 tok/s`), with `speed-all` (`All 44 tok/s`)

@@ -78,7 +78,8 @@ The callbacks to consider (not just `focus()`): Advanced `onFocus` /
 | approval rebuild | the approval is a normal remountable node | rebind | dispose the replaced frame |
 | fullscreen detach | close non-remountables; snapshot the prior physical owner | seat release/handoff (bounded, so the fork's per-hide fallback cannot fire) | derive the owner from LOGICAL intent (`frontmostFocusable`, with the prior owner as a fallback only while it still requests focus and is not explicit-hidden), then detach the raws |
 | fullscreen rebind / restore | the logical graph survives; rebind with `initialFocus:false` | rebind / one restore focus | none |
-| session switch / final teardown | close the Job viewer before its parent browser; clear refs | — | none |
+| session switch / final teardown | close the Job workspace before its parent browser; clear refs | — | none |
+| Job workspace open / close | commit the screen lease, latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the workspace panel's `Esc`/`tasks.stop` intents | `activeScreen` derives the physical owner from the lease (see §10.1) |
 | `custom()` done/close (factory or callback) | `settled` latch; the mounted lease is reclaimed | focus callbacks | no stale `pendingBrokerSettles` entry |
 
 ## 4. Reentrancy matrix
@@ -202,9 +203,10 @@ When you add or change an overlay path, cover the family it belongs to:
   the stage, leak its frame or leave a ghost projection. A failed presentation
   also rejects ITS OWN promise (a queued prompt no longer has an executor to do
   it) and runs the LAST-blocker restore once the queue drained (see §11).
-- **Session / teardown**: a child overlay (Job viewer) closes before its parent
+- **Session / teardown**: the Job workspace closes before its parent
   (Task Browser); callbacks capture the owning session identity; a parent that
-  was disposed WITHOUT its closer must still notify its owner (see §10).
+  was disposed WITHOUT its closer must still notify its owner (see §10). The Job
+  screen is a temporary physical-screen lease, not an overlay node (see §10.1).
 - **A new owner-closing overlay** (viewer / browser family): give it ONE
   per-open finalizer wired BOTH into the returned closer AND into the frame's
   fourth `onDispose`; precommit the latch before the user callback runs; keep
@@ -321,8 +323,8 @@ that grant instead of the whole terminal height.
 ## 10. One-shot closure: output viewer and task browser
 
 A managed overlay that owns an external resource (an OutputViewer's refresh
-timer, a Job viewer's observation subscription, a Task Browser's owner slot) has
-exactly ONE per-open finalizer, and every close route funnels through it:
+timer, a Task Browser's owner slot) — and the selected-Job workspace of §10.1 —
+has exactly ONE per-open finalizer, and every close route funnels through it:
 
 - **Esc / the returned closer**: mark the close requested, then run the physical
   hide and the finalizer as INDEPENDENT steps (`runSyncDisposalSteps`), so a
@@ -339,16 +341,17 @@ exactly ONE per-open finalizer, and every close route funnels through it:
 - **A throwing owned-child `dispose` is independent of the notification**: the
   frame attempts both and surfaces the collected failure (the exact original
   value for one failure, an `AggregateError` carrying both for two).
-- **Suppression is not closure.** `setHidden(true)` — including a Job detail
-  hiding its Task Browser — changes visibility and the keyboard owner only; the
-  suppressed instance keeps its state and is restored on the child's Esc. Only
-  `Frame.dispose` is a closure.
+- **Suppression is not closure.** `setHidden(true)` changes visibility and the
+  keyboard owner only; the suppressed instance keeps its state and is restored
+  when the suppressing owner closes. Only `Frame.dispose` is a closure. A Job
+  workspace does not even suppress its Task Browser as an overlay: it PAUSES the
+  whole physical screen the browser lives on (§10.1).
 - **The Task Browser owner gets a reason exactly once per open** (`cancel` /
   `select` / `promote` / `external`). `promote` (Quick → Full) is the ONE reason
   that preserves the dataset scope; every terminal reason resets it. The retired
-  browser identity is cleared BEFORE the child Job viewer is closed, so a
-  callback that synchronously opens a newer browser wins; a late callback from a
-  retired browser is a strict no-op.
+  browser identity is cleared BEFORE the Job workspace is closed, so a callback
+  that synchronously opens a newer browser wins; a late callback from a retired
+  browser is a strict no-op.
 - **A retired browser's navigation tails are generation-fenced.** The Esc → Quick
   restore and the Quick → Full promotion close over the monotonic epoch of the
   browser that opened them, so a browser a synchronous callback opened while the
@@ -356,18 +359,68 @@ exactly ONE per-open finalizer, and every close route funnels through it:
   physical focus) keeps the slot. The retired browser's OWN token cannot express
   this: its `onRetired` legitimately clears it, so "the token is clear" cannot be
   told apart from "someone newer owns the slot".
-- **The child closes before the parent's physical hide** on an explicit close;
-  on a physical disposal the child's own frame finalizer releases it. Either way
-  the observer is released exactly once (per-open `releaseOnce`), and a stale
-  finalizer can never clear a newer instance's token or closer.
-- **Instance identity, not the session**: a Job viewer's currentness is its
+- **The Job workspace closes before its parent browser's physical hide** on an
+  explicit close; on a physical disposal the workspace's own finalizer releases
+  it. Either way the observer is released exactly once (per-open `releaseOnce`),
+  and a stale finalizer can never clear a newer instance's token or closer.
+- **Instance identity, not the session**: a Job workspace's currentness is its
   per-open object token; the ownership subject (session + generation) is only the
   destructive-intent fence. `jobs.read()` — the consuming cursor — is never part
   of closing.
 
 Evidence: `test/surface-lifecycle-closure.test.ts` (Esc, returned closer, screen
 swap, parent-only close, Quick/Full restore, Job A → B, session reset, final
-dispose, throwing child dispose, Sign-in notice identity).
+dispose, throwing child dispose, Sign-in notice identity) and
+`test/job-inspector-workspace.test.ts` (the workspace screen lease itself).
+
+## 10.1 Job workspace: a temporary physical-screen lease
+
+A selected Job (a `/tasks` row) renders in its OWN fullscreen workspace. The
+lease is deliberately NOT an OverlayBroker node: a second physical screen owner
+would have to be projected, suppressed, remounted and focused through the broker
+graph, and a fullscreen swap would then destroy the very Task Browser the
+workspace must return to.
+
+- **One leased screen, one owner.** `TuiApp.openJobInspector` mints a
+  short-lived `TuiAltScreen` whose layout root and keyboard focus target is the
+  `JobInspectorPanel`. `this.jobWorkspace` is the ONE lease record, and
+  `activeScreen` is derived from it (`jobWorkspace.screen ?? fullscreen ?? tui`),
+  so every render request, input route, overlay mount and focus write targets the
+  same physical owner. There is no parallel `isJobOpen` boolean.
+- **The return surface is paused, never rebuilt.** The screen that opened the
+  workspace (the regular `TuiMainScreen` or the transcript `TuiAltScreen`) is
+  stopped with `preserveScreen: true`: its object tree, overlay graph, focus,
+  draft, scroll state and Task Browser selection survive. Closing the workspace
+  restarts the SAME instance and only re-assigns focus when that screen has no
+  focused component left — the workspace never forces the editor back.
+- **`this.fullscreen` stays the USER's transcript mode.** A workspace never
+  assigns or clears it, never calls `setFullscreen` and therefore never fires
+  `onFullscreenChange`; a display-mode request arriving while a workspace is
+  leased is refused (the preference value itself is untouched) instead of
+  detaching the paused surface. `activeScreen.mode` — not `this.fullscreen` — is
+  the predicate for "the active screen is a viewport owner" (for example the
+  focus-report pass-through).
+- **Modal pre-emption is by closure, not layering.** A Question, Approval or Save
+  Location that ARRIVES while a workspace is leased closes it FIRST (the three
+  entry points run `jobWorkspace.close()` before they commit their own state), so
+  the blocking owner mounts and focuses on the restored surface and the workspace
+  can never swallow the keys the user must answer with. A workspace open that
+  finds a blocking owner already active is refused and releases the observation
+  lease it just acquired.
+- **One non-truncating close batch.** `close()` commits the instance latch and
+  clears the lease BEFORE any callback, then attempts the screen stop, the panel
+  release, the return-surface restore and the exactly-once owner notification as
+  independent steps. A re-entrant callback that synchronously leases a NEWER
+  workspace wins: the stale workspace never restores its own screen over it, and
+  the owner notification runs last so it observes the restored physical state.
+- **Observer ownership stays in the Task Runtime.** The workspace only PRESENTS
+  the ONE captured `JobInspectorState`; the selected-Job observer, its per-open
+  `releaseOnce`, the Stop capability fence and the Stop mutation all stay in
+  `app/surface/task-runtime`. The panel holds no timer, no backend read and no
+  second subscription.
+- **Final dispose releases the lease first.** `TuiApp.dispose()` closes a still
+  leased workspace before the overlay teardown and the screen stops, so no
+  temporary screen keeps a terminal input handler into the dying surface.
 
 ## 11. Optional seat tenant: PARK / REFUSE
 

@@ -24,6 +24,7 @@ import { afterEach, test } from 'node:test'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp, type TaskBrowserHandle, type TuiAppOptions } from '../src/tui-app.ts'
 import { OutputViewerPanel } from '../src/tui/panels/output-viewer-panel.ts'
+import { JobInspectorPanel } from '../src/tui/panels/job-inspector-panel.ts'
 import { TaskBrowserPanel } from '../src/tui/panels/task-panel.ts'
 import { createTaskRuntime, type TaskBrowserViewState, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
 import type { AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
@@ -56,6 +57,11 @@ function startApp(options: TuiAppOptions = {}): { vt: VirtualTerminal; app: TuiA
 }
 
 const view = (vt: VirtualTerminal): string => vt.getViewport().map(stripTerminalSequences).join('\n')
+
+/** Phase 3B / B1-A: a Job detail is a dedicated temporary SCREEN whose root is
+ *  the `JobInspectorPanel` and which owns the physical keyboard — it is NOT an
+ *  overlay child of the Task Browser. */
+const jobScreenOpen = (app: TuiApp): boolean => app.focusedComponentForTest() instanceof JobInspectorPanel
 
 /** Let the runtime's owned async flows settle (the catalog read resolves on a
  *  microtask; `runOwned` reports through the diagnostic channel). */
@@ -366,7 +372,7 @@ test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a
 
 // ── A-04..A-10: the TaskRuntime parent/child ownership closure ──────────────
 
-test('A-04 a parent-only browser close releases the Job child observer once; suppression is NOT a closure', async () => {
+test('A-04 a parent-only browser close releases the Job child observer once; the Job screen never destroys the browser', async () => {
   const { vt, app } = startApp()
   // Count the real panel release (its 1s elapsed tick lives in the panel):
   // the owning frame must dispose it exactly once, on any close path.
@@ -384,32 +390,37 @@ test('A-04 a parent-only browser close releases the Job child observer once; sup
     const browser = harness.lastBrowser()
     assert.ok(browser !== undefined, 'the app must return a real browser handle')
 
-    // Select the highlighted Job row through the REAL panel: a Job detail is a
-    // child overlay that SUPPRESSES (never destroys) the browser.
+    // Select the highlighted Job row through the REAL panel: the Job detail is a
+    // dedicated temporary SCREEN — the browser stays the only overlay and is
+    // never destroyed or suppressed.
     vt.sendInput('\r')
     await vt.waitForRender()
     assert.deepEqual(harness.observation.forJob('job-a'), [0], 'selecting a Job opens exactly one observer')
-    assert.equal(app.overlayGraphState().handles, 2, 'the Job detail is a child of the browser')
-    assert.equal(app.overlayGraphState().dependents, 1, 'the browser is suppressed, not closed')
-    assert.equal(panelDisposals, 0, 'a suppressed browser must NOT be disposed')
-    assert.deepEqual(harness.retires, [], 'keep-open suppression must never retire the owner')
+    assert.equal(app.overlayGraphState().handles, 1, 'the Job workspace is a SCREEN, not an overlay child')
+    assert.equal(app.overlayGraphState().dependents, 0, 'the browser is not suppressed by an overlay')
+    assert.equal(jobScreenOpen(app), true, 'the Job workspace root owns the physical keyboard')
+    assert.equal(panelDisposals, 0, 'the browser must NOT be disposed')
+    assert.deepEqual(harness.retires, [], 'keep-open must never retire the owner')
 
     // Esc on the Job detail restores the SAME browser: the observer is released
     // exactly once and the parent survives.
     vt.sendInput('\x1b')
     await vt.waitForRender()
     assert.deepEqual(harness.observation.forJob('job-a'), [1], 'the Job detail Esc must release its observer once')
-    assert.equal(app.overlayGraphState().handles, 1, 'the suppressed parent must be restored, never rebuilt')
-    assert.equal(panelDisposals, 0, 'restoring the suppressed parent must not dispose its panel')
+    assert.equal(jobScreenOpen(app), false)
+    assert.equal(app.overlayGraphState().handles, 1, 'the parent browser must be restored, never rebuilt')
+    assert.equal(panelDisposals, 0, 'restoring the parent must not dispose its panel')
 
     // Re-open the detail, then close ONLY the parent browser: the parent-only
-    // entry must close the still-live Job child.
+    // entry must close the still-live Job workspace.
     vt.sendInput('\r')
     await vt.waitForRender()
     assert.deepEqual(harness.observation.forJob('job-a'), [1, 0])
+    assert.equal(jobScreenOpen(app), true)
     browser!.close()
     await vt.waitForRender()
     assert.deepEqual(harness.observation.forJob('job-a'), [1, 1], 'the parent-only close must release the child observer once')
+    assert.equal(jobScreenOpen(app), false, 'the parent-only close must release the temporary Job screen')
     assert.equal(app.overlayGraphState().handles, 0, 'no ghost overlay may remain')
     assert.deepEqual(harness.retires, ['external'], 'the parent-only close must retire the owner exactly once')
     assert.equal(panelDisposals, 1, 'the browser panel (and its tick) must be released exactly once')
@@ -423,7 +434,7 @@ test('A-04 a parent-only browser close releases the Job child observer once; sup
   }
 })
 
-test('A-05 a browser physical disposal (screen swap) retires the owner once and releases the Job child', async () => {
+test('A-05 a display-mode switch is refused while the Job screen owns the surface, and the physical browser disposal still retires once afterwards', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -431,12 +442,27 @@ test('A-05 a browser physical disposal (screen swap) retires the owner once and 
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(app.overlayGraphState().handles, 1, 'the browser is the only overlay')
 
+  // A fullscreen toggle while a Job workspace is leased must NOT detach the
+  // paused surface: the browser/observer/Job screen all survive and no display
+  // preference is written.
   app.setFullscreen(true)
   await vt.waitForRender()
-  assert.deepEqual(harness.observation.forJob('job-a'), [1], 'the physical browser disposal must release the Job child')
-  assert.equal(app.overlayGraphState().handles, 0, 'neither the browser nor its Job child may survive the swap')
+  assert.equal(app.isFullscreen(), false, 'the user display mode is untouched by the Job view')
+  assert.deepEqual(harness.observation.forJob('job-a'), [0], 'the Job observer stays live')
+  assert.equal(app.overlayGraphState().handles, 1)
+  assert.equal(jobScreenOpen(app), true)
+  assert.deepEqual(harness.retires, [], 'the paused browser is not retired by the refused switch')
+
+  // Leaving the Job screen restores the browser, and THEN the swap behaves
+  // exactly as before.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.deepEqual(harness.observation.forJob('job-a'), [1], 'leaving the Job releases its observer once')
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  assert.equal(app.overlayGraphState().handles, 0, 'the browser may not survive the physical swap')
   assert.deepEqual(harness.retires, ['external'],
     'the physical browser disposal must notify the owner exactly once, without any closer call')
 
@@ -612,16 +638,16 @@ test('A-07b a reentrant replacement inside a viewer finalizer wins over the oute
   // A production-plausible reentrancy: the OUTER replacement (B) closes A,
   // and A's finalizer synchronously opens ANOTHER Job (C). The newer intent
   // must win — B must never mount, and A's tail must not clear C's closer.
-  const originalOpenOutputViewer = app.openOutputViewer
+  const originalOpenJobInspector = app.openJobInspector
   let injected = false
-  app.openOutputViewer = function (
+  app.openJobInspector = function (
     this: TuiApp,
-    options: Parameters<typeof originalOpenOutputViewer>[0],
-  ): () => void {
-    if (injected || !options.title.includes('job-a')) return originalOpenOutputViewer.call(this, options)
+    options: Parameters<typeof originalOpenJobInspector>[0],
+  ) {
+    if (injected || options.initial.opening.jobId !== 'job-a') return originalOpenJobInspector.call(this, options)
     injected = true
     const originalOnClose = options.onClose
-    return originalOpenOutputViewer.call(this, {
+    return originalOpenJobInspector.call(this, {
       ...options,
       onClose: () => {
         originalOnClose?.()
@@ -632,19 +658,21 @@ test('A-07b a reentrant replacement inside a viewer finalizer wins over the oute
 
   harness.tasks.openJobView('job-a')
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2, 'the browser plus the job-a detail')
+  assert.equal(jobScreenOpen(app), true, 'job-a owns the temporary Job screen')
 
   harness.tasks.openJobView('job-b')
   await vt.waitForRender()
   assert.deepEqual(harness.observation.forJob('job-a'), [1], 'A must be released exactly once')
   assert.deepEqual(harness.observation.forJob('job-b'), [], 'the superseded outer selection must never mount')
   assert.deepEqual(harness.observation.forJob('job-c'), [0], 'the reentrant selection must own the live observer')
-  assert.equal(app.overlayGraphState().handles, 2, 'exactly one Job detail may be mounted, never two')
+  assert.equal(app.overlayGraphState().handles, 1, 'exactly one Job screen may be leased, never two')
+  assert.equal(jobScreenOpen(app), true, 'C owns the physical keyboard')
 
   // C owns the live slot: Esc closes C (and its observer), leaving the parent.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.deepEqual(harness.observation.forJob('job-c'), [1], 'C must still be closable')
+  assert.equal(jobScreenOpen(app), false)
   assert.equal(app.overlayGraphState().handles, 1, 'the parent browser must remain')
   harness.lastBrowser()!.close()
   await vt.waitForRender()
@@ -740,8 +768,8 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
     assert.equal(harness.lastBrowser()!.getViewState!().mode, 'full', 'the newer Full must own the slot')
     assert.deepEqual(harness.observation.forJob('job-a'), [0],
       'the retired browser\'s tail must not touch the newer browser\'s Job child')
-    assert.equal(app.overlayGraphState().handles, 3, 'the intro overlay, the newer browser and its Job child')
-    assert.equal(app.overlayGraphState().dependents, 2)
+    assert.equal(app.overlayGraphState().handles, 2, 'the intro overlay and the newer browser')
+    assert.equal(jobScreenOpen(app), true, 'the newer browser\'s Job screen owns the keyboard')
     assert.deepEqual(harness.retires, ['cancel'], 'only the retired Full must have retired')
 
     // The newer browser is fully interactive: its Job detail Esc returns to it,
@@ -749,6 +777,7 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
     vt.sendInput('\x1b')
     await vt.waitForRender()
     assert.deepEqual(harness.observation.forJob('job-a'), [1])
+    assert.equal(jobScreenOpen(app), false)
     assert.equal(app.overlayGraphState().handles, 2)
     assert.equal(harness.tasks.openJobView('job-a'), 'keep-open')
     await vt.waitForRender()
@@ -865,7 +894,8 @@ test('A-08d TaskRuntime: a stale browser\'s late close cannot clear the replacem
   assert.equal(harness.tasks.openJobView('job-a'), 'keep-open')
   await vt.waitForRender()
   assert.deepEqual(harness.observation.forJob('job-a'), [0])
-  assert.equal(app.overlayGraphState().handles, 3, 'the stale browser, the replacement and its Job child')
+  assert.equal(app.overlayGraphState().handles, 2, 'the stale browser and the replacement (the Job is a SCREEN)')
+  assert.equal(jobScreenOpen(app), true, 'the replacement Job workspace owns the surface')
 
   // Closing the STALE browser (its TaskRuntime token is no longer current)
   // must hit the browserToken mismatch fence: the replacement keeps its slot,
@@ -875,7 +905,8 @@ test('A-08d TaskRuntime: a stale browser\'s late close cannot clear the replacem
   assert.deepEqual(harness.retires, ['external'], 'only the stale browser may retire')
   assert.deepEqual(harness.observation.forJob('job-a'), [0],
     'the stale browser\'s retire must NOT release the replacement\'s Job child')
-  assert.equal(app.overlayGraphState().handles, 2, 'the replacement and its Job child must survive')
+  assert.equal(jobScreenOpen(app), true, 'the replacement\'s Job workspace must survive the stale close')
+  assert.equal(app.overlayGraphState().handles, 1, 'the replacement browser must survive')
   assert.deepEqual(
     replacement.visibleItems!().map(item => item.value)
       .filter(value => value.startsWith('agent:') || value.startsWith('job:')),
@@ -902,12 +933,13 @@ test('A-09 resetTasks is idempotent: one observer release, one browser disposal,
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(jobScreenOpen(app), true)
 
   harness.tasks.resetTasks()
   await vt.waitForRender()
   assert.equal(harness.observation.totalCloses(), 1, 'the session reset must release the observer once')
-  assert.equal(app.overlayGraphState().handles, 0, 'the reset must drop both the browser and its Job child')
+  assert.equal(jobScreenOpen(app), false, 'the reset must release the temporary Job screen')
+  assert.equal(app.overlayGraphState().handles, 0, 'the reset must drop the browser')
   assert.deepEqual(harness.retires, ['external'], 'the reset must retire the browser owner exactly once')
 
   harness.tasks.resetTasks()
@@ -929,20 +961,20 @@ test('A-09b a throwing Job finalizer cannot strand the browser disposal during a
   harness.tasks.openTasksBrowser('full')
   await vt.waitForRender()
   const boom = new Error('viewer finalizer boom')
-  const originalOpenOutputViewer = app.openOutputViewer
-  app.openOutputViewer = function (
+  const originalOpenJobInspector = app.openJobInspector
+  app.openJobInspector = function (
     this: TuiApp,
-    options: Parameters<typeof originalOpenOutputViewer>[0],
-  ): () => void {
+    options: Parameters<typeof originalOpenJobInspector>[0],
+  ) {
     const inner = options.onClose
-    return originalOpenOutputViewer.call(this, {
+    return originalOpenJobInspector.call(this, {
       ...options,
       onClose: () => { inner?.(); throw boom },
     })
   }
   harness.tasks.openJobView('job-a')
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(jobScreenOpen(app), true)
 
   // The Job finalizer throws (after releasing its observer). The browser
   // disposal is an INDEPENDENT obligation and must still run; the original
@@ -1090,20 +1122,32 @@ test('A-11 a throwing owned-child dispose still finalizes once, preserves the er
     app.dispose()
 
     // TaskRuntime level: a REAL Job observation released by its owner must
-    // still be released exactly once when the viewer's owned panel throws.
+    // still be released exactly once when the workspace panel's own release
+    // throws (the workspace release is ONE non-truncating batch, so the
+    // return-surface restore and the owner notification still run).
     const { vt: vt2, app: app2 } = startApp()
     const harness = attachTasks(app2, { jobIds: ['job-a'] })
-    await flush()
-    harness.tasks.openTasksBrowser('full')
-    await vt2.waitForRender()
-    harness.tasks.openJobView('job-a')
-    await vt2.waitForRender()
-    assert.deepEqual(harness.observation.forJob('job-a'), [0])
-    assert.throws(() => harness.tasks.disposeJobObservation(), (error: unknown) => error === disposeError)
-    assert.deepEqual(harness.observation.forJob('job-a'), [1],
-      'the real observer must still be released exactly once under a throwing panel dispose')
-    assert.equal(app2.overlayGraphState().handles, 1, 'the Job viewer must be gone; its parent browser remains')
-    app2.stop()
+    const originalJobPanelDispose = JobInspectorPanel.prototype.dispose
+    JobInspectorPanel.prototype.dispose = function (this: JobInspectorPanel): void {
+      originalJobPanelDispose.call(this)
+      throw disposeError
+    }
+    try {
+      await flush()
+      harness.tasks.openTasksBrowser('full')
+      await vt2.waitForRender()
+      harness.tasks.openJobView('job-a')
+      await vt2.waitForRender()
+      assert.deepEqual(harness.observation.forJob('job-a'), [0])
+      assert.throws(() => harness.tasks.disposeJobObservation(), (error: unknown) => error === disposeError)
+      assert.deepEqual(harness.observation.forJob('job-a'), [1],
+        'the real observer must still be released exactly once under a throwing panel dispose')
+      assert.equal(app2.overlayGraphState().handles, 1, 'the Job screen must be gone; its parent browser remains')
+      assert.equal(jobScreenOpen(app2), false, 'the throwing release must not strand the temporary Job screen')
+      app2.stop()
+    } finally {
+      JobInspectorPanel.prototype.dispose = originalJobPanelDispose
+    }
   } finally {
     OutputViewerPanel.prototype.dispose = originalDispose
   }
@@ -1287,10 +1331,10 @@ test('A-13 a throwing owner retire and a throwing parent hide are both attempted
   // The Job finalizer throws AFTER releasing its observer, and the browser's
   // owned panel throws from its real release (pass-through double, so the tick
   // is still cleared).
-  const originalOpenOutputViewer = app.openOutputViewer
-  app.openOutputViewer = function (this: TuiApp, options: Parameters<typeof originalOpenOutputViewer>[0]): () => void {
+  const originalOpenJobInspector = app.openJobInspector
+  app.openJobInspector = function (this: TuiApp, options: Parameters<typeof originalOpenJobInspector>[0]) {
     const inner = options.onClose
-    return originalOpenOutputViewer.call(this, { ...options, onClose: () => { inner?.(); throw childError } })
+    return originalOpenJobInspector.call(this, { ...options, onClose: () => { inner?.(); throw childError } })
   }
   const originalPanelDispose = TaskBrowserPanel.prototype.dispose
   let panelDisposals = 0
@@ -1302,7 +1346,7 @@ test('A-13 a throwing owner retire and a throwing parent hide are both attempted
   try {
     harness.tasks.openJobView('job-a')
     await vt.waitForRender()
-    assert.equal(app.overlayGraphState().handles, 2)
+    assert.equal(jobScreenOpen(app), true, 'the Job workspace screen owns the surface')
 
     // Both independent obligations fail — the owner retire (through the Job
     // child) and the browser's own physical hide — and BOTH original errors
@@ -1317,7 +1361,8 @@ test('A-13 a throwing owner retire and a throwing parent hide are both attempted
       'the Job observer must still be released exactly once despite both throws')
     assert.deepEqual(harness.retires, ['external'], 'the retire notifier must fire exactly once (latched), never twice')
     assert.equal(panelDisposals, 1, 'the browser panel must be released exactly once')
-    assert.equal(app.overlayGraphState().handles, 0, 'no ghost overlay (parent or child) may remain')
+    assert.equal(jobScreenOpen(app), false, 'no ghost Job screen (parent or child) may remain')
+    assert.equal(app.overlayGraphState().handles, 0, 'no ghost overlay may remain')
 
     browser.close()
     assert.deepEqual(harness.retires, ['external'], 'a repeated close must be a strict no-op')

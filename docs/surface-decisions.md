@@ -1571,6 +1571,36 @@ execution-history list. Invariants (DSH `0.1.7` JobRegistry contract):
    total; it may shrink when upstream removes a record. Compact density
    keeps the bare `1/3j` form.
 
+## The selected-Job detail is a fullscreen workspace, not an overlay
+
+Opening a Job row (`bash`/`pwsh`/`other`, or a `subagent` Job without a stable
+child id) leaves the Task Center for a dedicated fullscreen Job workspace: a
+typed header (Job identity, status, progress, the independent gap/error/settled
+facts, and one `Command:`/`Label:` identity row), a retained-output body, and a
+pinned bottom Action Bar (`<tasks.stop key> stop · Esc back`, degrading to
+`Esc back` alone when the row cannot carry more). The workspace is its own
+screen, so the main transcript, the original editor and the footer never take
+part in its layout, and the previous screen (regular or transcript fullscreen)
+is paused with the Task Browser kept alive underneath — `Esc` returns to the
+SAME browser instance, its selected row and the original draft/scroll state.
+
+Facts stay separated by construction: the workspace presents ONE captured
+`JobInspectorState` (the opening row plus the latest detached observation), and
+the body is exactly the port's retained tail — never a concatenation of status,
+label and output. The three placeholders are distinct and honest: `Waiting for
+retained output…` (no snapshot yet), `No retained output` (observed, nothing
+retained) and `Retained output unavailable` (the observation port refused). A
+`subagent` Job shows `Label:` instead of pretending to be a shell command, and
+the bottom row always discloses `Retained preview · not full history` — the
+tail is bounded and is not the Job's archive. `Esc` and the `tasks.stop`
+component action are the only intents; the Stop write stays the existing
+capability-gated `jobObservation.stop`, and ordinary typing never reaches the
+background editor or transcript.
+
+Not yet claimed: in-workspace search and an explicit follow/scroll state
+machine (B1-B), and the clickable Command reader with exact selection/copy
+(B1-C). The layout reserves those slots; the buttons do not exist yet.
+
 ## Long user messages collapse at the presentation layer only
 
 A text-only durable user message whose render-time visual row count exceeds
