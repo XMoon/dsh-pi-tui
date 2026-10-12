@@ -2971,3 +2971,75 @@ test('B-54: a real Advanced blur chain that throws through the host unwind leave
   assert.equal(await settleOrTimeout(healthy), 'allowed-once')
   assert.equal(closeCalls, 0)
 })
+
+test('B-55: a failed Approval mount across a re-entrant fullscreen swap never pops the surviving root', async () => {
+  const registry = new EditorRegistry()
+  const { vt, app } = startApp(registry)
+  await vt.waitForRender()
+  const sentinel = new Error('swap currentness sentinel')
+  let sentinelArmed = false
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => {
+      if (sentinelArmed) {
+        sentinelArmed = false
+        throw sentinel
+      }
+      return true
+    },
+    close: () => { closeCalls += 1 },
+  }))
+  await vt.waitForRender()
+  const winner = { rows: ['winner editor'] }
+  let chainStarted = false
+  const root = advancedOverlayProbe('swap-root', undefined, () => {
+    if (chainStarted) return
+    chainStarted = true
+    // A re-entrant fullscreen swap inside the mount's physical transition: the
+    // already-registered Approval node loses its raw projection to
+    // `detachPhysical()`, and the surviving root is re-mounted on the NEW screen.
+    app.setFullscreen(true)
+    registry.register({ id: 'winner', priority: -1, create: () => rowsEditor(winner) }, 'plugin-winner')
+    sentinelArmed = true
+    throw new Error('plugin boom')
+  })
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+
+  const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'swap then failed' })
+  let caught: unknown
+  try {
+    await settleOrTimeout(failed)
+  } catch (error) {
+    caught = error
+  }
+  const primary = caught instanceof AggregateError ? caught.errors[0] : caught
+  assert.equal(primary, sentinel, `the mount failure must be the caller sentinel by identity: ${String(caught)}`)
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.ok(
+    !viewport(vt).includes('bash'),
+    `the failed Approval must be unwound on the swapped screen too:\n${viewport(vt)}`,
+  )
+  assert.ok(
+    viewport(vt).includes('swap-root'),
+    `the RE-MOUNTED surviving root must never be popped as a ghost (its node's raw was cleared by the swap):\n${viewport(vt)}`,
+  )
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+  // The swapped surface stays coherent: the surviving root still owns the
+  // keyboard, and once it leaves the healthy tenant is restored and receives input.
+  rootLease.close()
+  await vt.waitForRender()
+  assert.equal(
+    app.focusedComponentForTest(),
+    tenant.component,
+    'the healthy tenant is restored and focused after the last owner leaves',
+  )
+  const keysBefore = tenant.keys.length
+  vt.sendInput('x')
+  assert.equal(tenant.keys.length, keysBefore + 1, 'input reaches the live owner on the swapped screen')
+  assert.equal(closeCalls, 0)
+})
