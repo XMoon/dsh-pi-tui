@@ -24,9 +24,18 @@
 - 性能统计改由 TUI 自有的 Host `piTuiPerformance` 投影提供：Direct 与 Remote
   同源，重连与本地分页不再影响数值；主会话与查看中的子会话各自显示自己 Session
   的数值。某个范围没有合格样本时不再显示 `0 tok/s`，而是省略该数值。
+- TSP 实验渲染器的 `/model` 收敛信息层级：主页面底部只保留 `Cancel` /
+  `Full details…` 与唯一的写入动作，主动作文案为 `Choose & Save as Default`
+  （无 Session）或 `Switch Model`（实时 Session）；完整事实进入
+  `Full model details` 内容页，完整 Reasoning Effort 列表由该页的
+  `All effort levels…` 进入，返回目标按进入来源显示。写入仍是同一次业务提交。
 
 ### 修复
 
+- TSP 实验渲染器的 `/model`：点击左列 `All models` 或某个 Provider 现在真的会
+  过滤模型列表（Provider 选择走 Tern 原生的 `action(scope)` 事件通道，不再被
+  当成模型行选择而忽略），模型行、Effort 行与 Provider 选择互不混淆，任何一次
+  点击都不会写模型。
 - Question / Approval / Save Location 占用输入时，Footer 不再显示此刻按不动的
   Task Center `↓ view`（窄屏为 `↓`）：模态结束、编辑器空且条件仍满足时提示自动
   恢复；待处理问题 `?N` 与失败 `!N` 计数始终保留。用户显式禁用

@@ -355,8 +355,8 @@ export class TspModelPicker {
         // returns there), and let an explicit return page win over the derived one.
         if (intent.zone === 'effort' && panel.page !== 'effort') panel.previousPage = panel.page
         panel.zone = intent.zone
-        // An EXPLICIT page always wins: the `Choose effort` action opens the
-        // effort page in EVERY layout, which is the drill-down path that keeps
+        // An EXPLICIT page always wins: the details page's `All effort levels…`
+        // action opens the effort page, which is the drill-down path that keeps
         // every candidate reachable and selectable when the environment's
         // font/zoom makes the wide column's own fit unsure. The DERIVED
         // zone/page agreement below only runs where the pages are what carries
@@ -379,7 +379,11 @@ export class TspModelPicker {
         // A provider filter changes BROWSE only: it never touches authority and
         // never discards another model's draft. `undefined` is the every-provider
         // scope entry (it filters nothing); any other value must be a provider the
-        // current read actually advertises.
+        // current read actually advertises. Only the model LIST page carries a
+        // scope column, so a scope action arriving on a drill-down page (a stale
+        // or hostile receiver) fails closed instead of filtering a page that has
+        // no way to show or clear it.
+        if (panel.page !== 'models') return
         const providerIds = new Set(panel.rows.map((row) => row.providerId))
         if (intent.scope !== undefined && !providerIds.has(intent.scope)) return
         panel.scope = intent.scope

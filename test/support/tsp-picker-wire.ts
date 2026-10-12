@@ -157,7 +157,13 @@ export function sendAction(pane: TspPane, act: string, value?: string, id = pick
   })
 }
 
-/** Send one row/scope selection (the pane does this when a list row is used). */
+/**
+ * Send one ROW selection (a model row or an effort candidate row). This is
+ * deliberately NOT how a provider scope is chosen: the SDK delivers the scope
+ * column's click on the `action` channel as `act:'scope', value:<scope id>`
+ * (see {@link sendAction}), so a `select` carrying a scope-shaped id is a
+ * protocol shape that must never filter.
+ */
 export function sendSelect(pane: TspPane, item: string, id = pickerNode(pane)?.id): void {
   // See `sendAction`: the default receiver is the `/model` layer's picker.
   assert.ok(id, 'the picker must be mounted to send a selection')

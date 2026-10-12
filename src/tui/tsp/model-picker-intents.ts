@@ -89,19 +89,19 @@ function stepEffort(panel: ModelPickerPanel, delta: -1 | 1): ModelPickerIntent |
 /** The frozen Tab/Shift+Tab cycle across the three K2 zones. */
 function tabZone(panel: ModelPickerPanel, direction: -1 | 1): ModelPickerZone {
   // A failed read has exactly ONE operable region — its action bar (Retry /
-  // Close). The stale model list keeps its rows on screen for context, but the
+  // Cancel). The stale model list keeps its rows on screen for context, but the
   // phase browses neither the list nor the search box and refuses Enter, so
   // Tab/Shift+Tab must never move the keyboard there: both stay in the bar,
-  // where ←→ switches between Retry and the always-enabled Close.
+  // where ←→ switches between Retry and the always-enabled Cancel.
   if (panel.phase === 'error') return 'primary-action'
   // The effort selector exists only while the phase admits BROWSING. A failed (or
   // running) read keeps the previous rows and their effort metadata for context, but
-  // its bar offers nothing but Retry/Close, so Tab must reach that bar instead of
+  // its bar offers nothing but Retry/Cancel, so Tab must reach that bar instead of
   // parking the keyboard in an inert effort zone the phase cannot operate.
   const browsable = panel.phase === 'ready'
   const hasChoices = browsable && modelChoices(highlightedModel(panel)).length > 0
   // The compact details page is static fact: its only reachable region is the
-  // explicit action bar (Back / Choose effort / Primary).
+  // explicit action bar (Back / All effort levels… / Primary).
   if (panel.page === 'details' && panel.zone !== 'effort') {
     return panel.zone === 'primary-action' ? 'models' : 'primary-action'
   }
@@ -141,7 +141,8 @@ export function keyIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent 
   if (key.ctrl === true && key.name === 'c') return undefined
   if (key.name === 'escape') {
     // Esc is NEVER swallowed. An admitted write, a running (re-)read and a failed
-    // read all leave Close as the only reachable action, and in the failed read the
+    // read all leave the close action as the only reachable one, and in the failed
+    // read the
     // zone/page Esc would return to is inert (`tabZone` keeps the keyboard in the
     // bar for exactly that reason), so all three close instead of parking the
     // keyboard where no key acts.
@@ -207,8 +208,9 @@ export function keyIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent 
   return queryIntent(panel, key)
 }
 
-/** One SDK action event as an intent (the action bar path). The panel decides
- *  where a page-relative action returns, so Back and Esc can never disagree. */
+/** One SDK action event as an intent (the action bar AND the scope column). The
+ *  panel decides where a page-relative action returns, so Back and Esc can never
+ *  disagree. */
 export function actionIntent(
   panel: ModelPickerPanel,
   act: string,
@@ -217,6 +219,18 @@ export function actionIntent(
   switch (act) {
     case 'close':
       return { kind: 'close' }
+    case 'scope': {
+      // The scope COLUMN speaks on this channel: a provider click is
+      // `action { act:'scope', value:<scope id> }` (never a row `select`). A
+      // value that names no scope at all is refused here; a real provider id is
+      // still only a REQUEST — the presenter re-checks it against the current
+      // read's own membership before it changes the browse filter.
+      if (value === undefined) return undefined
+      const provider = scopeProviderId(value)
+      if (provider === undefined) return undefined
+      // `null` is the every-provider entry.
+      return { kind: 'scope', scope: provider ?? undefined }
+    }
     case 'back':
       // The effort page was opened FROM a page, so its Back is that page (the
       // same target its Esc uses); every other page backs out to the model list.
@@ -241,14 +255,17 @@ export function actionIntent(
 }
 
 /**
- * One SDK row/scope activation.
+ * One SDK ROW activation (a model row or an effort candidate row).
  *
  * A candidate row carries its OWN wire namespace ({@link effortValue}), and that is
  * the only place a candidate value is read: the SDK delivers the scope column's ids
  * and the page's row ids on the same channel, so a candidate whose value looks like a
- * scope id (or IS the every-provider id) still changes the draft, and the scope
- * column's ids still filter — including ON the effort page, where the scopes stay
- * live. Only on the model/details pages is a row id a model highlight.
+ * scope id (or IS the every-provider id) still changes the draft.
+ *
+ * A scope id arriving here is NOT a filter request: the scope column speaks on the
+ * `action` channel ({@link actionIntent}), so accepting its shape here as well would
+ * leave a second, unfrozen way into the browse filter. Only the model list browses a
+ * model.
  */
 export function rowIntent(panel: ModelPickerPanel, item: string): ModelPickerIntent | undefined {
   if (panel.page === 'effort') {
@@ -259,11 +276,7 @@ export function rowIntent(panel: ModelPickerPanel, item: string): ModelPickerInt
         ? { kind: 'browse-effort', value }
         : undefined
     }
-    // Not a candidate row: fall through, because the scope entries are live here.
   }
-  const scope = scopeProviderId(item)
-  // `null` is the every-provider entry: it maps to the absence of a provider.
-  if (scope !== undefined) return { kind: 'scope', scope: scope ?? undefined }
   if (panel.page !== 'models') return undefined
   return visibleModels(panel).some((row) => modelRowId(row) === item)
     ? { kind: 'browse-model', rowId: item }

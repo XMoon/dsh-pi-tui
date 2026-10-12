@@ -5,10 +5,14 @@
  * this module never mutates state, never writes and never reads the SDK.
  *
  * Layout contract (Owner-frozen):
- *  - `wide`  (`lg` + side preview): provider scopes + model list + a details
- *    card whose Reasoning Effort is a list of native radio rows.
- *  - `compact` (`md`, no preview): the same picker drills through the model
- *    list, a details page and an effort page; no overlay, no `ui.el`, no strip.
+ *  - the model LIST page at wide width (`lg` + side preview): provider scopes +
+ *    model list + a details card whose Reasoning Effort is a list of native
+ *    radio rows;
+ *  - everywhere else the same picker renders `preview: 'none'`: the compact
+ *    layout drills through the model list, the Full model details page and the
+ *    Reasoning Effort page, and the wide details/effort pages are CONTENT pages
+ *    with no scope column and no side summary. No overlay, no `ui.el`, no
+ *    self-drawn button.
  * @module tui/tsp/model-picker-view
  */
 import { ui, span, type Node } from '@stencil-hq/tern'
@@ -138,13 +142,13 @@ function renderedActions(panel: ModelPickerPanel): PickerAction[] {
 
 /** Which picker region the SDK should show as focused, by logical zone. The
  *  primary action has no native region: the action bar shape change carries it.
- *  An EXPLICIT effort page is the picker's own LIST in every layout — the wide
- *  column's inline radio rows are a different surface and the keyboard is not on
- *  them — so the page takes the list focus even while the column stays inline. */
-function nativeFocus(panel: ModelPickerPanel, preview: boolean): PickerProps['focus'] {
+ *  Only the model LIST page at wide width has an inline effort selector in its
+ *  side column; the explicit effort PAGE is the picker's own LIST in every layout,
+ *  so it takes the list focus instead of pointing at a column it does not render. */
+function nativeFocus(panel: ModelPickerPanel, side: boolean, preview: boolean): PickerProps['focus'] {
   if (panel.phase === 'error' || panel.zone === 'primary-action') return undefined
   if (panel.page === 'effort') return 'list'
-  if (panel.zone === 'effort' && preview) return 'preview'
+  if (panel.zone === 'effort' && side && preview) return 'preview'
   return 'list'
 }
 
@@ -168,7 +172,7 @@ function pickerState(panel: ModelPickerPanel): Pick<
  * at `lg`, the strip's own line at `md` — both complete, neither duplicated.
  */
 function pageTitle(page: 'models' | 'details' | 'effort'): string {
-  return page === 'models' ? 'Models' : page === 'details' ? 'Model details' : 'Reasoning Effort'
+  return page === 'models' ? 'Models' : page === 'details' ? 'Full model details' : 'Reasoning Effort'
 }
 
 function effortChoiceRows(
@@ -276,6 +280,12 @@ function modelListPicker(
   const row = highlightedModel(panel)
   const page = panel.page
   const draft = draftedEffort(panel, row)
+  // The three-column selector shell (provider scopes + model list + details
+  // column) belongs to the model LIST page at wide width. The details and effort
+  // pages are content pages: they show the complete facts or the complete
+  // candidate list and must not repeat a scope column or a side summary beside
+  // themselves.
+  const side = page === 'models' && deps.wide
   const items = page === 'models'
     ? modelItems(panel, !deps.wide)
     : page === 'effort'
@@ -304,7 +314,7 @@ function modelListPicker(
     title: pageTitle(page),
     layout: 'rows',
     size: deps.wide ? 'lg' : 'md',
-    preview: deps.wide ? 'side' : 'none',
+    preview: side ? 'side' : 'none',
     query: page === 'models' ? panel.query : '',
     cursor: page === 'models' ? panel.cursor : 0,
     items,
@@ -316,21 +326,32 @@ function modelListPicker(
       : items.length,
     selected,
     current: page === 'models' ? panel.rows.filter((item) => item.isCurrent).map(modelRowId) : [],
+    // The subject keeps ONE complete slot per layout and is never duplicated: the
+    // wide picker puts it in its own `subtitle`, the compact one on the strip's
+    // own line. The scope column exists only on the main page.
     ...(deps.wide
       ? {
-          scopes: scopes(panel),
-          scope: panel.scope === undefined ? ALL_SCOPES_ID : scopeId(panel.scope),
+          ...(side
+            ? {
+                scopes: scopes(panel),
+                scope: panel.scope === undefined ? ALL_SCOPES_ID : scopeId(panel.scope),
+              }
+            : {}),
           subtitle: subjectLine(panel),
         }
       // The compact subject gets its own complete line instead of a truncated
       // title; the chips stay empty (the banned B2F form concatenated the
       // subject, current value and effort chips into one clipped line).
       : { strip: { label: subjectLine(panel), items: [] } }),
-    focus: nativeFocus(panel, deps.preview),
+    focus: nativeFocus(panel, side, deps.preview),
     ...pickerState(panel),
     actions: renderedActions(panel),
   }
-  if (!deps.wide) return ui.picker(props)
+  // The three-column selector shell (scopes + list + details column) belongs to
+  // the model LIST page only: the details and effort pages are content pages, so
+  // they render the same picker with no scope column and no side summary that
+  // would duplicate what the page itself already shows.
+  if (!side) return ui.picker(props)
   // The wide SHELL always keeps its details column: the full card + radio rows
   // when the budget proves they fit, otherwise the action-first bounded summary.
   return ui.picker(

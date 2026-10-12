@@ -14,6 +14,103 @@
 > (worktree-local; the approved surface is in
 > [../model-selection.md](../model-selection.md), which is the authoritative contract).
 
+## 0. Owner revision superseding four B2 statements below
+
+The Owner revised the B2 Model UX in a follow-up PR. The body of this file is kept
+as the historical PR4-A record; where it disagrees with
+[../model-selection.md](../model-selection.md), the revision below wins.
+
+| B2 statement (still in the body) | Current contract |
+|---|---|
+| §1/§2: an "always-available `Choose effort` page", and the write labels `Apply` / `Save default` | The MAIN footer no longer carries an effort entry; the complete list is the details page's `All effort levels…`. The one Primary Action reads `Switch Model` (live) or `Choose & Save as Default` (sessionless); `Cancel` replaces the visible `Close`. |
+| §2: "the wide shell (`cols >= 120`) never collapses: provider scopes + model list + details column" | The three-column shell belongs to the model LIST page. The details and effort pages are content pages: `preview: 'none'`, no `scope`/`scopes` props, no side summary. |
+| §2: a provider scope click is described together with row activations | A scope click is the SDK's own `action { act: 'scope', value }` channel; a scope-shaped row `select` is not a scope click, and a scope action on a drill-down page or outside `ready` fails closed. |
+| §3/§4: reachability is stated as the always-offered wide `Choose effort` page | Reachability is the `Full details…` → `All effort levels…` path in every layout, plus the compact model list's own `Enter` shortcut to the effort page. |
+
+The revision changes no business authority: the same one handler, catalog/read
+owner, writer, default-intent tracker, admission point and SDK tty owner remain.
+Its own scope-action root cause, tests, real-pane evidence and remaining limits
+are recorded in the pull request that carries it.
+
+### 0.1 Real-pane verification of the revision
+
+Measured in a real Tern pane (`tern serve`, real Tern 0.8.0 with the locked
+`@stencil-hq/tern@0.1.0`, software rendering) driving the PRODUCTION
+`TspModelPicker` with real pointer clicks and real keys; the driver and its PNG /
+node-tree captures are worktree-local and are not committed.
+
+Wording readability, pointer reachability and keyboard operability are reported
+SEPARATELY, and each is measured the way it can actually be measured: a DOM string
+or a text node's own rect is NOT a visibility proof (the client clips at an
+overflow edge and keeps the full string in the DOM while CSS cuts it), so the bar
+is checked by geometric CONTAINMENT inside its own `pk-bar`/`pk-sheet` box,
+pointer reachability by clicking the actually-visible fragment, and wording by the
+captured PNG. An unproven path is recorded as `NOT_VERIFIED`, never as a PASS.
+
+| Verified | Result |
+|---|---|
+| A real pointer click on the left Provider column | delivered as `action { act:'scope', value:'scope:q' }`; the list really filtered to that provider's rows; `All models` sent `scope-all` and restored every provider; **zero writes** |
+| The main footer | `Cancel` / `Full details…` / `Retry failed providers` / `Choose & Save as Default`, and no `Choose effort` |
+| The details page | `Full model details` with `preview: none`, no scope column and no side preview box; footer `Cancel` / `Back to models` / `All effort levels…` / `Retry failed providers` / Primary; at wide width the complete CJK + emoji description is in the rendered tree, and at the compact widths walking the presentation cursor really scrolls every part of it on screen (the native list renders only the window near its viewport) |
+| The effort page | `Reasoning Effort` with no scope column, `Back to details`, and the complete 7-candidate list of a model whose wide column cannot inline them |
+| The one write | at 1280x800 the Primary click wrote exactly once with the draft chosen on the effort page; the K2 keyboard path (`Tab`,`Tab`,`Enter`) also wrote exactly once |
+| The action bar at 1280x800 and 900x640 | every button box fits its own bar on all three pages (model list / details / effort); the pointer click on the Primary writes |
+| The action bar at 560x640 | the model-list and effort bars fit; the FIVE-button DETAILS bar does NOT — its Primary box is 463–634px inside a 500px-wide bar, so only 67px of 171px is visible and the label is cut to `Choose &` |
+| Details -> complete Effort list -> step -> Back, per configuration | verified by KEYBOARD at 900x640 and 560x640 in the client font, AND at 400x600 in the client font, +25% and +50% (widths and fonts are two separate sweeps, not a full cross product): the list opens, a candidate step really moves the selection, and `Esc` returns to the details page and then to the model list |
+
+#### Measured limitations of the action bar (reported, not repaired)
+
+The action bar lays its buttons on ONE line and does not wrap, and it has no
+scroll port of its own, so a bar cut at its own edge loses the rightmost buttons.
+Measured per page and per pane, with the visible fragment of each overflowing
+button:
+
+| Pane | model list (4) | Full model details (5) | Reasoning Effort (4) |
+|---|---|---|---|
+| 1280x800 | fits | fits | fits |
+| 900x640 | fits | fits | fits |
+| 560x640 | fits | Primary 67px of 171px visible | fits |
+| 400x600, client font | Primary 38px of 171px | Primary 0px; `Retry failed providers` 54px of 139px | Primary 22px of 171px |
+| 400x600, +25% | Primary 0px; `Retry failed providers` 117px of 214px | `All effort levels…` 86px of 167px; `Retry failed providers` 0px; Primary 0px | Primary 0px; `Retry failed providers` 91px of 214px |
+| 400x600, +50% | Primary 0px; `Retry failed providers` 81px of 254px | `All effort levels…` 44px of 197px; `Retry failed providers` 0px; Primary 0px | Primary 0px; `Retry failed providers` 50px of 254px |
+
+The bar's requirement is the width of its OWN button set, which is why the
+five-button DETAILS bar already clips at the measured 560px pane while the
+four-button model-list and effort bars fit there. That fifth button is
+`Retry failed providers`, which exists only while part of the directory failed:
+measured at 560x640, that bar is `Cancel` 42–96, `Back to models` 98–203,
+`All effort levels…` 205–314, `Retry failed providers` 316–455, Primary 463–634
+inside a 30–530px bar, so WITHOUT a failed provider the same page's four buttons
+would end at 493 and fit — a GEOMETRIC DERIVATION from those measured boxes, not a
+no-failure-pane run. At 400x600 the Primary's label is
+clipped to `Cho…` at the client font (the 38px fragment really does trigger the
+write) and the button has NO visible fragment at +25%/+50%; the focused action's
+`▸` cue measures 4.2px of a 158px label at the floor and 0px at an enlarged font,
+so at those configurations the keyboard write can only be triggered BLIND (it
+still writes exactly once — verified). The details title `Full model details` is
+also ellipsized to `Full model …` at 400x600 (rendered advance 5.07px/char against
+6.84 at 560px) while it is complete at 560px and 900px; the strip subject
+`Default model` is complete at the client font and ellipsized to `Default mo…` at
++25%/+50%.
+
+The Owner-frozen wording is NOT abbreviated and no button is self-drawn or
+wrapped: these are `STOP`-class environment limits reported to the Owner (the
+plan's §8 condition), not a silent PASS and not a reason to change the frozen UI
+here. Physical IME, focus/theme behavior, full-profile/HMR, enlarged UI fonts at
+the WIDE layout and the Remote TSP Model success path remain `NOT_VERIFIED`
+exactly as recorded in §5.
+
+### 0.2 What the revision's automated lanes cover
+
+The production presenter suite now drives the real SDK event channel end to end:
+one `pane.event({ ev:'action', act:'scope', value })` reaches the renderer's event
+route → `TspModelPicker.handleEvent` → `actionIntent` → `act` admission → the new
+picker props and filtered rows. It also pins the
+negative shapes (a scope-shaped row `select`, an unknown or failed provider, a
+missing value, a drill-down page, the `loading` / `pending` / `error` phases),
+the page-by-page footer, the `Back` target per entry page, and the K2 write
+admission.
+
 ## 1. What PR4-A adds
 
 - The native `/model` panel inside the TSP renderer: provider-scoped model list, an
@@ -126,7 +223,9 @@ owner.
 
 Not certified anywhere in this PR (`GUI_BLOCKED` / `NOT_VERIFIED`): physical GUI, IME,
 focus and theme behavior, full-profile and HMR, clean live-Agent teardown, the Remote TSP
-Model success path, and catalogues beyond the scripted sizes.
+Model success path, and catalogues beyond the scripted sizes. (This is the historical
+PR4-A record; the Owner revision's §0.1 adds real-pane pointer and keyboard evidence for
+the specific paths it lists, and nothing beyond them.)
 
 ## 6. Pitfalls that became rules or regressions
 
