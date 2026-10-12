@@ -3164,9 +3164,24 @@ test('B-57b: a capturing overlay mounted in the swap window keeps its keyboard',
   assert.notEqual(cOwner, null)
   assert.equal(app.focusedComponentForTest(), cOwner, 'the newer mount keeps the keyboard')
   assert.equal(c.blurCount(), 0, 'the late restore must not blur the newer capturing owner')
+  // VISUAL ORDER: the physical paint priority must follow the broker's logical
+  // z-order — the later-mounted capturing overlay stays drawn on top of the
+  // Approval panel it covers, never the other way round.
+  assert.ok(
+    viewport(vt).includes('newer-capturing-c'),
+    `the newer capturing overlay must stay VISUALLY on top of the Approval:\n${viewport(vt)}`,
+  )
+  // (The Approval's own rows underneath the covering box are legitimately
+  // hidden by it — the discriminating fact is that C is drawn at all, and the
+  // Approval stays active and answerable below, asserted after C leaves.)
   // The newer overlay leaves: the live Approval takes over and settles.
   cLease!.close()
   await vt.waitForRender()
+  assert.notEqual(
+    app.focusedComponentForTest(),
+    app.seatEditorForTest().component,
+    'the live Approval takes the keyboard once the newer overlay leaves',
+  )
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(approval), 'allowed-once')
   await vt.waitForRender()
@@ -3206,4 +3221,39 @@ test('B-58: an Advanced overlay whose own mount interleaves a swap is re-project
   rootLease.close()
   lateLease.close()
   await vt.waitForRender()
+})
+
+test('B-60: a NEWER owner that leaves inside the swap window still hands the keyboard to the live Approval', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let chainStarted = false
+  const c = advancedOverlayProbe('early-leaver-c')
+  const root = advancedOverlayProbe('early-leaver-root', undefined, () => {
+    if (chainStarted) return
+    chainStarted = true
+    app.setFullscreen(true)
+    // A newer capturing owner mounts and LEAVES inside the same synchronous window:
+    // it does not hold the keyboard when the late restore runs, so the live, visible
+    // Approval — never the editor — must own the keyboard afterwards.
+    const cLease = app.showAdvancedInteractiveOverlay(c.component)
+    cLease.close()
+  })
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'newer owner left early' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('bash'), `the live Approval must be projected:\n${viewport(vt)}`)
+  assert.notEqual(
+    app.focusedComponentForTest(),
+    app.seatEditorForTest().component,
+    'a live visible Approval owns the keyboard once the newer owner is gone',
+  )
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(approval), 'allowed-once')
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+  void rootLease
 })

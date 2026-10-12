@@ -120,11 +120,6 @@ export class OverlayBroker {
   private readonly roots = new Set<ManagedOverlayNode>()
   /** The node that owned the keyboard before a screen swap. */
   private swapFocusOwner: ManagedOverlayNode | undefined
-  /** The focus-INTENT revision when `swapFocusOwner` was sampled (see
-   * `detachPhysical`): a later revision means a synchronous callback handed the
-   * keyboard to a NEWER owner inside the same swap window, which wins over that
-   * snapshot. */
-  private swapFocusSeq = 0
   private zSequence = 0
   /** Monotonic count of physical focus transitions (see `focusPhysical`). */
   private focusTransitionSeq = 0
@@ -534,10 +529,6 @@ export class OverlayBroker {
       ?? (prior !== undefined && !prior.closed && prior.resumeFocus === true && !prior.explicitHidden
         ? prior
         : undefined)
-    // The snapshot is only valid while no NEWER handoff happens: a callback of
-    // this swap (or of a mount interleaved with it) may explicitly focus another
-    // owner, which then wins (see `restoreFocusAfterSwap`).
-    this.swapFocusSeq = this.focusTransitionSeq
     // 3. Detach every retained raw projection (the component survives; the
     //    host re-creates it after the swap).
     for (const node of [...this.nodes.values()]) {
@@ -567,47 +558,34 @@ export class OverlayBroker {
     if (this.isSuppressed(node) || node.explicitHidden) raw.setHidden(true)
   }
 
-  /** Whether this node's raw projection is currently BOUND. A fullscreen swap
-   * clears it in `detachPhysical` until the host re-creates it — a node whose
-   * remount callback registers only after a swap that ran inside its own mount
-   * must check this, because that swap's remount pass already ran and skipped
-   * it (its projection would otherwise never come back). */
-  hasProjection(handle: OverlayHandle): boolean {
-    const node = this.nodes.get(handle)
-    return node !== undefined && !node.closed && node.raw !== undefined
-  }
-
-  /** Re-apply the pre-swap keyboard owner (or the current seat owner) after
-   * every rebind. The owner is only re-focused when the natural rebind order
-   * did not already restore it — an extra `focus()` would promote it to the
-   * visual front and break e.g. a nonCapturing HUD that legitimately sits
-   * above the focused overlay. An owner whose projection is not re-created YET
-   * (its remount callback registered too late for this pass) stays PENDING: the
-   * next call — the host makes one right after that late rebind — installs it,
-   * so a swap interleaved with a mount still ends on the live owner instead of
-   * silently handing its keyboard to the editor. */
+  /** Re-apply the pre-swap keyboard owner (or the current seat owner) after the
+   * remount pass. Called ONCE per swap, after every remountable projection has
+   * been re-created in logical order (the host registers each node's remount
+   * callback BEFORE the mount that can start a swap, so no node can miss the
+   * pass). The owner is only re-focused when the natural remount order did not
+   * already restore it — an extra `focus()` would promote it to the visual front
+   * and break e.g. a nonCapturing HUD that legitimately sits above the focused
+   * overlay. */
   restoreFocusAfterSwap(): void {
     const owner = this.swapFocusOwner
-    if (this.focusTransitionSeq !== this.swapFocusSeq) {
-      // A synchronous callback handed the keyboard to a NEWER owner inside this
-      // swap window — an explicit `focus()`/`show()`, or a capturing overlay it
-      // mounted while a mount interleaved the swap. The live intent wins over the
-      // pre-swap snapshot: drop the pending owner instead of installing it over
-      // that newer operation, and leave the keyboard where the callback put it.
-      this.swapFocusOwner = undefined
+    this.swapFocusOwner = undefined
+    // A NEWER owner that holds the keyboard RIGHT NOW wins over the pre-swap
+    // snapshot: a remount callback of this very pass may have focused another
+    // overlay, and the keyboard must never be taken from it behind its back.
+    const live = this.currentlyFocused()
+    if (live !== undefined && live !== owner) {
       this.deps.reconcileFocusSeat?.()
       return
     }
     if (owner === undefined) {
       // The editor (not a managed overlay) owned the keyboard before the swap:
-      // the natural rebind order may have auto-focused a capturing overlay, so
-      // release it back to the seat owner.
-      this.deps.focusSeatOwner?.()
+      // the natural remount order restored no keyboard owner, so the seat owner
+      // takes it — unless a callback of the pass already established one.
+      if (live === undefined) this.deps.focusSeatOwner?.()
       this.deps.reconcileFocusSeat?.()
       return
     }
     if (!owner.closed && this.isVisible(owner) && owner.raw !== undefined) {
-      this.swapFocusOwner = undefined
       // An internal rebind restore only takes the keyboard: the remount order
       // already restored the visual order, so an explicit focus() must not
       // promote the owner (a nonCapturing owner can legitimately sit behind a
@@ -616,17 +594,6 @@ export class OverlayBroker {
       this.deps.reconcileFocusSeat?.()
       return
     }
-    if (owner.remountable && !owner.closed && owner.raw === undefined) {
-      // A remountable node SURVIVES the swap: its projection is simply not
-      // re-created yet (see `hasProjection`). Keep it pending rather than
-      // dropping it — nothing may take a live owner's keyboard behind its back.
-      // A projection that exists but is HIDDEN (suppressed under a modal, or
-      // explicitly hidden) is NOT this case: it cannot take the keyboard now, so
-      // it falls through to the normal "cannot be restored" handling below.
-      this.deps.reconcileFocusSeat?.()
-      return
-    }
-    this.swapFocusOwner = undefined
     if (this.currentlyFocused() === undefined) {
       // The owner did not survive the swap: keep a surviving replacement the
       // rebind already restored, otherwise hand the seat to the editor.

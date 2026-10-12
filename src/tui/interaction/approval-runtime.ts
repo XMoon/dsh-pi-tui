@@ -41,10 +41,14 @@ export interface ApprovalRuntimeHost {
   projectActivity(): void
   /** The live terminal dimensions the approval geometry derives from. */
   terminalSize(): { readonly columns: number; readonly rows: number }
-  /** Mount the responsive frame as a remountable managed overlay. */
-  showApprovalOverlay(frame: ResponsiveOverlayFrame): OverlayHandle
-  /** Register the fullscreen-rebind callback for one logical node. */
-  setOverlayRemount(handle: OverlayHandle, remount: () => void): void
+  /** Mount the responsive frame as a remountable managed overlay. The `remount`
+   *  callback is built from the stable logical handle and registered BEFORE the
+   *  physical mount (see `TuiApp.showOverlayOnHost`), so a fullscreen swap started
+   *  by a callback inside that mount already re-creates this node's projection. */
+  showApprovalOverlay(
+    frame: ResponsiveOverlayFrame,
+    remount: (handle: OverlayHandle) => void,
+  ): OverlayHandle
   /** Drop one logical node's rebind callback when it closes. */
   clearOverlayRemount(handle: OverlayHandle): void
   /** Project a fresh physical frame for an existing logical node. */
@@ -352,46 +356,54 @@ export class ApprovalRuntime {
     // fullscreen swap rebinds the SAME logical node (with a fresh surface), so
     // the overlays it suppresses stay suppressed and never get revealed/
     // focused/re-hidden (no fabricated focus transition).
+    // The frame is published BEFORE the physical mount: the mount's focus
+    // transition can synchronously run a plugin callback that starts a fullscreen
+    // swap, and that swap calls the remount callback registered inside the mount
+    // funnel — which replaces `responsiveFrame` and disposes the frame it replaces.
+    pending.responsiveFrame = frame
     let handle: OverlayHandle
     try {
-      handle = this.host.showApprovalOverlay(frame)
+      handle = this.host.showApprovalOverlay(frame, (logical) => {
+        if (this.active !== pending) return
+        const previous = pending.responsiveFrame
+        const next = this.createFrame(pending)
+        pending.responsiveFrame = next
+        this.host.rebindApprovalOverlay(logical, next)
+        previous?.dispose()
+      })
     } catch (error) {
-      // The physical mount threw: the host has already unwound the overlay node
-      // it prepared, and this frame is not published as `responsiveFrame` yet, so
-      // this mount is its only owner — dispose it as an independent obligation so
-      // a dispose failure cannot hide the original failure.
+      // The physical mount threw: the host has already unwound the overlay node it
+      // prepared and forgot this node's remount callback. Dispose the frame this
+      // mount currently owns — a swap inside the failing mount may already have
+      // replaced `frame` with its successor, which the callback published and which
+      // is the only frame left to release here — as an independent obligation, so a
+      // dispose failure cannot hide the original failure.
+      const current = pending.responsiveFrame
+      pending.responsiveFrame = undefined
       runSyncDisposalStepsWithPrimary('approval overlay mount', error, [
-        () => frame.dispose(),
+        () => current?.dispose(),
       ])
     }
     // Phase 3A / PR-B MOUNT FENCE: the physical mount can synchronously run a
     // plugin callback (onFocus/onBlur) that settles this prompt, replaces it
-    // with a newer one, or disposes the surface. Only the STILL-current prompt
-    // may publish the handle/frame and register the fullscreen rebind; a losing
-    // mount releases exactly what THIS mount created and never overwrites the
-    // newer prompt. The frame is deliberately NOT published as
-    // `responsiveFrame` before the fence, so a settling callback cannot dispose
-    // it a second time.
+    // with a newer one, or disposes the surface. Only the STILL-current prompt may
+    // publish the handle; a losing mount releases exactly what THIS mount created
+    // and never overwrites the newer prompt.
     if (!this.ownsStage(pending)) {
+      // A callback of this mount settled or replaced the prompt: release exactly
+      // what THIS mount created — its logical node (which also hides the physical
+      // projection it owns) and the CURRENT frame, which a swap inside the mount may
+      // already have replaced.
+      const current = pending.responsiveFrame
+      pending.responsiveFrame = undefined
       runSyncDisposalSteps('approval mount fence', [
+        () => this.host.clearOverlayRemount(handle),
         () => handle.hide(),
-        () => frame.dispose(),
+        () => current?.dispose(),
       ])
       return
     }
-    pending.responsiveFrame = frame
     pending.handle = handle
-    this.host.setOverlayRemount(handle, () => {
-      if (this.active !== pending) return
-      const previous = pending.responsiveFrame
-      const next = this.createFrame(pending)
-      pending.responsiveFrame = next
-      this.host.rebindApprovalOverlay(handle, next)
-      // The old frame's raw projection was detached with the old screen and
-      // the overlay opted out of disposeOnHide: dispose it explicitly so a
-      // repeated swap never leaks approval frames/surfaces.
-      previous?.dispose()
-    })
   }
 
   /** Build the responsive approval frame (surface + geometry) without mounting
