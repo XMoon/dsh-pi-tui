@@ -539,7 +539,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // File order is oldest-first; TuiApp's recall API takes newest-first,
     // so the session-filtered projection is reversed at the seed.
     const sessionRecall = recallHistoryForSession(historyRecords, input.sessionId)
-    deps.surface.display.resetInputHistory([...sessionRecall].reverse())
+    deps.surface.display.resetInputHistory([...sessionRecall].reverse(), input.sessionId)
     // Session identity commit (create/resume/switch): the title AND the
     // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()

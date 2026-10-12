@@ -2588,49 +2588,97 @@ test('resetInputHistory replaces the recall history wholesale (session switch)',
   app.stop()
 })
 
-test('the publication recall scope reconciles transient submissions and never crosses into a newer owner', async () => {
+/** Type into the editor and press Enter through the REAL submit entry. */
+async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: string): Promise<void> {
+  app.setDraft('')
+  vt.sendInput(text)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+}
+
+test('the recall scope reconciles settled and pending submissions and never crosses into a newer owner', async () => {
   const { vt, app, submitted } = startApp()
-  const submit = async (text: string): Promise<void> => {
-    app.setDraft('')
-    vt.sendInput(text)
-    vt.sendInput('\r')
-    await vt.waitForRender()
-  }
-  // Scope: the owner was PUBLISHED and its hydration reseed has not committed.
-  app.beginInputHistoryScope()
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  // A hydration commit for a real Session closes the sessionless pool.
+  app.resetInputHistory(['a old row'], 'session-a')
+  // A replacement owner publishes: the scope takes the new owner.
+  app.beginInputHistoryScope('session-b')
   await submit('a')
   await submit('b')
   await submit('c')
   assert.deepEqual(submitted, ['a', 'b', 'c'])
-  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'], 'accepted inputs are recalled immediately')
-  // The hydration snapshot carries the two OLDER rows: they are covered by the
-  // disk authority, the newer one stays in front, nothing is doubled.
-  app.resetInputHistory(['b', 'a'])
-  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'],
-    'the covered rows are not doubled and the unpersisted one is kept')
-  // A NEW scope whose snapshot already holds the same text from an EARLIER
-  // window: the fresh submission is not swallowed (no text-level dedupe).
-  app.beginInputHistoryScope()
-  await submit('a')
-  app.resetInputHistory(['b', 'a'])
-  assert.deepEqual(app.getInputHistory(), ['a', 'b', 'a'],
-    'a legitimate non-consecutive repeat survives the reconcile')
-  // A newer owner publishes before the previous scope's hydration ever
-  // committed: the previous scope's temporary submissions never cross.
-  app.beginInputHistoryScope()
-  await submit('transient entry')
-  app.beginInputHistoryScope()
-  app.resetInputHistory(['new owner row'])
-  assert.deepEqual(app.getInputHistory(), ['new owner row'],
-    'the replaced scope inherits nothing into the new owner')
-  // The window is closed after the reseed: ordinary submissions and ↑ use the
-  // plain in-memory path again.
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a', 'a old row'])
+  // The OLDEST submission's row was SKIPPED by the write policy (the CWD-level
+  // consecutive dedupe), so its scope entry stays — the disk does not carry it,
+  // and the UI recall never drops an input the user really submitted. The NEXT
+  // one was WRITTEN: its occurrence is settled out, so the snapshot row is not
+  // doubled.
+  app.settleScopeInput('session-b', 'b')
+  app.resetInputHistory(['b'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['c', 'a', 'b'],
+    'the written occurrence is not doubled and the skipped one is kept')
+  assert.equal(app.getInputHistory().filter(entry => entry === 'b').length, 1, 'exactly one occurrence')
+  // The window is closed: ordinary submissions and ↑ use the plain path again.
   await submit('settled entry')
-  assert.deepEqual(app.getInputHistory(), ['settled entry', 'new owner row'])
   app.setDraft('')
   vt.sendInput('\x1b[A')
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'settled entry', '↑ recalls the settled submission')
+  // A NEWER owner publishes before this scope's hydration ever committed: the
+  // replaced scope's pending submissions never cross into it.
+  app.beginInputHistoryScope('session-c')
+  await submit('c transient')
+  app.beginInputHistoryScope('session-d')
+  app.resetInputHistory(['new owner row'], 'session-d')
+  assert.deepEqual(app.getInputHistory(), ['new owner row'],
+    'the replaced scope inherits nothing into the new owner')
+  app.stop()
+})
+
+test('a scope submission identical to the outgoing Session\'s newest row still survives the reseed', async () => {
+  // The mirror keeps the outgoing Session's rows until the new owner's reseed,
+  // so its head must not decide the OPEN scope's consecutive duplicate: B's
+  // first input may legitimately repeat A's last one.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['same'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'same')
+  assert.deepEqual(submitted, ['same'])
+  assert.deepEqual(app.getInputHistory(), ['same'], 'the text is already the mirror head')
+  app.resetInputHistory([], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['same'],
+    'the fresh Session\'s empty snapshot must not drop the accepted input')
+  app.stop()
+})
+
+test('a same-Session earlier-window repeat block never consumes the open scope\'s own occurrences', async () => {
+  // /resume back into a Session whose disk rows already end with the same
+  // block the user submits again: the snapshot rows are EARLIER occurrences.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['old'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('a')
+  await submit('b')
+  await submit('c')
+  assert.deepEqual(submitted, ['a', 'b', 'c'])
+  app.resetInputHistory(['b', 'a'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a', 'b', 'a'],
+    'every occurrence survives: the three accepted submissions in front of the earlier-window rows')
+  app.stop()
+})
+
+test('the sessionless pool covers a mounted surface whose owner hydration is still awaited', async () => {
+  // No publication call at all: the pool scope is open from construction. A
+  // mounted surface can accept input while the owner's hydration is still
+  // awaited (the Remote startup resume's `remote.read`), and the reseed that
+  // finally commits must adopt those entries instead of dropping them.
+  const { vt, app, submitted } = startApp()
+  await submitThroughEditor(app, vt, 'pool entry')
+  assert.deepEqual(submitted, ['pool entry'])
+  app.resetInputHistory(['resumed row'], 'resumed-session')
+  assert.deepEqual(app.getInputHistory(), ['pool entry', 'resumed row'],
+    'the resumed owner\'s reseed adopts the pool entry')
   app.stop()
 })
 

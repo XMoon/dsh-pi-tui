@@ -194,7 +194,7 @@ function harness() {
     reportSwitch: (from, to) => { events.push(`switch:${from ?? '(none)'}->${services.owners.sessionId(to)}`) },
     clearUnpinnedDrafts: () => {},
     dropOutgoingActiveDraft: () => { events.push('dropDraft') },
-    beginInputHistoryScope: () => { events.push('inputHistoryScope') },
+    beginInputHistoryScope: (owner) => { events.push(`inputHistoryScope:${owner}`) },
     withdrawReplacedPresentation: () => { events.push('withdrawReplacedPresentation') },
     reportSwitchFailure: (sessionId, message) => { events.push(`switchfail:${sessionId}:${message}`) },
     launchComposition: async () => ({ composition: {} }),
@@ -336,6 +336,8 @@ test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE 
   // catalog refresh.
   const h = harness()
   h.publishRetained('session-a')
+  assert.equal(h.events.some(entry => entry.startsWith('inputHistoryScope')), false,
+    'the resume publication opens NO scope: the mounted app\'s sessionless pool is already open')
   await h.runtime.switchSession('session-b')
   const dropIndex = h.events.indexOf('dropDraft')
   const initIndex = h.events.findIndex(event => event === 'init:session-b')
@@ -345,10 +347,10 @@ test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE 
     `the drop precedes the new session's init (drop@${dropIndex}, init@${initIndex})`)
   assert.ok(catalogIndex !== -1 && dropIndex < catalogIndex,
     `the drop precedes the new session's catalog refresh (drop@${dropIndex}, catalog@${catalogIndex})`)
-  // The editor-recall scope of the PUBLISHED owner opens at the SAME commit:
-  // the new session's hydration reseeds ↕ recall afterwards, and an input
-  // accepted in between must survive that reseed.
-  const scopeIndex = h.events.indexOf('inputHistoryScope')
+  // The editor-recall scope of the PUBLISHED owner opens at the SAME commit,
+  // carrying that owner's id: the new session's hydration reseeds ↕ recall
+  // afterwards, and an input accepted in between must survive that reseed.
+  const scopeIndex = h.events.indexOf('inputHistoryScope:session-b')
   assert.ok(scopeIndex !== -1 && scopeIndex < initIndex,
     `the editor-recall scope opens before the new session's hydration (scope@${scopeIndex}, init@${initIndex})`)
 })

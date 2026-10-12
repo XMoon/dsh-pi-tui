@@ -160,7 +160,15 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
         hasAttachments: record.hasAttachments,
         file,
       })
-      if (written) lastHistoryContent = content
+      if (!written) return
+      lastHistoryContent = content
+      // Written-row evidence for the editor-recall scope: this factory is
+      // invoked SYNCHRONOUSLY and the append above is synchronous, so the row
+      // is on disk as of this very stack — a hydration reseed committing later
+      // will read it, and the scope-bound temporary submission it covers must
+      // not be merged on top of it. A skipped row reports nothing (the disk
+      // does not carry it).
+      deps.surface.display.settleScopeInput(record.sessionId, content)
     }, {
       diag: deps.diag,
       notify: (message) => {

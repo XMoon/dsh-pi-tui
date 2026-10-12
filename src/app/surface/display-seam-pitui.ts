@@ -66,8 +66,9 @@ export function pituiDisplaySeam(app: TuiApp): SurfaceDisplaySeam {
       // text always comes back to the user (steer.test.ts's restore family).
       return true
     },
-    resetInputHistory: entries => app.resetInputHistory(entries),
-    beginInputHistoryScope: () => app.beginInputHistoryScope(),
+    resetInputHistory: (entries, owner) => app.resetInputHistory(entries, owner),
+    beginInputHistoryScope: owner => app.beginInputHistoryScope(owner),
+    settleScopeInput: (owner, text) => app.settleScopeInput(owner, text),
     setSearchResult: (index, count) => app.setSearchResult(index, count),
     notify: (text, kind) => app.notify(text, kind),
     setDockNotice(notice) {

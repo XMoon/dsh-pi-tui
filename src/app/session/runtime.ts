@@ -85,15 +85,18 @@ export interface SessionRuntimeSurface {
   withdrawReplacedPresentation(): void
   /**
    * Open the editor-recall scope of the owner this commit section is about to
-   * publish: the owner's hydration reseeds ↕ recall from its session-scoped
-   * JSONL rows, while a submission accepted in the publication→hydration gap
-   * persists through a DETACHED append that can land after that read. The seam
-   * starts the scope-bound temporary submissions so the reseed reconciles them
-   * instead of dropping them, and drops the previous owner's entries with
-   * them. State-only and synchronous: called INSIDE the commit section, right
-   * after `setCurrentOwner`, before any post-commit await.
+   * publish (or create): the owner's hydration reseeds ↕ recall from its
+   * session-scoped JSONL rows, while a submission accepted in the
+   * publication→hydration gap has its own append ordered behind the transition
+   * (the submit FIFO turn and `ensureSession()`), so the row can land after
+   * that read. The seam starts the scope-bound temporary submissions so the
+   * reseed reconciles them instead of dropping them, drops the previous
+   * owner's entries with them, and ADOPTS the sessionless pool's entries for
+   * the first Session. State-only and synchronous: called INSIDE the commit
+   * section, right after `setCurrentOwner`, before any post-commit await.
+   * @param owner - the published Session's id.
    */
-  beginInputHistoryScope(): void
+  beginInputHistoryScope(owner: string): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
   // First-session (deferred creation) runner operations.
@@ -368,7 +371,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 // from its disk rows, and an input accepted before that
                 // reseed must survive it (the owner is current here, so the
                 // entry belongs to the new Session). State-only.
-                deps.surface.beginInputHistoryScope()
+                deps.surface.beginInputHistoryScope(sessionId)
                 // External review P2-B: the new owner IS published here, so the
                 // replaced subject's modal must already be out of the seat before
                 // the post-commit awaits below (retirement, quiesce, hydration).
@@ -820,7 +823,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               core.setCurrentOwner(nextOwner, nextSessionId)
               // The editor-recall scope follows the same synchronous
               // publication (see the ordinary commit seam).
-              deps.surface.beginInputHistoryScope()
+              deps.surface.beginInputHistoryScope(nextSessionId)
               // External review P2-B: same publication commit, same rule.
               if (oldOwner !== undefined && oldOwner !== nextOwner) {
                 deps.surface.withdrawReplacedPresentation()
@@ -1057,9 +1060,11 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
         // The editor-recall scope follows the same synchronous publication:
         // the deferred first session's hydration reseeds ↕ recall afterwards,
-        // and the sessionless submission that CREATED it is recorded before
-        // the create and must survive that reseed.
-        deps.surface.beginInputHistoryScope()
+        // and the sessionless submission that CREATED it was accepted in the
+        // sessionless pool BEFORE this create — the seam ADOPTS those pending
+        // entries instead of clearing them, because their row is written under
+        // THIS Session and can therefore not be in the snapshot yet.
+        deps.surface.beginInputHistoryScope(deps.owners.sessionId(childOwner))
         return deps.owners.completionIdentity(childOwner)
       },
       setCompletionOwner: deps.surface.setCompletionOwner,
@@ -1097,6 +1102,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       publishOwner: (owner) => {
         const resumed = owner as SessionHandle | undefined
         const nextOwner = resumed === undefined ? undefined : deps.owners.fromHandle(resumed)
+        // NO editor-recall scope call here: the resume publication happens
+        // BEFORE the surface is mounted, so the mounted app's SESSIONLESS POOL
+        // scope is already open and the resumed owner's hydration reseed closes
+        // it. That is what covers the Remote startup resume, whose
+        // `remote.read` await leaves the terminal accepting input: the entries
+        // accepted in that window are pool entries and the resumed owner's
+        // reseed adopts them (the Direct startup has no await before the reset,
+        // and the TSP renderer holds input until bind — both stay empty).
         core.setCurrentOwner(nextOwner, nextOwner === undefined ? undefined : deps.owners.sessionId(nextOwner))
         // External review P2-B: a resume publishes a new owner too.
         if (nextOwner !== undefined) deps.surface.withdrawReplacedPresentation()
