@@ -17,6 +17,7 @@ import type { ModelPickerFailureRow, ModelPickerModelRow } from '../pickers/mode
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
   ALL_SCOPES_ID,
+  actionKeyboardLive,
   detailCursor,
   detailFactItems,
   effortItemId,
@@ -120,10 +121,13 @@ function scopes(panel: ModelPickerPanel): PickerScope[] {
  * The rendered action bar: the state module owns WHICH actions exist (and which
  * the current phase admits), and the focused one — only while the action zone
  * owns the keyboard — carries the app-rendered shape cue, because the SDK has
- * no focus affordance for a button.
+ * no focus affordance for a button. A phase whose bar no key can run (an
+ * admitted write, a running re-read) marks nothing: the cue promises Enter.
  */
 function renderedActions(panel: ModelPickerPanel): PickerAction[] {
-  const focused = panel.zone === 'primary-action' ? focusedAction(panel).id : undefined
+  const focused = panel.zone === 'primary-action' && actionKeyboardLive(panel)
+    ? focusedAction(panel).id
+    : undefined
   return pickerActions(panel).map((action) =>
     // A DISABLED action owns no Enter, so it must not carry the focus cue.
     action.id === focused && action.label !== undefined && action.disabled !== true
@@ -244,7 +248,10 @@ function widePreview(panel: ModelPickerPanel, deps: ModelPickerViewDeps, row: Mo
   const card = ui.card(
     { key: 'model-details', head: modelHeadLine(row) },
     ...wideIdentityLines(row).map((line) => ui.text(line)),
-    ui.text(span(zoneHintText(panel), panel.zone === 'primary-action' ? 'accent' : 'muted')),
+    ui.text(span(
+      zoneHintText(panel),
+      panel.zone === 'primary-action' && actionKeyboardLive(panel) ? 'accent' : 'muted',
+    )),
     ...(optional === undefined
       ? []
       : [ui.text(span(optional, panel.notice === '' ? 'muted' : 'error'))]),
