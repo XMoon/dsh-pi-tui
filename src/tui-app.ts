@@ -2576,6 +2576,21 @@ export class TuiApp {
   private readonly localMessages: TranscriptMessage[] = []
   /** Submitted input history (newest first), mirrored for persistence. */
   private readonly inputHistory: string[] = []
+  /**
+   * The SCOPE-BOUND TEMPORARY SUBMISSIONS of the current editor-recall scope
+   * (newest first): every accepted input `rememberInput` recorded since the
+   * CURRENT Session owner was published, until that owner's hydration commits
+   * its disk snapshot. A Session's hydration reseeds ↕ recall from the
+   * session-scoped JSONL rows, and persistence is a DETACHED append that can
+   * land after that read — a submission accepted inside the publication→
+   * hydration window is therefore absent from the snapshot and would be wiped
+   * by the reseed. The overlay is cleared at every owner publication, so an
+   * entry can never cross into the replacement Session's recall.
+   */
+  private readonly pendingScopeInputs: string[] = []
+  /** Whether the current recall scope is still inside its hydration window
+   * (the publication→hydration reseed gap described above). */
+  private inputHistoryHydrating = false
   /** Cap for the persisted input history per working directory. */
   private static readonly INPUT_HISTORY_LIMIT = 100
   /** Ctrl+O master switch: expand the most recent turns' collapsible
@@ -6240,6 +6255,49 @@ export class TuiApp {
     if (this.inputHistory[0] === trimmed) return
     this.inputHistory.unshift(trimmed)
     if (this.inputHistory.length > TuiApp.INPUT_HISTORY_LIMIT) this.inputHistory.pop()
+    this.recordScopeInput(trimmed)
+  }
+
+  /**
+   * Record one accepted input as a scope-bound temporary submission while the
+   * current recall scope is inside its hydration window (see
+   * {@link pendingScopeInputs}). The overlay follows the editor's own rule —
+   * consecutive duplicates collapse, non-consecutive repeats survive — and its
+   * cap, and `rememberInput` calls it only for inputs the editor really kept.
+   */
+  private recordScopeInput(trimmed: string): void {
+    if (!this.inputHistoryHydrating) return
+    this.pendingScopeInputs.unshift(trimmed)
+    if (this.pendingScopeInputs.length > TuiApp.INPUT_HISTORY_LIMIT) this.pendingScopeInputs.pop()
+  }
+
+  /**
+   * The RECONCILE of one hydration snapshot (newest first) with the current
+   * scope's temporary submissions: the subset whose detached append already
+   * reached the file is the snapshot's OWN row set and is dropped, every other
+   * overlay entry stays in front of the snapshot in submission order. The
+   * snapshot keeps the disk authority order and multiplicity is preserved — a
+   * history like `a → b → a` stays intact, and a repeat whose snapshot twin
+   * comes from an earlier window is never swallowed by a text-level dedupe.
+   * @param entries - the current Session's disk rows, most recent first.
+   * @returns the reconciled recall rows, most recent first.
+   */
+  private reconcileScopeInputs(entries: readonly string[]): readonly string[] {
+    const overlay = this.pendingScopeInputs
+    if (overlay.length === 0) return entries
+    // The covered subset is the overlay's OLDEST entries (the detached appends
+    // run in submission order) and those are the snapshot's NEWEST rows, in
+    // reverse order — a positional match, never a text-level dedupe.
+    let covered = 0
+    const limit = Math.min(overlay.length, entries.length)
+    for (let candidate = limit; candidate >= 1; candidate -= 1) {
+      let matches = true
+      for (let index = 0; index < candidate; index += 1) {
+        if (entries[index] !== overlay[overlay.length - candidate + index]) { matches = false; break }
+      }
+      if (matches) { covered = candidate; break }
+    }
+    return [...overlay.slice(0, overlay.length - covered), ...entries]
   }
 
   /**
@@ -6276,13 +6334,34 @@ export class TuiApp {
    * REPLACE the whole recall history (editor + persistence mirror) with the
    * entries of the CURRENT workspace. Session switches must not recall the
    * previous workspace's inputs nor pollute the new workspace's persisted
-   * history, so the host resets on every session change.
+   * history, so the host resets on every session change. The current recall
+   * scope's temporary submissions that the snapshot does not already carry
+   * ride along (see {@link pendingScopeInputs}); the commit closes the scope's
+   * hydration window, so ordinary submissions use the plain
+   * {@link rememberInput} path again.
    * @param entries - the new workspace's persisted entries, newest first.
    */
   resetInputHistory(entries: readonly string[]): void {
     this.editor.clearHistory()
     this.inputHistory.length = 0
-    this.seedInputHistory(entries)
+    this.seedInputHistory(this.reconcileScopeInputs(entries))
+    this.pendingScopeInputs.length = 0
+    this.inputHistoryHydrating = false
+  }
+
+  /**
+   * Open the EDITOR-RECALL SCOPE of a just-published Session owner: the
+   * surface publishes a new owner synchronously at every commit shape
+   * (ordinary transition, fork adoption, first-session creation, startup
+   * resume), and the owner's hydration reseeds ↕ recall from disk afterwards.
+   * Inputs accepted in that gap belong to the NEW owner and must survive the
+   * reseed, so this seam starts (or restarts) the scope-bound temporary
+   * submissions; the previous owner's entries are dropped with it, which is
+   * what keeps Session A's input out of Session B's recall.
+   */
+  beginInputHistoryScope(): void {
+    this.pendingScopeInputs.length = 0
+    this.inputHistoryHydrating = true
   }
 
   /** The current input history (newest first) for persistence. */

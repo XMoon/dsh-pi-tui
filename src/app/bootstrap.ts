@@ -760,6 +760,15 @@ export function applyRunnerWithRuntime(
           // hydration), never only at the later `initLiveSession` reconcile.
           surface.withdrawReplacedPresentation()
         },
+        beginInputHistoryScope: () => {
+          // The editor-recall scope of the owner this commit section publishes:
+          // the owner's hydration reseeds ↕ recall from its session-scoped disk
+          // rows afterwards, and a submission accepted in between persists
+          // through a DETACHED append that can land after that read. Recording
+          // the scope-bound temporary submissions lets the reseed reconcile
+          // them instead of dropping them (PiTui editor history).
+          surface.display.beginInputHistoryScope()
+        },
         dropOutgoingActiveDraft: () => {
           // PR3-B §7.3: the committed cross-owner switch drops the outgoing
           // session's active editor draft through the renderer-neutral display

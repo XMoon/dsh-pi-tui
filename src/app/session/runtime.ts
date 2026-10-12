@@ -83,6 +83,17 @@ export interface SessionRuntimeSurface {
    * post-commit await.
    */
   withdrawReplacedPresentation(): void
+  /**
+   * Open the editor-recall scope of the owner this commit section is about to
+   * publish: the owner's hydration reseeds ↕ recall from its session-scoped
+   * JSONL rows, while a submission accepted in the publication→hydration gap
+   * persists through a DETACHED append that can land after that read. The seam
+   * starts the scope-bound temporary submissions so the reseed reconciles them
+   * instead of dropping them, and drops the previous owner's entries with
+   * them. State-only and synchronous: called INSIDE the commit section, right
+   * after `setCurrentOwner`, before any post-commit await.
+   */
+  beginInputHistoryScope(): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
   // First-session (deferred creation) runner operations.
@@ -352,6 +363,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                   deps.surface.dropOutgoingActiveDraft()
                 }
                 core.setCurrentOwner(nextOwner, sessionId)
+                // The editor-recall scope follows the SAME synchronous
+                // publication: the new owner's hydration reseeds ↕ recall
+                // from its disk rows, and an input accepted before that
+                // reseed must survive it (the owner is current here, so the
+                // entry belongs to the new Session). State-only.
+                deps.surface.beginInputHistoryScope()
                 // External review P2-B: the new owner IS published here, so the
                 // replaced subject's modal must already be out of the seat before
                 // the post-commit awaits below (retirement, quiesce, hydration).
@@ -801,6 +818,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 deps.surface.dropOutgoingActiveDraft()
               }
               core.setCurrentOwner(nextOwner, nextSessionId)
+              // The editor-recall scope follows the same synchronous
+              // publication (see the ordinary commit seam).
+              deps.surface.beginInputHistoryScope()
               // External review P2-B: same publication commit, same rule.
               if (oldOwner !== undefined && oldOwner !== nextOwner) {
                 deps.surface.withdrawReplacedPresentation()
@@ -1035,6 +1055,11 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return runFirstSessionCommit({
       publishOwner: () => {
         core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
+        // The editor-recall scope follows the same synchronous publication:
+        // the deferred first session's hydration reseeds ↕ recall afterwards,
+        // and the sessionless submission that CREATED it is recorded before
+        // the create and must survive that reseed.
+        deps.surface.beginInputHistoryScope()
         return deps.owners.completionIdentity(childOwner)
       },
       setCompletionOwner: deps.surface.setCompletionOwner,

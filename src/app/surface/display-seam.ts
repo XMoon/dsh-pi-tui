@@ -153,6 +153,13 @@ export interface SurfaceDisplaySeam {
   /** Replace the editor input-history recall rows (editor-only; a read-only
    * renderer ignores the rows but still records the reset). */
   resetInputHistory(entries: readonly string[]): void
+  /** Open the editor-recall scope of a just-published Session owner: the
+   * following {@link resetInputHistory} is that owner's hydration reseed and
+   * must reconcile the inputs accepted since the publication (scope-bound
+   * temporary submissions) instead of dropping them. Called at the
+   * synchronous Session publication seam of every commit shape; a read-only
+   * renderer records nothing. */
+  beginInputHistoryScope(): void
   /** Clear the search result readout (chrome-only; harmless on TSP). */
   setSearchResult(index: number, count: number): void
 
