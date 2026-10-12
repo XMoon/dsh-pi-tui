@@ -211,6 +211,10 @@ export class JobOutputSearch {
    *  coordinates. */
   private selectedGeometry: MatchGeometry | undefined
   private geometryShift = 0
+  /** The rendered width the carried geometry was measured at (0 = none): a
+   *  re-wrap has no proven row mapping, so the identity is dropped rather than
+   *  compared across widths. */
+  private geometryWidth = 0
   private selectedIndexValue = -1
 
   constructor(text: Text, visible: (width: number) => boolean) {
@@ -256,6 +260,7 @@ export class JobOutputSearch {
     if (evictedRows === undefined) {
       this.selectedGeometry = undefined
       this.geometryShift = 0
+      this.geometryWidth = 0
     } else {
       this.geometryShift += evictedRows
     }
@@ -382,6 +387,15 @@ export class JobOutputSearch {
       && this.epoch.width === width
       && this.epoch.sourceKey === this.sourceKeyValue
     if (reusable && this.pendingSelection === 'none') return this.epoch!
+    // A width change RE-WRAPS the rows: the carried geometry has no proven row
+    // mapping across widths, so it must never be compared — a different
+    // occurrence could occupy the old coordinates. Drop it and let the visible
+    // anchor decide.
+    if (this.geometryWidth !== 0 && this.geometryWidth !== width) {
+      this.selectedGeometry = undefined
+      this.geometryShift = 0
+      this.geometryWidth = 0
+    }
     const lines = reusable ? this.epoch!.lines : this.searchableValue ? this.text.render(width) : []
     const matches = this.index.search(lines, this.query).matches
     // The first match at/after the given row, else the first match (the fork's
@@ -432,6 +446,7 @@ export class JobOutputSearch {
       ? matches[selectedIndex]!.segments.map(segment => ({ ...segment }))
       : undefined
     this.geometryShift = 0
+    this.geometryWidth = this.selectedGeometry === undefined ? 0 : width
     this.epoch = {
       sourceKey: this.sourceKeyValue,
       text: this.sourceTextValue,
