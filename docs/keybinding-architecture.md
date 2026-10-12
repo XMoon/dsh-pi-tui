@@ -102,6 +102,28 @@ a way across a modal. `test/surface-modal-affordance.test.ts` locks the
 modal source→route→footer behavior, and the keybinding integration suite
 locks the remap/leader boundary.
 
+The hint also tracks the EFFECTIVE keymap, not only the seat/modal state. It
+advertises the `↓` trigger, so the gate asks whether the action still owns
+that key in the live read model —
+`HostKeybindingManager.keysFor('app.tasks.open').includes('down')`. An
+explicit `app.tasks.open: false` removes every source of the action's keys,
+including the host's synthesized conditional `↓` composition rule
+(`effective-keymap.ts` step 3); a DIFFERENT action bound to `↓` shadows that
+composition rule; a deactivated composition rule leaves the same gap. In
+every case the action may keep another trigger (a remap is ADDITIVE and
+normally keeps the conditional `↓` too) while `↓` itself no longer resolves
+to the task browser, so a gate that only asked "does this action still have
+any key?" would still promise a `↓` the router refuses. Because the footer
+text is derived from the keymap, a keymap rebuild recomposes it
+(`onInvalidate`), so the hint is never left stale by `/keybindings reload`,
+a `/keybindings` save or the settings appliers.
+
+The affordance suite locks all of it: the full, responsive-compact and
+fullscreen footers, the disabled action, the pure-remap case (the conditional
+`↓` survives), the `↓`-taken case, and a positive control proving that
+re-enabling restores both the hint and the real route through the keymap
+rebuild alone.
+
 ## Key decisions
 
 1. **One canonical physical-key identity.** Every key spelling collapses
