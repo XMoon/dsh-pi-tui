@@ -23,6 +23,12 @@ import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
   ALL_SCOPES_ID,
   actionKeyboardLive,
+  moreRowId,
+  moreSelected,
+  operationBlock,
+  operationName,
+  secondaryActions,
+  stripChips,
   detailCursor,
   detailFactItems,
   effortItemId,
@@ -42,6 +48,7 @@ import {
   subjectLine,
   visibleModels,
   zoneHintText,
+  type ModelPickerPage,
   type ModelPickerPanel,
 } from './model-picker-state.ts'
 
@@ -80,19 +87,27 @@ function modelOrder(panel: ModelPickerPanel, paged: boolean): (string | PickerGr
 }
 
 function modelItems(panel: ModelPickerPanel, paged: boolean): PickerItem[] {
-  const items: PickerItem[] = visibleModels(panel).map((row) => ({
-    id: modelRowId(row),
-    label: row.modelName,
-    detail: row.providerName,
-    title: row.modelId,
-    // The `Default` badge is the directory fact; `current` is the live Session
-    // fact. A sessionless subject projects NO current row, so it can never be
-    // painted from the directory default.
-    badges: [
-      ...(row.isDefault ? [{ text: 'Default' }] : []),
-      ...(row.isCurrent ? [{ text: 'current' }] : []),
-    ],
-  }))
+  const items: PickerItem[] = visibleModels(panel).map((row) => {
+    const id = modelRowId(row)
+    // The ONE write targets the HIGHLIGHTED model together with its drafted
+    // effort, so its own row states that effort: the client drops the preview
+    // region (and with it the operation block) at the narrowest panes, and the
+    // target must stay identifiable there. Every other row keeps its own provider.
+    const effort = modelChoices(row).find((choice) => choice.value === draftedEffort(panel, row))?.label
+    return {
+      id,
+      label: row.modelName,
+      detail: id === panel.selected && effort !== undefined ? `${row.providerName} · ${effort}` : row.providerName,
+      title: row.modelId,
+      // The `Default` badge is the directory fact; `current` is the live Session
+      // fact. A sessionless subject projects NO current row, so it can never be
+      // painted from the directory default.
+      badges: [
+        ...(row.isDefault ? [{ text: 'Default' }] : []),
+        ...(row.isCurrent ? [{ text: 'current' }] : []),
+      ],
+    }
+  })
   if (paged) items.push(...panel.failures.map(failureItem))
   return items
 }
@@ -147,6 +162,7 @@ function renderedActions(panel: ModelPickerPanel): PickerAction[] {
  *  so it takes the list focus instead of pointing at a column it does not render. */
 function nativeFocus(panel: ModelPickerPanel, side: boolean, preview: boolean): PickerProps['focus'] {
   if (panel.phase === 'error' || panel.zone === 'primary-action') return undefined
+  if (panel.zone === 'strip') return 'strip'
   if (panel.page === 'effort') return 'list'
   if (panel.zone === 'effort' && side && preview) return 'preview'
   return 'list'
@@ -171,8 +187,11 @@ function pickerState(panel: ModelPickerPanel): Pick<
  * requirement. The subject therefore gets its own slot per layout: `subtitle`
  * at `lg`, the strip's own line at `md` — both complete, neither duplicated.
  */
-function pageTitle(page: 'models' | 'details' | 'effort'): string {
-  return page === 'models' ? 'Models' : page === 'details' ? 'Full model details' : 'Reasoning Effort'
+function pageTitle(page: ModelPickerPage): string {
+  if (page === 'models') return 'Models'
+  if (page === 'details') return 'Full model details'
+  if (page === 'effort') return 'Reasoning Effort'
+  return 'More actions'
 }
 
 function effortChoiceRows(
@@ -297,24 +316,36 @@ function modelListPicker(
           detail: 'draft',
           mark: choice.value === draft ? { text: '●' } : { text: '○' },
         }))
-      : row === undefined
-        ? []
-        : detailFactItems(panel, row, deps.wide)
+      : page === 'more'
+        ? secondaryActions(panel).map((action) => ({
+            id: moreRowId(action.id),
+            label: action.label,
+            detail: 'action',
+          }))
+        : row === undefined
+          ? []
+          : detailFactItems(panel, row, deps.wide)
   const selected = page === 'effort'
     ? (draft === undefined ? undefined : effortItemId(draft))
     : page === 'models'
       ? panel.selected
-      : row === undefined
-        ? undefined
-        // The details page selects its presentation cursor, so the native list
-        // scrolls to the fact row being read.
-        : detailFactItems(panel, row, deps.wide)[detailCursor(panel, row, deps.wide)]?.id
+      : page === 'more'
+        ? moreSelected(panel)
+        : row === undefined
+          ? undefined
+          // The details page selects its presentation cursor, so the native list
+          // scrolls to the fact row being read.
+          : detailFactItems(panel, row, deps.wide)[detailCursor(panel, row, deps.wide)]?.id
   const props: PickerProps & { readonly key: string } = {
     key,
     title: pageTitle(page),
     layout: 'rows',
     size: deps.wide ? 'lg' : 'md',
-    preview: side ? 'side' : 'none',
+    // The preview region carries the OPERATION BLOCK on the model list (and the
+    // wide details column beside it): the client puts it below the list at
+    // `md`, beside it at `lg`, and HIDES it at the narrowest panes. The content
+    // pages stay `none` — they show their own content and must not repeat it.
+    preview: page === 'models' ? 'side' : 'none',
     query: page === 'models' ? panel.query : '',
     cursor: page === 'models' ? panel.cursor : 0,
     items,
@@ -328,7 +359,9 @@ function modelListPicker(
     current: page === 'models' ? panel.rows.filter((item) => item.isCurrent).map(modelRowId) : [],
     // The subject keeps ONE complete slot per layout and is never duplicated: the
     // wide picker puts it in its own `subtitle`, the compact one on the strip's
-    // own line. The scope column exists only on the main page.
+    // own line. The scope column exists only on the main page, and the strip
+    // carries the single `More actions…` chip there so the secondary operations
+    // never take width from the one write action.
     ...(deps.wide
       ? {
           ...(side
@@ -338,26 +371,55 @@ function modelListPicker(
               }
             : {}),
           subtitle: subjectLine(panel),
+          // At `lg` the subject owns the subtitle, so the strip's own line states
+          // the complete operation name instead — the same thing the `md` block
+          // states, in the one line this layout can afford beside the inline
+          // effort radios the side column must keep.
+          strip: { label: `Action: ${operationName(panel)}`, items: stripChips(panel) },
         }
       // The compact subject gets its own complete line instead of a truncated
-      // title; the chips stay empty (the banned B2F form concatenated the
-      // subject, current value and effort chips into one clipped line).
-      : { strip: { label: subjectLine(panel), items: [] } }),
+      // title; the banned B2F form concatenated the subject, current value and
+      // effort chips into one clipped line, so the chips stay the strip's own.
+      : { strip: { label: subjectLine(panel), items: stripChips(panel) } }),
     focus: nativeFocus(panel, side, deps.preview),
     ...pickerState(panel),
     actions: renderedActions(panel),
   }
   // The three-column selector shell (scopes + list + details column) belongs to
-  // the model LIST page only: the details and effort pages are content pages, so
-  // they render the same picker with no scope column and no side summary that
-  // would duplicate what the page itself already shows.
-  if (!side) return ui.picker(props)
-  // The wide SHELL always keeps its details column: the full card + radio rows
-  // when the budget proves they fit, otherwise the action-first bounded summary.
-  return ui.picker(
-    props,
-    ...(deps.preview ? widePreview(panel, deps, row) : boundedPreview(panel, row)),
-  )
+  // the model LIST page only: the details, effort and More pages are content
+  // pages, so they render the same picker with no scope column and no side
+  // summary that would duplicate what the page itself already shows.
+  if (page !== 'models') return ui.picker(props)
+  // `lg`: the preview region IS the side column, and the wide SHELL always keeps
+  // its details column — the full card + radio rows when the budget proves they
+  // fit, otherwise the action-first bounded summary. The operation block is not
+  // rendered here (see `widePreviewNeededPx`): the wide page states the operation
+  // through its strip label instead.
+  if (deps.wide) {
+    return ui.picker(props, ...(deps.preview ? widePreview(panel, deps, row) : boundedPreview(panel, row)))
+  }
+  // `md`: the preview region is the WRAPPING one below the list, which is where
+  // the complete operation meaning belongs.
+  return ui.picker(props, ...operationRegion(panel))
+}
+
+/**
+ * The OPERATION BLOCK: the one place that states the complete business meaning of
+ * the short `Confirm` and the target it applies to. Its lines are rendered WHOLE
+ * and wrapped by the client at the region's real width.
+ *
+ * It is a plain column, NOT a card with a head: the region the client renders it
+ * into is the space between the list and the strip, which is a few lines tall, and
+ * a card head costs one of them — measured at 900x640 a headed card pushed the
+ * consequence sentence past the region's bottom edge, so the block could not be
+ * read in full. Without the head every line fits.
+ */
+function operationRegion(panel: ModelPickerPanel): Node[] {
+  const lines = operationBlock(panel)
+  if (lines.length === 0) return []
+  return [
+    ui.col({ key: 'model-operation', gap: 'xs' }, ...lines.map((line) => ui.text(line))),
+  ]
 }
 
 /**

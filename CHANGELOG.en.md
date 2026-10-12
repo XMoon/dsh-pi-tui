@@ -21,13 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local paging, while the main session and a viewed child each show their own
   Session's figures. A scope with no eligible sample is omitted — never
   `0 tok/s`.
-- The experimental TSP renderer's `/model` tightens its information hierarchy:
-  the main page's footer keeps only `Cancel`, `Full details…` and the one write
-  action, labelled `Choose & Save as Default` (no Session) or `Switch Model`
-  (live Session); the complete facts move to a `Full model details` content page,
-  and the complete Reasoning Effort list is reached there through
-  `All effort levels…`, whose Back names the page it came from. The write is
-  still the same single business operation.
+- The experimental TSP renderer's `/model` tightens its information hierarchy: the
+  footer is now short and fixed — `Cancel` plus at most one short entry
+  besides the page's own `Back` (`Confirm` / `Retry`) — while the complete business meaning moves into an
+  `Operation` block next to the list (target model, reasoning effort, the full
+  action name and one sentence of consequence, wrapped automatically). The
+  secondary operations (`Full model details…`, `All reasoning effort levels…`,
+  `Retry failed providers (N)`) move to a `More actions` page opened from the
+  model list's `More actions…` strip chip, so they can no longer take width from
+  the one write action. The write is still the same single business operation. At
+  the 400px width floor the native client hides that explanation region
+  (`pv-hide`): that width guarantees the short footer is complete, the target is
+  identifiable and mouse and keyboard both work, and the full explanation text is
+  recorded as a known client limitation.
 
 ### Fixed
 

@@ -32,12 +32,13 @@ import {
 /** The read/write lifecycle of the panel. `pending` is an ADMITTED write. */
 export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
 
-/** The visible page. `lg` shows the wide page; `md` drills through all three. */
-export type ModelPickerPage = 'models' | 'details' | 'effort'
+/** The visible page. `models` is the selector; the other pages are content. */
+export type ModelPickerPage = 'models' | 'details' | 'effort' | 'more'
 
-/** K2: the three logical regions Tab moves between. Only `primary-action` may
- *  ever commit a write, and only when it is visible and enabled. */
-export type ModelPickerZone = 'models' | 'effort' | 'primary-action'
+/** K2: the logical regions Tab moves between. Only `primary-action` may ever
+ *  commit a write, and only when it is visible and enabled. `strip` exists only
+ *  while the strip really carries a chip (the main page's `More actions…`). */
+export type ModelPickerZone = 'models' | 'effort' | 'strip' | 'primary-action'
 
 export interface ModelPickerPanel {
   /** The presenter serial: an event bound to another panel can never act here. */
@@ -78,6 +79,10 @@ export interface ModelPickerPanel {
    * long description's tail stays reachable from the keyboard.
    */
   factCursor: number
+  /** The More page's presentation cursor (an index into its secondary actions):
+   *  the same pattern as `factCursor`, so the secondary entries stay reachable
+   *  from the keyboard instead of being pointer-only. */
+  moreCursor: number
   /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
   efforts: Map<string, string>
 }
@@ -272,24 +277,150 @@ export function zoneHintText(panel: ModelPickerPanel): string {
   if (panel.phase === 'loading') return 'Reading…'
   if (panel.phase === 'error') return 'Retry first'
   if (panel.zone === 'effort') return '↑↓ draft'
+  if (panel.zone === 'strip') return 'Enter: more'
   if (panel.zone === 'primary-action') return '←→ · Enter'
-  return modelChoices(highlightedModel(panel)).length > 0 ? 'Tab: effort' : 'Tab: actions'
+  // The hint names the zone `Tab` reaches NEXT, so it follows the ring's own
+  // order: the strip comes first (it exists only on this page), then the effort
+  // selector, then the action bar.
+  return stripChips(panel).length > 0
+    ? 'Tab: more'
+    : modelChoices(highlightedModel(panel)).length > 0 ? 'Tab: effort' : 'Tab: actions'
+}
+
+/* ------------------------------------------------------------ secondary page */
+
+/**
+ * The wire id of the single `More actions…` STRIP chip. The SDK delivers a strip
+ * click on the action channel as `act:'strip', value:<item id>`, so the chip needs
+ * its own id namespace next to the scope ids, the model row ids and the effort
+ * candidate ids.
+ */
+export const MORE_CHIP_ID = 'strip-more'
+
+const MORE_ROW_PREFIX = 'more:'
+
+/** The wire id of one row on the More page (the id of the action it runs). */
+export function moreRowId(actionId: string): string {
+  return MORE_ROW_PREFIX + actionId
+}
+
+/** The action id a More-page row carries, or `undefined` for any other row. */
+export function moreRowAction(item: string): string | undefined {
+  return item.startsWith(MORE_ROW_PREFIX) ? item.slice(MORE_ROW_PREFIX.length) : undefined
+}
+
+/**
+ * The secondary operations of the CURRENT state, in display order. They live on
+ * the More page (and, as a single chip, on the model list's strip) instead of the
+ * action bar, because the bar lays its buttons on one line and the five-entry
+ * details bar was already clipping the one write action at narrow panes. Only the
+ * entries that can really act right now are offered.
+ */
+export function secondaryActions(panel: ModelPickerPanel): readonly PickerAction[] {
+  if (panel.phase !== 'ready') return []
+  const row = highlightedModel(panel)
+  const actions: PickerAction[] = []
+  // `Full model details…` renders THAT model's own facts, so without a
+  // highlighted model it would open an empty page: it is offered only while there
+  // is a model to describe (the same rule the details entry had while it lived in
+  // the bar). `Retry failed providers (N)` and `Back to models` stay reachable.
+  if (row !== undefined) actions.push({ id: 'details', label: 'Full model details…' })
+  if (modelChoices(row).length > 0) {
+    actions.push({ id: 'effort-page', label: 'All reasoning effort levels…' })
+  }
+  if (panel.failures.length > 0) {
+    actions.push({ id: 'retry', label: `Retry failed providers (${panel.failures.length})` })
+  }
+  actions.push({ id: 'back', label: 'Back to models' })
+  return actions
+}
+
+/** The strip's chips: the one `More actions…` entry, on the model list only. */
+export function stripChips(panel: ModelPickerPanel): readonly { id: string; label: string }[] {
+  return panel.page === 'models' && secondaryActions(panel).length > 0
+    ? [{ id: MORE_CHIP_ID, label: 'More actions…' }]
+    : []
+}
+
+/** The More page's cursor, clamped to the rows it currently offers. */
+export function moreCursor(panel: ModelPickerPanel): number {
+  const count = secondaryActions(panel).length
+  return Math.min(Math.max(panel.moreCursor, 0), Math.max(0, count - 1))
+}
+
+/** The More page's selected row (its native list selection). */
+export function moreSelected(panel: ModelPickerPanel): string | undefined {
+  const action = secondaryActions(panel)[moreCursor(panel)]
+  return action === undefined ? undefined : moreRowId(action.id)
+}
+
+/* --------------------------------------------------------- operation block */
+
+/** The complete business name of the one operation (the button shows the short
+ *  form: `Confirm` / `Retry` / `Selecting…`). */
+export function operationName(panel: ModelPickerPanel): string {
+  if (panel.phase === 'error') return 'Retry loading models'
+  if (panel.phase === 'pending') return 'Selecting…'
+  return panel.request.subject.sessionless ? 'Choose & Save as Default' : 'Switch Model'
+}
+
+/**
+ * The OPERATION BLOCK: the one place per page that states, in full, what the
+ * short `Confirm` will do and to which target — the model, its drafted reasoning
+ * effort, the complete operation name, and one plain sentence of consequence.
+ *
+ * It is rendered into the picker's own preview region, which the verified client
+ * places BELOW the list (between the list and the strip/action bar) and wraps
+ * naturally, so the button never has to carry a long frozen sentence. The same
+ * client HIDES that region entirely at the narrowest panes (`pv-hide` at a
+ * 400px-wide pane), where the block is therefore absent: a recorded
+ * client limitation, reported rather than worked around by shortening the
+ * meaning or by a self-drawn region.
+ */
+/**
+ * The operation block is rendered into the preview region only where that region
+ * is the WRAPPING one below the list (`md`), never into the wide side column: a
+ * four-line block whose sentence is 80 characters long wraps into eight to twelve
+ * lines at the side column's own 248px text slot, which alone exceeds the 374px
+ * budget the wide column shares with the details card and the effort radios.
+ * Pricing it there would evict the inline Rational Effort selector at every pane.
+ * The wide page therefore states the same operation through its strip label
+ * instead, and the side column keeps its action-first structure unchanged.
+ */
+
+export function operationBlock(panel: ModelPickerPanel): readonly string[] {
+  const row = highlightedModel(panel)
+  if (row === undefined) return []
+  const effort = modelChoices(row).find((choice) => choice.value === draftedEffort(panel, row))?.label
+  return [
+    `Selected model: ${row.providerName} / ${row.modelName}`,
+    ...(effort === undefined ? [] : [`Reasoning effort: ${effort}`]),
+    `Action: ${operationName(panel)}`,
+    panel.phase === 'error'
+      ? 'The model list could not be read; retry to load it again.'
+      : panel.request.subject.sessionless
+        ? 'Confirming will select this model and save it as the default for future sessions.'
+        : "Confirming will switch this Session's model.",
+  ]
 }
 
 /* --------------------------------------------------------------- action bar */
 
 /** The single visible Primary Action of the current phase. Only this action may
- *  ever commit; while the directory read failed it IS the read-only Retry. The
- *  ready labels are Owner-frozen: a sessionless write confirms the model and saves
- *  it as the future default in ONE operation, a live write switches the Session's
- *  model. Naming the UI never changes what the one writer does. */
+ *  ever commit; while the directory read failed it IS the read-only Retry.
+ *
+ *  The label is short ON PURPOSE (`Confirm`), because the native action bar lays
+ *  its buttons on one line and clips the rightmost one at narrow panes: a long
+ *  frozen sentence as the button text pushed the ONE write action out of the sheet
+ *  at the 400px width floor and at enlarged UI fonts. The COMPLETE business meaning
+ *  is carried once per page by the operation block next to the list
+ *  ({@link operationBlock}); the button only has to confirm it. The one writer and
+ *  the one operation are unchanged. */
 function primaryAction(panel: ModelPickerPanel): PickerAction {
   if (panel.phase === 'pending') {
     return { id: 'apply', label: 'Selecting…', primary: true, disabled: true }
   }
-  const label = panel.phase === 'error'
-    ? 'Retry'
-    : panel.request.subject.sessionless ? 'Choose & Save as Default' : 'Switch Model'
+  const label = panel.phase === 'error' ? 'Retry' : 'Confirm'
   return {
     id: 'apply',
     label,
@@ -303,24 +434,16 @@ function primaryAction(panel: ModelPickerPanel): PickerAction {
   }
 }
 
-/** The partial-read recovery action: the reached providers stay usable and this
- *  re-reads the whole directory through the command's one read owner. */
-function retryAction(panel: ModelPickerPanel): PickerAction | undefined {
-  return panel.phase === 'ready' && panel.failures.length > 0
-    ? { id: 'retry', label: 'Retry failed providers' }
-    : undefined
-}
-
 /**
- * The action bar for the CURRENT phase and page: the ONE owner of "which actions
- * exist".
+ * The ACTION BAR for the CURRENT phase and page: short, fixed, and never wider
+ * than `Cancel` + one more entry.
  *
- * The MAIN page keeps only the three intuitive operations — `Cancel`, the reading
- * entry `Full details…` and the one Primary Action. The complete Effort list is a
- * DETAILS-page entry (`All effort levels…`), so the main footer never repeats an
- * effort shortcut next to the details drill-down. The details and effort pages are
- * content pages: each names the page it really returns to. A partial read's `Retry
- * failed providers` stays available wherever the phase is ready.
+ * `Confirm` is the only write. `Back` is the content pages' way out (the details
+ * and effort pages return to the page they came from) and the More page's only
+ * entry. The secondary operations never enter this bar: they live on the More
+ * page, reached from the model list's `More actions…` strip chip or the `strip`
+ * K2 zone, so a failure's `Retry failed providers` can no longer push the one
+ * write action outside the sheet.
  *
  * The view renders exactly this list and the key map moves the keyboard focus
  * across it, so a visible action can never be unreachable or a no-op.
@@ -335,26 +458,12 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
     actions.push(primaryAction(panel))
     return actions
   }
-  const retry = retryAction(panel)
-  const row = highlightedModel(panel)
-  if (panel.page === 'details') {
-    actions.push({ id: 'back', label: 'Back to models' })
-    // `All effort levels…` exists only when this model really advertises effort
-    // options: an empty full list would be a dead entry.
-    if (modelChoices(row).length > 0) {
-      actions.push({ id: 'effort-page', label: 'All effort levels…' })
-    }
-  } else if (panel.page === 'effort') {
-    // The effort page IS the selector, so its own bar offers no second,
-    // contradictory entry; Back names the page it was opened FROM.
-    actions.push({
-      id: 'back',
-      label: panel.previousPage === 'details' ? 'Back to details' : 'Back to models',
-    })
-  } else {
-    actions.push({ id: 'details', label: 'Full details…', disabled: row === undefined ? true : undefined })
+  // The More page is a menu: no write belongs on it, only its way back.
+  if (panel.page === 'more') {
+    actions.push({ id: 'back', label: 'Back' })
+    return actions
   }
-  if (retry !== undefined) actions.push(retry)
+  if (panel.page !== 'models') actions.push({ id: 'back', label: 'Back' })
   actions.push(primaryAction(panel))
   return actions
 }

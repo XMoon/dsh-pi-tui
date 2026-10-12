@@ -59,11 +59,13 @@ pair is never split and a CJK line holds half as many code points as an ASCII
 one; verified at 900x640 and 560x640 with ASCII, CJK and emoji text). The wide
 card shows the same description while the geometry budget above holds.
 
-Browsing (model rows, provider scopes, details pages) and clicking an effort
-radio row only change local browse state — the highlight, the scope filter or
-that model's draft effort. **Only the visible Primary Action writes**: it reads
-`Switch Model` with a live Session and `Choose & Save as Default` without one —
-one action, one operation, one writer. The provider-default sentinel submits
+Browsing (model rows, provider scopes, details pages, the More page's rows) and
+clicking an effort radio row only change local browse state — the highlight, the
+scope filter or that model's draft effort. **Only the visible Primary Action
+writes**: it reads the short `Confirm` and states its full name — `Switch Model`
+with a live Session, `Choose & Save as Default` without one — in the operation
+block, so one action performs one operation through one writer. The
+provider-default sentinel submits
 without a `reasoningEffort`; a real effort submits the advertised id. Naming the
 button never changes what the writer does: the live write is the existing Session
 selection and the sessionless write is the existing "confirm the model and save
@@ -71,58 +73,108 @@ it as the future default" intent, and neither is split into two operations.
 
 ### Keyboard (K2, frozen)
 
-Three logical zones — the model list, the effort selector, the Primary Action —
-share Tab; `zone` is presentation-local and is never business authority.
+Up to four logical zones share Tab — the model list, the effort selector, the
+strip (only while it carries the `More actions…` chip) and the action bar;
+`zone` is presentation-local and is never business authority. Tab and Shift+Tab
+walk the zones the CURRENT page really paints, in a ring: on the model list
+`models → strip (only while its chip is rendered) → effort (only when the
+highlighted model advertises efforts) → action bar`; the details and More pages
+have the two-stop `list ↔ action bar`
+ring; the effort page has `models ↔ effort ↔ action bar`.
 
 | Zone | `↑↓` | `Tab` / `Shift+Tab` | `Enter` | `Esc` |
 |---|---|---|---|---|
-| model list | browse models (search box text stays editable) | → effort (only when the model advertises efforts), else → Primary Action / reverse | → effort, else focus the Primary Action — **never writes** | close |
-| effort | change the draft | → Primary Action / ← model list | confirm the draft, focus the Primary Action — **never writes** | back to the model list (keeps the draft) |
-| Primary Action | — | → model list / ← effort | **the only key that writes**, once, when the action is enabled | back to the previous zone (a failed read closes: see below) |
+| model list | browse models (search box text stays editable) | → strip (while its chip is rendered), then the effort selector (the inline one while the side preview is not paged, otherwise its effort PAGE), then the action bar / the same ring backwards | → the effort selector when the model advertises efforts (inline while the side preview is not paged, otherwise its effort PAGE), else focus the action bar — **never writes** | close |
+| effort | change the draft | → action bar / ← back along the ring: the STRIP while the selector is inline, the model list on the effort PAGE | confirm the draft, focus the action bar — **never writes** | back to the PAGE the effort page was opened from (the model list while the selector is inline), keeping the draft |
+| strip | — | → the effort selector, then the action bar / the ring backwards | open `More actions…` — **never writes** | back to the model list |
+| More page | move the secondary-action cursor | → action bar / ← list | run the selected secondary operation — **never writes** | back to the model list |
+| action bar | — | → the next zone in the ring | **the only key that writes**, once, when the FOCUSED action is the enabled Primary | return to the zone/page the bar was entered from (a failed read closes) |
+
+The rings are per page, and the `effort` zone means two different things: on the
+model list at wide width it is the INLINE selector rendered by the side column, so
+its reverse stop is the strip; on the effort PAGE the ring is
+`model list ↔ effort ↔ action bar`, because that page renders no strip chip. The
+details and More pages always have the two-stop `list ↔ action bar` ring.
 
 The effort zone is visibly focused through the SDK's own `focus: preview` (the
-effort PAGE through `focus: list`); the model-list zone through `focus: list`.
-The inline `focus: preview` exists only on the model list page, the only page
-that renders a side column. The SDK has no focus affordance for an action, so the
-FOCUSED action carries an app-rendered shape cue (`▸ Switch Model` /
-`▸ Choose & Save as Default` / `▸ Retry` / `▸ Full details…` / `▸ Back to models`
-/ `▸ Back to details` / `▸ All effort levels…` / `▸ Cancel`).
+effort PAGE through `focus: list`), the strip through `focus: strip`, and every
+other list through `focus: list`. The SDK has no focus affordance for an action,
+so the FOCUSED action carries an app-rendered shape cue (`▸ Confirm` / `▸ Retry` /
+`▸ Back` / `▸ Cancel`).
 
-Within the action zone `←→`/`↑↓` move the focused action and `Enter` activates
-exactly that action through the same intent path the pointer uses — so every
-visible action (including `Full details…`, the page's `Back …`, `All effort
-levels…` and the partial-failure `Retry`) is keyboard reachable, and only the
-Primary Action resolves to a write. A disabled action never carries the cue, and
-neither does an action the current phase cannot run from the keyboard at all
-(`pending`, `loading`): the cue is a promise about `Enter`, so a phase that refuses
-`Enter` marks nothing and shows no bar hint. `Esc` returns to the zone and page the
-action bar was entered from (a details page stays a details page), and the
-effort page's `Esc` returns to the page it was opened from (`Back to details`
-when the details page opened it, otherwise the model list), keeping the draft.
+The bar itself is SHORT by design (see "The action bar, the operation block and the More page" below):
+`←→`/`↑↓` move across the two entries it renders and `Enter` activates exactly
+the focused one through the same intent path the pointer uses, so every visible
+action is keyboard reachable and only the Primary Action resolves to a write. The
+secondary operations are equally keyboard reachable without ever entering the
+bar: Tab reaches the strip, `Enter` opens the More page, its arrows move the
+cursor and `Enter` runs the selected operation. A disabled action never carries
+the cue, and neither does an action the current phase cannot run from the keyboard
+at all (`pending`, `loading`): the cue is a promise about `Enter`, so a phase that
+refuses `Enter` marks nothing and shows no bar hint. `Esc` returns to the zone and
+page the action bar was entered from (a details page stays a details page, the
+More page stays the More page), and the effort page's `Esc` returns to the page it
+was opened from, keeping the draft.
 While a write is pending, `Esc` closes; a running (re-)read and a failed read
 close too, because at that point the bar is the only region any key can run.
 `Ctrl+C` always remains the original application cancel owner, and a
 Question/Approval modal owns the keyboard before the Model panel.
 
-### The action bar, page by page
+### The action bar, the operation block and the More page
 
-The main page offers the three intuitive operations only — `Cancel`, the reading
-entry `Full details…` and the ONE Primary Action — plus `Retry failed providers`
-while part of the directory failed. It never repeats an effort shortcut next to
-the details drill-down.
+The native action bar lays its buttons on ONE line and does not wrap them, and the
+bar has no scroll port of its own. A bar whose buttons do not fit its `pk-bar` is
+cut at that edge, which is what used to push the ONE write action partly or
+entirely outside the sheet at narrow panes and enlarged UI fonts. The bar is
+therefore SHORT AND FIXED: `Cancel` plus at most one short entry besides the
+page's own `Back`, and the full business meaning lives next to the list instead of
+inside a button.
 
-| Page | Actions (left to right) |
+| Page | Action bar (left to right) |
 |---|---|
-| model list | `Cancel`, `Full details…` (disabled with no highlighted model), `Retry failed providers` (partial failure only), Primary |
-| Full model details | `Cancel`, `Back to models`, `All effort levels…` (only when the model advertises effort options), `Retry failed providers` (partial failure only), Primary |
-| Reasoning Effort | `Cancel`, `Back to details` \| `Back to models` (the page it was opened from), `Retry failed providers` (partial failure only), Primary |
-| `loading` / `pending` / `error` | `Cancel`, Primary (a disabled `Selecting…` while the write is admitted; the read-only `Retry` while the directory read failed) |
+| model list | `Cancel`, `Confirm` |
+| Full model details | `Cancel`, `Back`, `Confirm` |
+| Reasoning Effort | `Cancel`, `Back`, `Confirm` |
+| More actions | `Cancel`, `Back` (this page never writes) |
+| `loading` / `pending` / `error` | `Cancel`, Primary (a disabled `Confirm` while loading, a disabled `Selecting…` while the write is admitted, the read-only `Retry` while the directory read failed) |
+
+`Confirm` is the visible label of the same stable `apply` action: the live write
+still switches the Session's model and the sessionless write still confirms the
+model and saves it as the future default, in ONE operation. The complete name of
+that operation — `Choose & Save as Default`, `Switch Model`, or `Retry loading
+models` — is stated by the OPERATION BLOCK, one headless column rendered by the picker on
+the model list page: `Selected model: <provider> /
+<model>`, `Reasoning effort: <label>` while the model advertises efforts, `Action:
+<complete name>` and one plain sentence of consequence. Its lines are rendered
+WHOLE and wrapped by the client at whatever width the region really has (measured:
+the sentence becomes two lines at a 400px pane). The verified client places that
+region BELOW the list at `md` and HIDES it at the narrowest panes — see the
+measured limitation below.
+At `lg` the same region IS the side column, and a four-line block whose sentence
+wraps into eight to twelve lines at the column's own 248px text slot would alone
+exceed the fixed 374px budget the column shares with the details card and the
+inline effort radios: it would evict the inline Rational Effort selector at every
+pane. The wide page therefore states the same operation in the strip's own line
+instead — `Action: <complete name>` — and the side column keeps its action-first
+structure and its budget exactly as before.
+
+The SECONDARY operations never enter the action bar. They live on the `More
+actions` page — the same picker, one more page — whose rows are exactly the
+operations that can act right now, in this order: `Full model details…` (only while
+a model is highlighted, because it renders THAT model's facts and would otherwise
+open an empty page), `All reasoning effort levels…` (only while the highlighted
+model advertises effort options), `Retry failed providers (N)` (only while part of
+the directory failed, `N` being the failure count) and `Back to models`. The page is reached from the
+model list's single strip chip `More actions…`, which the SDK delivers as
+`action { act: 'strip', value: 'strip-more' }` on the same channel as the bar
+actions, and from the keyboard through the `strip` zone.
 
 `Cancel` is the visible label of the same stable `close` action, so its backdrop
-and `Esc` behavior are unchanged. The action **ids** are the routing authority
-and stay stable (`close`, `details`, `effort-page`, `back`, `retry`, `apply`);
-only the labels are Owner-frozen strings, and the key map routes by id, never by
-display text.
+and `Esc` behavior are unchanged. The action **ids** are the routing authority and
+stay stable (`close`, `details`, `effort-page`, `back`, `retry`, `apply`), the
+More page's rows carry the `more:` prefix of the action they run, and the strip
+chip carries `strip-more`; the key map and the row router act on those ids, never
+on display text.
 
 #### Scope and candidate namespaces
 
@@ -142,6 +194,10 @@ the two are told apart by **channel**, not by shape:
   prefix — unambiguous.
 - An effort candidate row carries its own `effort:` namespace, so a candidate
   value that looks like a scope id still takes the draft.
+- The strip's chip arrives on the action channel as `action { act: 'strip', value:
+  'strip-more' }`, its own id namespace again: a strip click can never be read as a
+  bar action or as a provider scope. The More page's rows carry the `more:` prefix
+  of the action they run, and only the `apply` action they can reach is ever a write.
 
 ### Loading, errors and retry
 
@@ -162,7 +218,9 @@ browses neither the list nor the search box and refuses `Enter`, so `Tab` and
 always-enabled `Cancel`) instead of walking the keyboard into an inert list, and
 its hint is `Retry first`. A partial failure keeps the reached
 providers usable, lists the failed provider as an inert row (compact) or an
-error-dot scope (wide), and offers an explicit `Retry failed providers` action.
+error-dot scope (wide), and offers `Retry failed providers (N)` as one row of the
+`More actions` page, so a failure can never widen the action bar and push the one
+write action out of it.
 Retry repairs the same mounted panel and preserves the query and every draft the
 new directory still advertises.
 
@@ -196,17 +254,19 @@ line count the budget proves. The description's full text and the extended
 Current/Default facts never decide whether the effort selector stays inline; the
 identity's own bounded lines ARE priced, so a longer identity can move the effort
 rows to the Effort page — never the shell itself. Whatever does not fit is
-one `Full details…` (and, from there, `All effort levels…`) action away in the
-same picker's pages, which the action bar always offers.
+one `More actions…` strip chip away in the same picker's pages (the `More
+actions` page's `Full model details…` and `All reasoning effort levels…` rows),
+which the model list always offers.
 
-The complete Effort page is reachable in EVERY layout through the details page,
-not only when the budget pages the column: it is the same native Picker list, over
+The complete Effort page is reachable in EVERY layout through the `More actions`
+page (or, at compact width, straight from the model list with `Enter`), not only
+when the budget pages the column: it is the same native Picker list, over
 the same draft, with the same K2 confirmation, and it is what keeps every
 candidate readable and selectable when the environment's font or zoom makes the
 column's own fit unsure (the inline radio rows stay the primary selector). Its own
 acceptance is that it really reads, selects and returns — which the real-pane run
 checks BY KEYBOARD per width and per UI-font configuration at the 400px floor
-(open the details page, open the complete Effort list, step a candidate, return).
+(open `More actions…`, run `All reasoning effort levels…`, step a candidate, return — or take the compact `Enter` shortcut).
 The compact layout keeps a
 second, direct path: `Enter` on the model list opens the effort page when the
 highlighted model advertises efforts, so a keyboard user never has to visit the
@@ -296,7 +356,8 @@ What has to hold in every environment is reachability, not a pixel promise: a lo
 fact value must have a complete reading path (its wrapped rows plus the native
 list's own scrolling, which the real-pane run checks by walking the presentation
 cursor per width), and every Effort candidate must have a reachable path — the
-complete Effort page is one `Full details…` action away in every layout, and the
+complete Effort page is two steps away in every layout (`More actions…` then
+`All reasoning effort levels…`), and the
 compact layout reaches it directly from the model list with `Enter`; the
 real-pane run verifies BY KEYBOARD, per width and per UI-font configuration at the
 400px floor, that the page opens, steps and returns. The run does NOT certify
@@ -306,42 +367,90 @@ granularity is therefore a COMPATIBILITY measure for the one-line native row —
 wrapped value is readable on its own rows — never a layout system of its own, and
 it is not lowered further to paper over geometry the presenter cannot see.
 
-The ACTION BAR is a separate constraint from the columns and the fact rows. The
-native client lays its buttons on ONE line and does not wrap them, and the bar
-carries no scroll port of its own, so a bar whose buttons do not fit its
-`pk-bar` is cut at that edge. Measured per page and per pane (the action bar of
-each of the three pages):
+### The action bar's measured limit, and the 400px client limitation
 
-| Pane | model list (4 buttons) | Full model details (5 buttons) | Reasoning Effort (4 buttons) |
-|---|---|---|---|
-| 1280x800 | fits | fits | fits |
-| 900x640 | fits | fits | fits |
-| 560x640 | fits | **Primary clipped** (67px of 171px visible, label cut to `Choose &`) | fits |
-| 400x600, client font | Primary clipped (38px of 171px) | Primary invisible; `Retry failed providers` clipped to 54px of 139px | Primary clipped (22px of 171px) |
-| 400x600, UI font +25% | Primary invisible; `Retry failed providers` clipped | `All effort levels…`, `Retry failed providers` and Primary all clipped/invisible | Primary invisible; `Retry failed providers` clipped |
-| 400x600, UI font +50% | the same SET of buttons clips (fragment widths differ) | the same SET | the same SET |
+The action bar lays its buttons on ONE line and does not wrap them, and it has no
+scroll port of its own, so a bar whose buttons do not fit its `pk-bar` is cut at
+that edge. That is why the bar is short and fixed now: the previous revision put
+four or five entries in it (including the whole `Choose & Save as Default`
+sentence as the write button), and a real-pane measurement found the write action
+clipped from 560px down on the details page and entirely outside the sheet at the
+400px floor and at enlarged UI fonts. With `Cancel` + one SHORT entry
+(`Confirm` / `Retry` / `Back`) plus the secondary operations moved to the More
+page, the bar's requirement drops to about 200px of pane, well below the
+documented 400px width floor. Measured with the production presenter in a real
+pane: at 400x600 the bar is a 30–370px box holding `Cancel` and `Confirm`, both
+fully contained, at the client font AND at a +25% and +50% UI font; the details
+page's `Cancel`/`Back`/`Confirm` are likewise contained at the 560x640 pane (a
+500px bar) and at 900x640, where the previous five-entry bar already clipped the
+write action.
 
-So the bar's real requirement is the width of ITS OWN button set: the 5-button
-DETAILS bar needs roughly 680px of pane, which is why it already clips the Primary
-at the measured 560px pane while the 4-button model-list and effort bars still fit
-there. That fifth button is `Retry failed providers`, which exists only while part
-of the directory failed: measured at 560x640, that bar is `Cancel` 42–96,
-`Back to models` 98–203, `All effort levels…` 205–314,
-`Retry failed providers` 316–455, Primary 463–634 inside a 30–530px bar, so
-WITHOUT a failed provider the same page's four buttons would end at 493 and fit —
-a GEOMETRIC DERIVATION from those measured boxes, not a measured no-failure pane.
-At the 400x600 floor, and on any of the three pages at an enlarged UI font,
-buttons fall outside the sheet entirely — the `▸` focus cue is then invisible or
-unreadable too, so even the keyboard write can only be triggered blind.
+The OPERATION BLOCK is subject to a client limitation that must be stated
+plainly. The verified client renders the picker's preview region — the region the
+block is rendered into — BELOW the list at `md` (measured at 900x640: the list ends
+at y=378, the block's four lines sit at y=399/421/443/465, fully inside the region,
+and the strip starts at y=510) and NOT into the wide side column at `lg`, and it
+WRAPS the block's long sentence naturally on two lines at a 400px-wide pane. At the 400x600 floor, however, the
+client marks the picker `pv-hide` and DROPS the whole preview region, so the block
+is absent there:
 
-The Owner-frozen wording is never abbreviated to make this fit, and no button is
-self-drawn or wrapped: these are `STOP`-class environment limits reported to the
-Owner (the plan's §8 condition), not a silent PASS and not a license to change the
-frozen UI here. [The PR4-A evidence](./evidence/pr4-a.md) §0 carries the
-per-configuration measurements, the fragments that were really clicked and the
-screenshots. The `lg`/`md` sizes, the fact-row slots and the Effort paths are
-unaffected by this: it is the ONE action bar per page that cannot present its
-rightmost button at these widths.
+> **KNOWN_CLIENT_LIMITATION.** At the 400x600 floor (and at any pane the client
+> decides to hide the preview region in) the OPERATION BLOCK is not displayed.
+> What is guaranteed at that width is the short footer itself: `Cancel` and
+> `Confirm` are complete and readable, the highlighted target stays identifiable
+> in the list, and every operation stays reachable by mouse and by keyboard. The
+> full operation meaning is NOT readable there, and that is recorded rather than
+> worked around by shortening the meaning or by drawing a region of our own.
+
+The wide page states the operation in one line instead of the full block, because
+the block's own wrapped height (8–12 lines at the side column's 248px text slot)
+exceeds the column's whole 374px budget and would therefore destroy the inline
+Reasoning Effort selector the Owner asked to keep.
+
+**Owner decision — Model Picker Responsive Action Explanation (ratified).** Based on
+these real-pane measurements the unified requirement "at 560px and above EVERY
+layout must permanently display the complete, auto-wrapping operation-consequence
+explanation" is CANCELLED, and the explanatory content's layout is accepted per
+layout class instead:
+
+- `md` shows the complete explanation through the below-the-list region (measured
+  at 900x640: all four of its lines sit fully between the list and the strip, so it
+  is rendered as a headless column — a card head cost one of that region's few
+  lines and pushed the consequence sentence past its bottom edge);
+- `lg` shows the complete business action NAME in the strip and keeps the side
+  column's Model Details and its inline Reasoning Effort, with no multi-line
+  explanation added;
+- the 400px floor does not show the complete consequence explanation, per the
+  `KNOWN_CLIENT_LIMITATION` above — but the TARGET stays identifiable there by
+  another means: the highlighted model's own row states its drafted effort
+  (`<provider> · <effort label>`, measured `provider p · High`), so the write's
+  model AND effort are readable on the confirmation page even where the block is
+  dropped.
+
+Every layout still has to satisfy: the primary action button is completely visible,
+the target Model/Effort is identifiable, the write happens only after an explicit
+confirmation, the keyboard and mouse paths are equivalent, and there is no blind
+write and no duplicate submission. The decision changes only the layout acceptance
+of the explanatory text; no business write or safety constraint changes.
+
+**Owner decision — Model Picker 400px Font Scaling (`KNOWN_UI_LIMITATION` /
+`OWNER_ACCEPTED`).** At a 400x600 pane with an ENLARGED UI font — both +25% and
++50% — the native client truncates the selected model/provider/effort information
+(measured: at +25% the highlighted row renders only `Reasoning Model` and
+`Default`, at +50% likewise, and the strip subject is ellipsized too), so the target
+is not readable there while `Confirm` still is and stays enabled. The Owner
+explicitly ACCEPTS this as a known client-side UI limitation and lets the user
+decide whether to confirm; no geometry-based write guard and no further
+font-specific layout workaround is added, and the K2 explicit-apply and Host Writer
+semantics are unchanged. Both configurations are recorded as known UI limitations
+and are NOT claimed as visually passing. This waiver does NOT apply to the
+default-font 400x600 layout, to the normally supported widths, to an incorrect
+selection, or to a duplicate write. The exact per-configuration
+measurements, the fragments that were really clicked and the screenshots live in
+[the PR4-A evidence](./evidence/pr4-a.md) §0. The `lg`/`md` sizes, the fact-row
+slots, the scope column and the Effort paths are unaffected: the operation block is
+NOT rendered into the wide side column and that column's 374px budget is unchanged
+(a multi-line block there would evict the inline effort radios).
 
 ## Ownership and lifecycle
 
@@ -382,9 +491,9 @@ filter with its refused shapes (a scope-shaped row `select`, an unknown or
 disabled provider, a valueless action, a drill-down page, a loading/failed read),
 a radio-row `onClick` that only drafts, the K2 zone walk with Enter refused
 outside the Primary Action, the page-by-page action bar (`Cancel` /
-`Full details…` / `All effort levels…` / the page's own `Back …` / the
-partial-failure `Retry` / the one Primary Action, with `Choose & Save as Default`
-sessionless and `Switch Model` live), `Esc` returning to the zone/page it came
+the `more:`-prefixed More-page rows / the page's own `Back` / the one Primary
+Action, whose full name the operation block states), the `strip` zone and the
+`More actions…` chip (`action(act:'strip')`), `Esc` returning to the zone/page it came
 from, the resize from the wide effort zone into the compact effort page, a
 loading panel that keeps the search editable and closes on `Esc`, the
 pending/refusal/

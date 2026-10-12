@@ -28,8 +28,11 @@ import {
   highlightedModel,
   modelChoices,
   modelRowId,
+  moreCursor,
+  secondaryActions,
   seedDrafts,
   selectionOf,
+  stripChips,
   stepActionFocus,
   visibleModels,
   widePreviewFits,
@@ -91,6 +94,7 @@ export class TspModelPicker {
       cursor: 0,
       selected: undefined,
       factCursor: 0,
+      moreCursor: 0,
       actionFocus: undefined,
       previousZone: undefined,
       previousPage: undefined,
@@ -238,6 +242,10 @@ export class TspModelPicker {
     // on the model list) depends on the paged layout: with the rows inline the
     // wide column IS the selector and Enter must not flip the page.
     if (panel.zone === 'models' && panel.page === 'effort') panel.page = 'models'
+    // The strip zone exists only while the model list's strip really carries its
+    // chip: a phase that drops the chip (loading, an admitted write, a failed
+    // read) must not leave the keyboard focused on a region that is not painted.
+    if (panel.zone === 'strip' && stripChips(panel).length === 0) panel.zone = 'models'
     if (!this.paged(panel)) return
     if (panel.zone === 'effort' && panel.page !== 'effort') panel.page = 'effort'
   }
@@ -337,6 +345,26 @@ export class TspModelPicker {
         if (count === 0) return
         panel.factCursor = (detailCursor(panel, cursorRow, wide) + intent.delta + count) % count
         this.change(panel)
+        return
+      }
+      case 'more-cursor': {
+        // The More page's rows are actions, not facts: the cursor only decides
+        // which secondary operation Enter will run. It never writes.
+        const count = secondaryActions(panel).length
+        if (count === 0 || panel.page !== 'more') return
+        panel.moreCursor = (moreCursor(panel) + intent.delta + count) % count
+        this.change(panel)
+        return
+      }
+      case 'activate-more': {
+        // Enter on the More page runs the SELECTED secondary operation through
+        // the same admission as its own row/bar activation — and, since none of
+        // them is the `apply` action, it can never write.
+        if (panel.page !== 'more') return
+        const action = secondaryActions(panel)[moreCursor(panel)]
+        if (action === undefined) return
+        const activated = actionIntent(panel, action.id, undefined)
+        if (activated !== undefined) this.act(panel, panel.revision, activated)
         return
       }
       case 'retry':

@@ -17,11 +17,15 @@
 - 性能统计改由 TUI 自有的 Host `piTuiPerformance` 投影提供：Direct 与 Remote
   同源，重连与本地分页不再影响数值；主会话与查看中的子会话各自显示自己 Session
   的数值。某个范围没有合格样本时不再显示 `0 tok/s`，而是省略该数值。
-- TSP 实验渲染器的 `/model` 收敛信息层级：主页面底部只保留 `Cancel` /
-  `Full details…` 与唯一的写入动作，主动作文案为 `Choose & Save as Default`
-  （无 Session）或 `Switch Model`（实时 Session）；完整事实进入
-  `Full model details` 内容页，完整 Reasoning Effort 列表由该页的
-  `All effort levels…` 进入，返回目标按进入来源显示。写入仍是同一次业务提交。
+- TSP 实验渲染器的 `/model` 收敛信息层级：底部按钮改为短而固定——`Cancel`
+  加至多一个短动作（`Confirm` / `Retry`；页面自身返回用的 `Back` 除外），完整业务含义由列表旁的
+  「Operation」说明块给出（目标模型、Reasoning Effort、完整动作名与一句后果
+  说明，自动折行）；`Full model details…`、`All reasoning effort levels…`、
+  `Retry failed providers (N)` 等次级操作移入 `More actions` 页，由模型列表
+  strip 上的 `More actions…` 打开，不再挤占写入按钮的宽度。写入仍是同一次业务
+  提交。原生客户端在 400px 宽度下限会隐藏该说明区（`pv-hide`），该宽度只保证
+  短按钮完整可读、目标可辨认、鼠标与键盘均可操作；完整说明文字记为
+  已知客户端限制。
 
 ### 修复
 
