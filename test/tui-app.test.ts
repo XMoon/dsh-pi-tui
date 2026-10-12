@@ -2900,6 +2900,27 @@ test('a long run of identical pending submissions never evicts an older occurren
   app.stop()
 })
 
+test('an evicted SKIP that settled after an evicted write stays newer than its row', async () => {
+  // F2: the covered window also carries rows whose WRITE settlement the cap
+  // evicted, so the skip's rank cannot be "behind the whole window" — it sits at
+  // the append boundary its own settlement recorded.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('w')
+  await submit('s')
+  settleAt(0, 'session-b', 'written')    // w's row is appended first
+  settleAt(1, 'session-b', 'skipped')   // s settles after that append: s is newer
+  for (let index = 0; index < 100; index += 1) {
+    app.settleScopeInput({ owner: 'session-b', outcome: 'skipped', text: 'x' })
+  }
+  app.resetInputHistory(['w'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['s', 'w'],
+    'the later skip is newer than the evicted write row it settled after')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)

@@ -2642,7 +2642,13 @@ export class TuiApp {
    * settlement the queue evicted can neither resurrect the occurrence nor lose
    * it.
    */
-  private readonly scopeSettled = new Map<number, { readonly owner: string | undefined; readonly outcome: 'written' | 'skipped' }>()
+  private readonly scopeSettled = new Map<number, {
+    readonly owner: string | undefined
+    readonly outcome: 'written' | 'skipped'
+    /** The number of the ROW OWNER's appends that preceded this settlement —
+     *  its rank among the covered rows, which survives the queue's cap. */
+    readonly appendsBefore: number
+  }>()
   /** The LIVE occurrence tokens of the open scope: the durable facts above are
    *  kept for exactly these (bounded by the scope cap, never by the queue). */
   private readonly scopeOccurrences = new Set<number>()
@@ -6399,10 +6405,6 @@ export class TuiApp {
   }
 
   /**
-   * Record ONE settlement of the OPEN scope    return token
-  }
-
-  /**
    * Record ONE settlement of the OPEN scope, in append order. The
    * input-history owner calls this from the SAME synchronous stack as its
    * append (the detached task's factory is invoked synchronously) and ALSO when
@@ -6419,11 +6421,16 @@ export class TuiApp {
     // The durable facts FIRST: they outlive the queue's cap for every LIVE
     // occurrence, and a late settlement of an already dropped occurrence adds
     // nothing.
+    const appendsBefore = this.scopeAppends.get(settlement.owner) ?? 0
     if (settlement.outcome === 'written') {
-      this.scopeAppends.set(settlement.owner, (this.scopeAppends.get(settlement.owner) ?? 0) + 1)
+      this.scopeAppends.set(settlement.owner, appendsBefore + 1)
     }
     if (settlement.token !== undefined && this.scopeOccurrences.has(settlement.token)) {
-      this.scopeSettled.set(settlement.token, { owner: settlement.owner, outcome: settlement.outcome })
+      this.scopeSettled.set(settlement.token, {
+        owner: settlement.owner,
+        outcome: settlement.outcome,
+        appendsBefore,
+      })
     }
     this.scopeSettlements.push(settlement)
     if (this.scopeSettlements.length > TuiApp.INPUT_HISTORY_LIMIT) this.scopeSettlements.shift()
@@ -6507,6 +6514,7 @@ export class TuiApp {
     // occurrence rank it carries (`undefined` = another writer's row).
     const windowTexts: string[] = []
     const windowRanks: (number | undefined)[] = []
+    const windowRows: boolean[] = []
     let writeSeen = 0
     for (let index = settlements.length - 1; index >= 0; index -= 1) {
       const settlement = settlements[index]!
@@ -6522,6 +6530,7 @@ export class TuiApp {
         windowTexts.push(this.scopeInputs[rank]!.text)
       }
       windowRanks.push(rank)
+      windowRows.push(settlement.outcome === 'written')
     }
     // The appends whose settlements the cap evicted are the OLDER window rows:
     // their rows are still part of the projection and must be emitted in the disk
@@ -6529,6 +6538,7 @@ export class TuiApp {
     for (let row = retainedWrites; row < covered; row += 1) {
       windowTexts.push(entries[row]!)
       windowRanks.push(undefined)
+      windowRows.push(true)
     }
     // The occurrences the window does not carry, in submission order (newest
     // first): a never-settled occurrence is NEWER than every settled submission
@@ -6536,20 +6546,37 @@ export class TuiApp {
     // settlement the cap evicted was settled strictly BEFORE every retained one,
     // so it expires BEHIND the whole window.
     const before: number[] = []
-    const after: number[] = []
+    const after: { readonly rank: number; readonly newerRows: number }[] = []
     for (let index = 0; index < this.scopeInputs.length; index += 1) {
       const token = this.scopeInputs[index]!.token
       if (retainedTokens.has(token)) continue
       const settled = this.scopeSettled.get(token)
       if (settled === undefined) before.push(index)
-      else if (settled.outcome === 'skipped' && settled.owner === owner) after.push(index)
+      else if (settled.outcome === 'skipped' && settled.owner === owner) {
+        // A skip the queue evicted keeps its rank: it sits after the appends that
+        // preceded it, so its boundary is a ROW count inside the covered window —
+        // negative means every covered row is older, i.e. it belongs at its end.
+        after.push({ rank: index, newerRows: covered - settled.appendsBefore })
+      }
     }
+    // The most recent skip first, so its boundary is reached first.
+    after.sort((left, right) => (right.newerRows - left.newerRows) || (left.rank - right.rank))
     // ONE ordered cursor: an occurrence the window does not carry is emitted just
     // before the first position that is another writer's row or an older
     // occurrence — no search inside either loop.
     this.reconcileSteps = 0
     const merged: string[] = []
     let next = 0
+    let rowsSeen = 0
+    let skipped = 0
+    // A skip whose settlement the cap evicted: every one of them settled before
+    // every RETAINED settlement, and it belongs after the rows that preceded it.
+    const emitEvictedSkips = (upTo: number): void => {
+      while (skipped < after.length && after[skipped]!.newerRows <= upTo) {
+        merged.push(this.scopeInputs[after[skipped]!.rank]!.text)
+        skipped += 1
+      }
+    }
     for (let index = 0; index < windowTexts.length; index += 1) {
       this.reconcileSteps += 1
       const windowRank = windowRanks[index]
@@ -6558,14 +6585,20 @@ export class TuiApp {
         merged.push(this.scopeInputs[before[next]!]!.text)
         next += 1
       }
+      // A skip that settled before this position's append belongs here.
+      emitEvictedSkips(rowsSeen)
       merged.push(windowTexts[index]!)
+      if (windowRows[index] === true) {
+        rowsSeen += 1
+        emitEvictedSkips(rowsSeen)
+      }
     }
     while (next < before.length) {
       this.reconcileSteps += 1
       merged.push(this.scopeInputs[before[next]!]!.text)
       next += 1
     }
-    for (const rank of after) merged.push(this.scopeInputs[rank]!.text)
+    emitEvictedSkips(covered)
     this.seedInputHistory([...merged, ...entries.slice(covered)])
     this.scopeInputs.length = 0
     this.scopeSettlements.length = 0
