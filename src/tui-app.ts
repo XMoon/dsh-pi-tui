@@ -20172,6 +20172,39 @@ export class TuiApp {
       onClose: () => record.close(),
       canStop: options.canStop,
       onStop: options.onStop,
+      // Phase 3B / B1-C: the panel captures the payload SYNCHRONOUSLY and this
+      // app owns only the delivery. The clipboard capability stays the SAME
+      // Client-local `copySelection` the rest of the surface already uses (no
+      // Host port, no new clipboard service, no remote OS clipboard), and the
+      // settlement re-proves THIS workspace record before it may notify: a
+      // stale copy that lands after the user left Job A can neither repaint nor
+      // address a replacement viewer.
+      onCopy: (request) => {
+        const copy = this.copySelection
+        if (copy === undefined || finalized || this.jobWorkspace !== record) {
+          if (this.jobWorkspace === record) this.notify('Copy failed', 'error')
+          return
+        }
+        // Fire-and-forget through the owned-task entry (AGENTS.md hard rule —
+        // never a bare `void promise`): a rejection is classified, never an
+        // unhandled rejection.
+        this.events.runOwned?.('job copy', () => copy(request.text), {
+          onResult: (ok) => {
+            if (this.disposed || this.jobWorkspace !== record) return
+            // `true` only proves the strategy EMITTED the bytes (OSC52 has no
+            // clipboard ACK), so the wording never claims the system clipboard
+            // received them.
+            this.notify(ok ? 'Copy sent' : 'Copy failed', ok ? 'info' : 'error')
+          },
+          onError: () => {
+            if (this.disposed || this.jobWorkspace !== record) return
+            this.notify('Copy failed', 'error')
+          },
+        })
+      },
+      // The alt screen's OWN last-painted geometry (X054): the Command reader
+      // resolves a drag against the frame the user really saw.
+      paintedBox: (component) => screen.getPaintedBox(component),
       // Phase 3B / B1-B: the EFFECTIVE Find binding is scoped to the Job's own
       // Output. The panel decides from the LIVE resolution, so a remap, a
       // disable or a conflict moves the key for the Job too — never a static
@@ -20202,14 +20235,28 @@ export class TuiApp {
       // reveal (and leaves a search whose row the frame could not show), so no
       // layout is ever mutated from inside `render()`.
       onFramePainted: () => panel.onFramePainted(),
+      // Phase 3B / B1-C: the header's Command summary / Copy All affordances are
+      // plain painted cells (no mouse-handling component), so their same-cell
+      // press/click arrives here and the panel re-proves the press-time painted
+      // identity before acting.
+      onCellPress: (x, y) => panel.onHeaderPress(x, y),
+      onCellClick: (x, y) => panel.onHeaderClick(x, y),
     })
     screen.setLayoutRoot(panel)
     // Registration order IS dispatch order (X043): the host router first, then
     // the viewport listener (wheel/selection), then the protocol sink fence —
     // the same order the transcript alt screen installs. This screen owns NO
-    // transcript boundary or cell-click callback: its wheel can only move the
-    // Job body, never the main transcript.
+    // transcript boundary: its wheel can only move the Job body, never the main
+    // transcript.
     screen.addInputListener((data) => this.routeInput(data))
+    // A terminal focus-out can never be followed by the release of an in-flight
+    // Command drag, so the workspace releases that gesture (and its temporary
+    // edge timer) here, BEFORE the viewport listener drops the fork's own
+    // capture. The report is not consumed: the host focus tracker still sees it.
+    screen.addInputListener((data) => {
+      if (data === '\x1b[O') panel.onTerminalBlur()
+      return undefined
+    })
     screen.installViewportListener()
     screen.addInputListener((data) => this.protocolSinkFence(data))
 

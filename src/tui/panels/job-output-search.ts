@@ -26,10 +26,20 @@ import {
   type AltScreenSearchSegment,
   type Component,
   type Focusable,
-  type Text,
 } from '@xmoon76/pi-tui'
 import { highlightSearchLines } from '../components/transcript/search-presentation.ts'
 import { color } from '../theme/runtime.ts'
+
+/**
+ * The ONLY capability the search model needs from its source: `render(width)`.
+ * The Output page passes the vendored `Text`; the Command page passes the
+ * {@link JobCommandDocument}, which is the same shape but maps every painted row
+ * back to the original command offsets. The model reaches into neither object
+ * beyond this read-only renderer surface.
+ */
+export interface JobSearchTextSource {
+  render(width: number): string[]
+}
 
 /** The ONE search state machine of the Job Output. */
 export type JobOutputSearchMode = 'inactive' | 'edit' | 'navigate'
@@ -187,7 +197,7 @@ class JobOutputSearchRow implements Component, Focusable {
  * pending reveal.
  */
 export class JobOutputSearch {
-  private readonly text: Text
+  private readonly text: JobSearchTextSource
   private readonly index = new AltScreenSearchIndex()
   private readonly input: Input
   private readonly rowComponent: JobOutputSearchRow
@@ -217,9 +227,9 @@ export class JobOutputSearch {
   private geometryWidth = 0
   private selectedIndexValue = -1
 
-  constructor(text: Text, visible: (width: number) => boolean) {
+  constructor(text: JobSearchTextSource, visible: (width: number) => boolean, prompt = 'Find Output: ') {
     this.text = text
-    this.input = new Input({ prompt: 'Find Output: ' })
+    this.input = new Input({ prompt })
     this.rowComponent = new JobOutputSearchRow(this, visible)
   }
 

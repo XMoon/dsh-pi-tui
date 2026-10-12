@@ -1,11 +1,12 @@
 /**
- * The selected-Job workspace presenter (Phase 3B / B1-A + B1-B): the typed
- * Header, the retained Output body with the Job's OWN strict follow owner and
- * Find model, the ONE optional SearchRow, a transient notice row and the pinned
- * bottom Action Bar of the Job fullscreen workspace. The notice row renders the
- * app's OWN live notice (the ONE notice authority) while the workspace owns the
- * terminal, so a Stop settlement stays visible where the user is looking — never
- * a second Stop state.
+ * The selected-Job workspace presenter (Phase 3B / B1-A + B1-B + B1-C): the
+ * typed Header, the retained Output body with the Job's OWN strict follow owner
+ * and Find model, the mutually exclusive Command reading page, the ONE optional
+ * SearchRow, a transient notice row and the pinned bottom Action Bar of the Job
+ * fullscreen workspace. The notice row renders the app's OWN live notice (the
+ * ONE notice authority) while the workspace owns the terminal, so a Stop
+ * settlement stays visible where the user is looking — never a second Stop
+ * state.
  *
  * The panel IS the layout root and the keyboard focus target of the ONE
  * short-lived `TuiAltScreen` a Job view opens (the opener calls
@@ -15,17 +16,22 @@
  * observes a Job, reads a backend, owns a timer, or decides open/close —
  * `Esc` and the `tasks.stop` component action are intents injected by the
  * opener, and the Job's own `label` is never rewritten for anything but the
- * displayed one-line summary.
+ * displayed one-line summary and the B1-C Command document.
  *
  * The typed INPUT contract (`JobInspectorState` + its opening row) belongs to
  * the application owner that constructs it (`app/surface/task-runtime`, like
  * `TaskBrowserViewState`); this module owns the pure DISPLAY projection
  * (`JobInspectorView` / `deriveJobInspectorView`) and the component.
  *
- * B1-B keeps ONE Job-local interaction authority per concern: the
- * {@link JobOutputScrollView} owns the strict follow intent, the
- * {@link JobOutputSearch} owns the query/index/reveal, and this panel owns only
- * the single per-frame chrome plan and the key dispatch between them.
+ * ONE Job-local interaction authority per concern: the
+ * {@link JobOutputScrollView} owns the strict Output follow intent, the Output
+ * {@link JobOutputSearch} owns its query/index/reveal, the
+ * {@link JobCommandReader} owns the Command viewport / original-text selection /
+ * Command Find, and this panel owns only the single per-frame chrome plan, the
+ * `activeReadView` switch and the key dispatch between them. Both bodies stay
+ * constructed for the WHOLE panel lifetime and are made mutually invisible by
+ * the layout's own `visible` entries — the Output page can therefore never lose
+ * its follow intent, anchor or query by visiting the Command page.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/job-inspector-panel
  */
@@ -34,6 +40,7 @@ import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
 import { color } from '../theme/runtime.ts'
+import { JobCommandReader, type CommandPaintedBox } from './job-command-reader.ts'
 import { JobOutputScrollView } from './job-output-scroll-view.ts'
 import { JobOutputSearch, retentionEviction } from './job-output-search.ts'
 import type { JobInspectorState } from '../../app/surface/task-runtime.ts'
@@ -53,6 +60,32 @@ export interface JobInspectorView {
   readonly phase: 'connecting' | 'observed' | 'unavailable'
 }
 
+/** The two mutually exclusive READING pages of ONE Job workspace. */
+export type JobReadView = 'output' | 'command'
+
+/** The three copy sources of the workspace (plan §1.2). */
+export type JobCopySource = 'output' | 'command-all' | 'command-selection'
+
+/** ONE copy intent: the payload is captured SYNCHRONOUSLY by the panel, so the
+ *  app's asynchronous clipboard settlement never recomputes it from newer
+ *  state. */
+export interface JobCopyRequest {
+  readonly source: JobCopySource
+  readonly text: string
+}
+
+/** One clickable region of the LAST PAINTED header frame. `row` is relative to
+ *  the header's own first painted row; `documentKey` identifies the exact
+ *  Command source the target belonged to. */
+export interface JobHeaderHitTarget {
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly action: 'open-command' | 'copy-command-all'
+  readonly documentKey: string
+  readonly view: JobReadView
+}
+
 /** Job kinds whose `label` is the shell command the Job was started with. */
 const COMMAND_KINDS = new Set(['bash', 'pwsh'])
 
@@ -70,6 +103,13 @@ const COMPACT_HEADER_MAX_ROWS = 2
 const FULL_HEADER_MAX_ROWS = 5
 /** The Job page step mirrors the alt screen's own page semantics (X page scroll). */
 const PAGE_SCROLL_OVERLAP = 4
+
+/** The Command page's reader/identity row. `COMMAND_READER_PREFIX` is the part
+ *  before the interactive Copy All affordance, so the hit map can name exactly
+ *  the cells the user can click. */
+const COMMAND_READER_PREFIX = 'Command reader · '
+const COMMAND_COPY_ALL = '[Copy All]'
+const COMMAND_READER_ROW = `${COMMAND_READER_PREFIX}${COMMAND_COPY_ALL}`
 
 /**
  * The ONE per-frame chrome plan of the workspace: the pinned Action Bar keeps
@@ -132,6 +172,10 @@ const BODY_UNAVAILABLE = 'Retained output unavailable'
 /** The one line every phase shows at the physical bottom: the port's retained
  *  tail is a bounded preview, never the Job's full history. */
 const RETAINED_NOTE = 'Retained preview · not full history'
+
+/** The Command page's counterpart disclosure: the reader shows the ORIGINAL
+ *  command, not a preview of it (plan §5.2). */
+const COMMAND_FULL_NOTE = 'Full command'
 
 /** The pure display fold of the ONE captured Job state. It answers exactly
  *  one question — what the user may see — and never re-derives authority: the
@@ -203,9 +247,17 @@ export interface JobInspectorPanelIntents {
   readonly canStop: () => boolean
   /** The `tasks.stop` component action, dispatched only while `canStop()`. */
   readonly onStop: () => void
+  /** ONE copy intent with its SYNCHRONOUSLY captured payload. The app executes
+   *  it through the existing Client-local clipboard capability; the panel never
+   *  writes a clipboard itself. */
+  readonly onCopy: (request: JobCopyRequest) => void
+  /** The LAST PAINTED rect of a mounted component (the alt screen's X054
+   *  read-only geometry query at the frame-painted boundary), or undefined when
+   *  it is not part of that frame. */
+  readonly paintedBox: (component: Component) => CommandPaintedBox | undefined
   /** Whether one raw key is the EFFECTIVE direct Find binding of the live keymap
    *  (`app.transcript.search`'s winning resolution). The Job scopes the BINDING
-   *  to its own Output; it never shares Transcript data or the search overlay. */
+   *  to its own page; it never shares Transcript data or the search overlay. */
   readonly isFindKey: (data: string) => boolean
   /** The effective Find hint of the Action Bar (direct keys / leader sequence;
    *  '' when Find is disabled or unbound). Never a fabricated `Ctrl+F`. */
@@ -252,9 +304,15 @@ const withReservedStatus = (prefix: string, status: string, width: number): stri
 }
 
 /** The bounded typed header: Job identity, status, progress, the independent
- *  gap/error/settled facts, and the command-or-label identity. */
+ *  gap/error/settled facts, the command-or-label identity, and — on the Command
+ *  page — the reader row with its Copy All affordance. It also reports the hit
+ *  regions its LAST render produced, so a later click resolves against the frame
+ *  the user actually saw rather than a re-measured live layout. */
 class JobInspectorHeader implements Component {
   private view: JobInspectorView
+  private mode: JobReadView = 'output'
+  private commandAvailable = false
+  private hitTargets: readonly JobHeaderHitTarget[] = []
   private readonly plan: (width: number) => JobInspectorChromePlan
 
   constructor(view: JobInspectorView, plan: (width: number) => JobInspectorChromePlan) {
@@ -262,14 +320,31 @@ class JobInspectorHeader implements Component {
     this.plan = plan
   }
 
-  setView(view: JobInspectorView): void {
+  setState(view: JobInspectorView, mode: JobReadView, commandAvailable: boolean): void {
     this.view = view
+    this.mode = mode
+    this.commandAvailable = commandAvailable
+  }
+
+  /** The hit targets of the LAST rendered frame (empty when the frame showed
+   *  no clickable Command affordance). */
+  hits(): readonly JobHeaderHitTarget[] {
+    return this.hitTargets
   }
 
   render(width: number): string[] {
+    return this.mode === 'command' ? this.renderCommand(width) : this.renderOutput(width)
+  }
+
+  /** The B1-A/B Output header, unchanged, plus the one clickable region the
+   *  B1-C Command summary adds while a shell Command is actually observed. */
+  private renderOutput(width: number): string[] {
     const view = this.view
     const { compact, headerRows } = this.plan(width)
-    if (headerRows <= 0) return []
+    if (headerRows <= 0) {
+      this.hitTargets = []
+      return []
+    }
     const kind = COMMAND_KINDS.has(view.kind) ? 'Command' : 'Label'
     const identity = `Job ${view.jobId} · ${view.kind}`
     const command = `${kind}: ${oneLine(view.label)}`
@@ -302,7 +377,84 @@ class JobInspectorHeader implements Component {
       }
       lines.push(command)
     }
-    return lines.slice(0, headerRows).map(line => truncateToWidth(line, width, '…', true))
+    // The Command summary is the LAST rendered row of both layouts: its hit map
+    // must describe the truncated text the frame really painted.
+    const commandRow = lines.length - 1
+    const truncated = lines.slice(0, headerRows).map(line => truncateToWidth(line, width, '…', true))
+    this.hitTargets = this.observedTarget(commandRow, truncated)
+    return truncated
+  }
+
+  /** The Command page header: the same status/marker truth, the descriptive
+   *  rows while the frame can still show the reader row, and then the reader row
+   *  with its Copy All affordance. */
+  private renderCommand(width: number): string[] {
+    const view = this.view
+    const { headerRows } = this.plan(width)
+    if (headerRows <= 0) {
+      this.hitTargets = []
+      return []
+    }
+    const identity = `Job ${view.jobId} · ${view.kind}`
+    // The markers are appended to the status row when they fit, because the
+    // Command page reserves its last row for the reader identity: a finger/ERROR
+    // fact must never be the price of the Copy All affordance.
+    let head = view.status
+    for (const marker of markerTokens(view)) {
+      if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
+    }
+    const withIdentity = `${identity} · ${head}`
+    const middle: string[] = []
+    if (view.progress !== undefined) middle.push(`progress: ${oneLine(view.progress)}`)
+    if (view.detail !== undefined) middle.push(`detail: ${oneLine(view.detail)}`)
+    const markers = flagMarkers(view)
+    if (markers !== '') {
+      const facts = flagTexts(view)
+      middle.push(facts === '' ? markers : withReservedHead(markers, facts, width))
+    }
+    const readerRow = COMMAND_READER_ROW
+    const lines = [visibleWidth(withIdentity) <= width ? withIdentity : head]
+    if (headerRows >= 2) {
+      lines.push(...middle.slice(0, headerRows - 2))
+      lines.push(readerRow)
+    }
+    const truncated = lines.slice(0, headerRows).map(line => truncateToWidth(line, width, '…', true))
+    const row = truncated.length - 1
+    const visible = truncated[row]
+    this.hitTargets = truncated.length >= 2 && visible !== undefined && visibleWidth(readerRow) <= width
+      ? [{
+          row,
+          startCol: visibleWidth(COMMAND_READER_PREFIX),
+          endCol: visibleWidth(visible),
+          action: 'copy-command-all',
+          documentKey: this.documentKey(),
+          view: 'command',
+        }]
+      : []
+    return truncated
+  }
+
+  /** The Command summary hit region of the Output page, only while a shell
+   *  Command is really observed AND the painted row survived the truncation. */
+  private observedTarget(commandRow: number, truncated: readonly string[]): JobHeaderHitTarget[] {
+    if (!this.commandAvailable) return []
+    const line = truncated[commandRow]
+    if (line === undefined) return []
+    const width = visibleWidth(line)
+    if (width === 0) return []
+    return [{
+      row: commandRow,
+      startCol: 0,
+      endCol: width,
+      action: 'open-command',
+      documentKey: this.documentKey(),
+      view: 'output',
+    }]
+  }
+
+  /** The exact Command source identity a hit target belongs to. */
+  private documentKey(): string {
+    return `${this.view.kind}\u0000${this.view.label}`
   }
 
   invalidate(): void {
@@ -331,6 +483,35 @@ class JobOutputBody implements Component {
   }
 }
 
+/** One Action Bar segment: `short` is the compaction this segment accepts when
+ *  the row is tight, `priority` the order it is DROPPED in (lower goes first). */
+interface JobActionBarSegment {
+  text: string
+  priority: number
+  short?: string
+}
+
+/** Lay out one Action Bar row: compact shortenable segments first, then drop
+ *  the lowest-priority segment until the row fits (never the last one). */
+function renderActionBarRow(segments: JobActionBarSegment[], width: number): string {
+  for (;;) {
+    const line = segments.map(segment => segment.text).join(' | ')
+    if (visibleWidth(line) <= width || segments.length <= 1) {
+      return truncateToWidth(line, width, '…', true)
+    }
+    const shortenable = segments.find(segment => segment.short !== undefined && segment.text !== segment.short)
+    if (shortenable !== undefined) {
+      shortenable.text = shortenable.short!
+      continue
+    }
+    let lowest = 0
+    for (let index = 1; index < segments.length; index += 1) {
+      if (segments[index]!.priority < segments[lowest]!.priority) lowest = index
+    }
+    segments.splice(lowest, 1)
+  }
+}
+
 /** The visible position/follow/find facts of the Action Bar. */
 interface JobOutputStatusFacts {
   readonly follow: boolean
@@ -344,28 +525,63 @@ interface JobOutputStatusFacts {
    *  line edit, so the bar must not promise `End resume` nor a Find re-entry. */
   readonly searchEditing: boolean
   readonly position: { readonly start: number; readonly end: number; readonly total: number }
+  /** Whether `v` can open the shell Command page this frame. */
+  readonly canViewCommand: boolean
+  /** Whether `C` can copy a non-empty retained Output this frame. */
+  readonly canCopyOutput: boolean
+}
+
+/** The visible facts of the Command page's Action Bar. */
+interface JobCommandStatusFacts {
+  readonly findHint: string
+  readonly searchActive: boolean
+  readonly searchEditing: boolean
+  readonly position: { readonly start: number; readonly end: number; readonly total: number }
 }
 
 /**
- * The pinned bottom Action Bar: `Esc back`, the effective `tasks.stop` hint
- * (only while Stop is live), the strict follow truth, `[GAP]`, the
- * retained-preview disclosure, the CURRENT retained viewport position and the
- * effective Find hint. Whole segments yield in priority order — never an
- * over-wide row, and the disclosure survives whenever the row can carry it.
+ * The pinned bottom Action Bar: `Esc`, the effective `tasks.stop` hint (only
+ * while Stop is live), the strict follow truth, `[GAP]`, the retained/full
+ * disclosure, the CURRENT viewport position and the effective Find hint, plus
+ * the Job-local read-only `V command` / `C copy` verbs. Whole segments yield in
+ * priority order — never an over-wide row, and the disclosure survives whenever
+ * the row can carry it. The Command page advertises ONLY what it can do: no
+ * Stop, no Follow, `C copy all` only while no Find owns the ordinary keys.
  */
 class JobInspectorActionBar implements Component {
   private readonly canStop: () => boolean
-  private readonly facts: (width: number) => JobOutputStatusFacts
+  private readonly facts: (width: number) => JobOutputStatusFacts | (JobCommandStatusFacts & { readonly command: true })
 
-  constructor(canStop: () => boolean, facts: (width: number) => JobOutputStatusFacts) {
+  constructor(
+    canStop: () => boolean,
+    facts: (width: number) => JobOutputStatusFacts | (JobCommandStatusFacts & { readonly command: true }),
+  ) {
     this.canStop = canStop
     this.facts = facts
   }
 
   render(width: number): string[] {
     const facts = this.facts(width)
-    // Retention priority: Esc, Stop, Follow, GAP, disclosure, position, Find.
-    const segments: Array<{ text: string; priority: number; short?: string }> = []
+    if ('command' in facts) {
+      const segments: JobActionBarSegment[] = []
+      segments.push({ text: 'Esc output', priority: 7 })
+      if (!facts.searchActive) segments.push({ text: 'C copy all', priority: 6 })
+      segments.push({ text: COMMAND_FULL_NOTE, priority: 5 })
+      if (facts.position.total > 0) {
+        segments.push({
+          text: `rows ${facts.position.start}-${facts.position.end}/${facts.position.total}`,
+          priority: 2,
+        })
+      }
+      if (!facts.searchEditing) {
+        segments.push({ text: facts.findHint === '' ? 'Find /' : `Find ${facts.findHint} /`, priority: 1 })
+      }
+      return [renderActionBarRow(segments, width)]
+    }
+    // Retention priority: Esc, Stop, Follow, GAP, disclosure, position, Find,
+    // then the two B1-C verbs (they are the ONLY segments a tight row may drop
+    // before the pre-existing truth).
+    const segments: JobActionBarSegment[] = []
     segments.push({ text: 'Esc back', priority: 7 })
     const stopKey = componentKeymap.keyHint('tasks.stop')
     if (!facts.searchActive && this.canStop() && stopKey !== '') {
@@ -391,22 +607,14 @@ class JobInspectorActionBar implements Component {
     if (!facts.searchEditing) {
       segments.push({ text: facts.findHint === '' ? 'Find /' : `Find ${facts.findHint} /`, priority: 1 })
     }
-    for (;;) {
-      const line = segments.map(segment => segment.text).join(' | ')
-      if (visibleWidth(line) <= width || segments.length <= 1) {
-        return [truncateToWidth(line, width, '…', true)]
-      }
-      const shortenable = segments.find(segment => segment.short !== undefined && segment.text !== segment.short)
-      if (shortenable !== undefined) {
-        shortenable.text = shortenable.short!
-        continue
-      }
-      let lowest = 0
-      for (let index = 1; index < segments.length; index += 1) {
-        if (segments[index]!.priority < segments[lowest]!.priority) lowest = index
-      }
-      segments.splice(lowest, 1)
+    // Neither verb is advertised while a Job Find owns the ordinary keys
+    // (`v`/`C` are inert in EDIT and NAVIGATE), nor when the action itself
+    // cannot execute this frame.
+    if (!facts.searchActive) {
+      if (facts.canCopyOutput) segments.push({ text: 'C copy output', priority: 0 })
+      if (facts.canViewCommand) segments.push({ text: 'V command', priority: 0 })
     }
+    return [renderActionBarRow(segments, width)]
   }
 
   invalidate(): void {
@@ -449,12 +657,18 @@ const bodyText = (view: JobInspectorView): string => {
   return view.retainedText === '' ? BODY_EMPTY : view.retainedText
 }
 
+/** Whether the observed snapshot really is a shell Command the reader may show
+ *  and copy (plan §1.1: never inferred from an opening row or a shell-looking
+ *  label). */
+const commandEligible = (view: JobInspectorView): boolean =>
+  view.phase === 'observed' && COMMAND_KINDS.has(view.kind) && view.label !== ''
+
 /** The current retained-preview viewport position — never a Job-history line
  *  number. A body-less phase (placeholder or empty retained text) reports
  *  `0/0`. */
 function positionFacts(
   search: JobOutputSearch,
-  scrollView: JobOutputScrollView,
+  scrollView: { readonly viewportHeight: number; readonly scrollTop: number },
   width: number,
 ): { start: number; end: number; total: number } {
   const total = search.positionTotal(width)
@@ -466,9 +680,9 @@ function positionFacts(
 }
 
 /**
- * The Job workspace root: a fixed typed header, the one-epoch Job Find search
- * row, ONE primary strict-follow `JobOutputScrollView` over the retained body,
- * the transient notice row and the fixed bottom Action Bar. It is the
+ * The Job workspace root: a fixed typed header, the one-epoch Find search row
+ * of the CURRENT page, ONE primary ScrollView over the current body, the
+ * transient notice row and the fixed bottom Action Bar. It is the
  * `setLayoutRoot` root AND the keyboard focus target, so `Esc`/`tasks.stop`
  * arrive on its own {@link handleInput} — and, while a Find is being edited, the
  * SearchRow is the physical focus target instead.
@@ -478,6 +692,11 @@ export class JobInspectorPanel extends VStack {
   private readonly body: Text
   private readonly search: JobOutputSearch
   private readonly scrollView: JobOutputScrollView
+  private readonly commandReader: JobCommandReader
+  /** The ONE reading-page owner of this instance. Mutated only through the
+   *  guarded transitions below, so the layout's `visible` entries always agree
+   *  with the key routing. */
+  private readonly readState: { view: JobReadView }
   private readonly intents: JobInspectorPanelIntents
   /** One frame plan shared by every fixed child and rewritten once per render,
    *  plus the frame width, the live view the Action Bar reads and the viewport
@@ -497,10 +716,21 @@ export class JobInspectorPanel extends VStack {
   private baselineWidth = 0
   private baselineLines: readonly string[] | undefined
   private baselineEviction = 0
+  /** The header's hit regions of the LAST PAINTED frame, the header's painted
+   *  top row and the press-time target a same-cell click must re-prove. */
+  private paintedTargets: readonly JobHeaderHitTarget[] = []
+  private headerTop = 0
+  private pressedTarget: JobHeaderHitTarget | undefined
   private disposed = false
 
   constructor(initial: JobInspectorState, intents: JobInspectorPanelIntents) {
     const view = deriveJobInspectorView(initial)
+    const readState: { view: JobReadView } = { view: 'output' }
+    /** The Command reader is built AFTER the chrome plan closure (the plan asks
+     *  the ACTIVE page for its Find state) — the holder breaks that cycle
+     *  without ever reading an unset value, because the plan runs only during a
+     *  render. */
+    const holders: { commandReader?: JobCommandReader } = {}
     /** The ONE per-frame chrome plan. The fullscreen layout engine renders this
      *  panel's children through its layout node, so the plan is derived at each
      *  fixed child's render boundary from the SAME live inputs and recorded
@@ -521,11 +751,14 @@ export class JobInspectorPanel extends VStack {
       positionViewportHeight: -1,
     }
     const plan = (width: number): JobInspectorChromePlan => {
+      const activeSearchMode = readState.view === 'command'
+        ? holders.commandReader?.search.mode ?? 'inactive'
+        : search.mode
       const next = planChrome(
         width,
         intents.rows(),
         intents.notice() !== undefined,
-        search.mode !== 'inactive',
+        activeSearchMode !== 'inactive',
       )
       chrome.plan = next
       chrome.width = width
@@ -534,13 +767,33 @@ export class JobInspectorPanel extends VStack {
     const header = new JobInspectorHeader(view, plan)
     const body = new Text('', 0, 0)
     body.setText(bodyText(view))
-    const search = new JobOutputSearch(body, (width) => plan(width).searchRows === 1)
+    const search = new JobOutputSearch(
+      body,
+      (width) => readState.view === 'output' && plan(width).searchRows === 1,
+    )
     const scrollView = new JobOutputScrollView(new JobOutputBody(search), {
       follow: 'end',
       primary: true,
       scrollbar: 'auto',
     })
+    const commandReader = new JobCommandReader({
+      requestRender: intents.requestRender,
+      paintedBox: intents.paintedBox,
+      onCopy: (text) => intents.onCopy({ source: 'command-selection', text }),
+      searchRowVisible: (width) => readState.view === 'command' && plan(width).searchRows === 1,
+    })
+    holders.commandReader = commandReader
     const bar = new JobInspectorActionBar(intents.canStop, (width) => {
+      if (readState.view === 'command') {
+        chrome.positionViewportHeight = commandReader.scroll.viewportHeight
+        return {
+          command: true,
+          findHint: intents.findHint(),
+          searchActive: commandReader.search.mode !== 'inactive',
+          searchEditing: commandReader.search.mode === 'edit',
+          position: positionFacts(commandReader.search, commandReader.scroll, width),
+        }
+      }
       chrome.positionViewportHeight = scrollView.viewportHeight
       return {
         follow: scrollView.isFollowRequested,
@@ -549,15 +802,21 @@ export class JobInspectorPanel extends VStack {
         searchActive: search.mode !== 'inactive',
         searchEditing: search.mode === 'edit',
         position: positionFacts(search, scrollView, width),
+        canViewCommand: commandEligible(chrome.view),
+        canCopyOutput: chrome.view.phase === 'observed' && chrome.view.retainedText !== '',
       }
     })
     super([
       // Every fixed child renders AT MOST the rows the plan granted it (zero
       // included), so the pinned Action Bar can never be pushed off the screen;
-      // the Output absorbs whatever remains and may reach zero rows.
+      // the current body absorbs whatever remains and may reach zero rows.
+      // The two bodies and their SearchRows are mounted ONCE and made mutually
+      // invisible, so neither loses its scroll/follow/query state on a switch.
       { component: header, shrink: 0 },
-      { component: search.row, shrink: 0 },
-      { component: scrollView, basis: 0, grow: 1 },
+      { component: search.row, shrink: 0, visible: () => readState.view === 'output' },
+      { component: commandReader.search.row, shrink: 0, visible: () => readState.view === 'command' },
+      { component: scrollView, basis: 0, grow: 1, visible: () => readState.view === 'output' },
+      { component: commandReader.scroll, basis: 0, grow: 1, visible: () => readState.view === 'command' },
       // The transient notice row sits ABOVE the pinned Action Bar and renders
       // zero rows when nothing is live or the budget is too short.
       { component: new JobInspectorNoticeRow(intents.notice, plan), shrink: 0 },
@@ -567,6 +826,8 @@ export class JobInspectorPanel extends VStack {
     this.body = body
     this.search = search
     this.scrollView = scrollView
+    this.commandReader = commandReader
+    this.readState = readState
     this.intents = intents
     this.chrome = chrome
     // The opener may ALREADY carry an observed snapshot (an observation port is
@@ -574,6 +835,8 @@ export class JobInspectorPanel extends VStack {
     // searchable source and the position fact are seeded from the initial state
     // exactly like the body text — never left empty until a later push.
     this.search.setSource(view.retainedText, view.phase === 'observed' && view.retainedText !== '')
+    this.header.setState(view, 'output', commandEligible(view))
+    if (commandEligible(view)) this.commandReader.setSource(view.label)
   }
 
   /** Replace the whole frozen projection with the latest captured state and
@@ -584,7 +847,17 @@ export class JobInspectorPanel extends VStack {
     if (this.disposed) return
     const view = deriveJobInspectorView(state)
     const searchable = view.phase === 'observed' && view.retainedText !== ''
-    this.header.setView(view)
+    const eligible = commandEligible(view)
+    // A lost Command eligibility returns to the ONLY readable page: the Command
+    // reader must never be left as a hidden focus/gesture owner.
+    const previousView = this.readState.view
+    const nextView: JobReadView = previousView === 'command' && !eligible ? 'output' : previousView
+    if (nextView !== previousView) {
+      this.commandReader.exitSearch()
+      this.commandReader.cancelSelection()
+    }
+    this.readState.view = nextView
+    this.header.setState(view, nextView, eligible)
     this.chrome.view = view
     this.body.setText(bodyText(view))
     let selectionEviction: number | undefined
@@ -610,15 +883,51 @@ export class JobInspectorPanel extends VStack {
     // current match can fall back to a match provable from what the user sees.
     this.search.setVisibleAnchor(this.scrollView.scrollTop)
     this.search.setSource(view.retainedText, searchable, selectionEviction)
+    // The Command document follows the SAME observed label authority; a changed
+    // label drops the old selection offsets, and a lost eligibility returns the
+    // ONLY page that can still be read.
+    if (eligible) this.commandReader.setSource(view.label)
+    else this.commandReader.clearSource()
+    if (nextView !== previousView) {
+      // The header/action bar project the SAME reading page as the key routing.
+      this.pressedTarget = undefined
+      this.intents.focusComponent(this)
+    }
     this.invalidate()
     this.intents.requestRender()
   }
 
   /** The layout frame is committed and painted: consume the ONE pending search
-   *  reveal against the real geometry, and leave a search whose SearchRow this
-   *  frame could no longer show. Never mutates the layout from `render()`. */
+   *  reveal of the CURRENT page against the real geometry, leave a search whose
+   *  SearchRow this frame could no longer show, and commit the header hit map
+   *  the user can actually click. Never mutates the layout from `render()`. */
   onFramePainted(): void {
     if (this.disposed) return
+    // The painted header frame is the ONE identity a later click resolves
+    // against: its rows and the clickable regions its last render produced.
+    this.headerTop = this.intents.paintedBox(this.header)?.y ?? 0
+    this.paintedTargets = this.header.hits()
+    if (this.readState.view === 'command') {
+      if (this.commandReader.onFramePainted(this.chrome.width)) this.intents.requestRender()
+      if (this.commandReader.search.mode !== 'inactive' && this.chrome.plan.searchRows === 0) {
+        this.exitSearch()
+        return
+      }
+      const target = this.commandReader.search.consumeReveal(
+        this.commandReader.scroll.scrollTop,
+        this.commandReader.scroll.viewportHeight,
+        this.chrome.width,
+      )
+      if (target !== undefined) {
+        this.commandReader.scroll.scrollTo(target)
+        this.intents.requestRender()
+      }
+      if (this.chrome.positionViewportHeight !== this.commandReader.scroll.viewportHeight) {
+        this.chrome.positionViewportHeight = this.commandReader.scroll.viewportHeight
+        this.intents.requestRender()
+      }
+      return
+    }
     // The viewport this frame ACTUALLY painted is the ONE visible anchor a lost
     // search hit falls back to: a plain scroll (arrow/wheel) that never touches
     // the Job output must still move it, or a later resize would re-select from
@@ -662,16 +971,20 @@ export class JobInspectorPanel extends VStack {
     }
   }
 
-  /** The Job workspace's ONE input owner. `Esc`/`tasks.stop` are the B1-A
-   *  intents; Find, the search state machine and the strict-follow viewport keys
-   *  are B1-B's. Every other key is inert: the Job is read-only and never leaks
-   *  into the background editor or transcript. */
+  /**
+   * The Job workspace's ONE input owner. `Esc`/`tasks.stop` are the B1-A
+   * intents; Find, the search state machine, the strict-follow viewport keys and
+   * the Job-local `v`/`C` verbs are B1-B/B1-C's. Every other key is inert: the
+   * Job is read-only and never leaks into the background editor or transcript.
+   */
   handleInput(data: string): void {
     if (this.disposed) return
-    const search = this.search
+    const command = this.readState.view === 'command'
+    const search = command ? this.commandReader.search : this.search
+    const scroll = command ? this.commandReader.scroll : this.scrollView
     if (search.mode === 'edit') {
       // EDIT: the SearchRow's real Input owns line editing; Enter and Esc are the
-      // Job search's own mode seams, never a Job submit or close.
+      // Job search's own mode seams, never a Job submit, a copy or a close.
       if (matchesKey(data, 'escape')) {
         this.exitSearch()
         return
@@ -686,73 +999,83 @@ export class JobInspectorPanel extends VStack {
     }
     // Physical End/Home are the Job's RESERVED viewport keys (plan §5.1): the
     // owner handles them FIRST so a Find binding remapped onto one of them can
-    // never shadow the ONLY follow re-arm (End) or the retained-preview top
-    // (Home). The Action Bar's Find hint drops such a reserved binding, and `/`
-    // stays the always-available Job-local Find alias.
+    // never shadow the ONLY follow re-arm (End on Output) / the viewport ends.
+    // The Action Bar's Find hint drops such a reserved binding, and `/` stays
+    // the always-available Job-local Find alias.
     if (matchesKey(data, 'end')) {
-      // Physical End is the ONLY follow re-arm; a live result view is left
-      // through the ONE exit path (physical focus returns to the panel) so the
-      // tail is not locked by a stale selection.
+      // On Output, physical End is the ONLY follow re-arm; a live result view is
+      // left through the ONE exit path (physical focus returns to the panel) so
+      // the tail is not locked by a stale selection. On Command there is no
+      // follow: End is the document's own last row.
       if (search.mode === 'navigate') this.exitSearch()
-      this.scrollView.resumeFollow()
+      if (command) this.commandReader.scroll.scrollToEnd()
+      else this.scrollView.resumeFollow()
       this.intents.requestRender()
       return
     }
     if (matchesKey(data, 'home')) {
-      this.scrollView.scrollToStart()
+      scroll.scrollToStart()
       this.intents.requestRender()
       return
     }
     // `/` is the Job-local alias and the effective Find binding is scoped to the
-    // Job: both open EDIT here and never reach the Transcript search.
+    // Job: both open EDIT on the CURRENT reading page and never reach the
+    // Transcript search.
     if (matchesKey(data, '/') || this.intents.isFindKey(data)) {
       this.openFind()
       return
     }
     if (matchesKey(data, 'escape')) {
-      // Only a non-searching Esc is the B1-A close intent.
       if (search.mode === 'navigate') {
         this.exitSearch()
+        return
+      }
+      if (command) {
+        // Command is a page of the SAME workspace: Esc returns to Output and
+        // never closes the workspace or releases the observer.
+        this.showOutput()
+        this.intents.requestRender()
         return
       }
       this.intents.onClose()
       return
     }
     if (matchesKey(data, 'pageUp')) {
-      this.scrollView.scrollBy(-Math.max(1, this.scrollView.viewportHeight - PAGE_SCROLL_OVERLAP))
+      scroll.scrollBy(-Math.max(1, scroll.viewportHeight - PAGE_SCROLL_OVERLAP))
       this.intents.requestRender()
       return
     }
     if (matchesKey(data, 'pageDown')) {
-      this.scrollView.scrollBy(Math.max(1, this.scrollView.viewportHeight - PAGE_SCROLL_OVERLAP))
+      scroll.scrollBy(Math.max(1, scroll.viewportHeight - PAGE_SCROLL_OVERLAP))
       this.intents.requestRender()
       return
     }
     if (matchesKey(data, 'up')) {
-      this.scrollView.scrollBy(-1)
+      scroll.scrollBy(-1)
       this.intents.requestRender()
       return
     }
     if (matchesKey(data, 'down')) {
-      this.scrollView.scrollBy(1)
+      scroll.scrollBy(1)
       this.intents.requestRender()
       return
     }
     // Ctrl+Home / Ctrl+End are the fork viewport-request aliases: pure browsing,
     // so they pause and never re-arm follow.
     if (matchesKey(data, 'ctrl+home')) {
-      this.scrollView.scrollToStart()
+      scroll.scrollToStart()
       this.intents.requestRender()
       return
     }
     if (matchesKey(data, 'ctrl+end')) {
-      this.scrollView.scrollToEnd()
+      scroll.scrollToEnd()
       this.intents.requestRender()
       return
     }
     if (search.mode === 'navigate') {
       // NAVIGATE: only the result navigation keys act; ordinary printing is
-      // inert — the Job is read-only and never leaks into the editor.
+      // inert — the Job is read-only and never leaks into the editor, and the
+      // `v`/`C`/Stop verbs are NOT reachable here.
       if (matchesKey(data, 'n')) {
         search.step(1)
         this.intents.requestRender()
@@ -762,24 +1085,86 @@ export class JobInspectorPanel extends VStack {
       }
       return
     }
-    if (componentKeymap.matches(data, 'tasks.stop') && this.intents.canStop()) this.intents.onStop()
+    if (command) {
+      // Command is a pure reading page: the ONLY ordinary verb is the original
+      // Copy All, and Stop is never reachable from here.
+      if (matchesKey(data, 'shift+c')) this.copyCommandAll()
+      return
+    }
+    // Stop keeps its existing precedence on the Output page (the fixed
+    // `tasks.stop` branch runs BEFORE the B1-C read-only verbs).
+    if (componentKeymap.matches(data, 'tasks.stop') && this.intents.canStop()) {
+      this.intents.onStop()
+      return
+    }
+    if (matchesKey(data, 'v')) {
+      this.openCommand()
+      return
+    }
+    if (matchesKey(data, 'shift+c')) this.copyOutput()
   }
 
-  /** Make updates and intents inert. The owned children (the body text, the
-   *  ScrollView, the SearchRow) are released by the inherited container chain. */
+  /** The painted header hit region at one screen cell, or undefined. */
+  private headerTargetAt(x: number, y: number): JobHeaderHitTarget | undefined {
+    const row = y - this.headerTop
+    return this.paintedTargets.find(target => target.row === row && x >= target.startCol && x < target.endCol)
+  }
+
+  /** The PRESS half of a same-cell click: remember the target the user pressed,
+   *  without acting. */
+  onHeaderPress(x: number, y: number): void {
+    if (this.disposed) return
+    this.pressedTarget = this.headerTargetAt(x, y)
+  }
+
+  /** The RELEASE half: the click acts only when the SAME cell still resolves to
+   *  the SAME painted target — same action, same page and same exact Command
+   *  source — so a repaint between press and release (another Job, a narrowed
+   *  button, a different header row) can never fire a ghost action. */
+  onHeaderClick(x: number, y: number): void {
+    if (this.disposed) return
+    const pressed = this.pressedTarget
+    this.pressedTarget = undefined
+    const target = this.headerTargetAt(x, y)
+    if (pressed === undefined || target === undefined) return
+    if (target.action !== pressed.action || target.view !== pressed.view || target.documentKey !== pressed.documentKey) return
+    if (target.action === 'open-command') this.openCommand()
+    else this.copyCommandAll()
+  }
+
+  /** The terminal lost focus (FOCUS_OUT): an in-flight Command drag can never
+   *  receive its release, so its selection and its temporary edge timer are
+   *  released now (plan §4.2 rules for blur/teardown). */
+  onTerminalBlur(): void {
+    if (this.disposed) return
+    if (this.commandReader.cancelSelection()) this.intents.requestRender()
+  }
+
+  /** Make updates and intents inert. The owned children (the body texts, the
+   *  ScrollViews, the SearchRows) are released by the inherited container chain;
+   *  the Command reader's own gesture timer is released explicitly. */
   dispose(): void {
+    if (this.disposed) return
     this.disposed = true
+    this.commandReader.dispose()
     super.dispose()
   }
 
-  /** Open (or re-open) the Job Find — the shared entry of the direct effective
-   *  Find binding, the `/` alias and the Host leader completion. Below four rows
-   *  the frame grants no SearchRow, so the request changes no state. */
+  /** Open (or re-open) the CURRENT page's Job Find — the shared entry of the
+   *  direct effective Find binding, the `/` alias and the Host leader
+   *  completion. Below four rows the frame grants no SearchRow, so the request
+   *  changes no state. */
   openFind(): void {
     if (this.disposed) return
     // Below four rows the frame grants no SearchRow, so Find cannot be entered as
     // a hidden editor: the request is consumed without changing any state.
     if (planChrome(this.chrome.width, this.intents.rows(), this.intents.notice() !== undefined, true).searchRows === 0) {
+      return
+    }
+    if (this.readState.view === 'command') {
+      this.commandReader.openFind()
+      this.intents.focusComponent(this.commandReader.search.row)
+      this.intents.requestRender()
       return
     }
     this.search.openFind(this.scrollView.scrollTop)
@@ -789,8 +1174,53 @@ export class JobInspectorPanel extends VStack {
     this.intents.requestRender()
   }
 
-  private exitSearch(): void {
+  /** Show the Command page of the SAME workspace/observer, leaving the Output
+   *  page's scroll, follow intent, query and viewport untouched. */
+  private openCommand(): void {
+    if (this.disposed || this.readState.view === 'command') return
+    if (!commandEligible(this.chrome.view)) return
+    // The Output Find gives up its input OWNERSHIP only (the query is kept for
+    // the next open); the Output viewport/follow intent is never touched.
     this.search.exit()
+    this.readState.view = 'command'
+    this.header.setState(this.chrome.view, 'command', true)
+    this.pressedTarget = undefined
+    this.intents.focusComponent(this)
+    this.intents.requestRender()
+  }
+
+  /** Return to the Output page: the Command Find drops its input ownership (its
+   *  query survives), the selection and gesture are cancelled, and the Output
+   *  viewport/follow/query are exactly as the user left them. */
+  private showOutput(): void {
+    if (this.readState.view !== 'command') return
+    this.commandReader.exitSearch()
+    this.commandReader.cancelSelection()
+    this.readState.view = 'output'
+    this.header.setState(this.chrome.view, 'output', commandEligible(this.chrome.view))
+    this.pressedTarget = undefined
+    this.intents.focusComponent(this)
+  }
+
+  /** `C` on the Command page: the ORIGINAL observed label, captured now. */
+  private copyCommandAll(): void {
+    if (this.disposed || !commandEligible(this.chrome.view)) return
+    const text = this.commandReader.source
+    if (text === '') return
+    this.intents.onCopy({ source: 'command-all', text })
+  }
+
+  /** `C` on the Output page: the retained snapshot text, captured now, with no
+   *  trim/strip/replace shaping of any kind. */
+  private copyOutput(): void {
+    const view = this.chrome.view
+    if (view.phase !== 'observed' || view.retainedText === '') return
+    this.intents.onCopy({ source: 'output', text: view.retainedText })
+  }
+
+  private exitSearch(): void {
+    if (this.readState.view === 'command') this.commandReader.exitSearch()
+    else this.search.exit()
     this.intents.focusComponent(this)
     this.intents.requestRender()
   }

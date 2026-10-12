@@ -936,3 +936,45 @@ test('L6 §14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR
   await waitFor('the current viewer stop error notified', () =>
     fx.notices.slice(noticesBefore).some(message => message.includes(`could not stop ${JOB_TWO_LABEL}`)), 10_000)
 })
+
+test('L6 B1-C: the Remote Client roster label reaches the Command page and Copy All copies the ORIGINAL command without a Host read', async (t) => {
+  const life = testLifecycle(t)
+  const fx = await mountJobViewerFixture(life)
+  const { app, view } = fx
+
+  // A real Host background Job whose label is a shell command with a TAB, a
+  // quoted argument and trailing spaces: the Remote Client roster row carries it
+  // verbatim, and NOTHING may reshape it on the way to the clipboard.
+  const command = '  remote-build\t--flag "a b"  '
+  const job = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: command, text: 'remote retained\n' })
+  submit(app, '/tasks')
+  await openJobRow(fx, 'remote-build')
+  await waitFor('the Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
+  await waitFor('the Remote observation reached the workspace', () => view().includes('remote retained'), 20_000)
+  const readsBefore = fx.hostReadCalls()
+  const observesBefore = fx.observeAcquires()
+
+  // `v` opens the Command page of the SAME observation instance.
+  fx.fixture.vt.sendInput('v')
+  await waitFor('the Command reader painted', () => view().includes('Command reader · [Copy All]'), 10_000)
+  assert.match(view(), /Full command/u, 'the Command page discloses that it shows the full command')
+  assert.match(view(), /Esc output/u, 'Esc on the Command page returns to Output, never out of the workspace')
+
+  // The clipboard capability is the SAME Client-local one the surface uses.
+  const copied: string[] = []
+  const copyTarget = app as unknown as { copySelection?: (text: string) => Promise<boolean> }
+  copyTarget.copySelection = async (text: string) => {
+    copied.push(text)
+    return true
+  }
+  fx.fixture.vt.sendInput('C')
+  await waitFor('the copy settled with a success notice', () => fx.notices.includes('Copy sent'), 10_000)
+  assert.deepEqual(copied, [command],
+    'the Remote roster label is the Command source byte for byte (TAB, quotes and trailing spaces kept)')
+  assert.equal(fx.observeAcquires(), observesBefore,
+    'the Command page reuses the ONE observation and never opens a second one')
+  assert.equal(fx.hostReadCalls(), readsBefore,
+    'the Command page never consumes `ctx.jobs.read`')
+  assert.equal(fx.hostReadCalls(), 0, 'no `ctx.jobs.read` may run on the Remote application path')
+  assert.equal(String(job.id).length > 0, true)
+})

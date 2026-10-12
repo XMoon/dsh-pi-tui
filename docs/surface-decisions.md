@@ -1692,9 +1692,111 @@ rather than to an old ordinal, and that visible anchor is the viewport the frame
 ACTUALLY painted — synchronised at every frame commit, so a plain scroll moves it
 even when no Job output arrived.
 
-Not yet claimed: the clickable Command reader with exact selection/copy and the
-Output copy action (B1-C). Search, follow and the retention anchor above are
-B1-B.
+Not yet claimed here: the Command reader, the exact original-text selection and
+the two Copy verbs live in their own sections below. Search, follow and the
+retention anchor above are B1-B.
+
+## The Command page is a mutually exclusive second body of the SAME workspace
+
+A shell Job (`bash`/`pwsh`) whose OBSERVED `label` is non-empty gains a Command
+page inside the same workspace, the same `TuiAltScreen`, the same Job and the
+same observation: `v` on the Output page, or a click on the visible `Command:`
+summary, switches to it; `Esc` returns to Output (it never closes the workspace
+and never releases the observer). `Label:` Jobs (`subagent` and every non-shell
+kind) never grow one — the entry is gated on the OBSERVED kind plus a non-empty
+label, so an opening Task row that merely looks like a shell command can show a
+read-only summary but cannot open or copy a Command, and a Job whose eligibility
+disappears returns to Output synchronously, dropping the Command hit map, the
+selection and the editing focus with it.
+
+Both bodies and both Search rows are mounted ONCE for the whole panel lifetime
+and made mutually invisible by the layout's own `visible` entries, so exactly one
+body is ever laid out and exactly one is the primary ScrollView. The Output page
+therefore keeps its follow intent, its viewport, its anchor and its query across
+any number of round trips; entering or leaving the Command page never calls
+`pauseFollow`/`resumeFollow`, and the Command page never shows an Output Follow
+state, never shows the Output retained-preview disclosure (it shows `Full
+command` instead) and never advertises Stop. `End` on the Command page is that
+document's end (it has no follow to re-arm), while `Home`/`End`/`PgUp`/`PgDn`/
+arrow/wheel/scrollbar all move only the page the user is reading.
+
+`Ctrl+F` (or the live effective binding) and `/` open the CURRENT page's own
+Find: two independent `JobOutputSearch` instances with their own query, mode,
+epoch, `i/N` fact and reveal, so a Command query never inherits the Output query
+or its match ordinal. Switching pages ends the current Find's INPUT ownership
+(the query is kept for the next open) and returns the physical focus to the
+workspace root, and `C` while a Find owns the ordinary keys is query text —
+never a copy.
+
+## Command copy is original-text only, through the existing Client clipboard
+
+Three verbs share the ONE existing Client-local capability
+(`ClientActions.copySelection`, injected into `TuiApp`); no Host port, no new
+clipboard service, no remote OS clipboard and no `process.stdout` write is
+introduced.
+
+- **Output Copy** (`C` while no Find owns the ordinary keys) sends the
+  `JobObservedSnapshot.text` captured at the keypress, verbatim: no trim, no ANSI
+  strip, no header/marker/decoration, no Command source, and no claim about
+  evicted history.
+- **Command Copy All** (`C` on the Command page, or a click on the painted
+  `[Copy All]`) sends the ORIGINAL `JobObservedSnapshot.label`: leading and
+  trailing whitespace, TABs, CRLF and a trailing newline all survive, and the
+  display prefix, ellipsis, escapes and alignment spaces are never part of the
+  payload. On a frame too narrow to paint the whole button no click target is
+  created at all, and `C` remains the reachable path.
+- **Command drag selection** sends `label.slice(start, end)` for the half-open
+  UTF-16 range the gesture covered.
+
+The Command page renders a dedicated document model rather than the vendored
+`Text` renderer, because `Text` expands TAB to three spaces, word-wraps and
+`trimEnd()`s every wrapped row — round-tripping those rows could never reproduce
+the original bytes. The model scans the label once per (source, width) and keeps,
+for every painted cell run, the exact original UTF-16 range it came from:
+`\n`/`\r\n` are real hard-break tokens whose offsets stay in the source, soft
+wrapping inserts nothing, TAB paints three cells but maps one `\t`, a lone `\r`
+and every other C0/C1/DEL byte are painted as safe text escapes (`\x1b`, `\x00`,
+`\r`, …) that still map back to their single original character, and a grapheme
+wider than the whole grant paints one placeholder cell while still mapping in
+full. Padding to the terminal's right edge forms no run, so it can never be
+dragged into the payload. A changed label, a width change, a page switch, a blur
+or a dispose cancels the gesture instead of re-mapping stale offsets.
+
+The selection itself is consumer-layer: the published `MouseRegion` wraps the
+Command body as the ScrollView's only child, returns `capture: true` on a left
+press, and resolves every press/drag/release against the LAST PAINTED viewport
+geometry (read at the frame-painted boundary) plus the live scroll position —
+never the press-time captured origin, which goes stale as soon as an edge scroll
+moves the viewport. Press anchors at the grapheme's start; the later endpoint of
+the range is inclusive of the grapheme under the pointer, so a drag is the same
+range forwards and backwards, and a same-cell click selects nothing and copies
+nothing. The wheel is deliberately left UNHANDLED so the fork's own routing
+scrolls the active viewport, and the scrollbar keeps the fork's existing
+interaction. Holding the pointer past the body's top/bottom edge starts a
+temporary 50 ms timer that scrolls one row and grows the selection over the rows
+that scroll in; the timer belongs to the gesture alone and is released on
+release, page switch, resize, blur, workspace exit and dispose.
+
+Both Copy verbs capture the payload SYNCHRONOUSLY and only then hand it to the
+app, so a snapshot arriving while the promise is in flight can never rewrite what
+was requested. The settlement re-proves the exact Job workspace record before it
+may notify: a copy that lands after the user left that Job — or after a
+replacement viewer opened — is dropped silently. `true` from the clipboard
+strategy only proves the bytes were EMITTED (OSC52 has no clipboard ACK), so the
+notice reads `Copy sent` and never claims the system clipboard received them; a
+`false` result and a rejection both read `Copy failed`, and an empty Output, an
+unobserved Output, an unavailable Command or an empty selection writes nothing
+and reports nothing.
+
+The header's Command summary and its `[Copy All]` are plain painted cells, so
+they route through the alt screen's existing press/click callbacks against a hit
+map produced by the LAST PAINTED header frame (the header's own painted top row
+included). The release must re-prove the SAME action, the SAME page and the SAME
+Command source identity the press named, so a repaint between press and release —
+another Job, a re-flowed header row, a narrowed button — can never fire a ghost
+open or a copy of different bytes. Both verbs also have their fixed Job-local
+keyboard fallbacks (`v` on Output, `C` on either page), so nothing is
+mouse-only.
 
 ## Long user messages collapse at the presentation layer only
 
