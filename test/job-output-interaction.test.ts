@@ -61,6 +61,20 @@ function startApp(
 const rawView = (vt: VirtualTerminal): string[] => vt.getViewport().map(stripTerminalSequences)
 const view = (vt: VirtualTerminal): string => rawView(vt).join('\n')
 
+/** The painted row carrying the STRONG (background) search highlight, or ''. It
+ *  reads the real cell attributes, so it names the occurrence the user actually
+ *  sees emphasised. */
+const highlightedRowText = (vt: VirtualTerminal): string => {
+  const rows = rawView(vt)
+  const highlighted = rows.findIndex((_, row) => {
+    for (let column = 0; column < 200; column += 1) {
+      if (vt.getCellBgRgb(row, column) !== undefined) return true
+    }
+    return false
+  })
+  return highlighted < 0 ? '' : rows[highlighted]!.trim()
+}
+
 /** Paint until the predicate holds (bounded): a UI transition whose last step is
  *  a requestRender-scheduled frame (a reveal, a chrome re-measure) needs one
  *  more committed frame than a single `waitForRender()` is guaranteed to span. */
@@ -1100,25 +1114,71 @@ test('B-10b3 a truncated window never transfers the current hit to another occur
   vt.sendInput('n')
   await vt.waitForRender()
   assert.match(view(vt), /2\/3/, 'needle B is current')
-  const currentHitRow = (): string => {
-    const rows = rawView(vt)
-    const highlighted = rows.findIndex((_, row) => {
-      for (let column = 0; column < 80; column += 1) {
-        if (vt.getCellBgRgb(row, column) !== undefined) return true
-      }
-      return false
-    })
-    return highlighted < 0 ? '' : rows[highlighted]!.trim()
-  }
-  assert.match(currentHitRow(), /needle B/, 'the strong highlight is on the selected hit')
+  assert.match(highlightedRowText(vt), /needle B/, 'the strong highlight is on the selected hit')
 
   // Evict ten rows: B moves to row 100 while C lands on B's old row 110.
   harness.observation.latest()!.emit({ text: lines.slice(10).join('\n') })
   await vt.waitForRender()
   assert.match(view(vt), /2\/3/, 'the same occurrence stays current')
-  assert.match(currentHitRow(), /needle B/,
+  assert.match(highlightedRowText(vt), /needle B/,
     'the hit follows the PROVEN row mapping, never the old coordinates')
-  assert.ok(!/needle C/.test(currentHitRow()), 'needle C must not inherit the selection')
+  assert.ok(!/needle C/.test(highlightedRowText(vt)), 'needle C must not inherit the selection')
+  app.stop()
+})
+
+// ── B-10b4: a resize re-wrap never hands the hit to a coincidental match ───
+
+test('B-10b4 a resize re-wrap drops the unprovable hit identity instead of handing it to a coincidental match', async () => {
+  // Line 0 is exactly ONE row at width 120 and TWO rows at width 80, so after the
+  // shrink both same-geometry hits sit one row lower: `NEED c` (the current hit)
+  // lands on the row `NEED b` occupied before, and vice versa.
+  const lines = Array.from({ length: 120 }, (_, index) => `line ${String(index).padStart(3, '0')}`)
+  lines[0] = 'Z'.repeat(100)
+  lines[9] = 'NEED b'
+  lines[10] = 'NEED c'
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  const text = lines.join('\n')
+  harness.observation.latest()!.emit({ text })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('NEED')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/2/)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /2\/2/, 'NEED c is current')
+  assert.match(highlightedRowText(vt), /NEED c/)
+
+  // Park the viewport on the current hit's row and let one no-op snapshot record
+  // that visible anchor (the fallback re-selects from it after the resize).
+  for (let step = 0; step < 11; step += 1) vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  harness.observation.latest()!.emit({ text })
+  await vt.waitForRender()
+  assert.match(view(vt), /2\/2/, 'the hit survives the no-op snapshot')
+
+  // Shrink: the re-wrap has NO proven row mapping, so the carried identity is
+  // dropped and the VISIBLE ANCHOR (row 11) decides. `NEED c` moved to row 11 and
+  // `NEED b` still occupies the old row 10, so a coordinate-carrying hit would
+  // select index 0 (`1/2`); the anchor-correct result is the SECOND match.
+  vt.resize(80, 40)
+  const painted = await paintedWhen(vt, current => /2\/2/.test(current))
+  assert.match(painted, /2\/2/, `the hit must not fall back to the coincidental match:\n${painted}`)
+  // Bring the pair into view for the visible-sink check: the strong highlight
+  // must be on `NEED c`, never on the coincidental `NEED b`.
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  assert.match(highlightedRowText(vt), /NEED c/,
+    'the strong highlight stays on the occurrence the user was reading')
+  assert.ok(!/NEED b/.test(highlightedRowText(vt)), 'NEED b must not inherit the selection')
   app.stop()
 })
 

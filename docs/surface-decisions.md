@@ -1678,9 +1678,11 @@ highlight or `i/N` behind. A surviving current hit stays current across a newer
 window while its row is still provable (a pure append never resets `n`/`N`),
 because the hit is carried through the SAME proven row mapping as the anchor —
 never as a bare coordinate key, which an eviction could hand to a different
-occurrence. Only when the current match itself cannot be proven in the new window
-does the selection fall back to the nearest PROVABLE match at or after the visible
-anchor rather than to an old ordinal.
+occurrence. A width change has no such mapping at all (the rows are re-wrapped),
+so the carried identity is dropped there rather than compared across widths. Only
+when the current match itself cannot be proven in the new window does the
+selection fall back to the nearest PROVABLE match at or after the visible anchor
+rather than to an old ordinal.
 
 Not yet claimed: the clickable Command reader with exact selection/copy and the
 Output copy action (B1-C). Search, follow and the retention anchor above are
