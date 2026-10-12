@@ -2971,6 +2971,31 @@ test('a published owner drops the outgoing Session recall before its hydration c
   app.stop()
 })
 
+test('the first Session publication isolates the boot recall of the CWD history', async () => {
+  // No Session yet: the boot recall holds the CWD history of earlier Sessions. The
+  // FIRST publication must isolate it as well, while the occurrence it just
+  // accepted stays recallable until hydration folds it.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['old A prompt', 'older B prompt'])
+  await submitThroughEditor(app, vt, 'first prompt')
+  assert.deepEqual(submitted, ['first prompt'])
+  app.beginInputHistoryScope('session-b')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'first prompt',
+    'only the occurrence accepted for the new Session is recallable, not the CWD pool')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.notEqual(app.getDraft(), 'old A prompt', 'the boot recall is isolated at publication')
+  app.resetInputHistory(['new row'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['first prompt', 'new row'],
+    'hydration folds the snapshot under the accepted occurrence')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)
