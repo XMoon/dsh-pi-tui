@@ -6554,13 +6554,16 @@ export class TuiApp {
       if (settled === undefined) before.push(index)
       else if (settled.outcome === 'skipped' && settled.owner === owner) {
         // A skip the queue evicted keeps its rank: it sits after the appends that
-        // preceded it, so its boundary is a ROW count inside the covered window —
-        // negative means every covered row is older, i.e. it belongs at its end.
+        // preceded it, so its boundary is a ROW count inside the covered window
+        // (never negative: every append adds a session row, so the covered count is
+        // at least the appends that preceded it — a zero boundary means the skip is
+        // newer than every covered row and belongs in front of them).
         after.push({ rank: index, newerRows: covered - settled.appendsBefore })
       }
     }
-    // The most recent skip first, so its boundary is reached first.
-    after.sort((left, right) => (right.newerRows - left.newerRows) || (left.rank - right.rank))
+    // The most recent skip first: its boundary is the smallest row count, so an
+    // ASCENDING cursor reaches each boundary in turn.
+    after.sort((left, right) => (left.newerRows - right.newerRows) || (left.rank - right.rank))
     // ONE ordered cursor: an occurrence the window does not carry is emitted just
     // before the first position that is another writer's row or an older
     // occurrence — no search inside either loop.
