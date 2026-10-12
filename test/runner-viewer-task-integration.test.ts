@@ -35,6 +35,15 @@ import {
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+/**
+ * Phase 3B / B1-A: a Job detail opened from `/tasks` is a dedicated temporary
+ * SCREEN (`JobInspectorPanel`) whose pinned bottom disclosure the Task Browser
+ * never paints — the user-visible ownership signal these cases assert on,
+ * instead of an overlay handle count.
+ */
+const JOB_WORKSPACE_MARK = 'Retained preview · not full history'
+const jobWorkspaceOpen = (rendered: string): boolean => rendered.includes(JOB_WORKSPACE_MARK)
+
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
@@ -791,7 +800,8 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   input('\r') // open the selected running job's status detail
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2, 'the Job detail must keep the parent browser mounted')
+  assert.equal(app.overlayGraphState().handles, 1, 'the Job workspace is a SCREEN: the parent browser stays the only overlay')
+  assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
 
   // The job settles WHILE the parent is hidden. In a jobs-only session the
   // only channel is jobs.events.subscribe → refreshTasks, which must repaint the
@@ -1091,18 +1101,20 @@ test('a failed jobs read never blanks the retained Task Browser parent', async (
   assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be the only overlay')
   assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
 
-  input('\r') // Job detail; the parent stays mounted but hidden
+  input('\r') // Job workspace; the parent stays mounted
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(app.overlayGraphState().handles, 1)
+  assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
 
   // The close-time refresh hits a transient registry failure: that must NOT
   // be interpreted as an authoritative empty catalog.
   jobs.setListFailure(new Error('registry unavailable'))
-  input('\x1b') // close the Job detail → onClose → refreshTasks()
+  input('\x1b') // close the Job workspace → onClose → refreshTasks()
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  assert.equal(jobWorkspaceOpen(view()), false, 'Esc must close only the Job workspace')
+  assert.equal(app.overlayGraphState().handles, 1, 'the parent browser must remain')
   assert.ok(view().includes('build'),
     `the retained parent must keep its rows across a failed registry read:\n${view()}`)
 })
@@ -1281,8 +1293,9 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   input('\r') // open the Job status detail (a child overlay of the browser)
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2, 'browser + Job detail')
-  assert.ok(view().includes('Esc back'), `the Job detail shows Esc back:\n${view()}`)
+  assert.equal(app.overlayGraphState().handles, 1, 'the browser only (the Job is a SCREEN)')
+  assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
+  assert.ok(view().includes('Esc back'), `the Job workspace shows Esc back:\n${view()}`)
 
   await resume({ rawInput: sessionB.id })
   await settle()

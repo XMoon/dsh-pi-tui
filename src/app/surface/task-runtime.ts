@@ -28,14 +28,14 @@ import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRunti
 import { rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPanelItem, type TaskScope } from './task-presentation.ts'
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-attention.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
-import type { TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
+import type { JobInspectorHandle, TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
 import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
-import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 
 /**
@@ -313,23 +313,32 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
       })
 }
 
-/** One-line viewer hint for a job state (never touches the read cursor). */
-function jobStatusHint(status: string, detail: string | undefined): string {
-  const tail = status === 'running' || status === 'stopping'
-    ? ' — opening the non-consuming retained-output stream…'
-    : ` — final output is delivered to the agent via job_output${detail === undefined ? '' : ` (${detail})`}`
-  return `${status}${tail}`
+/**
+ * The opening Task-Browser row projection of ONE Job workspace (Phase 3B /
+ * B1-A). It is the FIRST-FRAME identity fallback of the selected-Job view — the
+ * observer's snapshots are the authority from the first one on — and it is
+ * owned here because this runtime captures it at open time.
+ */
+export interface JobInspectorOpeningRow {
+  readonly jobId: string
+  readonly kind: string
+  readonly label: string
+  readonly status: string
+  readonly detail?: string
 }
 
-/** The Job detail body from the detached observation (never a Host read). */
-function formatJobObservation(observed: JobObservedSnapshot): string {
-  const lines: string[] = [observed.status]
-  if (observed.progress !== undefined) lines.push(`progress: ${observed.progress}`)
-  if (observed.detail !== undefined) lines.push(`detail: ${observed.detail}`)
-  if (observed.gapBefore) lines.push('note: earlier output was evicted before this retained preview')
-  if (observed.error !== undefined) lines.push(`follow error: ${observed.error}`)
-  lines.push('', 'best-effort retained output preview (not a complete transcript):', '', observed.text)
-  return lines.join('\n')
+/**
+ * The ONE captured state a Job workspace presents: the opening row plus the
+ * latest detached observation, or the failure of the observation itself. The
+ * TUI panel consumes it as a TYPE only and folds it into its display projection
+ * (`deriveJobInspectorView`); the presenter never becomes a second authority
+ * over Job facts.
+ */
+export interface JobInspectorState {
+  readonly opening: JobInspectorOpeningRow
+  readonly observed?: JobObservedSnapshot
+  /** Set only when the observation port refused to open a stream at all. */
+  readonly observationError?: string
 }
 
 /**
@@ -560,7 +569,6 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
    */
   const openJobStatusViewer = (
     jobId: string,
-    title: string,
     row: { readonly jobKind: string; readonly label: string; readonly status: string; readonly detail?: string },
   ): void => {
     const source = taskCenter()
@@ -591,23 +599,39 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     previousCloser?.()
     if (activeJobViewerToken !== viewerToken) return
     const viewerCurrent = (): boolean => activeJobViewerToken === viewerToken
-    const fallbackText = row.jobKind === 'subagent'
-      ? source.subagentJobViewHint(row.status, row.detail)
-      : jobStatusHint(row.status, row.detail)
-    // The selected Job is the ONLY observed Job (P1-B1). The observer is
-    // event-driven at its data source: the official follow stream updates
-    // this local snapshot and the viewer's existing refresh timer merely
-    // repaints it — the tick never reads Host output.
-    let observed: JobObservedSnapshot | undefined
-    let observationError: string | undefined
+    // The ONE captured state of this workspace instance: the opening Task row is
+    // the first-frame identity fallback, and every Job fact after the first
+    // snapshot comes from the SAME observed object.
+    let state: JobInspectorState = {
+      opening: {
+        jobId,
+        kind: row.jobKind,
+        label: row.label,
+        status: row.status,
+        ...(row.detail === undefined ? {} : { detail: row.detail }),
+      },
+    }
+    // The selected Job is the ONLY observed Job (P1-B1). The follow stream is
+    // opened EXACTLY once and pushes each snapshot straight into the workspace —
+    // no refresh timer, no `jobs.read()`, no second subscription. An open may
+    // emit synchronously, so the latest state is cached locally and the UI is
+    // pushed through a hook that is inert until the handle exists.
+    let handle: JobInspectorHandle | undefined
+    const publish = (): void => {
+      if (viewerCurrent()) handle?.update(state)
+    }
     let closeObserver: () => void = () => {}
     try {
-      closeObserver = source.jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
+      closeObserver = source.jobObservation.open(ownerSessionId, jobId, (next) => {
+        state = { ...state, observed: next }
+        publish()
+      })
     } catch (error) {
       // A composition without the official job-controller row (the injected
-      // production row guarantees it) degrades to the status-only detail —
-      // the documented safety valve — and says so explicitly.
-      observationError = safeErrorMessage(error)
+      // production row guarantees it) degrades to the opening row plus the
+      // VISIBLE reason — the documented safety valve — and never to a fabricated
+      // "finished with no output".
+      state = { ...state, observationError: safeErrorMessage(error) }
     }
     // ONE release owner for THIS open's subscription: Esc, the parent browser
     // retiring, a session reset and the final surface teardown all funnel
@@ -618,75 +642,83 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       observationReleased = true      // before releasing the external subscription
       closeObserver()
     }
-    const refreshBody = (): string => {
-      if (observed !== undefined) return formatJobObservation(observed)
-      // Only the opening row projection before the first observed snapshot:
-      // never a registry/roster re-read on the timer.
-      return observationError === undefined
-        ? fallbackText
-        : `${fallbackText}\nlive observation unavailable: ${observationError}`
-    }
     // The Stop key and its hint share ONE live capability source: THIS viewer
     // instance still current, the captured subject still current, and the
     // latest OBSERVED status (the opening row before the first snapshot).
     const activeForStop = (): boolean =>
       viewerCurrent()
       && source.subjectMatches(viewerSubject)
-      && isActiveJobStatus(observed?.status ?? row.status)
-    const closer = options.mounted().openOutputViewer({
-      title,
-      initial: fallbackText,
-      refresh: refreshBody,
-      onStop: () => {
-        // Re-check both fences at dispatch: a stale viewer/session
-        // confirmation dispatches nothing.
-        if (!activeForStop()) return
-        runOwned('job stop', () => source.jobObservation.stop(ownerSessionId, jobId), {
-          diag: taskDiag(),
-          sessionId: () => ownerSessionId,
-          onResult: (outcome) => {
-            if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
-            const notice = jobStopNotice(outcome, row.label)
-            options.mounted().notify(notice.message, notice.level)
-          },
-          onError: (error) => {
-            if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
-            options.mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        // No optimistic local mutation: the official roster/observation
-        // streams converge on their own.
-      },
-      canStop: activeForStop,
-      // The viewer was opened from the Task Center browser: Esc returns
-      // to the parent browser, not to the editor.
-      closeHint: 'back',
-      onClose: () => {
-        // Read the currentness ONCE: a stale (replaced) viewer must neither
-        // clear the live closer nor repaint with its own context.
-        const wasCurrent = activeJobViewerToken === viewerToken
-        // Invalidate THIS viewer's instance fence BEFORE releasing, so a Stop
-        // settlement still in flight can never notify a replacement surface.
-        if (wasCurrent) {
+      && isActiveJobStatus(state.observed?.status ?? row.status)
+    const stopOnce = (): void => {
+      // Re-check both fences at dispatch: a stale viewer/session
+      // confirmation dispatches nothing.
+      if (!activeForStop()) return
+      runOwned('job stop', () => source.jobObservation.stop(ownerSessionId, jobId), {
+        diag: taskDiag(),
+        sessionId: () => ownerSessionId,
+        onResult: (outcome) => {
+          if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
+          const notice = jobStopNotice(outcome, row.label)
+          options.mounted().notify(notice.message, notice.level)
+        },
+        onError: (error) => {
+          if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
+          options.mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+        },
+      })
+      // No optimistic local mutation: the official roster/observation streams
+      // converge on their own.
+    }
+    try {
+      handle = options.mounted().openJobInspector({
+        initial: state,
+        canStop: activeForStop,
+        onStop: stopOnce,
+        // The viewer was opened from the Task Center browser: closing the
+        // workspace returns to that same browser, not to the editor.
+        onClose: () => {
+          // Read the currentness ONCE: a stale (replaced) viewer must neither
+          // clear the live closer nor repaint with its own context.
+          const wasCurrent = activeJobViewerToken === viewerToken
+          // Invalidate THIS viewer's instance fence BEFORE releasing, so a Stop
+          // settlement still in flight can never notify a replacement surface.
+          if (wasCurrent) {
+            activeJobViewerToken = undefined
+            activeJobViewerClose = undefined
+          }
+          // Leaving the workspace always releases the observer (Esc, the parent
+          // browser closing, a session transition, or surface teardown); the
+          // owner repaint is an INDEPENDENT obligation.
+          runSyncDisposalSteps('job viewer finalization', [
+            releaseOnce,
+            () => {
+              if (wasCurrent && activeJobViewerToken === undefined && !options.isCleanedUp()) refreshTasks()
+            },
+          ])
+        },
+      })
+    } catch (error) {
+      // The workspace mount/start failed: the lease never published, so release
+      // THIS open's observation exactly once, retire the instance fence, and
+      // rethrow the real failure — never a silent "no output" and never a leaked
+      // background stream.
+      runSyncDisposalStepsWithPrimary('job viewer open failure', error, [
+        releaseOnce,
+        () => {
+          if (!viewerCurrent()) return
           activeJobViewerToken = undefined
           activeJobViewerClose = undefined
-        }
-        // Closing the viewer always releases the observer (Esc, the parent
-        // browser closing, a session transition, or surface teardown); the
-        // owner repaint is an INDEPENDENT obligation.
-        runSyncDisposalSteps('job viewer finalization', [
-          releaseOnce,
-          () => {
-            if (wasCurrent && activeJobViewerToken === undefined && !options.isCleanedUp()) refreshTasks()
-          },
-        ])
-      },
-    })
-    // Only the STILL-current selection owns the global closer slot: if the
-    // mount synchronously closed/replaced this viewer, the newer owner's slot
-    // must survive and this stale handle is closed on its own.
-    if (activeJobViewerToken === viewerToken) activeJobViewerClose = closer
-    else closer()
+        },
+      ])
+    }
+    // First-frame guarantee: the observation may have emitted BEFORE the handle
+    // existed; present the captured state once now that the workspace can.
+    publish()
+    // Only the STILL-current selection owns the global closer slot: if the mount
+    // synchronously closed/replaced this workspace, the newer owner's slot must
+    // survive and this stale handle is closed on its own.
+    if (activeJobViewerToken === viewerToken) activeJobViewerClose = () => handle?.close()
+    else handle?.close()
   }
 
   /**
@@ -733,10 +765,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // fallback and let /tasks (which owns child identities through
       // the merged browser) perform transcript selection; never substitute
       // label/order/time matching.
-      openJobStatusViewer(jobId, `subagent ${row.jobId} · ${row.label}`, row)
+      openJobStatusViewer(jobId, row)
       return 'keep-open'
     }
-    openJobStatusViewer(jobId, `${row.jobKind} ${row.jobId} · ${row.label}`, row)
+    openJobStatusViewer(jobId, row)
     return 'keep-open'
   }
 

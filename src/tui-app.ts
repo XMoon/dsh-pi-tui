@@ -143,8 +143,9 @@ import { isDiffResult, summarizeDiffs } from './tui/transcript/diff-projection.t
 import { renderDiffLines, renderDiffView } from './tui/components/transcript/diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
+import { JobInspectorPanel } from './tui/panels/job-inspector-panel.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
-import type { TaskBrowserViewState } from './app/surface/task-runtime.ts'
+import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
 import type { StatusStore } from './domain/status/store.ts'
 import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
@@ -1467,6 +1468,54 @@ export interface PickerHandle {
   _removeAbortListener?(): void
 }
 
+/**
+ * The opening options of ONE Job workspace (Phase 3B / B1-A). The opener (the
+ * Task Runtime Job viewer) owns the observation; the app owns only the
+ * temporary physical screen lease over it.
+ */
+export interface JobInspectorOpenOptions {
+  /** The ONE captured Job state of this workspace instance (the opening row
+   *  before the first observed snapshot). */
+  readonly initial: JobInspectorState
+  /** The live Stop capability (instance/subject/status fenced by the opener). */
+  readonly canStop: () => boolean
+  /** The opener's Stop intent (the existing `jobObservation.stop` call). */
+  readonly onStop: () => void
+  /** The ONE re-entrant closure notification: the opener releases its
+   *  observation and retires its viewer token here, and may synchronously open
+   *  a newer Job. */
+  readonly onClose: () => void
+}
+
+/** The returned control of an open Job workspace. Both methods are fenced by
+ *  THIS workspace instance: a stale handle can neither repaint nor close a
+ *  newer one. */
+export interface JobInspectorHandle {
+  /** Replace the presented Job state (presentation only; never a source write). */
+  update(state: JobInspectorState): void
+  /** Leave the Job workspace and restore the surface that opened it. */
+  close(): void
+}
+
+/**
+ * The ONE short-lived Job workspace screen lease. The Job renders in its own
+ * temporary alt screen while the screen that opened it — the regular surface or
+ * the transcript alt screen, TOGETHER with its object tree, focus and live
+ * state — is only STOPPED. `TuiApp.fullscreen` stays the user's transcript
+ * display mode throughout.
+ */
+interface JobWorkspaceRecord {
+  readonly token: object
+  readonly screen: TuiAltScreen
+  readonly panel: JobInspectorPanel
+  readonly returnScreen: TuiMainScreen | TuiAltScreen
+  readonly returnFocus: Component | null
+  /** Latch + release this instance's screen and panel exactly once. */
+  readonly finalizeOnce: () => void
+  /** The ONE close path: finalize, restore the return surface, then notify. */
+  readonly close: () => void
+}
+
 /** Live control of an open task browser (rows carry status/startedAt). */
 export interface TaskBrowserHandle {
   /** Close the browser without a selection. */
@@ -2648,6 +2697,13 @@ export class TuiApp {
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
+  /**
+   * The ONE current Job workspace lease (Phase 3B / B1-A), or undefined. Its
+   * `screen` is the physical owner while it is set: `activeScreen` derives the
+   * whole render/input/focus arbitration from THIS record, so no parallel
+   * `isJobOpen` boolean can disagree with the physical owner.
+   */
+  private jobWorkspace: JobWorkspaceRecord | undefined
   /** The fullscreen mouse-wheel step (transcript lines per wheel event).
    * A Client runtime preference: the fork's `wheelScrollLines` is a
    * constructor-time alt-screen option, so this value feeds the NEXT
@@ -3996,6 +4052,11 @@ export class TuiApp {
    * the round-trip (they die only with dispose()).
    */
   private suspendForExternalEditor(): void {
+    // A Job workspace leases its OWN terminal screen: $EDITOR must never take
+    // the PTY over while the Job screen is still the physical owner. Leave the
+    // workspace first (the SAME close path Esc uses, restoring the surface the
+    // user was in), then suspend that surface.
+    this.jobWorkspace?.close()
     this.keybindings.cancelLeader()
     this.clearExitConfirmation()
     this.lastEscapeAt = undefined
@@ -4045,6 +4106,11 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * tui/process-slot.ts). */
   stop(): void {
+    // The stop boundary is a terminal-ownership boundary: a leased Job workspace
+    // screen must be released FIRST (through the same close path Esc uses), so
+    // the screens stopped below are the only remaining physical owners and no Job
+    // screen keeps a terminal input handler alive.
+    this.jobWorkspace?.close()
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
     this.leaveTerminalPresentation()
@@ -4495,6 +4561,13 @@ export class TuiApp {
     this.optionalSeat = undefined
     if (optionalSeat !== undefined) optionalSeat.finalized = true
     runSyncDisposalSteps('tui dispose', [
+      // Phase 3B / B1-A: the leased Job workspace screen is released FIRST —
+      // through the SAME close path Esc uses, so its observer notification (the
+      // opener's releaseOnce) still runs exactly once, its temporary alt screen
+      // never keeps a terminal input handler into the dying surface, and the
+      // overlay teardown below never meets a foreign physical owner. `disposed`
+      // is already latched, so the close deliberately skips the screen restore.
+      () => this.jobWorkspace?.close(),
       // The optional tenant is released FIRST (its identity is already gone):
       // no later settlement, projection or focus path in this batch may touch
       // it, and no stale surface callback can survive the teardown.
@@ -4883,10 +4956,13 @@ export class TuiApp {
     //     existing X036 divergence it deliberately does NOT consume,
     //     so the report keeps flowing to the focused component
     //     afterwards (the editor ignores ESC-prefixed sequences — that
-    //     is the pre-existing X036 behavior, not a host guarantee).
+    //     is the pre-existing X036 behavior, not a host guarantee). The
+    //     temporary Job workspace screen is such a viewport owner too:
+    //     the predicate is the ACTIVE screen's mode, never the user's
+    //     transcript display mode.
     if (data === '\x1b[O' || data === '\x1b[I') {
       this.events.onTerminalFocus?.(data === '\x1b[I')
-      if (this.fullscreen !== undefined) return undefined
+      if (this.activeScreen.mode === 'fullscreen') return undefined
       return { consume: true }
     }
     // Kitty-protocol terminals report press, repeat, and release events as
@@ -4927,6 +5003,20 @@ export class TuiApp {
     if (this.approvals.isActive()) {
       this.clearExitConfirmation()
       return this.approvals.handleKey(data)
+    }
+    // Phase 3B / B1-A: a leased Job workspace screen owns ordinary input. The
+    // workspace is READ-ONLY — the key goes to its presenter (Esc closes it,
+    // `tasks.stop` fires the opener's Stop only while its live capability holds)
+    // and is consumed, so nothing leaks into the background transcript, the
+    // original editor, the Task Browser or a host action. Blocking owners keep
+    // their precedence: the Question/Approval/Save branches above (and the
+    // host-reserved focus/mouse/protocol paths before them) already had their
+    // chance, and the three blocking entries leave the workspace BEFORE it could
+    // swallow a key they need.
+    if (this.jobWorkspace !== undefined) {
+      this.clearExitConfirmation()
+      this.jobWorkspace.panel.handleInput(data)
+      return { consume: true }
     }
     // The subagent viewer input policy is MODE-AWARE:
     // - one-shot: read-only — every key except Esc (exit) and Ctrl+O (the
@@ -5850,13 +5940,14 @@ export class TuiApp {
   }
 
   /**
-   * The screen currently rendering: the alt screen in fullscreen mode, the
-   * main screen otherwise. Every render request, terminal query and overlay
-   * mount routes through this accessor so regular and fullscreen modes
-   * always target the ACTIVE screen (M0 naming; previously overlayHost).
+   * The screen currently rendering: the temporary Job workspace screen while
+   * one is leased, else the alt screen in fullscreen mode, else the main
+   * screen. Every render request, terminal query and overlay mount routes
+   * through this accessor so regular, fullscreen and Job-workspace modes always
+   * target the ACTIVE screen (M0 naming; previously overlayHost).
    */
   private get activeScreen(): TuiMainScreen | TuiAltScreen {
-    return this.fullscreen ?? this.tui
+    return this.jobWorkspace?.screen ?? this.fullscreen ?? this.tui
   }
 
   /**
@@ -6234,6 +6325,13 @@ export class TuiApp {
    */
   setFullscreen(enabled: boolean): void {
     if (this.disposed) return
+    // A leased Job workspace owns the physical screen: a display-mode switch
+    // now would detach the PAUSED return surface (killing its broker graph, its
+    // Task Browser overlay and the transcript object this workspace promises to
+    // restore) and would rewrite the user's persisted preference. The request is
+    // simply not applied while the workspace is leased — the preference value
+    // itself is untouched and takes effect after the user leaves the Job.
+    if (this.jobWorkspace !== undefined) return
     // Fullscreen transitions change the focused screen and disarm transient
     // keyboard confirmation state.
     this.clearExitConfirmation()
@@ -6538,7 +6636,7 @@ export class TuiApp {
     // any) was rebind-restored above as the same logical node.
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
-      (this.fullscreen ?? this.tui).setFocus(question.frame)
+      this.activeScreen.setFocus(question.frame)
     }
     // A Save Location prompt survives the switch through the SHARED seat
     // the same way: keep its frame focused on the new screen (the prompt's
@@ -6546,7 +6644,7 @@ export class TuiApp {
     // above wins when both are somehow active.
     const saveLocation = this.activeSaveLocation
     if (saveLocation?.frame !== undefined) {
-      (this.fullscreen ?? this.tui).setFocus(saveLocation.frame)
+      this.activeScreen.setFocus(saveLocation.frame)
     }
     // The surface slice tracks the mode switch (plan §7.1).
     this.extensionHost?.updateSurface({ fullscreen: enabled })
@@ -16607,7 +16705,7 @@ export class TuiApp {
     // from the CURRENT terminal geometry on every render — a resize lands
     // here on the first repaint after the event.
     this.syncSurfaceGeometry()
-    ;(this.fullscreen ?? this.tui).requestRender(force)
+    ;this.activeScreen.requestRender(force)
   }
 
   /** Mirror the live terminal geometry into the extension surface slice
@@ -19523,6 +19621,167 @@ export class TuiApp {
   }
 
   /**
+   * Open the selected-Job fullscreen workspace (Phase 3B / B1-A): a temporary
+   * `TuiAltScreen` whose layout root AND keyboard focus target is the Job
+   * `JobInspectorPanel`. The screen that opened it (the regular surface or the
+   * transcript alt screen) is only STOPPED with `preserveScreen` — its object
+   * tree, focus, draft and scroll state survive the round trip, nothing is
+   * disposed or rebuilt, and `TuiApp.fullscreen` (the USER's transcript display
+   * mode) is never touched, so no `onFullscreenChange` is emitted.
+   *
+   * The lease is committed to `this.jobWorkspace` BEFORE the physical switch, so
+   * every render request, input route and re-entrant closer observes the same
+   * current owner. Exactly ONE `TuiBase` owns the shared terminal at any time.
+   * @param options - the captured Job state plus the opener's intents.
+   * @returns the instance-fenced handle of THIS workspace.
+   */
+  openJobInspector(options: JobInspectorOpenOptions): JobInspectorHandle {
+    if (this.disposed) throw new Error('cannot lease a Job workspace screen on a disposed surface')
+    if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
+    // A blocking owner outranks the Job view: refuse the lease and leave the
+    // current keyboard owner untouched (the opener releases its observation).
+    if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
+      throw new Error('a blocking modal owns the surface')
+    }
+    const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
+    const returnFocus = returnScreen.getFocusedComponent()
+    const token: object = {}
+    let record: JobWorkspaceRecord
+    const panel = new JobInspectorPanel(options.initial, {
+      rows: () => this.terminal.rows,
+      requestRender: () => this.requestRender(),
+      onClose: () => record.close(),
+      canStop: options.canStop,
+      onStop: options.onStop,
+    })
+    const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
+      deferViewportListener: true,
+      copySelection: this.copySelection,
+      wheelScrollLines: this.wheelScrollLines,
+    })
+    screen.setLayoutRoot(panel)
+    // Registration order IS dispatch order (X043): the host router first, then
+    // the viewport listener (wheel/selection), then the protocol sink fence —
+    // the same order the transcript alt screen installs. This screen owns NO
+    // transcript boundary or cell-click callback: its wheel can only move the
+    // Job body, never the main transcript.
+    screen.addInputListener((data) => this.routeInput(data))
+    screen.installViewportListener()
+    screen.addInputListener((data) => this.protocolSinkFence(data))
+
+    let finalized = false
+    /** The instance latch + detach: idempotent and non-throwing, committed
+     *  BEFORE any callback of this workspace, so a re-entrant closer can never
+     *  act twice and a stale record can never be treated as the owner. */
+    const finalizeOnce = (): void => {
+      if (finalized) return
+      finalized = true
+      if (this.jobWorkspace === record) this.jobWorkspace = undefined
+    }
+    const close = (): void => {
+      if (finalized) return
+      // ONE ordered non-truncating batch: the latch first, then the screen and
+      // panel release, the return-surface restore and the exactly-once owner
+      // notification — a throwing sibling never strands another obligation.
+      // The restore runs BEFORE the notification, so a synchronously leased
+      // newer workspace observes (and may legitimately replace) the restored
+      // physical state.
+      runSyncDisposalSteps('job workspace close', [
+        finalizeOnce,
+        () => screen.stop(),
+        () => panel.dispose(),
+        () => {
+          // Restore ONLY while no newer physical owner exists: a callback during
+          // the release above may have leased a newer workspace or legitimately
+          // swapped the surface, and a stale workspace never overwrites it.
+          if (!this.disposed && this.jobWorkspace === undefined && this.activeScreen === returnScreen) {
+            this.resumeJobReturnSurface(returnScreen, returnFocus)
+          }
+        },
+        () => { options.onClose?.() },
+      ])
+    }
+    /** A synchronous callback during ANY physical step of the open sequence may
+     *  close or replace THIS workspace. The stale opener must then abandon its
+     *  own sequence (the catch below rethrows) instead of starting a screen for
+     *  a record that is already gone. */
+    const assertStillOpening = (): void => {
+      if (finalized) throw new Error('the Job workspace was superseded while it was opening')
+    }
+    record = { token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
+    this.jobWorkspace = record
+    try {
+      this.leaveTerminalPresentation()
+      assertStillOpening()
+      returnScreen.stop({ preserveScreen: true })
+      assertStillOpening()
+      screen.start()
+      assertStillOpening()
+      // Mode 2031 is per screen: the freshly started screen syncs the CURRENT
+      // tracking choice now that it owns the terminal.
+      screen.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
+      // The stopped screen cleared the physical progress indicator; re-assert
+      // the desired state on the new owner and let it hear scheme reports.
+      this.enterTerminalPresentation()
+      assertStillOpening()
+      this.refreshSchemeRegistrations()
+      screen.setFocus(panel)
+    } catch (error) {
+      // A failed mount must never leave half a surface: latch/detach THIS record,
+      // release its screen and panel, restore the surface that opened it, and
+      // rethrow the real failure (the opener releases its observation lease on
+      // the same path). A re-entrant closer that already handled this record left
+      // `finalized` set, so every step below is skipped.
+      const alreadyClosed = finalized
+      runSyncDisposalStepsWithPrimary('job workspace open unwind', error, [
+        finalizeOnce,
+        () => { if (!alreadyClosed) screen.stop() },
+        () => { if (!alreadyClosed) panel.dispose() },
+        () => {
+          if (!alreadyClosed && !this.disposed && this.jobWorkspace === undefined && this.activeScreen === returnScreen) {
+            this.resumeJobReturnSurface(returnScreen, returnFocus)
+          }
+        },
+      ])
+    }
+    return {
+      update: (state: JobInspectorState): void => {
+        // Instance fence: a stale handle can neither repaint nor notify a newer
+        // workspace.
+        if (finalized || this.jobWorkspace?.token !== token) return
+        panel.update(state)
+      },
+      close: () => close(),
+    }
+  }
+
+  /**
+   * Re-enter the surface a Job workspace paused: start the SAME screen object
+   * (`preserveScreen` kept its renderer identity), re-assert terminal
+   * presentation and the scheme fan-out, and repaint from row 0. Focus is only
+   * re-assigned when the paused screen has NO focused component left — its own
+   * focus survived the pause, and the workspace never forces the editor back.
+   */
+  private resumeJobReturnSurface(screen: TuiMainScreen | TuiAltScreen, returnFocus: Component | null): void {
+    screen.start()
+    if (screen === this.tui) {
+      // The alt screen's stop disabled focus reporting (?1004l rides the
+      // mouse-disable sequence) and the regular screen keeps needing focus
+      // events (the host's completion-notification tracker observes them) — the
+      // same re-assert setFullscreen(false) performs on a swap back to regular.
+      try {
+        this.terminal.write(ENABLE_FOCUS_REPORTING)
+      } catch {
+        // A broken stdout degrades focus reporting silently.
+      }
+    }
+    if (screen.getFocusedComponent() === null) screen.setFocus(returnFocus)
+    this.enterTerminalPresentation()
+    this.refreshSchemeRegistrations()
+    this.requestRender(true)
+  }
+
+  /**
    * Open the live output viewer: a titled text panel with a fixed bottom
    * action hint, refreshed by a timer while open (the caller returns the
    * accumulated output each tick; a terminal job's final read is
@@ -19810,6 +20069,9 @@ export class TuiApp {
     this.schemeDisposers = []
     const screens: Array<TuiMainScreen | TuiAltScreen> = [this.tui]
     if (this.fullscreen !== undefined) screens.push(this.fullscreen)
+    // A Job workspace screen owns the terminal just like the transcript alt
+    // screen: scheme reports arrive THERE while it is leased.
+    if (this.jobWorkspace !== undefined) screens.push(this.jobWorkspace.screen)
     for (const screen of screens) {
       this.schemeDisposers.push(screen.onTerminalColorSchemeChange((scheme) => {
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
@@ -19832,6 +20094,12 @@ export class TuiApp {
     request: ApprovalPromptRequest,
     agentInputWait = false,
   ): Promise<ApprovalOutcome> {
+    // Phase 3B / B1-A modal precedence: the blocking owner ARRIVES — leave the
+    // Job workspace BEFORE the approval claims the seat, so the restored surface
+    // is the one the approval mounts on and no second keyboard owner can exist.
+    // A synchronous closer that starts a newer blocking owner is rejected by the
+    // existing owner identity fences below, not by this line.
+    this.jobWorkspace?.close()
     return this.approvals.showPrompt(request, agentInputWait)
   }
 
@@ -20014,6 +20282,11 @@ export class TuiApp {
    * fence: a flow that a callback preempted, replaced or cancelled must never
    * mount, focus or publish its frame (Phase 3A / PR-B §B2/§B5). */
   private presentQuestion(state: QuestionState): void {
+    // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
+    // question claims the seat (`activeQuestions` below), so the flow mounts and
+    // focuses on the restored surface — never on a screen the workspace still
+    // owns, and never with the Job swallowing the user's answer keys.
+    this.jobWorkspace?.close()
     // M6: a question owns the seat now — any pending leader sequence is
     // cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
@@ -20090,7 +20363,7 @@ export class TuiApp {
     // ALIVE but detached; the non-owning replace() never disposes it (a
     // disposed component tree would render empty after the round-trip).
     this.editorSeat.replace(frame)
-    const screen = this.fullscreen ?? this.tui
+    const screen = this.activeScreen
     screen.setFocus(frame)
     // The focus transition runs the previous owner's onBlur: a newer operation
     // it started (a settle, a replacement, a disposal) owns the final state.
@@ -20213,7 +20486,7 @@ export class TuiApp {
       // hands back the suspension it still owns (its successor already took the
       // graph) and must never re-focus its retired frame over the newer owner.
       () => { this.abandonIfDead(this.questionFlowIsLive(target), target) },
-      () => { if (this.questionFlowIsLive(target)) (this.fullscreen ?? this.tui).setFocus(target.frame!) },
+      () => { if (this.questionFlowIsLive(target)) this.activeScreen.setFocus(target.frame!) },
       // The next queued flow owns the seat (follow-up P1).
       () => { if (this.questionFlowIsLive(target)) this.setFocusSeat('overlay') },
       // The wait that owns the surface CHANGED — a different flow, possibly
@@ -20384,6 +20657,11 @@ export class TuiApp {
         reject(cancellationError('a host question or approval is active'))
         return
       }
+      // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
+      // prompt state (and its frame) exists, so the Save Location prompt mounts
+      // on the restored surface and the workspace can never swallow its keys.
+      // The refusal checks above already decided this request may proceed.
+      this.jobWorkspace?.close()
       const state: SaveLocationState = {
         prompt: new SaveLocationPrompt(
           request,
@@ -20451,7 +20729,7 @@ export class TuiApp {
     // editor's compiled component) stays ALIVE but detached; the non-owning
     // replace() never disposes it (the same rule as the question flow).
     this.editorSeat.replace(frame)
-    const screen = this.fullscreen ?? this.tui
+    const screen = this.activeScreen
     screen.setFocus(frame)
     if (this.abandonIfDead(this.saveLocationFlowIsLive(state), state)) return
     this.setFocusSeat('overlay')
