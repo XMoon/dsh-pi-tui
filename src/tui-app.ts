@@ -6643,7 +6643,16 @@ export class TuiApp {
     // until the reconcile folds it over the snapshot.
     this.editor.clearHistory()
     this.inputHistory.length = 0
-    this.seedInputHistory(this.scopeInputs.map(entry => entry.text))
+    // Only what this owner can still own: an occurrence whose row was already
+    // written under ANOTHER identity (a sessionless local command, say) is settled
+    // and must not appear in this Session's recall even for a moment; an occurrence
+    // that is merely unpersisted belongs to this owner and stays.
+    this.seedInputHistory(this.scopeInputs
+      .filter(entry => {
+        const settled = this.scopeSettled.get(entry.token)
+        return settled === undefined || settled.owner === owner || settled.outcome !== 'written'
+      })
+      .map(entry => entry.text))
     this.scopeOwner = owner
     this.scopeOpen = true
   }
