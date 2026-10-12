@@ -88,7 +88,12 @@ function stepEffort(panel: ModelPickerPanel, delta: -1 | 1): ModelPickerIntent |
 
 /** The frozen Tab/Shift+Tab cycle across the three K2 zones. */
 function tabZone(panel: ModelPickerPanel, direction: -1 | 1): ModelPickerZone {
-  const hasChoices = modelChoices(highlightedModel(panel)).length > 0
+  // The effort selector exists only while the phase admits BROWSING. A failed (or
+  // running) read keeps the previous rows and their effort metadata for context, but
+  // its bar offers nothing but Retry/Close, so Tab must reach that bar instead of
+  // parking the keyboard in an inert effort zone the phase cannot operate.
+  const browsable = panel.phase === 'ready'
+  const hasChoices = browsable && modelChoices(highlightedModel(panel)).length > 0
   // The compact details page is static fact: its only reachable region is the
   // explicit action bar (Back / Choose effort / Primary).
   if (panel.page === 'details' && panel.zone !== 'effort') {
