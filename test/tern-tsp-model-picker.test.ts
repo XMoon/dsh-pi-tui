@@ -502,21 +502,28 @@ test('native Model: the action bar per page and phase offers only what it can ru
   // `Confirm` and never a multi-entry menu.
   assert.deepEqual(actionIds(pane), ['close', 'retry', 'apply'])
   assert.deepEqual(actionLabels(pane), ['Cancel', 'Retry', 'Save default'])
-  // The Overview is the model's own actionable page: Back + the one write.
+  // The Overview is the model's own actionable page: the frozen footer cap is
+  // `Back` + the ONE write — no `Cancel` (a user leaves with Back/Esc and
+  // cancels from the model list).
   await resize(pane, 100)
   await waitUntil('compact', () => props(pane).size === 'md')
   assert.deepEqual(actionIds(pane), ['close', 'retry'], 'the compact model list commits nothing')
   await enterOverview(pane)
-  assert.deepEqual(actionIds(pane), ['close', 'back', 'apply'])
-  assert.deepEqual(actionLabels(pane), ['Cancel', 'Back', 'Save default'])
-  // The read-only Full details page has exactly one way out and no write.
+  assert.deepEqual(actionIds(pane), ['back', 'apply'])
+  assert.deepEqual(actionLabels(pane), ['Back', 'Save default'])
+  assert.equal(actionOf(pane, 'close'), undefined, 'the Overview footer carries no Cancel')
+  // The read-only Full details page is Back ALONE: no cancel entry, no write.
   await walkList(pane, OVERVIEW_DETAILS_ID)
   pane.key('\r')
   await waitUntil('details page', () => props(pane).title === 'Full model details')
-  assert.deepEqual(actionIds(pane), ['close', 'back'])
+  assert.deepEqual(actionIds(pane), ['back'])
+  assert.deepEqual(actionLabels(pane), ['Back'])
+  assert.equal(actionOf(pane, 'close'), undefined, 'the read-only page footer carries no Cancel')
   assert.equal(actionOf(pane, 'apply'), undefined, 'the read-only page carries no write')
-  action(pane, 'back')
-  await waitUntil('back on the Overview', () => props(pane).title === 'Model overview')
+  // The panel's own dismissal authority stays ADMITTED there (the client's
+  // backdrop gesture is the same intent Esc uses), it is just not a button.
+  action(pane, 'close')
+  await waitUntil('a backdrop-style close still dismisses the panel', () => picker(pane) === undefined)
   m.handle.close()
   // A LIVE subject names the same action differently: it switches the Session.
   const live = await mounted(t, { sessionless: false })
@@ -1208,7 +1215,7 @@ test('native Model: every visible action is keyboard reachable and never a no-op
   await resize(sp, 100)
   await waitUntil('compact again', () => props(sp).size === 'md')
   await enterOverview(sp)
-  assert.deepEqual(actionIds(sp), ['close', 'back', 'apply'])
+  assert.deepEqual(actionIds(sp), ['back', 'apply'], 'the Overview footer is Back + the one write')
   sp.key('\t')
   await waitUntil('the Overview primary is focused', () => focusCue(sp, 'apply'))
   sp.key('\u001b[D')
@@ -1216,9 +1223,9 @@ test('native Model: every visible action is keyboard reachable and never a no-op
   sp.key('\r')
   await waitUntil('Enter ran the focused Back', () => props(sp).title === 'Models')
   assert.equal(second.writes.length, 0, 'no bar action ever wrote here')
-  // The read-only details page: only Back.
+  // The read-only details page: Back alone, and Tab really reaches it.
   await openDetails(sp)
-  assert.deepEqual(actionIds(sp), ['close', 'back'])
+  assert.deepEqual(actionIds(sp), ['back'], 'the read-only footer is Back alone')
   sp.key('\t')
   await waitUntil('the details Back is focused', () => focusCue(sp, 'back'))
   sp.key('\r')

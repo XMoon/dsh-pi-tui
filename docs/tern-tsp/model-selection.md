@@ -49,9 +49,10 @@ shell):
   the same zone opens the Overview instead, exactly as that card's own
   `Open model & effort ›` label says (see below). In the K2 ring the card is the
   `detail-card` zone in both forms. The SDK dispatches such an action by EXACT
-  node id with no bubbling, so whether a real client reports a click landing on a
-  nested body text node as the CARD's id is `NOT_VERIFIED` (see the list at the end
-  of this document); the `Enter` path does not depend on it.
+  node id with no bubbling, and a real pane confirms the client attributes a click
+  on the card's HEAD **and on its nested body text lines** to the card node, so
+  the whole card is a hit area (see "Real-pane verification" below); the `Enter`
+  path does not depend on the pointer at all.
 - When the column provably presents the whole details card and every advertised
   effort (`widePreviewFits`), the column also renders the `Reasoning Effort`
   card, whose options are native `row`s acting as radio buttons. Clicking a row
@@ -85,6 +86,14 @@ At `cols < 120` the same picker renders `preview: 'none'`:
   a click drafts on an effort row, opens the Full details page on the details
   row, and is inert on a static identity row;
 - the Full details page is read-only and its only action is `Back`.
+
+The compact picker shows the open-time subject (`Default model` / `Session model`)
+once, on the native `strip`'s own line, because that is the picker's only
+single-complete-line slot at `md` (the header title truncates a long line). That
+line is a READ-ONLY DISPLAY with an empty chip list: it carries no `Action:` text,
+no operation chip and no clickable entry, and it is not the removed global action
+strip. The subject is never duplicated into the title, and at `lg` it uses the
+picker's `subtitle` instead — so it has exactly one complete slot per layout.
 
 The Overview is also what the wide BOUNDED column opens, so `cols` never decides
 whether the full content is reachable.
@@ -189,15 +198,17 @@ Question/Approval modal owns the keyboard before the Model panel.
 ### The action bar
 
 The native action bar lays its buttons on ONE line and does not wrap them, and the
-bar has no scroll port of its own, so the bar is SHORT AND FIXED: `Cancel` plus at
-most the page's own operations.
+bar has no scroll port of its own, so the bar is SHORT AND FIXED and the frozen
+table caps it per page: no more than `Cancel` (+ `Retry`) (+ the one write) on the
+model list, `Back` + the one write on the Overview, and `Back` ALONE on the
+read-only page.
 
 | Page / phase | Action bar (left to right) |
 |---|---|
 | `models`, wide | `Cancel`, `Retry` (only while part of the directory failed), `Switch` / `Save default` |
 | `models`, compact | `Cancel`, `Retry` (only while part of the directory failed) — **no write** |
-| `overview` | `Cancel`, `Back`, `Switch` / `Save default` |
-| `details` | `Cancel`, `Back` (this page never writes) |
+| `overview` | `Back`, `Switch` / `Save default` — **no `Cancel`** |
+| `details` | `Back` alone — **no `Cancel`, no write** |
 | `error` | `Cancel`, read-only `Retry` |
 | `loading` | `Cancel`, a disabled `Switch` / `Save default` |
 | `pending` | `Close`, a disabled `Selecting…` |
@@ -205,8 +216,15 @@ most the page's own operations.
 `Cancel` is the visible label of the stable `close` action, and while a write is
 ADMITTED it reads `Close`: closing the panel does not cancel an operation that is
 already with the Host, and the label must not promise an undo the contract does
-not offer. `Retry` is the stable `retry` action and is the only action a failed
-read offers; it is read-only and re-reads through the command's single read owner.
+not offer. The content pages therefore carry NO `Cancel` button: a user leaves them
+with `Back` (or `Esc`, the same intent) and cancels from the model list, which is
+what keeps the Overview inside the frozen two-entry cap. The `close` INTENT itself
+stays admitted on every page, because it is the panel's own DISMISSAL authority —
+the same intent `Esc` and the client's backdrop gesture use — and dismissing can
+never write; only the page OPERATIONS (`back`, `retry`, `apply`) have to be really
+rendered by the current bar. `Retry` is the stable `retry` action and is the only
+action a failed read offers; it is read-only and re-reads through the command's
+single read owner.
 
 The action **ids** are the routing authority and stay stable: `close`, `back`,
 `retry`, `apply`. The key map and the row router act on those ids, never on
@@ -413,36 +431,33 @@ keeps the PiTui picker behavior; `test/tern-tsp-model-profile.test.ts` keeps the
 official Loader/ConfigEditor profile save, the authoritative reopen and disk
 recovery through a fresh Context.
 
-## Qualification limits
+## Real-pane verification of the restructured surface
 
-Physical wheel, IME and OS-focus semantics, dark themes, terminal scaling, screen
-readers, directories beyond the scripted sizes, the shipped full-profile/HMR,
-clean live-Agent teardown and the Remote TSP application success path are NOT
-certified by these lanes: the real-pane driver summarized in
-[the evidence doc](./evidence/pr4-a.md) §0 exercises pointer clicks and keys on
-exactly the paths it lists, and nothing beyond them. Headless real-Tern runs (the
-renderer's own tree and PNG) are kept outside the repository with the review
-package; this document records the maintainable behavior and boundaries.
+The restructuring revision was driven in a real Tern pane (real Tern `0.8.2`,
+`tern serve` + `tern ctl`, software rendering, the locked `@stencil-hq/tern@0.1.0`)
+with the PRODUCTION `TspModelPicker` mounted over one official SDK inline surface
+and REAL input: `ctl key` (real key events) and `ctl click <selector>` (real
+pointer clicks). Measurements are quoted as the client's own element boxes
+(CSS px at `deviceScaleFactor` 2), and the PNG/tree captures stay outside Git with
+the review package.
 
-**Not verified in this revision (real pane).** The restructured surface has NOT
-been re-driven in a physical Tern pane yet, so the following stay `NOT_VERIFIED`
-and are not claimed as passing:
+| Verified | Result |
+|---|---|
+| real row gestures | clicking a NOT-selected model row sends `select {item}`; a double click sends `select` and then `activate` on the NEXT frame, and the wide list only highlights (no page change, no write); clicking the already-selected row sends `activate` |
+| real keys | `Enter` on the model list opens the model's Overview (a real `enter` key event); `Esc` on the read-only page returns to the model list (`Back`, not close); `Tab` on the Overview renders the app's `▸ Switch` focus cue |
+| the wide details card's pointer hit | a real click on the card HEAD (`.sf-card-head`), on a BODY TEXT line (`.sf-card-body .sf-text`) and on the card slot wrapper (`.pk-pv-slot`) each opened the read-only Full details page — the client attributes body-text clicks to the CARD node, so the `onClick` hit area is not limited to the header |
+| the frozen footer caps | at 1280x800 the models footer is `Cancel` + `Switch`; at 400x600 the compact models footer is `Cancel` ALONE (no write) and the Overview footer is `Back` + `Switch`; the read-only page is `Back` alone (no `Cancel` anywhere on a content page) |
+| footer containment | 1280x800: `pk-bar` x 80..1200 holds `Cancel` [1047.6,728,60.5,28] and `Switch` [1120,726,68,32] (right edge 1188); 400x600: `pk-bar` x 30..370 holds `Back` [40,533,43.8,28] and `Switch` [294.1,531,68,32] (right edge 362.1) — every button is fully inside its bar at both sizes |
+| pointer operability of the one write | at 400x600 a real click on the primary button sent `action {act:'apply'}`, the panel showed `Close` + a disabled `Selecting…`, and exactly ONE `apply({provider,model,reasoningEffort})` reached the writer; the refusal path left the Overview usable with its buttons restored |
+| resize | the real `resize` event drives the layout (400px ⇒ `cols` 47 ⇒ compact, `preview: 'none'`, no side column), and no resize paged or committed on its own |
 
-- the native hit area of the wide details card's `onClick`, in BOTH forms (the
-  full card and the bounded `Open model & effort ›` card, whose bodies are nested
-  `ui.text` children): whether a pointer click that lands on such a body text node
-  resolves to the CARD's action at all. The SDK's own dispatch resolves an action
-  by the exact node id with no bubbling, and the card-level handler is the only
-  bound target, so a client that reports the deepest node would make that click
-  inert; the `detail-card` K2 zone's `Enter` is the keyboard path that does not
-  depend on it, and no document here claims the body-text click as verified;
-- the pixel containment of the new bar labels (`Retry` on the model list,
-  `Back` on the Overview, `Save default` / `Switch`) at the 400px width floor and
-  under the +25%/+50% UI fonts — their geometry is argued from the short-label
-  rule, not measured;
-- the real select/activate ordering and double-click behaviour of real Tern for
-  the new pages (the scripted tty covers the two wire shapes, the real pane does
-  not).
+What remains `NOT_VERIFIED` and is NOT claimed as passing:
+
+- the +25% / +50% enlarged-UI-font matrix at the 400px floor and at the wide
+  layout — the pre-existing Owner-accepted limitation below;
+- physical wheel/trackpad, IME, OS focus, dark themes, screen readers, terminal
+  scaling, directories beyond the scripted sizes, the shipped full-profile/HMR and
+  the Remote TSP application success path.
 
 A resolved write outcome is reported by the existing dock notice on any page that
 cannot host a picker `message`.

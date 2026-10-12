@@ -424,21 +424,34 @@ function primaryAction(panel: ModelPickerPanel): PickerAction {
 
 /**
  * The ACTION BAR for the CURRENT page and phase: short, fixed, and never wider
- * than the page's own two or three entries. The write appears only where the
- * page really offers it ({@link applyOffered}); `Retry` appears only on the
- * model list, and only while part of the directory failed.
+ * than the page's own entries. The write appears only where the page really
+ * offers it ({@link applyOffered}); `Retry` appears only on the model list, and
+ * only while part of the directory failed.
  *
- * `Switch` / `Save default` is the only write. `Back` is the content pages' way
- * out (the Overview and the read-only Full details page). The view renders
- * exactly this list and the key map moves the keyboard focus across it, so a
- * visible action can never be unreachable or a no-op.
+ * The frozen table caps the footer per page: the model list is
+ * `Cancel` (+ `Retry`) (+ the one write), the Overview is `Back` + the one write,
+ * and the read-only Full details page is `Back` alone. `Cancel` is therefore NOT
+ * rendered on the content pages — a user leaves them with `Back` (and `Esc`, which
+ * is the same intent) and cancels from the model list, exactly as the frozen
+ * table says. The panel's own dismissal authority ({@link actionIntent}'s `close`)
+ * stays admitted on every page, so the client's backdrop/dismiss gesture still
+ * closes the panel there; it is simply not a VISIBLE entry the footer has to
+ * carry.
+ *
+ * `Switch` / `Save default` is the only write. The view renders exactly this list
+ * and the key map moves the keyboard focus across it, so a visible action can
+ * never be unreachable or a no-op.
  */
 export function pickerActions(panel: ModelPickerPanel, layout: ModelPickerLayout): PickerAction[] {
+  const actions: PickerAction[] = []
   // The visible label follows what the action really does: while a write is
   // admitted, closing the panel does NOT cancel the operation that is already
   // with the Host, so that phase keeps the honest `Close` instead of the `Cancel`
-  // a user would read as "undo the write".
-  const actions: PickerAction[] = [{ id: 'close', label: panel.phase === 'pending' ? 'Close' : 'Cancel', end: true }]
+  // a user would read as "undo the write". Only the model list (and the phases
+  // that close INSTEAD of offering page operations) renders it.
+  if (panel.phase !== 'ready' || panel.page === 'models') {
+    actions.push({ id: 'close', label: panel.phase === 'pending' ? 'Close' : 'Cancel', end: true })
+  }
   // A failed read admits exactly one operation — the read-only Retry — so the
   // bar never offers a browse or a write the phase would refuse.
   if (panel.phase === 'error') {
