@@ -2683,10 +2683,14 @@ test('B-49: multiple rollback failures sit FLAT behind the primary failure', asy
   const originalMount = mountProto.mountSeatChild
   const originalPublish = publishProto.publishFocusSeat
   // Armed by the stale tenant's cleanup: the park's OWN mount call has already
-  // run by then, so only the ROLLBACK's two steps throw.
+  // run by then, so only the ROLLBACK's two steps throw. Each failure is a
+  // pre-created instance so the assertions below can compare OBJECT IDENTITY.
   let armRollback = false
   let closeCalls = 0
   let tenantIsCurrent = true;
+  const closeFailure = new Error('stale tenant close boom')
+  const mountFailure = new Error('rollback mount boom')
+  const publishFailure = new Error('rollback publish boom')
   const tenant = makeTenant()
   openOptional(app, () => ({
     component: tenant.component,
@@ -2694,17 +2698,17 @@ test('B-49: multiple rollback failures sit FLAT behind the primary failure', asy
     close: () => {
       closeCalls += 1
       armRollback = true
-      throw new Error('stale tenant close boom')
+      throw closeFailure
     },
   }))
   await vt.waitForRender()
   tenantIsCurrent = false
   mountProto.mountSeatChild = function (this: unknown): void {
-    if (armRollback) throw new Error('rollback mount boom')
+    if (armRollback) throw mountFailure
     originalMount.call(this)
   }
   publishProto.publishFocusSeat = function (this: unknown): void {
-    if (armRollback) throw new Error('rollback publish boom')
+    if (armRollback) throw publishFailure
     originalPublish.call(this)
   }
   let caught: unknown
@@ -2727,8 +2731,243 @@ test('B-49: multiple rollback failures sit FLAT behind the primary failure', asy
     3,
     'the primary failure and BOTH rollback failures must stay FLAT entries (never nested)',
   )
-  assert.equal((errors[0] as Error).message, 'stale tenant close boom', 'the primary failure comes first')
-  assert.equal((errors[1] as Error).message, 'rollback mount boom', 'rollback failures keep step order')
-  assert.equal((errors[2] as Error).message, 'rollback publish boom')
+  assert.equal(errors[0], closeFailure, 'the primary failure keeps its object identity, first')
+  assert.equal(errors[1], mountFailure, 'rollback failures keep their identity in step order')
+  assert.equal(errors[2], publishFailure)
   assert.equal(closeCalls, 1, 'the stale tenant is retired exactly once')
+})
+
+test('B-50: a failed Approval mount restores a parked-but-current optional tenant', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component, 'the tenant owns the seat first')
+
+  // The physical mount throws while a HEALTHY (still-current) tenant is parked
+  // behind it: the park retires nobody, so the last-blocker restore obligation is
+  // the only thing that can bring this tenant back.
+  const proto = TuiApp.prototype as unknown as {
+    showOverlayOnHost(component: unknown, options: unknown, ownership?: unknown): unknown
+  }
+  const original = proto.showOverlayOnHost
+  let armed = true
+  proto.showOverlayOnHost = function (
+    this: unknown,
+    component: unknown,
+    options: unknown,
+    ownership?: unknown,
+  ): unknown {
+    if (armed) {
+      armed = false
+      throw new Error('overlay mount boom')
+    }
+    return original.call(this, component, options, ownership)
+  }
+  try {
+    const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'failed with a parked tenant' })
+    await assert.rejects(settleOrTimeout(failed))
+  } finally {
+    proto.showOverlayOnHost = original
+  }
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.equal(
+    app.focusedComponentForTest(),
+    tenant.component,
+    'the SAME parked tenant instance must be restored once no approval is left',
+  )
+  assert.ok(
+    viewport(vt).includes('optional-tenant:'),
+    `the restored tenant must be painted again:\n${viewport(vt)}`,
+  )
+  const keysBefore = tenant.keys.length
+  vt.sendInput('x')
+  assert.equal(tenant.keys.length, keysBefore + 1, 'the restored tenant takes keys again')
+  assert.equal(tenant.closeCalls(), 0)
+})
+
+test('B-51: a physical overlay mount that fails before registration leaves no ghost modal', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  // The fork pushes its overlay-stack entry and then performs terminal IO before
+  // returning the raw handle. Fail that IO seam ONCE: the broker never saw a node
+  // for this projection, so only a positional release can remove the ghost.
+  const originalHideCursor = vt.hideCursor.bind(vt)
+  let armed = true
+  vt.hideCursor = (): void => {
+    if (armed) {
+      armed = false
+      throw new Error('terminal io boom')
+    }
+    originalHideCursor()
+  }
+  try {
+    const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'ghost mount' })
+    let caught: unknown
+    try {
+      await settleOrTimeout(failed)
+    } catch (error) {
+      caught = error
+    }
+    const primary = caught instanceof AggregateError ? caught.errors[0] : caught
+    assert.ok(
+      primary instanceof Error && primary.message === 'terminal io boom',
+      `the IO failure must surface by identity: ${String(caught)}`,
+    )
+  } finally {
+    vt.hideCursor = originalHideCursor
+  }
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.ok(
+    !viewport(vt).includes('bash'),
+    `an unregistered raw projection must not survive as a ghost modal:\n${viewport(vt)}`,
+  )
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+  // ... and the stage stays usable.
+  const healthy = app.showApprovalPrompt({ toolName: 'fs', reason: 'healthy after the ghost' })
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(healthy), 'allowed-once')
+})
+
+test('B-53: a QUEUED Approval whose mount fails rejects its own promise', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const tenant = makeTenant()
+  openTenant(app, tenant)
+  await vt.waitForRender()
+
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'first approval' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('bash'), `the first approval owns the stage:\n${viewport(vt)}`)
+  // B is QUEUED: its Promise executor has already returned, so a mount failure for
+  // B can no longer rely on the executor to reject it.
+  const proto = TuiApp.prototype as unknown as {
+    showOverlayOnHost(component: unknown, options: unknown, ownership?: unknown): unknown
+  }
+  const original = proto.showOverlayOnHost
+  let armed = false
+  proto.showOverlayOnHost = function (
+    this: unknown,
+    component: unknown,
+    options: unknown,
+    ownership?: unknown,
+  ): unknown {
+    if (armed) {
+      armed = false
+      throw new Error('queued mount boom')
+    }
+    return original.call(this, component, options, ownership)
+  }
+  let queued: Promise<unknown> | undefined
+  try {
+    queued = app.showApprovalPrompt({ toolName: 'fs', reason: 'queued approval' })
+    armed = true
+    // Settling the first prompt mounts the queued one — that mount fails and the
+    // settle tail propagates the failure.
+    try {
+      vt.sendInput('y')
+    } catch {
+      // The failure escapes through the settlement path; the assertions below are
+      // about the two promises.
+    }
+  } finally {
+    proto.showOverlayOnHost = original
+  }
+  assert.equal(await settleOrTimeout(first), 'allowed-once', 'the first approval settles normally')
+  let queuedFailure: unknown
+  try {
+    const outcome = await settleOrTimeout(queued!)
+    queuedFailure = new Error(`the queued approval RESOLVED as ${String(outcome)} instead of rejecting`)
+  } catch (error) {
+    queuedFailure = error
+  }
+  const primary = queuedFailure instanceof AggregateError ? queuedFailure.errors[0] : queuedFailure
+  assert.ok(
+    primary instanceof Error && primary.message === 'queued mount boom',
+    `a queued approval whose mount fails must REJECT with the failure, never time out: ${String(queuedFailure)}`,
+  )
+  await vt.waitForRender()
+  assert.ok(!viewport(vt).includes('fs'), 'the failed queued approval must never be presented')
+  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.equal(
+    app.focusedComponentForTest(),
+    tenant.component,
+    'the tenant comes back once no approval is left',
+  )
+  const healthy = app.showApprovalPrompt({ toolName: 'grep', reason: 'healthy after the fifo failure' })
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(healthy), 'allowed-once')
+})
+
+test('B-54: a real Advanced blur chain that throws through the host unwind leaves no ghost Approval', async () => {
+  const registry = new EditorRegistry()
+  const { vt, app } = startApp(registry)
+  await vt.waitForRender()
+  // A REAL optional tenant whose currentness lookup throws the sentinel, armed by
+  // the root's own blur so the throw lands in the host's reconciliation of the
+  // MOUNT (after the park), never in the park.
+  const sentinel = new Error('currentness sentinel')
+  let sentinelArmed = false
+  let closeCalls = 0
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => {
+      if (sentinelArmed) {
+        sentinelArmed = false
+        throw sentinel
+      }
+      return true
+    },
+    close: () => { closeCalls += 1 },
+  }))
+  await vt.waitForRender()
+  const winner = { rows: ['winner editor'] }
+  const root = advancedOverlayProbe('real-root', undefined, () => {
+    // A real editor-winner change plus a plugin exception: the adapter routes the
+    // exception to `onError` → notify → requestRender → editor reconciliation →
+    // mountSeatChild → the tenant lookup throws `sentinel`, which escapes the
+    // MOUNT (the initial PARK is already done).
+    registry.register({ id: 'winner', priority: -1, create: () => rowsEditor(winner) }, 'plugin-winner')
+    sentinelArmed = true
+    throw new Error('plugin boom')
+  })
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+
+  const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'registered then failed' })
+  let caught: unknown
+  try {
+    await settleOrTimeout(failed)
+  } catch (error) {
+    caught = error
+  }
+  const primary = caught instanceof AggregateError ? caught.errors[0] : caught
+  assert.equal(primary, sentinel, `the mount failure must be the caller sentinel by identity: ${String(caught)}`)
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.ok(
+    !viewport(vt).includes('bash'),
+    `the registered node and its raw projection must both be unwound:\n${viewport(vt)}`,
+  )
+  assert.ok(viewport(vt).includes('real-root'), `the original root must still be there:\n${viewport(vt)}`)
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+  // The surviving root still owns the keyboard (it is a live capturing overlay);
+  // once it leaves, the healthy tenant — parked during the failed mount — is the
+  // live seat owner and must take it.
+  rootLease.close()
+  await vt.waitForRender()
+  assert.equal(
+    app.focusedComponentForTest(),
+    tenant.component,
+    'the healthy tenant is restored and focused once the last owner leaves',
+  )
+  const healthy = app.showApprovalPrompt({ toolName: 'grep', reason: 'healthy after the real chain' })
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(healthy), 'allowed-once')
+  assert.equal(closeCalls, 0)
 })

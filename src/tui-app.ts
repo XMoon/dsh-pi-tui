@@ -5890,18 +5890,25 @@ export class TuiApp {
       nonCapturing: options?.nonCapturing === true,
       remountable: ownership.remountable === true,
     })
-    // FAIL CLOSED: the physical mount can run a synchronous plugin focus/blur
-    // callback that throws — either inside the fork's own showOverlay, or in the
-    // broker's physical transition, which registers the logical node BEFORE it
-    // hands over the keyboard. A mount that throws never returns a handle to its
-    // caller, so nothing else could release that node: unwinding it here (by
-    // identity; a no-op when it was never registered) is the ONE overlay mount
-    // funnel's contract. The caller still owns its component/frame lifetime.
+    // FAIL CLOSED: the physical mount can throw at two distinct stages, and a
+    // mount that throws never returns a handle to its caller, so nothing else
+    // could release what it created.
+    // (a) The fork pushes its overlay-stack entry and performs terminal IO before
+    //     it returns the raw handle: at that point the broker has NO node, so that
+    //     projection is an untracked ghost modal (still painted, no owner) and must
+    //     be released POSITIONALLY. The positional pop can only remove the entry
+    //     THIS mount pushed: `initialFocus:false` runs no callback and the IO call
+    //     is the last statement before the handle is returned.
+    // (b) The broker's physical transition registers the logical node BEFORE it
+    //     hands over the keyboard (and can re-enter through a plugin callback via
+    //     the host's reconciliation): that node is released by identity.
+    // The caller still owns its own component/frame lifetime.
     try {
       const raw = this.activeScreen.showOverlay(component, { ...merged, initialFocus: false })
       return this.overlayBroker.commitMount(prepared, raw)
     } catch (error) {
       runSyncDisposalStepsWithPrimary('overlay mount unwind', error, [
+        () => { if (prepared.node.raw === undefined) this.activeScreen.hideOverlay() },
         () => this.overlayBroker.close(prepared.node.wrapper),
       ])
     }

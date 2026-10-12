@@ -196,7 +196,9 @@ When you add or change an overlay path, cover the family it belongs to:
   disposed; the stage identity is re-read after the park hook, after the Save
   cancellation and inside the mount, so a settled prompt's tail can never cancel
   the newer Save Location a cleanup opened, and a throwing mount can never latch
-  the stage or leak its frame (see §11).
+  the stage, leak its frame or leave a ghost projection. A failed presentation
+  also rejects ITS OWN promise (a queued prompt no longer has an executor to do
+  it) and runs the LAST-blocker restore once the queue drained (see §11).
 - **Session / teardown**: a child overlay (Job viewer) closes before its parent
   (Task Browser); callbacks capture the owning session identity; a parent that
   was disposed WITHOUT its closer must still notify its owner (see §10).
@@ -557,14 +559,23 @@ or over the editor seat.
   presentation — a throwing park hook OR a throwing mount — takes one shared
   identity-fenced path: this prompt is latched settled, its abort binding is
   released, its active ownership is cleared only while it is still the active one,
-  the frame this mount created is disposed (it is not published as
-  `responsiveFrame` yet, so this mount is its only owner) and the host completes
-  the seat publish / repaint and the queue advance as independent steps. The ONE
-  overlay mount funnel (`showOverlayOnHost`) fails closed too: a mount that throws
-  after the broker registered its logical node unwinds exactly that node — by
-  identity, a no-op when it was never registered — before the failure propagates,
-  so a mount whose caller never received a handle can never survive as a
-  half-committed, keyboard-owning suppressor.
+  its OWN promise is rejected with exactly the value that path throws (a prompt
+  mounted from another prompt's settle tail has already returned from its
+  executor, so nothing else could ever settle its caller), the frame this mount
+  created is disposed (it is not published as `responsiveFrame` yet, so this mount
+  is its only owner), the host completes the seat publish / repaint and the queue
+  advance as independent steps, and the LAST-blocker notification runs once no
+  approval is active and the queue drained — a PARKED but still-current tenant
+  comes back instead of staying parked behind a presentation that never happened.
+  The ONE overlay mount funnel (`showOverlayOnHost`) fails closed on BOTH mount
+  stages: the fork pushes its overlay-stack entry and performs terminal IO BEFORE
+  it returns a raw handle, so a mount that throws there — the broker has no node
+  yet — releases that projection POSITIONALLY (`hideOverlay()`, and only when the
+  broker never bound the node: `initialFocus:false` runs no callback in that
+  window, so the pop can only remove the entry this mount pushed); a mount that
+  throws after the broker registered its logical node unwinds exactly that node by
+  identity. Either way a mount whose caller never received a handle can never
+  survive as a ghost modal or a half-committed, keyboard-owning suppressor.
 - **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
   rides the caller's `close()` as the FIRST independent step of the `tui
   dispose` batch, so a throwing tenant cleanup neither skips the
@@ -577,7 +588,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-49: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-54: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -604,4 +615,8 @@ own initial suspension (the inherited roots stay hidden and the live frame keeps
 the keyboard), a settled approval that never cancels the Save Location its own
 cleanup opened, a throwing physical mount that releases the failed approval and
 keeps the queue and the optional seat usable, the flat identity/order contract of
-multiple rollback failures, and input routing).
+multiple rollback failures, an unregistered raw projection released positionally
+after a terminal-IO mount failure, a real Advanced blur/reconciliation chain that
+escapes the mount (the registered node unwound, the surviving root intact and the
+healthy tenant restored afterwards), a QUEUED approval whose mount fails rejecting
+its own promise instead of waiting forever, and input routing).

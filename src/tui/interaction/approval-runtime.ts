@@ -75,6 +75,15 @@ export interface ApprovalRuntimeHost {
 export interface PendingApproval {
   request: ApprovalPromptRequest
   resolve: (outcome: ApprovalOutcome) => void
+  /**
+   * The promise's own rejection path. A prompt whose presentation FAILS must
+   * settle its caller too: a prompt mounted from ANOTHER prompt's settle tail
+   * (`showNext()` inside `settle`) has already returned from its executor, so
+   * nothing else would ever settle it. The rejected value is exactly the value
+   * the failure path throws (the primary failure, aggregated by identity with
+   * the rollback failures).
+   */
+  reject: (error: unknown) => void
   onAbort?: () => void
   /** Whether the main Agent is BLOCKED on this approval (never a local dialog). */
   agentInputWait: boolean
@@ -170,8 +179,8 @@ export class ApprovalRuntime {
     // cancelled immediately (M0 stale-generation contract — the runner's
     // approval handler may fire during exit teardown).
     if (this.host.isDisposed()) return Promise.resolve('cancelled')
-    return new Promise<ApprovalOutcome>((resolve) => {
-      const pending: PendingApproval = { request, resolve, agentInputWait }
+    return new Promise<ApprovalOutcome>((resolve, reject) => {
+      const pending: PendingApproval = { request, resolve, reject, agentInputWait }
       if (request.signal !== undefined) {
         const onAbort = (): void => {
           try {
@@ -296,8 +305,9 @@ export class ApprovalRuntime {
    * NEWER approval keeps its ownership, or 'y'/'n' could no longer settle the
    * newer prompt), the host completes the abandoned presentation's
    * seat/publish/render obligations, a legally queued successor is still presented
-   * through the existing queue authority, and the ORIGINAL failure propagates
-   * (aggregated by identity with a rollback failure).
+   * through the existing queue authority, the LAST-blocker notification runs once
+   * no approval is active and the queue drained, and the ORIGINAL failure
+   * propagates (aggregated by identity with a rollback failure).
    */
   private rollbackFailedPresentation(
     label: string,
@@ -310,10 +320,29 @@ export class ApprovalRuntime {
     }
     const owned = this.active === pending
     if (owned) this.active = undefined
-    runSyncDisposalStepsWithPrimary(label, primary, [
-      () => this.host.rollbackApprovalPark(),
-      () => { if (owned) this.showNext() },
-    ])
+    try {
+      runSyncDisposalStepsWithPrimary(label, primary, [
+        () => this.host.rollbackApprovalPark(),
+        () => { if (owned) this.showNext() },
+        // The failed presentation left the stage, so the normal settle tail's
+        // LAST-blocker obligation applies here too: a PARKED but still-current
+        // optional tenant must come back once no approval is active and the queue
+        // drained (a mount failure with a healthy tenant would otherwise strand it
+        // parked forever). A successor `showNext()` just presented keeps it parked —
+        // the predicate is the same live one `settle` uses.
+        () => {
+          if (this.active === undefined && this.queue.length === 0) this.host.afterApprovalQueueDrained()
+        },
+      ])
+    } catch (failure) {
+      // THIS prompt's own promise settles here too: when it was mounted from
+      // another prompt's settle tail its executor already returned, so the throw
+      // could never reject it (a caller would have waited forever). The rejected
+      // value is exactly what this failure path throws, so the first-presented
+      // case (whose executor also rejects) observes the SAME value.
+      pending.reject(failure)
+      throw failure
+    }
   }
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
