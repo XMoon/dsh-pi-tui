@@ -51,7 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   system clipboard was confirmed (OSC52 has no acknowledgement). An empty
   retained output answers `Nothing to copy`, and a not-yet-observed or
   unavailable one answers `Output unavailable`: neither writes the clipboard and
-  neither reports a false success.
+  neither reports a false success. Terminal control sequences inside the Job
+  metadata (`label`/`detail`/`progress`) are only ever shown as sanitized text in
+  the header and are never passed to the terminal, and the Command page suspends
+  the terminal's native copy-on-select while it is shown, so a rapid double click
+  on `[Copy All]` cannot overwrite the full command with a screen word.
   When the retained window is truncated, a paused view keeps the same
   still-present row where it can, the bottom row number is a position inside this
   retained preview only, and `[GAP]` still comes only from the official fact.
