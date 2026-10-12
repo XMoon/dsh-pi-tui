@@ -26,15 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Job output — never the background transcript, the Task Browser or the editor
   input. Opening a Job follows the newest output, any manual browse pauses that
   follow, and only an explicit `End` resumes it; a newer snapshot, a shrinking
-  body or a terminal resize never silently re-arm it, and the bottom row always
-  says `Follow ON` or `Follow PAUSED · End resume`. `Ctrl+F` (or whatever the
-  live keymap really binds) and `/` search only the CURRENT retained Job output:
-  every hit is highlighted with the current one emphasised, `i/N` and
-  `0/0 · No matches` are shown, `Enter` switches to result navigation where
-  `n`/`N` cycle the hits, the first `Esc` leaves only the search (the Job stays
-  open and follow stays paused) and the second `Esc` returns to the Task Center;
-  while a search owns the ordinary keys the bottom row no longer advertises Stop,
-  because that key belongs to the query there.
+  body or a terminal resize never silently re-arm it, and the bottom row follows
+  the state: `Follow ON`, or `Follow PAUSED` (with the `End` resume hint while
+  `End` can act — while the query is being edited it is omitted, because `End`
+  belongs to the input there). `Ctrl+F` (or whatever the live keymap really
+  binds) and `/` search only the CURRENT retained Job output: every hit is
+  highlighted with the current one emphasised, `i/N` and `0/0 · No matches` are
+  shown, `Enter` switches to result navigation where `n`/`N` cycle the hits, the
+  first `Esc` leaves only the search (the Job stays open and follow stays paused)
+  and the second `Esc` returns to the Task Center; while a search owns the
+  ordinary keys the bottom row no longer advertises Stop, and while the query is
+  being edited it also omits the Find/End hints, because those keys belong to the
+  query input there.
   When the retained window is truncated, a paused view keeps the same
   still-present row where it can, the bottom row number is a position inside this
   retained preview only, and `[GAP]` still comes only from the official fact.
