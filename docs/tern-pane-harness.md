@@ -39,7 +39,9 @@ and it takes minutes. Run it deliberately, for acceptance evidence.
 | Piece | Owns |
 |---|---|
 | `scripts/tern-pane-drive.mjs` | The driver: `tern serve` lifecycle, the control channel, real input, the node tree, captures, the run directory and the result ledger |
-| `scripts/tern-pane-geometry.mjs` | The visibility oracle: boxes, clipping ancestors, the visible click point. Pure, so it is covered headlessly by `test/tern-pane-geometry.test.mjs` |
+| `scripts/tern-pane-geometry.mjs` | The visibility oracle: boxes, clipping ancestors, the visible click point. Pure, covered by `test/tern-pane-geometry.test.mjs` |
+| `scripts/tern-pane-instrument.mjs` | The instrument's own rules: which directory it may wipe, which commands may be repeated, how paths are quoted into the generated script. Pure, covered by `test/tern-pane-instrument.test.mjs` |
+| `scripts/tern-pane-smoke.mjs` + `-smoke-subject.mts` | The committed smoke: the worked example, and the check that the driver still works end to end |
 | Your **flow** module | What to drive and what to assert. It receives the harness handle |
 | Your **subject** `.mts` | The UI under test, mounted in a real pane by `harness.launch` |
 
@@ -48,60 +50,56 @@ node scripts/tern-pane-drive.mjs <flow.mjs> [--out <dir>]
 ```
 
 Artifacts land in `<repo>/temp/tern-pane` by default (gitignored); `--out` or
-`TERN_PANE_OUT` moves them. **The run directory is wiped at start** — never point
-`--out` at something you want to keep.
+`TERN_PANE_OUT` moves them. **The run directory is wiped at start**, so the driver
+only takes over a directory that is absent, empty, or already carries its own
+marker (`tern-pane-run.json`). It refuses the repository, its ancestors, the
+working directory, home, and any other non-empty directory it does not own —
+point `--out` at a fresh or harness-owned path:
+
+```sh
+mkdir -p /tmp/not-ours && touch /tmp/not-ours/keep.txt
+node scripts/tern-pane-drive.mjs scripts/tern-pane-smoke.mjs --out /tmp/not-ours
+# refuses, exits 1, and leaves keep.txt in place
+```
+
+## Run the committed smoke first
+
+`scripts/tern-pane-smoke.mjs` is the worked example and the end-to-end check of
+the instrument itself: it resizes, launches `scripts/tern-pane-smoke-subject.mts`
+in a real pane, sends a REAL pointer click and a REAL key, reads the subject's own
+record back, measures the viewport and captures a PNG. Run it before trusting your
+own flow:
+
+```sh
+node scripts/tern-pane-drive.mjs scripts/tern-pane-smoke.mjs
+```
 
 ## A flow and its subject
 
-`temp/pane-check/flow.mjs` — the flow decides everything:
+The flow decides everything; read `scripts/tern-pane-smoke.mjs` for the full
+shape. The essentials:
 
 ```js
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-
 export default async function (h) {
-  await h.resize(400, 600)
-  const booted = await h.launch(join(h.repo, 'temp', 'pane-check', 'subject.mts'), { ready: 'pane-check ready' })
+  await h.resize(400, 600)                                  // verified against stats.viewport
+  const booted = await h.launch(join(h.repo, 'scripts', 'tern-pane-smoke-subject.mts'), { ready: 'pane-smoke ready' })
   h.check('the subject boots inside a real Tern pane', booted)
 
-  let snap = h.snapshot()
-  const button = snap.nodes.find((n) => n.tag === 'button' && h.descendantsText(n).includes('Pick'))
-  h.check('the Pick button is in the tree', button !== undefined)
-  if (button === undefined) return
+  const snap = h.snapshot()
+  const button = snap.nodes.find((node) => node.tag === 'button' && h.descendantsText(node).includes('Pick'))
+  h.check('a REAL pointer click on the visible fragment runs the handler',
+    await h.click(snap.chains, button) && h.has(h.snapshot(), 'clicks=1'))
 
-  const clicked = await h.click(snap.chains, button)
-  h.check('a REAL pointer click runs the handler', clicked && h.has(h.snapshot(), 'picks=1'),
-    h.texts(h.snapshot()).join(' | '))
-
-  h.measure('viewport', JSON.stringify(h.ctl('stats').viewport ?? null))
-  h.capture('pane-check', 'after one real click')
+  await h.key('a', 700)
+  h.capture('smoke-400x600', 'after one real click and one real key')
 }
 ```
 
-`temp/pane-check/subject.mts` — any program that mounts into a real pane. The
-SDK routes a click to `html.button({ onClick })` for you:
-
-```ts
-import { connect, html, ui } from '@stencil-hq/tern'
-
-const session = await connect({ app: 'pane-check', timeout: 2000 })
-if (!session) throw new Error('run inside a real Tern pane')
-const surface = session.open({ mode: 'inline', title: 'check' })
-
-let picks = 0
-const render = () => surface.render({
-  main: ui.col({ key: 'main' },
-    ui.text('pane-check ready'),
-    ui.text(`picks=${picks}`),
-    html.button({ onClick: () => { picks += 1; render() } }, 'Pick'),
-  ),
-})
-render()
-for await (const input of session) {
-  if (input.type === 'key' && input.key.name === 'f10') break
-}
-await surface.close({ keep: false })
-await session.close()
+The subject is any program that mounts into a real pane through the SDK's
+`connect()` and `surface.render`; the driver only runs it with `tsx` and waits for
+the marker you name. Follow the three conventions of `-smoke-subject.mts`: read the
+run directory from `process.env.TERN_PANE_DIR`, record what actually happened there
+so the flow can read it back as its positive control, and exit on F10.
 ```
 
 The subject owns its own artifacts (here, nothing; the harness owns the rest).
@@ -121,7 +119,7 @@ inferring it from a redraw.
 | `key` / `resize` / `css` / `clickAt` / `click` | Real input to the pane |
 | `capture(name, note)` | Node-tree dump + PNG + layout under one id |
 | `shot(id)` | Raw `shot` reply |
-| `ctl(...)` | Any other control command (`stats`, `pick`, `dump`, `quit`, …) |
+| `ctl(...)` | An inspection or idempotent command (`stats`, `pick`, `dump`, …); a real input sent here is refused |
 | `check(label, ok, detail)` / `measure(label, detail)` | Record an assertion / a measurement |
 | `finish(extra)` | Write `assertions.json`, print the summary, return the exit code |
 | `log` / `sleep` / `root` / `repo` | Run log, delay, run directory, repo root |
@@ -130,9 +128,10 @@ inferring it from a redraw.
 
 | Path (under the run directory) | What |
 |---|---|
-| `run.log` | The command line, the Tern version, every `tern` exchange, assertion, measurement and capture, in order |
+| `run.log` | The command line, the Tern version, every control command with its outcome (`CTL ok` / `SEND ok` / `CTL-RETRY` / `CTL-FAIL`), every assertion, measurement and capture, in order |
 | `assertions.json` | The ledger plus the Tern version and flow path; `failed` counts assertions only |
 | `flow.<ext>` / `subject.<ext>` | Copies of the flow and of the subject this run used |
+| `tern-pane-run.json` | The ownership marker that makes this directory safe to wipe on the next run |
 | `<id>.tree.json` | The node tree at capture time |
 | `shots/serve/<id>.png` | The rendered pane — the human check |
 | `shots/serve/<id>.layout.json` | Element paths, boxes and computed geometry for that frame |
@@ -157,10 +156,19 @@ inferring it from a redraw.
   it, or be off screen entirely while the node still has width.
 - **A command that did not run fails the run.** Commands sent before the server
   listens are dropped, so the handle resolves only after the server answers, and
-  that cannot silently skip your first `resize`. A command that still fails logs
-  `CTL-FAIL` and throws: a failed `tree` would otherwise read as an empty tree,
-  and an empty tree makes "the control is absent" or "nothing was written" pass
-  vacuously.
+  that cannot silently skip your first `resize` — which is also verified against
+  `stats.viewport` afterwards, because every box is measured against it. A command
+  that still fails logs `CTL-FAIL` and throws: a failed `tree` would otherwise read
+  as an empty tree, and an empty tree makes "the control is absent" or "nothing was
+  written" pass vacuously. A flow that throws is recorded as a failed
+  `the flow ran to completion` and still writes the ledger, so a red run is as
+  auditable as a green one.
+- **A real input is delivered exactly once.** `click`, `key` and the subject
+  launch are never retried — a repeat would be a SECOND real input while the run
+  still claimed "exactly one", so an unacknowledged send aborts the run instead.
+  Reads and idempotent sets (`tree`, `shot`, `resize`, `css`) may be retried,
+  because a lost reply costs nothing. Read the subject's own record back when you
+  claim a count: it is the positive control that the input really arrived.
 - **`shot` is software rendering at the client's scale.** A 400x600 viewport
   produces an 800x1200 PNG (scale 2); compare geometry from `layout.json` or the
   tree, not from pixel offsets in the PNG.
@@ -172,6 +180,10 @@ inferring it from a redraw.
 - It drives a subject **you** mount; it is not the real `dsh` application
   end-to-end. Writes are whatever your subject does at the seam it was given, so
   "nothing wrote" means nothing reached that seam.
+- The client is a **headless** `tern serve`: it is the real client's rendering and
+  control logic, not a mock, but it is not a desktop window. A green run says
+  nothing about OS-level input methods, window focus or the fonts a desktop
+  session resolves.
 - One pane, one subject per run.
 - The run directory keeps a copy of the flow and of the subject it launched, so a
   run can be audited later; any other module they import is not copied.

@@ -29,10 +29,12 @@
  *      TERN_PANE_OUT=<path>  artifact directory (default: <repo>/temp/tern-pane)
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { index, rect, visiblePoint } from './tern-pane-geometry.mjs'
+import { RUN_MARKER, isRepeatableCommand, runDirectoryVerdict, shellQuote } from './tern-pane-instrument.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '..')
@@ -56,15 +58,26 @@ function usage(exitCode) {
  * server that has not opened its socket yet.
  */
 async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
+  // The run directory is wiped on every start: take it over only when it is
+  // empty, absent, or already carries this driver's marker.
+  const verdict = runDirectoryVerdict({
+    root,
+    repo,
+    cwd: process.cwd(),
+    home: homedir(),
+    entries: existsSync(root) ? readdirSync(root) : [],
+  })
+  if (!verdict.ok) {
+    throw new Error(`${verdict.reason}; point --out at a fresh or harness-owned directory`)
+  }
   rmSync(root, { recursive: true, force: true })
   mkdirSync(join(root, 'shots'), { recursive: true })
+  writeFileSync(join(root, RUN_MARKER), JSON.stringify({ driver: 'tern-pane-drive', pid: process.pid, started: new Date().toISOString() }, null, 1))
   const endpoint = join(root, socket)
   const log = (line) => appendFileSync(join(root, 'run.log'), `${line}\n`)
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-  // The control protocol is one command line, one JSON reply line. A reply that
-  // is missing or `ok:false` is retried: the server answers `ok:false` while the
-  // subject is still booting its first frame.
+  // The control protocol is one command line, one JSON reply line.
   function ctlOnce(...args) {
     const sent = spawnSync(ternBin, ['ctl', '--control', endpoint, ...args.map(String)], { encoding: 'utf8', timeout: 60_000 })
     if (sent.status !== 0) return undefined
@@ -74,10 +87,17 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
       return undefined
     }
   }
+  // A read, or an idempotent set, may be retried: a lost reply costs nothing.
   function ctl(...args) {
+    if (!isRepeatableCommand(args[0])) {
+      throw new Error(`tern ctl ${args.join(' ')} is not repeatable; send it with send()`)
+    }
     for (let i = 0; i < 6; i += 1) {
       const reply = ctlOnce(...args)
-      if (reply !== undefined && reply.ok !== false) return reply
+      if (reply !== undefined && reply.ok !== false) {
+        log(`CTL ok ${JSON.stringify(args)}`)
+        return reply
+      }
       log(`CTL-RETRY ${JSON.stringify(args)} :: ${JSON.stringify(reply ?? null)}`)
       spawnSync('sleep', ['0.4'])
     }
@@ -87,6 +107,21 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
     // is absent" / "nothing was written" pass VACUOUSLY. The instrument fails
     // closed instead of reporting that as a green run.
     throw new Error(`tern ctl ${args.join(' ')} failed`)
+  }
+  /**
+   * Deliver a command whose repetition would be observable — a click, a key, a
+   * subject launch — exactly ONCE. A retry could deliver a second real input
+   * while the run still claims "exactly one", so an unacknowledged send aborts
+   * the run instead of being repeated.
+   */
+  function send(...args) {
+    const reply = ctlOnce(...args)
+    if (reply === undefined || reply.ok === false) {
+      log(`CTL-FAIL ${JSON.stringify(args)} :: not retried, a repeat would be a second input`)
+      throw new Error(`tern ctl ${args.join(' ')} failed`)
+    }
+    log(`SEND ok ${JSON.stringify(args)}`)
+    return reply
   }
 
   const serve = spawn(ternBin, ['serve', '--control', endpoint, '--out', join(root, 'shots')], { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -136,19 +171,28 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
 
   // ------------------------------------------------------------- real input
   const key = async (name, settleMs = 400) => {
-    ctl('key', name)
+    send('key', name)
     await sleep(settleMs)
   }
+  /**
+   * Resize the pane and verify the client really took it: every box measured
+   * afterwards is relative to this viewport, so an accepted-but-ignored resize
+   * would silently invalidate the whole run.
+   */
   const resize = async (width, height, settleMs = 700) => {
     ctl('resize', width, height)
     await sleep(settleMs)
+    const viewport = ctl('stats').viewport ?? []
+    if (viewport[0] !== width || viewport[1] !== height) {
+      throw new Error(`resize ${width}x${height} did not take effect: viewport ${JSON.stringify(viewport)}`)
+    }
   }
   const css = async (name, file, settleMs = 500) => {
     ctl('css', name, file)
     await sleep(settleMs)
   }
   const clickAt = async (x, y, settleMs = 900) => {
-    ctl('click', x, y)
+    send('click', x, y)
     await sleep(settleMs)
   }
   /**
@@ -188,11 +232,11 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
     // without the machine that produced them.
     copyFileSync(subject, join(root, `subject${extname(subject)}`))
     writeFileSync(join(root, 'launch.sh'), `#!/bin/bash
-export TERN_PANE_DIR=${root}
-cd ${repo}
-exec node --import tsx/esm ${subject} 2>> ${root}/subject.err
+export TERN_PANE_DIR=${shellQuote(root)}
+cd ${shellQuote(repo)} || exit 1
+exec node --import tsx/esm ${shellQuote(subject)} 2>> ${shellQuote(join(root, 'subject.err'))}
 `, { mode: 0o755 })
-    ctl('run', join(root, 'launch.sh'))
+    send('run', join(root, 'launch.sh'))
     return ready === undefined ? true : waitFor(ready, { timeoutMs: readyTimeoutMs })
   }
 
@@ -291,6 +335,12 @@ if (!harness.ready) {
 }
 try {
   await flow.default(harness)
+} catch (error) {
+  // A flow that throws is a red run, not a missing one: record it as a failed
+  // assertion and still write the ledger, so a failed run is as auditable as a
+  // passing one.
+  harness.log(`FLOW-ERROR ${error?.stack ?? error}`)
+  harness.check('the flow ran to completion', false, String(error?.message ?? error))
 } finally {
   harness.quit()
   harness.stopServe()
