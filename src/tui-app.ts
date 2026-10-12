@@ -20181,14 +20181,24 @@ export class TuiApp {
       // address a replacement viewer.
       onCopy: (request) => {
         const copy = this.copySelection
-        if (copy === undefined || finalized || this.jobWorkspace !== record) {
+        // An EMPTY payload is a real intent with nothing behind it: the panel
+        // reports it so the user learns why `C` did nothing. It never reaches
+        // the clipboard and never claims a copy (plan §1.2).
+        if (request.text === '') {
+          if (this.jobWorkspace === record) this.notify('Nothing to copy', 'info')
+          return
+        }
+        const runner = this.events.runOwned
+        // A missing capability is reported, never silently swallowed: the copy
+        // verb must not look inert when the composition is incomplete.
+        if (copy === undefined || runner === undefined || finalized || this.jobWorkspace !== record) {
           if (this.jobWorkspace === record) this.notify('Copy failed', 'error')
           return
         }
         // Fire-and-forget through the owned-task entry (AGENTS.md hard rule —
         // never a bare `void promise`): a rejection is classified, never an
         // unhandled rejection.
-        this.events.runOwned?.('job copy', () => copy(request.text), {
+        runner('job copy', () => copy(request.text), {
           onResult: (ok) => {
             if (this.disposed || this.jobWorkspace !== record) return
             // `true` only proves the strategy EMITTED the bytes (OSC52 has no

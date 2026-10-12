@@ -145,11 +145,6 @@ export class JobCommandReader {
     return this.document.source
   }
 
-  /** Whether a non-empty original range is selected. */
-  get hasSelection(): boolean {
-    return this.selectionRange() !== undefined
-  }
-
   /** Open (or re-open) the Command Find over the existing query. */
   openFind(): void {
     this.searchModel.openFind(this.scrollView.scrollTop)

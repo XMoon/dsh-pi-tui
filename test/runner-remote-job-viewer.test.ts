@@ -976,5 +976,5 @@ test('L6 B1-C: the Remote Client roster label reaches the Command page and Copy 
   assert.equal(fx.hostReadCalls(), readsBefore,
     'the Command page never consumes `ctx.jobs.read`')
   assert.equal(fx.hostReadCalls(), 0, 'no `ctx.jobs.read` may run on the Remote application path')
-  assert.equal(String(job.id).length > 0, true)
+  assert.equal(fx.rosterStatus(job.id), 'running', 'the official Client roster really carries the copied job')
 })

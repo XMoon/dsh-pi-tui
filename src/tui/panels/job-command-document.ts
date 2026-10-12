@@ -110,8 +110,20 @@ export function buildCommandVisualLayout(source: string, width: number): Command
   let col = 0
   let rowStart = 0
   let rowEnd = 0
+  /** A LEADING zero-width grapheme has no cell of its own yet: it belongs to
+   *  the first painted cell of the row, so it waits for that run instead of
+   *  becoming a zero-cell run no gesture could ever reach. */
+  let pendingMark = ''
+  let pendingMarkStart = 0
 
   const pushRow = (hardBreakEnd: number): void => {
+    // A row made ONLY of zero-width graphemes: they stay one zero-cell run at
+    // the row's own column, so the row still maps a real source range.
+    if (pendingMark !== '') {
+      runs.push({ startCol: col, endCol: col, sourceStart: pendingMarkStart, sourceEnd: rowEnd, display: pendingMark })
+      rendered += pendingMark
+      pendingMark = ''
+    }
     rows.push({ sourceStart: rowStart, sourceEnd: rowEnd, hardBreakEnd, runs, rendered })
     runs = []
     rendered = ''
@@ -135,13 +147,19 @@ export function buildCommandVisualLayout(source: string, width: number): Command
     let display = isTab ? TAB_DISPLAY : control ? controlDisplay(segment) : segment
     let cells = isTab ? TAB_CELLS : visibleWidth(display)
     if (!isTab && !control && cells === 0) {
-      // A zero-width grapheme (a lone mark): it has no cell of its own, so it
-      // rides on the previous run's source range and stays copyable.
+      // A zero-width grapheme (a lone mark / selector) owns no cell: it rides on
+      // the base character it belongs to and stays inside that character's
+      // ORIGINAL range. It therefore EXTENDS the previous run when there is one
+      // and otherwise pends for the next run. `rendered` is updated in every
+      // path, so "concatenating every run's display reproduces the painted row"
+      // holds universally.
       const previous = runs.length === 0 ? undefined : runs[runs.length - 1]
       if (previous === undefined) {
-        runs.push({ startCol: 0, endCol: 0, sourceStart: start, sourceEnd: end, display })
+        if (pendingMark === '') pendingMarkStart = start
+        pendingMark += display
       } else {
         runs[runs.length - 1] = { ...previous, sourceEnd: end, display: previous.display + display }
+        rendered += display
       }
       rowEnd = end
       continue
@@ -159,8 +177,18 @@ export function buildCommandVisualLayout(source: string, width: number): Command
       rowStart = start
       rowEnd = start
     }
-    runs.push({ startCol: col, endCol: col + cells, sourceStart: start, sourceEnd: end, display })
-    rendered += display
+    // A pended leading zero-width grapheme belongs to THIS first painted cell:
+    // its source range starts before the base character, so a gesture anchored
+    // on the cell always carries the mark with it.
+    runs.push({
+      startCol: col,
+      endCol: col + cells,
+      sourceStart: pendingMark === '' ? start : pendingMarkStart,
+      sourceEnd: end,
+      display: pendingMark + display,
+    })
+    rendered += pendingMark + display
+    pendingMark = ''
     col += cells
     rowEnd = end
   }
@@ -183,6 +211,12 @@ export function commandPointOffset(
   // Negative columns (a pointer clamped past the left edge) read as column 0.
   const col = Math.max(0, point.col)
   for (const run of row.runs) {
+    if (run.endCol === run.startCol) {
+      // A row made ONLY of zero-width graphemes: the whole row is that run, so
+      // its own column must still resolve to a real offset.
+      if (col <= run.startCol) return align === 'start' ? run.sourceStart : run.sourceEnd
+      continue
+    }
     if (col < run.startCol) return run.sourceStart
     if (col < run.endCol) return align === 'start' ? run.sourceStart : run.sourceEnd
   }
