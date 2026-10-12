@@ -456,7 +456,7 @@ the review package.
 What remains `NOT_VERIFIED` and is NOT claimed as passing:
 
 - the +25% / +50% enlarged-UI-font matrix at the 400px floor and at the wide
-  layout — the pre-existing Owner-accepted limitation below;
+  layout — the pre-existing Owner-accepted limitation above;
 - physical wheel/trackpad, IME, OS focus, dark themes, screen readers, terminal
   scaling, directories beyond the scripted sizes, the shipped full-profile/HMR and
   the Remote TSP application success path.
