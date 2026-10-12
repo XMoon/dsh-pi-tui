@@ -40,6 +40,7 @@ knows where the rest lives.
 | `keybinding-architecture.md` | contributors | The user-orchestrable keybinding design: the semantic action inventory (`app.*`), the context-aware effective keymap, the input ladder, the leader (M6) machinery, user configuration, and the static gate |
 | `extension-tiers.md` | plugin authors | The three-tier contract table and the current tier status (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`) |
 | `tern-tsp.md` | contributors | The Tern Surface Protocol (TSP) integration entry point: the protocol/SDK boundary, the dsh-pi-tui ownership chain, the current PR1/PR2 implementation status and limits, the capability matrix, and the evidence ledger (per-PR measurements live under `tern-tsp/evidence/`) |
+| `tern-pane-harness.md` | contributors | The real-pane Tern harness (`scripts/tern-pane-drive.mjs` plus the pure `scripts/tern-pane-geometry.mjs` oracle, covered by `test/tern-pane-geometry.test.mjs`): when a real client run is needed instead of headless, the flow/subject split, the run artifacts, the assertion-vs-measurement rules, the clipping and click-point traps, and its limits |
 | `tmux/` | — | Helper scripts (`ansi2html.mjs`, `tui-demo.sh`) with their own tests |
 | `dsh-pi-tui.png` | — | Screenshot used by the root README |
 
