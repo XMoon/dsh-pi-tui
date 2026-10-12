@@ -1833,6 +1833,15 @@ action that cannot execute is advertised, and a `[Copy All]` the frame could not
 paint leaves no click target behind. Long-term discoverability of these entries
 belongs to the B1-D tab/action design, not to a Footer redesign here.
 
+One KNOWN PRE-EXISTING interaction is deliberately not changed: this screen has
+the fork's copy-on-select enabled (B1-A never disabled it), so a SECOND click on
+the same cell inside the fork's 500 ms double-click window is classified as a word
+selection rather than a header click, and the fork copies the word under the
+pointer through its own trimmed screen-text path instead of the official label. A
+single click always behaves exactly as documented here; suppressing the double
+click would require either a pi-tui fork change or a gesture/copy-on-select change
+that is outside B1-C's authority.
+
 ## Long user messages collapse at the presentation layer only
 
 A text-only durable user message whose render-time visual row count exceeds
