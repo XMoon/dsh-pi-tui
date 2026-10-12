@@ -2688,7 +2688,13 @@ export function applyRunnerWithRuntime(
       settings.applyFooterSettings()
       // The editor recall seed is PiTui-only on this branch (the read-only
       // renderer has no editor); the JSONL history store still accumulates.
-      history.activateBootRecall()
+      // A startup RESUME publishes its Session owner BEFORE this mount and its
+      // hydration reseeds ↑ from that Session's own rows, so seeding the launch
+      // cwd's whole history here would expose every earlier Session's rows — and
+      // let them be resubmitted into this one — for as long as that reseed takes
+      // (arbitrarily long on Remote, where the read is awaited). A fresh start has
+      // no owner yet, so the boot recall is exactly what it is for.
+      if (ownership.currentSessionId() === undefined) history.activateBootRecall()
     }
     // Fresh/deferred startup title: no session yet — cwd identity only. The
     // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
