@@ -20,6 +20,7 @@ import type {
 } from '../../app/command/preset-presentation.ts'
 import { actionIntent, keyIntent, rowIntent, type PresetPickerIntent } from './preset-picker-intents.ts'
 import {
+  actionEnabled,
   detailFactItems,
   focusedAction,
   highlightedRow,
@@ -242,7 +243,7 @@ export class TspPresetPicker {
         return
       }
       case 'retry':
-        this.retry(panel)
+        if (actionEnabled(panel, 'retry')) this.retry(panel)
         return
       case 'zone':
         // Remember where the action bar was entered FROM: Esc must return there
@@ -252,6 +253,9 @@ export class TspPresetPicker {
         this.change(panel)
         return
       case 'page':
+        // The read-only Details page exists only while its OWN action is live
+        // (a highlighted row); going back to the list is always allowed.
+        if (intent.page === 'details' && !actionEnabled(panel, 'details')) return
         panel.page = intent.page
         panel.zone = 'list'
         this.change(panel)
@@ -269,10 +273,13 @@ export class TspPresetPicker {
         this.change(panel)
         return
       case 'apply':
-        this.apply(panel)
+        // A synthetic/pointer event can name any action id; the ONE admission
+        // consumes the SAME enabled decision the bar renders, so a disabled
+        // action can never write even when its id reaches this entry point.
+        if (actionEnabled(panel, 'use')) this.apply(panel)
         return
       case 'save-default':
-        this.saveDefault(panel)
+        if (actionEnabled(panel, 'set-default')) this.saveDefault(panel)
         return
       default:
         return

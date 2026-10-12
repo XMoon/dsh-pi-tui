@@ -9,8 +9,13 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { parse } from 'yaml'
+import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { createDirectTspFixture, waitFor } from './support/direct-tsp-fixture.ts'
-import { ownTspBoot, waitUntil } from './support/tsp-runner-harness.ts'
+import { ownTspBoot, settle, waitUntil } from './support/tsp-runner-harness.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { DirectPresetCatalog } from '../src/runtime/direct/catalog-direct.ts'
 import {
@@ -277,66 +282,72 @@ test('PR4-A: a Host-owned /preset keeps its own route ahead of the TUI registrat
 
 /* ----------------------------------------------------- the default write */
 
-/** The faithful settings-service stand-in: the Direct preset-default adapter
- *  mutates exactly this surface (namespace + set-op + revision). */
-function settingsStandIn() {
-  const mutations: Array<{ ns: string; ops: readonly { op: string; path: readonly string[]; value: unknown }[] }> = []
-  return {
-    mutations,
-    describe: () => [{ ns: 'agent-preset-registry', revision: mutations.length }],
-    mutate: async (ns: string, ops: readonly { op: string; path: readonly string[]; value: unknown }[]) => {
-      mutations.push({ ns, ops })
-      return { revision: mutations.length }
-    },
-  }
+/** The registry's real settings row inside the profile document. */
+function presetDefaultRow(patchPath: string): string | undefined {
+  const rows = parse(readFileSync(patchPath, 'utf8')) as Array<{
+    readonly id?: string
+    readonly config?: { readonly selectedDefault?: string }
+  }>
+  return rows.find((row) => row.id === 'agent-preset-registry')?.config?.selectedDefault
 }
 
-/** The default-write mutations only: the runner's own legacy settings migration
- *  goes through the SAME service and is not this write. */
-const presetMutations = (settings: ReturnType<typeof settingsStandIn>) =>
-  settings.mutations.filter((mutation) => mutation.ns === 'agent-preset-registry')
-
-test('PR4-A: Set new-session default and the typed verb drive ONE settings writer', async (t) => {
+test('PR4-A: the picker default write persists through the official profile plane', async (t) => {
   const life = testLifecycle(t)
-  const settings = settingsStandIn()
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
-    settings,
-    presets: [{ id: 'minimal-preset', name: 'Minimal preset' }],
+    presetProfile: {
+      presets: [{ id: 'fixture-a', name: 'Fixture A' }, { id: 'fixture-b', name: 'Fixture B' }],
+    },
   })
+  const patchPath = join(fixture.workRoot, 'profile', 'cordis.patch.yml')
   try {
     await waitFor('renderer ready', () => dockText(fixture.pane).includes('dock.composer'))
+    assert.equal(presetDefaultRow(patchPath), undefined, 'no test pre-seeds the saved default')
+    assert.equal((fixture.ctx.get('agentPresets') as { defaultId: string }).defaultId, 'fixture-a')
     fixture.pane.key('/preset\r')
     await waitFor('picker ready', () => props(fixture.pane).state === 'ready')
-    // The Config owner is present, so the default write is really offered.
+    assert.match(dockText(fixture.pane), /New-session default: fixture-a/)
+    // The registry IS a configurable plugin entry here, so the write is offered.
     fixture.pane.key('\u001b[B')
-    await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
+    await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:fixture-b')
     assert.notEqual(action(fixture.pane, 'set-default')?.disabled, true)
-    // Focus it explicitly and commit.
     fixture.pane.key('\t')
     await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
     fixture.pane.key('\u001b[C')
     await waitFor('default focused', () => String(action(fixture.pane, 'set-default')?.label).startsWith('▸'))
     fixture.pane.key('\r')
-    await waitFor('the ONE default mutation', () => presetMutations(settings).length === 1)
-    assert.deepEqual(presetMutations(settings)[0], {
-      ns: 'agent-preset-registry',
-      ops: [{ op: 'set', path: ['selectedDefault'], value: 'minimal-preset' }],
-    })
-    await waitFor('default notice', () => dockText(fixture.pane)
-      .includes('new-session default set: minimal-preset — changes new sessions only'))
-    await waitFor('dismissed', () => node(fixture.pane) === undefined)
-    // The TYPED verb drives the very same writer.
-    fixture.pane.key('/preset default b2-direct-preset\r')
-    await waitFor('the second, identical mutation', () => presetMutations(settings).length === 2)
-    assert.deepEqual(presetMutations(settings)[1], {
-      ns: 'agent-preset-registry',
-      ops: [{ op: 'set', path: ['selectedDefault'], value: 'b2-direct-preset' }],
-    })
+    // The REAL ConfigEditor/Loader writes the selected default into the profile
+    // document, and the registry's effective default follows it.
+    await waitFor('the profile document holds the new default', () => presetDefaultRow(patchPath) === 'fixture-b')
+    await waitFor('picker dismissed', () => pickerNode(fixture.pane, P) === undefined)
+    assert.equal((fixture.ctx.get('agentPresets') as { defaultId: string }).defaultId, 'fixture-b')
     assert.equal([...fixture.ctx.agents.list()].length, 0, 'a default write creates no Session')
+    // The TYPED verb drives the very same writer: the document flips back.
+    await clearComposer(fixture.pane)
+    fixture.pane.key('/preset default fixture-a\r')
+    await waitFor('the typed verb writes the same document', () => presetDefaultRow(patchPath) === 'fixture-a')
+    // A reopened panel reads the new default from the authority.
+    fixture.pane.key('/preset\r')
+    await waitFor('reopened', () => props(fixture.pane).state === 'ready')
+    assert.match(dockText(fixture.pane), /New-session default: fixture-a/)
+    fixture.pane.key('\u001b')
+    await waitFor('closed', () => pickerNode(fixture.pane, P) === undefined)
   } finally {
     await fixture.settle()
   }
+  // A FRESH composition composes the same profile document: its only input is
+  // the real file saved above, never the original service instance.
+  const fresh = new Context()
+  life.defer(() => fresh.fiber.dispose())
+  await fresh.plugin(Loader)
+  const { mountAgentLoopTestDependencies } = await import('@deepseek-ai/dsh-agent-loop-testkit')
+  await mountAgentLoopTestDependencies(fresh)
+  const { mountPresetProfile } = await import('./support/preset-profile-fixture.ts')
+  const reloaded = await mountPresetProfile(fresh, fixture.workRoot, [])
+  assert.equal((fresh.get('agentPresets') as { defaultId: string }).defaultId, 'fixture-a',
+    'the new composition reads the persisted default')
+  assert.equal(JSON.stringify(reloaded.patches).includes('selectedDefault'), true,
+    'and it composes the saved profile document')
 })
 
 test('PR4-A: without a Config owner the default write is honestly disabled', async (t) => {
@@ -352,12 +363,19 @@ test('PR4-A: without a Config owner the default write is honestly disabled', asy
     fixture.pane.key('\u001b[B')
     await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
     assert.equal(action(fixture.pane, 'set-default')?.disabled, true)
-    // Dispatching it anyway is a no-op, and the typed verb reports the missing
-    // owner through the ORIGINAL message.
-    sendAction(fixture.pane, 'set-default', undefined, pickerNode(fixture.pane, P)!.id)
-    fixture.pane.key('\r')
-    await waitFor('no cue on the disabled action', () => props(fixture.pane).state === 'ready')
+    // Dispatching the DISABLED action at the presenter is refused at admission:
+    // the panel keeps the same frame and no settings write happens at all.
+    const before = pickerNode(fixture.pane, P)!.id
+    sendAction(fixture.pane, 'set-default', undefined, before)
+    await settle(600)
+    assert.equal(pickerNode(fixture.pane, P)?.id, before, 'a disabled action never repaints or dismisses')
+    assert.equal(props(fixture.pane).state, 'ready')
     assert.equal(dockText(fixture.pane).includes('new-session default set:'), false)
+    assert.equal(dockText(fixture.pane).includes('settings service unavailable'), false)
+    // The panel owns the keyboard, so the typed verb runs after it closes.
+    fixture.pane.key('\u001b')
+    await waitFor('closed', () => pickerNode(fixture.pane, P) === undefined)
+    await clearComposer(fixture.pane)
     fixture.pane.key('/preset default minimal-preset\r')
     await waitFor('settings service unavailable', () => dockText(fixture.pane).includes('settings service unavailable'))
   } finally {

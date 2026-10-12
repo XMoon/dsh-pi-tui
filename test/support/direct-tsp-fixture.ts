@@ -222,9 +222,10 @@ export async function createDirectTspFixture(
     /** Extra agent presets registered into the REAL registry beside the
      *  fixture's own (a second real switch target). */
     readonly presets?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly description?: string }>
-    /** The settings-service stand-in the preset-default WRITE path mutates.
-     *  Provided BEFORE the registry mounts (it injects `settings`). */
-    readonly settings?: unknown
+    /** Mount the official preset-declaring profile plane: the listed presets are
+     *  declared by REAL bundle rows (healthy, with a resolution base) and the
+     *  default write goes through the real ConfigEditor/Loader. */
+    readonly presetProfile?: { readonly presets?: readonly { readonly id: string; readonly name?: string }[] }
     readonly appExit?: () => void
     /**
      * GENUINE Host commands registered into the REAL command catalog before the
@@ -313,21 +314,30 @@ export async function createDirectTspFixture(
   ctx.provide('fileReferences', { list: async () => [] })
   await ctx.plugin(UserQuestionService)
   await ctx.plugin(Loader)
-  if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   if (options.profileDefault !== undefined) await mountModelProfile(ctx, workRoot, options.profileDefault)
-  await ctx.plugin(AgentPresetRegistry, { default: options.startup?.presetId ?? 'b2-direct-preset' })
-  await ctx.get('agentPresets')!.register({
-    id: options.startup?.presetId ?? 'b2-direct-preset',
-    name: 'B2 direct preset',
-    plugins: [],
-  })
-  for (const preset of options.presets ?? []) {
+  if (options.presetProfile !== undefined) {
+    // The preset plane declares the registry AND its presets as REAL bundle rows,
+    // so the settings namespace the default write mutates exists.
+    const { mountPresetProfile } = await import('./preset-profile-fixture.ts')
+    await mountPresetProfile(ctx, workRoot, options.presetProfile.presets ?? [])
+  }
+  if (options.presetProfile === undefined) {
+    await ctx.plugin(AgentPresetRegistry, { default: options.startup?.presetId ?? 'b2-direct-preset' })
+  }
+  if (options.presetProfile === undefined) {
     await ctx.get('agentPresets')!.register({
-      id: preset.id,
-      ...(preset.name === undefined ? {} : { name: preset.name }),
-      ...(preset.description === undefined ? {} : { description: preset.description }),
+      id: options.startup?.presetId ?? 'b2-direct-preset',
+      name: 'B2 direct preset',
       plugins: [],
     })
+    for (const preset of options.presets ?? []) {
+      await ctx.get('agentPresets')!.register({
+        id: preset.id,
+        ...(preset.name === undefined ? {} : { name: preset.name }),
+        ...(preset.description === undefined ? {} : { description: preset.description }),
+        plugins: [],
+      })
+    }
   }
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
