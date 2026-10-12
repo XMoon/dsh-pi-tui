@@ -285,6 +285,69 @@ test('PR4-A: a REAL blank live Session switches preset through the Host and rere
   assert.deepEqual(liveAgents(), [], 'the runner teardown released the resumed Session')
 })
 
+test('PR4-A: a Host write that settles after its panel was replaced notifies nobody', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    presetPicker: true,
+    persistedBlankSession: { id: 'blank-live-1' },
+    startup: { sessionId: 'blank-live-1' },
+    presets: [{ id: 'minimal-preset', name: 'Minimal preset' }],
+  })
+  const original = DirectPresetCatalog.prototype.selectSessionPreset
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let calls = 0
+  DirectPresetCatalog.prototype.selectSessionPreset = async function (...args) {
+    calls += 1
+    await gate
+    return original.apply(this, args)
+  }
+  t.after(() => { DirectPresetCatalog.prototype.selectSessionPreset = original })
+  const selections = (): number =>
+    ((fixture.ctx.agents.get('blank-live-1' as never)?.session.snapshotEvents() ?? []) as ReadonlyArray<{ type: string }>)
+      .filter((event) => event.type === 'agent-preset/selected').length
+  try {
+    await waitFor('renderer ready', () => dockText(fixture.pane).includes('dock.composer'))
+    fixture.pane.key('/preset\r')
+    await waitFor('picker ready', () => props(fixture.pane).state === 'ready')
+    fixture.pane.key('\u001b[B')
+    await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
+    fixture.pane.key('\t')
+    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
+    fixture.pane.key('\r')
+    await waitFor('the write reached the Host writer', () => calls === 1)
+    // Esc closes the panel; the admitted Host write keeps running (closing a
+    // panel never cancels a write).
+    fixture.pane.key('\u001b')
+    await waitFor('closed', () => pickerNode(fixture.pane, P) === undefined)
+    assert.equal(selections(), 0, 'the write is still in flight')
+    // A NEWER `/preset` takes the surface while the first write is still open.
+    fixture.pane.key('/preset\r')
+    await waitFor('the new panel is ready', () => props(fixture.pane).state === 'ready'
+      && pickerNode(fixture.pane, P) !== undefined)
+    const newPanel = pickerNode(fixture.pane, P)!.id
+    // The OLD write settles: no line may describe it on the surface that
+    // replaced it.
+    release()
+    await waitFor('the old write committed', () => selections() === 1)
+    await settle(600)
+    assert.equal(pickerNode(fixture.pane, P)?.id, newPanel, 'the new panel is untouched')
+    assert.equal(dockText(fixture.pane).includes('session preset switched to minimal-preset'), false,
+      'a retired panel never notifies the surface that replaced it')
+    // POSITIVE CONTROL on the same seam: while the panel still owns the surface,
+    // the very same outcome IS announced (the fence is not a blanket silence).
+    fixture.pane.key('\t')
+    await waitFor('use focused again', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
+    fixture.pane.key('\r')
+    await waitFor('the control switch is announced', () =>
+      dockText(fixture.pane).includes('session preset switched to b2-direct-preset'))
+    assert.equal(selections(), 2)
+  } finally {
+    release()
+    await fixture.settle()
+  }
+})
+
 /* ------------------------------------------------------------ typed verbs */
 
 test('PR4-A: the typed verbs keep their original Host routes and never open a picker', async (t) => {

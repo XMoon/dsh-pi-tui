@@ -565,6 +565,71 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   t.app.stop()
 })
 
+test('/preset with an EMPTY roster keeps the original command success text', async () => {
+  const t = setup({ roster: async () => ({ presets: [] }) })
+  const result = await t.run('') as { kind: string; text?: string }
+  // The PiTui command settlement is part of the frozen surface: an empty roster
+  // is a successful command whose text the command path owns.
+  assert.deepEqual(result, { kind: 'success', text: 'no agent presets configured' })
+  assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
+  const view = await t.view()
+  assert.ok(!view.includes('Standard mode (standard)'), `an empty roster opens no overlay:\n${view}`)
+  t.app.stop()
+})
+
+test('/preset roster failure keeps the original command failure settlement', async () => {
+  const t = setup({ roster: async () => { throw new Error('catalog is unreachable') } })
+  // The read failure is rethrown to the command path (which owns the notice,
+  // the health record and the draft restore) — never swallowed into a success
+  // plus a late background notice.
+  await assert.rejects(async () => { await t.run('') }, /catalog is unreachable/u)
+  const view = await t.view()
+  assert.ok(!view.includes('Standard mode (standard)'), `no overlay after a failed read:\n${view}`)
+  t.app.stop()
+})
+
+test('a standing-catalog notice never lands on a newer /preset surface', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let held = false
+  const t = setup({
+    refreshCatalog: async () => {
+      if (held) {
+        await gate
+        return standingOutcome(['glab'], 'stale standing notice')
+      }
+      return standingOutcome(['glab'], 'owned standing notice')
+    },
+  })
+  try {
+    // POSITIVE CONTROL: while the operation still owns the surface, its notice
+    // is visible — the fence cannot be a blanket silence.
+    const owned = await t.run('minimal') as { kind: string; text?: string }
+    assert.equal(owned.kind, 'success')
+    assert.ok((await t.view()).includes('owned standing notice'),
+      'the owned standing notice must be visible')
+
+    // STALE CASE: the operation holds its standing refresh while a newer bare
+    // `/preset` takes the surface; the older notice must not describe it.
+    held = true
+    const older = t.run('standard')
+    for (let i = 0; i < 100 && t.refreshes.filter(r => r.source === 'preset').length < 3; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    const newer = await t.run('') as { kind: string; text?: string }
+    assert.equal(newer.kind, 'success', 'the newer invocation still settles')
+    release()
+    await older
+    await t.view()
+    const view = await t.view()
+    assert.ok(!view.includes('stale standing notice'),
+      `a replaced surface must not receive the older notice:\n${view}`)
+  } finally {
+    release()
+    t.app.stop()
+  }
+})
+
 test('/preset default refuses a declared-but-broken preset without writing', async () => {
   const writes: unknown[] = []
   const t = setup({
