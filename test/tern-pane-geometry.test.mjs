@@ -4,8 +4,9 @@
  *
  *   - a node's own rect is not a visibility proof (its clip ancestor decides);
  *   - a line can fit the horizontal clip and still fall past its region's bottom;
- *   - the click point must sit on the fragment the client shows, not on the
- *     node's own centre, which is covered by whatever clips it;
+ *   - the click point must sit on the fragment the client shows on BOTH axes,
+ *     never on the node's own centre, which can be covered by whatever clips it
+ *     — or be off screen entirely;
  *   - a zero-sized ancestor cannot clip.
  *
  * Every case nests the measured node INSIDE the box that clips it, which is the
@@ -70,6 +71,23 @@ test('visiblePoint clicks the shown fragment, not the own-rect centre', () => {
   const clip = node([100, 0, 200, 400], [button])
   const { chains } = index([node([0, 0, 400, 400], [clip])])
   assert.deepEqual(visiblePoint(chains, button), { x: 125, y: 20 }, 'the own centre (100) sits on the clip edge')
+})
+
+test('visiblePoint clips the VERTICAL axis too, and never aims below the region', () => {
+  const line = node([10, 150, 200, 50])
+  const region = node([0, 100, 400, 60], [line])
+  const { chains } = index([node([0, 0, 400, 400], [region])])
+  // 150..160 survives; the own centre (y=175) is inside the clipped-away part and
+  // would click whatever sits under the region.
+  assert.deepEqual(visiblePoint(chains, line), { x: 110, y: 155 }, 'not the own centre y=175')
+})
+
+test('visiblePoint refuses a node that survives nothing vertically', () => {
+  const scrolledOut = node([10, 200, 20, 16])
+  const region = node([0, 100, 400, 60], [scrolledOut])
+  const { chains } = index([node([0, 0, 400, 400], [region])])
+  assert.equal(visibleSpan(chains, scrolledOut, 'x'), 20, 'it still has width')
+  assert.equal(visiblePoint(chains, scrolledOut), undefined, 'but no part of it is on screen')
 })
 
 test('visiblePoint refuses a fragment too small to hit', () => {

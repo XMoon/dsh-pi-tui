@@ -29,8 +29,8 @@
  *      TERN_PANE_OUT=<path>  artifact directory (default: <repo>/temp/tern-pane)
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { index, rect, visiblePoint } from './tern-pane-geometry.mjs'
 
@@ -82,7 +82,11 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
       spawnSync('sleep', ['0.4'])
     }
     log(`CTL-FAIL ${JSON.stringify(args)}`)
-    return { ok: false }
+    // A control command that did not run makes every later observation a guess:
+    // a failed `tree` reads as an empty tree, and an empty tree makes "the control
+    // is absent" / "nothing was written" pass VACUOUSLY. The instrument fails
+    // closed instead of reporting that as a green run.
+    throw new Error(`tern ctl ${args.join(' ')} failed`)
   }
 
   const serve = spawn(ternBin, ['serve', '--control', endpoint, '--out', join(root, 'shots')], { stdio: ['ignore', 'pipe', 'pipe'] })
@@ -180,6 +184,9 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
    * the run.
    */
   async function launch(subject, { ready, readyTimeoutMs = 20_000 } = {}) {
+    // Keep a copy of the subject with the run: the artifacts must be auditable
+    // without the machine that produced them.
+    copyFileSync(subject, join(root, `subject${extname(subject)}`))
     writeFileSync(join(root, 'launch.sh'), `#!/bin/bash
 export TERN_PANE_DIR=${root}
 cd ${repo}
@@ -224,7 +231,8 @@ exec node --import tsx/esm ${subject} 2>> ${root}/subject.err
     snapshot, waitFor, vis, texts, has, textNode, classNodes, descendantsText,
     key, resize, css, click, clickAt, shot, capture,
     launch,
-    quit: () => ctl('quit'),
+    // Teardown must not mask an earlier failure with one of its own.
+    quit: () => { ctlOnce('quit') },
     stopServe,
   }
 }
@@ -272,7 +280,10 @@ if (typeof flow.default !== 'function') {
 
 const harness = await createHarness({ ternBin, root })
 harness.log(`TERN ${ternBin} :: ${ternVersion}`)
+harness.log(`ARGV ${process.argv.slice(2).join(' ')}`)
 harness.log(`FLOW ${flowPath}`)
+// Keep the flow with the run so the artifacts can be audited and re-run later.
+copyFileSync(flowPath, join(root, `flow${extname(flowPath)}`))
 if (!harness.ready) {
   console.error(`the Tern serve control socket never answered (${root})`)
   harness.stopServe()
