@@ -351,6 +351,8 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
         isFindKey: () => false,
         findHint: () => '',
         focusComponent: () => {},
+        onCopy: () => {},
+        paintedBox: () => undefined,
       },
     )
     const lines = panel.render(budget.width)
@@ -411,6 +413,8 @@ test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capabil
     isFindKey: () => false,
     findHint: () => '',
     focusComponent: () => {},
+    onCopy: () => {},
+    paintedBox: () => undefined,
   })
   assert.match(panel.render(100).at(-1)!, /stop/)
   assert.match(panel.render(100).at(-1)!, /Esc back/)
@@ -447,6 +451,8 @@ test('A-01d a long Job identity and a long error text never hide the status or t
       isFindKey: () => false,
       findHint: () => '',
       focusComponent: () => {},
+      onCopy: () => {},
+      paintedBox: () => undefined,
     },
   )
   const lines = panel.render(80)
@@ -481,6 +487,8 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
     isFindKey: () => false,
     findHint: () => '',
     focusComponent: () => {},
+    onCopy: () => {},
+    paintedBox: () => undefined,
   })
 
   // 44×8 with GAP/ERROR: the compact header is TWO rows at most, the Command and

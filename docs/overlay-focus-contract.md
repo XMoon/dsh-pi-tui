@@ -416,11 +416,49 @@ workspace must return to.
 - **Observer ownership stays in the Task Runtime.** The workspace only PRESENTS
   the ONE captured `JobInspectorState`; the selected-Job observer, its per-open
   `releaseOnce`, the Stop capability fence and the Stop mutation all stay in
-  `app/surface/task-runtime`. The panel holds no timer, no backend read and no
-  second subscription.
+  `app/surface/task-runtime`. The panel holds no backend read and no second
+  subscription. The Command reader's edge auto-scroll timer is NOT a second Job
+  refresh: it belongs to one pointer gesture, scrolls only its own viewport, is
+  `unref()`d, and is released on release, page switch, resize, terminal blur,
+  workspace exit and dispose.
+- **Two mutually exclusive bodies inside the ONE leased screen.** The workspace
+  mounts both reading pages and both Search rows for the whole panel lifetime and
+  makes them mutually invisible through the layout's own `visible` entries, so
+  exactly one body and exactly one Search row are ever laid out and exactly one
+  ScrollView is the primary viewport. Switching pages therefore never rebuilds a
+  ScrollView (the Output page keeps its follow intent, anchor and query) and
+  never creates a second physical owner: the same `TuiAltScreen`, the same
+  `setLayoutRoot(panel)` root and the same keyboard focus target remain in force,
+  with the physical focus only moving between the panel root and the CURRENT
+  page's Search row. `Esc` on the Command page returns to Output (a logical
+  intent of the same panel), never a screen swap.
+- **The header's copy affordances resolve against the LAST PAINTED frame.** The
+  Command summary row and its `[Copy All]` button are plain painted cells with no
+  mouse-handling component, so the alt screen's existing `onCellPress`/
+  `onCellClick` callbacks reach the panel. The panel reads its hit regions and the
+  header's painted top row at the frame-painted boundary (the same X054 geometry
+  query the Command selection uses) and a click acts only when the release
+  re-proves the press-time action, page and Command source identity; a repaint in
+  between refuses it. The Command BODY is the one region that DOES own the
+  pointer: its published `MouseRegion` returns `capture: true` on a left press,
+  and the gesture, its selection and its timer are released on any page switch,
+  label change, resize, blur or dispose, so no ghost selection or timer can
+  outlive the frame it belonged to.
 - **Final dispose releases the lease first.** `TuiApp.dispose()` closes a still
   leased workspace before the overlay teardown and the screen stops, so no
   temporary screen keeps a terminal input handler into the dying surface.
+
+### 10.2 Command selection read-through
+
+The Command drag selection deliberately does NOT use the alt screen's own
+`getActiveSelectionText()`: that path slices the PAINTED screen rows, trims each
+row and strips a leading 1–3 cell indent (X024), so it cannot reproduce a shell
+command's TABs, trailing spaces or soft wraps. The reader keeps its own
+`visual row + display cell -> original UTF-16 half-open range` mapping instead
+and asks the alt screen only for the last painted rects. It never enables a
+second global SGR parser and never installs a second selection owner, so the
+fork's scrollbar interaction, wheel routing and native selection elsewhere on the
+same screen are untouched.
 
 ## 11. Optional seat tenant: PARK / REFUSE
 

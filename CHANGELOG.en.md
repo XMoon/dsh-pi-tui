@@ -38,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary keys the bottom row no longer advertises Stop, and while the query is
   being edited it also omits the Find/End hints, because those keys belong to the
   query input there.
+- The Job workspace gained a Command reading page: a shell (`bash`/`pwsh`) Job
+  opens it with `v` or by clicking the `Command:` summary in the header, showing
+  the ORIGINAL command text unmodified (indentation, tabs, trailing spaces and
+  line breaks included) with its own scrolling and Find, plus mouse drag-selection
+  of any original fragment; `C` or a click on `[Copy All]` copies the whole
+  original command once, and `Esc` returns to the Output page without closing the
+  workspace. Non-shell Jobs still show only `Label:` and never get a fabricated
+  Command page. On the Output page `C` copies the retained output as of that
+  keypress. Both copies go through the existing local clipboard strategy: success
+  reads `Copy sent`, failure reads `Copy failed`, and the message never claims the
+  system clipboard was confirmed (OSC52 has no acknowledgement). Empty content, an
+  unavailable Command and an empty selection write nothing.
   When the retained window is truncated, a paused view keeps the same
   still-present row where it can, the bottom row number is a position inside this
   retained preview only, and `[GAP]` still comes only from the official fact.

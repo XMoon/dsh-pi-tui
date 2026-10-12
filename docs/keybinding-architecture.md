@@ -235,6 +235,23 @@ rebuild alone.
     other completion without dispatching it, and the leader activation
     wiring intercepts Find for the Job BEFORE the host action dispatch —
     never "open the Transcript search, then repair it".
+13. **A fullscreen Job workspace has fixed Job-local read-only verbs that
+    are NOT configurable action ids.** `v` opens the shell Command page
+    from the Output page and `C` (`shift+c`) copies the CURRENT reading
+    page's own source — the retained Output on the Output page, the
+    original command label on the Command page — through the existing
+    Client-local clipboard capability. They are component logic, not an
+    entry in `APP_KEYBINDINGS`: they take part in no conflict
+    classification, move with no remap and never shadow the global
+    Transcript, picker or editor bindings, which still own those letters
+    everywhere else. Their precedence inside the workspace is fixed: the
+    physical `Home`/`End` viewport keys and the effective Find binding are
+    matched FIRST (see 11/12 above), `tasks.stop` keeps its existing branch
+    BEFORE the two verbs, and in the search `NAVIGATE` state — and in
+    `EDIT`, where the query Input owns every printable key — all three are
+    inert and the Action Bar advertises none of them. The Command page
+    never advertises or dispatches Stop; `Esc` there is the page's own
+    return to Output, and only an Output-page `Esc` runs the B1-A close.
 
 ## User configuration
 
