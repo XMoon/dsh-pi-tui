@@ -3059,7 +3059,6 @@ test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog 
   const rootLease = app.showAdvancedInteractiveOverlay(root.component)
   await vt.waitForRender()
   assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
-  const rootOwner = app.focusedComponentForTest()
 
   const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'swap during mount' })
   await vt.waitForRender()
@@ -3068,15 +3067,12 @@ test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog 
     `the active Approval must be physically mounted on the swapped screen:\n${viewport(vt)}`,
   )
   assert.equal(app.focusSeatForTest(), 'overlay', 'the approval owns the seat on the swapped screen')
+  // The pre-swap wrapper identity is NOT a valid negative control after a swap
+  // (the root is re-mounted as a NEW wrapper): the NEWER-owner control is B-57.
   assert.notEqual(
     app.focusedComponentForTest(),
     app.seatEditorForTest().component,
     'the interleaved swap may not hand the live Approval keyboard to the editor',
-  )
-  assert.notEqual(
-    app.focusedComponentForTest(),
-    rootOwner,
-    'the surviving root stays suppressed under the Approval, it does not keep the keyboard',
   )
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(approval), 'allowed-once', 'the approval stays answerable after the swap')
@@ -3085,5 +3081,129 @@ test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog 
   assert.equal(app.assertOverlayForestForTest(), undefined)
   assert.ok(viewport(vt).includes('swap-root-ok'), `the surviving root must be restored:\n${viewport(vt)}`)
   rootLease.close()
+  await vt.waitForRender()
+})
+
+test('B-57: a callback NEWER focus inside the swap window beats the pre-swap owner', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let chainStarted = false
+  let newerOwner: Component | null = null
+  let rootLease: { focus(): void; close(): void } | undefined
+  const root = advancedOverlayProbe('newer-focus-root', undefined, () => {
+    if (chainStarted) return
+    chainStarted = true
+    app.setFullscreen(true)
+    // The SAME synchronous window performs a NEWER explicit focus: it must win over
+    // the pre-swap owner the late Approval restore would otherwise re-install.
+    rootLease!.focus()
+    newerOwner = app.focusedComponentForTest()
+  })
+  rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+  const blursBefore = root.blurCount()
+  void blursBefore
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'swap then newer focus' })
+  await vt.waitForRender()
+  assert.ok(
+    viewport(vt).includes('bash'),
+    `the Approval is still projected by its late remount:\n${viewport(vt)}`,
+  )
+  assert.notEqual(newerOwner, null)
+  assert.equal(
+    app.focusedComponentForTest(),
+    newerOwner,
+    'the callback NEWER focus must win over the pre-swap owner snapshot',
+  )
+  assert.equal(
+    root.blurCount(),
+    blursBefore + 1,
+    'only the mount\'s own blur may happen: the late restore must not blur the newer owner',
+  )
+  // The newer owner leaves: the live Approval takes the keyboard (it is the
+  // frontmost capturing root) and stays answerable.
+  rootLease.close()
+  await vt.waitForRender()
+  assert.notEqual(
+    app.focusedComponentForTest(),
+    app.seatEditorForTest().component,
+    'the live Approval takes the keyboard once the newer root leaves',
+  )
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(approval), 'allowed-once')
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+})
+
+test('B-57b: a capturing overlay mounted in the swap window keeps its keyboard', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let chainStarted = false
+  let cOwner: Component | null = null
+  let cLease: { blur(): void; close(): void } | undefined
+  const c = advancedOverlayProbe('newer-capturing-c')
+  const root = advancedOverlayProbe('newer-swap-root', undefined, () => {
+    if (chainStarted) return
+    chainStarted = true
+    app.setFullscreen(true)
+    // A NEWER capturing mount (not just a focus()): its handoff must also survive
+    // the late pre-swap restore.
+    cLease = app.showAdvancedInteractiveOverlay(c.component)
+    cOwner = app.focusedComponentForTest()
+  })
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1)
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'swap then newer mount' })
+  await vt.waitForRender()
+  assert.equal(c.focusCount(), 1, 'the newer capturing overlay auto-focused on its mount')
+  assert.notEqual(cOwner, null)
+  assert.equal(app.focusedComponentForTest(), cOwner, 'the newer mount keeps the keyboard')
+  assert.equal(c.blurCount(), 0, 'the late restore must not blur the newer capturing owner')
+  // The newer overlay leaves: the live Approval takes over and settles.
+  cLease!.close()
+  await vt.waitForRender()
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(approval), 'allowed-once')
+  await vt.waitForRender()
+  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+})
+
+test('B-58: an Advanced overlay whose own mount interleaves a swap is re-projected', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const late = advancedOverlayProbe('sibling-late-a')
+  let chainStarted = false
+  const root = advancedOverlayProbe('sibling-swap-root', undefined, () => {
+    if (chainStarted) return
+    chainStarted = true
+    // This root's blur is triggered by ANOTHER Advanced overlay's mount, and the
+    // swap it starts detaches THAT overlay's projection while its mount is still in
+    // flight — the sibling window, where its remount callback cannot exist yet.
+    app.setFullscreen(true)
+  })
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+
+  const lateLease = app.showAdvancedInteractiveOverlay(late.component)
+  await vt.waitForRender()
+  assert.ok(
+    viewport(vt).includes('sibling-late-a'),
+    `an overlay whose own mount interleaved a swap must still be projected:\n${viewport(vt)}`,
+  )
+  assert.notEqual(
+    app.focusedComponentForTest(),
+    app.seatEditorForTest().component,
+    'a live overlay owns the keyboard, never the editor',
+  )
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+  rootLease.close()
+  lateLease.close()
   await vt.waitForRender()
 })
