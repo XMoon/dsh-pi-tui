@@ -2921,6 +2921,31 @@ test('an evicted SKIP that settled after an evicted write stays newer than its r
   app.stop()
 })
 
+test('two evicted skips keep their own boundaries across evicted writes', async () => {
+  // N1: the evicted skips must be consumed in boundary order, so a skip that
+  // settled early is not dumped behind a row it is newer than just because a
+  // later skip exists.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('w')
+  await submit('s1')
+  await submit('w2')
+  await submit('s2')
+  settleAt(0, 'session-b', 'written')    // w   (appendsBefore 0)
+  settleAt(1, 'session-b', 'skipped')    // s1  (newerRows 1)
+  settleAt(2, 'session-b', 'written')    // w2  (appendsBefore 1)
+  settleAt(3, 'session-b', 'skipped')    // s2  (newerRows 0)
+  for (let index = 0; index < 100; index += 1) {
+    app.settleScopeInput({ owner: 'session-b', outcome: 'skipped', text: 'x' })
+  }
+  app.resetInputHistory(['w2', 'w'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['s2', 'w2', 's1', 'w'],
+    'each evicted skip lands at the boundary its own settlement recorded')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)
