@@ -233,8 +233,8 @@ test('C-04 the opening row is never a Command source: only the observed label op
   opening.panel.handleInput('v')
   assert.ok(!/Command reader/.test(paint(opening, 120).join('\n')), 'no Command page before the first observation')
   opening.panel.handleInput('C')
-  assert.deepEqual(opening.copies, [{ source: 'output', text: '' }],
-    'no Output copy without observed retained text: an EMPTY payload is reported so the app can say so')
+  assert.deepEqual(opening.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
+    'no Output copy without an observation: the UNAVAILABLE reason is reported so the app can say so')
   opening.panel.dispose()
 
   // The SAME instance becomes eligible once the observation arrives.
@@ -306,21 +306,57 @@ test('C-15 the two pages own independent Find state, and `C` in EDIT never copie
   harness.panel.dispose()
 })
 
-test('C-14 an empty Output or an empty Command never writes a clipboard or claims success', () => {
+test('C-14 an empty / unavailable / ineligible copy source reports its own reason and never writes', () => {
+  // Observed, but nothing retained: the empty body has its own reason.
   const empty = makePanel(observedState({ text: '' }))
   paint(empty)
   empty.panel.handleInput('C')
-  assert.deepEqual(empty.copies, [{ source: 'output', text: '' }],
-    'an empty retained Output reports an EMPTY payload: the app refuses the write and says so')
+  assert.deepEqual(empty.copies, [{ source: 'output', text: '', unavailable: 'output-empty' }],
+    'an empty retained Output names the EMPTY reason')
   empty.panel.dispose()
 
+  // No observation at all: a DIFFERENT reason, so the user learns which state
+  // they are looking at (plan §3).
+  const connecting = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
+  paint(connecting)
+  connecting.panel.handleInput('C')
+  assert.deepEqual(connecting.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
+    'a not-yet-observed Output names the UNAVAILABLE reason')
+  connecting.panel.dispose()
+
+  const failed = makePanel({
+    opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' },
+    observationError: 'no job controller',
+  })
+  paint(failed)
+  failed.panel.handleInput('C')
+  assert.deepEqual(failed.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
+    'a refused observation names the UNAVAILABLE reason')
+  failed.panel.dispose()
+
+  // An empty label is not a Command page at all; the Output path still answers.
   const emptyLabel = makePanel(observedState({ label: '', text: '' }))
   paint(emptyLabel)
   emptyLabel.panel.handleInput('v')
   assert.ok(!/Command reader/.test(paint(emptyLabel).join('\n')), 'an empty label is not a Command')
   emptyLabel.panel.handleInput('C')
-  assert.deepEqual(emptyLabel.copies, [{ source: 'output', text: '' }], 'nothing is copyable')
+  assert.deepEqual(emptyLabel.copies, [{ source: 'output', text: '', unavailable: 'output-empty' }],
+    'nothing is copyable, and the reason is the empty body')
   emptyLabel.panel.dispose()
+
+  // Losing Command eligibility returns to Output synchronously, so the NEXT
+  // copy intent is an Output intent with the Output reason — the Command page is
+  // never left as a hidden copy owner (plan §1.1 / §3).
+  const lost = makePanel(observedState({ label: 'echo one' }))
+  paint(lost)
+  lost.panel.handleInput('v')
+  assert.match(paint(lost).join('\n'), /Command reader/)
+  lost.panel.update({ opening: { jobId: 'job-a', kind: 'bash', label: 'echo one', status: 'running' } })
+  assert.ok(!/Command reader/.test(paint(lost).join('\n')), 'a lost Command eligibility returns to Output')
+  lost.panel.handleInput('C')
+  assert.deepEqual(lost.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
+    'the copy intent now belongs to the Output page, with its own reason')
+  lost.panel.dispose()
 })
 
 test('C-16/C-06 an Output Follow/PAUSED position survives a round trip through the Command page', async () => {
@@ -432,8 +468,11 @@ class JobObservationDouble implements JobObservationPort {
   readonly records: ObservationRecord[] = []
   readonly stops: string[] = []
   stopOutcome: JobStopOutcome = { kind: 'requested' }
+  /** When set, `open` refuses: the workspace presents the UNAVAILABLE phase. */
+  openFailure: string | undefined
 
   open(_sessionId: string | undefined, jobId: string, listener: (snapshot: JobObservedSnapshot) => void): () => void {
+    if (this.openFailure !== undefined) throw new Error(this.openFailure)
     const record: ObservationRecord = {
       jobId,
       closes: 0,
@@ -593,6 +632,16 @@ const firstRowMatching = (vt: VirtualTerminal, pattern: RegExp): string => {
   return ''
 }
 
+/** The LAST painted row matching a pattern (the visible last body row). */
+const lastRowMatching = (vt: VirtualTerminal, pattern: RegExp): string => {
+  let found = ''
+  for (const row of rawView(vt)) {
+    const match = pattern.exec(row.trim())
+    if (match !== null) found = match[0]
+  }
+  return found
+}
+
 /** The FIRST retained-body row of the painted frame, located by CONTENT
  *  (`line NNN`) rather than a fixed row index. */
 const firstBodyLine = (vt: VirtualTerminal): string => {
@@ -656,6 +705,32 @@ test('C-01 the header Command summary click opens the Command page, and Copy All
   release(harness.vt, buttonRow, buttonCol + 2)
   await flush(4)
   assert.deepEqual(harness.copied, [label], 'the painted button copies the ORIGINAL label')
+  // plan §5: a REAL visible [Copy All] stays clickable while a Find owns the
+  // keyboard, and the click changes nothing about the search.
+  harness.copied.length = 0
+  // Leave the fork's 500 ms double-click window: a second click on the same cell
+  // would otherwise become a native word selection on this screen (pre-existing
+  // B1-A behaviour), which is a different gesture from the header click.
+  await new Promise<void>(resolve => setTimeout(resolve, 600))
+  harness.vt.sendInput('/')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput('hello')
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.match(view(harness.vt), /Find Command: hello/, 'the Command query is being edited')
+  press(harness.vt, buttonRow, buttonCol + 2)
+  release(harness.vt, buttonRow, buttonCol + 2)
+  await flush(4)
+  assert.deepEqual(harness.copied, [label], 'the button copies the ORIGINAL label, never the query or a hit')
+  const editing = view(harness.vt)
+  assert.match(editing, /Find Command: hello/, 'the query is unchanged by the click')
+  assert.match(editing, /Command reader · \[Copy All\]/, 'the click never switched pages')
+  // The Search Input still owns the keyboard: the next character edits the query.
+  harness.vt.sendInput('!')
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.match(view(harness.vt), /Find Command: hello!/, 'the click never stole the search input focus')
+  assert.deepEqual(harness.copied, [label], 'no duplicate copy from the extra typing')
 })
 
 test('C-11 a real SGR press→drag→release copies the exact original half-open range, forwards and backwards', async () => {
@@ -675,14 +750,37 @@ test('C-11 a real SGR press→drag→release copies the exact original half-open
   await flush(4)
   assert.deepEqual(harness.copied, ['abc\nd'], 'the forward drag keeps the original hard break')
   harness.copied.length = 0
-  // Backward: press on `d`, drag back onto `c` — the earlier point is start
-  // aligned, so the pressed grapheme is excluded exactly as the terminal does.
+  // Backward: press on `d`, drag back onto `c`. The range is SYMMETRIC: the
+  // earlier point is start aligned and the later one end aligned, so the
+  // grapheme the press landed on stays INSIDE the range (plan §2) — `d` is kept
+  // here even though it was the pressed end.
   press(harness.vt, second, 0)
   drag(harness.vt, first, 2)
   release(harness.vt, first, 2)
   await flush(4)
-  assert.deepEqual(harness.copied, ['c\nd'], 'the backward drag is the exact half-open range')
+  assert.deepEqual(harness.copied, ['c\nd'], 'the backward drag includes the pressed grapheme')
   harness.copied.length = 0
+  // The two directions over one line are byte-identical (plan §2: `a -> c` and
+  // `c -> a` both copy `abc`).
+  harness.tasks.observation.latest()!.emit({ label: 'abc' })
+  await harness.vt.waitForRender()
+  await flush(2)
+  const single = bodyRow(harness.vt, 'abc')
+  press(harness.vt, single, 0)
+  drag(harness.vt, single, 2)
+  release(harness.vt, single, 2)
+  await flush(4)
+  assert.deepEqual(harness.copied, ['abc'], 'a -> c copies abc')
+  harness.copied.length = 0
+  press(harness.vt, single, 2)
+  drag(harness.vt, single, 0)
+  release(harness.vt, single, 0)
+  await flush(4)
+  assert.deepEqual(harness.copied, ['abc'], 'c -> a copies the SAME bytes')
+  harness.copied.length = 0
+  harness.tasks.observation.latest()!.emit({ label })
+  await harness.vt.waitForRender()
+  await flush(2)
   // A plain click (press + release on one cell) copies NOTHING.
   press(harness.vt, first, 1)
   release(harness.vt, first, 1)
@@ -723,7 +821,7 @@ test('C-11 a drag on a TAB and on CJK copies the ORIGINAL characters, not the pa
   assert.deepEqual(harness.copied, ['b 中文'], 'a wide grapheme is never cut in half')
 })
 
-test('C-11 a long Command soft-wraps and an edge drag auto-scrolls the Command viewport only', async () => {
+test('C-11 edge auto-scroll follows the fork gesture: drag to the visible edge row, stop at the boundary', async () => {
   const harness = startApp(80, 24)
   await openFirstJob(harness)
   const label = Array.from({ length: 120 }, (_, index) => `cmd-${String(index).padStart(3, '0')}`).join('\n')
@@ -733,23 +831,80 @@ test('C-11 a long Command soft-wraps and an edge drag auto-scrolls the Command v
   await openCommand(harness)
   const barRow = bodyRow(harness.vt, 'Esc output')
   const topRow = bodyRow(harness.vt, 'cmd-000')
-  const bodyBottom = bodyRow(harness.vt, 'cmd-020')
-  // Press on the first visible row, then hold the pointer BELOW the body: the
-  // reader's own edge timer must scroll the Command viewport while the gesture
-  // stays captured, so the selection grows over rows that were NOT visible when
-  // the drag started.
+  assert.ok(bodyRow(harness.vt, 'cmd-020') > 0, 'the initially visible bottom row was located')
+  // plan §6 rule 1: a press only anchors. Holding a press on the last visible
+  // row must NOT start the timer.
+  press(harness.vt, barRow - 1, 0)
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  assert.equal(firstRowMatching(harness.vt, /^cmd-\d{3}/), 'cmd-000',
+    'a press without a drag never auto-scrolls')
+  release(harness.vt, barRow - 1, 0)
+  await flush(2)
+  // plan §6 rule 2: once the gesture has dragged, reaching the visible LAST row
+  // scrolls, and the selection grows over rows that were not visible at press.
   press(harness.vt, topRow, 0)
-  drag(harness.vt, barRow, 0)
-  await new Promise<void>(resolve => setTimeout(resolve, 260))
-  release(harness.vt, barRow, 0)
+  const lastVisibleCmd = bodyRow(harness.vt, lastRowMatching(harness.vt, /^cmd-\d{3}/))
+  drag(harness.vt, lastVisibleCmd, 0)
+  await new Promise<void>(resolve => setTimeout(resolve, 300))
+  assert.notEqual(firstRowMatching(harness.vt, /^cmd-\d{3}/), 'cmd-000',
+    'the visible LAST row starts the downward edge scroll')
+  release(harness.vt, lastVisibleCmd, 0)
   await flush(4)
   assert.equal(harness.copied.length, 1, 'the auto-scrolled gesture still copies once')
-  const payload = harness.copied[0]!
-  assert.ok(payload.startsWith('cmd-000'), 'the gesture keeps its original anchor')
-  assert.ok(bodyBottom > 0, 'the initially visible bottom row was located')
-  assert.ok(payload.includes('cmd-021'), 'the edge timer advanced the selection past the first viewport')
-  assert.ok(!payload.includes('cmd-119'), 'the selection never jumped to an off-screen document row')
-  assert.ok(!payload.includes('\r'), 'no display escape leaked into the payload')
+  const grown = harness.copied[0]!
+  assert.ok(grown.startsWith('cmd-000'), 'the gesture keeps its original anchor')
+  assert.ok(grown.includes('cmd-021'), 'the edge timer advanced the selection past the first viewport')
+  assert.ok(!grown.includes('cmd-119'), 'the selection never jumped to an off-screen document row')
+  assert.ok(!grown.includes('\r'), 'no display escape leaked into the payload')
+  assert.equal(grown, label.slice(0, grown.length), 'the payload is a contiguous original half-open range')
+  harness.copied.length = 0
+  // plan §6 rule 7: a release ends the gesture — no further scrolling happens.
+  const afterRelease = firstRowMatching(harness.vt, /^cmd-\d{3}/)
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  assert.equal(firstRowMatching(harness.vt, /^cmd-\d{3}/), afterRelease, 'a release stops the edge timer')
+
+  // plan §6 rule 6: against a document short enough to reach the real end, the
+  // timer stops instead of looping, and the selection ends on the LAST row.
+  const short = Array.from({ length: 30 }, (_, index) => `row-${String(index).padStart(2, '0')}`).join('\n')
+  harness.tasks.observation.latest()!.emit({ label: short })
+  await harness.vt.waitForRender()
+  await flush(2)
+  // A new (shorter) document keeps the Command viewport: Home returns to its
+  // first row so the boundary phase starts from a known position.
+  harness.vt.sendInput('\x1b[H')
+  await harness.vt.waitForRender()
+  await flush(2)
+  press(harness.vt, bodyRow(harness.vt, 'row-00'), 0)
+  // Release a cell inside the last VISIBLE row's own text, so the inclusive end
+  // alignment covers that whole row.
+  const lastVisibleShort = bodyRow(harness.vt, lastRowMatching(harness.vt, /^row-\d{2}/))
+  drag(harness.vt, lastVisibleShort, 5)
+  await new Promise<void>(resolve => setTimeout(resolve, 700))
+  const atBoundary = firstRowMatching(harness.vt, /^row-\d{2}/)
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  assert.equal(firstRowMatching(harness.vt, /^row-\d{2}/), atBoundary,
+    'the timer stops once the viewport can no longer move')
+  release(harness.vt, lastVisibleShort, 5)
+  await flush(4)
+  const bounded = harness.copied[0]!
+  assert.ok(bounded.endsWith('row-29'), 'the boundary hold reached the LAST document row')
+  assert.equal(bounded, short.slice(0, bounded.length), 'and it is still one contiguous original range')
+  harness.copied.length = 0
+  // plan §6 rule 2 (reverse): the visible FIRST row scrolls back up.
+  const viewTop = bodyRow(harness.vt, firstRowMatching(harness.vt, /^row-\d{2}/))
+  press(harness.vt, bodyRow(harness.vt, lastRowMatching(harness.vt, /^row-\d{2}/)), 3)
+  drag(harness.vt, viewTop, 3)
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  assert.notEqual(firstRowMatching(harness.vt, /^row-\d{2}/), atBoundary,
+    'the visible FIRST row scrolls the Command viewport back up')
+  release(harness.vt, viewTop, 3)
+  await flush(4)
+  harness.copied.length = 0
+  // The Output page's own state is untouched by any of this.
+  harness.vt.sendInput('\x1b')
+  await harness.vt.waitForRender()
+  await flush(2)
+  assert.match(view(harness.vt), /Follow ON/, 'the Output follow state is untouched')
 })
 
 test('C-13 the Output page copies the trigger-moment retained text, never the Command source', async () => {
@@ -969,6 +1124,20 @@ test('C-14 an empty retained Output is refused with honest feedback, never a fal
   await flush(4)
   assert.deepEqual(harness.copied, [], 'nothing is written for an empty retained Output')
   assert.equal(harness.notices.at(-1), 'Nothing to copy', 'the user learns why C did nothing')
+})
+
+test('C-14 a refused observation reports Output unavailable, never a copy', async () => {
+  const harness = startApp()
+  // The observation port refuses to open at all: the workspace presents the
+  // UNAVAILABLE phase, which must not be reported as an empty copy.
+  harness.tasks.observation.openFailure = 'no job controller'
+  await openFirstJob(harness)
+  await flush(6)
+  assert.match(view(harness.vt), /Retained output unavailable/, 'the unavailable phase is visible')
+  harness.vt.sendInput('C')
+  await flush(4)
+  assert.deepEqual(harness.copied, [], 'an unavailable Output is never written to the clipboard')
+  assert.equal(harness.notices.at(-1), 'Output unavailable', 'and it names its OWN reason')
 })
 
 test('C-01 Direct L6: the official bash args.command label crosses the PRODUCTION Direct adapter into the Command copy', async () => {

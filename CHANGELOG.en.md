@@ -48,9 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Command page. On the Output page `C` copies the retained output as of that
   keypress. Both copies go through the existing local clipboard strategy: success
   reads `Copy sent`, failure reads `Copy failed`, and the message never claims the
-  system clipboard was confirmed (OSC52 has no acknowledgement). An empty or
-  not-yet-observed retained output writes nothing and answers `Nothing to copy`
-  instead of a false success.
+  system clipboard was confirmed (OSC52 has no acknowledgement). An empty
+  retained output answers `Nothing to copy`, and a not-yet-observed or
+  unavailable one answers `Output unavailable`: neither writes the clipboard and
+  neither reports a false success.
   When the retained window is truncated, a paused view keeps the same
   still-present row where it can, the bottom row number is a position inside this
   retained preview only, and `[GAP]` still comes only from the official fact.

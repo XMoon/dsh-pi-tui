@@ -143,7 +143,7 @@ import { isDiffResult, summarizeDiffs } from './tui/transcript/diff-projection.t
 import { renderDiffLines, renderDiffView } from './tui/components/transcript/diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
-import { JobInspectorPanel } from './tui/panels/job-inspector-panel.ts'
+import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
@@ -1470,6 +1470,15 @@ export interface PickerHandle {
    * broker's settle path — a settled promise must not retain the
    * listener on the caller's signal). */
   _removeAbortListener?(): void
+}
+
+/** The ONE wording of each "nothing was copied" outcome (plan §3). The panel
+ *  names the reason; the app owns the user-facing sentence, exactly like the
+ *  Stop settlement does. */
+const JOB_COPY_UNAVAILABLE_NOTICE: Record<JobCopyUnavailable, string> = {
+  'output-empty': 'Nothing to copy',
+  'output-unavailable': 'Output unavailable',
+  'command-unavailable': 'Command unavailable',
 }
 
 /**
@@ -20180,14 +20189,14 @@ export class TuiApp {
       // stale copy that lands after the user left Job A can neither repaint nor
       // address a replacement viewer.
       onCopy: (request) => {
-        const copy = this.copySelection
-        // An EMPTY payload is a real intent with nothing behind it: the panel
-        // reports it so the user learns why `C` did nothing. It never reaches
-        // the clipboard and never claims a copy (plan §1.2).
-        if (request.text === '') {
-          if (this.jobWorkspace === record) this.notify('Nothing to copy', 'info')
+        // An intent with no payload is a real answer, not a failure: report the
+        // named reason the panel captured and write nothing (plan §3).
+        const unavailable = request.unavailable
+        if (unavailable !== undefined) {
+          if (this.jobWorkspace === record) this.notify(JOB_COPY_UNAVAILABLE_NOTICE[unavailable], 'info')
           return
         }
+        const copy = this.copySelection
         const runner = this.events.runOwned
         // A missing capability is reported, never silently swallowed: the copy
         // verb must not look inert when the composition is incomplete.
