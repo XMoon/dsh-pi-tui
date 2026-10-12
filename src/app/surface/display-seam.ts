@@ -151,15 +151,23 @@ export interface SurfaceDisplaySeam {
    */
   retainsStaleDraftRestore(): boolean
   /** Replace the editor input-history recall rows (editor-only; a read-only
-   * renderer ignores the rows but still records the reset). */
-  resetInputHistory(entries: readonly string[]): void
-  /** Open the editor-recall scope of a just-published Session owner: the
-   * following {@link resetInputHistory} is that owner's hydration reseed and
-   * must reconcile the inputs accepted since the publication (scope-bound
-   * temporary submissions) instead of dropping them. Called at the
-   * synchronous Session publication seam of every commit shape; a read-only
+   * renderer ignores the rows but still records the reset).
+   * @param entries - the current Session's rows, most recent first.
+   * @param owner - the owner whose hydration committed this reseed. Omitted
+   *   for the sessionless boot seed, which only seeds the recall pool. */
+  resetInputHistory(entries: readonly string[], owner?: string): void
+  /** Open the editor-recall scope of the owner a Session commit section is
+   * publishing (or creating): the following {@link resetInputHistory} for that
+   * owner must reconcile the inputs accepted since the publication
+   * (scope-bound temporary submissions) instead of dropping them. A read-only
    * renderer records nothing. */
-  beginInputHistoryScope(): void
+  beginInputHistoryScope(owner: string | undefined): void
+  /** Settle ONE scope-bound temporary submission with written-row evidence:
+   * called from the SAME synchronous stack as the successful append of the
+   * row that carries the submission (and never for a row the write policy
+   * skipped), so the hydration reconcile stops merging that occurrence.
+   * @param owner - the session id the appended row carries. */
+  settleScopeInput(owner: string | undefined, text: string): void
   /** Clear the search result readout (chrome-only; harmless on TSP). */
   setSearchResult(index: number, count: number): void
 

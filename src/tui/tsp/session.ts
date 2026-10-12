@@ -618,6 +618,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     beginInputHistoryScope() {
       // Editor-only; no recall surface exists on the read-only renderer.
     },
+    settleScopeInput() {
+      // Editor-only; no recall surface exists on the read-only renderer.
+    },
     setSearchResult() {
       // Search chrome is PiTui-only (input-gated); nothing to present.
     },

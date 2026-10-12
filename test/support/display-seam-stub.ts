@@ -30,6 +30,7 @@ export function displaySeamStub(overrides: Partial<SurfaceDisplaySeam> = {}): Su
     retainsStaleDraftRestore: () => true,
     resetInputHistory: () => {},
     beginInputHistoryScope: () => {},
+    settleScopeInput: () => {},
     setSearchResult: () => {},
     notify: () => {},
     setDockNotice: () => {},
