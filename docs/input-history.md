@@ -229,31 +229,30 @@ reconciles them:
   anchor. The mirror keeps its own, unchanged duplicate rule, so an input
   identical to the outgoing Session's last row is still recalled after the
   reseed;
-- `settleScopeInput(owner, text)` — called by the write owner from the SAME
-  synchronous stack as a SUCCESSFUL append — MARKS exactly that occurrence with
-  the session id its row carries. The sequence is never re-ordered or shrunk, so
-  the predecessor and the interleaving of written / policy-skipped / still-pending
-  submissions stay exact. A row the write policy SKIPPED (the CWD-level
-  consecutive dedupe) emits no settlement and stays in the recall: the file
-  policy governs the FILE, and the UI recall never silently drops an input the
-  user really submitted;
-- `resetInputHistory(entries, owner)` commits that owner's reseed by keeping
-  EVERY snapshot row and giving each scope occurrence its own rank. The scope is
-  not the only session-scoped writer: a raw Ctrl+S steer, an editor steer action
-  and an application extension steer all persist through the same history owner
-  (`makeSteerPersist` → `InputHistory.persist`) without ever passing
-  `rememberInput`, so the snapshot can carry rows no scope occurrence owns.
-  Walking the scope newest-first, an occurrence written under THIS owner claims
-  its own row — the scope's rows are appended in submission order, so rows of the
-  other writers that sit between two of them are emitted in place — while a
-  still-pending or policy-skipped occurrence is inlined at its own rank. An
-  occurrence written under another identity (a sessionless pool row) is not part
-  of this Session's projection and is dropped without claiming a row. A row older
-  than the recall window (the 100-row cap) is not present at all, and the
-  occurrence is inlined like a pending one. Occurrence counts, non-consecutive
-  repeats (`a → b → a` stays intact) and the relative order of every writer
-  survive. The sessionless boot seed passes no owner: it only seeds the pool and
-  leaves the scope open.
+- every accepted Enter gets an internal OCCURRENCE TOKEN that rides its submission
+  into the persistence record. The token — never the text — is what attributes a
+  settlement to exactly one occurrence, so repeated identical submissions stay
+  distinguishable (`a → b → a` keeps both `a`s);
+- the write owner reports EVERY settled submission, in APPEND ORDER, through
+  `settleScopeInput({ token?, owner, outcome, text })` — a successful append and a
+  policy SKIP alike, from the SAME synchronous stack that performed it. The
+  append order is the file's row order, and a skipped submission still occupies
+  its position there. Writers that never pass `rememberInput` (a raw Ctrl+S
+  steer, the editor steer action, an application extension steer, a shell line,
+  a sessionless command) simply report no token: their row is kept where the disk
+  put it and is never claimed by a scope occurrence;
+- `resetInputHistory(entries, owner)` commits that owner's reseed from the
+  settlement stream alone: the snapshot's newest written-count rows ARE those
+  appends, in reverse (a count watermark, never text matching), so each written
+  occurrence is emitted exactly once; a skipped occurrence is inserted at its own
+  settlement position; and an occurrence the owner never settled keeps its rank
+  in the scope's submission order — a settled submission always precedes an
+  unsettled one among the writers that share the submit turn, so it stays in
+  front of their rows. An occurrence written under another identity (a
+  sessionless pool row) is not part of this Session's projection and adds
+  nothing, and a written row older than the recall window (the 100-row cap) is not
+  in the projection at all. The seed then performs the adjacent-duplicate
+  compression and the 100-entry truncation LAST, exactly as the baseline did.
 
 While a reseed is still pending, the outgoing Session's rows remain recallable
 (`resetForGeneration` is an invalidation signal, not a confirmed switch); they
