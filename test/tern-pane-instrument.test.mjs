@@ -17,10 +17,10 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { RUN_MARKER, isRepeatableCommand, runDirectoryVerdict, shellQuote } from '../scripts/tern-pane-instrument.mjs'
+import { RUN_MARKER, isRepeatableCommand, markerOwnership, runDirectoryVerdict, shellQuote } from '../scripts/tern-pane-instrument.mjs'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const DRIVER = fileURLToPath(new URL('../scripts/tern-pane-drive.mjs', import.meta.url))
@@ -54,6 +54,8 @@ test('a directory this driver owns is taken over again', () => {
     cwd: CWD,
     home: HOME,
     entries: [RUN_MARKER, 'assertions.json', 'shots'],
+    marker: markerOwnership('{"driver":"tern-pane-drive","pid":4242,"started":"x"}'),
+    isAlive: () => false,
   })
   assert.deepEqual(verdict, { ok: true })
 })
@@ -90,7 +92,7 @@ test('a command that only LOOKS like a read is classified by its full shape', ()
 })
 
 test('a run directory held by a LIVE run is refused, a stale one is taken over', () => {
-  const held = { root: '/tmp/tern-pane', repo: REPO, cwd: CWD, home: HOME, entries: [RUN_MARKER], holder: { pid: 4242 } }
+  const held = { root: '/tmp/tern-pane', repo: REPO, cwd: CWD, home: HOME, entries: [RUN_MARKER], marker: { present: true, valid: true, pid: 4242 } }
   const live = runDirectoryVerdict({ ...held, isAlive: (pid) => pid === 4242 })
   assert.equal(live.ok, false, 'two harnesses must not share one run directory')
   assert.match(live.reason, /live run \(pid 4242\)/)
@@ -99,6 +101,34 @@ test('a run directory held by a LIVE run is refused, a stale one is taken over',
     { ok: true },
     'the run that left the marker is gone, so its directory is ours again',
   )
+})
+
+test('only a marker that parses and identifies this driver proves ownership', () => {
+  assert.deepEqual(markerOwnership(undefined), { present: false })
+  assert.deepEqual(markerOwnership('{"driver":"tern-pane-drive","pid":7}'), { present: true, valid: true, pid: 7 })
+  for (const raw of [
+    '{"driver":"tern-pane-drive"',            // truncated
+    'not json at all',                        // another writer's file
+    '{"driver":"someone-else","pid":7}',      // not this driver
+    '{"driver":"tern-pane-drive","pid":"7"}', // a pid that is not a number
+    'null',
+  ]) {
+    assert.deepEqual(markerOwnership(raw), { present: true, valid: false }, `${raw} must not prove ownership`)
+  }
+})
+
+test('a non-empty directory whose marker does not parse is refused, not wiped', () => {
+  const verdict = runDirectoryVerdict({
+    root: '/home/dev/notes',
+    repo: REPO,
+    cwd: CWD,
+    home: HOME,
+    entries: [RUN_MARKER, 'photos'],
+    marker: markerOwnership('{"broken"'),
+    isAlive: () => false,
+  })
+  assert.equal(verdict.ok, false, 'a file with the marker NAME is not a claim')
+  assert.match(verdict.reason, /cannot read/)
 })
 
 test('the DRIVER applies that rule: a live holder is refused and its directory is untouched', (t) => {
@@ -119,6 +149,32 @@ test('the DRIVER applies that rule: a live holder is refused and its directory i
   assert.notEqual(refused.status, 0, `the driver must not take over a held directory:\n${refused.stdout}${refused.stderr}`)
   assert.match(refused.stderr, /held by a live run/, 'and it must say which run holds it')
   assert.equal(readFileSync(evidence, 'utf8'), 'the previous run wrote this\n', 'a refused run directory is never wiped')
+})
+
+test('the DRIVER normalizes --out, so `.` and `..` cannot disguise a protected directory', (t) => {
+  // The bypass: identity was compared on the raw string while `rmSync` resolves
+  // the path on the way to the filesystem, so `<dir>/../<dir>` skipped the guard.
+  // A stale-but-VALID marker is what makes the raw comparison decide: without
+  // normalization the directory looks owned and gets wiped.
+  const dir = testLifecycle(t).tempDir('tern-pane-normalize-')
+  const evidence = join(dir, 'evidence.txt')
+  writeFileSync(evidence, 'prior evidence\n')
+  const gonePid = spawnSync(process.execPath, ['-e', '']).pid
+  writeFileSync(join(dir, RUN_MARKER), JSON.stringify({ driver: 'tern-pane-drive', pid: gonePid }))
+  const flow = join(dir, 'flow.mjs')
+  writeFileSync(flow, 'export default async function () {}\n')
+
+  const disguises = [dir, `${dir}/./`, `${dir}/../${basename(dir)}`, `${dir}/../${basename(dir)}/`]
+  for (const out of disguises) {
+    const refused = spawnSync(process.execPath, [DRIVER, flow, '--out', out], {
+      encoding: 'utf8',
+      cwd: dir, // so the run directory IS the working directory, which is protected
+      env: { ...process.env, TERN_BIN: process.execPath },
+    })
+    assert.notEqual(refused.status, 0, `${out} must not be taken over:\n${refused.stdout}${refused.stderr}`)
+    assert.match(refused.stderr, /holds/, `${out} must be refused as the working directory`)
+    assert.equal(readFileSync(evidence, 'utf8'), 'prior evidence\n', `${out} must not be wiped`)
+  }
 })
 
 test('a path written into the generated launch script survives spaces and quotes', () => {

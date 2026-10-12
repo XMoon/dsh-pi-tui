@@ -31,10 +31,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { index, rect, visiblePoint } from './tern-pane-geometry.mjs'
-import { RUN_MARKER, isRepeatableCommand, runDirectoryVerdict, shellQuote } from './tern-pane-instrument.mjs'
+import { DRIVER_ID, RUN_MARKER, isRepeatableCommand, markerOwnership, runDirectoryVerdict, shellQuote } from './tern-pane-instrument.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '..')
@@ -62,14 +62,14 @@ function usage(exitCode) {
   process.exit(exitCode)
 }
 
-/** The marker a previous run left, when it is readable: who claims this directory. */
-function readRunMarker(path) {
+/** A previous run's marker text, or `undefined` when there is no marker file. */
+function readMarkerFile(path) {
   try {
-    return JSON.parse(readFileSync(path, 'utf8'))
+    return readFileSync(path, 'utf8')
   } catch (error) {
-    // A missing or half-written marker is not a claim. Anything else is a bug in
-    // this file, and swallowing it here would silently disable the guard below.
-    if (error?.code === 'ENOENT' || error instanceof SyntaxError) return undefined
+    // A missing marker is not a claim. Anything else is a bug in this file, and
+    // swallowing it here would silently disable the guard below.
+    if (error?.code === 'ENOENT') return undefined
     throw error
   }
 }
@@ -84,6 +84,36 @@ function processIsAlive(pid) {
   }
 }
 
+const markerText = () => JSON.stringify({ driver: DRIVER_ID, pid: process.pid, started: new Date().toISOString() }, null, 1)
+
+/**
+ * Claim the run directory atomically. The marker is created with `wx` — one
+ * creator wins — and the winner re-reads it, because a run that stole a dead
+ * marker at the same moment would otherwise leave both of us believing we own
+ * the directory. A pid check alone cannot close that race, a create-only-if-absent
+ * can.
+ */
+function claimRunDirectory(root) {
+  const markerPath = join(root, RUN_MARKER)
+  mkdirSync(root, { recursive: true })
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      writeFileSync(markerPath, markerText(), { flag: 'wx' })
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      const holder = markerOwnership(readMarkerFile(markerPath))
+      if (holder.valid && processIsAlive(holder.pid)) {
+        return { ok: false, reason: `${root} is held by a live run (pid ${holder.pid})` }
+      }
+      rmSync(markerPath, { force: true })
+      continue
+    }
+    const mine = markerOwnership(readMarkerFile(markerPath))
+    if (mine.valid && mine.pid === process.pid) return { ok: true }
+  }
+  return { ok: false, reason: `${root} was claimed by another run` }
+}
+
 /**
  * The harness handle a flow receives: the control channel, real input, the real
  * node tree, captures, the subject launcher and the result ledger. It resolves
@@ -92,24 +122,29 @@ function processIsAlive(pid) {
  */
 async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
   // The run directory is wiped on every start: take it over only when it is
-  // empty, absent, or already carries this driver's marker — and only when the
-  // marker's run is not still alive.
-  const entryNames = existsSync(root) ? readdirSync(root) : []
+  // empty, absent, or carries a marker that identifies this driver and whose run
+  // is gone.
   const verdict = runDirectoryVerdict({
     root,
     repo,
     cwd: process.cwd(),
     home: homedir(),
-    entries: entryNames,
-    holder: readRunMarker(join(root, RUN_MARKER)),
+    entries: existsSync(root) ? readdirSync(root) : [],
+    marker: markerOwnership(readMarkerFile(join(root, RUN_MARKER))),
     isAlive: processIsAlive,
   })
   if (!verdict.ok) {
     throw new Error(`${verdict.reason}; point --out at a fresh directory, or delete the whole ${root} if that run is really gone`)
   }
-  rmSync(root, { recursive: true, force: true })
+  const claim = claimRunDirectory(root)
+  if (!claim.ok) {
+    throw new Error(`${claim.reason}; point --out at a fresh directory, or delete the whole ${root} if that run is really gone`)
+  }
+  // The marker is the claim we now hold; every other entry is this run's to replace.
+  for (const name of readdirSync(root)) {
+    if (name !== RUN_MARKER) rmSync(join(root, name), { recursive: true, force: true })
+  }
   mkdirSync(join(root, 'shots'), { recursive: true })
-  writeFileSync(join(root, RUN_MARKER), JSON.stringify({ driver: 'tern-pane-drive', pid: process.pid, started: new Date().toISOString() }, null, 1))
   const endpoint = join(root, socket)
   const log = (line) => appendFileSync(join(root, 'run.log'), `${line}\n`)
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -356,7 +391,10 @@ if (probed.status !== 0) {
 const ternVersion = String(probed.stdout).trim()
 
 const out = outFlag ?? process.env.TERN_PANE_OUT
-const root = out === undefined ? join(repo, 'temp', 'tern-pane') : isAbsolute(out) ? out : resolve(process.cwd(), out)
+// Normalize BEFORE anything looks at it: `rmSync` resolves `.` and `..` on the way
+// to the filesystem, so a raw `/repo/../repo` would pass an identity comparison and
+// then delete the repository.
+const root = resolve(out === undefined ? join(repo, 'temp', 'tern-pane') : out)
 const flow = await import(pathToFileURL(flowPath).href)
 if (typeof flow.default !== 'function') {
   console.error(`flow must default-export a function: ${flowPath}`)
