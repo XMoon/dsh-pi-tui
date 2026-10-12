@@ -425,7 +425,7 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // ONE submission entry: the request (the Enter gesture, the accelerated
     // chord, or the explicit queue action) rides along — the boundary resolves
     // its delivery mode.
-    onSubmit: (text, request) => deps.submission.submit(text, request),
+    onSubmit: (text, request, scopeToken) => deps.submission.submit(text, request, scopeToken),
     // The image-only submit gate (plan §11.1): an empty-text draft with staged
     // images is a real submission.
     isImageDraft: () => draftHasImages(deps.surface.composer.getDraft(), deps.drafts.images),

@@ -51,6 +51,11 @@ export interface InputHistoryPersistRequest {
   readonly sessionId: string | undefined
   /** Whether the submission carries staged attachments (never persisted). */
   readonly hasAttachments: boolean
+  /** The editor-recall OCCURRENCE this submission was accepted as (see
+   *  `TuiApp.rememberInput`): the write owner reports it back with the
+   *  settlement so the scope can attribute the outcome to exactly that
+   *  occurrence. Absent for every other session-history writer. */
+  readonly scopeToken?: number
   /** The USER's submission time (epoch-ms) — never the disk-write time. */
   readonly timestamp: number
 }
@@ -147,7 +152,21 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
    */
   const persist = (record: InputHistoryPersistRequest): void => {
     const content = record.text.trim()
-    if (content === '' || content === lastHistoryContent || record.hasAttachments) return
+    // EVERY settled submission is reported, in append order: a policy skip
+    // settles without a row, and its position among the appends is what places
+    // the occurrence in the recall.
+    const settle = (outcome: 'written' | 'skipped'): void => {
+      deps.surface.display.settleScopeInput({
+        ...(record.scopeToken === undefined ? {} : { token: record.scopeToken }),
+        owner: record.sessionId,
+        outcome,
+        text: content,
+      })
+    }
+    if (content === '' || content === lastHistoryContent || record.hasAttachments) {
+      settle('skipped')
+      return
+    }
     const cwd = deps.sessionCwd()
     const file = historyFilePath(dshHome(process.env), cwd)
     runDetached('input history write', () => {
@@ -162,13 +181,10 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
       })
       if (!written) return
       lastHistoryContent = content
-      // Written-row evidence for the editor-recall scope: this factory is
-      // invoked SYNCHRONOUSLY and the append above is synchronous, so the row
-      // is on disk as of this very stack — a hydration reseed committing later
-      // will read it, and the scope-bound temporary submission it covers must
-      // not be merged on top of it. A skipped row reports nothing (the disk
-      // does not carry it).
-      deps.surface.display.settleScopeInput(record.sessionId, content)
+      // Settlement evidence for the editor-recall scope: this factory is
+      // invoked SYNCHRONOUSLY and the append above is synchronous, so the row is
+      // on disk as of this very stack and its position is this append's position.
+      settle('written')
     }, {
       diag: deps.diag,
       notify: (message) => {

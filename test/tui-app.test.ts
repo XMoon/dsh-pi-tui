@@ -42,18 +42,44 @@ afterEach(() => {
 })
 
 
-function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; get exits(): number } {
+function startApp(): {
+  vt: VirtualTerminal
+  app: TuiApp
+  submitted: string[]
+  /** Settle the submission at `index` (the order it was submitted in), with
+   *  the occurrence token THAT submission carried. */
+  settleAt: (index: number, owner: string | undefined, outcome: 'written' | 'skipped') => void
+  get exits(): number
+} {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
+  const tokens: (number | undefined)[] = []
   let exits = 0
   const app = new TuiApp(vt, {
-    onSubmit: (text) => submitted.push(text),
+    onSubmit: (text, _request, scopeToken) => {
+      submitted.push(text)
+      tokens.push(scopeToken)
+    },
     onExit: () => { exits += 1 },
   })
   app.start()
   startedApps.add(app)
   // `exits` is a number: returning it by value would copy 0, so expose a getter.
-  return { vt, app, submitted, get exits(): number { return exits } }
+  return {
+    vt,
+    app,
+    submitted,
+    settleAt: (index, owner, outcome) => {
+      const token = tokens[index]
+      app.settleScopeInput({
+        ...(token === undefined ? {} : { token }),
+        owner,
+        outcome,
+        text: submitted[index]!,
+      })
+    },
+    get exits(): number { return exits },
+  }
 }
 
 /** Pause longer than the todo click-coalescing window (500ms): a
@@ -2596,8 +2622,8 @@ async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: strin
   await vt.waitForRender()
 }
 
-test('the recall scope reconciles written, skipped and pending submissions in submission order', async () => {
-  const { vt, app, submitted } = startApp()
+test('the recall scope reconciles written, skipped and pending occurrences in the append order', async () => {
+  const { vt, app, submitted, settleAt } = startApp()
   const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
   // A hydration commit for a real Session closes the sessionless pool.
   app.resetInputHistory(['a old row'], 'session-a')
@@ -2608,14 +2634,15 @@ test('the recall scope reconciles written, skipped and pending submissions in su
   await submit('c')
   assert.deepEqual(submitted, ['a', 'b', 'c'])
   assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a', 'a old row'])
-  // `a` was SKIPPED by the CWD-level write policy (no settlement, no row);
-  // `b` was WRITTEN, so its occurrence is settled and the snapshot's row must
-  // not be doubled; `c` is still pending. The reseed keeps the scope's
-  // submission order: c, then the written b, then the skipped a.
-  app.settleScopeInput('session-b', 'b')
+  // The write owner reports `a` SKIPPED (the CWD-level policy) and `b` WRITTEN,
+  // in append order; `c` is still unsettled. The reseed keeps the append order
+  // for the rows (`b`) and places the skipped `a` where its settlement sits,
+  // with the unsettled `c` at its own rank in the scope's submission order.
+  settleAt(0, 'session-b', 'skipped')
+  settleAt(1, 'session-b', 'written')
   app.resetInputHistory(['b'], 'session-b')
   assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'],
-    'written/skipped/pending occurrences interleave in submission order, never reordered')
+    'skipped/written/unsettled occurrences interleave in submission order, never reordered')
   assert.equal(app.getInputHistory().filter(entry => entry === 'b').length, 1, 'exactly one b occurrence')
   // The window is closed: ordinary submissions and ↑ use the plain path again.
   await submit('settled entry')
@@ -2624,7 +2651,7 @@ test('the recall scope reconciles written, skipped and pending submissions in su
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'settled entry', '↑ recalls the settled submission')
   // A NEWER owner publishes before this scope's hydration ever committed: the
-  // replaced scope's pending submissions never cross into it.
+  // replaced scope's occurrences never cross into it.
   app.beginInputHistoryScope('session-c')
   await submit('c transient')
   app.beginInputHistoryScope('session-d')
@@ -2634,70 +2661,43 @@ test('the recall scope reconciles written, skipped and pending submissions in su
   app.stop()
 })
 
-test('rows written by OTHER session-scoped writers are never consumed by a scope occurrence', async () => {
-  // A Ctrl+S steer (and an extension steer) writes a row through the same
-  // history owner WITHOUT passing `rememberInput`, so the snapshot can carry
-  // rows the scope never saw. Only a scope occurrence's OWN row may be claimed:
-  // every other row stays, in its own rank.
-  const { vt, app, submitted } = startApp()
-  app.resetInputHistory(['old'], 'session-a')
+test('a skipped occurrence is placed by its settlement, not ahead of every row', async () => {
+  // F2-R4 case 1: the only scope occurrence was SKIPPED and a later Ctrl+S steer
+  // wrote a row. Its settlement precedes the steer's append, so the steer's row
+  // is NEWER and must come first (the old text walk inlined the skipped text at
+  // the front and produced ['a','z']).
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
   app.beginInputHistoryScope('session-b')
-  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
-  await submit('entered')
-  assert.deepEqual(submitted, ['entered'])
-  // The scope wrote `entered`; a steer wrote `steered` afterwards.
-  app.settleScopeInput('session-b', 'entered')
-  app.resetInputHistory(['steered', 'entered', 'older B'], 'session-b')
-  assert.deepEqual(app.getInputHistory(), ['steered', 'entered', 'older B'],
-    'the steer row and the earlier-window row survive; the scope row is not doubled')
-  // Two scope rows with an external row between them, in append order.
-  app.beginInputHistoryScope('session-c')
-  await submit('first')
-  await submit('second')
-  app.settleScopeInput('session-c', 'first')
-  app.settleScopeInput('session-c', 'second')
-  app.resetInputHistory(['second', 'steered between', 'first'], 'session-c')
-  assert.deepEqual(app.getInputHistory(), ['second', 'steered between', 'first'],
-    'the external row keeps its rank between the two claimed rows')
-  // The SAME text written by both writers: the claimed occurrence and the
-  // external row collapse exactly like the baseline reseed does.
-  app.beginInputHistoryScope('session-d')
-  await submit('x')
-  app.settleScopeInput('session-d', 'x')
-  app.resetInputHistory(['x', 'x', 'older'], 'session-d')
-  assert.deepEqual(app.getInputHistory(), ['x', 'older'],
-    'a repeated text across the two writers matches the baseline reseed exactly')
-  // A marked row older than the recall window (the 100-row cap) is not in the
-  // snapshot at all: the occurrence keeps its OLDER rank (after every row the
-  // window still holds) and no snapshot row is claimed — the seed's own 100-row
-  // cap then drops it exactly like the baseline did.
-  app.beginInputHistoryScope('session-e')
-  await submit('beyond the cap')
-  app.settleScopeInput('session-e', 'beyond the cap')
-  app.resetInputHistory(['someone else row', 'older'], 'session-e')
-  assert.deepEqual(app.getInputHistory(), ['someone else row', 'older', 'beyond the cap'],
-    'a claimed row beyond the recall cap keeps its older rank and consumes no row')
+  await submitThroughEditor(app, vt, 'a')
+  settleAt(0, 'session-b', 'skipped')
+  // The steer has no occurrence token: its row is the other writer's.
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'z' })
+  app.resetInputHistory(['z'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['z', 'a'],
+    'the skipped occurrence sits after the row appended later, at its settlement rank')
   app.stop()
 })
 
-test('a repeated submission inside the scope keeps its own occurrence and predecessor', async () => {
-  // a (skipped by the CWD policy) → b (written) → a (written). The scope's
-  // predecessor must stay the TRUE submission sequence (b), so the later `a` is
-  // not mistaken for a consecutive duplicate of the older skipped one, and the
-  // reseed must yield three occurrences.
-  const { vt, app, submitted } = startApp()
-  app.resetInputHistory(['old'], 'session-a')
+test('repeated identical submissions settle by occurrence token, and keep their ranks', async () => {
+  // F2-R4 case 2: a(skipped) → b(written) → a(written) → Ctrl+S z(written).
+  // The token attributes each settlement to ITS occurrence, so the first `a`
+  // stays skipped while the third one owns the appended row.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
   app.beginInputHistoryScope('session-b')
   const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
   await submit('a')
   await submit('b')
-  app.settleScopeInput('session-b', 'b')
   await submit('a')
-  app.settleScopeInput('session-b', 'a')
   assert.deepEqual(submitted, ['a', 'b', 'a'])
-  app.resetInputHistory(['a', 'b'], 'session-b')
-  assert.deepEqual(app.getInputHistory(), ['a', 'b', 'a'],
-    'every occurrence survives: the skipped a, the written b and the written a')
+  settleAt(0, 'session-b', 'skipped')      // the FIRST a is the one the policy skipped
+  settleAt(1, 'session-b', 'written')      // b
+  settleAt(2, 'session-b', 'written')      // the LATER a owns the appended row
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'z' })
+  app.resetInputHistory(['z', 'a', 'b'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['z', 'a', 'b', 'a'],
+    'every occurrence survives with its own rank: both a occurrences, b and the steer row')
   app.stop()
 })
 
@@ -2718,8 +2718,9 @@ test('a scope submission identical to the outgoing Session\'s newest row still s
 })
 
 test('a same-Session earlier-window repeat block never consumes the open scope\'s own occurrences', async () => {
-  // /resume back into a Session whose disk rows already end with the same
-  // block the user submits again: the snapshot rows are EARLIER occurrences.
+  // /resume back into a Session whose disk rows already end with the same block
+  // the user submits again: the snapshot rows are EARLIER occurrences, and
+  // nothing is settled in this window.
   const { vt, app, submitted } = startApp()
   app.resetInputHistory(['old'], 'session-a')
   app.beginInputHistoryScope('session-b')
@@ -2745,6 +2746,21 @@ test('the sessionless pool covers a mounted surface whose owner hydration is sti
   app.resetInputHistory(['resumed row'], 'resumed-session')
   assert.deepEqual(app.getInputHistory(), ['pool entry', 'resumed row'],
     'the resumed owner\'s reseed adopts the pool entry')
+  app.stop()
+})
+
+test('a written occurrence whose row is beyond the recall window is not re-inlined', async () => {
+  // The row cap: a settled write older than the snapshot's window has no row in
+  // the projection at all, exactly like the baseline snapshot — the occurrence
+  // is not re-added as a synthetic extra entry.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'beyond the cap')
+  settleAt(0, 'session-b', 'written')
+  app.resetInputHistory(['someone else row', 'older'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['someone else row', 'older'],
+    'a claimed row outside the recall window adds nothing')
   app.stop()
 })
 
