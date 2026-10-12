@@ -215,9 +215,16 @@ export async function createDirectTspFixture(
     }>
     readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
     readonly modelPicker?: boolean
+    readonly presetPicker?: boolean
     /** Replace the historical default stand-in with the official isolated
      * profile/configuration plane for Model persistence qualification. */
     readonly profileDefault?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+    /** Extra agent presets registered into the REAL registry beside the
+     *  fixture's own (a second real switch target). */
+    readonly presets?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly description?: string }>
+    /** The settings-service stand-in the preset-default WRITE path mutates.
+     *  Provided BEFORE the registry mounts (it injects `settings`). */
+    readonly settings?: unknown
     readonly appExit?: () => void
     /**
      * GENUINE Host commands registered into the REAL command catalog before the
@@ -235,7 +242,7 @@ export async function createDirectTspFixture(
   const workRoot = life.tempDir('dsh-b2-direct-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
-  const pane = installTspPane({ modelPicker: options.modelPicker })
+  const pane = installTspPane({ modelPicker: options.modelPicker, presetPicker: options.presetPicker })
   // OWNERSHIP, not success-contingency: the pane replaced the PROCESS tty and
   // cleared five env vars the instant it was installed. From this point on,
   // ANY setup failure below must still restore them — the caller's `finally`
@@ -306,6 +313,7 @@ export async function createDirectTspFixture(
   ctx.provide('fileReferences', { list: async () => [] })
   await ctx.plugin(UserQuestionService)
   await ctx.plugin(Loader)
+  if (options.settings !== undefined) ctx.provide('settings', options.settings as never)
   if (options.profileDefault !== undefined) await mountModelProfile(ctx, workRoot, options.profileDefault)
   await ctx.plugin(AgentPresetRegistry, { default: options.startup?.presetId ?? 'b2-direct-preset' })
   await ctx.get('agentPresets')!.register({
@@ -313,6 +321,14 @@ export async function createDirectTspFixture(
     name: 'B2 direct preset',
     plugins: [],
   })
+  for (const preset of options.presets ?? []) {
+    await ctx.get('agentPresets')!.register({
+      id: preset.id,
+      ...(preset.name === undefined ? {} : { name: preset.name }),
+      ...(preset.description === undefined ? {} : { description: preset.description }),
+      plugins: [],
+    })
+  }
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })

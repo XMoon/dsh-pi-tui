@@ -40,12 +40,22 @@ evidence ledger. Per-PR measurements live under
   ownership, regression coverage and qualification limits, and
   [PR4-A evidence](./tern-tsp/evidence/pr4-a.md) for the durable summary of what is
   certified at which tier and which pitfalls became rules.
+- **PR4-A Preset:** the original `/preset` command family now has PiTui and
+  native TSP presentation adapters implementing the Owner-frozen Preset UX (one
+  compact native picker, Built-in/Custom rows, a read-only Details page,
+  independent Current/Next-session/default/Draft facts, two-zone K2,
+  explicit-action-only writes). The whole command family rides ONE capability
+  behind the same native kinds; every read, write and Config owner stays in the
+  original command. See [Preset selection](./tern-tsp/preset-selection.md) and
+  [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md).
 - **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm, a
   runtime `dependencies` entry) against real Tern `0.6.2` (PR1), `0.7.0` (PR3-B
-  real-pane runs) and `0.7.2` (PR4-A real-pane Model runs). A future SDK or pane version may change any field below.
-- **Last verified:** 2026-10-12 (UTC+8) for the PR4-A Model surface (real-pane
-  Model runs on Tern `0.7.2`); 2026-10-10 for the interactive (PR3-B) surface;
-  2026-10-08 for the read-only PR3-A surface.
+  real-pane runs), `0.7.2` (PR4-A real-pane Model runs) and `0.8.0` (the PR4-A
+  real-pane Preset runs). A future SDK or pane version may change any field below.
+- **Last verified:** 2026-10-12 (UTC+8) for the PR4-A Preset surface (real-pane
+  Preset runs on Tern `0.8.0`) and the PR4-A Model surface (real-pane Model runs
+  on Tern `0.7.2`); 2026-10-10 for the interactive (PR3-B) surface; 2026-10-08
+  for the read-only PR3-A surface.
 
 | Item | State |
 |---|---|
@@ -191,6 +201,7 @@ island (the SDK import stays lazy).
 | Display seam, shared composer, submission/command admission | `src/app/surface/**`, `src/app/submission/**` | DONE (PR3-A, PR3-B B0–B2) |
 | Official Question/Approval modal seat and its lifecycle | reused as-is inside TSP | DONE (PR3-B B3); B4 is the owner-QA-confirmed physical qualification record |
 | Native Model B2 (`/model`): model + Reasoning Effort selection over the original handler | `src/app/command/model-presentation.ts`, `src/tui/commands/models.ts`, `src/tui/tsp/model-picker*.ts`, `src/tui/pickers/model-directory.ts` | IMPLEMENTED under owner-frozen UX, qualification partial — see [model-selection.md](./tern-tsp/model-selection.md) and [evidence/pr4-a.md](./tern-tsp/evidence/pr4-a.md) |
+| Native Preset (`/preset` + its typed verbs): the original handler behind one compact picker with a read-only Details page | `src/app/command/preset-presentation.ts`, `src/tui/commands/models.ts`, `src/tui/tsp/preset-picker*.ts`, `src/tui/pickers/preset-presentation-pitui.ts`, `src/tui/pickers/preset-display.ts` | IMPLEMENTED under owner-frozen UX, qualification partial — see [preset-selection.md](./tern-tsp/preset-selection.md) and [evidence/pr4-a-preset.md](./tern-tsp/evidence/pr4-a-preset.md) |
 | Editor/input inside TSP (a Client-controlled `ui.editor`) | the TSP composer | IMPLEMENTED (PR3-B B1/B2); real-GUI IME, physical paste and physical control keys stay B4 items |
 
 TSP is still opt-in (`DSH_PI_TUI_RENDERER=tsp`) and experimental; Direct and PiTui remain
@@ -254,6 +265,7 @@ composition root (table above); the caution is kept here because it is why no se
 | Live application projection → real Tern pane (product) | PR3-A manual smoke (see evidence); still experimental |
 | Editor/submit input inside TSP | IMPLEMENTED (B1/B2); real-GUI IME / physical paste / physical control keys are B4 qualification items |
 | Question/Approval modals inside TSP | IMPLEMENTED (B3): one official FIFO seat over the real lifecycle (timed → continued → `Alt+Q` → late answer); fail-closed in PR3-A only |
+| Preset inspection and selection inside TSP | PR4-A implementation: Owner-frozen native UI over the original command family (Built-in/Custom rows, Current/Next-session/default/Draft facts, read-only Details page, two-zone K2, explicit-action-only `Use`/`Set new-session default`); `picker` required. Automated coverage includes the real Direct registry roster, the started-Session refusal, the typed verbs and the settings-write chain; the real blank-live-Session switch, the official profile reload and physical input remain open. [Preset selection](./tern-tsp/preset-selection.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
 | Model/effort selection inside TSP | PR4-A implementation: Owner-frozen B2/compact native UI over the original handler (radio-row draft, single explicit Apply/Save default, K2 keyboard, one read owner with Retry); `picker`/`row`/`card` required. Automated coverage includes live Agent selection, isolated profile persistence/restart and real-pane headless layout; physical input and full-profile qualification remain open. [Model selection](./tern-tsp/model-selection.md) · [PR4-A evidence](./tern-tsp/evidence/pr4-a.md) |
 | Search/Reveal/Focus parity inside TSP | PLANNED (PR4–PR5) |
 | ExtensionView / custom renderers over TSP | PLANNED (policy undefined) |
@@ -326,6 +338,7 @@ Evidence levels — do not merge these into a stronger claim:
 | PR3-B B4 | Qualification COMPLETE (owner QA-confirmed) | The §6.4 mandatory cases and the B-01..B-09 gates with evidence tiers (real pane / real SDK+scripted tty / production harness), the fixture manifest, the per-case record digests, the owner's QA confirmation and the independent review record; the automated lanes are green on the frozen artifact | The explicit merge approval (and the reviewer's re-check of this revision). The masked Question's **physical** qualification was deferred by the owner to PR4 and is NOT part of this closure | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
 | PR4-0 capability audit | DONE (`AUDIT_DONE / SPLIT_PROPOSED_NOT_FROZEN`) | The actual reachability ledger: every registered command with its origin/refusal/handler, the panel/keybinding/session/task/viewer/media/extension consumers, the pinned SDK 0.1.0 vs real Tern 0.7.0 event proof, and a proposed (unfrozen) PR4A/B/C split with the owner decision sheet | The PR4A/B/C split and the first command batch are **owner decisions**, not accepted here; the physical/GUI tier is `GUI_BLOCKED`; the early-catalog `/settings` cause is `UNKNOWN` | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
 | PR4-A Model | IMPLEMENTED (owner-frozen UX); qualification partial | Original handler + native presenter implementing UX-D01/D02/D08/D09(K2)/D10/D12/D15 and Retry; regression tests cover scoped writes, the K2 write admission, read-error Retry, isolated profile persistence/restart and stale input; real-Tern headless runs cover the wide/compact layouts | Physical GUI/IME/focus, full-profile/HMR, clean live-Agent teardown, Remote TSP Model success and catalogues beyond the scripted sizes are NOT certified (`GUI_BLOCKED` / `NOT_VERIFIED`) | [Model selection](./tern-tsp/model-selection.md) · [PR4-A evidence](./tern-tsp/evidence/pr4-a.md) |
+| PR4-A Preset | IMPLEMENTED (owner-frozen UX); qualification partial | Original `/preset` handler plus one native presenter: Built-in/Custom rows, the independent Current/Next-session/default/Draft facts, a read-only Details page, two-zone K2 with explicit-action-only writes, and the same settings writer behind the picker action and the typed verb; regression tests cover the K2 admission, the settlement matrix, the capability/admission negatives and the real Direct registry/handler path; real-Tern headless runs cover 1280x800, 900x640, 560x640 and the 400x600 minimum | The real blank-live-Session durable switch, the official Loader/ConfigEditor preset reload, Remote TSP preset success and physical GUI/IME/focus are NOT certified (`GUI_BLOCKED` / `NOT_VERIFIED`) | [Preset selection](./tern-tsp/preset-selection.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
 | PR4+ (feature work) | PLANNED | UI/panel/clipboard parity, exit-confirmation window, native editor chords — scoped by the PR4-0 proposal once the owner freezes the split | — | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
 
 ## Next decisions

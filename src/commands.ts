@@ -73,6 +73,7 @@ import { registerExitCommand, registerHelpCommand } from './tui/commands/utility
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
+import type { PresetPresentation } from './app/command/preset-presentation.ts'
 import { registerReloadCommand, registerSkillCommand, type SkillsCommandDeps } from './tui/commands/skills.ts'
 import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
@@ -187,9 +188,9 @@ export { sessionPickerCategories, sessionSearchCategory } from './tui/commands/s
 /** The /status extension-health rows (moved to `src/tui/commands/status.ts`,
  * re-exported here to keep the stable command-surface import path). */
 export { extensionHealthRows } from './tui/commands/status.ts'
-/** The shipped-preset display copy (moved to `src/tui/commands/models.ts`,
+/** The shipped-preset display copy (moved to `src/tui/pickers/preset-display.ts`,
  * re-exported here to keep the stable command-surface import path). */
-export { isBuiltInPresetRow, presetDisplayText } from './tui/commands/models.ts'
+export { isBuiltInPresetRow, presetDisplayText } from './tui/pickers/preset-display.ts'
 
 /**
  * The effective mode ONE submission resolved at the submit boundary: whether
@@ -817,6 +818,7 @@ export function registerTuiCommands(
   initial?: InitialCommandCatalog,
   catalogSeams: CommandCatalogSeams = {},
   modelPresentation?: ModelPresentation,
+  presetPresentation?: PresetPresentation,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -2033,6 +2035,7 @@ export function registerTuiCommands(
   const modelCommands = createModelCommands({
     runner, app: app as TuiApp, registerOne, recordCommandDraftDisposition,
     ...(modelPresentation === undefined ? {} : { modelPresentation }),
+    ...(presetPresentation === undefined ? {} : { presetPresentation }),
   })
   modelCommands.registerModel()
 

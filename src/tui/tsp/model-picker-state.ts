@@ -19,6 +19,15 @@ import {
   type ModelPickerFailureRow,
   type ModelPickerModelRow,
 } from '../pickers/model-directory.ts'
+import {
+  clampColumns,
+  displayWidth,
+  factLineColumns,
+  factRowItems,
+  oneLine,
+  PICKER_GLYPH_PX,
+  wrapColumns,
+} from './picker-text.ts'
 
 /** The read/write lifecycle of the panel. `pending` is an ADMITTED write. */
 export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
@@ -71,82 +80,6 @@ export interface ModelPickerPanel {
   factCursor: number
   /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
   efforts: Map<string, string>
-}
-
-/* ------------------------------------------------------------------ widths */
-
-const graphemeSegmenter = new Intl.Segmenter('en', { granularity: 'grapheme' })
-/**
- * East Asian Wide/Fullwidth, emoji and supplementary planes occupy two columns;
- * everything else one. A conservative classification is fine here: it only makes
- * a wrap earlier and the layout budget smaller.
- */
-const WIDE_GRAPHEME = /[\u1100-\u115F\u2E80-\uA4CF\uA960-\uA97F\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE6F\uFF00-\uFF60\uFFE0-\uFFE6]|[\u{1F000}-\u{1FAFF}]|[\u{20000}-\u{3FFFD}]/u
-const LINE_BREAK = /[\n\r\v\f\u2028\u2029]/
-const columnsOf = (grapheme: string): number => {
-  // A tab can advance to the next tab stop (several widest-glyph units), so it
-  // is priced conservatively rather than as one column.
-  if (grapheme === '\t') return 3
-  return WIDE_GRAPHEME.test(grapheme) ? 2 : 1
-}
-
-/** The display columns of one text (never UTF-16 units). */
-export function displayWidth(text: string): number {
-  let width = 0
-  for (const { segment } of graphemeSegmenter.segment(text)) width += columnsOf(segment)
-  return width
-}
-
-/**
- * Wrap `text` into lines of at most `columns` DISPLAY columns, breaking on
- * grapheme boundaries (a surrogate pair is never split) and preferring the last
- * space (a break consumes it, which is what a word wrap does). An explicit
- * newline always breaks.
- */
-export function wrapColumns(text: string, columns: number): readonly string[] {
-  const lines: string[] = []
-  let line = ''
-  let width = 0
-  /** Commit the current line KEEPING an empty one: the renderer preserves an
-   *  explicit blank line, so dropping it would under-count the height. */
-  const emit = (): void => {
-    lines.push(line.trim())
-    line = ''
-    width = 0
-  }
-  const flushWrapped = (): void => {
-    const trimmed = line.trim()
-    if (trimmed === '') return
-    lines.push(trimmed)
-    line = ''
-    width = 0
-  }
-  for (const { segment } of graphemeSegmenter.segment(text)) {
-    // A grapheme cluster can CARRY the break (`\r\n` is one cluster, and a lone
-    // CR or a Unicode line/paragraph separator is its own): every such segment
-    // is exactly ONE rendered line break.
-    if (LINE_BREAK.test(segment)) {
-      emit()
-      continue
-    }
-    const cell = columnsOf(segment)
-    if (width + cell > columns && line !== '') {
-      const space = line.lastIndexOf(' ')
-      if (space > 0) {
-        const rest = line.slice(space + 1)
-        line = line.slice(0, space)
-        flushWrapped()
-        line = rest
-        width = displayWidth(rest)
-      } else {
-        flushWrapped()
-      }
-    }
-    line += segment
-    width += cell
-  }
-  flushWrapped()
-  return lines
 }
 
 /* ------------------------------------------------------------------- scope */
@@ -438,73 +371,9 @@ export function stepActionFocus(panel: ModelPickerPanel, delta: -1 | 1): string 
 
 /* ------------------------------------------------------------- details page */
 
-/** The measured ONE-line width a Details fact row offers its `detail`, in px.
- *
- *  The SDK renders a fact row's `detail` on a SINGLE measured 18px line and
- *  clips what does not fit with an ellipsis: an unbroken fragment never becomes
- *  two lines, so "the row is 36px tall" is not a readability budget. The two
- *  numbers below are the slots of the NARROWEST pane each layout supports, both
- *  measured in the real Tern production presenter:
- *
- *  - compact (`sz-md`, `narrow`, `pv-hide`): 286px at the 400px minimum
- *    supported pane width (560px gives 446px).
- *  - wide (`sz-lg`, side preview): 366px at 1040px — the narrowest pane the
- *    client keeps the details column BESIDE the list (at 1000-1020px it moves
- *    the preview below and the list becomes full width, which is wider and
- *    therefore covered by the same bound; 1100px gives 426px).
- */
-const FACT_SLOT_COMPACT_PX = 286
-const FACT_SLOT_WIDE_PX = 366
-/** The Owner-frozen caps of one fact row (compact / wide). */
-const FACT_LINE_COLUMNS_COMPACT = 11
-const FACT_LINE_COLUMNS_WIDE = 21
-/** The label of a fact row shares its line, and our labels are static ASCII of a
- *  known font: 9px per character is an upper bound of the measured ~6.4px/char
- *  (`Provider` measures 51px), so the room a label leaves is provable. */
-const FACT_LABEL_CHAR_PX = 9
-/** One column of slack: the slots above are integer measurements, and the
- *  rendered advance of the widest glyph is measured, not exactly 20px. */
-const FACT_SLOT_SLACK_PX = 20
-
-/**
- * The display columns one Details fact row may carry on its single line, given
- * the label it shares that line with. Every character is priced at
- * {@link WIDE_GLYPH_PX} (the measured worst-case advance of one display column,
- * so any glyph mix is covered), the row's own label is subtracted, and the
- * Owner-frozen caps (11 compact / 21 wide) are upper bounds the measured slot
- * may tighten further.
- */
-export function factLineColumns(wide: boolean, label: string): number {
-  const slot = (wide ? FACT_SLOT_WIDE_PX : FACT_SLOT_COMPACT_PX)
-    - label.length * FACT_LABEL_CHAR_PX
-    - FACT_SLOT_SLACK_PX
-  const cap = wide ? FACT_LINE_COLUMNS_WIDE : FACT_LINE_COLUMNS_COMPACT
-  return Math.max(1, Math.min(cap, Math.floor(slot / WIDE_GLYPH_PX)))
-}
-
-/**
- * One labelled fact as complete, readable rows: the row that carries the label
- * shares its line with it, so its fragment fits the room the label leaves, and
- * the remainder continues on label-less rows at the full row bound. Every
- * fragment therefore fits its own row's measured ONE-line slot.
- */
-function wrappedRows(id: string, label: string, text: string, wide: boolean): PickerItem[] {
-  const lines = wrapColumns(text, factLineColumns(wide, ''))
-  const head = wrapColumns(lines[0] ?? '', factLineColumns(wide, label))
-  const rows = [...head, ...lines.slice(1)]
-  // A value that wraps to nothing (an empty advertised name) still keeps its
-  // labelled row rather than disappearing from the page.
-  if (rows.length === 0) rows.push('')
-  return rows.map((line, index) => ({
-    id: index === 0 ? id : `${id}-${index + 1}`,
-    label: index === 0 ? label : '',
-    detail: line,
-  }))
-}
-
 /** The model-details page's inert fact rows (a compact or wide-list page).
  *
- *  EVERY fact value goes through {@link wrappedRows}: a row renders ONE line and
+ *  EVERY fact value goes through {@link factRowItems}: a row renders ONE line and
  *  ellipsizes what does not fit, so a long name/provider/ID/configured value can
  *  only be read completely when its continuation rows exist AND each fragment
  *  fits the row's own measured one-line slot. `wide` selects the slot/bound of
@@ -519,16 +388,16 @@ export function detailFactItems(
   const draft = draftedEffort(panel, row)
   const draftLabel = modelChoices(row).find((choice) => choice.value === draft)?.label
   return [
-    ...wrappedRows('fact-model', 'Model', row.modelName, wide),
-    ...wrappedRows('fact-provider', 'Provider', `${row.providerName} (${row.providerId})`, wide),
-    ...wrappedRows('fact-id', 'ID', row.modelId, wide),
+    ...factRowItems('fact-model', 'Model', row.modelName, wide),
+    ...factRowItems('fact-provider', 'Provider', `${row.providerName} (${row.providerId})`, wide),
+    ...factRowItems('fact-id', 'ID', row.modelId, wide),
     // The configured facts come from the ONE directory DTO, so a Default effort
     // is never lost when the default is not the current model.
-    ...configuredFacts(panel).flatMap((fact) => wrappedRows(fact.id, fact.label, fact.detail, wide)),
+    ...configuredFacts(panel).flatMap((fact) => factRowItems(fact.id, fact.label, fact.detail, wide)),
     // A long description is wrapped into complete, readable rows.
-    ...(description === undefined ? [] : wrappedRows('fact-description', 'Description', description, wide)),
-    ...(draftLabel === undefined ? [] : wrappedRows('fact-draft', 'Draft effort', draftLabel, wide)),
-    ...(panel.notice === '' ? [] : wrappedRows('fact-notice', 'Status', panel.notice, wide)),
+    ...(description === undefined ? [] : factRowItems('fact-description', 'Description', description, wide)),
+    ...(draftLabel === undefined ? [] : factRowItems('fact-draft', 'Draft effort', draftLabel, wide)),
+    ...(panel.notice === '' ? [] : factRowItems('fact-notice', 'Status', panel.notice, wide)),
   ]
 }
 
@@ -546,20 +415,14 @@ export function detailCursor(
 /* ------------------------------------------------------------ layout budget */
 
 /**
- * The glyph advance bound of the wide preview's font.
- *
- * The pane renders PROPORTIONAL text, so a terminal-column count is not a line
- * count: a `'W'.repeat(34)` label wraps into two native rows even though 34
- * columns "fit". The measured widest ASCII glyph advance is ~14.6px, so every
- * character (and every 2-column CJK/emoji grapheme) is priced at 20px: the
- * resulting line count is an UPPER BOUND for any glyph mix, never an estimate.
+ * The wide preview's own line budget: every rendered character is priced at the
+ * shared worst-case glyph advance, so the resulting line count is an UPPER BOUND
+ * for any glyph mix. The content width of the wide details card / radio row is
+ * 340px of box, 296px of slot and 248px of text.
  */
-const WIDE_GLYPH_PX = 20
-/** The content width of the wide details card / radio row (340px box, 296px
- *  slot, 248px of text). */
 const WIDE_TEXT_PX = 248
 /** The columns one wide line may carry under that bound. */
-const WIDE_TEXT_COLUMNS = Math.floor(WIDE_TEXT_PX / WIDE_GLYPH_PX)
+const WIDE_TEXT_COLUMNS = Math.floor(WIDE_TEXT_PX / PICKER_GLYPH_PX)
 
 /*
  * Measured vertical geometry of the wide side preview (real Tern 0.7.2,
@@ -596,22 +459,6 @@ const WIDE_CARD_PAD_PX = 10
  * `docs/tern-tsp/model-selection.md` and never claimed as automatically safe.
  */
 const WIDE_USABLE_HEIGHT_PX = 374
-
-/** Truncate one line to the worst-case column bound, marking the cut. A single
- *  clamped line is what the action-first details column shows for a long value
- *  (the complete value stays readable in the Details page). */
-export function clampColumns(text: string, columns: number): string {
-  const graphemes = [...graphemeSegmenter.segment(text)].map((entry) => entry.segment)
-  let width = 0
-  let kept = ''
-  for (const grapheme of graphemes) {
-    const cell = columnsOf(grapheme)
-    if (width + cell > columns) return `${kept.trimEnd()}…`
-    kept += grapheme
-    width += cell
-  }
-  return kept
-}
 
 /** The identity fields the action-first column shows, each on at most this many
  *  pre-wrapped lines (the complete value stays readable in the Details page). */
@@ -660,16 +507,6 @@ export function widePreviewFits(
   // which can overflow on its own at a short pane: the budget never skips it.
   if (row === undefined) return true
   return widePreviewNeededPx(panel, row) <= WIDE_USABLE_HEIGHT_PX
-}
-
-/**
- * The ONE-line form of a text: every whitespace run — an explicit LF, CRLF, CR
- * or Unicode line/paragraph separator included — collapses to a single space, so
- * the result is exactly one rendered line and the budget prices it as one. The
- * complete value always stays readable on the Details page.
- */
-function oneLine(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim()
 }
 
 /**

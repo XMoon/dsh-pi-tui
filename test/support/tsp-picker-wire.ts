@@ -41,26 +41,43 @@ export function wireNodes(pane: TspPane): WireNode[] {
         const node = live.get(String(op[1]))
         if (node !== undefined) Object.assign(node.p, op[2])
       }
+      // The SDK streams text-bearing nodes (`editor`, `md`, …) through its own
+      // `text` op: `replace` sets the value, `append` extends it. Folding it is
+      // what makes a STABLE node id (the composer) readable across frames.
+      if (op[0] === 'text') {
+        const node = live.get(String(op[1]))
+        const mode = op[2]
+        const value = op[3]
+        if (node !== undefined && typeof value === 'string') {
+          if (mode === 'replace') node.p.text = value
+          if (mode === 'append') node.p.text = String(node.p.text ?? '') + value
+        }
+      }
     }
   return [...live.values()]
 }
 
-/** Every mounted node of the model layer: the layer key prefixes its whole
- *  subtree, so one filter addresses the layer and nothing else on the surface. */
-export function layerNodes(pane: TspPane): WireNode[] {
-  return wireNodes(pane).filter((node) => node.id.split(/[.:]/).some((part) => part.startsWith('model-')))
+/** The `/model` layer's key prefix (the default of every helper below). */
+export const MODEL_LAYER_PREFIX = 'model-'
+/** The `/preset` layer's key prefix. */
+export const PRESET_LAYER_PREFIX = 'preset-'
+
+/** Every mounted node of ONE picker layer: the layer key prefixes its whole
+ *  subtree, so one filter addresses that layer and nothing else on the surface. */
+export function layerNodes(pane: TspPane, prefix = MODEL_LAYER_PREFIX): WireNode[] {
+  return wireNodes(pane).filter((node) => node.id.split(/[.:]/).some((part) => part.startsWith(prefix)))
 }
 
-/** The mounted model picker, or `undefined` while no frame is committed. */
-export function pickerNode(pane: TspPane): WireNode | undefined {
-  return layerNodes(pane).find((node) => node.k === 'picker')
+/** The mounted picker of one layer, or `undefined` while no frame is committed. */
+export function pickerNode(pane: TspPane, prefix = MODEL_LAYER_PREFIX): WireNode | undefined {
+  return layerNodes(pane, prefix).find((node) => node.k === 'picker')
 }
 
 /** The picker's props, or `{}` while absent: a `waitUntil` predicate must never
  *  throw (a thrown predicate skips the wait and leaves a credit-gated frame
  *  unflushed). */
-export function pickerProps(pane: TspPane): Record<string, unknown> {
-  return pickerNode(pane)?.p ?? {}
+export function pickerProps(pane: TspPane, prefix = MODEL_LAYER_PREFIX): Record<string, unknown> {
+  return pickerNode(pane, prefix)?.p ?? {}
 }
 
 /** A picker the caller has ALREADY waited for (a hard assertion, not a poll). */
@@ -70,9 +87,9 @@ export function requiredProps(pane: TspPane): Record<string, unknown> {
 }
 
 /** Every visible text of the committed layer, plain and span text alike. */
-export function sheetText(pane: TspPane): string {
+export function sheetText(pane: TspPane, prefix = MODEL_LAYER_PREFIX): string {
   const out: string[] = []
-  for (const node of layerNodes(pane)) {
+  for (const node of layerNodes(pane, prefix)) {
     if (typeof node.p.text === 'string') out.push(node.p.text)
     const spans = node.p.spans
     if (!Array.isArray(spans)) continue
@@ -96,15 +113,15 @@ export function hasEffortCard(pane: TspPane): boolean {
 }
 
 /** One named action of the picker's action bar. */
-export function pickerAction(pane: TspPane, id: string): Record<string, unknown> | undefined {
-  return ((pickerProps(pane).actions ?? []) as Array<Record<string, unknown>>)
+export function pickerAction(pane: TspPane, id: string, prefix = MODEL_LAYER_PREFIX): Record<string, unknown> | undefined {
+  return ((pickerProps(pane, prefix).actions ?? []) as Array<Record<string, unknown>>)
     .find((entry) => entry.id === id)
 }
 
 /** A Row the SDK dispatches `onClick` on (an effort radio row). */
-export function rowNode(pane: TspPane, fragment: string): WireNode {
-  const node = layerNodes(pane).find((entry) => entry.k === 'row' && entry.id.includes(fragment))
-  assert.ok(node, `no row matching ${fragment} in ${layerNodes(pane).map((n) => n.id).join(', ')}`)
+export function rowNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): WireNode {
+  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'row' && entry.id.includes(fragment))
+  assert.ok(node, `no row matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
   return node
 }
 
@@ -114,10 +131,11 @@ export async function waitForPicker(
   pane: TspPane,
   state: 'ready' | 'loading' | 'error' = 'ready',
   timeoutMs = 10_000,
+  prefix = MODEL_LAYER_PREFIX,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (pickerProps(pane).state === state) return
+    if (pickerProps(pane, prefix).state === state) return
     await new Promise((resolve) => setTimeout(resolve, 20))
   }
   throw new Error(`timed out waiting for ${label}`)
@@ -127,6 +145,8 @@ const sf = (pane: TspPane): string => pane.frames().at(-1)!.sf
 
 /** Send one picker action-bar action (the pane does this when its action bar is used). */
 export function sendAction(pane: TspPane, act: string, value?: string, id = pickerNode(pane)?.id): void {
+  // The caller may address ANY layer's picker by passing its node id; the
+  // default is the `/model` one, the only layer the original callers open.
   assert.ok(id, 'the picker must be mounted to send an action')
   pane.event({
     ev: 'action',
@@ -139,6 +159,7 @@ export function sendAction(pane: TspPane, act: string, value?: string, id = pick
 
 /** Send one row/scope selection (the pane does this when a list row is used). */
 export function sendSelect(pane: TspPane, item: string, id = pickerNode(pane)?.id): void {
+  // See `sendAction`: the default receiver is the `/model` layer's picker.
   assert.ok(id, 'the picker must be mounted to send a selection')
   pane.event({ ev: 'select', sf: sf(pane), id, item })
 }

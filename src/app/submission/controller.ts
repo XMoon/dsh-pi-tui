@@ -234,6 +234,8 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly supportsTuiBuiltinUi: boolean
   /** The installed native Model presenter, including its terminal capability. */
   readonly supportsModelPickerUi?: () => boolean
+  /** The installed native Preset presenter, including its terminal capability. */
+  readonly supportsPresetPickerUi?: () => boolean
   /**
    * PR3-B §7.3 (F2): whether this renderer RETAINS a stale submission's
    * draft restore across a session switch. PiTui = true (steer.test.ts's
@@ -1678,11 +1680,14 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // already the authoritative classifier's `client-command` + `source:'tui'`
     // result, so a genuine Host-origin command of the same spelling was never
     // captured here and a Host claim keeps its precedence. The exit pair and
-    // the mounted native Model presenter are available; PiTui-only builtins
-    // are refused with an actionable notice and the draft restored — no false
-    // success, no silent no-op, no session created for a UI that cannot run.
+    // the mounted native Model/Preset presenters are available; PiTui-only
+    // builtins are refused with an actionable notice and the draft restored — no
+    // false success, no silent no-op, no session created for a UI that cannot run.
     if (parsed !== undefined) {
-      const availability = tspBuiltinAvailability(classification, parsed.name, deps.supportsModelPickerUi?.() === true)
+      const availability = tspBuiltinAvailability(classification, parsed.name, {
+        modelPicker: deps.supportsModelPickerUi?.() === true,
+        presetPicker: deps.supportsPresetPickerUi?.() === true,
+      })
       // ONLY the TUI-owned builtin family is this gate's business. A Host
       // command, an extension contribution, a skill invocation or an ordinary
       // submission keeps its OWN routing below — the family decision comes

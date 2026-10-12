@@ -1457,6 +1457,7 @@ export function applyRunnerWithRuntime(
       signal: lifecycleController.signal,
       app: () => app,
       modelPresentation: () => surface.modelPresentation,
+      presetPresentation: () => surface.presetPresentation,
       // PR3-A: registration/refresh failures are background-reachable under a
       // read-only TSP renderer; the notice goes through the display seam.
       notify: (text, kind) => surface.display.notify(text, kind),
@@ -2184,6 +2185,7 @@ export function applyRunnerWithRuntime(
       // admission. The native Model presenter is supplied separately below.
       get supportsTuiBuiltinUi() { return !tspRendererActive },
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
+      supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
       // PR3-B §7.3 (F2): PiTui retains a stale submission's draft restore
       // across a switch (its contract); the TSP renderer's committed switch
       // DROPPED the outgoing draft, so the stale restore is suppressed.

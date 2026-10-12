@@ -14,6 +14,7 @@
 import { ui, span, type Node } from '@stencil-hq/tern'
 import type { PickerAction, PickerGroup, PickerItem, PickerProps, PickerScope } from '@stencil-hq/tern'
 import type { ModelPickerFailureRow, ModelPickerModelRow } from '../pickers/model-directory.ts'
+import { wrapColumns } from './picker-text.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
   ALL_SCOPES_ID,
@@ -36,7 +37,6 @@ import {
   scopeId,
   subjectLine,
   visibleModels,
-  wrapColumns,
   zoneHintText,
   type ModelPickerPanel,
 } from './model-picker-state.ts'
