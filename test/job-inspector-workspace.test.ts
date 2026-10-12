@@ -482,9 +482,16 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
   assert.match(compact.join('\n'), /Command: pnpm build --watch/)
   assert.match(compact.join('\n'), /failed/)
 
-  // 44×4 with a LIVE notice: header (2) + notice (1) + Action Bar (1) = exactly the
-  // granted rows, Action Bar last.
-  const withNotice = panelAt(4, true).render(44)
+  // 44×4 with a LIVE notice: the notice YIELDS, because taking its row would leave
+  // the Output with nothing — header (2) + Action Bar (1) only.
+  const tight = panelAt(4, true).render(44)
+  assert.equal(tight.length, 3, 'the notice yields so the Output keeps a row')
+  assert.match(tight.at(-1)!, /Esc back/)
+  assert.ok(!/could not stop/.test(tight.join('\n')), 'no notice row on a 4-row grant')
+
+  // 44×5 with a LIVE notice: header (2) + notice (1) + Action Bar (1) = 4 rows,
+  // leaving exactly one Output row.
+  const withNotice = panelAt(5, true).render(44)
   assert.equal(withNotice.length, 4, 'the notice is inside the height budget, never below the bar')
   assert.match(withNotice.at(-1)!, /Esc back/)
   assert.match(withNotice.join('\n'), /✗ could not stop job job-a: refused/)
@@ -725,6 +732,25 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   assert.equal(tiny.length, 2)
   assert.match(tiny[1]!, /Esc back/, `the Action Bar must survive an 80x2 grant with a live notice:\n${tiny.join('\n')}`)
   assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields to the pinned chrome')
+
+  // 44×4: the notice still yields — the Output keeps its row.
+  vt.resize(44, 4)
+  await vt.waitForRender()
+  const tight = rawView(vt)
+  assert.equal(tight.length, 4)
+  assert.match(tight[3]!, /Esc back/, `the Action Bar stays last at 44x4:\n${tight.join('\n')}`)
+  assert.ok(!/could not stop/.test(tight.join('\n')), 'a notice never squeezes the last output row away')
+  assert.match(tight.join('\n'), /retained job-a/, `the Output keeps its row at 44x4:\n${tight.join('\n')}`)
+
+  // 44×5: header + Output + notice + Action Bar all fit.
+  vt.resize(44, 5)
+  await vt.waitForRender()
+  const five = rawView(vt)
+  assert.equal(five.length, 5)
+  assert.match(five[4]!, /Esc back/, 'the Action Bar stays the last row')
+  assert.match(five.join('\n'), /could not stop job job-a/, `the notice shows once an output row is still guaranteed:\n${five.join('\n')}`)
+  assert.match(five.join('\n'), /retained job-a/, `the Output keeps its row at 44x5:\n${five.join('\n')}`)
+
   vt.resize(80, 24)
   await vt.waitForRender()
   assert.match(view(vt), /could not stop job job-a/, 'the notice row returns with the room')
