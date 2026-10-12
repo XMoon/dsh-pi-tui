@@ -431,13 +431,25 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // It is resolved per invocation and never dereferences an `app` on the
         // TSP branch (no `TuiApp` exists there; the post-classification
         // capability admission refuses `/preset` before this handler).
-        const presentation = deps.presetPresentation ?? pituiPresetPresentation(app)
+        const native = deps.presetPresentation
+        const presentation = native ?? pituiPresetPresentation(app)
         const notify = presentation.notify
         // EVERY `/preset` invocation owns the presentation surface: a newer one
         // retires whatever panel the previous invocation opened, while an
         // already-admitted Host write still settles through its own owner. The
         // bare `/preset` below reuses this one token for its whole panel life.
         const surfaceToken = ++presetSurfaceToken
+        /**
+         * A notice is owned by BOTH markers: the operation token fences the
+         * WRITE's settlement (inside `applyPresetSelection`) and this fences the
+         * DISPLAY. A newer `/preset` invocation takes a new surface token, so an
+         * operation it did not start can never write a line onto its panel or
+         * dock — while the already-admitted Host write still settles through its
+         * own owner (closing a panel never cancels a write).
+         */
+        const notifyOwned = (text: string, kind: 'info' | 'error'): void => {
+          if (surfaceToken === presetSurfaceToken) notify(text, kind)
+        }
         // The live composition is the runner's own read (Direct ownership);
         // the roster catalog the command surface needs is the port's. Every
         // session-dependent decision re-fences against the captured scope at
@@ -466,7 +478,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           // session will not compose on.
           if (runner.effectivePresetId === undefined) {
             const outcome = await runner.refreshStandingCatalog(id, 'preset')
-            if (outcome.kind === 'applied' && outcome.notice !== undefined) notify(outcome.notice, 'error')
+            if (outcome.kind === 'applied' && outcome.notice !== undefined) notifyOwned(outcome.notice, 'error')
           }
         }
         const matched = invocation.rawInput.trim().match(/^(\S+)(?:\s+(.*))?$/)
@@ -538,7 +550,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             const outcome = await runner.refreshStandingCatalog(resolved.id, 'preset')
             if (token !== presetOperationToken) return { kind: 'superseded' }
             if (!ownerCurrent()) return { kind: 'superseded' }
-            if (outcome.kind === 'applied' && outcome.notice !== undefined) notify(outcome.notice, 'error')
+            if (outcome.kind === 'applied' && outcome.notice !== undefined) notifyOwned(outcome.notice, 'error')
             return { kind: 'pending', preset: resolved.id }
           }
           // The live-session preset swap runs INSIDE the session-transition
@@ -614,22 +626,22 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             outcome = await applyPresetSelection(id, owner)
           } catch (error) {
             const message = presetErrorText(error)
-            notify(message, 'error')
+            notifyOwned(message, 'error')
             return { kind: 'rejected', message }
           }
           if (outcome.kind === 'pending') {
-            notify(`new sessions will start on preset ${outcome.preset}`, 'info')
+            notifyOwned(`new sessions will start on preset ${outcome.preset}`, 'info')
           } else if (outcome.kind === 'switched') {
-            notify(`session preset switched to ${outcome.preset}`, 'info')
+            notifyOwned(`session preset switched to ${outcome.preset}`, 'info')
           } else if (outcome.kind === 'superseded') {
             // A newer pick owns the surface: the notice would only describe an
             // already-superseded switch.
           } else if (outcome.kind === 'locked') {
-            notify(lockedPresetMessage(outcome.sessionId), 'error')
+            notifyOwned(lockedPresetMessage(outcome.sessionId), 'error')
           } else if (outcome.kind === 'indeterminate') {
-            notify(`${outcome.message} — the displayed preset reconciles from the Session; do not retry`, 'error')
+            notifyOwned(`${outcome.message} — the displayed preset reconciles from the Session; do not retry`, 'error')
           } else {
-            notify(outcome.message, 'error')
+            notifyOwned(outcome.message, 'error')
           }
           return outcome
         }
@@ -649,7 +661,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             }
             if (outcome.kind === 'locked') {
               const message = lockedPresetMessage(outcome.sessionId)
-              notify(message, 'error')
+              notifyOwned(message, 'error')
               return { kind: 'error', text: message }
             }
             if (outcome.kind === 'indeterminate') {
@@ -659,10 +671,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
               // `outcome.kind === 'rejected'` below and is restored.
               recordCommandDraftDisposition(invocation.commandId, 'suppressed')
               const message = `${outcome.message} — the displayed preset reconciles from the Session; do not retry`
-              notify(message, 'error')
+              notifyOwned(message, 'error')
               return { kind: 'error', text: message }
             }
-            notify(outcome.message, 'error')
+            notifyOwned(outcome.message, 'error')
             return { kind: 'error', text: outcome.message }
           } catch (error) {
             return { kind: 'error', text: presetErrorText(error) }
@@ -682,11 +694,16 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // picker and lets the Host be the final authority.
         if (pickerScope.sessionId !== undefined && runner.sessionBlank() === false) {
           const message = `preset switching is only available in a new session — session "${pickerScope.sessionId}" has already started; its preset is fixed (use /new for a fresh session, or /preset default <id> for future sessions)`
-          notify(message, 'error')
+          notifyOwned(message, 'error')
           return { kind: 'error', text: message }
         }
-        // The surface token was taken at the top of this invocation: mount the
-        // loading picker IMMEDIATELY. The roster read runs as owned background
+        // The surface token was taken at the top of this invocation. The NATIVE
+        // picker mounts its loading panel IMMEDIATELY and runs the roster read as
+        // owned background work, so the user gets instant feedback and may type a
+        // query while it loads. The PiTui adapter keeps its ORIGINAL settlement:
+        // the read is awaited inside this handler, so its own success text, its
+        // thrown read failure and the command path's draft disposition are
+        // unchanged. The roster read runs as owned background
         // work, so the user gets instant feedback and may type a query while it
         // loads (PiTui keeps its own "open when the rows are known" behaviour —
         // its `setLoading` is a no-op).
@@ -729,11 +746,11 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // different invocation.
             if (surfaceToken !== presetSurfaceToken) return { kind: 'superseded' }
             const message = presetErrorText(error)
-            notify(`default preset save: ${message}`, 'error')
+            notifyOwned(`default preset save: ${message}`, 'error')
             return { kind: 'unconfirmed', message }
           }
           if (surfaceToken !== presetSurfaceToken) return { kind: 'superseded' }
-          notify(`new-session default set: ${id} — changes new sessions only; the current session is unchanged`, 'info')
+          notifyOwned(`new-session default set: ${id} — changes new sessions only; the current session is unchanged`, 'info')
           return { kind: 'saved', preset: id }
         }
         /** Read (or re-read) the roster through the original owner. Never a
@@ -804,8 +821,51 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             },
           })
         }
-        loadOnce()
-        return { kind: 'success' }
+        if (native !== undefined) {
+          // The native TSP path: the panel is already mounted in its loading
+          // state and the ONE read owner hydrates it in the background.
+          loadOnce()
+          return { kind: 'success' }
+        }
+        // ── the PiTui path: the ORIGINAL command settlement ──
+        // The same read owner (`presets.roster` under the captured scope and
+        // signal) is awaited here, so the handler keeps its own result: the
+        // frozen empty-roster text, and a real read failure rethrown to the
+        // command path (which owns the failure notice and the draft restore).
+        try {
+          const roster = await presets.roster(runner.signal)
+          if (!pickerOwnerCurrent()) {
+            picker.close()
+            return { kind: 'success' }
+          }
+          if (roster.presets.length === 0) {
+            picker.close()
+            return { kind: 'success', text: 'no agent presets configured' }
+          }
+          const defaultId = roster.defaultId ?? await displayedDefault()
+          // Re-check AFTER the displayedDefault await too: a Session switch during
+          // it must not mix the old roster/default with the new Session's state.
+          if (!pickerOwnerCurrent()) {
+            picker.close()
+            return { kind: 'success' }
+          }
+          picker.setRoster({
+            roster,
+            currentId: subject.sessionless ? undefined : runner.currentPreset(),
+            pendingId: subject.sessionless ? runner.pendingPreset : undefined,
+            defaultId,
+            canSetDefault: runner.config.presetDefault.available(),
+          })
+          return { kind: 'success' }
+        } catch (error) {
+          picker.close()
+          // A superseded/aborted read no longer owns the surface: stay silent
+          // instead of surfacing a stale roster failure (v2 §0.2.3/§0.3.1).
+          if (error instanceof SupersededReadError || !pickerOwnerCurrent() || runner.signal.aborted) {
+            return { kind: 'success' }
+          }
+          throw error
+        }
       },
     })
   }

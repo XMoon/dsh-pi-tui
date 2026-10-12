@@ -26,11 +26,11 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
           // PiTui has never shown a roster LOADING overlay: its list exists only
           // once the rows are known. The command runs the same one read owner.
         },
-        setLoadError: (message) => {
-          // The original PiTui path let the roster failure surface through the
-          // command's own error channel; the overlay never opened, and no Retry
-          // action appears out of nowhere.
-          app.notify(message, 'error')
+        setLoadError: () => {
+          // Unreachable by construction: the PiTui settlement keeps a roster
+          // failure on the COMMAND path (the handler rethrows), so the adapter
+          // never receives one — and it must not invent a Retry or a second
+          // notice if it ever did.
         },
         setRoster: (input: PresetPickerRoster) => {
           if (disposed || closer !== undefined) return
