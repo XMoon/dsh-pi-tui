@@ -190,10 +190,18 @@ When you add or change an overlay path, cover the family it belongs to:
 - **Fullscreen lifecycle**: the logical graph, visibility intent, focus intent,
   z-order and modal suspensions survive; non-remountable overlays are closed
   first; the owner is derived from logical intent (physical focus can be
-  overwritten by the outer `setFocus(editor)`).
+  overwritten by the outer `setFocus(editor)`); a swap that interleaves an
+  overlay's own mount must still leave that overlay projected IN LOGICAL ORDER —
+  register the remount capability before the physical mount, never append it
+  afterwards — and, when it was the pre-swap keyboard owner, focused (see §11).
 - **Approval**: it is a remountable logical node; the overlays it suppresses
   must never flash or receive focus through a rebuild; replaced frames are
-  disposed.
+  disposed; the stage identity is re-read after the park hook, after the Save
+  cancellation and inside the mount, so a settled prompt's tail can never cancel
+  the newer Save Location a cleanup opened, and a throwing mount can never latch
+  the stage, leak its frame or leave a ghost projection. A failed presentation
+  also rejects ITS OWN promise (a queued prompt no longer has an executor to do
+  it) and runs the LAST-blocker restore once the queue drained (see §11).
 - **Session / teardown**: a child overlay (Job viewer) closes before its parent
   (Task Browser); callbacks capture the owning session identity; a parent that
   was disposed WITHOUT its closer must still notify its owner (see §10).
@@ -202,6 +210,23 @@ When you add or change an overlay path, cover the family it belongs to:
   fourth `onDispose`; precommit the latch before the user callback runs; keep
   the physical hide and the owner notification as INDEPENDENT
   `runSyncDisposalSteps` steps (see §10).
+- **A new blocker that takes the seat** (question / save / approval class):
+  commit the blocking intent BEFORE the park and before any call that can run a
+  plugin callback, then park the optional tenant; the modal must never be able
+  to observe an unblocked seat (see §11).
+- **A private optional seat tenant**: one record, one per-open token, one
+  caller-owned `close`; REFUSE before the factory; restore only at the LAST
+  blocker; re-validate `isCurrent()` at every ACTIVE input / re-projection /
+  focus / screen-swap entry and re-project the live winner; give it no
+  host-classified protocol delivery; never let the tenant become a second
+  focus/currentness authority (see §11).
+- **A failed blocking presentation**: keep the rollback steps, the FIFO advance
+  and the caller's promise settlement INDEPENDENT (a throwing step surfaces
+  aggregated, never truncating); commit the successor fact BEFORE the handover
+  runs; gate the advance on the failed state still owning the seat; a successor
+  UNIONS the inherited suspension set and then takes its own suspension over the
+  still-visible roots; and fence the handover tail after that suspension on the
+  successor still being the live owner (see §11).
 - **Assertions to add**: `assertOverlayForestForTest()` after reentrant
   operations; focus/blur counts around internal restores; the logical
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
@@ -343,3 +368,292 @@ exactly ONE per-open finalizer, and every close route funnels through it:
 Evidence: `test/surface-lifecycle-closure.test.ts` (Esc, returned closer, screen
 swap, parent-only close, Quick/Full restore, Job A → B, session reset, final
 dispose, throwing child dispose, Sign-in notice identity).
+
+## 11. Optional seat tenant: PARK / REFUSE
+
+A private Client-local caller may project ONE optional tenant into the editor
+seat. Phase 3A ships the seam and its arbitration, not a product surface:
+`TuiApp.tryOpenOptionalSeatTenant` is private and no command or extension
+service opens a tenant yet. The three BLOCKING owners (Question, Approval, Save
+Location) outrank it, and the record never becomes a second authority over them
+or over the editor seat.
+
+- **Authority.** The single record (`phase: 'active' | 'parked'`, one per-open
+  `token`, one caller-owned `close`) lives in `TuiApp`. The component and its
+  lifetime stay caller-owned, and `EditorSeatHolder` stays the only owner of the
+  host/plugin editor it manages. Currentness is the caller's `isCurrent()`
+  predicate (its session/generation subject) — never a status cwd/text, a
+  `TuiApp.generation` on its own, or a shadow `focused` boolean.
+- **REFUSE is a capacity result.** The open checks a disposed surface, a live
+  Question (`activeQuestions`), a pending approval (`approvals.hasPending()` —
+  an ACTIVE prompt OR a queued one, so the synchronous window between a settle
+  and the next `showNext()` is still blocking) and a live Save Location
+  (`activeSaveLocation`) BEFORE the factory runs: a refused request calls no
+  factory, calls no `close`, writes no notification and leaves the blocking
+  owner untouched. The seat-arbitration gates (`optionalSeatBlocking`, the
+  projection focus fence and the `↓ view` affordance) read that same pending
+  fact.
+- **One source of truth for the seat projection.** `seatFallbackComponent()`
+  derives the physical occupant from the LIVE owner — Question frame > Save
+  Location frame > ACTIVE-and-current optional tenant > the latest host/plugin
+  editor — and returns `undefined` while a blocking owner is live but its frame
+  is not built yet, so a synchronous callback's late tail can never project a
+  newer winner over it. `mountSeatChild()`, `focusSeatOwner()`, the fullscreen
+  focus fallbacks and the plugin `viewSwap` guard all read that ONE derivation;
+  physical focus is never inferred from, and never rewritten by, a parked
+  tenant.
+- **The subject is re-validated at every ACTIVE entry.** `revalidateOptionalSeat()`
+  runs at the input entry, at the re-projection entry (`mountSeatChild`), at the
+  focus entry (`focusSeatOwner`), at the protocol fence and at BOTH screen-swap
+  entries (`setFullscreen`), which also re-sync the SHARED seat mount through
+  `projectSeatOccupant()` (a swap projects the live owner BEFORE the new screen
+  takes the keyboard and retires the stale record AFTER the swap is committed,
+  so a throwing cleanup cannot half-swap the surface). A record whose
+  `isCurrent()` went false is RETIRED there — its caller cleanup runs exactly
+  once, like an explicit close — and the seat re-projects and focuses the live
+  winner, so the physical mount can never keep painting a panel whose
+  session/generation is gone while the fork still dispatches keys to it. The
+  focus entry protects a NEWER owner that the retirement's cleanup established:
+  it samples the broker's monotonic focus-INTENT revision around the
+  re-validation and skips its fallback only when that revision moved DURING the
+  call (a capturing overlay focused itself, or an already focused one
+  re-requested focus — comparing the focused component's identity would miss
+  both). That revision counts EVERY keyboard handoff the broker performs: its
+  explicit `focus()` AND the auto-focus the fork performs inside
+  `setHidden(false)` for a hidden capturing overlay (a cleanup's `show()` /
+  `focus()`), which never passes through the broker's focus seam — an uncounted
+  handoff would let the fallback steal the keyboard back from that newer owner.
+  An owner the broker is RELEASING right now moved its revision before the
+  call and therefore never vetoes the fallback — which is exactly what keeps the
+  fork's own unfocus fallback from restoring the `preFocus` of a just-retired
+  component. Whenever nothing was retired the pre-existing fallback semantics are
+  unchanged (the broker's suspension/resume paths rely on them).
+- **A failed park rolls the blocking owner back.** The park of a blocking owner
+  (Question / Save Location / approval) runs the stale tenant's caller cleanup,
+  which may throw. The owner then ROLLS BACK instead of staying half-committed,
+  and the rollback is a per-step batch of INDEPENDENT obligations: the failed
+  state is latched settled and its `abort` binding released (it leaves every owner
+  slot here, so nothing else could ever unbind the caller's signal), the owner
+  slot is cleared only while the failed state STILL owns it — a cleanup that
+  aborted the old modal, synchronously opened a NEWER same-type modal and then
+  threw must not have its newer owner wiped (the new Question / Save frame stays
+  mounted and the new approval stays answerable) — the Save prompt is released,
+  the seat is re-projected to the live owner, the derived seat is re-published (a
+  hostless `TuiApp` only mirrors it through the render funnel's host branch) and
+  the frame repainted. The ORIGINAL failure then propagates, aggregated with a
+  rollback failure, both kept BY IDENTITY (a user-thrown `AggregateError` is ONE
+  entry and is never flattened into its `.errors`), so the caller's promise
+  rejects and no unpresented owner blocks later requests. An abandoned
+  presentation also (a) advances its FIFO successor through the EXISTING queue
+  authority — a Question's handover with the same suspension transfer and focus
+  order, an approval's `showNext()` — so a flow a cleanup legally queued while the
+  failing one still owned the seat is presented instead of staying pending
+  forever, and (b) when nothing is queued, hands back any suspension roots it
+  acquired (`releaseAbandonedSuspension`): a callback inside its window can open a
+  newer overlay that the broker appended to its set, and dropping the state
+  without resuming them would strand live roots hidden with nobody left to
+  restore them. Neither obligation may truncate the other: a throwing rollback
+  step (seat remount, focus setter, repaint) still lets the queue advance run, and
+  an approval's `showNext()` failing still lets the host rollback run — both
+  failures surface by identity with the primary one. The advance is GATED on the
+  failed state still owning the seat when its park failed: a cleanup that aborted
+  it through the normal path already handed the seat — and with it the queue
+  authority — to a NEWER successor, and dequeuing "on behalf of" the abandoned
+  flow would overwrite that live successor and leave it pending forever. The
+  successor fact is committed BEFORE the handover runs (`shiftLiveQuestion()`,
+  then `handOverQuestion`): a throwing handover step has already installed and
+  logically committed its successor, so "the handover returned normally" must
+  never decide whether the settlement's restoration runs — that would clear the
+  live successor's owner slot and strand its promise. The handover UNIONS the
+  predecessor's suspension set into the successor's (never dropped) and then
+  ALWAYS takes its own `suspendVisibleRoots` over whatever is still visible, once
+  it is committed as the live owner: "has a frame" is NOT the same fact as "its
+  initial suspension completed" — a predecessor can be superseded by a root's
+  `onBlur` WHILE that suspension is running, leaving its frame installed and its
+  roots neither hidden nor resumed, and the superseded suspension then skips its
+  remaining hides because the set was handed over. Re-suspending closes both:
+  already hidden roots are filtered by visibility (no re-suspension, no focus
+  move), and a root a callback re-showed while the modal owned the seat is hidden
+  exactly like at a fresh presentation. Because that suspension is a NEW callback
+  window, the handover mirrors `presentQuestion`'s fences: only a still-live
+  successor focuses its frame and publishes its seat, while a superseded one hands
+  back the suspension it still owns (its successor already took the graph) and
+  never re-focuses its retired frame over the newer owner.
+  Without all of this, a caller-side cleanup failure would leave an
+  unpresented modal blocking every later request while a retired component stayed
+  painted.
+- **PARK is committed before the blocker's first callback.** A Question commits
+  `activeQuestions` and parks the tenant BEFORE the Save Location handoff; an
+  approval commits its pending prompt as active BEFORE the park, the Save
+  Location cancellation and the mount; a Save Location commits
+  `activeSaveLocation` BEFORE the park. The tenant therefore never flashes an
+  intermediate ACTIVE → PARK round trip, and a settling Save Location can never
+  take its "nothing else is active" restore path behind a prompt that is
+  already mounting.
+- **Question → Save Location handoff.** A Question that supersedes a Save
+  Location passes its own state into `settleSaveLocation(state, result,
+  handoff)`. When that flow is STILL the live active one, the prompt transfers
+  its `suspendedOverlays` INTO the flow's set (a UNION — a callback inside the
+  batch may already have opened a newer overlay that the broker appended to that
+  flow, and those roots must be resumed by its own settle, not stranded) and
+  SKIPS the seat remount, the focus
+  fallback and `resumeSuspendedRoots` (the question resumes the graph once, at
+  its own final settle). Prompt disposal, the abort-listener cleanup and the
+  promise settlement stay independent steps, and the handoff target is re-read
+  INSIDE the batch AFTER those cleanup callbacks: `prompt.dispose()` aborts the
+  prompt's completion port, whose subscribers can synchronously cancel or
+  replace the superseding flow, so a settle/dead target makes the handoff a
+  no-op and the prompt restores normally instead of resurrecting a dead
+  presentation. `presentQuestion` fences every one of its own callback windows
+  (the optional-tenant park, the activity projection, the handoff, the broker
+  suspension, the frame focus) with the same live-flow identity test, so a
+  preempted flow never mounts, focuses or publishes its frame — and in
+  particular never hides a live overlay root into a dead flow's suspension set,
+  which nothing would ever resume.
+- **Restore only at the LAST blocker.** The Question/Save final settles clear
+  their owner first, then call `maybeRestoreOptionalSeat()`; an approval
+  restores only after `showNext()` proved the LIVE queue drained (`active ===
+  undefined && queue.length === 0`), so a queued A → B approval keeps the tenant
+  PARKED between the two prompts. The restore re-reads `isCurrent()` and the
+  live blocker set; a stale subject is retired instead of restored. The
+  focus fallback that follows a settle (`focusSeatFallback`) re-reads the live
+  owner too: a capturing overlay that a callback of the SAME batch opened (or
+  another blocking owner that appeared) keeps the keyboard instead of being
+  blurred by a pre-settle snapshot and re-focused by the broker afterwards.
+- **Exactly-once identity.** `retireOptionalSeat(token)` drops the identity
+  FIRST, latches `finalized` BEFORE the caller's `close()`, and attempts the
+  cleanup and the fallback projection as INDEPENDENT `runSyncDisposalSteps`
+  entries; a lease that arrives late is a strict no-op for the newer record. A
+  monotonic request revision fences BOTH a re-entrant factory and a re-entrant
+  previous `close()`: a candidate whose revision went stale releases exactly
+  itself and never installs (there is no unconditional
+  `finally { optionalSeat = old }`).
+- **Input.** While the tenant is `active`, current and PHYSICALLY focused — and
+  after every modal / viewer / search / capturing-overlay owner had its turn —
+  the ordinary keys go to its `handleInput` and are consumed: the Host editor
+  submit / steer / queue / task actions, the leader machine and the
+  plugin-editor Enter forward must never fire behind it. Host-RESERVED input
+  keeps its owner: physical Esc (the interrupt/exit lifecycle seam), the
+  effective exit key, the unstable raw-capture stage and the terminal protocol
+  all keep their own policy. Host-classified protocol chunks (SGR/legacy mouse
+  reports, terminal focus reports, Kitty key release/repeat) are additionally
+  stopped from ever being DELIVERED to a tenant. `protocolSinkFence` is the
+  LAST input listener on every screen — for fullscreen it is registered AFTER
+  the alt screen's viewport listener, so FOCUS_OUT still runs that listener's
+  selection cleanup and every mouse event the viewport recognizes stays with it
+  — and it re-validates the subject FIRST (a stale record is retired and the
+  live owner re-projected even when the chunk never reaches the key ladder,
+  whose mouse / focus-report branches return earlier) and then guards on the
+  PHYSICAL focus fact, so a stale-but-still-focused record can never collect a
+  raw chunk either. It is completely inert otherwise (the pre-existing editor /
+  overlay / viewport routing is unchanged). Bracketed PASTE is user text, not
+  protocol input, and still reaches the focused component. The ordinary-key
+  path re-validates the subject too, so a parked, finalized or stale tenant
+  receives nothing.
+- **Approval mount fence.** `ApprovalRuntime.showNext()` commits `active =
+  pending` BEFORE the park / save cancellation / mount, and re-reads that same
+  stage identity (`ownsStage`) after EVERY mount-phase hook that can run a
+  callback: after the park hook (a caller cleanup that settles THIS prompt and
+  opens a newer Save Location must not have that prompt cancelled by this tail),
+  after the Save cancellation (the prompt's disposal can settle or replace this
+  prompt), and in `mount()` after `showApprovalOverlay` returned: a losing mount
+  hides only the handle it created, disposes only the frame it created, registers
+  no fullscreen rebind and never publishes over the newer prompt. A FAILED
+  presentation — a throwing park hook OR a throwing mount — takes one shared
+  identity-fenced path: this prompt is latched settled, its abort binding is
+  released, its active ownership is cleared only while it is still the active one,
+  its OWN promise is rejected with exactly the value that path throws (a prompt
+  mounted from another prompt's settle tail has already returned from its
+  executor, so nothing else could ever settle its caller), the frame this mount
+  created is disposed (it is not published as `responsiveFrame` yet, so this mount
+  is its only owner), the host completes the seat publish / repaint and the queue
+  advance as independent steps, and the LAST-blocker notification runs once no
+  approval is active and the queue drained — a PARKED but still-current tenant
+  comes back instead of staying parked behind a presentation that never happened.
+  The ONE overlay mount funnel (`showOverlayOnHost`) fails closed on BOTH mount
+  stages, and it decides which stage it reached from THIS call's own progress —
+  never from `node.raw`, which a re-entrant fullscreen swap legitimately clears
+  again for an already-registered remountable node (`OverlayBroker.detachPhysical`)
+  and would make a registered node look unregistered. The raw-handle-returned fact
+  is recorded at the fork call, and the mounting SCREEN is captured for the
+  cleanup: the fork pushes its overlay-stack entry and performs terminal IO BEFORE
+  it returns a raw handle, so a throw before that handle exists releases that
+  projection POSITIONALLY on the screen that mounted it (`hideOverlay()`, and only
+  then: `initialFocus:false` runs no callback in that window, so the pop can only
+  remove the entry this mount pushed) — a re-entrant swap must not make the unwind
+  pop an entry belonging to the NEW screen, e.g. the projection of a surviving
+  root that was just re-mounted there. A throw after the handle was returned
+  unwinds the broker node by identity instead. Either way a mount whose caller
+  never received a handle can never survive as a ghost modal, a half-committed,
+  keyboard-owning suppressor, or a cleanup that removes somebody else's entry.
+  The SYMMETRIC window (no throw) is the same mount interleaved with a fullscreen
+  swap that a plugin callback started. It is closed STRUCTURALLY: the remount
+  callback is registered BEFORE the fork's physical mount — `showOverlayOnHost`
+  takes it as an ownership capability and publishes it from `prepareMount`'s
+  stable logical handle — so the swap's own back→front remount pass already
+  re-creates that node's projection, in the CURRENT logical order, and the mount
+  ends visible, focused and answerable instead of as an invisible active owner.
+  Recovering after the fact is NOT equivalent: `showOverlay` can only APPEND a
+  physical entry, so a projection created later sits above the overlays that are
+  logically above it and the broker's logical z-order diverges from the paint and
+  pointer-hit order. `registerOverlayRemount` is the ONE authority every
+  remountable registration goes through (the approval, the three
+  Advanced/unstable plugin leases, the history search overlay and the model
+  picker), so no consumer can miss the pass. `restoreFocusAfterSwap()` then
+  re-applies the pre-swap keyboard owner only while no NEWER owner holds the
+  keyboard at that moment: a newer explicit `focus()`, or a capturing overlay a
+  callback mounted, wins and keeps the keyboard.
+- **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
+  rides the caller's `close()` as the FIRST independent step of the `tui
+  dispose` batch, so a throwing tenant cleanup neither skips the
+  approval/question/save/holder teardown nor is swallowed — both failures
+  surface as `AggregateError.errors` in batch order.
+- **By-design boundaries.** An approval alone never fences the physical seat (it
+  is a host overlay), so a plugin recompile may still swap the seat beneath it.
+  `stop()`/`start()` and the external-editor round-trip are NOT disposal: the
+  logical record survives them. No History or Approval product migration rides
+  this seam — `openHistorySearch()` keeps its own managed overlay and its own
+  PARK semantics, and it is deliberately not an optional tenant.
+
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-60: activation and
+real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
+and Approval including both FIFOs with a REAL suspended overlay root, the
+host-classified protocol fence on both screens for CURRENT and STALE subjects, a
+capturing overlay opened from a restore callback, a completion-abort that
+cancels the superseding flow, an ACTIVE stale subject at the input and at both
+screen-swap entries, replacement and re-entrant-close identity, a plugin editor
+HMR while parked, regular↔fullscreen, resize cycles, final disposal,
+throwing-cleanup aggregation, a cleanup that preempts the presentation and opens
+a NEWER same-type modal, the failed state's released abort binding, a cancelled
+Save presentation that mounts no frame and hides no root, the Approval A→B
+handover refusing a fresh opener, a callback-created root handed back, the
+rollback's independent repaint and seat publish with identity-preserving
+aggregation, Save preemption by a Question and by an Approval, an Approval +
+Question overlap, a capturing-overlay handoff, the untouched History overlay, the
+`↓ view` affordance withheld while an ACTIVE tenant owns the seat, a broker
+release that must not resurrect a just-retired tenant, a failed presentation that
+advances a QUEUED successor (Question handover and approval `showNext`), a
+DOUBLY-failing approval park that still presents its queued successor, a throwing
+handover step that cannot clear the successor it installed, a failed
+presentation that cannot dequeue over the newer successor that preempted it, a
+successor that takes its own initial suspension, an auto-focused overlay that
+keeps the keyboard against the seat fallback, a successor superseded INSIDE its
+own initial suspension (the inherited roots stay hidden and the live frame keeps
+the keyboard), a settled approval that never cancels the Save Location its own
+cleanup opened, a throwing physical mount that releases the failed approval and
+keeps the queue and the optional seat usable, the flat identity/order contract of
+multiple rollback failures, an unregistered raw projection released positionally
+after a terminal-IO mount failure, a real Advanced blur/reconciliation chain that
+escapes the mount (the registered node unwound, the surviving root intact and the
+healthy tenant restored afterwards), a QUEUED approval whose mount fails rejecting
+its own promise instead of waiting forever, a re-entrant fullscreen swap inside the
+failed mount (the failed Approval unwound on the swapped screen while the
+re-mounted surviving root is never popped as a ghost), a swap interleaved with the
+Approval mount itself (the dialog stays physically mounted, focused and answerable
+on the new screen while the suppressed root stays suppressed), a callback's NEWER
+focus (and a capturing overlay it mounted) inside that swap window keeping the
+keyboard against the pre-swap snapshot, an Advanced lease whose OWN mount
+interleaved a swap being re-projected in logical order through the one
+registration authority, the newer covering overlay staying VISUALLY on top of the
+late-projected Approval, a newer owner that leaves inside the window still handing
+the keyboard to the live Approval, and input routing).

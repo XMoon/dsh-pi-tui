@@ -121,6 +121,8 @@ export class OverlayBroker {
   /** The node that owned the keyboard before a screen swap. */
   private swapFocusOwner: ManagedOverlayNode | undefined
   private zSequence = 0
+  /** Monotonic count of physical focus transitions (see `focusPhysical`). */
+  private focusTransitionSeq = 0
   private idSequence = 0
   private readonly deps: OverlayBrokerDeps
 
@@ -556,26 +558,43 @@ export class OverlayBroker {
     if (this.isSuppressed(node) || node.explicitHidden) raw.setHidden(true)
   }
 
-  /** Re-apply the pre-swap keyboard owner (or the current seat owner) after
-   * every rebind. The owner is only re-focused when the natural rebind order
-   * did not already restore it — an extra `focus()` would promote it to the
-   * visual front and break e.g. a nonCapturing HUD that legitimately sits
-   * above the focused overlay. */
+  /** Re-apply the pre-swap keyboard owner (or the current seat owner) after the
+   * remount pass. Called ONCE per swap, after every remountable projection has
+   * been re-created in logical order (the host registers each node's remount
+   * callback BEFORE the mount that can start a swap, so no node can miss the
+   * pass). The owner is only re-focused when the natural remount order did not
+   * already restore it — an extra `focus()` would promote it to the visual front
+   * and break e.g. a nonCapturing HUD that legitimately sits above the focused
+   * overlay. */
   restoreFocusAfterSwap(): void {
     const owner = this.swapFocusOwner
     this.swapFocusOwner = undefined
-    if (owner !== undefined && !owner.closed && this.isVisible(owner) && owner.raw !== undefined) {
+    // A NEWER owner that holds the keyboard RIGHT NOW wins over the pre-swap
+    // snapshot: a remount callback of this very pass may have focused another
+    // overlay, and the keyboard must never be taken from it behind its back.
+    const live = this.currentlyFocused()
+    if (live !== undefined && live !== owner) {
+      this.deps.reconcileFocusSeat?.()
+      return
+    }
+    if (owner === undefined) {
+      // The editor (not a managed overlay) owned the keyboard before the swap:
+      // the natural remount order restored no keyboard owner, so the seat owner
+      // takes it — unless a callback of the pass already established one.
+      if (live === undefined) this.deps.focusSeatOwner?.()
+      this.deps.reconcileFocusSeat?.()
+      return
+    }
+    if (!owner.closed && this.isVisible(owner) && owner.raw !== undefined) {
       // An internal rebind restore only takes the keyboard: the remount order
       // already restored the visual order, so an explicit focus() must not
       // promote the owner (a nonCapturing owner can legitimately sit behind a
       // later nonCapturing HUD).
       if (owner.raw.isFocused() !== true) this.focusPhysical(owner, { preserveOrder: true })
-    } else if (owner === undefined) {
-      // The editor (not a managed overlay) owned the keyboard before the swap:
-      // the natural rebind order may have auto-focused a capturing overlay, so
-      // release it back to the seat owner.
-      this.deps.focusSeatOwner?.()
-    } else if (this.currentlyFocused() === undefined) {
+      this.deps.reconcileFocusSeat?.()
+      return
+    }
+    if (this.currentlyFocused() === undefined) {
       // The owner did not survive the swap: keep a surviving replacement the
       // rebind already restored, otherwise hand the seat to the editor.
       this.deps.focusSeatOwner?.()
@@ -715,6 +734,18 @@ export class OverlayBroker {
     if (wasHidden && !node.nonCapturing && options?.preserveOrder !== true) {
       node.zOrder = ++this.zSequence
     }
+    // Phase 3A / PR-B: showing a HIDDEN CAPTURING overlay hands it the keyboard
+    // inside the fork's own `setHidden(false)` — the contract `focus()` relies on
+    // above, with `preserveFocus` as the internal-restore exception. That handoff
+    // must be counted HERE as well: the seat arbitration samples this revision
+    // around its re-validation, so an auto-focus it cannot see would let the
+    // fallback steal the keyboard back from a newer owner. The fork's internal
+    // UNFOCUS fallback is deliberately not counted — the broker preempts it by
+    // moving the keyboard first (see `unfocus` / `releaseKeyboard`), so it never
+    // hands the seat to a newer explicit owner.
+    if (wasHidden && !node.nonCapturing && options?.preserveFocus !== true) {
+      this.focusTransitionSeq += 1
+    }
     node.raw.setHidden(false, options)
   }
 
@@ -731,7 +762,21 @@ export class OverlayBroker {
   private focusPhysical(node: ManagedOverlayNode, options?: { preserveOrder?: boolean }): void {
     if (node.raw === undefined) return
     if (options?.preserveOrder !== true) node.zOrder = ++this.zSequence
+    // Phase 3A / PR-B: ONE monotonic count of every time this broker actually
+    // handed the keyboard to a specific overlay. The seat arbitration samples it
+    // around the optional-tenant re-validation: a revision that moved DURING that
+    // call means a NEWER focus intent won, while an owner the broker is RELEASING
+    // right now (its transition already happened before the call) must not veto
+    // the seat fallback. Observation only — the broker stays the sole
+    // focus-intent authority.
+    this.focusTransitionSeq += 1
     node.raw.focus(options)
+  }
+
+  /** How many times this broker handed the keyboard to a specific overlay (see
+   * {@link focusPhysical} — the seat arbitration's intent-observation seam). */
+  focusTransitionRevision(): number {
+    return this.focusTransitionSeq
   }
 
   /** The frontmost visible node that asked for the keyboard (`resumeFocus`).

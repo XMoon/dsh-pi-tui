@@ -1502,7 +1502,11 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   const panelView = fixture.vt.getViewport().join('')
   assert.match(panelView, /TTFB 0\.[1-9]\d*s/u,
     `the rendered status must show the seeded non-zero TTFB:\n${panelView}`)
-  assert.match(panelView, /([1-9]\d{1,3}) tok\/s/u,
+  // `displayRate` renders ONE decimal below 100 tok/s and an integer at or
+  // above it, so a rate is asserted as a NON-ZERO bounded number, never as an
+  // integer: the seeded model wall is real elapsed time, and a loaded machine
+  // can legitimately push either scope below the decimal threshold.
+  assert.match(panelView, /[1-9]\d{0,3}(?:\.\d)? tok\/s/u,
     `the rendered status must show a seeded non-zero rate:\n${panelView}`)
   // FOOTER consistency: the footer reads the SAME status facts, so it shows
   // the same Host-projection figures — never the no-sample zeros.
@@ -1514,8 +1518,10 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
     `the footer's recent figures are the Host projection's:\n${footerText}`)
   // TPS plan PR-3: the DEFAULT footer layout shows the combined pair — the
   // real Host → Client → Footer chain must deliver BOTH scopes to the
-  // rendered footer row, with the singular `tok/s` unit.
-  assert.match(footerText, /R5 [1-9]\d* · All [1-9]\d* tok\/s/u,
+  // rendered footer row, with the singular `tok/s` unit. Each scope keeps its
+  // own decimal policy (see `displayRate`): the assertion must not encode an
+  // integer-only assumption the load-dependent wall time can break.
+  assert.match(footerText, /R5 [1-9]\d*(?:\.\d)? · All [1-9]\d*(?:\.\d)? tok\/s/u,
     `the footer must render the default R5 + All pair from the Host projection:\n${footerText}`)
 })
 
