@@ -595,4 +595,15 @@ test('PR5: a partially available fact renders only the formats that own it', () 
   assert.equal(render('performance', allOnly, { id: 'performance', format: 'speed-both' }), 'All 44 tok/s')
   assert.equal(render('performance', allOnly, { id: 'performance', format: 'speed' }), '')
   assert.equal(render('performance', allOnly, { id: 'performance', format: 'full' }), '')
+  // The ONE display precision policy reaches the RENDERED row: below 100 tok/s
+  // the figure keeps one decimal (`derivePerformance` → `displayRate`), so a
+  // status assertion must accept that form — the seeded model wall is real
+  // elapsed time and can legitimately push a scope below the integer threshold.
+  const decimal = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8_100, firstTokenMs: 1_800, tokensPerSec: 87.5, sessionTokensPerSec: 44.3 }
+  })
+  assert.equal(render('performance', decimal, { id: 'performance', format: 'full' }),
+    'TTFB 1.8s · R5 87.5 tok/s')
+  assert.equal(render('performance', decimal, { id: 'performance', format: 'speed-both' }),
+    'R5 87.5 · All 44.3 tok/s')
 })
