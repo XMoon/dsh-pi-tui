@@ -39,6 +39,7 @@
  */
 
 import { mkdirSync } from 'node:fs'
+import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -222,6 +223,10 @@ export async function createDirectTspFixture(
     /** Extra agent presets registered into the REAL registry beside the
      *  fixture's own (a second real switch target). */
     readonly presets?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly description?: string }>
+    /** Materialize a REAL persisted, released, turn-boundary-BLANK Session
+     *  through the official persistence seam before the runner boots, then let
+     *  the runner's ordinary startup resume it. */
+    readonly persistedBlankSession?: { readonly id: string }
     /** Mount the official preset-declaring profile plane: the listed presets are
      *  declared by REAL bundle rows (healthy, with a resolution base) and the
      *  default write goes through the real ConfigEditor/Loader. */
@@ -422,6 +427,27 @@ export async function createDirectTspFixture(
       } as never)
     }
   }) as never, {} as never)
+  if (options.persistedBlankSession !== undefined) {
+    // The OFFICIAL persistence seam: `create` takes write ownership, `flush`
+    // materializes the artifact, and `close` releases the handle WITHOUT
+    // deleting the stored log — so the runner's `agents.resume` finds a real
+    // persisted Session that holds no user turn.
+    const persistence = ctx.get('sessionPersistence') as unknown as {
+      create(header: unknown, options?: unknown): Promise<{
+        flush(options?: unknown): Promise<void>
+        close(): Promise<void>
+      }>
+    }
+    const handle = await persistence.create({
+      id: options.persistedBlankSession.id,
+      cwd: workRoot,
+      createdAt: Date.now(),
+      version: SESSION_FORMAT_VERSION,
+      isSeeded: false,
+    })
+    await handle.flush()
+    await handle.close()
+  }
   const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
     pluginCtx,
     TuiConfigSchema({ fullscreen: 'off', ...options.tuiConfig } as never),

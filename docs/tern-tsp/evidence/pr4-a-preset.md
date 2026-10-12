@@ -119,27 +119,25 @@ Measured on the real renderer for this increment (`tern serve` + `ctl tree` /
 | `SDK_SCRIPTED` | The production presenter over the shipped SDK (`connect` + `mountTspRenderer`) with a scripted tty: layout props, the K2 write admission (including a synthetic event naming a disabled action), the settlement matrix, the supersession/staleness fences (a moved subject, a late settlement against a replaced panel, a late read), stale receivers, Model/Preset mutual exclusion and fail-closed capability. |
 | `REAL_TERN_HEADLESS` | The production `TspPresetPicker` inside a real Tern pane at 1280x800, 900x640, 560x640 and 400x600: the header/hint single-row bound, the full action bar, real keyboard K2 including the cue and the arrow cycle, a real pointer row selection that writes nothing, the read-only Details page, the empty roster, the failed read with its one `Retry`, special ids, the long CJK/emoji description and the worst-case unbroken id. |
 | `L6` (command/Host) | The real classifier, capability admission, original handler and Direct Host sinks: the capability refusal keeping the draft and creating no Session, the real `agent-presets` registry roster, sessionless staging without a Session, both started-Session refusals, the typed verbs keeping their original routes and never opening a picker, a Host-owned `preset` keeping its route, and the default write through the REAL configuration plane — the picker's action and the typed verb both write the same `selectedDefault` into the real profile document, and a fresh Context composes that document and reads the persisted default back through a live registry. |
-| `NOT_VERIFIED` / `GUI_BLOCKED` | Physical mouse/wheel/IME/OS focus, dark themes, scaling and screen readers; the real blank-live-Session durable switch (recorded as an OPEN OWNER DECISION); Remote TSP preset success; catalogues and sizes beyond the scripted ones. |
+| `NOT_VERIFIED` / `GUI_BLOCKED` | Physical mouse/wheel/IME/OS focus, dark themes, scaling and screen readers; Remote TSP preset success; the shipped full profile/HMR; catalogues and terminal sizes beyond the scripted ones. |
 
 The real-pane tier is a HEADLESS real-renderer run (`tern serve` with the pane's
 node tree and PNG captures); it is not a physical GUI/IME qualification, and the
 sibling Model increment's `GUI_BLOCKED` items stay `GUI_BLOCKED`.
 
-One limit is stated rather than papered over, and it is an explicit OPEN OWNER
-DECISION rather than a silent gap:
-
-- The durable `agent-preset/selected` commit for a *blank live* Session is
-  covered only at the presenter level. On the TSP renderer `/new` is a PiTui-only
-  builtin that the frozen PR3-B admission refuses, so a blank live Session is
-  reachable in production only by resuming a persisted blank Session — and the
-  available fixtures cannot build one: creating a Session with the official
-  registry and releasing the handle does not help, because the handle's
-  documented `dispose()` REMOVES its session from the store, leaving the runner's
-  ordinary resume path with no log to reopen. The STARTED-Session Host refusal is
-  certified end-to-end through the real Direct catalog. Closing this gap needs a
-  new fixture seam that hands the runner a persisted-but-released blank Session
-  (or an out-of-scope `/new` capability); that is the Owner's call, and this file
-  records it as `OPEN OWNER DECISION` rather than as done.
+The blank live-Session durable switch is certified end-to-end. The TSP renderer
+refuses `/new` (a PiTui-only builtin under the frozen PR3-B admission) and the
+official registry handle's `dispose()` removes its session from the store, so the
+test-infrastructure seam went through the OFFICIAL persistence seam instead:
+`create(header)` takes write ownership, `flush()` materializes the artifact and
+`close()` releases the handle WITHOUT deleting the stored log, after which the
+runner's ordinary startup resumes that persisted, released, blank Session. The
+test then drives the real picker and asserts the blank state through the Host
+authority, exactly one `agent-preset/selected` in the live Session's own log with
+no re-created Session, the official Session projection plus a reopened panel
+rereading the new preset as Current, an untouched new-session default, the STARTED
+Session's locked refusal afterwards, and a post-teardown registry with no live
+Agent left. No durable commit is simulated and no projection is tampered with.
 
 ## 6. Pitfalls that became rules or regressions
 
@@ -152,6 +150,7 @@ DECISION rather than a silent gap:
 | Row ids colliding with control ids in the SDK's single event channel | Rows carry their own `preset:` namespace; the presenter regression covers ids equal to an action id, a `fact:` id, a scope id and an effort id. |
 | Treating the settings write as a classified `WriteOutcome` and reporting a raise as a proven rollback | The default write is reported as UNCONFIRMED, never retried automatically, and the panel dismisses so the next read is authoritative. |
 | A `disabled` action that is only rendered inert, so a pointer/synthetic SDK event naming it still writes (or silently dismisses the panel) | The ONE admission consumes the same enabled predicate the bar renders, so a disabled action can never write through any event channel; the regression dispatches exactly that event and asserts the panel keeps its frame and no write happens (mutation-checked: it fails without the gate). |
+| A blank live Session that no fixture can build (`/new` is refused on TSP, and the official registry handle's `dispose()` deletes the stored session) | Materialize the Session through the OFFICIAL persistence seam (`create` → `flush` → `close`, which releases ownership without deleting the log) and let the runner's ordinary startup resume it; the blank-live test then proves the durable host commit, the authority reread, the locked negative and a clean teardown. |
 | A directly registered preset under a profile composition failing the compatibility preflight for lack of a resolution base | Declare presets (and the registry itself) as REAL profile bundle rows, which is what gives the settings namespace the default write mutates; the reload test composes a fresh Context over the saved document. |
 | `/preset` typed verbs dereferencing a `TuiApp` that the TSP renderer does not have | Every notification goes through the presentation contract; the typed verbs are exercised over the TSP path and the PiTui adapter keeps `app.notify`. |
 | A failed read leaving the keyboard in an inert list | Both Tab directions stay in the error bar, whose `Retry` re-enters loading through the one read owner. |

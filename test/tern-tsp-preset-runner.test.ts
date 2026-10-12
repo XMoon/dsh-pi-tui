@@ -32,6 +32,12 @@ const node = (pane: unknown): unknown => pickerNode(pane as never, P)
 const action = (pane: unknown, id: string): Record<string, unknown> | undefined =>
   pickerAction(pane as never, id, P)
 
+/** One visible preset-panel status fact (the presenter's own line). */
+function statusOf(pane: { readonly output: { text(): string } }, label: string): string | undefined {
+  const match = new RegExp(`"t":"(${label}: [^"]*)"`, 'u').exec(dockText(pane))
+  return match?.[1]
+}
+
 /** The pane's own dock/notice text (the display seam's visible facts). */
 const dockText = (pane: { output: { text(): string } }): string => pane.output.text()
 
@@ -203,6 +209,81 @@ async function waitTo(predicate: () => boolean, timeoutMs = 2000): Promise<void>
   }
   assert.fail('timed out waiting for a negative fact')
 }
+
+test('PR4-A: a REAL blank live Session switches preset through the Host and rereads it', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    presetPicker: true,
+    // The fixture materializes a REAL persisted, released Session through the
+    // official persistence seam; the runner's ordinary startup resumes it.
+    persistedBlankSession: { id: 'blank-live-1' },
+    startup: { sessionId: 'blank-live-1' },
+    deltas: ['blank-switch-turn'],
+    presets: [{ id: 'minimal-preset', name: 'Minimal preset' }],
+  })
+  // The registry instance itself is kept: the post-settle check must read the
+  // SAME authority after the composition is disposed.
+  const registry = fixture.ctx.get('agents') as unknown as {
+    list(): ReadonlyArray<{ readonly session: { readonly id: unknown } }>
+  }
+  const liveAgents = (): string[] => [...registry.list()].map((agent) => String(agent.session.id))
+  const sessionEvents = (type: string): ReadonlyArray<{ readonly type: string; readonly data: unknown }> =>
+    ((fixture.ctx.agents.get('blank-live-1' as never)?.session.snapshotEvents() ?? []) as
+      ReadonlyArray<{ readonly type: string; readonly data: unknown }>)
+      .filter((event) => event.type === type)
+  try {
+    await waitFor('renderer ready', () => dockText(fixture.pane).includes('dock.composer'))
+    assert.deepEqual(liveAgents(), ['blank-live-1'], 'the runner resumed the persisted Session')
+    fixture.pane.key('/preset\r')
+    await waitFor('native picker', () => props(fixture.pane).state === 'ready')
+    // The Host turn-boundary authority says the resumed Session is still BLANK:
+    // no started-Session refusal, a `Current session` fact, and the in-session
+    // write offered by its own wording.
+    assert.match(dockText(fixture.pane), /Current session: b2-direct-preset/)
+    assert.equal(dockText(fixture.pane).includes('preset switching is only available in a new session'), false)
+    assert.equal(String(action(fixture.pane, 'use')?.label), 'Use in this session')
+    assert.equal(action(fixture.pane, 'use')?.disabled, undefined)
+    assert.deepEqual(props(fixture.pane).current, ['preset:b2-direct-preset'])
+    // Browse the second real preset and commit through the focused action.
+    fixture.pane.key('\u001b[B')
+    await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
+    fixture.pane.key('\t')
+    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
+    fixture.pane.key('\r')
+    // The DURABLE Host commit: the live Session's own log holds exactly one
+    // selection, and the Session was NEVER re-created or replaced.
+    await waitFor('durable agent-preset/selected', () => sessionEvents('agent-preset/selected').length === 1)
+    assert.deepEqual(sessionEvents('agent-preset/selected')[0]?.data, { agentPreset: 'minimal-preset' })
+    assert.deepEqual(liveAgents(), ['blank-live-1'], 'the switch never created a second Session')
+    await waitFor('picker dismissed', () => pickerNode(fixture.pane, P) === undefined)
+    // The ORIGINAL Session authority reread: the official projection and a
+    // reopened panel both report the new preset as the Current one.
+    const sessionQuery = fixture.ctx.get('sessionQuery') as unknown as {
+      observeSession(id: unknown): Promise<{ projections: { values: { agentPreset?: string } } }>
+    }
+    const observed = await sessionQuery.observeSession('blank-live-1')
+    assert.equal(observed.projections.values.agentPreset, 'minimal-preset')
+    fixture.pane.key('/preset\r')
+    await waitFor('reopened', () => props(fixture.pane).state === 'ready')
+    assert.match(dockText(fixture.pane), /Current session: minimal-preset/)
+    assert.deepEqual(props(fixture.pane).current, ['preset:minimal-preset'])
+    assert.equal(statusOf(fixture.pane, 'New-session default'), 'New-session default: b2-direct-preset',
+      'a Session switch never rewrites the new-session default')
+    // A Session that has STARTED is refused by the Host (the locked negative).
+    fixture.pane.key('\u001b')
+    await waitFor('closed', () => pickerNode(fixture.pane, P) === undefined)
+    fixture.pane.key('blank-switch-turn\r')
+    await waitFor('the turn ran', () => dockText(fixture.pane).includes('blank-switch-turn'))
+    await clearComposer(fixture.pane)
+    fixture.pane.key('/preset minimal-preset\r')
+    await waitFor('locked refusal', () => dockText(fixture.pane).includes('its agent preset is fixed —'))
+    assert.equal(sessionEvents('agent-preset/selected').length, 1, 'the locked attempt wrote nothing')
+  } finally {
+    await fixture.settle()
+  }
+  // Teardown leaves no live Agent behind.
+  assert.deepEqual(liveAgents(), [], 'the runner teardown released the resumed Session')
+})
 
 /* ------------------------------------------------------------ typed verbs */
 

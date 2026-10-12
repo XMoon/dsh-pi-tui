@@ -278,19 +278,24 @@ readers are NOT certified by these lanes; the real-pane runs are headless
 (`tern serve` + the pane's own node tree and PNG), and a real-pane run on Tern
 `0.8.0` is recorded in the review package rather than in the repository.
 
-The real blank-live-Session preset switch is NOT certified end-to-end, and it is
-an explicit OPEN OWNER DECISION rather than a silent gap: the TSP renderer refuses
-`/new` (a PiTui-only builtin under the frozen PR3-B admission), so a blank live
-Session is reachable in production only by resuming a persisted blank Session —
-and the available fixtures cannot build one. Creating a Session with the official
-registry and releasing the handle does not help: the handle's documented
-`dispose()` REMOVES its session from the store, so the runner's ordinary resume
-path finds no log to reopen. The durable `agent-preset/selected` commit for that
-single path is therefore covered only at the presenter level (the `Use in this
-session` label, admission and single-write behavior); the started-Session Host
-refusal IS certified end-to-end through the real Direct catalog. Closing this
-would need a new fixture seam that hands the runner a persisted-but-released blank
-Session (or an out-of-scope `/new` capability), which is the Owner's call.
+The blank live-Session switch IS certified end-to-end, through a test-infrastructure
+seam rather than a product change: the TSP renderer refuses `/new` (a PiTui-only
+builtin under the frozen PR3-B admission) and the official registry handle's
+`dispose()` removes its session from the store, so no fixture could hand the
+runner a blank Session. The fixture therefore uses the OFFICIAL persistence seam
+directly — `create(header)` takes write ownership, `flush()` materializes the
+artifact, and `close()` releases the handle without deleting the stored log — and
+the runner's ordinary startup then resumes that persisted, released, blank
+Session. The test drives the real TSP picker: the Host turn-boundary authority
+reports the resumed Session as blank (a `Current session` fact, the `Use in this
+session` wording, and no started-Session refusal), the focused action commits
+through the original `applyPresetSelection` and the Host writer, the live
+Session's own log gains exactly ONE `agent-preset/selected` while no Session is
+re-created, the official Session projection and a reopened panel both reread the
+new preset as Current, the new-session default is untouched, and a Session that
+then STARTS is refused with the original `agent-preset/locked` wording without
+writing anything. No durable commit is simulated, no projection is tampered with,
+and no production authority, API or `/new` admission changed.
 
 `Set new-session default` IS certified through the real configuration plane: the
 test mounts the official preset-declaring plugin and the registry as REAL profile
