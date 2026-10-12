@@ -16,6 +16,7 @@ import type { PickerAction, PickerGroup, PickerItem, PickerProps, PickerScope } 
 import type { ModelPickerFailureRow, ModelPickerModelRow } from '../pickers/model-directory.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
+  ALL_SCOPES_ID,
   detailCursor,
   detailFactItems,
   wideIdentityLines,
@@ -93,7 +94,7 @@ function modelItems(panel: ModelPickerPanel, paged: boolean): PickerItem[] {
 /** The provider scope column (wide only; it filters, it is never authority). */
 function scopes(panel: ModelPickerPanel): PickerScope[] {
   const entries: PickerScope[] = [
-    { id: scopeId('all'), label: 'All models', icon: 'list', count: panel.rows.length },
+    { id: ALL_SCOPES_ID, label: 'All models', icon: 'list', count: panel.rows.length },
   ]
   for (const group of panel.directory?.directory.groups ?? []) {
     const count = panel.rows.filter((row) => row.providerId === group.id).length
@@ -305,7 +306,11 @@ function modelListPicker(
     selected,
     current: page === 'models' ? panel.rows.filter((item) => item.isCurrent).map(modelRowId) : [],
     ...(deps.wide
-      ? { scopes: scopes(panel), scope: scopeId(panel.scope), subtitle: subjectLine(panel) }
+      ? {
+          scopes: scopes(panel),
+          scope: panel.scope === undefined ? ALL_SCOPES_ID : scopeId(panel.scope),
+          subtitle: subjectLine(panel),
+        }
       // The compact subject gets its own complete line instead of a truncated
       // title; the chips stay empty (the banned B2F form concatenated the
       // subject, current value and effort chips into one clipped line).

@@ -17,6 +17,7 @@ import {
   visibleModels,
   type ModelPickerPanel,
   type ModelPickerPage,
+  type ModelPickerScope,
   type ModelPickerZone,
 } from './model-picker-state.ts'
 
@@ -24,7 +25,7 @@ export type ModelPickerIntent =
   | { readonly kind: 'close' }
   | { readonly kind: 'page'; readonly page: ModelPickerPage }
   | { readonly kind: 'zone'; readonly zone: ModelPickerZone; readonly page?: ModelPickerPage }
-  | { readonly kind: 'scope'; readonly scope: string }
+  | { readonly kind: 'scope'; readonly scope: ModelPickerScope }
   | { readonly kind: 'browse-model'; readonly rowId: string }
   | { readonly kind: 'browse-effort'; readonly value: string }
   | { readonly kind: 'query'; readonly query: string; readonly cursor: number }
@@ -222,19 +223,24 @@ export function actionIntent(
   }
 }
 
-/** One SDK row/scope activation. A scope id filters (browse only); on the
- *  effort page a candidate row changes the draft; elsewhere a model row is
- *  highlighted. Anything else is not an intent this panel accepts. */
+/**
+ * One SDK row/scope activation. The CURRENT PAGE decides what a row means first:
+ * on the effort page a row is an advertised candidate and changes the draft, so
+ * a candidate whose id merely looks like a scope id (even the every-provider id)
+ * can never be misread as a provider filter. Only then is a scope id treated as
+ * the provider scope column's filter, and only on the model/details pages is a row
+ * id a model highlight. Anything else is not an intent this panel accepts.
+ */
 export function rowIntent(panel: ModelPickerPanel, item: string): ModelPickerIntent | undefined {
-  const scope = scopeProviderId(item)
-  if (scope !== undefined) return { kind: 'scope', scope }
   if (panel.page === 'effort') {
     const choices = modelChoices(highlightedModel(panel))
-    // A row id that is not an advertised candidate is not a draft change.
-    return choices.some((choice) => choice.value === item)
-      ? { kind: 'browse-effort', value: item }
-      : undefined
+    if (choices.some((choice) => choice.value === item)) return { kind: 'browse-effort', value: item }
+    // Not a candidate: fall through, because the scope column stays live on this
+    // page too (an unknown item simply is not a scope id).
   }
+  const scope = scopeProviderId(item)
+  // `null` is the every-provider entry: it maps to the absence of a provider.
+  if (scope !== undefined) return { kind: 'scope', scope: scope ?? undefined }
   if (panel.page !== 'models') return undefined
   return visibleModels(panel).some((row) => modelRowId(row) === item)
     ? { kind: 'browse-model', rowId: item }
