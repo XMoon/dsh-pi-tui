@@ -6626,22 +6626,24 @@ export class TuiApp {
    */
   beginInputHistoryScope(owner: string | undefined): void {
     if (this.scopeOwner !== undefined) {
-      // A REPLACED owner. This seam runs AFTER the publication committed, and the
-      // new owner's hydration reseed only lands later, so the outgoing Session's
-      // rows would stay recallable (↑) in the meantime: they are dropped HERE,
-      // synchronously with the publication, never before it. The scope's own
-      // occurrences survive in `scopeInputs` (the reconcile re-adds them), so an
-      // input already accepted for the new owner is never lost to this reset. The
-      // FIRST Session's creation has no previous owner, so the sessionless pool's
-      // adopted entries are untouched.
+      // A REPLACED owner: its occurrences are dropped with the scope.
       this.scopeInputs.length = 0
       this.scopeSettlements.length = 0
       this.scopeSettled.clear()
       this.scopeOccurrences.clear()
       this.scopeAppends.clear()
-      this.editor.clearHistory()
-      this.inputHistory.length = 0
     }
+    // The OUTGOING recall pool never survives into the newly published owner. This
+    // seam runs AFTER the publication committed (never in the possibly-failing
+    // pre-publication phase), while the new owner's hydration reseed only lands
+    // later, so without this both a replaced Session's rows AND the boot recall of
+    // the CWD history (the FIRST Session's creation has no previous owner) would
+    // stay recallable by ↑ in the meantime. The open scope's own occurrences are
+    // re-seeded here, so an input already accepted for this owner stays recallable
+    // until the reconcile folds it over the snapshot.
+    this.editor.clearHistory()
+    this.inputHistory.length = 0
+    this.seedInputHistory(this.scopeInputs.map(entry => entry.text))
     this.scopeOwner = owner
     this.scopeOpen = true
   }
