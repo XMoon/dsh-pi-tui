@@ -281,6 +281,19 @@ export function focusedAction(panel: PresetPickerPanel): PickerAction {
   return actions.filter(enabled).at(-1) ?? actions[actions.length - 1]!
 }
 
+/**
+ * Whether one named action may run in the CURRENT phase and page.
+ *
+ * It is the SAME `disabled` decision {@link pickerActions} renders, so the write
+ * path and the visible bar can never disagree: `act` refuses a disabled action
+ * at admission instead of merely rendering it inert, because a pointer or a
+ * synthetic SDK `action` event reaches the same entry point the keyboard uses.
+ */
+export function actionEnabled(panel: PresetPickerPanel, id: string): boolean {
+  const action = pickerActions(panel).find((candidate) => candidate.id === id)
+  return action !== undefined && action.disabled !== true
+}
+
 /** The next ENABLED action in the bar, wrapping in `delta`'s direction. */
 export function stepActionFocus(panel: PresetPickerPanel, delta: -1 | 1): string {
   const offered = pickerActions(panel).filter((action) => action.disabled !== true)

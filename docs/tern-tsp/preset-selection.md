@@ -30,6 +30,11 @@ them before invoking the handler and keeps the submitted draft. A genuine Host
 command named `preset` keeps its Host route, and every other PiTui-only builtin
 stays unavailable in TSP.
 
+The capability is the `picker` kind alone, because that is the only kind this
+layer could plausibly be missing: the status/hint lines and the layer column are
+the core `col`/`text` kinds the native Model layer already depends on, and no
+known Tern pane advertises `picker` without them.
+
 One native `ui.picker` at the fixed `md` size with no preview column renders both
 pages: the preset list and the read-only `Preset details` page. No overlay, no
 self-drawn button, no injected stylesheet, no second overlay or confirmation
@@ -102,6 +107,13 @@ cue is a promise about Enter. The bar-internal arrows cycle in render order amon
 enabled actions only, so a disabled `Set new-session default` (a broken row, or
 the row that already IS the default) is never a dead focus target.
 
+The SAME enabled decision is consumed by the one admission point, not only by the
+rendering: an SDK `action` event (a pointer click, or any synthetic event naming
+an action id) is refused while that action is disabled, so a disabled entry can
+neither write nor dismiss the panel. Only the keyboard's `focusedAction` and the
+rendered `disabled` flag are safe on their own; the admission consumes the same
+predicate so the visible bar and the write path can never disagree.
+
 `Ctrl+C` always remains the original application cancel owner, and a
 Question/Approval modal owns the keyboard before the preset panel.
 
@@ -130,6 +142,13 @@ authoritative.
 
 Browsing (rows, search, the Details page) only changes local browse state.
 Closing the panel never cancels an admitted business operation.
+
+A settlement that arrives after the panel's captured subject moved commits no
+frame and takes no close decision — the fence retires that panel on its next
+touch, and the rendered layer is dropped by the renderer's own hydration frame.
+A settlement from a panel a newer invocation already replaced never closes or
+repaints the new one, and a late roster read (or a late read failure) never
+hydrates a moved subject.
 
 ### Loading, errors and retry
 
@@ -252,18 +271,26 @@ readers are NOT certified by these lanes; the real-pane runs are headless
 (`tern serve` + the pane's own node tree and PNG), and a real-pane run on Tern
 `0.8.0` is recorded in the review package rather than in the repository.
 
-The real blank-live-Session preset switch is NOT certified end-to-end: on the TSP
-renderer `/new` is a PiTui-only builtin that the frozen PR3-B admission refuses,
-and the available fixtures cannot resume a *blank* Session, so the durable
-`agent-preset/selected` commit for that one path is covered only at the presenter
-level (the `Use in this session` label, admission and single-write behavior). The
-started-Session Host refusal IS certified end-to-end through the real Direct
-catalog. `Set new-session default` is certified up to the settings-service
-mutation (namespace, set-operation and value, driven identically by the picker
-and the typed verb); the official
-Loader/ConfigEditor profile reload is NOT certified for a preset, because a
-Direct fixture that mounts the profile plane cannot keep a directly registered
-preset healthy — every one of them fails the profile compatibility preflight for
-lack of a resolution base, which is a fixture-composition limit and not a product
-behavior. Remote TSP preset success and the shipped full profile/HMR are open, as
-are catalogues and terminal sizes beyond the scripted ones.
+The real blank-live-Session preset switch is NOT certified end-to-end, and it is
+an explicit OPEN OWNER DECISION rather than a silent gap: the TSP renderer refuses
+`/new` (a PiTui-only builtin under the frozen PR3-B admission), so a blank live
+Session is reachable in production only by resuming a persisted blank Session —
+and the available fixtures cannot build one. Creating a Session with the official
+registry and releasing the handle does not help: the handle's documented
+`dispose()` REMOVES its session from the store, so the runner's ordinary resume
+path finds no log to reopen. The durable `agent-preset/selected` commit for that
+single path is therefore covered only at the presenter level (the `Use in this
+session` label, admission and single-write behavior); the started-Session Host
+refusal IS certified end-to-end through the real Direct catalog. Closing this
+would need a new fixture seam that hands the runner a persisted-but-released blank
+Session (or an out-of-scope `/new` capability), which is the Owner's call.
+
+`Set new-session default` IS certified through the real configuration plane: the
+test mounts the official preset-declaring plugin and the registry as REAL profile
+rows, drives the picker's action, and reads the new `selectedDefault` out of the
+real profile document the ConfigEditor/Loader wrote — then composes a FRESH
+Context over that document and reads the persisted default back through a live
+`agentPresets` registry. The typed verb writes the same document, which is how the
+shared writer is proven. Remote TSP preset success and the shipped full
+profile/HMR are open, as are catalogues and terminal sizes beyond the scripted
+ones.

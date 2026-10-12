@@ -21,7 +21,7 @@ import type {
 import type { ModelApplyOutcome, ModelPickerDirectory } from '../src/app/command/model-presentation.ts'
 import { displayWidth, factLineColumns } from '../src/tui/tsp/picker-text.ts'
 import { installTspPane, type TspPane } from './support/tsp-terminal-fixture.ts'
-import { waitUntil } from './support/tsp-runner-harness.ts'
+import { settle, waitUntil } from './support/tsp-runner-harness.ts'
 import {
   MODEL_LAYER_PREFIX as M,
   PRESET_LAYER_PREFIX as P,
@@ -144,12 +144,14 @@ async function mounted(
   let resolveApply!: (outcome: PresetApplyOutcome) => void
   let resolveDefault!: (outcome: PresetDefaultOutcome) => void
   let retries = 0
+  /** The captured-subject fence: a test can move the subject under the panel. */
+  let subjectCurrent = true
   /** Open one more preset panel for the SAME request shape (a newer invocation). */
   const open = () => {
     assert.ok(renderer.presetPresentation)
     return renderer.presetPresentation.open({
       subject,
-      isCurrent: () => true,
+      isCurrent: () => subjectCurrent,
       retry: () => { retries += 1 },
       apply: (id: string) => new Promise<PresetApplyOutcome>((resolve) => {
         applies.push(id)
@@ -177,6 +179,8 @@ async function mounted(
     defaults,
     retries: () => retries,
     reopens: () => retries,
+    /** Move the subject: the panel's captured scope is no longer current. */
+    moveSubject: () => { subjectCurrent = false },
     settleApply: (outcome: PresetApplyOutcome) => resolveApply(outcome),
     settleDefault: (outcome: PresetDefaultOutcome) => resolveDefault(outcome),
     open,
@@ -619,6 +623,103 @@ test('native Preset: a retired frame id or a foreign surface never reaches the p
   pane.event({ ev: 'action', sf: pane.frames().at(-1)!.sf, id: staleId, act: 'use' })
   await waitUntil('stale receivers are inert', () => props(pane).selected === 'preset:reviewer')
   assert.equal(m.applies.length, 0)
+})
+
+test('native Preset: a synthetic event naming a DISABLED action is refused at admission', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  // The hydrated panel already highlights the recorded default, so its own
+  // default write is disabled: an SDK `action` event naming it can never
+  // re-write the value.
+  assert.equal(props(pane).selected, 'preset:ptc')
+  assert.equal(action(pane, 'set-default')?.disabled, true)
+  const shown = node(pane)!.id
+  const before = JSON.stringify(props(pane))
+  send(pane, 'set-default')
+  await settle(250)
+  assert.equal(m.defaults.length, 0, 'a disabled action never writes')
+  assert.equal(node(pane)?.id, shown, 'and it never re-renders the panel')
+  assert.equal(JSON.stringify(props(pane)), before, 'the visible panel is unchanged')
+  // A broken row disables BOTH writes; the same event path is refused too.
+  select(pane, 'legacy')
+  await waitUntil('broken row', () => props(pane).selected === 'preset:legacy')
+  assert.equal(action(pane, 'use')?.disabled, true)
+  assert.equal(action(pane, 'set-default')?.disabled, true)
+  send(pane, 'use')
+  send(pane, 'set-default')
+  await settle(250)
+  assert.equal(m.applies.length, 0, 'a broken row is never written through the event path')
+  assert.equal(m.defaults.length, 0)
+  assert.ok(node(pane), 'the panel is still mounted')
+})
+
+/* ------------------------------------------------- supersession and staleness */
+
+test('native Preset: a settlement after the subject moved repaints nothing', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  writeUse(pane)
+  await waitUntil('write admitted', () => m.applies.length === 1)
+  // The pending frame must have committed before the count is read, otherwise a
+  // frame still in flight would masquerade as a settlement-caused repaint.
+  await waitUntil('the pending bar is visible', () => action(pane, 'use')?.label === 'Applying preset…')
+  const frames = pane.frameCount()
+  const admitted = node(pane)!.id
+  // The captured subject moves while the admitted write is still in flight: the
+  // settlement owns NO repaint and NO close decision.
+  m.moveSubject()
+  m.settleApply({ kind: 'pending', preset: 'ptc' })
+  await settle(250)
+  assert.equal(pane.frameCount(), frames, 'a stale settlement commits no frame')
+  assert.equal(node(pane)?.id, admitted, 'and it never repaints the panel')
+  // The fence retires the panel on its next touch, so it cannot stay reachable
+  // as a live wire receiver after its subject is gone; the renderer's own
+  // hydration frame is what removes the layer from the wire.
+  m.handle.setRoster(roster({ pendingId: 'reviewer' }))
+  assert.equal(m.handle.isDisposed(), true, 'the moved subject retired the panel')
+  assert.equal(props(pane).selected, 'preset:ptc', 'the late roster never hydrated it')
+  m.renderer.display.beginSessionHydration()
+  await waitUntil('the renderer drops the retired layer', () => node(pane) === undefined)
+  assert.equal(m.applies.length, 1, 'the settled write was never re-entered')
+})
+
+test('native Preset: a late settlement never touches the panel that replaced it', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  writeUse(pane)
+  await waitUntil('the first panel admitted a write', () => m.applies.length === 1)
+  // A NEWER `/preset` invocation replaces the panel while the first write is
+  // still in flight (the renderer retires the old one before opening the new).
+  const second = m.open()
+  second.setRoster(roster({ pendingId: 'reviewer' }))
+  await waitUntil('the new panel is ready', () => props(pane).state === 'ready'
+    && props(pane).selected === 'preset:reviewer')
+  const newPanel = node(pane)!.id
+  // The retired panel's write settles: it owns no close and no repaint.
+  m.settleApply({ kind: 'switched', preset: 'ptc' })
+  await settle(300)
+  assert.equal(node(pane)?.id, newPanel, 'the newer panel is still the mounted one')
+  assert.equal(props(pane).selected, 'preset:reviewer', 'and it kept its own browse target')
+  assert.equal(props(pane).state, 'ready')
+})
+
+test('native Preset: a late read never hydrates a moved subject', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  await waitUntil('loading panel', () => props(pane).state === 'loading')
+  const frames = pane.frameCount()
+  m.moveSubject()
+  // The command's one read owner answers late: the panel belongs to the old
+  // subject, so neither a roster nor a failure may reach it.
+  m.handle.setRoster(roster())
+  m.handle.setLoadError('late failure')
+  await settle(200)
+  assert.equal(pane.frameCount(), frames, 'a late read commits no frame')
+  assert.equal(props(pane).state, 'loading', 'and it never hydrates the moved panel')
+  assert.equal(m.handle.isDisposed(), true, 'the fence retired the panel')
 })
 
 /* -------------------------------------------------- layer ownership / modal */
