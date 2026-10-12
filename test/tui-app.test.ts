@@ -2633,7 +2633,9 @@ test('the recall scope reconciles written, skipped and pending occurrences in th
   await submit('b')
   await submit('c')
   assert.deepEqual(submitted, ['a', 'b', 'c'])
-  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a', 'a old row'])
+  // The outgoing Session's rows are gone as soon as the new owner was published:
+  // its hydration has not committed yet, and ↑ must never recall Session A here.
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'])
   // The write owner reports `a` SKIPPED (the CWD-level policy) and `b` WRITTEN,
   // in append order; `c` is still unsettled. The reseed keeps the append order
   // for the rows (`b`) and places the skipped `a` where its settlement sits,
@@ -2943,6 +2945,29 @@ test('two evicted skips keep their own boundaries across evicted writes', async 
   app.resetInputHistory(['w2', 'w'], 'session-b')
   assert.deepEqual(app.getInputHistory(), ['s2', 'w2', 's1', 'w'],
     'each evicted skip lands at the boundary its own settlement recorded')
+  app.stop()
+})
+
+test('a published owner drops the outgoing Session recall before its hydration commits', async () => {
+  // The transition window, measured from the SYNCHRONOUS publication: Session B is
+  // current, its hydration is still pending, and ↑ must already be B's alone.
+  const { vt, app } = startApp()
+  app.resetInputHistory(['A old prompt'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.notEqual(app.getDraft(), 'A old prompt',
+    'the outgoing Session must not be recallable once the new owner is published')
+  // An input accepted for B is recalled even though hydration has not committed.
+  await submitThroughEditor(app, vt, 'B new prompt')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'B new prompt', 'the accepted B input is recallable')
+  app.resetInputHistory(['B persisted'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['B new prompt', 'B persisted'],
+    'the commit keeps the new Session records AND the occurrence accepted before it landed')
   app.stop()
 })
 
