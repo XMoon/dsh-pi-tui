@@ -4880,10 +4880,12 @@ test('collision recovery clears only the COMMAND health record, never a same-id 
   void mounted
 })
 
-// ── `/new` skill-wrapper survival ──────────────────────────────────────────
+// ── `/new` skill-wrapper survival + advertised-miss draft recovery ─────────
 // The `/new` regression: the fresh session's catalog refresh must keep a
 // same-name skill wrapper whenever the only Host row carrying that name is the
-// TUI's OWN Direct compatibility mirror (exact `definitionId` provenance).
+// TUI's OWN Direct compatibility mirror (exact `definitionId` provenance), and
+// an advertised command the fresh session's catalog really lacks must hand the
+// COMPLETE submitted line back to the editor instead of dropping it.
 
 test('a fresh /new session keeps the same-name skill wrapper alive (its own Direct mirror is not a Host collision)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
@@ -4909,5 +4911,48 @@ test('a fresh /new session keeps the same-name skill wrapper alive (its own Dire
   assert.equal(harness.host.followedUp.length, 0, 'never downgraded to a plain model prompt')
   assert.match(mounted.app.notifyTextForTest(), /^$/,
     'no advertised-miss notice for a skill the fresh session really provides')
+})
+
+test('an advertised command missing from the created session restores the COMPLETE submitted line (no attachments)', async (t) => {
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    // `leadingInput`: the argued line below IS an invocation at submit time.
+    // The name then disappears from the session's catalog before the plane runs
+    // — the advertised-miss shape the fresh-session collision produced in
+    // production.
+    hostCommands: [{ name: 'compact', input: { hint: '<args>' } }],
+  })
+  mounted.app.setDraft('/compact now')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  // The name goes away in the window between the submit-time admission and the
+  // command plane's execution.
+  disposeHostCommand('compact')
+  await drainUntil(() => /not available in the created session/.test(mounted.app.notifyTextForTest()), 10_000)
+  assert.match(mounted.app.notifyTextForTest(), /\/compact is not available in the created session/,
+    `the miss is consumed with an explicit error: ${mounted.app.notifyTextForTest()}`)
+  assert.equal(mounted.app.getDraft(), '/compact now',
+    'the COMPLETE original line returns to the editor (a determined non-execution never eats the draft)')
+  assert.equal(harness.host.followedUp.length, 0, 'never delivered to the model as a plain prompt')
+  assert.equal(harness.host.steered.length, 0, 'never steered')
+  assert.ok(!harness.executed.some(entry => entry.line.startsWith('/compact')),
+    `the missing command never runs: ${JSON.stringify(harness.executed)}`)
+})
+
+test('a new draft typed while an advertised-miss command settles is preserved, not overwritten', async (t) => {
+  const { harness, mounted, disposeHostCommand } = await bootCommandHarness(t, {
+    busyEnter: 'queue',
+    status: 'idle',
+    hostCommands: [{ name: 'compact', input: { hint: '<args>' } }],
+  })
+  mounted.app.setDraft('/compact now')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  disposeHostCommand('compact')
+  // The user starts the next prompt before the refused command settles.
+  mounted.app.setDraft('next draft')
+  await drainUntil(() => /not available in the created session/.test(mounted.app.notifyTextForTest()), 10_000)
+  assert.equal(mounted.app.getDraft(), 'next draft\n\n/compact now',
+    'the refused line is merged BELOW the newer draft — neither is dropped')
+  assert.equal(harness.host.followedUp.length, 0, 'the refused line is never sent to the model')
 })
 
