@@ -432,14 +432,17 @@ workspace must return to.
   with the physical focus only moving between the panel root and the CURRENT
   page's Search row. `Esc` on the Command page returns to Output (a logical
   intent of the same panel), never a screen swap.
-- **The header's copy affordances resolve against the LAST PAINTED frame.** The
-  Command summary row and its `[Copy All]` button are plain painted cells with no
+- **The header's copy/reading affordances resolve against the LAST PAINTED
+  frame.** The Command summary row, its `↗ Command` entry, its `Copy All [C]`
+  button and the other reading page's tab are plain painted cells with no
   mouse-handling component, so the alt screen's existing `onCellPress`/
   `onCellClick` callbacks reach the panel. The panel reads its hit regions and the
   header's painted top row at the frame-painted boundary (the same X054 geometry
   query the Command selection uses) and a click acts only when the release
-  re-proves the press-time action, page and Command source identity; a repaint in
-  between refuses it. The Command BODY is the one region that DOES own the
+  re-proves the press-time action, page, Command source identity AND the same
+  relative row/cell range; a repaint in between refuses it, and a row the frame
+  truncated keeps only the label cells it really painted (the ellipsis that
+  `truncateToWidth` substitutes is inert). The Command BODY is the one region that DOES own the
   pointer: its published `MouseRegion` returns `capture: true` on a left press,
   and the gesture, its selection and its timer are released on any page switch,
   label change, resize, blur or dispose, so no ghost selection or timer can

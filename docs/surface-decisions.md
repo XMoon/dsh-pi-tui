@@ -1575,31 +1575,31 @@ execution-history list. Invariants (DSH `0.1.7` JobRegistry contract):
 
 Opening a Job row (`bash`/`pwsh`/`other`, or a `subagent` Job without a stable
 child id) leaves the Task Center for a dedicated fullscreen Job workspace: a
-typed header (Job identity, status, progress, the independent gap/error/settled
-facts, and one `Command:`/`Label:` identity row), a retained-output body with its
-own Find row, and a pinned bottom Action Bar. Between the body and that bar a
-TRANSIENT notice row renders the app's own live notice while the workspace owns
-the terminal, so a Stop settlement (a refused or unproven stop in particular) is
-visible without leaving the Job view; it reuses the single app notice and its
-lifetime rather than a second Stop state.
+typed header (the status title, the real metadata, the page's summary and the
+Output/Command reading tabs), a retained-output body with its own Find row, an
+optional reading-facts row, and a pinned bottom Action Bar. Between the body and
+that bar a TRANSIENT notice row renders the app's own live notice while the
+workspace owns the terminal, so a Stop settlement (a refused or unproven stop in
+particular) is visible without leaving the Job view; it reuses the single app
+notice and its lifetime rather than a second Stop state. The visual layout itself
+is owned by the B1-D section below.
 
-One chrome plan budgets every fixed row from the live terminal grant, in a fixed
-priority: the Action Bar first (it is NEVER budgeted away), then the header — the
-status and every gap/error/settled marker, then the `Command:`/`Label:` summary —
-then the descriptive fact text, then the Search row, then the notice. Below 80×10
-the header therefore stays within TWO rows, with the fact text riding on the
-Command row only while that row has room, and on the four-row floor the compact
-header gives up its second row so `[status, search, output, Action Bar]` still
-fits. A live notice takes its own row only when the header AND the Search row can
-still have their own AND at least one Output row remains: a transient notice
-never squeezes the last output row away. A Search row is only granted from four
-rows up, so a shorter frame cannot enter Find at all, and a resize that takes the
-row away leaves the search (keeping the paused viewport and its anchor) instead of
-pointing the physical focus at a hidden editor. The workspace is its own screen,
-so the main transcript, the original editor and the footer never take part in its
-layout, and the previous screen (regular or transcript fullscreen) is paused with
-the Task Browser kept alive underneath — `Esc` returns to the SAME browser
-instance, its selected row and the original draft/scroll state.
+One chrome plan (`planChrome()`) budgets every fixed row from the live terminal
+grant, in a fixed priority: the Action Bar first (it is NEVER budgeted away),
+then the status title (from two rows), then one readable body row (from three),
+then the Search row, the summary, the tabs, the transient notice, the metadata
+row and finally the reading-facts row. Every optional row is granted only while
+the reserved body row survives, and the metadata / reading-facts rows need enough
+body left to stay worth reading, so a transient notice never squeezes the last
+output row away and no optional row can push the Action Bar off the screen. A
+Search row is only granted from four rows up, so a shorter frame cannot enter
+Find at all, and a resize that takes the row away leaves the search (keeping the
+paused viewport and its anchor) instead of pointing the physical focus at a hidden
+editor. The workspace is its own screen, so the main transcript, the original
+editor and the footer never take part in its layout, and the previous screen
+(regular or transcript fullscreen) is paused with the Task Browser kept alive
+underneath — `Esc` returns to the SAME browser instance, its selected row and the
+original draft/scroll state.
 
 Facts stay separated by construction: the workspace presents ONE captured
 `JobInspectorState` (the opening row plus the latest detached observation), and
@@ -1607,9 +1607,10 @@ the body is exactly the port's retained tail — never a concatenation of status
 label and output. The three placeholders are distinct and honest: `Waiting for
 retained output…` (no snapshot yet), `No retained output` (observed, nothing
 retained) and `Retained output unavailable` (the observation port refused). A
-`subagent` Job shows `Label:` instead of pretending to be a shell command, and
-the bottom row always discloses `Retained preview · not full history` — the
-tail is bounded and is not the Job's archive. `Esc` and the `tasks.stop`
+`subagent` Job shows `Label` instead of pretending to be a shell command, and
+every frame discloses `Retained preview · not full history` (on the reading-facts
+row where the grant allows one, otherwise on the pinned Action Bar) — the tail is
+bounded and is not the Job's archive. `Esc` and the `tasks.stop`
 component action remain the only write intents; the Stop write stays the
 existing capability-gated `jobObservation.stop`, and ordinary typing never
 reaches the background editor or transcript.
@@ -1639,8 +1640,9 @@ consumes.
 
 `Ctrl+F` (or whatever the live keymap really resolves `app.transcript.search`
 to, leader sequences included) and the non-configurable `/` alias open a Find
-over the CURRENT retained Output only: the header, the `Command:`/`Label:`
-summary, the notice and the background transcript are never searchable, and an
+over the CURRENT retained Output only: the header, the `Command`/`Label`
+summary row, the tabs, the notice and the background transcript are never
+searchable, and an
 empty/unavailable body reports `0/0 · No matches` instead of inventing a hit. The
 binding is scoped to the Job — the Transcript search handler and the fork's
 built-in search overlay are never entered from inside the workspace — while a
@@ -1700,8 +1702,8 @@ retention anchor above are B1-B.
 
 A shell Job (`bash`/`pwsh`) whose OBSERVED `label` is non-empty gains a Command
 page inside the same workspace, the same `TuiAltScreen`, the same Job and the
-same observation: `v` on the Output page, or a click on the visible `Command:`
-summary, switches to it; `Esc` returns to Output (it never closes the workspace
+same observation: `v` on the Output page, or a click on the visible Command
+summary / its `↗ Command` entry / the `Command` tab, switches to it; `Esc` returns to Output (it never closes the workspace
 and never releases the observer). `Label:` Jobs (`subagent` and every non-shell
 kind) never grow one — the entry is gated on the OBSERVED kind plus a non-empty
 label, so an opening Task row that merely looks like a shell command can show a
@@ -1740,7 +1742,7 @@ introduced.
   strip, no header/marker/decoration, no Command source, and no claim about
   evicted history.
 - **Command Copy All** (`C` on the Command page, or a click on the painted
-  `[Copy All]`) sends the ORIGINAL `JobObservedSnapshot.label`: leading and
+  `Copy All [C]` button) sends the ORIGINAL `JobObservedSnapshot.label`: leading and
   trailing whitespace, TABs, CRLF and a trailing newline all survive, and the
   display prefix, ellipsis, escapes and alignment spaces are never part of the
   payload. On a frame too narrow to paint the whole button no click target is
@@ -1822,20 +1824,21 @@ the sources: a Command page that cannot be entered makes no request at all, and
 an empty gesture (a click, or a drag that covers no cell) is not a copy intent, so
 neither produces a request or a notice.
 
-The header's Command summary and its `[Copy All]` are plain painted cells, so
-they route through the alt screen's existing press/click callbacks against a hit
-map produced by the LAST PAINTED header frame (the header's own painted top row
-included), and the region is exactly the `Command: …` / `Label: …` summary — a
-click on the row's trailing blank space stays inert, and so does the GAP/ERROR
-fact text that shares the compact row. The release must re-prove the SAME action, the
-SAME page and the SAME Command source identity the press named, so a repaint
-between press and release — another Job, a re-flowed header row, a narrowed
-button — can never fire a ghost open or a copy of different bytes. Both verbs also
+The header's Command summary, its `↗ Command` entry, its `Copy All [C]` button
+and the other page's tab are plain painted cells, so they route through the alt
+screen's existing press/click callbacks against a hit map produced by the LAST
+PAINTED header frame (the header's own painted top row included). A region is
+exactly the painted TEXT it names: the summary and the `↗ Command` entry are two
+separate regions, the `Copy All [C]` button is its own, and the padding in between
+stays inert. The release must re-prove the SAME action, the SAME page, the SAME
+Command source identity AND the same relative row/cell range the press named, so a
+repaint between press and release — another Job, a re-flowed header row, a
+narrowed button — can never fire a ghost open or a copy of different bytes. Both verbs also
 have their fixed Job-local keyboard fallbacks (`v` on Output, `C` on either
 page), so nothing is mouse-only. The keyboard and the pointer are separate
 intents: while a Command Find owns the ordinary keys a plain `C` types into the
 query (or stays inert in result navigation) and neither state advertises a
-keyboard Copy, yet the still-painted `[Copy All]` remains clickable — one click
+keyboard Copy, yet the still-painted `Copy All [C]` remains clickable — one click
 copies only the official original label, and it never touches the query, the
 current hit, the search mode or the search input's focus.
 
@@ -1845,9 +1848,10 @@ before `V command` and both before any pre-existing truth (`Esc back`, Stop,
 Follow, `[GAP]`, the retained/full disclosure, the position fact and the Find
 hint). At 80 columns that means the verbs are usually not advertised at all while
 their KEYS stay fully functional: no half-painted affordance is ever shown, no
-action that cannot execute is advertised, and a `[Copy All]` the frame could not
-paint leaves no click target behind. Long-term discoverability of these entries
-belongs to the B1-D tab/action design, not to a Footer redesign here.
+action that cannot execute is advertised, and a `Copy All [C]` whose row the
+frame could not grant leaves no click target behind. The B1-D reading tabs are the
+long-term entry point for these verbs; the KEYBOARD fallbacks and the drop order
+above are unchanged there.
 
 The Command page therefore suspends the fork's OWN copy-on-select while it is
 shown (and restores whatever the screen started with on Output), because that
@@ -1857,9 +1861,97 @@ trimmed screen-text path — overwriting the exact command copy the button just
 made. The Command body's precise drag selection does not depend on it: it is the
 `MouseRegion` path above. The Output page keeps B1-A's native selection copy on
 purpose (dragging the retained body still copies screen text), which also means a
-rapid double click on the Output page's `Command:` summary copies a screen word
-instead of opening the Command page — the pre-existing screen-wide behaviour, not
+rapid double click on the Output page's `Command` summary (or its `↗ Command`
+entry) copies a screen word instead of opening the Command page — the pre-existing screen-wide behaviour, not
 a B1-C regression; a single click always opens the page as documented.
+
+## Job Workspace visual layout after B1-C (B1-D)
+
+B1-D is a PRESENTATION change on top of the merged B1-A/B/C behaviour: the same
+panel, the same ONE observer, the same two reading pages, the same copy sources
+and the same press-time hit-map owner, with a readable hierarchy. The frozen
+visual order of one frame is: the status title, the optional metadata row, the
+page's summary row, the reading tabs, the current page's optional Search row, the
+body, the optional reading-facts row, the transient notice row, and the pinned
+bottom Action Bar. `planChrome()` above remains the ONE budget; no component
+computes its own `terminal.rows` share.
+
+- **Status title** (from two rows): the fixed `JOB` label, the Job id and kind,
+  then the status dot plus the UPPERCASE status text in `taskStatusColor` and the
+  independent `[GAP]`/`[ERROR]`/`[SETTLED]` markers (warning/error/dim). The
+  status and its markers are laid out FIRST, so a long identity truncates itself
+  and can never push the status out of its row, and the markers stay readable
+  without colour.
+- **Metadata** (standard frames only): the real `progress`/`detail` plus the
+  descriptive `Earlier output evicted` / `error: …` facts. Progress outranks
+  detail, and the descriptive facts claim at most half the row, so an unbounded
+  progress value can never make the independent gap/error reason unreachable. No
+  row is drawn when the view has no such fact — never a blank placeholder.
+- **Summary**: on Output, `<Command|Label>  <label>` with the right-aligned
+  `↗ Command` entry ONLY while a shell Command is really observed (the opening row
+  may show the read-only summary but never grows the entry); on Command,
+  `Full command` with the right-aligned `Copy All [C]` button. Every non-shell
+  kind reads `Label`, and no arrow, button or Command tab exists for it.
+- **Reading tabs** (one row): the CURRENT page is bracketed and emphasised
+  (`[Output]`/`[Command]`, compact `[Out]`/`[Cmd]`), the other page is plain, and
+  a themed `─` run fills the rest of the row (CJK/wide labels included: the run is
+  sized in terminal cells). The tabs derive from the existing `readState.view` —
+  there is no second `selectedTab`/`activeReadView` state — and only the OTHER
+  page's label is a hit target: the current page's bracketed label is a status
+  marker, so clicking it changes nothing.
+- **Body**: the same B1-B/B1-C renderers on the terminal's own background — never
+  a second card, frame, `$` prefix or injected colour that could reach a payload.
+- **Reading facts** (wide and tall frames only): one themed rule row carrying the
+  page's own disclosure (`Retained preview · not full history` / `Full command`)
+  and the real `rows a-b/N` position of THIS retained preview. Where the frame
+  grants no such row, the pinned Action Bar keeps the bounded disclosure instead:
+  one fact is never advertised twice in the same frame, and neither form ever
+  claims a complete history.
+- **Action Bar**: pinned last and painted with the theme's dim token —
+  `Esc back`/`Esc output`, the legal `tasks.stop` hint, the strict `Follow ON`/
+  `Follow PAUSED` truth, `[GAP]`, the effective Find hint, the Job-local `v`/`C`
+  verbs and a pure `PgUp/PgDn` browsing hint, each yielding in the B1-B priority
+  order. Every entry is gated on the LIVE frame: the Find hint appears only while
+  the frame can host a SearchRow and the query is not being edited, the page hint
+  only while a body row is really painted and the query does not own the ordinary
+  keys, and the preview position only while a body is painted — a frame that
+  cannot act on a hint never advertises it.
+
+Responsive grants use the same 80×10 boundary B1-B already owned: `rows>=4`
+grants the SearchRow, `rows>=5` the summary and the tabs, `rows>=6` the transient
+notice, `cols>=80 && rows>=10` the metadata row (and only with at least four body
+rows left), and `cols>=100 && rows>=12` the reading-facts row (with at least six
+body rows left). Below those floors the optional rows disappear in that order and
+the body keeps at least one row from three rows up: `rows=2` is status + Action
+Bar, `rows=1` is the Action Bar alone with `Esc` still reachable. A live notice
+therefore yields at five rows and takes its own row at six only because one body
+row survives.
+
+Copy payloads are UNCHANGED: Output Copy is still `observed.text`, Command Copy
+All is still the original `observed.label`, and a Command drag is still
+`label.slice(start,end)`. The new chrome adds no copy source, and a rendered,
+highlighted or truncated string is never fed into a payload. The Command page
+still suspends the fork's native copy-on-select (the Output page restores the
+setting the screen started with), and the Output page keeps B1-A's native
+selection copy on purpose.
+
+The hit map remains "the LAST PAINTED frame, and only its painted text": the
+header produces the regions its own render really painted — the summary and the
+`↗ Command` entry as two separate regions, the `Copy All [C]` button, and the
+other page's tab — and a release re-proves the same action, page, Command source
+identity and the same relative row/cell range. Hidden and zero-grant affordances
+keep no target, and a row the frame had to truncate keeps only the label cells it
+really painted: the ellipsis `truncateToWidth` substitutes is inert, so a frame
+too narrow for the label can never be triggered through its own overflow marker. The `open-output` action added for the Output tab
+routes to the existing `showOutput()`, so a tab click is the SAME page switch as
+`Esc`/`v` (Search exit, selection cancel, native copy-on-select restore and the
+repaint included) and never a display-only body swap.
+
+No Job fact is invented: the chrome renders only the fields
+`deriveJobInspectorView` already projects, and every Host-supplied string
+(`label`, `detail`, `progress`, the follow-stream error, the notice text) crosses
+the SAME `chromeText()` control-sequence boundary BEFORE the theme styling is
+applied, exactly as the B1-C section above records.
 
 ## Long user messages collapse at the presentation layer only
 

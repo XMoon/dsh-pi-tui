@@ -61,6 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   When the retained window is truncated, a paused view keeps the same
   still-present row where it can, the bottom row number is a position inside this
   retained preview only, and `[GAP]` still comes only from the official fact.
+- The Job workspace now has a clear visual hierarchy: the top row always shows the
+  fixed `JOB` marker, the Job identity, a themed status dot and the UPPERCASE
+  status plus the independent `[GAP]`/`[ERROR]`/`[SETTLED]` markers; real progress
+  and detail get their own row next to the output-gap and observation-error
+  reasons. Under the title, clickable and readable `Output` / `Command` reading
+  tabs (the current one bracketed; `Out`/`Cmd` on narrow terminals) switch pages
+  exactly like `v`/`Esc`; the command entry is the right-aligned `↗ Command`, and
+  the command page is titled `Full command` with `Copy All [C]`. The log body keeps
+  the terminal's own background — no card or second frame — and a wide terminal
+  gets one rule row under the body with "retained preview, not full history" plus
+  the real preview line numbers; where that row does not fit, the bottom bar keeps
+  the same disclosure, never both at once. Very narrow or short terminals drop the
+  optional rows in a fixed order, always keeping at least one body row for the
+  current page and a reachable `Esc`; at `80×1` only the bottom `Esc` remains. A
+  live theme switch applies immediately.
 - The Footer's Performance item gains the whole-Session rate and shows both
   scopes in the default layout: the speed placement now defaults to
   `speed-both` (`R5 116 · All 44 tok/s`), with `speed-all` (`All 44 tok/s`)

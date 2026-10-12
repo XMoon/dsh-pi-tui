@@ -185,10 +185,14 @@ Regular `↑` / `↓` history recall is still available for recent input.
 
 `/tasks` opens the full Task Center, showing the work the current Session's
 Job Registry / Subagent catalog still tracks; the Footer's `↓` opens the
-lightweight Quick Tasks view for the current active work. Selecting a Job
-opens a detail with the official non-consuming live
-output preview (status, progress and the retained output tail); it never consumes
-the model's `job_output` cursor and never becomes session history.
+lightweight Quick Tasks view for the current active work. Selecting a Job opens
+the fullscreen Job workspace: one status row with the Job identity, the themed
+status and the `[GAP]`/`[ERROR]`/`[SETTLED]` facts, followed by the real
+progress/detail, the command summary and the `Output` / `Command` reading tabs.
+Output is the official non-consuming live preview (scrollable, searchable and
+explicitly labelled as a retained tail rather than the full history), and the
+Command page shows and copies the original shell command. It never consumes the
+model's `job_output` cursor and never becomes session history.
 
 Task Center is a live tracked/control projection, not an execution-history
 list. `ACTIVE` / `TRACKED` are presentation scopes: `ACTIVE` shows only the

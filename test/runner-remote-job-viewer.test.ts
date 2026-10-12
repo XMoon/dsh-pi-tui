@@ -477,7 +477,7 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   assert.equal(fx.hostKillCalls(), 0, 'the inert requested kill must not reach the Host')
   assert.equal(fx.rosterStatus(job.id), 'running',
     'a requested admission must not optimistically rewrite the official roster')
-  assert.match(view(), /running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
+  assert.match(view(), /RUNNING/u, `no optimistic local status may replace the official running fact:\n${view()}`)
   assert.ok(view().includes(viewerStopSegment()),
     'canStop must follow the latest OBSERVED status, not the local request')
 
@@ -495,7 +495,7 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
     'the injected inert/indeterminate probes must not reach the Host registry at all')
   assert.equal(fx.rosterStatus(job.id), 'running',
     'the injected indeterminate kill must not change the official roster')
-  assert.match(view(), /running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
+  assert.match(view(), /RUNNING/u, `no optimistic local status may replace the official running fact:\n${view()}`)
   assert.ok(view().includes(viewerStopSegment()),
     'canStop must stay advertised while the latest OBSERVED status is active')
 
@@ -504,15 +504,15 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   fx.fixture.vt.sendInput(key)
   await waitFor('the official roster converged to the terminal status', () =>
     fx.rosterStatus(job.id) === 'killed', 20_000)
-  await waitFor('the viewer rendered the terminal status', () => view().includes('killed'), 20_000)
+  await waitFor('the viewer rendered the terminal status', () => view().includes('KILLED'), 20_000)
   await waitFor('the viewer Stop capability disappeared after settlement', () =>
     !view().includes(viewerStopSegment()), 10_000)
   await waitFor('the observation stream settled', () =>
     fx.clientJobs.state.getSnapshot().observed[String(job.id)]?.streaming === false, 20_000)
   await waitFor('the settled body rendered its detail and dropped the live progress', () =>
-    view().includes('killed') && view().includes('detail: cancelled by the user')
+    view().includes('KILLED') && view().includes('detail: cancelled by the user')
     && !view().includes('progress: 3/10 compiling'), 20_000)
-  assert.match(view(), /killed/u, `the terminal status must render in the viewer:\n${view()}`)
+  assert.match(view(), /KILLED/u, `the terminal status must render in the viewer:\n${view()}`)
   assert.match(view(), /detail: cancelled by the user/u,
     `the official settlement detail must converge into the viewer body:\n${view()}`)
   assert.equal(view().includes('progress: 3/10 compiling'), false,
@@ -579,7 +579,7 @@ test('L6 §15 step 10 + 11(b): a SECOND real Job stops through the Task-Center r
   await openJobRow(fx, JOB_TWO_LABEL)
   await waitFor('the second Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the settled detail renders its terminal observation', () =>
-    view().includes('killed') && view().includes('pr3-two retained line'), 20_000)
+    view().includes('KILLED') && view().includes('pr3-two retained line'), 20_000)
   assert.equal(fx.observeAcquires(), acquiresBeforeDetail + 1,
     'one Job-detail open must acquire exactly one selected-Job observer')
   fx.fixture.vt.sendInput('\x1b')
@@ -695,7 +695,7 @@ test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same 
   fx.fixture.vt.sendInput(key)
   await waitFor('the post-B Stop converged the live Job', () =>
     fx.rosterStatus(liveJob.id) === 'killed', 20_000)
-  await waitFor('the viewer rendered the terminal status', () => view().includes('killed'), 20_000)
+  await waitFor('the viewer rendered the terminal status', () => view().includes('KILLED'), 20_000)
   assert.equal(fx.killControl.calls, killCallsAtReconnect + 1,
     'exactly ONE Client kill dispatched after B (the post-B Stop), nothing else')
   assert.equal(fx.hostKillCalls(), hostKillsAtReconnect + 1,
@@ -724,9 +724,9 @@ test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child
   await waitFor('the subagent Job detail rendered its observed retained output', () =>
     view().includes('pr3-subagent retained line'), 20_000)
   const detail = view()
-  assert.match(detail, new RegExp(`Job ${String(subagentJob.id)} · subagent`, 'u'),
+  assert.match(detail, new RegExp(`JOB\\s+${String(subagentJob.id)} · subagent.*● RUNNING`, 'u'),
     `the workspace header must name the Job, never a guessed child:\n${detail}`)
-  assert.match(detail, new RegExp(`Label: ${SUBAGENT_JOB_LABEL}`, 'u'),
+  assert.match(detail, new RegExp(`Label {2}${SUBAGENT_JOB_LABEL}`, 'u'),
     `a subagent Job shows the Label identity row (never a faked $ command):\n${detail}`)
   // A guessed transcript would have replaced the surface and committed a child
   // subject; the main subject must stay untouched.
@@ -956,7 +956,7 @@ test('L6 B1-C: the Remote Client roster label reaches the Command page and Copy 
 
   // `v` opens the Command page of the SAME observation instance.
   fx.fixture.vt.sendInput('v')
-  await waitFor('the Command reader painted', () => view().includes('Command reader · [Copy All]'), 10_000)
+  await waitFor('the Command reader painted', () => view().includes('Copy All [C]'), 10_000)
   assert.match(view(), /Full command/u, 'the Command page discloses that it shows the full command')
   assert.match(view(), /Esc output/u, 'Esc on the Command page returns to Output, never out of the workspace')
 

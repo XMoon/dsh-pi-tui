@@ -377,9 +377,9 @@ test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll 
   let painted = view(vt)
   assert.match(painted, /line 199/, 'the tail is visible on open')
   assert.match(painted, /Follow ON/)
-  assert.match(painted, /Job job-a · bash · running/)
+  assert.match(painted, /JOB\s+job-a · bash.*● RUNNING/)
   assert.match(painted, /Esc back/)
-  assert.equal(bodyTop(vt), 'line 163', 'the 37-row Output viewport starts at the retained tail')
+  assert.equal(bodyTop(vt), 'line 165', 'the 35-row Output viewport starts at the retained tail')
 
   // PgUp is an active browse: pause and move the body.
   vt.sendInput('\x1b[5~')
@@ -387,8 +387,8 @@ test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll 
   painted = view(vt)
   assert.match(painted, /Follow PAUSED/)
   assert.ok(!/line 199/.test(painted), 'the tail leaves the viewport')
-  assert.equal(bodyTop(vt), 'line 130')
-  assert.match(painted, /Job job-a · bash · running/, 'the Header stays pinned')
+  assert.equal(bodyTop(vt), 'line 134')
+  assert.match(painted, /JOB\s+job-a · bash.*● RUNNING/, 'the Header stays pinned')
   assert.match(painted, /Esc back/, 'the Action Bar stays the last row')
 
   // Home goes to the top of THIS retained preview and stays PAUSED.
@@ -412,7 +412,7 @@ test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll 
   painted = view(vt)
   assert.match(painted, /Follow ON/)
   assert.match(painted, /line 199/)
-  assert.match(painted, /rows 164-200\/200/, 'the position is the retained preview, not Job history')
+  assert.match(painted, /rows 166-200\/200/, 'the position is the retained preview, not Job history')
 
   // The background surface never moved and never received the keys.
   assert.equal(app.hostEditorTextForTest(), 'kept draft')
@@ -431,15 +431,15 @@ test('B-03 a newer official snapshot never moves a PAUSED viewport; End catches 
   await vt.waitForRender()
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130')
+  assert.equal(bodyTop(vt), 'line 134')
   const opensBefore = observation.records.length
 
   // A pure append while PAUSED: the top row must not move.
   observation.latest()!.emit({ text: numberedLines(0, 239) })
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130', 'a pure append never pulls the user to the tail')
+  assert.equal(bodyTop(vt), 'line 134', 'a pure append never pulls the user to the tail')
   assert.match(view(vt), /Follow PAUSED/)
-  assert.match(view(vt), /rows 131-167\/240/)
+  assert.match(view(vt), /rows 135-169\/240/)
 
   // End catches up and follows the newer tail; the NEXT push keeps following.
   vt.sendInput('\x1b[F')
@@ -500,7 +500,7 @@ test('B-04b a real scrollbar press, drag and release move the Output, keep it pa
   await vt.waitForRender()
   assert.match(view(vt), /Follow PAUSED/)
   const topIndex = (): number => Number(bodyTop(vt).split(' ')[1])
-  assert.equal(topIndex(), 178, 'one wheel notch above the tail')
+  assert.equal(topIndex(), 179, 'one wheel notch above the tail')
 
   // Press near the TRACK TOP (not on the thumb, which sits at the bottom): the
   // fork jumps the track and starts the drag through the overridden `scrollTo`.
@@ -509,16 +509,17 @@ test('B-04b a real scrollbar press, drag and release move the Output, keep it pa
   assert.equal(topIndex(), 0, 'the scrollbar press jumped to the top')
   assert.match(view(vt), /Follow PAUSED/)
 
-  // Drag the thumb down the track, then release.
-  vt.sendInput('\x1b[<32;80;13M')
+  // Drag the thumb down the track, then release. The body box owns rows 3..22
+  // (status + summary + tabs above it), so the mid-track row is 14.
+  vt.sendInput('\x1b[<32;80;14M')
   await vt.waitForRender()
   const midway = topIndex()
   assert.ok(midway > 80 && midway < 110, `the drag really moved the viewport (top=${midway})`)
-  vt.sendInput('\x1b[<32;80;21M')
+  vt.sendInput('\x1b[<32;80;22M')
   await vt.waitForRender()
   const bottom = topIndex()
   assert.ok(bottom >= 160, `dragging to the bottom really scrolled (top=${bottom})`)
-  vt.sendInput('\x1b[<0;80;21m')
+  vt.sendInput('\x1b[<0;80;22m')
   await vt.waitForRender()
   assert.match(view(vt), /Follow PAUSED/, 'a scrollbar gesture is browsing, never a re-arm')
 
@@ -803,7 +804,7 @@ test('B-07 the first Esc leaves only the search (still PAUSED in the same Job) a
   await vt.waitForRender()
   const painted = view(vt)
   assert.ok(!/Find Output:/.test(painted), 'the first Esc closes the search')
-  assert.match(painted, /Job job-a · bash · running/, 'the Job workspace is still open')
+  assert.match(painted, /JOB\s+job-a · bash.*● RUNNING/, 'the Job workspace is still open')
   assert.match(painted, /Follow PAUSED/, 'the Esc never re-arms follow')
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
 
@@ -1025,13 +1026,13 @@ test('B-10 a truncated retained window rebases a provable anchor, never fabricat
   // Pause at a provable row, then evict ten old rows in the new window.
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130')
+  assert.equal(bodyTop(vt), 'line 134')
   observation.latest()!.emit({ text: numberedLines(10, 199) })
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130', 'the same provable row stays visible across the eviction')
+  assert.equal(bodyTop(vt), 'line 134', 'the same provable row stays visible across the eviction')
   assert.match(view(vt), /Follow PAUSED/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'a local window change never fabricates GAP')
-  assert.match(view(vt), /rows 121-157\/190/, 'the position is relative to the retained window')
+  assert.match(view(vt), /rows 125-159\/190/, 'the position is relative to the retained window')
 
   // The official gap fact is the ONLY source of [GAP].
   observation.latest()!.emit({ text: numberedLines(10, 199), gapBefore: true })
@@ -1062,18 +1063,18 @@ test('B-10b several snapshots before the next frame keep the anchor on the same 
   await vt.waitForRender()
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130', 'the DRAWN baseline (line 130) is the anchor')
+  assert.equal(bodyTop(vt), 'line 134', 'the DRAWN baseline (line 134) is the anchor')
 
   // THREE windows land BEFORE the next frame (no render in between). The anchor
   // is compared against the last DRAWN window and moved by the TOTAL proven
-  // eviction (5 + 5 + 5), so `line 130` — still present in the newest window —
+  // eviction (5 + 5 + 5), so `line 134` — still present in the newest window —
   // stays visible. Rebasing each undrawn hop separately (or re-applying an
-  // eviction) would drift to `line 145`.
+  // eviction) would drift to `line 149`.
   observation.latest()!.emit({ text: numberedLines(5, 199) })
   observation.latest()!.emit({ text: numberedLines(10, 199) })
   observation.latest()!.emit({ text: numberedLines(15, 199) })
   await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130',
+  assert.equal(bodyTop(vt), 'line 134',
     'the total proven eviction against the drawn baseline preserves the row')
   assert.match(view(vt), /Follow PAUSED/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'no fabricated GAP')
@@ -1083,8 +1084,8 @@ test('B-10b several snapshots before the next frame keep the anchor on the same 
   // the viewport clamps it into the new (shorter) window.
   observation.latest()!.emit({ text: Array.from({ length: 40 }, (_, index) => `fresh ${String(index).padStart(3, '0')}`).join('\n') })
   await vt.waitForRender()
-  assert.match((rawView(vt)[2] ?? '').trim(), /^fresh 003/,
-    'an unprovable window safely clamps the offset into the new window')
+  assert.match((rawView(vt)[3] ?? '').trim(), /^fresh 005/,
+    'an unprovable window safely clamps the offset into the new window (40 rows, 35 body rows)')
   assert.match(view(vt), /Follow PAUSED/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'a clamp never fabricates a GAP')
   app.stop()
@@ -1303,7 +1304,7 @@ test('B-11 short frames keep one Output row, the Action Bar last, and a Find onl
   let rows = rawView(vt)
   assert.equal(rows.length, 4)
   assert.match(rows[3]!, /Esc back/, 'the Action Bar is the last row')
-  assert.match(rows[0]!, /running/, 'the status row survives')
+  assert.match(rows[0]!, /RUNNING/, 'the status row survives')
   assert.ok(rows.slice(0, 3).some(row => /line 00/.test(row)), 'at least one Output row stays readable')
 
   // A 4-row frame CAN host the SearchRow: it takes the header's second row.
@@ -1354,7 +1355,7 @@ test('B-12 a Job replacement/dispose keeps ONE observer per Job and never restor
   await vt.waitForRender()
   const painted = view(vt)
   assert.ok(!/Find Output:/.test(painted), 'the new Job has no inherited search row')
-  assert.match(painted, /Job job-b · bash · running/)
+  assert.match(painted, /JOB\s+job-b · bash.*● RUNNING/)
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true, 'the new Job owns the panel focus')
   assert.deepEqual(harness.observation.forJob('job-a'), [1], 'A released its observer exactly once')
 

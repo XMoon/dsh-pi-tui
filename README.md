@@ -175,7 +175,7 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 ### Subagent 与 Task Center
 
-`/tasks` 打开完整 Task Center，显示当前 Session 中仍由 Job Registry / Subagent catalog 跟踪的工作；Footer 的 `↓` 打开轻量 Quick Tasks，只看当前活动（active）工作。选中 Job 后，详情会显示官方非消耗式的实时输出预览（状态、进度与保留的输出尾部），不会消耗模型的 `job_output` 游标，也不写入会话历史。
+`/tasks` 打开完整 Task Center，显示当前 Session 中仍由 Job Registry / Subagent catalog 跟踪的工作；Footer 的 `↓` 打开轻量 Quick Tasks，只看当前活动（active）工作。选中 Job 后进入全屏 Job 工作区：顶部一行显示 Job 身份、主题状态与大写状态及 `[GAP]`/`[ERROR]`/`[SETTLED]` 事实，下面是真实进度/说明、命令摘要与 `Output`/`Command` 阅读标签。Output 是官方非消耗式的实时输出预览（可滚动、可搜索，并明确标注为保留尾部而非完整历史），Command 页可阅读并按原文复制 shell 命令。工作区不会消耗模型的 `job_output` 游标，也不写入会话历史。
 
 Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前活动项，`TRACKED` 显示当前跟踪源（Job Registry / Subagent catalog）仍列出的全部项；`TRACKED` 不是 Session 执行历史。DSH `0.1.7` 会在普通前台 `bash` / `pwsh` 执行期间临时注册 Job，使其可以在 Task Center 中观察和停止；如果命令在前台等待内完成，DSH 会移除该临时记录，最终结果仍保留在 Transcript 的 tool card 中。显式 `run_in_background: true` 或被提升为后台的 Job 在完成后，只要 Job Registry 继续保留其记录，就仍可在 `TRACKED` 中查看。
 

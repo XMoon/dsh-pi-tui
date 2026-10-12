@@ -360,24 +360,26 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
     for (const line of lines) {
       assert.ok(visibleWidth(line) <= budget.width, `no line may exceed ${budget.width} columns: ${JSON.stringify(line)}`)
     }
-    const painted = lines.join('\n')
+    // The header's own tokens carry theme ANSI, so assert on the VISIBLE text.
+    const painted = lines.map(stripTerminalSequences).join('\n')
     // The status and every fact marker survive EVERY budget; the identity prefix
     // is only kept while it still fits beside them.
-    assert.match(painted, /failed/, `the status must stay visible at ${budget.width}x${budget.rows}`)
+    assert.match(painted, /FAILED/, `the status must stay visible at ${budget.width}x${budget.rows}`)
     assert.match(painted, /\[GAP\]/, `the gap marker must stay visible at ${budget.width}x${budget.rows}`)
     assert.match(painted, /\[ERROR\]/, `the error marker must stay visible at ${budget.width}x${budget.rows}`)
     assert.match(painted, /\[SETTLED\]/, `the settled marker must stay visible at ${budget.width}x${budget.rows}`)
-    if (budget.width >= 80) {
-      // The descriptive fact text rides on the Command row while the row has room;
-      // the [GAP] marker above is the fact that survives every budget.
+    if (budget.width >= 80 && budget.rows >= 10) {
+      // The descriptive fact text rides the standard-size metadata row; on a
+      // compact terminal the [GAP] marker on the status row is the fact that
+      // survives every budget (plan B1-D §3.1/§3.2).
       assert.match(painted, /Earlier output evicted/, `the gap fact must be readable at ${budget.width}x${budget.rows}`)
     }
     if (budget.width >= 80) {
-      assert.match(painted, /Job job-a · bash · failed/, `the identity must stay visible at ${budget.width}x${budget.rows}`)
+      assert.match(painted, /JOB\s+job-a · bash.*● FAILED/, `the identity must stay visible at ${budget.width}x${budget.rows}`)
     }
     // The Command/Label summary is part of the locked workspace UI: a short or
     // narrow screen may drop the descriptive fact text, never the Command row.
-    assert.match(painted, /Command: pnpm build --watch/,
+    assert.match(painted, /Command {2}pnpm build --watch/,
       `the command identity must be shown at every budget (${budget.width}x${budget.rows})`)
     if (budget.width >= 80 && budget.rows >= 10) {
       assert.match(painted, /progress: building 3\/8/, 'the typed progress row must be shown on a tall screen')
@@ -387,7 +389,19 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
     assert.ok(lines.length <= Math.max(1, budget.rows - 1), 'the pinned chrome must leave a body row')
     assert.match(lines.at(-1)!, /Esc back/, `the Action Bar is the last rendered row at ${budget.width}x${budget.rows}`)
     if (budget.width >= 80) {
-      assert.match(lines.at(-1)!, /Retained preview · not full history/, 'the retained-preview disclosure stays pinned')
+      // The bounded preview is disclosed at every standard budget — by the
+      // DEDICATED reading-facts row where the frame grants it, and by the pinned
+      // Action Bar otherwise. It is never advertised twice and never as a
+      // complete history (plan B1-D §3.3).
+      const disclosure = lines.findIndex(line => /Retained preview · not full history/.test(line))
+      assert.notEqual(disclosure, -1, `the bounded preview is disclosed at ${budget.width}x${budget.rows}`)
+      if (budget.width >= 100 && budget.rows >= 12) {
+        assert.notEqual(disclosure, lines.length - 1, 'the dedicated facts row sits above the Action Bar')
+        assert.match(lines[disclosure]!, /rows 0-0\/1/, 'the dedicated facts row carries the real position')
+        assert.ok(!/Retained preview/.test(lines.at(-1)!), 'the Action Bar never repeats the disclosure')
+      } else {
+        assert.equal(disclosure, lines.length - 1, 'the pinned Action Bar carries the disclosure')
+      }
     }
     if (budget.width >= 80) assert.match(lines.at(-1)!, /stop/, 'Stop is advertised while the capability is live')
     // Esc and the stop action are the panel's only intents.
@@ -459,8 +473,8 @@ test('A-01d a long Job identity and a long error text never hide the status or t
     },
   )
   const lines = panel.render(80)
-  const painted = lines.join('\n')
-  assert.match(painted, /failed/, `the status must survive a long identity:\n${painted}`)
+  const painted = lines.map(stripTerminalSequences).join('\n')
+  assert.match(painted, /FAILED/, `the status must survive a long identity:\n${painted}`)
   assert.match(painted, /\[GAP\]/, `the gap marker must survive:\n${painted}`)
   assert.match(painted, /\[ERROR\]/, `the error marker must survive:\n${painted}`)
   assert.match(painted, /\[SETTLED\]/, `the settled marker must survive a long error text:\n${painted}`)
@@ -495,28 +509,31 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
     setNativeCopyOnSelect: () => {},
   })
 
-  // 44×8 with GAP/ERROR: the compact header is TWO rows at most, the Command and
-  // every marker survive, and the Action Bar is the last row.
+  // 44×8 with GAP/ERROR: the compact header is status + summary + tabs, every
+  // marker survives on the status row, and the Action Bar is the last row.
   const compact = panelAt(8, false).render(44)
-  assert.equal(compact.length, 3, 'a compact header (2) plus the pinned Action Bar (1)')
+  assert.equal(compact.length, 4, 'a compact header (status, summary, tabs) plus the pinned Action Bar (1)')
   assert.match(compact.at(-1)!, /Esc back/)
   assert.match(compact.join('\n'), /\[GAP\]/)
   assert.match(compact.join('\n'), /\[ERROR\]/)
   assert.match(compact.join('\n'), /\[SETTLED\]/)
-  assert.match(compact.join('\n'), /Command: pnpm build --watch/)
-  assert.match(compact.join('\n'), /failed/)
+  assert.match(compact.join('\n'), /Command {2}pnpm build --watch/)
+  assert.match(compact.join('\n'), /FAILED/)
 
-  // 44×4 with a LIVE notice: the notice YIELDS, because taking its row would leave
-  // the Output with nothing — header (2) + Action Bar (1) only.
+  // 44×4 with a LIVE notice: the notice, the summary and the tabs all yield,
+  // because taking a row would leave the Output with nothing.
   const tight = panelAt(4, true).render(44)
-  assert.equal(tight.length, 3, 'the notice yields so the Output keeps a row')
+  assert.equal(tight.length, 2, 'only the status row and the pinned Action Bar fit a 4-row grant')
   assert.match(tight.at(-1)!, /Esc back/)
   assert.ok(!/could not stop/.test(tight.join('\n')), 'no notice row on a 4-row grant')
 
-  // 44×5 with a LIVE notice: header (2) + notice (1) + Action Bar (1) = 4 rows,
-  // leaving exactly one Output row.
-  const withNotice = panelAt(5, true).render(44)
-  assert.equal(withNotice.length, 4, 'the notice is inside the height budget, never below the bar')
+  // A 5-row grant is still too few for the notice (plan B1-D §3.2 grants it only
+  // from six rows); 44×6 fits status + summary + tabs + notice + Action Bar with
+  // exactly one Output row left over.
+  assert.ok(!/could not stop/.test(panelAt(5, true).render(44).join('\n')),
+    'a 5-row grant still has no notice row')
+  const withNotice = panelAt(6, true).render(44)
+  assert.equal(withNotice.length, 5, 'the notice is inside the height budget, never below the bar')
   assert.match(withNotice.at(-1)!, /Esc back/)
   assert.match(withNotice.join('\n'), /✗ could not stop job job-a: refused/)
 
@@ -524,10 +541,10 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
   const tiny = panelAt(2, true).render(80)
   assert.equal(tiny.length, 2, 'only the status row and the pinned Action Bar')
   assert.match(tiny.at(-1)!, /Esc back/)
-  assert.match(tiny[0]!, /failed/)
+  assert.match(tiny[0]!, /FAILED/)
   assert.match(tiny.join('\n'), /\[GAP\]/)
   assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields on a 2-row terminal')
-  assert.ok(!/Command:/.test(tiny.join('\n')), 'the Command ranks below the status/markers')
+  assert.ok(!/Command/.test(tiny.join('\n')), 'the Command ranks below the status/markers')
 
   // 80×1 with a live notice: the Action Bar ALONE — it is never budgeted away.
   const one = panelAt(1, true).render(80)
@@ -558,8 +575,8 @@ test('A-02 selecting a Job in the real Task Browser opens the fullscreen Job wor
     'the Job workspace root owns the physical focus')
   assert.deepEqual(harness.retires, [], 'opening a Job never retires the browser')
   const painted = view(vt)
-  assert.match(painted, /Job job-a · bash · running/, `the typed header must be painted:\n${painted}`)
-  assert.match(painted, /Command: job job-a/, 'a bash Job shows the Command identity row')
+  assert.match(painted, /JOB\s+job-a · bash.*● RUNNING/, `the typed header must be painted:\n${painted}`)
+  assert.match(painted, /Command {2}job job-a/, 'a bash Job shows the Command identity row')
   assert.match(painted, /retained job-a/, 'the retained tail is painted in the body')
   assert.match(painted, /Retained preview · not full history/, 'the retained-preview disclosure stays pinned')
   assert.ok(!/job job-b/.test(painted), 'the Job screen shows ONE Job, never the roster')
@@ -697,7 +714,7 @@ test('A-05 ONE observer pushes every snapshot into the painted workspace and Sto
   await vt.waitForRender()
   const painted = view(vt)
   assert.match(painted, /final tail/, `the pushed snapshot must reach the paint:\n${painted}`)
-  assert.match(painted, /Job job-a · bash · completed/)
+  assert.match(painted, /JOB\s+job-a · bash.*● COMPLETED/)
   assert.match(painted, /\[SETTLED\]/)
   assert.equal(harness.observation.records.length, 1, 'no second subscription is ever opened')
   assert.equal(harness.observation.stops.length, 0)
@@ -733,7 +750,7 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   const first = view(vt)
   assert.match(first, /could not confirm stopping/, `the settlement failure must be visible in the workspace:\n${first}`)
   // …and the Job facts were NOT rewritten by the local Stop (no optimistic state).
-  assert.match(first, /Job job-a · bash · running/)
+  assert.match(first, /JOB\s+job-a · bash.*● RUNNING/)
   assert.match(first, /retained job-a/)
 
   // A throwing Stop dispatch is reported the same way, replacing the notice.
@@ -743,7 +760,7 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   await vt.waitForRender()
   const second = view(vt)
   assert.match(second, /could not stop job job-a/, `the dispatch failure must be visible in the workspace:\n${second}`)
-  assert.match(second, /Job job-a · bash · running/, 'still no optimistic state change')
+  assert.match(second, /JOB\s+job-a · bash.*● RUNNING/, 'still no optimistic state change')
   assert.deepEqual(harness.observation.stops, ['job-a', 'job-a'], 'each press dispatches exactly one port Stop')
   // The pinned Action Bar stays the last row even with the notice row present.
   const barRow = rawView(vt).findIndex(line => /Esc back/.test(line))
@@ -766,14 +783,26 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   assert.ok(!/could not stop/.test(tight.join('\n')), 'a notice never squeezes the last output row away')
   assert.match(tight.join('\n'), /retained job-a/, `the Output keeps its row at 44x4:\n${tight.join('\n')}`)
 
-  // 44×5: header + Output + notice + Action Bar all fit.
+  // 44×5: summary + tabs + Output + Action Bar use the whole grant, so the
+  // notice still yields — the Output keeps its row.
   vt.resize(44, 5)
   await vt.waitForRender()
   const five = rawView(vt)
   assert.equal(five.length, 5)
   assert.match(five[4]!, /Esc back/, 'the Action Bar stays the last row')
-  assert.match(five.join('\n'), /could not stop job job-a/, `the notice shows once an output row is still guaranteed:\n${five.join('\n')}`)
+  assert.ok(!/could not stop/.test(five.join('\n')),
+    `a notice still yields at 44x5:\n${five.join('\n')}`)
   assert.match(five.join('\n'), /retained job-a/, `the Output keeps its row at 44x5:\n${five.join('\n')}`)
+
+  // 44×6: the first grant tall enough for the transient notice — status, summary,
+  // tabs, Output, notice, Action Bar.
+  vt.resize(44, 6)
+  await vt.waitForRender()
+  const six = rawView(vt)
+  assert.equal(six.length, 6)
+  assert.match(six[5]!, /Esc back/, 'the Action Bar stays the last row at 44x6')
+  assert.match(six.join('\n'), /could not stop job job-a/, `the notice shows once an output row is still guaranteed:\n${six.join('\n')}`)
+  assert.match(six.join('\n'), /retained job-a/, `the Output keeps its row at 44x6:\n${six.join('\n')}`)
 
   vt.resize(80, 24)
   await vt.waitForRender()
@@ -820,7 +849,7 @@ test('A-06 the workspace re-budgets with the LIVE terminal: tail and Action Bar 
     await vt.waitForRender()
     const lines = rawView(vt)
     assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
-    assert.match(lines.join('\n'), /Job job-a · bash · running/, `the header must survive ${width}x${height}`)
+    assert.match(lines.join('\n'), /JOB\s+job-a · bash.*● RUNNING/, `the header must survive ${width}x${height}`)
     const barRow = lines.findIndex(line => /Esc back/.test(line))
     assert.notEqual(barRow, -1, `the Action Bar must be painted at ${width}x${height}`)
     assert.ok(barRow < height, `the Action Bar must be inside the screen at ${width}x${height}`)
@@ -853,8 +882,8 @@ test('A-07 a same-session A → B replacement releases each observer once and a 
   await vt.waitForRender()
   assert.equal(harness.observation.opensFor('job-b'), 1)
   assert.deepEqual(harness.observation.forJob('job-a'), [1], 'A is released exactly once when B replaces it')
-  assert.match(view(vt), /Job job-b · bash · running/)
-  assert.ok(!/Job job-a/.test(view(vt)), 'A must not repaint over B')
+  assert.match(view(vt), /JOB\s+job-b · bash.*● RUNNING/)
+  assert.ok(!/JOB\s+job-a/.test(view(vt)), 'A must not repaint over B')
   // Esc leaves B and the runtime slot is clean.
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -891,7 +920,7 @@ test('A-07b a re-entrant Job open inside the closing workspace\'s onClose wins o
     await vt.waitForRender()
     vt.sendInput('\r')
     await vt.waitForRender()
-    assert.match(view(vt), /Job job-a · bash · running/)
+    assert.match(view(vt), /JOB\s+job-a · bash.*● RUNNING/)
 
     // A -> B: B commits its token, then closing A re-enters and commits C.
     harness.tasks.openJobView('job-b')
@@ -900,8 +929,8 @@ test('A-07b a re-entrant Job open inside the closing workspace\'s onClose wins o
     assert.deepEqual(closed, ['close'], 'A notified its owner exactly once')
     assert.equal(harness.observation.opensFor('job-b'), 0, 'B never opened an observer: C superseded it first')
     assert.equal(harness.observation.opensFor('job-c'), 1)
-    assert.match(view(vt), /Job job-c · bash · running/, 'the newer workspace owns the screen')
-    assert.ok(!/Job job-b/.test(view(vt)), 'B must never paint over C')
+    assert.match(view(vt), /JOB\s+job-c · bash.*● RUNNING/, 'the newer workspace owns the screen')
+    assert.ok(!/JOB\s+job-b/.test(view(vt)), 'B must never paint over C')
     assert.deepEqual(harness.observation.forJob('job-a'), [1], 'A released its observer once')
     vt.sendInput('\x1b')
     await vt.waitForRender()
@@ -1009,7 +1038,7 @@ test('A-09 a Question / Approval / Save request arriving while the Job is open l
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
   const painted = view(vt)
   assert.match(painted, /blocking question\?/, `the question frame must be painted:\n${painted}`)
-  assert.ok(!/Job job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the question')
+  assert.ok(!/JOB\s+job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the question')
   // The question really owns the keyboard: its own two-step confirm is routed.
   vt.sendInput('\r')
   vt.sendInput('\r')
@@ -1036,7 +1065,7 @@ test('A-09b an Approval arriving while the Job is open leaves the workspace and 
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
   const painted = view(vt)
   assert.match(painted, /run the build/, `the approval must be painted:\n${painted}`)
-  assert.ok(!/Job job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the approval')
+  assert.ok(!/JOB\s+job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the approval')
   // The approval owns the keyboard: its own approve key reaches it.
   vt.sendInput('y')
   const outcome = await approval
@@ -1070,7 +1099,7 @@ test('A-09c a Save Location prompt arriving while the Job is open leaves the wor
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
   const painted = view(vt)
   assert.match(painted, /Save session archive/, `the Save prompt must be painted:\n${painted}`)
-  assert.ok(!/Job job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the prompt')
+  assert.ok(!/JOB\s+job-a · bash/.test(painted), 'the Job screen must be gone, not layered under the prompt')
   // The prompt owns the keyboard: Esc cancels it through its own contract.
   vt.sendInput('\x1b')
   const result = await save
@@ -1181,7 +1210,7 @@ test('A-09k an ALREADY-aborted Approval never preempts the Job workspace', async
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true,
     'the workspace keeps the physical surface for a request that can never appear')
   const painted = view(vt)
-  assert.match(painted, /Job job-a · bash · running/, `the workspace must stay visible:\n${painted}`)
+  assert.match(painted, /JOB\s+job-a · bash.*● RUNNING/, `the workspace must stay visible:\n${painted}`)
   assert.ok(!/cancelled long ago/.test(painted), 'no approval frame may be mounted')
   handle.close()
   await vt.waitForRender()
@@ -1356,7 +1385,7 @@ test('A-09i a workspace leased BY the abandonment callback while a blocking owne
     // surface and really owns the keyboard — never an invisible frame over a Job.
     const painted = view(vt)
     assert.match(painted, /blocking question\?/, `the blocking owner must be visible:\n${painted}`)
-    assert.ok(!/Job job-a · bash/.test(painted), 'no Job screen may remain behind the blocking owner')
+    assert.ok(!/JOB\s+job-a · bash/.test(painted), 'no Job screen may remain behind the blocking owner')
     assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
     assert.deepEqual(harness.observation.forJob('job-b'), [1],
       'the refused lease released its observation exactly once')
@@ -1549,7 +1578,7 @@ test('A-12 a throwing workspace open releases the observation once, retires the 
   // clear it.
   harness.tasks.openJobView('job-b')
   await vt.waitForRender()
-  assert.match(view(vt), /Job job-b · bash · running/)
+  assert.match(view(vt), /JOB\s+job-b · bash.*● RUNNING/)
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.deepEqual(harness.observation.forJob('job-b'), [1])
@@ -1637,7 +1666,7 @@ test('A-12d a REAL failing Job screen start unwinds: the observation is released
   assert.deepEqual(harness.observation.forJob('job-a'), [1, 1])
   harness.tasks.openJobView('job-b')
   await vt.waitForRender()
-  assert.match(view(vt), /Job job-b · bash · running/)
+  assert.match(view(vt), /JOB\s+job-b · bash.*● RUNNING/)
   assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
   vt.sendInput('\x1b')
   await vt.waitForRender()
