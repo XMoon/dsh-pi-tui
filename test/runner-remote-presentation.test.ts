@@ -412,8 +412,7 @@ test('L6: the resumed Remote startup keeps input accepted while its hydration re
     session.append('step/end', { turn: 1, step: 1 })
     session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   }
-  let enterRead!: () => void
-  const readEntered = new Promise<void>(resolve => { enterRead = resolve })
+  let readEntered = false
   let releaseRead!: () => void
   const readGate = new Promise<void>(resolve => { releaseRead = resolve })
   let gated = false
@@ -436,13 +435,15 @@ test('L6: the resumed Remote startup keeps input accepted while its hydration re
         // "hydration still pending while the terminal accepts input" window a
         // slow production read produces.
         const captured = await real.call(reader, sessionId, signal)
-        enterRead()
+        readEntered = true
         await readGate
         return captured
       }
     },
   })
-  await readEntered
+  // Bounded readiness: a startup read that never runs (or a first persist that
+  // never lands) fails this test instead of parking it.
+  await waitFor('the held startup read to be entered', () => readEntered, 20_000)
   const editor = fixture.runnerApp() as unknown as {
     setDraft(text: string): void
     submitDraft(): void
@@ -462,6 +463,7 @@ test('L6: the resumed Remote startup keeps input accepted while its hydration re
   const historyFile = historyFilePath(host.workRoot, host.anchorDir)
   const ownersOf = (text: string): readonly (string | undefined)[] => loadHistoryRecords(historyFile)
     .filter(row => row.content === text).map(row => row.sessionId)
+  try {
 
   // The first submission persists BEFORE the held hydration commits.
   editor.setDraft('first remote prompt')
@@ -500,6 +502,10 @@ test('L6: the resumed Remote startup keeps input accepted while its hydration re
   fixture.vt.sendInput('\x1b[A')
   await waitFor('↑ recalls the input accepted during the held read', () =>
     editor.getDraft() === 'pending remote prompt', 5_000)
+  } finally {
+    // Never leave the startup hydration parked, whatever failed above.
+    releaseRead()
+  }
 })
 
 test('L6: the Remote branch performs zero Direct graph construction', async (t) => {

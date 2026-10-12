@@ -2634,6 +2634,52 @@ test('the recall scope reconciles written, skipped and pending submissions in su
   app.stop()
 })
 
+test('rows written by OTHER session-scoped writers are never consumed by a scope occurrence', async () => {
+  // A Ctrl+S steer (and an extension steer) writes a row through the same
+  // history owner WITHOUT passing `rememberInput`, so the snapshot can carry
+  // rows the scope never saw. Only a scope occurrence's OWN row may be claimed:
+  // every other row stays, in its own rank.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['old'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('entered')
+  assert.deepEqual(submitted, ['entered'])
+  // The scope wrote `entered`; a steer wrote `steered` afterwards.
+  app.settleScopeInput('session-b', 'entered')
+  app.resetInputHistory(['steered', 'entered', 'older B'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['steered', 'entered', 'older B'],
+    'the steer row and the earlier-window row survive; the scope row is not doubled')
+  // Two scope rows with an external row between them, in append order.
+  app.beginInputHistoryScope('session-c')
+  await submit('first')
+  await submit('second')
+  app.settleScopeInput('session-c', 'first')
+  app.settleScopeInput('session-c', 'second')
+  app.resetInputHistory(['second', 'steered between', 'first'], 'session-c')
+  assert.deepEqual(app.getInputHistory(), ['second', 'steered between', 'first'],
+    'the external row keeps its rank between the two claimed rows')
+  // The SAME text written by both writers: the claimed occurrence and the
+  // external row collapse exactly like the baseline reseed does.
+  app.beginInputHistoryScope('session-d')
+  await submit('x')
+  app.settleScopeInput('session-d', 'x')
+  app.resetInputHistory(['x', 'x', 'older'], 'session-d')
+  assert.deepEqual(app.getInputHistory(), ['x', 'older'],
+    'a repeated text across the two writers matches the baseline reseed exactly')
+  // A marked row older than the recall window (the 100-row cap) is not in the
+  // snapshot at all: the occurrence keeps its OLDER rank (after every row the
+  // window still holds) and no snapshot row is claimed — the seed's own 100-row
+  // cap then drops it exactly like the baseline did.
+  app.beginInputHistoryScope('session-e')
+  await submit('beyond the cap')
+  app.settleScopeInput('session-e', 'beyond the cap')
+  app.resetInputHistory(['someone else row', 'older'], 'session-e')
+  assert.deepEqual(app.getInputHistory(), ['someone else row', 'older', 'beyond the cap'],
+    'a claimed row beyond the recall cap keeps its older rank and consumes no row')
+  app.stop()
+})
+
 test('a repeated submission inside the scope keeps its own occurrence and predecessor', async () => {
   // a (skipped by the CWD policy) → b (written) → a (written). The scope's
   // predecessor must stay the TRUE submission sequence (b), so the later `a` is

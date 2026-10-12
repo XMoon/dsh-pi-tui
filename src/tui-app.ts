@@ -6376,13 +6376,18 @@ export class TuiApp {
       return
     }
     // Every scope submission is NEWER than any snapshot row from an earlier
-    // window, so the recall is the scope's own submission order, with the
-    // snapshot rows the written submissions already own consumed from its
-    // newest end (append order = submission order). An occurrence written under
+    // window, but the scope is NOT the only session-scoped writer: a Ctrl+S
+    // steer and an extension steer append rows through the same history owner
+    // without ever passing `rememberInput`. The recall therefore keeps EVERY
+    // snapshot row and gives each scope occurrence its own rank: walking the
+    // scope newest-first, a written occurrence claims its row — the scope's rows
+    // are appended in submission order, so external rows sitting between two of
+    // them are emitted in place as they are passed — while a still-pending or
+    // policy-skipped occurrence is inlined at its own rank. A row written under
     // ANOTHER identity (a sessionless pool row) is not part of this Session's
-    // projection and is dropped without consuming a row.
+    // projection and is dropped without claiming a row.
     const merged: string[] = []
-    let covered = 0
+    let cursor = 0
     for (const entry of this.pendingScopeInputs) {
       const written = entry.written
       if (written === undefined) {
@@ -6390,10 +6395,20 @@ export class TuiApp {
         continue
       }
       if (written.owner !== owner) continue
-      merged.push(entry.text)
-      covered += 1
+      while (cursor < entries.length && entries[cursor] !== entry.text) {
+        merged.push(entries[cursor]!)
+        cursor += 1
+      }
+      // Its own row, or — past the recall cap, where the row is not in the
+      // window at all — the submission itself, which stays in the recall.
+      if (cursor < entries.length) {
+        merged.push(entries[cursor]!)
+        cursor += 1
+      } else {
+        merged.push(entry.text)
+      }
     }
-    this.seedInputHistory([...merged, ...entries.slice(covered)])
+    this.seedInputHistory([...merged, ...entries.slice(Math.min(cursor, entries.length))])
     this.pendingScopeInputs.length = 0
     this.scopeOpen = false
     this.scopeOwner = owner
