@@ -189,9 +189,10 @@ catalog/read owner, writer, default-intent tracker, admission point and SDK tty
 owner remain, and the write payload rules are untouched. What is covered
 headlessly (the full page/zone/action matrix and the retained invariants) is
 described in [../model-selection.md](../model-selection.md), and its real-pane run
-(real Tern 0.8.2: card head/body pointer hit, real `select`/`activate`, footer
-containment and the one write at 400x600 and 1280x800) is tabulated in that same
-document's "Real-pane verification" section; only the enlarged-font matrix and the
+(real Tern 0.8.2 through the repository's real-pane harness,
+`scripts/tern-pane-model-ux.mjs`: card head/body pointer hit, real
+`select`/`activate`, footer containment and the one write at 400x600 and
+1280x800) is tabulated in that same document's "Real-pane verification" section; only the enlarged-font matrix and the
 orthogonal wheel/IME/theme/Remote paths stay `NOT_VERIFIED`. The measured
 guarantees of §0.1/§0.1b still belong to the surfaces those runs measured and are
 not inherited by the new pages.
