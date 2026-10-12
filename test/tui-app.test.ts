@@ -2996,6 +2996,33 @@ test('the first Session publication isolates the boot recall of the CWD history'
   app.stop()
 })
 
+test('the first publication never re-seeds an occurrence another identity already wrote', async () => {
+  // A sessionless `/help` (its row is written with `sessionId: undefined`) followed
+  // by the prompt that creates Session B: the publication must NOT re-seed the
+  // sessionless occurrence into B's temporary recall, while the accepted but still
+  // unpersisted prompt stays.
+  const { vt, app, submitted, settleAt } = startApp()
+  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, 'first prompt')
+  assert.deepEqual(submitted, ['/help', 'first prompt'])
+  settleAt(0, undefined, 'written')       // /help wrote a SESSIONLESS row
+  app.beginInputHistoryScope('B')         // the boot recall is dropped, B published
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'first prompt', 'the unpersisted B prompt is recallable')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.notEqual(app.getDraft(), '/help',
+    'a sessionless occurrence already written under another identity is not re-seeded')
+  app.resetInputHistory([], 'B')
+  assert.deepEqual(app.getInputHistory(), ['first prompt'],
+    'hydration keeps the B projection: the sessionless row adds nothing')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)
