@@ -219,6 +219,22 @@ rebuild alone.
     sanctioned seams (read-only viewer guard, the Ctrl+C clear-draft
     semantic discriminator, approval dialog keys, replacement-editor Enter
     seams, the effective-submit Shift+Enter exclusion).
+12. **A fullscreen Job workspace re-scopes the EFFECTIVE Find binding to
+    its own Output.** While a Job workspace owns the physical screen, the
+    winning resolution of `app.transcript.search` is interpreted as
+    "find in the current retained Output": the key is consumed by the Job
+    panel, the global Transcript search handler is never entered and the
+    fork's built-in search overlay is never opened. This reuses the LIVE
+    winner (so a remap, a disable or a leader-only binding moves the Job
+    key too, and a disabled Find advertises nothing) without creating a
+    second configurable action id or a second keymap truth; `/` stays a
+    non-configurable Job-local alias, active only while the query is not
+    being edited. A leader completion is the same action's effective
+    completion: the Job input branch feeds exactly the exit-bound and
+    Find-bound completing keys to the shared machine and cancels every
+    other completion without dispatching it, and the leader activation
+    wiring intercepts Find for the Job BEFORE the host action dispatch —
+    never "open the Transcript search, then repair it".
 
 ## User configuration
 

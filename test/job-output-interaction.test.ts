@@ -1,0 +1,870 @@
+/**
+ * Phase 3B / B1-B — the Job retained Output interaction (implementation plan
+ * §8, B-01..B-15): the strict End-only follow owner, the Job-local Find over the
+ * REAL retained body, the one-frame chrome budget and the retention anchor.
+ *
+ * The REAL closure for the L6 cases: a mounted `TuiApp` + `VirtualTerminal`
+ * drives the REAL `createTaskRuntime` owner, the real Task Browser and the real
+ * `JobInspectorPanel` on its own temporary `TuiAltScreen`; only the external
+ * Job-observation PORT is replaced by an acquire/emit/disposer recorder. The
+ * pure cases exercise the production `JobOutputScrollView` and the pure
+ * `rebaseRetainedAnchor`.
+ *
+ * @module @xmoon76/dsh-pi-tui/job-output-interaction.test
+ */
+
+import assert from 'node:assert/strict'
+import { afterEach, test } from 'node:test'
+import { stripTerminalSequences, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import type { TaskBrowserHandle, TuiAppEvents } from '../src/tui-app.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import { JobInspectorPanel } from '../src/tui/panels/job-inspector-panel.ts'
+import { JobOutputScrollView } from '../src/tui/panels/job-output-scroll-view.ts'
+import { rebaseRetainedAnchor } from '../src/tui/panels/job-output-search.ts'
+import { createTaskRuntime, type JobInspectorState, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
+import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
+import type { SessionSubject } from '../src/app/session/subject.ts'
+import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
+import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { displaySeamStub } from './support/display-seam-stub.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+function startApp(
+  options: Record<string, unknown> = {},
+  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'onOpenTasks' | 'runOwned'>> = {},
+  columns = 80,
+  rows = 24,
+): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(columns, rows)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => events.onExit?.() ?? undefined,
+    ...(events.onFullscreenChange === undefined ? {} : { onFullscreenChange: events.onFullscreenChange }),
+    ...(events.onOpenTasks === undefined ? {} : { onOpenTasks: events.onOpenTasks }),
+    ...(events.runOwned === undefined ? {} : { runOwned: events.runOwned }),
+  }, options)
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+const rawView = (vt: VirtualTerminal): string[] => vt.getViewport().map(stripTerminalSequences)
+const view = (vt: VirtualTerminal): string => rawView(vt).join('\n')
+
+async function flush(rounds = 8): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+}
+
+interface ObservationRecord {
+  readonly jobId: string
+  closes: number
+  readonly emit: (patch: Partial<JobObservedSnapshot>) => void
+}
+
+class JobObservationDouble implements JobObservationPort {
+  readonly records: ObservationRecord[] = []
+  readonly stops: string[] = []
+  openFailure: string | undefined
+  syncEmit = true
+  stopOutcome: JobStopOutcome = { kind: 'requested' }
+  stopFailure: Error | undefined
+
+  open(_sessionId: string | undefined, jobId: string, listener: (snapshot: JobObservedSnapshot) => void): () => void {
+    if (this.openFailure !== undefined) throw new Error(this.openFailure)
+    const record: ObservationRecord = {
+      jobId,
+      closes: 0,
+      emit: (patch) => listener({
+        jobId,
+        kind: 'bash',
+        label: `job ${jobId}`,
+        status: 'running',
+        text: `retained ${jobId}`,
+        gapBefore: false,
+        settled: false,
+        ...patch,
+      }),
+    }
+    this.records.push(record)
+    if (this.syncEmit) record.emit({})
+    return () => { record.closes += 1 }
+  }
+
+  async stop(_sessionId: string, jobId: string): Promise<JobStopOutcome> {
+    this.stops.push(jobId)
+    if (this.stopFailure !== undefined) throw this.stopFailure
+    return this.stopOutcome
+  }
+
+  latest(): ObservationRecord | undefined {
+    return this.records.at(-1)
+  }
+
+  forJob(jobId: string): number[] {
+    return this.records.filter(record => record.jobId === jobId).map(record => record.closes)
+  }
+}
+
+interface TaskHarness {
+  readonly tasks: TaskRuntime
+  readonly observation: JobObservationDouble
+  readonly retires: readonly string[]
+  lastBrowser(): TaskBrowserHandle | undefined
+}
+
+function attachTasks(app: TuiApp, options: { jobIds?: readonly string[] } = {}): TaskHarness {
+  const jobIds = [...(options.jobIds ?? [])]
+  const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => ({
+    id,
+    kind: 'bash',
+    label: `job ${id}`,
+    status: 'running',
+    startedAt: 1_000 + index,
+  }))
+  const observation = new JobObservationDouble()
+  const subject = {} as SessionSubject
+  const source: TaskSurfaceSource = {
+    sessionId: () => 'sess-main',
+    captureSubject: () => subject,
+    subjectMatches: candidate => candidate === subject,
+    enterView: async () => {},
+    interruptSubagent: async () => { throw new Error('subagent interrupt is not exercised by this suite') },
+    rowSelectionDisposition: (row, jobDetail) => row === undefined || row.kind === 'job' ? jobDetail : 'close',
+    subagentJobTranscriptId: () => undefined,
+    subagentJobViewHint: status => status,
+    jobObservation: observation,
+    jobs: { list: () => jobSnapshots(), subscribe: () => () => {} },
+    taskRead: {
+      currentKey: () => 'g1:sess-main',
+      currentSessionId: () => 'sess-main',
+      readTask: async () => ({
+        parentSessionId: 'sess-main',
+        parentAvailable: true,
+        descendants: [],
+        jobs: jobSnapshots(),
+      }),
+      activityOf: () => 'running',
+    },
+  }
+  const tasks = createTaskRuntime({
+    mounted: () => app,
+    display: () => displaySeamStub(),
+    isCleanedUp: () => false,
+    attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+  })
+  tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
+  const browsers: TaskBrowserHandle[] = []
+  const retires: string[] = []
+  const originalOpenTaskBrowser = app.openTaskBrowser
+  app.openTaskBrowser = function (
+    this: TuiApp,
+    items: Parameters<typeof originalOpenTaskBrowser>[0],
+    onSelect: Parameters<typeof originalOpenTaskBrowser>[1],
+    onCancel: Parameters<typeof originalOpenTaskBrowser>[2],
+    browserOptions: Parameters<typeof originalOpenTaskBrowser>[3],
+  ): TaskBrowserHandle {
+    const innerRetire = browserOptions.onRetired
+    const handle = originalOpenTaskBrowser.call(this, items, onSelect, onCancel, {
+      ...browserOptions,
+      onRetired: (reason) => {
+        retires.push(reason)
+        innerRetire?.(reason)
+      },
+    })
+    browsers.push(handle)
+    return handle
+  }
+  return { tasks, observation, retires, lastBrowser: () => browsers.at(-1) }
+}
+
+/** Open the first Job of the REAL `/tasks` browser through the real selection. */
+async function openFirstJob(vt: VirtualTerminal, harness: TaskHarness): Promise<void> {
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+}
+
+/** The ONE retained body text of the fixture: numbered single visual rows. */
+const numberedLines = (from: number, to: number, prefix = 'line'): string =>
+  Array.from({ length: to - from + 1 }, (_, index) => `${prefix} ${String(from + index).padStart(3, '0')}`).join('\n')
+
+/** The FIRST retained-body row of the painted frame. It is located by content
+ *  (`line NNN`) rather than a fixed row index, so a header that gains the GAP
+ *  fact row (or a SearchRow) never shifts the read. A transient auto scrollbar
+ *  paints over the last column after a manual scroll and is stripped. */
+const bodyTop = (vt: VirtualTerminal): string =>
+  rawView(vt).map(row => row.trim().replace(/[\s│┃|]+$/, '')).find(row => /^line \d{3}$/.test(row)) ?? ''
+
+// ── B-01: the strict follow owner (pure/component) ──────────────────────────
+
+/** A fixed-size component: the ScrollView's only child in the pure cases. */
+class Lines implements Component {
+  private readonly count: number
+  constructor(count: number) { this.count = count }
+  render(): string[] { return Array.from({ length: this.count }, (_, index) => `row ${index}`) }
+  invalidate(): void {}
+}
+
+test('B-01 JobOutputScrollView: every manual scroll pauses, only End re-arms, and relayout never steals the intent', () => {
+  const mk = (content: number, viewport: number): JobOutputScrollView => {
+    const view = new JobOutputScrollView(new Lines(content), { follow: 'end', primary: true, scrollbar: 'auto' })
+    view.updateLayout(content, viewport, () => {})
+    return view
+  }
+
+  // Initial: the native tail follows and the intent is ON.
+  const view = mk(50, 10)
+  assert.equal(view.isFollowRequested, true)
+  assert.equal(view.isFollowingEnd, true, 'the native tail follow paints the newest rows')
+  assert.equal(view.scrollTop, 40)
+
+  // A single line up pauses and really leaves the tail.
+  view.scrollBy(-1)
+  assert.equal(view.isFollowRequested, false)
+  assert.equal(view.scrollTop, 39)
+  assert.equal(view.isFollowingEnd, false)
+
+  // Down to the very last row does NOT re-arm (the fork would).
+  assert.equal(view.scrollBy(1), 0, 'the unconsumed remainder is preserved')
+  assert.equal(view.scrollTop, 40)
+  assert.equal(view.isFollowRequested, false)
+  assert.equal(view.isFollowingEnd, false, 'reaching the bottom is not following')
+
+  // A newer snapshot (content append) while PAUSED keeps the same top row.
+  view.updateLayout(80, 10, () => {})
+  assert.equal(view.scrollTop, 40, 'the visible top row is preserved across an append')
+  assert.equal(view.isFollowRequested, false)
+
+  // Content shrink must not re-arm either.
+  view.updateLayout(30, 10, () => {})
+  assert.equal(view.isFollowRequested, false)
+
+  // Viewport growth must not re-arm.
+  view.scrollTo(5)
+  view.updateLayout(50, 20, () => {})
+  assert.equal(view.isFollowRequested, false, 'a viewport growth never steals the historical row')
+  assert.equal(view.scrollTop, 5)
+
+  // Explicit End is the ONLY re-arm. Scrolling to the (already reached) max
+  // still returns the unconsumed remainder exactly like the fork.
+  assert.equal(view.scrollBy(100), 75)
+  view.resumeFollow()
+  assert.equal(view.isFollowRequested, true)
+  assert.equal(view.scrollTop, 30, 'the viewport growth moved the tail (50 rows - 20 rows)')
+  assert.equal(view.isFollowingEnd, true)
+
+  // A scrollbar-equivalent jump pauses even at the max target.
+  view.scrollTo(30)
+  assert.equal(view.isFollowRequested, false)
+  assert.equal(view.isFollowingEnd, false)
+
+  // `scrollToEnd` is an ordinary manual jump, never the End key.
+  view.resumeFollow()
+  view.scrollToEnd()
+  assert.equal(view.isFollowRequested, false)
+  assert.equal(view.isFollowingEnd, false)
+
+  // `Home` on short content stays PAUSED too.
+  const short = mk(3, 10)
+  assert.equal(short.isFollowRequested, true)
+  short.scrollToStart()
+  assert.equal(short.isFollowRequested, false)
+  assert.equal(short.isFollowingEnd, false)
+
+  // The rebase re-positions without touching the intent, and follow stays ON
+  // (the tail) when the user never left it.
+  view.resumeFollow()
+  view.rebaseTo(10)
+  assert.equal(view.isFollowRequested, true, 'the rebase never changes the follow intent')
+  assert.equal(view.scrollTop, 10)
+  view.dispose()
+})
+
+test('B-01b rebaseRetainedAnchor: a pure append keeps the row, an eviction shifts by the proven rows', () => {
+  const old = ['a', 'b', 'c', 'd', 'e']
+  // Pure append: nothing moved.
+  assert.equal(rebaseRetainedAnchor({
+    previousText: 'x', nextText: 'xy', previousRenderedLines: old, nextRenderedLines: [...old, 'f'], oldScrollTop: 2,
+  }), 2)
+  // Evicts `a`,`b`: the surviving rows 2..4 shift up by two.
+  assert.equal(rebaseRetainedAnchor({
+    previousText: 'old window', nextText: 'new window',
+    previousRenderedLines: old, nextRenderedLines: ['c', 'd', 'e', 'f'], oldScrollTop: 4,
+  }), 2)
+  // No provable overlap: the old offset survives and the viewport clamps it.
+  assert.equal(rebaseRetainedAnchor({
+    previousText: 'old window', nextText: 'new window',
+    previousRenderedLines: old, nextRenderedLines: ['x', 'y'], oldScrollTop: 3,
+  }), 3)
+  // The clamp never invents a negative offset.
+  assert.equal(rebaseRetainedAnchor({
+    previousText: 'old window', nextText: 'new window',
+    previousRenderedLines: old, nextRenderedLines: ['d', 'e'], oldScrollTop: 0,
+  }), 0)
+})
+
+// ── B-02: the real Job screen, keyboard scroll and the strict follow ─────────
+
+test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll the Output, End re-arms, and the background never moves', async () => {
+  // 120×40: the frame can carry the LOWEST-priority viewport position too, so
+  // the bar's own position fact is read from the user's sink.
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'transcript row' }])
+  vt.sendInput('kept draft')
+  await vt.waitForRender()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+
+  let painted = view(vt)
+  assert.match(painted, /line 199/, 'the tail is visible on open')
+  assert.match(painted, /Follow ON/)
+  assert.match(painted, /Job job-a · bash · running/)
+  assert.match(painted, /Esc back/)
+  assert.equal(bodyTop(vt), 'line 163', 'the 37-row Output viewport starts at the retained tail')
+
+  // PgUp is an active browse: pause and move the body.
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  painted = view(vt)
+  assert.match(painted, /Follow PAUSED/)
+  assert.ok(!/line 199/.test(painted), 'the tail leaves the viewport')
+  assert.equal(bodyTop(vt), 'line 130')
+  assert.match(painted, /Job job-a · bash · running/, 'the Header stays pinned')
+  assert.match(painted, /Esc back/, 'the Action Bar stays the last row')
+
+  // Home goes to the top of THIS retained preview and stays PAUSED.
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 000')
+  assert.match(view(vt), /Follow PAUSED/)
+
+  // Arrows move one line at a time; PgDn moves back down without re-arming.
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 001')
+  vt.sendInput('\x1b[6~')
+  await vt.waitForRender()
+  assert.ok(bodyTop(vt) !== 'line 001')
+  assert.match(view(vt), /Follow PAUSED/, 'PgDn is browsing, never a re-arm')
+
+  // Physical End re-arms and returns to the retained tail.
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  painted = view(vt)
+  assert.match(painted, /Follow ON/)
+  assert.match(painted, /line 199/)
+  assert.match(painted, /rows 164-200\/200/, 'the position is the retained preview, not Job history')
+
+  // The background surface never moved and never received the keys.
+  assert.equal(app.hostEditorTextForTest(), 'kept draft')
+  app.stop()
+})
+
+// ── B-03: pushes while PAUSED, End catch-up, then follow again ──────────────
+
+test('B-03 a newer official snapshot never moves a PAUSED viewport; End catches up and keeps following', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  const observation = harness.observation
+  observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 130')
+  const opensBefore = observation.records.length
+
+  // A pure append while PAUSED: the top row must not move.
+  observation.latest()!.emit({ text: numberedLines(0, 239) })
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 130', 'a pure append never pulls the user to the tail')
+  assert.match(view(vt), /Follow PAUSED/)
+  assert.match(view(vt), /rows 131-167\/240/)
+
+  // End catches up and follows the newer tail; the NEXT push keeps following.
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  assert.match(view(vt), /line 239/)
+  assert.match(view(vt), /Follow ON/)
+  observation.latest()!.emit({ text: numberedLines(0, 259) })
+  await vt.waitForRender()
+  assert.match(view(vt), /line 259/, 'follow really tracks the newer tail')
+  assert.equal(observation.records.length, opensBefore, 'no second observation was ever opened')
+  assert.deepEqual(observation.stops, [], 'scrolling/search never touches Stop')
+  app.stop()
+})
+
+// ── B-04: real terminal wheel input ─────────────────────────────────────────
+
+test('B-04 a real alt-screen wheel pauses follow, and a later append is not followed', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow ON/)
+
+  vt.sendInput('\x1b[<64;20;12M') // wheel up over the body
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /Follow PAUSED/, 'a wheel is a real browse and pauses follow')
+  assert.ok(!/line 199/.test(painted))
+
+  // Spin all the way to the last row: it is still PAUSED (no auto re-arm).
+  for (let index = 0; index < 30; index += 1) vt.sendInput('\x1b[<65;20;12M')
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow PAUSED/, 'dragging to the bottom never re-arms follow')
+  assert.match(view(vt), /line 199/)
+
+  harness.observation.latest()!.emit({ text: numberedLines(0, 219) })
+  await vt.waitForRender()
+  assert.match(view(vt), /Follow PAUSED/)
+  assert.ok(!/line 219/.test(view(vt)), 'a newer tail is not followed after manual browsing')
+  app.stop()
+})
+
+// ── B-05: the effective Find is Job-local ───────────────────────────────────
+
+test('B-05 the effective Find opens the JOB Find over the retained body and never enters the Transcript search', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: `retained head\nneedle here\nretained tail` })
+  await vt.waitForRender()
+
+  // Patch the LIVE app's production search entry (receiver preserved) so "the
+  // Transcript search never opened" is a real call count.
+  const originalStart = app.startTranscriptSearch
+  let transcriptSearches = 0
+  app.startTranscriptSearch = function (this: TuiApp): void {
+    transcriptSearches += 1
+    originalStart.call(this)
+  }
+  const overlaysBefore = app.overlayGraphState().handles
+  const draftBefore = app.hostEditorTextForTest()
+
+  vt.sendInput('\x06') // Ctrl+F — the effective app.transcript.search binding
+  await vt.waitForRender()
+  let painted = view(vt)
+  assert.match(painted, /Find Output:/, 'the Job SearchRow really opened')
+  assert.equal(transcriptSearches, 0, 'the Transcript search handler was never entered')
+  assert.equal(app.overlayGraphState().handles, overlaysBefore, 'no transcript search overlay was opened')
+  assert.equal(app.hostEditorTextForTest(), draftBefore, 'Find never types into the editor')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false,
+    'the SearchRow owns the physical focus while editing')
+
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  painted = view(vt)
+  assert.match(painted, /Find Output: needle/)
+  assert.match(painted, /1\/1/, 'the match is counted in the retained window')
+  assert.equal(app.hostEditorTextForTest(), draftBefore)
+
+  // A query that only exists in the Header or the Command must NOT match.
+  vt.sendInput('\x15') // Ctrl+U clears the Input line
+  await vt.waitForRender()
+  vt.sendInput('job-a')
+  await vt.waitForRender()
+  assert.match(view(vt), /0\/0 · No matches/, 'Header/command text is not searchable Output')
+  assert.equal(transcriptSearches, 0)
+  app.stop()
+})
+
+// ── B-06: EDIT vs NAVIGATE and n/N ─────────────────────────────────────────
+
+test('B-06 EDIT types n/N as query text, Enter enters result navigation, n/N cycle, and 0 hits stay 0/0', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: `needle one\nmiddle\nneedle two\nneedle three` })
+  await vt.waitForRender()
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/)
+  // In EDIT, `n` is query text — it can never navigate.
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output: needlen/)
+  assert.match(view(vt), /0\/0 · No matches/)
+  vt.sendInput('\x7f')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output: needle/)
+
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/, 'Enter selects the nearest hit to the opening anchor')
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /2\/3/)
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /3\/3/)
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/, 'n wraps')
+  vt.sendInput('N')
+  await vt.waitForRender()
+  assert.match(view(vt), /3\/3/, 'N wraps backwards')
+  // Ordinary printing in NAVIGATE is inert: the Job stays read-only.
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.match(view(vt), /3\/3/)
+  assert.equal(app.hostEditorTextForTest(), '')
+  app.stop()
+})
+
+// ── B-07: Esc layering and End ─────────────────────────────────────────────
+
+test('B-07 the first Esc leaves only the search (still PAUSED in the same Job) and the second returns to the same browser; End resumes from a search', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 99) })
+  await vt.waitForRender()
+  const browser = harness.lastBrowser()!
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('line 05')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output: line 05/)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/10/)
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.ok(!/Find Output:/.test(painted), 'the first Esc closes the search')
+  assert.match(painted, /Job job-a · bash · running/, 'the Job workspace is still open')
+  assert.match(painted, /Follow PAUSED/, 'the Esc never re-arms follow')
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+
+  // End inside a result view leaves the search AND returns to the tail.
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\x1b[F')
+  await vt.waitForRender()
+  const tail = view(vt)
+  assert.ok(!/Find Output:/.test(tail), 'End leaves the result view')
+  assert.match(tail, /Follow ON/)
+  assert.match(tail, /line 099/)
+
+  // The second Esc returns to the SAME browser instance.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(harness.lastBrowser(), browser)
+  assert.match(view(vt), /job-a/, 'the Task Browser is painted again')
+  harness.tasks.disposeTaskBrowser()
+  app.stop()
+})
+
+// ── B-08: remap / disable / leader ─────────────────────────────────────────
+
+test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable and a leader completion are all honored', async () => {
+  // A wide frame so the LOWEST-priority Find hint is actually on screen and can
+  // be read as the user's sink (plan §6.2 degradation order).
+  const { vt, app } = startApp({}, {}, 200, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: 'needle' })
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Ctrl\+F \//, 'the default direct binding is advertised')
+
+  // A disabled Find advertises nothing and Ctrl+F is inert.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    bindings: { 'app.transcript.search': false },
+  }))
+  await vt.waitForRender()
+  assert.ok(!/Ctrl\+F/.test(view(vt)), 'a disabled Find never advertises Ctrl+F')
+  assert.match(view(vt), /Find \//, 'the Job-local `/` alias still advertises the only live entry')
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.ok(!/Find Output:/.test(view(vt)), 'a disabled binding does not open the Job Find')
+  // `/` remains the Job-local alias.
+  vt.sendInput('/')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+
+  // A remap is what the Job honors — both the hint and the real key.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    bindings: { 'app.transcript.search': 'ctrl+y' },
+  }))
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Ctrl\+Y \//, 'the hint follows the effective remap')
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.ok(!/Find Output:/.test(view(vt)), 'the old key is really inert')
+  vt.sendInput('\x19')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+
+  // A leader-bound Find completes into the Job Find without dispatching the
+  // Transcript search.
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    leader: 'ctrl+x',
+    bindings: { 'app.transcript.search': '<leader>s' },
+  }))
+  const originalStart = app.startTranscriptSearch
+  let transcriptSearches = 0
+  app.startTranscriptSearch = function (this: TuiApp): void {
+    transcriptSearches += 1
+    originalStart.call(this)
+  }
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('s')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/, 'the leader completion opens the Job Find')
+  assert.equal(transcriptSearches, 0, 'the Transcript search handler is never dispatched')
+  app.stop()
+})
+
+// ── B-09: CJK / wrapping / ANSI ────────────────────────────────────────────
+
+test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and visible width, and highlights the hit', async () => {
+  // A SHORT body so the whole fixture stays inside the Output viewport: the
+  // highlight comparison is then a same-row, same-width proof.
+  const lines = [
+    'alpha 中文 needle beta',
+    `wrap ${'x'.repeat(60)}`,
+    '\x1b[31mred needle tail\x1b[39m',
+    'tail needle end',
+  ].join('\n')
+  const contentRows = (vt: VirtualTerminal): string[] =>
+    rawView(vt).filter(row => /alpha|wrap|red needle|tail needle/.test(row)).map(row => row.trim())
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: lines })
+  await vt.waitForRender()
+  const before = contentRows(vt)
+  const beforeWidths = before.map(row => visibleWidth(row))
+  assert.equal(before.length, 4, 'the whole fixture is visible before the search')
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('中文')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/1/, 'CJK text is matched through the rendered matcher')
+  vt.sendInput('\x15')
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/)
+  // Navigate so the first hit (row 0) is the current, strongly highlighted one
+  // and the others stay weak — the reveal must not change any content row.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const after = contentRows(vt)
+  assert.deepEqual(after, before, 'highlighting never changes the rendered content')
+  assert.deepEqual(after.map(row => visibleWidth(row)), beforeWidths,
+    'highlighting never changes a visible width')
+  for (const row of rawView(vt)) assert.ok(visibleWidth(row) <= 80)
+
+  const rowsWith = (fragment: string): number => rawView(vt).findIndex(row => row.includes(fragment))
+  const scan = (row: number): { background: number; underline: number } => {
+    let background = 0
+    let underline = 0
+    for (let column = 0; column < 80; column += 1) {
+      if (vt.getCellBgRgb(row, column) !== undefined) background += 1
+      if (vt.getCellUnderline(row, column)) underline += 1
+    }
+    return { background, underline }
+  }
+  const currentRow = rowsWith('alpha 中文 needle beta')
+  assert.ok(currentRow >= 0, 'the current hit row is visible (the reveal ran)')
+  assert.ok(scan(currentRow).background > 0, 'the current hit carries the themed background highlight')
+  const weakRow = rowsWith('red needle tail')
+  assert.ok(weakRow >= 0, 'the other occurrence stays visible')
+  const weak = scan(weakRow)
+  assert.ok(weak.underline > 0, 'the other occurrence is weak-underlined')
+  assert.equal(weak.background, 0, 'only the current occurrence gets the strong background')
+
+  // A re-search over the ALREADY highlighted render must not see the highlight
+  // decoration: the matcher indexes the raw retained rows only.
+  vt.sendInput('\x15')
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/3/, 'the decorated render never becomes the search source')
+  app.stop()
+})
+
+// ── B-10: bounded retention and the GAP truth ──────────────────────────────
+
+test('B-10 a truncated retained window rebases a provable anchor, never fabricates GAP, and the footer stays preview-relative', async () => {
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  const observation = harness.observation
+  observation.latest()!.emit({ text: numberedLines(0, 199) })
+  await vt.waitForRender()
+
+  // Pause at a provable row, then evict ten old rows in the new window.
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 130')
+  observation.latest()!.emit({ text: numberedLines(10, 199) })
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 130', 'the same provable row stays visible across the eviction')
+  assert.match(view(vt), /Follow PAUSED/)
+  assert.ok(!/\[GAP\]/.test(view(vt)), 'a local window change never fabricates GAP')
+  assert.match(view(vt), /rows 121-157\/190/, 'the position is relative to the retained window')
+
+  // The official gap fact is the ONLY source of [GAP].
+  observation.latest()!.emit({ text: numberedLines(10, 199), gapBefore: true })
+  await vt.waitForRender()
+  assert.match(view(vt), /\[GAP\]/)
+  assert.match(view(vt), /Earlier output evicted/)
+
+  // An anchor whose bytes are gone clamps instead of guessing.
+  vt.sendInput('\x1b[H')
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 010')
+  observation.latest()!.emit({ text: numberedLines(120, 199) })
+  await vt.waitForRender()
+  assert.equal(bodyTop(vt), 'line 120', 'the evicted anchor clamps to the earliest surviving row')
+  assert.match(view(vt), /Follow PAUSED/)
+  app.stop()
+})
+
+// ── B-11: the short-screen budget ──────────────────────────────────────────
+
+test('B-11 short frames keep one Output row, the Action Bar last, and a Find only where its row can exist', async () => {
+  const { vt, app } = startApp({}, {}, 44, 4)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 9) })
+  await vt.waitForRender()
+  let rows = rawView(vt)
+  assert.equal(rows.length, 4)
+  assert.match(rows[3]!, /Esc back/, 'the Action Bar is the last row')
+  assert.match(rows[0]!, /running/, 'the status row survives')
+  assert.ok(rows.slice(0, 3).some(row => /line 00/.test(row)), 'at least one Output row stays readable')
+
+  // A 4-row frame CAN host the SearchRow: it takes the header's second row.
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  rows = rawView(vt)
+  assert.equal(rows.length, 4)
+  assert.match(rows[1]!, /Find Output:/, 'the SearchRow is inside the 4-row budget')
+  assert.match(rows[3]!, /Esc back/)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+
+  // Shrinking below four rows leaves the search (keeping the Job + PAUSED).
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  vt.resize(44, 3)
+  await vt.waitForRender()
+  const tiny = view(vt)
+  assert.ok(!/Find Output:/.test(tiny), 'a frame with no SearchRow leaves the search')
+  assert.match(tiny, /Esc back/, 'the Action Bar survives the shrink')
+  assert.match(tiny, /job-a/, 'the Job is still the owner')
+
+  // Growing again does not silently reopen a hidden editor.
+  vt.resize(120, 40)
+  await vt.waitForRender()
+  assert.ok(!/Find Output:/.test(view(vt)), 'the search needs a fresh explicit Find')
+  app.stop()
+})
+
+// ── B-12: lifecycle ────────────────────────────────────────────────────────
+
+test('B-12 a Job replacement/dispose keeps ONE observer per Job and never restores the old query, anchor or focus', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 99) })
+  await vt.waitForRender()
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('line 05')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output: line 05/)
+
+  // A same-session replacement (A → B) retires A once and B starts clean.
+  harness.tasks.openJobView('job-b')
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.ok(!/Find Output:/.test(painted), 'the new Job has no inherited search row')
+  assert.match(painted, /Job job-b · bash · running/)
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true, 'the new Job owns the panel focus')
+  assert.deepEqual(harness.observation.forJob('job-a'), [1], 'A released its observer exactly once')
+
+  // Esc closes B once; the old search never revives on the browser.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.deepEqual(harness.observation.forJob('job-b'), [1])
+  assert.ok(!/Find Output:/.test(view(vt)))
+  assert.equal(app.hostEditorTextForTest(), '', 'no stale Job input ever reached the editor')
+  harness.tasks.disposeTaskBrowser()
+  app.stop()
+})
+
+// ── B-13: the strict follow survives a real production push (Direct shape) ──
+
+test('B-13 the strict follow/search work over the production observer push, and the PAUSED state is not reset by a newer snapshot', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  const record = harness.observation.latest()!
+  record.emit({ text: numberedLines(0, 159), progress: 'step 1', status: 'running' })
+  await vt.waitForRender()
+  assert.match(view(vt), /progress: step 1/)
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('line 12')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/10/)
+  assert.match(view(vt), /Follow PAUSED/)
+
+  // A reconnect-style newer retained tail arrives through the SAME port.
+  record.emit({ text: numberedLines(0, 179), progress: 'step 2', status: 'running' })
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /progress: step 2/, 'the newer snapshot still updates the Header')
+  assert.match(painted, /Follow PAUSED/, 'the newer tail never resets the follow intent')
+  assert.match(painted, /Find Output: line 12/, 'the search row keeps its query')
+  assert.equal(harness.observation.records.length, 1, 'no reconnect opens a second observation')
+  app.stop()
+})

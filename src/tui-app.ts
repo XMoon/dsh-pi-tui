@@ -3653,6 +3653,16 @@ export class TuiApp {
       },
       onLeaderStateChange: () => this.renderFooter(),
       onLeaderActivate: (action, key) => {
+        // Phase 3B / B1-B: while a Job workspace owns the physical screen, the
+        // EFFECTIVE Find action is a JOB-LOCAL Find. It is consumed HERE, before
+        // any modal-inspection/viewer guard and BEFORE `dispatchResolvedAction`,
+        // so the global Transcript search handler is never entered (and no
+        // fork search overlay is opened) — the leader completion is not a
+        // "dispatch then repair" path.
+        if (action === 'app.transcript.search' && this.jobWorkspace !== undefined) {
+          this.jobWorkspace.panel.openFind()
+          return true
+        }
         // A response modal may arm the shared leader machine, but only the
         // explicit inspection plane can complete there. Return consumed=true
         // for blocked actions so their completion key cannot become answer
@@ -5162,15 +5172,17 @@ export class TuiApp {
         }
       }
       // The effective exit may also be LEADER-bound (the user bound
-      // `app.exit.request` to a `<leader>x` sequence). The prefix arms the ONE
-      // pending sequence so it can complete; only an exit-bound completing key is
-      // fed through to the machine (which runs the same host exit admission),
-      // every OTHER leader action is cancelled WITHOUT being dispatched, and
-      // physical Escape keeps the ladder's documented meaning: with a sequence
-      // pending it cancels that sequence (consumed) and only a non-pending Escape
-      // closes the workspace. The confirmation discipline matches the ladder: a
-      // DIFFERENT action's sequence disarms a pending exit confirmation, while the
-      // SAME leader sequence leaves it armed for its confirming completion.
+      // `app.exit.request` to a `<leader>x` sequence), and so may the EFFECTIVE
+      // Find binding (B1-B). The prefix arms the ONE pending sequence so it can
+      // complete; only an exit-bound or Find-bound completing key is fed through
+      // to the machine (the exit runs the same host exit admission, Find runs the
+      // Job-local Find), every OTHER leader action is cancelled WITHOUT being
+      // dispatched, and physical Escape keeps the ladder's documented meaning:
+      // with a sequence pending it cancels that sequence (consumed) and only a
+      // non-pending Escape closes the workspace. The confirmation discipline
+      // matches the ladder: a DIFFERENT action's sequence disarms a pending exit
+      // confirmation, while the SAME leader sequence leaves it armed for its
+      // confirming completion.
       const leader = this.keybindings.leaderMachine()
       if (leader !== undefined) {
         const physicalEscape = matchesKey(data, 'escape')
@@ -5178,16 +5190,25 @@ export class TuiApp {
         const exitCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
           binding => binding.action === 'app.exit.request' && matchesKey(data, binding.key),
         )
+        const findCompletion = leader.pending && !physicalEscape && leader.leaderBindings.some(
+          binding => binding.action === 'app.transcript.search' && matchesKey(data, binding.key),
+        )
         if (exitCompletion) {
           const outcome = leader.feed(data)
           return outcome.kind === 'activated' && !outcome.consumed ? undefined : { consume: true }
+        }
+        if (findCompletion) {
+          // The completion is fed so the machine activates the SAME effective
+          // action; `onLeaderActivate` turns it into the Job-local Find.
+          leader.feed(data)
+          return { consume: true }
         }
         if (leader.pending || armPrefix) {
           let reArmedPrefix = false
           if (leader.pending && !physicalEscape
             && leader.leaderBindings.some(binding => matchesKey(data, binding.key))) {
-            // A NON-exit leader completion: the workspace blocks it — the sequence
-            // is cancelled without dispatching anything.
+            // A NON-exit, non-Find leader completion: the workspace blocks it —
+            // the sequence is cancelled without dispatching anything.
             leader.cancel()
           } else {
             // The prefix arms; Escape cancels (consumed); typing cancels and passes.
@@ -20151,11 +20172,25 @@ export class TuiApp {
       onClose: () => record.close(),
       canStop: options.canStop,
       onStop: options.onStop,
+      // Phase 3B / B1-B: the EFFECTIVE Find binding is scoped to the Job's own
+      // Output. The panel decides from the LIVE resolution, so a remap, a
+      // disable or a conflict moves the key for the Job too — never a static
+      // `Ctrl+F` string and never the Transcript's search handler.
+      isFindKey: (data) => {
+        const resolution = this.keybindings.resolve(data, this.keybindingContext())
+        return resolution !== undefined && resolution.action === 'app.transcript.search'
+      },
+      findHint: () => this.keybindings.keyHint('app.transcript.search'),
+      focusComponent: (component) => screen.setFocus(component),
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
+      // The frame-completion boundary consumes the ONE pending Job search
+      // reveal (and leaves a search whose row the frame could not show), so no
+      // layout is ever mutated from inside `render()`.
+      onFramePainted: () => panel.onFramePainted(),
     })
     screen.setLayoutRoot(panel)
     // Registration order IS dispatch order (X043): the host router first, then
