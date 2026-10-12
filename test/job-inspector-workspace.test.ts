@@ -361,7 +361,11 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
     assert.match(painted, /\[GAP\]/, `the gap marker must stay visible at ${budget.width}x${budget.rows}`)
     assert.match(painted, /\[ERROR\]/, `the error marker must stay visible at ${budget.width}x${budget.rows}`)
     assert.match(painted, /\[SETTLED\]/, `the settled marker must stay visible at ${budget.width}x${budget.rows}`)
-    assert.match(painted, /Earlier output evicted/, `the gap fact must stay visible at ${budget.width}x${budget.rows}`)
+    if (budget.width >= 80) {
+      // The descriptive fact text rides on the Command row while the row has room;
+      // the [GAP] marker above is the fact that survives every budget.
+      assert.match(painted, /Earlier output evicted/, `the gap fact must be readable at ${budget.width}x${budget.rows}`)
+    }
     if (budget.width >= 80) {
       assert.match(painted, /Job job-a · bash · failed/, `the identity must stay visible at ${budget.width}x${budget.rows}`)
     }
@@ -447,6 +451,57 @@ test('A-01d a long Job identity and a long error text never hide the status or t
     assert.ok(visibleWidth(line) <= 80, `no line may exceed the row width: ${JSON.stringify(line)}`)
   }
   panel.dispose()
+})
+
+test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, notice included', () => {
+  const flags = (): JobInspectorState => ({
+    ...openingRow(),
+    observed: {
+      jobId: 'job-a', kind: 'bash', label: 'pnpm build --watch', status: 'failed',
+      progress: 'building 3/8', detail: 'exit code 1',
+      text: 'retained tail', gapBefore: true, settled: true, error: 'stream reset',
+    },
+  })
+  const panelAt = (rows: number, noticeLive: boolean): JobInspectorPanel => new JobInspectorPanel(flags(), {
+    rows: () => rows,
+    requestRender: () => {},
+    notice: () => (noticeLive ? { text: 'could not stop job job-a: refused', kind: 'error' } : undefined),
+    onClose: () => {},
+    canStop: () => false,
+    onStop: () => {},
+  })
+
+  // 44×8 with GAP/ERROR: the compact header is TWO rows at most, the Command and
+  // every marker survive, and the Action Bar is the last row.
+  const compact = panelAt(8, false).render(44)
+  assert.equal(compact.length, 3, 'a compact header (2) plus the pinned Action Bar (1)')
+  assert.match(compact.at(-1)!, /Esc back/)
+  assert.match(compact.join('\n'), /\[GAP\]/)
+  assert.match(compact.join('\n'), /\[ERROR\]/)
+  assert.match(compact.join('\n'), /\[SETTLED\]/)
+  assert.match(compact.join('\n'), /Command: pnpm build --watch/)
+  assert.match(compact.join('\n'), /failed/)
+
+  // 44×4 with a LIVE notice: header (2) + notice (1) + Action Bar (1) = exactly the
+  // granted rows, Action Bar last.
+  const withNotice = panelAt(4, true).render(44)
+  assert.equal(withNotice.length, 4, 'the notice is inside the height budget, never below the bar')
+  assert.match(withNotice.at(-1)!, /Esc back/)
+  assert.match(withNotice.join('\n'), /✗ could not stop job job-a: refused/)
+
+  // 80×2 with a live notice: the notice YIELDS to the header and the Action Bar.
+  const tiny = panelAt(2, true).render(80)
+  assert.equal(tiny.length, 2, 'only the status row and the pinned Action Bar')
+  assert.match(tiny.at(-1)!, /Esc back/)
+  assert.match(tiny[0]!, /failed/)
+  assert.match(tiny.join('\n'), /\[GAP\]/)
+  assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields on a 2-row terminal')
+  assert.ok(!/Command:/.test(tiny.join('\n')), 'the Command ranks below the status/markers')
+
+  // 80×1 with a live notice: the Action Bar ALONE — it is never budgeted away.
+  const one = panelAt(1, true).render(80)
+  assert.equal(one.length, 1)
+  assert.match(one[0]!, /Esc back/)
 })
 
 // ── A-02: the real Task Browser → Job workspace → same browser ─────────────
@@ -663,6 +718,16 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   const barRow = rawView(vt).findIndex(line => /Esc back/.test(line))
   assert.equal(barRow, 23, 'the Action Bar stays pinned to the physical bottom')
   assert.equal(headerBefore.includes('Esc back'), true)
+  // The same notice on an extremely short REAL terminal: the pins hold.
+  vt.resize(80, 2)
+  await vt.waitForRender()
+  const tiny = rawView(vt)
+  assert.equal(tiny.length, 2)
+  assert.match(tiny[1]!, /Esc back/, `the Action Bar must survive an 80x2 grant with a live notice:\n${tiny.join('\n')}`)
+  assert.ok(!/could not stop/.test(tiny.join('\n')), 'the notice yields to the pinned chrome')
+  vt.resize(80, 24)
+  await vt.waitForRender()
+  assert.match(view(vt), /could not stop job job-a/, 'the notice row returns with the room')
   app.stop()
 })
 
