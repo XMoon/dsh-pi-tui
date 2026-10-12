@@ -1112,6 +1112,15 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
   assert.ok(!/C copy output/.test(tight), 'a tight row yields the copy verb')
   assert.match(tight, /Retained preview · not full history/, 'the pre-existing disclosure is never the price')
   harness.panel.dispose()
+
+  // plan §4: an action that cannot execute this frame is never advertised. With
+  // nothing retained the copy verb is absent even where the row has all the room
+  // in the world, while the Command entry (which CAN act) stays.
+  const emptyOutput = makePanel(observedState({ label: 'echo one', text: '' }))
+  const wideBar = paint(emptyOutput, 200).at(-1)!
+  assert.ok(!/C copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
+  assert.match(wideBar, /V command/, 'the Command entry can still act, so it stays advertised')
+  emptyOutput.panel.dispose()
 })
 
 test('C-14 an empty retained Output is refused with honest feedback, never a false Copy sent', async () => {
