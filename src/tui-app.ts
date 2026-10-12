@@ -5896,19 +5896,29 @@ export class TuiApp {
     // (a) The fork pushes its overlay-stack entry and performs terminal IO before
     //     it returns the raw handle: at that point the broker has NO node, so that
     //     projection is an untracked ghost modal (still painted, no owner) and must
-    //     be released POSITIONALLY. The positional pop can only remove the entry
-    //     THIS mount pushed: `initialFocus:false` runs no callback and the IO call
-    //     is the last statement before the handle is returned.
+    //     be released POSITIONALLY, on the screen that performed the mount — a
+    //     re-entrant `setFullscreen(true)` inside the failure chain swaps
+    //     `activeScreen`, and the entry to pop belongs to the OLD one. The
+    //     positional pop can only remove the entry THIS mount pushed:
+    //     `initialFocus:false` runs no callback and the IO call is the last
+    //     statement before the handle is returned.
     // (b) The broker's physical transition registers the logical node BEFORE it
     //     hands over the keyboard (and can re-enter through a plugin callback via
     //     the host's reconciliation): that node is released by identity.
+    // THIS call's own progress decides which case applies. Never read
+    // `prepared.node.raw`: a fullscreen swap legitimately clears it again for an
+    // already-registered remountable node (`OverlayBroker.detachPhysical`), which
+    // would make a REGISTERED node look unregistered and pop a live entry.
     // The caller still owns its own component/frame lifetime.
+    const screen = this.activeScreen
+    let rawReturned = false
     try {
-      const raw = this.activeScreen.showOverlay(component, { ...merged, initialFocus: false })
+      const raw = screen.showOverlay(component, { ...merged, initialFocus: false })
+      rawReturned = true
       return this.overlayBroker.commitMount(prepared, raw)
     } catch (error) {
       runSyncDisposalStepsWithPrimary('overlay mount unwind', error, [
-        () => { if (prepared.node.raw === undefined) this.activeScreen.hideOverlay() },
+        () => { if (!rawReturned) screen.hideOverlay() },
         () => this.overlayBroker.close(prepared.node.wrapper),
       ])
     }

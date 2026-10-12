@@ -568,14 +568,21 @@ or over the editor seat.
   approval is active and the queue drained — a PARKED but still-current tenant
   comes back instead of staying parked behind a presentation that never happened.
   The ONE overlay mount funnel (`showOverlayOnHost`) fails closed on BOTH mount
-  stages: the fork pushes its overlay-stack entry and performs terminal IO BEFORE
-  it returns a raw handle, so a mount that throws there — the broker has no node
-  yet — releases that projection POSITIONALLY (`hideOverlay()`, and only when the
-  broker never bound the node: `initialFocus:false` runs no callback in that
-  window, so the pop can only remove the entry this mount pushed); a mount that
-  throws after the broker registered its logical node unwinds exactly that node by
-  identity. Either way a mount whose caller never received a handle can never
-  survive as a ghost modal or a half-committed, keyboard-owning suppressor.
+  stages, and it decides which stage it reached from THIS call's own progress —
+  never from `node.raw`, which a re-entrant fullscreen swap legitimately clears
+  again for an already-registered remountable node (`OverlayBroker.detachPhysical`)
+  and would make a registered node look unregistered. The raw-handle-returned fact
+  is recorded at the fork call, and the mounting SCREEN is captured for the
+  cleanup: the fork pushes its overlay-stack entry and performs terminal IO BEFORE
+  it returns a raw handle, so a throw before that handle exists releases that
+  projection POSITIONALLY on the screen that mounted it (`hideOverlay()`, and only
+  then: `initialFocus:false` runs no callback in that window, so the pop can only
+  remove the entry this mount pushed) — a re-entrant swap must not make the unwind
+  pop an entry belonging to the NEW screen, e.g. the projection of a surviving
+  root that was just re-mounted there. A throw after the handle was returned
+  unwinds the broker node by identity instead. Either way a mount whose caller
+  never received a handle can never survive as a ghost modal, a half-committed,
+  keyboard-owning suppressor, or a cleanup that removes somebody else's entry.
 - **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
   rides the caller's `close()` as the FIRST independent step of the `tui
   dispose` batch, so a throwing tenant cleanup neither skips the
@@ -588,7 +595,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-54: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-55: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -619,4 +626,6 @@ multiple rollback failures, an unregistered raw projection released positionally
 after a terminal-IO mount failure, a real Advanced blur/reconciliation chain that
 escapes the mount (the registered node unwound, the surviving root intact and the
 healthy tenant restored afterwards), a QUEUED approval whose mount fails rejecting
-its own promise instead of waiting forever, and input routing).
+its own promise instead of waiting forever, a re-entrant fullscreen swap inside the
+failed mount (the failed Approval unwound on the swapped screen while the
+re-mounted surviving root is never popped as a ghost), and input routing).
