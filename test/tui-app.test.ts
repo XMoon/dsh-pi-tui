@@ -2850,6 +2850,56 @@ test('the recall reconcile is linear in the scope and the window', async () => {
   app.stop()
 })
 
+test('an evicted SKIP expires behind the whole window, not only the retained one', async () => {
+  // F2-R5 boundary: a skip, then a write, then 100 further skips evict BOTH the
+  // skip and the write from the queue. The write's row is still part of the
+  // projection (the durable append watermark knows the window's row count), and
+  // the evicted skip is older than every appended row, so it expires behind it.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'a')
+  settleAt(0, 'session-b', 'skipped')                       // evicted below
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'z' })   // evicted below
+  for (let index = 0; index < 100; index += 1) {
+    app.settleScopeInput({ owner: 'session-b', outcome: 'skipped', text: 'z' })
+  }
+  app.resetInputHistory(['z', 'older B'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['z', 'a', 'older B'],
+    'the evicted write keeps its row and the evicted skip expires behind it')
+  app.stop()
+})
+
+test('the durable settlement facts stay bounded by the scope occurrence cap', async () => {
+  // The fact map must not become an unbounded per-token leak: a long window
+  // (here 150 accepted occurrences, each settled) drops the occurrences beyond
+  // the cap together with their facts.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.beginInputHistoryScope('session-b')
+  for (let index = 1; index <= 150; index += 1) {
+    await submitThroughEditor(app, vt, `submission ${index}`)
+    settleAt(index - 1, 'session-b', 'skipped')   // settle THAT occurrence
+  }
+  assert.equal(submitted.length, 150)
+  assert.ok(app.scopeFactCountForTest() <= 100,
+    `the durable facts must be bounded by the scope cap: ${app.scopeFactCountForTest()}`)
+  app.stop()
+})
+
+test('a long run of identical pending submissions never evicts an older occurrence', async () => {
+  // The scope's cap counts RUNS, exactly like the editor/mirror recall it feeds:
+  // one pending `a` plus 100 consecutive pending `b`s must still recall both.
+  const { vt, app, submitted } = startApp()
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'a')
+  for (let index = 1; index <= 100; index += 1) await submitThroughEditor(app, vt, 'b')
+  assert.equal(submitted.length, 101)
+  app.resetInputHistory([], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['b', 'a'],
+    'the run of duplicates collapses to one entry and the older occurrence survives')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)

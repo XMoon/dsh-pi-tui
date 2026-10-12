@@ -2643,6 +2643,13 @@ export class TuiApp {
    * it.
    */
   private readonly scopeSettled = new Map<number, { readonly owner: string | undefined; readonly outcome: 'written' | 'skipped' }>()
+  /** The LIVE occurrence tokens of the open scope: the durable facts above are
+   *  kept for exactly these (bounded by the scope cap, never by the queue). */
+  private readonly scopeOccurrences = new Set<number>()
+  /** The number of APPENDS this scope's settlements reported per row owner — the
+   *  exact watermark of how many of the snapshot's newest rows the window owns,
+   *  even for settlements the bounded queue evicted. */
+  private readonly scopeAppends = new Map<string | undefined, number>()
   /**
    * The number of positions the last recall reconcile visited — a HEADLESS-TEST
    * HOOK pinning the frozen plan's O(100) bound (never read by production code).
@@ -6336,9 +6343,63 @@ export class TuiApp {
     // sees every writer in append order.
     this.scopeTokenSeq += 1
     const token = this.scopeTokenSeq
-    this.scopeInputs.unshift({ owner: this.scopeOwner, token, text: trimmed })
-    if (this.scopeInputs.length > TuiApp.INPUT_HISTORY_LIMIT) this.scopeInputs.pop()
+    const entry: ScopeSubmission = { owner: this.scopeOwner, token, text: trimmed }
+    const head = this.scopeInputs[0]
+    if (head !== undefined && head.text === trimmed) {
+      // A consecutive identical submission. Only the run's FIRST occurrence can
+      // ever append (every later one hits the CWD-level consecutive dedupe), while
+      // the NEWEST one carries the run's newest rank, so exactly those two are
+      // kept: a long run of pending duplicates costs O(1) state and can never
+      // evict an older, distinct occurrence.
+      let runStart = this.scopeInputs.length
+      for (let index = 0; index < this.scopeInputs.length; index += 1) {
+        if (this.scopeInputs[index]!.text !== trimmed) { runStart = index; break }
+      }
+      const first = this.scopeInputs[runStart - 1]!
+      const older = this.scopeInputs.slice(runStart)
+      // Every superseded run member except its oldest one goes: the oldest is the
+      // only occurrence that can still append.
+      for (let index = 0; index < runStart - 1; index += 1) this.forgetScopeInput(this.scopeInputs[index]!)
+      this.scopeInputs.length = 0
+      this.scopeInputs.push(entry, first, ...older)
+      this.scopeOccurrences.add(token)
+      return token
+    }
+    this.scopeInputs.unshift(entry)
+    this.scopeOccurrences.add(token)
+    // The cap counts RUNS of consecutive identical text, exactly like the
+    // editor/mirror recall this scope feeds: a long run of duplicates cannot
+    // evict an older, distinct occurrence.
+    if (this.countScopeRuns() > TuiApp.INPUT_HISTORY_LIMIT) {
+      const oldest = this.scopeInputs[this.scopeInputs.length - 1]!
+      let runStart = this.scopeInputs.length - 1
+      while (runStart > 0 && this.scopeInputs[runStart - 1]!.text === oldest.text) runStart -= 1
+      for (let index = this.scopeInputs.length - 1; index >= runStart; index -= 1) {
+        this.forgetScopeInput(this.scopeInputs[index]!)
+      }
+      this.scopeInputs.length = runStart
+    }
     return token
+  }
+
+  /** Drop every durable trace of one occurrence the scope no longer holds. */
+  private forgetScopeInput(entry: ScopeSubmission): void {
+    this.scopeOccurrences.delete(entry.token)
+    this.scopeSettled.delete(entry.token)
+  }
+
+  /** The number of runs of consecutive identical text in the scope. */
+  private countScopeRuns(): number {
+    let runs = 0
+    let previous: string | undefined
+    for (const entry of this.scopeInputs) {
+      if (entry.text !== previous) { runs += 1; previous = entry.text }
+    }
+    return runs
+  }
+
+  /**
+   * Record ONE settlement of the OPEN scope    return token
   }
 
   /**
@@ -6355,8 +6416,13 @@ export class TuiApp {
    */
   settleScopeInput(settlement: ScopeSettlement): void {
     if (!this.scopeOpen) return
-    // The durable fact FIRST: it outlives the queue's cap for every occurrence.
-    if (settlement.token !== undefined) {
+    // The durable facts FIRST: they outlive the queue's cap for every LIVE
+    // occurrence, and a late settlement of an already dropped occurrence adds
+    // nothing.
+    if (settlement.outcome === 'written') {
+      this.scopeAppends.set(settlement.owner, (this.scopeAppends.get(settlement.owner) ?? 0) + 1)
+    }
+    if (settlement.token !== undefined && this.scopeOccurrences.has(settlement.token)) {
       this.scopeSettled.set(settlement.token, { owner: settlement.owner, outcome: settlement.outcome })
     }
     this.scopeSettlements.push(settlement)
@@ -6422,12 +6488,15 @@ export class TuiApp {
     // is ever matched to guess which occurrence a row belongs to.
     const settlements = this.scopeSettlements.filter(settlement => settlement.owner === owner)
     const retainedTokens = new Set<number>()
-    let writtenCount = 0
+    let retainedWrites = 0
     for (const settlement of settlements) {
-      if (settlement.outcome === 'written') writtenCount += 1
+      if (settlement.outcome === 'written') retainedWrites += 1
       if (settlement.token !== undefined) retainedTokens.add(settlement.token)
     }
-    const covered = Math.min(writtenCount, entries.length)
+    // The watermark is the DURABLE append count for this Session's rows, not the
+    // retained queue's: the snapshot's newest covered rows are this window's
+    // appends in reverse, whether or not their settlements survived the cap.
+    const covered = Math.min(this.scopeAppends.get(owner) ?? 0, entries.length)
     // Occurrence token → rank (0 = newest), built ONCE: every lookup below is a
     // map read, so the reconstruction stays linear in the scope and the window.
     const ranks = new Map<number, number>()
@@ -6453,6 +6522,13 @@ export class TuiApp {
         windowTexts.push(this.scopeInputs[rank]!.text)
       }
       windowRanks.push(rank)
+    }
+    // The appends whose settlements the cap evicted are the OLDER window rows:
+    // their rows are still part of the projection and must be emitted in the disk
+    // order, with no occurrence association (their own facts stay in the map).
+    for (let row = retainedWrites; row < covered; row += 1) {
+      windowTexts.push(entries[row]!)
+      windowRanks.push(undefined)
     }
     // The occurrences the window does not carry, in submission order (newest
     // first): a never-settled occurrence is NEWER than every settled submission
@@ -6494,6 +6570,8 @@ export class TuiApp {
     this.scopeInputs.length = 0
     this.scopeSettlements.length = 0
     this.scopeSettled.clear()
+    this.scopeOccurrences.clear()
+    this.scopeAppends.clear()
     this.scopeOpen = false
     this.scopeOwner = owner
   }
@@ -6515,6 +6593,8 @@ export class TuiApp {
       this.scopeInputs.length = 0
       this.scopeSettlements.length = 0
       this.scopeSettled.clear()
+      this.scopeOccurrences.clear()
+      this.scopeAppends.clear()
     }
     this.scopeOwner = owner
     this.scopeOpen = true
@@ -6530,6 +6610,13 @@ export class TuiApp {
    *  bound is pinned by a number instead of by the shape of the code. */
   reconcileStepsForTest(): number {
     return this.reconcileSteps
+  }
+
+  /** HEADLESS-TEST HOOK: the number of durable per-occurrence settlement facts
+   *  the open scope currently holds — it must stay bounded by the scope's own
+   *  occurrence cap, never by how many submissions the window saw. */
+  scopeFactCountForTest(): number {
+    return this.scopeSettled.size
   }
 
   /**
