@@ -21,9 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local paging, while the main session and a viewed child each show their own
   Session's figures. A scope with no eligible sample is omitted — never
   `0 tok/s`.
+- The experimental TSP renderer's `/model` tightens its information hierarchy:
+  the main page's footer keeps only `Cancel`, `Full details…` and the one write
+  action, labelled `Choose & Save as Default` (no Session) or `Switch Model`
+  (live Session); the complete facts move to a `Full model details` content page,
+  and the complete Reasoning Effort list is reached there through
+  `All effort levels…`, whose Back names the page it came from. The write is
+  still the same single business operation.
 
 ### Fixed
 
+- The experimental TSP renderer's `/model`: clicking `All models` or a Provider
+  in the left column now really filters the model list (the provider choice
+  arrives on Tern's native `action(scope)` channel instead of being ignored as a
+  model-row selection). Model rows, effort rows and provider choices can no
+  longer be confused, and no click ever writes the model.
 - While a Question / Approval / Save Location captures the input, the Footer no
   longer advertises the Task Center `↓ view` (the narrow-screen `↓`), which
   could not act there. The hint returns once the modal settles, the editor is

@@ -245,23 +245,25 @@ export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFa
  * `▸` cue is a promise about Enter and `focusedAction`'s fallback is a statement
  * about which action Enter runs, so BOTH are meaningful only where this holds:
  * everywhere else the bar must read as having no keyboard focus instead of
- * marking `Close` and then swallowing the Enter that cue announced.
+ * marking `Cancel` and then swallowing the Enter that cue announced.
  */
 export function actionKeyboardLive(panel: ModelPickerPanel): boolean {
   return panel.phase === 'ready' || panel.phase === 'error'
 }
 
 /**
- * The single-line keyboard hint of the current zone (rendered by the view and
- * counted by the layout budget, so the two can never disagree).
+ * The single-line keyboard hint of the current zone (rendered by the model list
+ * page's details column only, and counted by the layout budget, so the two can
+ * never disagree).
  *
  * It never names a BUSINESS action: in the action bar `Enter` runs whichever
  * action that bar has FOCUSED — the `▸ label` cue says which — so the hint only
  * explains how the bar is driven instead of claiming Enter applies. In the list
  * the hint names the zone `Tab` reaches NEXT, which is the effort selector
  * whenever the highlighted model advertises efforts (mirrors the frozen
- * `tabZone` cycle). Every hint stays inside one worst-case line so it never eats
- * the layout budget.
+ * `tabZone` cycle). The drill-down pages render no column, so they carry no hint
+ * at all. Every hint stays inside one worst-case line so it never eats the
+ * layout budget.
  */
 export function zoneHintText(panel: ModelPickerPanel): string {
   if (panel.phase === 'pending') return 'Selecting…'
@@ -271,23 +273,23 @@ export function zoneHintText(panel: ModelPickerPanel): string {
   if (panel.phase === 'error') return 'Retry first'
   if (panel.zone === 'effort') return '↑↓ draft'
   if (panel.zone === 'primary-action') return '←→ · Enter'
-  // The details page's static facts have NO effort zone to reach, so Tab goes
-  // straight to the action bar there (mirrors the frozen `tabZone` cycle).
-  if (panel.page === 'details') return 'Tab: actions'
   return modelChoices(highlightedModel(panel)).length > 0 ? 'Tab: effort' : 'Tab: actions'
 }
 
 /* --------------------------------------------------------------- action bar */
 
 /** The single visible Primary Action of the current phase. Only this action may
- *  ever commit; while the directory read failed it IS the read-only Retry. */
+ *  ever commit; while the directory read failed it IS the read-only Retry. The
+ *  ready labels are Owner-frozen: a sessionless write confirms the model and saves
+ *  it as the future default in ONE operation, a live write switches the Session's
+ *  model. Naming the UI never changes what the one writer does. */
 function primaryAction(panel: ModelPickerPanel): PickerAction {
   if (panel.phase === 'pending') {
     return { id: 'apply', label: 'Selecting…', primary: true, disabled: true }
   }
   const label = panel.phase === 'error'
     ? 'Retry'
-    : panel.request.subject.sessionless ? 'Save default' : 'Apply'
+    : panel.request.subject.sessionless ? 'Choose & Save as Default' : 'Switch Model'
   return {
     id: 'apply',
     label,
@@ -311,19 +313,22 @@ function retryAction(panel: ModelPickerPanel): PickerAction | undefined {
 
 /**
  * The action bar for the CURRENT phase and page: the ONE owner of "which actions
- * exist". The complete details and the complete Effort list are ALWAYS offered
- * while the highlighted model has them: at wide width the inline radio rows are
- * the primary selector, but a different UI font, an enlarged font or another zoom
- * can change what that column really shows, so the `Choose effort` page — the
- * same picker list, the same draft and the same confirmation — stays one action
- * away in EVERY layout and environment. The view renders exactly this list and
- * the key map moves the keyboard focus across it, so a visible action can never
- * be unreachable or a no-op.
+ * exist".
+ *
+ * The MAIN page keeps only the three intuitive operations — `Cancel`, the reading
+ * entry `Full details…` and the one Primary Action. The complete Effort list is a
+ * DETAILS-page entry (`All effort levels…`), so the main footer never repeats an
+ * effort shortcut next to the details drill-down. The details and effort pages are
+ * content pages: each names the page it really returns to. A partial read's `Retry
+ * failed providers` stays available wherever the phase is ready.
+ *
+ * The view renders exactly this list and the key map moves the keyboard focus
+ * across it, so a visible action can never be unreachable or a no-op.
  */
 export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
-  const actions: PickerAction[] = [{ id: 'close', label: 'Close', end: true }]
+  const actions: PickerAction[] = [{ id: 'close', label: 'Cancel', end: true }]
   // Only `ready` admits browsing: a loading panel admits the search box and
-  // Close, an admitted write admits Close, and a failed read admits only the
+  // Cancel, an admitted write admits Cancel, and a failed read admits only the
   // action bar's Retry. Rendering a browse action the phase refuses would make
   // it a visible no-op (and a keyboard focus target that cannot act).
   if (panel.phase !== 'ready') {
@@ -331,15 +336,23 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
     return actions
   }
   const retry = retryAction(panel)
-  if (panel.page !== 'models') actions.push({ id: 'back', label: 'Back' })
   const row = highlightedModel(panel)
-  if (panel.page === 'models') {
-    actions.push({ id: 'details', label: 'Details', disabled: row === undefined ? true : undefined })
-  }
-  // The effort page IS the selector, so its own action bar never offers a
-  // second, contradictory "Models" entry (Back is the way out).
-  if (panel.page !== 'effort' && modelChoices(row).length > 0) {
-    actions.push({ id: 'effort-page', label: 'Choose effort' })
+  if (panel.page === 'details') {
+    actions.push({ id: 'back', label: 'Back to models' })
+    // `All effort levels…` exists only when this model really advertises effort
+    // options: an empty full list would be a dead entry.
+    if (modelChoices(row).length > 0) {
+      actions.push({ id: 'effort-page', label: 'All effort levels…' })
+    }
+  } else if (panel.page === 'effort') {
+    // The effort page IS the selector, so its own bar offers no second,
+    // contradictory entry; Back names the page it was opened FROM.
+    actions.push({
+      id: 'back',
+      label: panel.previousPage === 'details' ? 'Back to details' : 'Back to models',
+    })
+  } else {
+    actions.push({ id: 'details', label: 'Full details…', disabled: row === undefined ? true : undefined })
   }
   if (retry !== undefined) actions.push(retry)
   actions.push(primaryAction(panel))
@@ -352,7 +365,7 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
  *  current phase or page falls back to it), but a DISABLED action owns no Enter and
  *  shows no cue: when the Primary cannot act — a read that failed, a directory with
  *  no selectable model, a search with no match — focus falls back to the last action
- *  that CAN act (`Close` is always enabled), instead of parking the keyboard on a dead
+ *  that CAN act (`Cancel` is always enabled), instead of parking the keyboard on a dead
  *  entry that no `▸` marks and Enter does nothing with. */
 export function focusedAction(panel: ModelPickerPanel): PickerAction {
   const actions = pickerActions(panel)
