@@ -54,9 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   neither reports a false success. Terminal control sequences inside the Job
   metadata (`label`/`detail`/`progress`) are only ever shown as sanitized text in
   the workspace header and notice row (a Stop settlement embeds the Job label
-  there) and are never passed to the terminal from those rows, and the Command page suspends
-  the terminal's native copy-on-select while it is shown, so a rapid double click
-  on `[Copy All]` cannot overwrite the full command with a screen word.
+  there) and are never passed to the terminal from those rows. The Command page
+  suspends the terminal's native copy-on-select while it is shown, so a rapid
+  double click on `[Copy All]` cannot overwrite the full command with a screen
+  word.
   When the retained window is truncated, a paused view keeps the same
   still-present row where it can, the bottom row number is a position inside this
   retained preview only, and `[GAP]` still comes only from the official fact.
