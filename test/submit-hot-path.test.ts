@@ -26,7 +26,7 @@ import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { historyFilePath, loadHistoryRecords, recallHistoryForSession } from '../src/client/history/store.ts'
+import { historyFilePath, loadHistoryRecords } from '../src/client/history/store.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -5022,6 +5022,12 @@ test('inputs accepted while the fresh /new session hydrates survive ↑ recall, 
   const harness = makeHarness(home, { id: 'history-session-a', events: sessionEvents('resumed answer') })
   const mounted = await mountRunner(context, home, harness, { sessionId: 'history-session-a' })
   assert.deepEqual([...mounted.app.getInputHistory()], [], 'the resumed session starts with no recalled input')
+  // One row OWNED by session A, so the Ctrl+R scopes have an exclusion witness.
+  mounted.app.setDraft('session A only')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => loadHistoryRecords(historyFilePath(home, home))
+    .some(row => row.content === 'session A only' && row.sessionId === 'history-session-a'), 10_000), true,
+  'session A owns its own recall row')
 
   // The hydration-commit probe (the repo's real-consumer patch pattern): record
   // every editor-recall reseed the presentation owner commits, so the test can
@@ -5077,14 +5083,21 @@ test('inputs accepted while the fresh /new session hydrates survive ↑ recall, 
   `the row is persisted under the fresh session id (${sessionId})`)
   assert.ok(!loadHistoryRecords(file).some(row => row.content === '/wf longer-than-one-line prompt' && row.sessionId === 'history-session-a'),
     'the row belongs to the fresh session, never the retired one')
-  // H3: both Ctrl+R scopes resolve the SAME row of the SAME cwd file —
-  // `Current session` through the session projection predicate, `Current
-  // directory` by scanning the cwd file without that filter.
-  const rows = loadHistoryRecords(file)
-  assert.ok(recallHistoryForSession(rows, sessionId).includes('/wf longer-than-one-line prompt'),
-    'the Ctrl+R Current session scope finds the row under the fresh session id')
-  assert.ok(rows.some(row => row.content === '/wf longer-than-one-line prompt'),
-    'the Ctrl+R Current directory scope finds the row in the cwd file')
+  // H3: the REAL Ctrl+R panel over this same fixture — the search source, the
+  // scope resolver and the rendered panel, not a direct records read.
+  const panel = (): string => vt.getViewport().join('\n')
+  vt.sendInput('\x12')
+  assert.equal(await drainUntil(() => panel().includes('/wf longer-than-one-line prompt'), 10_000), true,
+    `the Ctrl+R panel opens in the Current session scope and lists the fresh Session's row:\n${panel()}`)
+  assert.equal(panel().includes('session A only'), false,
+    'the Current session scope excludes the other Session\'s row')
+  vt.sendInput('\t')
+  assert.equal(await drainUntil(() => panel().includes('session A only'), 10_000), true,
+    `the Current directory scope lists BOTH Sessions' rows:\n${panel()}`)
+  assert.ok(panel().includes('/wf longer-than-one-line prompt'),
+    'the fresh Session row is in the Current directory scope too')
+  vt.sendInput('\x1b')
+  assert.equal(await drainUntil(() => !panel().includes('History'), 5_000), true, 'the panel closes')
 })
 
 test('submissions the fresh session already persisted are not duplicated by the hydration reconcile', async (t) => {
@@ -5200,12 +5213,13 @@ test('a deferred start keeps its FIRST prompt in ↑ after the first-session hyd
   assert.equal(mounted.app.getDraft(), 'first prompt of a deferred start', '↑ recalls the first prompt')
 })
 
-test('observational: a cross-Session identical input keeps no disk row but stays in the recall window', async (t) => {
+test('observational: the CWD-level skip spans Sessions while the recall window keeps every accepted input', async (t) => {
   // DEFERRED SEMANTICS (docs/input-history.md): the persistence dedupe anchor
   // (`lastHistoryContent`) is the CWD file's actual last row, NOT a per-Session
-  // one, so a repeat of that row writes nothing. The editor-recall scope still
-  // keeps the input it accepted — the disk policy and the recall projection are
-  // deliberately not the same question.
+  // one, so an identical repeat writes nothing — while a DIFFERENT submission in
+  // the same window does write (the control that proves the write path really
+  // ran). The editor-recall scope keeps the input it accepted either way: the
+  // disk policy and the recall projection are deliberately not the same question.
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-cwd-dedupe-window-')
   const previousHome = process.env.DSH_HOME
@@ -5219,7 +5233,7 @@ test('observational: a cross-Session identical input keeps no disk row but stays
   const harness = makeHarness(home, { id: 'cwd-dedupe-session-a', events: sessionEvents('resumed answer') })
   const mounted = await mountRunner(context, home, harness, { sessionId: 'cwd-dedupe-session-a' })
   const file = historyFilePath(home, home)
-  // Session A writes the cwd file's last row (and the dedupe anchor).
+  // Session A writes the cwd file's last row and the dedupe anchor.
   mounted.app.setDraft('same text')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   assert.equal(await drainUntil(() => loadHistoryRecords(file)
@@ -5244,20 +5258,27 @@ test('observational: a cross-Session identical input keeps no disk row but stays
       'the fresh session is published and its hydration is still pending')
     mounted.app.setDraft('same text')
     ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    // The CONTROL: a different text submitted in the SAME window.
+    mounted.app.setDraft('fresh text')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
   } finally {
     releaseNewWhenIdle()
   }
   assert.equal(await drainUntil(() => hydrationCommits.length > 0, 5_000), true,
     'the fresh session hydration committed')
-  // The submission is delivered AFTER its persistence gate ran, so the disk
-  // state below is final: the write was SKIPPED by the CWD anchor.
-  assert.equal(await drainUntil(() => harness.host.followedUp.length >= 1, 10_000), true,
-    'the repeated input was delivered after its persistence settled')
+  const freshSessionId = harness.createdSessionIds[0]
+  assert.ok(freshSessionId !== undefined, 'the fresh session id is known')
+  // The submissions are serialized by the submit FIFO turn, so the CONTROL row
+  // landing proves the earlier identical submission's persistence gate ran (and
+  // skipped) too: the disk state below is final.
+  assert.equal(await drainUntil(() => loadHistoryRecords(file)
+    .some(row => row.content === 'fresh text' && row.sessionId === freshSessionId), 10_000), true,
+  `the control submission writes under the fresh Session (${freshSessionId})`)
   assert.deepEqual(loadHistoryRecords(file).map(row => [row.content, row.sessionId]),
-    [['same text', 'cwd-dedupe-session-a']],
-    'the CWD-level anchor spans Sessions: no second row for the fresh Session')
-  assert.deepEqual([...mounted.app.getInputHistory()], ['same text'],
-    'the recall window still shows the input the user really submitted')
+    [['same text', 'cwd-dedupe-session-a'], ['fresh text', freshSessionId]],
+    'the CWD-level anchor spans Sessions: the identical repeat writes NO row for the fresh Session')
+  assert.deepEqual([...mounted.app.getInputHistory()], ['fresh text', 'same text'],
+    'the recall window still shows every input the user really submitted, in submission order')
 })
 
 test('after /new fully settles, an ordinary submission is recalled by ↑ exactly once (STABLE control)', async (t) => {
