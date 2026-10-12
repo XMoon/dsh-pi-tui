@@ -52,9 +52,43 @@ const COMMAND_KINDS = new Set(['bash', 'pwsh'])
 const COMPACT_WIDTH = 80
 const COMPACT_ROWS = 10
 
-/** The rows the header always leaves outside itself: the bottom Action Bar
- *  and at least ONE body row. */
-const HEADER_RESERVED_ROWS = 2
+/** The Action Bar's own row — the ONE chrome row that is NEVER budgeted away. */
+const ACTION_BAR_ROWS = 1
+/** The plan's compact-header contract (§5): below 80×10 the header collapses to
+ *  at most TWO rows. */
+const COMPACT_HEADER_MAX_ROWS = 2
+/** The full header's bounded row count (status, progress, detail, facts, command). */
+const FULL_HEADER_MAX_ROWS = 5
+
+/**
+ * The ONE per-frame chrome plan of the workspace: the pinned Action Bar keeps
+ * its row first, then the header (status + fact markers, then the Command/Label
+ * summary, then the descriptive fact text), then the transient notice. Every
+ * fixed child derives its row count from THIS plan, so no combination of a short
+ * terminal and a live notice can ever push the Action Bar off the screen.
+ */
+interface JobInspectorChromePlan {
+  readonly compact: boolean
+  readonly headerRows: number
+  readonly noticeRows: number
+}
+
+/** Derive the chrome plan for the CURRENT frame: pure in the live row grant, the
+ *  rendered width and whether a notice is live. */
+const planChrome = (
+  width: number,
+  rows: number,
+  noticeLive: boolean,
+): JobInspectorChromePlan => {
+  const safeRows = Math.max(1, Math.floor(rows))
+  const compact = width < COMPACT_WIDTH || safeRows < COMPACT_ROWS
+  const budget = Math.max(0, safeRows - ACTION_BAR_ROWS)
+  const headerMax = Math.min(compact ? COMPACT_HEADER_MAX_ROWS : FULL_HEADER_MAX_ROWS, budget)
+  // The notice yields to the header and, together with everything else, to the
+  // Action Bar: it only takes a row when the header can still have its own.
+  const noticeRows = noticeLive && budget - headerMax >= 1 ? 1 : 0
+  return { compact, headerRows: Math.max(0, Math.min(headerMax, budget - noticeRows)), noticeRows }
+}
 
 /** The retained-body placeholder of a phase with no `text` yet: three
  *  distinct statements, so "still connecting", "settled with nothing
@@ -180,11 +214,11 @@ const withReservedStatus = (prefix: string, status: string, width: number): stri
  *  gap/error/settled facts, and the command-or-label identity. */
 class JobInspectorHeader implements Component {
   private view: JobInspectorView
-  private readonly rows: () => number
+  private readonly plan: (width: number) => JobInspectorChromePlan
 
-  constructor(view: JobInspectorView, rows: () => number) {
+  constructor(view: JobInspectorView, plan: (width: number) => JobInspectorChromePlan) {
     this.view = view
-    this.rows = rows
+    this.plan = plan
   }
 
   setView(view: JobInspectorView): void {
@@ -193,28 +227,27 @@ class JobInspectorHeader implements Component {
 
   render(width: number): string[] {
     const view = this.view
-    const rows = Math.max(1, Math.floor(this.rows()))
-    const budget = Math.max(1, rows - HEADER_RESERVED_ROWS)
+    const { compact, headerRows } = this.plan(width)
+    if (headerRows <= 0) return []
     const kind = COMMAND_KINDS.has(view.kind) ? 'Command' : 'Label'
     const identity = `Job ${view.jobId} · ${view.kind}`
     const command = `${kind}: ${oneLine(view.label)}`
     const lines: string[] = []
-    if (width < COMPACT_WIDTH || rows < COMPACT_ROWS) {
-      // Short/narrow terminal: at most THREE rows, in PRIORITY order. The STATUS
-      // and every fact marker come first (never shortened), then the Command/Label
-      // identity the locked UI always shows, and only then the descriptive facts
-      // (the markers already say WHAT happened, so this row is the first one the
-      // row budget may drop). The identity prefix is kept only when it fits beside
-      // the status.
+    if (compact) {
+      // TWO rows at most, in PRIORITY order. Row one carries the STATUS and every
+      // fact marker (never shortened); row two carries the Command/Label summary
+      // the locked UI always shows, followed by the descriptive fact text while the
+      // row still has room for it — so the summary can never be displaced by a
+      // GAP/ERROR description, and the identity prefix is kept only when it fits
+      // beside the status.
       let head = view.status
       for (const marker of markerTokens(view)) {
         if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
       }
       const withIdentity = `${identity} · ${head}`
       lines.push(visibleWidth(withIdentity) <= width ? withIdentity : head)
-      lines.push(command)
       const facts = flagTexts(view)
-      if (facts !== '') lines.push(facts)
+      lines.push(facts === '' ? command : `${command}   ${facts}`)
     } else {
       // The identity never pushes the status out of its row, and the markers
       // never push the (unbounded) fact text out of theirs.
@@ -228,7 +261,7 @@ class JobInspectorHeader implements Component {
       }
       lines.push(command)
     }
-    return lines.slice(0, budget).map(line => truncateToWidth(line, width, '…', true))
+    return lines.slice(0, headerRows).map(line => truncateToWidth(line, width, '…', true))
   }
 
   invalidate(): void {
@@ -272,14 +305,19 @@ class JobInspectorActionBar implements Component {
  *  authority (the app), never from a second Stop state. */
 class JobInspectorNoticeRow implements Component {
   private readonly notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
+  private readonly plan: (width: number) => JobInspectorChromePlan
 
-  constructor(notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined) {
+  constructor(
+    notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined,
+    plan: (width: number) => JobInspectorChromePlan,
+  ) {
     this.notice = notice
+    this.plan = plan
   }
 
   render(width: number): string[] {
     const live = this.notice()
-    if (live === undefined) return []
+    if (live === undefined || this.plan(width).noticeRows === 0) return []
     const line = live.kind === 'info' ? color.textDim(`ℹ ${live.text}`) : color.error(`✗ ${live.text}`)
     return [truncateToWidth(line, width, '…', true)]
   }
@@ -310,18 +348,23 @@ export class JobInspectorPanel extends VStack {
 
   constructor(initial: JobInspectorState, intents: JobInspectorPanelIntents) {
     const view = deriveJobInspectorView(initial)
-    const header = new JobInspectorHeader(view, intents.rows)
+    // The ONE chrome plan every fixed child derives its row count from: the Action
+    // Bar first, then the header, then the notice.
+    const plan = (width: number): JobInspectorChromePlan =>
+      planChrome(width, intents.rows(), intents.notice() !== undefined)
+    const header = new JobInspectorHeader(view, plan)
     const body = new Text('', 0, 0)
     body.setText(bodyText(view))
     const bar = new JobInspectorActionBar(intents.canStop)
     super([
-      // The pinned chrome never shrinks; the body absorbs the remainder and
-      // may reach zero rows on a very short terminal.
+      // Every fixed child renders AT MOST the rows the plan granted it (zero
+      // included), so the pinned Action Bar can never be pushed off the screen;
+      // the body absorbs whatever remains and may reach zero rows.
       { component: header, shrink: 0 },
       { component: new ScrollView(body, { follow: 'end', primary: true, scrollbar: 'auto' }), basis: 0, grow: 1 },
       // The transient notice row sits ABOVE the pinned Action Bar and renders
-      // zero rows when nothing is live.
-      { component: new JobInspectorNoticeRow(intents.notice), shrink: 0 },
+      // zero rows when nothing is live or the budget is too short.
+      { component: new JobInspectorNoticeRow(intents.notice, plan), shrink: 0 },
       { component: bar, shrink: 0 },
     ])
     this.header = header
