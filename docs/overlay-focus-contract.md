@@ -370,10 +370,14 @@ or over the editor seat.
   predicate (its session/generation subject) — never a status cwd/text, a
   `TuiApp.generation` on its own, or a shadow `focused` boolean.
 - **REFUSE is a capacity result.** The open checks a disposed surface, a live
-  Question (`activeQuestions`), a live approval (`approvals.isActive()`) and a
-  live Save Location (`activeSaveLocation`) BEFORE the factory runs: a refused
-  request calls no factory, calls no `close`, writes no notification and leaves
-  the blocking owner untouched.
+  Question (`activeQuestions`), a pending approval (`approvals.hasPending()` —
+  an ACTIVE prompt OR a queued one, so the synchronous window between a settle
+  and the next `showNext()` is still blocking) and a live Save Location
+  (`activeSaveLocation`) BEFORE the factory runs: a refused request calls no
+  factory, calls no `close`, writes no notification and leaves the blocking
+  owner untouched. The seat-arbitration gates (`optionalSeatBlocking`, the
+  projection focus fence and the `↓ view` affordance) read that same pending
+  fact.
 - **One source of truth for the seat projection.** `seatFallbackComponent()`
   derives the physical occupant from the LIVE owner — Question frame > Save
   Location frame > ACTIVE-and-current optional tenant > the latest host/plugin
@@ -394,20 +398,35 @@ or over the editor seat.
   once, like an explicit close — and the seat re-projects and focuses the live
   winner, so the physical mount can never keep painting a panel whose
   session/generation is gone while the fork still dispatches keys to it. The
-  focus entry additionally compares the physical keyboard owner BEFORE and AFTER
-  the re-validation: a cleanup callback that synchronously opened a NEWER
-  capturing overlay keeps the keyboard, while the pre-existing fallback
-  semantics are unchanged whenever the re-validation did not move the owner.
+  focus entry protects a NEWER owner that the retirement's cleanup established:
+  when a stale record was retired in that call AND a managed overlay holds the
+  keyboard afterwards, the fallback is skipped — comparing the focused
+  component's identity is NOT enough, because the cleanup may re-focus an overlay
+  that was already focused. Whenever nothing was retired the pre-existing
+  fallback semantics are unchanged (the broker's suspension/resume paths rely on
+  them).
 - **A failed park rolls the blocking owner back.** The park of a blocking owner
   (Question / Save Location / approval) runs the stale tenant's caller cleanup,
-  which may throw. The owner then ROLLS BACK instead of staying half-committed:
-  its intent is cleared, the prompt is released, the seat is re-projected to the
-  live owner and the frame repainted (`Question` / `Save`; the approval clears
-  its active prompt and calls the host's `rollbackApprovalPark`), and the
-  ORIGINAL failure propagates — aggregated with a rollback failure — so the
-  caller's promise rejects and no unpresented owner blocks later requests.
-  Without this, a caller-side cleanup failure would leave an unpresented modal
-  blocking every later request while a retired component stayed painted.
+  which may throw. The owner then ROLLS BACK instead of staying half-committed,
+  and the rollback is a per-step batch of INDEPENDENT obligations: the failed
+  state is latched settled and its `abort` binding released (it leaves every owner
+  slot here, so nothing else could ever unbind the caller's signal), the owner
+  slot is cleared only while the failed state STILL owns it — a cleanup that
+  aborted the old modal, synchronously opened a NEWER same-type modal and then
+  threw must not have its newer owner wiped (the new Question / Save frame stays
+  mounted and the new approval stays answerable) — the Save prompt is released,
+  the seat is re-projected to the live owner, the derived seat is re-published (a
+  hostless `TuiApp` only mirrors it through the render funnel's host branch) and
+  the frame repainted. The ORIGINAL failure then propagates, aggregated with a
+  rollback failure, both kept BY IDENTITY (a user-thrown `AggregateError` is ONE
+  entry and is never flattened into its `.errors`), so the caller's promise
+  rejects and no unpresented owner blocks later requests. An abandoned
+  presentation also hands back any suspension roots it acquired
+  (`releaseAbandonedSuspension`): a callback inside its window can open a newer
+  overlay that the broker appended to its set, and dropping the state without
+  resuming them would strand live roots hidden with nobody left to restore them.
+  Without all of this, a caller-side cleanup failure would leave an unpresented
+  modal blocking every later request while a retired component stayed painted.
 - **PARK is committed before the blocker's first callback.** A Question commits
   `activeQuestions` and parks the tenant BEFORE the Save Location handoff; an
   approval commits its pending prompt as active BEFORE the park, the Save
@@ -481,7 +500,11 @@ or over the editor seat.
   re-validates `active === pending && !settled && !isDisposed()` AFTER
   `showApprovalOverlay` returned: a losing mount hides only the handle it
   created, disposes only the frame it created, registers no fullscreen rebind
-  and never publishes over the newer prompt.
+  and never publishes over the newer prompt. A FAILED park takes the same
+  identity-fenced path: this prompt is latched settled, its abort binding is
+  released, its active ownership is cleared only while it is still the active
+  one, and the host's `rollbackApprovalPark` completes the seat publish and the
+  repaint as independent steps.
 - **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
   rides the caller's `close()` as the FIRST independent step of the `tui
   dispose` batch, so a throwing tenant cleanup neither skips the
@@ -494,14 +517,20 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-29: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-36: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
-host-classified protocol fence on both screens, a capturing overlay opened from
-a restore callback, a completion-abort that cancels the superseding flow, an
-ACTIVE stale subject at the input and at both screen-swap entries, replacement
-and re-entrant-close identity, a plugin editor HMR while parked,
-regular↔fullscreen, resize cycles, final disposal, throwing-cleanup
+host-classified protocol fence on both screens for CURRENT and STALE subjects, a
+capturing overlay opened from a restore callback, a completion-abort that
+cancels the superseding flow, an ACTIVE stale subject at the input and at both
+screen-swap entries, replacement and re-entrant-close identity, a plugin editor
+HMR while parked, regular↔fullscreen, resize cycles, final disposal,
+throwing-cleanup aggregation, a cleanup that preempts the presentation and opens
+a NEWER same-type modal, the failed state's released abort binding, a cancelled
+Save presentation that mounts no frame and hides no root, the Approval A→B
+handover refusing a fresh opener, a callback-created root handed back, the
+rollback's independent repaint and seat publish with identity-preserving
 aggregation, Save preemption by a Question and by an Approval, an Approval +
-Question overlap, a capturing-overlay handoff, the untouched History overlay,
-and input routing).
+Question overlap, a capturing-overlay handoff, the untouched History overlay, the
+`↓ view` affordance withheld while an ACTIVE tenant owns the seat, and input
+routing).

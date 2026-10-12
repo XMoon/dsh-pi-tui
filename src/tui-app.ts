@@ -2445,8 +2445,14 @@ export class TuiApp {
     // seat must project the live owner again (a retired tenant never stays
     // painted/focused) and the frame repaints.
     rollbackApprovalPark: () => {
-      this.mountSeatChild()
-      this.requestRender()
+      // Same per-step contract as the Question / Save rollback: a throwing
+      // mount/focus setter must not skip the independent seat publish and
+      // repaint.
+      runSyncDisposalSteps('approval park rollback', [
+        () => this.mountSeatChild(),
+        () => this.publishFocusSeat(),
+        () => this.requestRender(),
+      ])
     },
   })
   /** The active user-questions flow, if any (one on screen at a time). */
@@ -13604,7 +13610,7 @@ export class TuiApp {
     // would see the WRONG focused component and plugin bindings would steal
     // editor keys). A nonCapturing or blurred capturing overlay has released
     // the keyboard, so it must NOT fence the handoff.
-    if (this.activeQuestions === undefined && !this.approvals.isActive()
+    if (this.activeQuestions === undefined && !this.approvals.hasPending()
       && this.activeSaveLocation === undefined
       && !this.overlayBroker.hasFocusedOverlay()) {
       this.activeScreen.setFocus(occupant)
@@ -13717,14 +13723,20 @@ export class TuiApp {
    * @param steps - the owner's rollback obligations.
    */
   private rollbackBlockingPresentation(primary: unknown, steps: readonly (() => void)[]): never {
+    // Collect the rollback failures the SAME way every other disposal batch
+    // does — ONE entry per thrown value, in step order — and keep BOTH the
+    // primary failure and every rollback value by IDENTITY. A user-thrown
+    // `AggregateError` is a single thrown value and is never flattened into its
+    // `.errors` (that would replace what the caller actually threw).
+    let rollbackFailure: unknown
+    let failed = false
     try {
       runSyncDisposalSteps('blocking presentation rollback', steps)
-    } catch (rollbackFailure) {
-      const failures = rollbackFailure instanceof AggregateError
-        ? [primary, ...rollbackFailure.errors]
-        : [primary, rollbackFailure]
-      throw new AggregateError(failures, 'blocking presentation rollback')
+    } catch (error) {
+      rollbackFailure = error
+      failed = true
     }
+    if (failed) throw new AggregateError([primary, rollbackFailure], 'blocking presentation rollback')
     throw primary
   }
 
@@ -13735,20 +13747,68 @@ export class TuiApp {
    * live owner first, so the retired component stops being painted and focused;
    * the original failure then propagates.
    */
-  private parkOptionalSeatOrRollback(rollback: () => void): void {
+  private parkOptionalSeatOrRollback(
+    state: { suspendedOverlays: Set<OverlayHandle> },
+    steps: readonly (() => void)[],
+  ): void {
     try {
       this.parkOptionalSeat()
     } catch (error) {
       // The rollback COMPLETES the independent obligations the park would have
-      // finished — the seat projects the live owner again (the retired tenant
-      // stops being painted/focused) and the frame repaints — before the
-      // original failure propagates.
+      // finished. Each `steps` entry (state latch, abort binding, identity fenced
+      // slot clear, prompt release) is attempted on its own, any suspension root
+      // a callback acquired while this state still owned the seat is handed back
+      // (the exception leaves this presentation, so its own fence never runs),
+      // the seat projects the live owner again (the retired tenant stops being
+      // painted/focused), the derived seat is re-published (a hostless TuiApp
+      // only mirrors it through the render funnel's host branch) and the frame
+      // repaints — all before the original failure propagates.
       this.rollbackBlockingPresentation(error, [
-        rollback,
+        ...steps,
+        () => this.releaseAbandonedSuspension(state),
         () => this.mountSeatChild(),
+        () => this.publishFocusSeat(),
         () => this.requestRender(),
       ])
     }
+  }
+
+  /**
+   * Phase 3A / PR-B: release one failed interactive state's `abort` binding.
+   * That state is about to leave every owner slot (its presentation never
+   * happened), so this rollback is the LAST chance to unbind the caller's
+   * signal: nothing else would ever settle it, and the final disposal must not
+   * inherit a live listener.
+   */
+  private releaseAbortBinding(state: { onAbort?: () => void; signal?: AbortSignal }): void {
+    if (state.onAbort !== undefined && state.signal !== undefined) {
+      state.signal.removeEventListener('abort', state.onAbort)
+    }
+  }
+
+  /**
+   * Phase 3A / PR-B: hand back the suspension roots an ABANDONED presentation
+   * acquired. A callback inside its presentation window can open a NEWER
+   * overlay, which the broker appends to THIS state's suspension set (the modal
+   * already owns the seat) — dropping the state without resuming them would
+   * strand live roots hidden with nobody left to restore them. An EMPTY set is
+   * deliberately left alone: resuming it would re-focus an unrelated root.
+   */
+  private releaseAbandonedSuspension(state: { suspendedOverlays: Set<OverlayHandle> }): void {
+    if (state.suspendedOverlays.size === 0) return
+    this.overlayBroker.resumeSuspendedRoots(state)
+  }
+
+  /**
+   * Phase 3A / PR-B: stop a presentation a synchronous callback killed. Returns
+   * whether the caller must return — after handing any suspension roots the
+   * dead state acquired back to the broker (see
+   * {@link releaseAbandonedSuspension}).
+   */
+  private abandonIfDead(live: boolean, state: { suspendedOverlays: Set<OverlayHandle> }): boolean {
+    if (live) return false
+    this.releaseAbandonedSuspension(state)
+    return true
   }
 
   /**
@@ -13761,6 +13821,19 @@ export class TuiApp {
    */
   private questionFlowIsLive(state: QuestionState): boolean {
     return !this.disposed && this.activeQuestions === state && state.settled !== true
+  }
+
+  /**
+   * Phase 3A / PR-B: whether a Save Location presentation may still continue —
+   * the prompt is the live active one, not settled, and the surface is alive.
+   * The mirror of `questionFlowIsLive`, re-read after every step of
+   * `presentSaveLocation` that can run a synchronous callback (the park, the
+   * activity projection, the broker suspension, a focus transition): a prompt a
+   * cleanup callback cancelled or replaced must never mount, focus or publish a
+   * frame — nor hide a live overlay root into its own dead suspension set.
+   */
+  private saveLocationFlowIsLive(state: SaveLocationState): boolean {
+    return !this.disposed && this.activeSaveLocation === state && state.settled !== true
   }
 
   /**
@@ -13806,7 +13879,7 @@ export class TuiApp {
   private optionalSeatBlocking(): boolean {
     return this.disposed
       || this.activeQuestions !== undefined
-      || this.approvals.isActive()
+      || this.approvals.hasPending()
       || this.activeSaveLocation !== undefined
   }
 
@@ -13964,6 +14037,17 @@ export class TuiApp {
   }
 
   /**
+   * Phase 3A / PR-B: whether an optional tenant currently OWNS the editor seat
+   * as its input-capturing owner (ACTIVE, not finalized, still current) — the
+   * same capture fact class as the Question / Save / Approval owners, so the
+   * `↓ view` affordance and the seat-arbitration gates read it.
+   */
+  private optionalTenantOwnsSeat(): boolean {
+    const record = this.optionalSeat
+    return record !== undefined && !record.finalized && record.phase === 'active' && record.isCurrent()
+  }
+
+  /**
    * The task-browser affordance as the FOOTER sees it: the UI projection of
    * the question the ↓ route already answers through the input ladder (the
    * `TASKS_OPEN_AFFORDANCE` composition rule, plus the modal owners that
@@ -13987,8 +14071,12 @@ export class TuiApp {
   private taskBrowserAvailable(): boolean {
     return this.tasksActive
       && this.activeQuestions === undefined
-      && !this.approvals.isActive()
+      && !this.approvals.hasPending()
       && this.activeSaveLocation === undefined
+      // Phase 3A / PR-B integration: an ACTIVE optional tenant owns the seat and
+      // consumes the ↓ route, so the affordance must not advertise it either
+      // (the same "no input-capturing owner" rule as the modals above).
+      && !this.optionalTenantOwnsSeat()
       && !this.overlayBroker.hasFocusedOverlay()
       && this.seatEditor().getText().trim() === ''
       && this.seatInputMode() === 'prompt'
@@ -16638,14 +16726,17 @@ export class TuiApp {
     // blocker whose frame is not ready yet falls back to the seat editor,
     // exactly like the pre-tenant path (the blocker focuses its own frame
     // right after).
-    const focusedBefore = this.activeScreen.getFocusedComponent()
+    const stale = this.optionalSeat !== undefined && !this.optionalSeat.finalized
+      && !this.optionalSeat.isCurrent()
     this.revalidateOptionalSeat()
-    // The retirement runs the caller's cleanup, which may synchronously hand
-    // the keyboard to a NEWER owner (a capturing overlay): that newer fact
-    // wins, so the fallback must not steal it back. When the re-validation did
-    // NOT change the physical owner, the pre-existing fallback semantics are
-    // unchanged (the broker's suspension/resume paths rely on them).
-    if (this.activeScreen.getFocusedComponent() !== focusedBefore) return
+    // The retirement runs the caller's cleanup, which may synchronously hand the
+    // keyboard to a NEWER owner — including a RE-focus of an overlay that was
+    // already focused, so comparing the component identity is NOT enough. While
+    // a managed overlay holds the keyboard after such a retirement, the fallback
+    // must not steal it back; when nothing was retired the pre-existing fallback
+    // semantics are unchanged (the broker's suspension/resume paths rely on
+    // them).
+    if (stale && this.overlayBroker.hasFocusedOverlay()) return
     this.activeScreen.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
   }
 
@@ -19852,8 +19943,12 @@ export class TuiApp {
     // Parking re-projects the seat and may RETIRE a stale tenant, whose caller
     // cleanup can throw (rolled back below) or synchronously settle/replace
     // THIS flow: never continue into a suspension/seat mount for a dead flow.
-    this.parkOptionalSeatOrRollback(() => { this.activeQuestions = undefined })
-    if (!this.questionFlowIsLive(state)) return
+    this.parkOptionalSeatOrRollback(state, [
+      () => { state.settled = true },
+      () => this.releaseAbortBinding(state),
+      () => { if (this.activeQuestions === state) this.activeQuestions = undefined },
+    ])
+    if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
     // A Host question is authoritative over a Client-local Save Location
     // prompt: presenting a question settles the prompt as cancelled (the
     // caller's owned workflow classifies it and notifies nothing). The save
@@ -19866,17 +19961,17 @@ export class TuiApp {
       // The prompt's disposal aborts its completion port, whose subscribers can
       // synchronously cancel THIS flow (or open a newer one): a dead flow must
       // never mount a frame.
-      if (!this.questionFlowIsLive(state)) return
+      if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
     }
     this.projectActivity()
-    if (!this.questionFlowIsLive(state)) return
+    if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
     // A question is a logical capturing modal: the broker directly suspends
     // every visible logical ROOT (hidden, topology intact) until the flow
     // settles. Child topology, focus intent and z-order stay in the broker.
     this.overlayBroker.suspendVisibleRoots(state)
     // The suspension hands the keyboard to the seat owner and may fire a plugin
     // focus/blur callback: re-read the identity before building the frame.
-    if (!this.questionFlowIsLive(state)) return
+    if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
     const frame = new QuestionFrame(state.flow, () => this.terminal.rows)
     state.frame = frame
     // Re-vendor lifecycle follow-up P1: the flow only PROJECTS into the
@@ -19888,7 +19983,7 @@ export class TuiApp {
     screen.setFocus(frame)
     // The focus transition runs the previous owner's onBlur: a newer operation
     // it started (a settle, a replacement, a disposal) owns the final state.
-    if (!this.questionFlowIsLive(state)) return
+    if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
     // The question flow owns the seat (follow-up P1).
     this.setFocusSeat('overlay')
     // PR-D (external review P2): the seat occupant just changed height, so the
@@ -20163,14 +20258,23 @@ export class TuiApp {
     // must never be a keyboard target while the prompt owns the seat. A
     // throwing stale-tenant cleanup rolls the intent back (and releases the
     // prompt) instead of leaving an unpresented owner behind.
-    this.parkOptionalSeatOrRollback(() => {
-      this.activeSaveLocation = undefined
-      state.prompt.dispose()
-    })
+    this.parkOptionalSeatOrRollback(state, [
+      () => { state.settled = true },
+      () => this.releaseAbortBinding(state),
+      () => { if (this.activeSaveLocation === state) this.activeSaveLocation = undefined },
+      () => state.prompt.dispose(),
+    ])
+    // Mirror of `presentQuestion`: every step below that can run a synchronous
+    // callback is followed by an identity fence, so a cleanup callback that
+    // cancels or replaces THIS prompt can never mount a dead frame or hide a
+    // live overlay root into its own dead suspension set.
+    if (this.abandonIfDead(this.saveLocationFlowIsLive(state), state)) return
     this.projectActivity()
+    if (this.abandonIfDead(this.saveLocationFlowIsLive(state), state)) return
     // The prompt is a logical capturing modal: the broker directly suspends
     // every visible logical ROOT (topology intact) until it settles.
     this.overlayBroker.suspendVisibleRoots(state)
+    if (this.abandonIfDead(this.saveLocationFlowIsLive(state), state)) return
     const frame = new SaveLocationFrame(state.prompt)
     state.frame = frame
     // The prompt only PROJECTS into the seat — the previous occupant (the
@@ -20179,6 +20283,7 @@ export class TuiApp {
     this.editorSeat.replace(frame)
     const screen = this.fullscreen ?? this.tui
     screen.setFocus(frame)
+    if (this.abandonIfDead(this.saveLocationFlowIsLive(state), state)) return
     this.setFocusSeat('overlay')
     // The Save Location capture writes NO ActivityStatus section of its own
     // (unlike Question/Approval, which project through projectActivity), so
