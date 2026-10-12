@@ -11,12 +11,11 @@ import test from 'node:test'
 import { connect } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 // The fact-row readability rule (the assertion reads the wire's own values and
-// only the bound from the implementation).
+// only the bound from the shared implementation).
+import { displayWidth, factLineColumns } from '../src/tui/tsp/picker-text.ts'
 import {
   ALL_SCOPES_ID,
-  displayWidth,
   effortItemId,
-  factLineColumns,
 } from '../src/tui/tsp/model-picker-state.ts'
 import { runOwned } from '../src/runtime/process/tasks.ts'
 import type {

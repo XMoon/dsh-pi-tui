@@ -49,6 +49,7 @@ import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 import type { ModelPresentation } from './model-presentation.ts'
+import type { PresetPresentation } from './preset-presentation.ts'
 
 /** The catalog capability slice the command surface subscribes to. */
 export interface CommandCatalogCapability {
@@ -126,6 +127,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly app: () => TuiApp | undefined
   /** Only the Model presenter; never an alternate command executor. */
   readonly modelPresentation?: () => ModelPresentation | undefined
+  /** Only the Preset presenter; never an alternate command executor. */
+  readonly presetPresentation?: () => PresetPresentation | undefined
   /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
    *  are background-reachable under a read-only TSP renderer). */
   readonly notify: (text: string, kind?: 'error' | 'info') => void
@@ -674,6 +677,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         runner(), initial,
         { ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }) },
         deps.modelPresentation?.(),
+        deps.presetPresentation?.(),
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own

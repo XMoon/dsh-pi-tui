@@ -111,6 +111,7 @@ import {
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { ModelPresentation } from '../command/model-presentation.ts'
+import type { PresetPresentation } from '../command/preset-presentation.ts'
 import { pituiSurfaceInteractionPresenter, type SurfaceInteractionPresenter } from './interaction-presenter.ts'
 import type { TaskBrowserDatasetScope } from './task-browser-runtime.ts'
 import type { TaskBrowserViewState } from './task-runtime.ts'
@@ -247,6 +248,8 @@ export interface SurfaceRendererMount {
      */
     readonly composer: SubmissionComposerPort
     readonly modelPresentation?: ModelPresentation | undefined
+    /** The native `/preset` presenter, beside the Model one. */
+    readonly presetPresentation?: PresetPresentation | undefined
     /**
      * PR3-B §3.2: the renderer's modal presenter. B1 keeps the INERT
      * implementation (no TSP form exists; every ask rejects — fail-closed,
@@ -446,6 +449,8 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   readonly composer: SubmissionComposerPort
   /** Native /model presentation, absent until a supported renderer mounts. */
   readonly modelPresentation?: ModelPresentation | undefined
+  /** Native /preset presentation, absent until a supported renderer mounts. */
+  readonly presetPresentation?: PresetPresentation | undefined
   /**
    * PR3-A: the renderer-facing display seam (PiTui adapter or the TSP
    * renderer). Throws if read before {@link SurfaceRuntime.start}.
@@ -735,6 +740,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    */
   let composerPort: SubmissionComposerPort | undefined
   let modelPresentation: ModelPresentation | undefined
+  let presetPresentation: PresetPresentation | undefined
   /**
    * PR3-B §3.3: the renderer input projection constructed at `start()` and the
    * mount that will receive it. `bindRendererInput()` performs the ONE bind
@@ -1680,6 +1686,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       return composerSeam()
     },
     get modelPresentation() { return modelPresentation },
+    get presetPresentation() { return presetPresentation },
     get display(): SurfaceDisplaySeam {
       return displaySeam()
     },
@@ -1858,6 +1865,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         display = mounted.display
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation
+        presetPresentation = mounted.presetPresentation
         interactionPresenter = mounted.interaction
         rendererDispose = mounted.dispose
         // PR3-B §3.3: the input projection is constructed HERE (from the EXACT
@@ -1955,6 +1963,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       const releaseRenderer = rendererDispose
       rendererDispose = undefined
       modelPresentation = undefined
+      presetPresentation = undefined
       // A disposed surface never binds its renderer input afterwards.
       pendingInputBinding = undefined
       inputBindTarget = undefined

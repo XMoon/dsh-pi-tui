@@ -122,6 +122,7 @@ export interface TspPane {
  * override the advertised set verbatim (the fail-closed negative). */
 export function installTspPane(options: {
   readonly modelPicker?: boolean
+  readonly presetPicker?: boolean
   readonly kinds?: readonly string[]
 } = {}): TspPane {
   const input = new FakeInput()
@@ -136,11 +137,19 @@ export function installTspPane(options: {
   const closeBodies: string[] = []
   const frameList: TspWireFrame[] = []
   let frames = 0
+  // The native-kind sets are the pane's own advertised set, exactly like the
+  // real client: the Model layer needs rows/cards, the Preset layer needs the
+  // picker alone. A case can override the advertised set verbatim (fail-closed).
+  const native = [
+    ...(options.modelPicker === true ? ['picker', 'row', 'card'] : []),
+    ...(options.presetPicker === true ? ['picker'] : []),
+    ...(options.modelPicker === true || options.presetPicker === true ? ['text'] : []),
+  ]
   const hello = options.kinds !== undefined
     ? { ...HELLO, ver: '0.7.2', kinds: options.kinds }
-    : options.modelPicker
-      ? { ...HELLO, ver: '0.7.2', kinds: [...HELLO.kinds, 'picker', 'row', 'text', 'card'] }
-      : HELLO
+    : native.length === 0
+      ? HELLO
+      : { ...HELLO, ver: '0.7.2', kinds: [...HELLO.kinds, ...native] }
 
   const reply = (): void => {
     const pending = queued

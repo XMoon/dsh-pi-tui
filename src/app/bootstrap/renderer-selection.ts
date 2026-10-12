@@ -33,6 +33,7 @@ export interface RendererSelectionDeps {
     readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
     readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
     readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
+    readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
     readonly dispose: () => Promise<void>
@@ -61,6 +62,7 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
       display: tsp.display,
       composer: tsp.composer,
       modelPresentation: tsp.modelPresentation,
+      presetPresentation: tsp.presetPresentation,
       interaction: tsp.interaction,
       bindInput: (handlers) => tsp.bindInput(handlers),
       dispose: () => tsp.dispose(),
@@ -94,6 +96,7 @@ export function productionTspConnector(
   readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
   readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
   readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
+  readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
   readonly dispose: () => Promise<void>

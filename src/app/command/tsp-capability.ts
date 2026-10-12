@@ -18,8 +18,9 @@
  *   spelling is never captured here);
  * - it holds no state and performs no IO.
  *
- * The unconditional set is the two exit builtins. PR4 Model additionally
- * requires the mounted native presenter; other TUI builtins are refused.
+ * The unconditional set is the two exit builtins. PR4 additionally admits the
+ * TUI builtins whose native presenter the mounted renderer really installed
+ * (`/model`, `/preset`); every other TUI builtin is refused.
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
@@ -31,6 +32,22 @@ import type { CommandLineClassification } from '../../domain/command/policy.ts'
  * EXISTING exit orchestration, which needs no PiTui chrome.
  */
 export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set(['exit', 'quit'])
+
+/**
+ * Which native TUI builtin presenters the mounted renderer actually installed.
+ * A capability is admitted only when the presenter exists, so a renderer that
+ * lacks the node kinds (or never mounted the picker) refuses the command instead
+ * of running a handler that would dereference a `TuiApp` that is not there.
+ *
+ * The whole `/preset` command FAMILY (`/preset`, `/preset <id>`, `/preset
+ * status`, `/preset default [<id>]`) rides the ONE `preset` entry, because the
+ * registered command family shares this name: no typed verb gets a raw-string
+ * bypass around the classification.
+ */
+export interface TspBuiltinPickers {
+  readonly modelPicker?: boolean
+  readonly presetPicker?: boolean
+}
 
 /**
  * What the predicate concluded. THREE states, so a caller cannot mistake
@@ -58,11 +75,12 @@ export type TspBuiltinAvailability =
  *   is reported unavailable-by-family so the caller never routes it here (the
  *   caller checks the family first — see the production consumer).
  * @param name - the parsed builtin name the classifier selected.
+ * @param pickers - which native presenters the mounted renderer installed.
  */
 export function tspBuiltinAvailability(
   classification: CommandLineClassification,
   name: string,
-  supportsModelPicker = false,
+  pickers: TspBuiltinPickers = {},
 ): TspBuiltinAvailability {
   if (classification.kind !== 'client-command' || classification.source !== 'tui') {
     // Not a TUI builtin: a Host command, an extension contribution, a skill
@@ -70,7 +88,9 @@ export function tspBuiltinAvailability(
     // must branch on this kind — it is the family decision, made once here.
     return { kind: 'not-a-tui-builtin' }
   }
-  return (TSP_SUPPORTED_TUI_BUILTINS.has(name) || (name === 'model' && supportsModelPicker))
+  return TSP_SUPPORTED_TUI_BUILTINS.has(name)
+    || (name === 'model' && pickers.modelPicker === true)
+    || (name === 'preset' && pickers.presetPicker === true)
     ? { kind: 'available' }
     : { kind: 'unsupported' }
 }

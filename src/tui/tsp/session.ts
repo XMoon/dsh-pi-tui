@@ -54,7 +54,9 @@ import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
+import { TspPresetPicker } from './preset-picker.ts'
 import type { ModelPresentation } from '../../app/command/model-presentation.ts'
+import type { PresetPresentation } from '../../app/command/preset-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -172,6 +174,11 @@ export interface TspRendererOptions {
 export interface TspRenderer extends TspInputBinding {
   readonly display: SurfaceDisplaySeam
   readonly modelPresentation: ModelPresentation | undefined
+  /**
+   * PR4-A: the native `/preset` preset picker. Absent when the pane does not
+   * advertise the official kinds it renders.
+   */
+  readonly presetPresentation: PresetPresentation | undefined
   /**
    * PR3-B B1: the composer projection backed by the renderer's ONE
    * program-owned composer (`getDraft()` reads the VISIBLE editor, never a
@@ -303,6 +310,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let hydrating = false
   let lastMain: Node | undefined
   let modelPicker: TspModelPicker | undefined
+  let presetPicker: TspPresetPicker | undefined
   const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
@@ -347,7 +355,32 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
     notify: (text, kind) => display.notify(text, kind),
   })
+  presetPicker = new TspPresetPicker({
+    render: () => render(),
+    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
+    notify: (text, kind) => display.notify(text, kind),
+  })
   modelPicker.resize(session.caps.cols)
+  /**
+   * The ONE layer, and the two presenters that may claim it. Opening either
+   * one retires the other FIRST, so the renderer's `layer` region can never
+   * carry two panels and a stale panel's wire ids can never stay reachable
+   * (the retirement commits the next frame through its `render` callback).
+   */
+  const modelPresentation: ModelPresentation = {
+    open: (request) => {
+      presetPicker?.retire()
+      return modelPicker!.presentation.open(request)
+    },
+    notify: (message, kind) => modelPicker!.presentation.notify(message, kind),
+  }
+  const presetPresentation: PresetPresentation = {
+    open: (request) => {
+      modelPicker?.retire()
+      return presetPicker!.presentation.open(request)
+    },
+    notify: (message, kind) => presetPicker!.presentation.notify(message, kind),
+  }
   /**
    * PR3-A supports NO viewer, so this read is the explicit UNSUPPORTED capability
    * (the seam's `supportsViewer` is false and `enterView` declines at its real
@@ -375,7 +408,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** Apply the seat's desired hardware focus after a committed frame. */
   const applyFocus = (force: boolean): void => {
     if (disposed) return
-    const desired = seat.hasModalSeat() ? seat.desiredFocusId() : modelPicker?.isOpen() ? modelPicker.desiredFocusId() ?? null : 'dock.composer'
+    const desired = seat.hasModalSeat()
+      ? seat.desiredFocusId()
+      : presetPicker?.isOpen() === true
+        ? presetPicker.desiredFocusId() ?? null
+        : modelPicker?.isOpen() === true
+          ? modelPicker.desiredFocusId() ?? null
+          : 'dock.composer'
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
     composer.setFocused(desired === 'dock.composer')
@@ -387,13 +426,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  diff, wiping an open modal on the next unrelated repaint). */
   function render(): void {
     if (disposed) return
-    if (seat.hasModalSeat()) modelPicker?.suspend()
+    if (seat.hasModalSeat()) {
+      modelPicker?.suspend()
+      presetPicker?.suspend()
+    }
     const dockNode = dockView()
     const mainNode = lastMain
     surface.render({
       ...(mainNode === undefined ? {} : { main: mainNode }),
       ...(dockNode === undefined ? {} : { dock: dockNode }),
-      layer: seat.hasModalSeat() ? seat.renderLayer() : modelPicker?.renderLayer() ?? seat.renderLayer(),
+      layer: seat.hasModalSeat()
+        ? seat.renderLayer()
+        : presetPicker?.renderLayer() ?? modelPicker?.renderLayer() ?? seat.renderLayer(),
     })
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.
@@ -537,6 +581,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     beginSessionHydration() {
       if (disposed) return
       modelPicker?.retire()
+      presetPicker?.retire()
       // P3: the transient Alt+Q list belongs to the subject that opened it — a
       // newly committed owner must not inherit it (and its keys).
       seat.closeTransientList()
@@ -678,6 +723,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       handlers.cancel()
       return false
     }
+    if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
     if (key.name === 'escape') {
       handlers.cancel()
@@ -735,8 +781,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       if (seat.hasModalSeat()) { if (seat.handleEvent(input.event)) applyFocus(true); return false }
       if (!hydrating && inputBound && 'sf' in input.event && input.event.sf === surface.id) {
+        if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
-        if (modelPicker?.isOpen() && input.event.ev === 'focus') applyFocus(true)
+        if ((presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
+          && input.event.ev === 'focus') applyFocus(true)
       }
       return false
     }
@@ -807,8 +855,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // advertises fewer kinds is refused BEFORE the handler (fail closed) —
       // the same set the real headless pane reports (see the evidence index).
       return ['picker', 'row', 'card'].every(kind => session.caps.kinds.includes(kind))
-        ? modelPicker!.presentation
+        ? modelPresentation
         : undefined
+    },
+    get presetPresentation() {
+      // The PR4-A Preset layer renders ONE `ui.picker` (list + action bar) with
+      // text lines around it and no preview column, so it needs only the picker
+      // kind. A pane that cannot present it is refused BEFORE the handler.
+      return session.caps.kinds.includes('picker') ? presetPresentation : undefined
     },
     composer: composerPort,
     // PR3-B B3 (§3.5.1): the REAL interaction presenter (the seat) replaces
@@ -842,6 +896,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // call is idempotent with the interaction owner's own `withdrawPending`.
       seat.dispose()
       modelPicker?.retire()
+      presetPicker?.retire()
       // Both steps are ALWAYS attempted — the tty restore (and the SDK's own
       // input drain) lives inside `session.close()`, so a surface-close
       // failure must still reach it, exactly once. A `try/finally` would
