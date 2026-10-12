@@ -1656,13 +1656,18 @@ view keeps them inert), and while the query is being EDITED it also drops the
 chord belong to the query Input there; the result view keeps `End resume` and the
 Find re-entry, and leaving the search restores the normal bar.
 
-The retained window is the ONLY source any of this may read. When the port's
-bounded tail evicts old bytes, a paused viewport is re-anchored onto the longest
-provable surviving rendered-row run — compared by ANSI-stripped visible content —
-(and clamped to the new window when no overlap can be proven, or when an
-intermediate snapshot never reached a frame and therefore has no rendered rows of
-its own: the viewport then keeps its last proven offset, which may drift forward
-but never backward) instead of jumping to the tail or fabricating a `GAP`; `[GAP]`
+The retained window is the ONLY source any of this may read. The anchor and the
+search hit are both carried against ONE baseline: the retained window that was
+actually DRAWN last (its source, width and rendered rows) plus the proven row
+eviction applied to it since. When the port's bounded tail evicts old bytes, the
+newest window is compared with that baseline — by ANSI-stripped visible content —
+and the total eviction moves the visible top row and the current hit together, so
+several snapshots landing before the next frame keep the exact same row instead of
+re-applying or discarding an eviction, and a different occurrence that happens to
+reuse the old row/column coordinates can never inherit the current hit. A window
+with no provable overlap (a width re-wrap, a fully replaced preview) keeps the
+offset and lets the viewport clamp it, never guessing and never fabricating a
+`GAP`; `[GAP]`
 still comes only from the official `gapBefore` fact, `[ERROR]` from the
 observation error and `[SETTLED]` from the official settlement, and they remain
 independently co-visible. The Action Bar's `rows a-b/N` is the position inside
@@ -1670,10 +1675,12 @@ THIS retained preview, never a Job-history line number, and it yields to the
 disclosure when the row is narrow. Search indexes are rebuilt for the current
 window/width/query only; a match that left the window cannot leave a stale
 highlight or `i/N` behind. A surviving current hit stays current across a newer
-window while its row is still provable (a pure append never resets `n`/`N`); only
-when the current match itself cannot be proven in the new window does the
-selection fall back to the nearest PROVABLE match at or after the visible anchor
-rather than to an old ordinal.
+window while its row is still provable (a pure append never resets `n`/`N`),
+because the hit is carried through the SAME proven row mapping as the anchor —
+never as a bare coordinate key, which an eviction could hand to a different
+occurrence. Only when the current match itself cannot be proven in the new window
+does the selection fall back to the nearest PROVABLE match at or after the visible
+anchor rather than to an old ordinal.
 
 Not yet claimed: the clickable Command reader with exact selection/copy and the
 Output copy action (B1-C). Search, follow and the retention anchor above are

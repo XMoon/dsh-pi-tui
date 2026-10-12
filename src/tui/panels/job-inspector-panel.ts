@@ -35,7 +35,7 @@ import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
 import { color } from '../theme/runtime.ts'
 import { JobOutputScrollView } from './job-output-scroll-view.ts'
-import { JobOutputSearch, rebaseRetainedAnchor } from './job-output-search.ts'
+import { JobOutputSearch, retentionEviction } from './job-output-search.ts'
 import type { JobInspectorState } from '../../app/surface/task-runtime.ts'
 
 /** The pure, non-authoritative display projection of the ONE captured state. */
@@ -488,6 +488,15 @@ export class JobInspectorPanel extends VStack {
     view: JobInspectorView
     positionViewportHeight: number
   }
+  /** The ONE anchor/selection baseline: the retained window that was actually
+   *  DRAWN last (source text, width and rendered rows), plus the proven row
+   *  eviction applied to it since. Every later snapshot is mapped against THIS
+   *  baseline, so an undrawn intermediate window can neither destroy the anchor
+   *  nor double-count an eviction. */
+  private baselineText = ''
+  private baselineWidth = 0
+  private baselineLines: readonly string[] | undefined
+  private baselineEviction = 0
   private disposed = false
 
   constructor(initial: JobInspectorState, intents: JobInspectorPanelIntents) {
@@ -575,27 +584,32 @@ export class JobInspectorPanel extends VStack {
     if (this.disposed) return
     const view = deriveJobInspectorView(state)
     const searchable = view.phase === 'observed' && view.retainedText !== ''
-    const previousText = this.search.sourceText
-    const width = this.search.renderedWidth
-    const previousLines = this.search.renderedLines
     this.header.setView(view)
     this.chrome.view = view
     this.body.setText(bodyText(view))
-    if (!this.scrollView.isFollowRequested && searchable && previousLines !== undefined && width !== undefined
-      && previousText !== view.retainedText) {
-      const target = rebaseRetainedAnchor({
-        previousText,
+    let selectionEviction: number | undefined
+    if (!this.scrollView.isFollowRequested && searchable
+      && this.baselineLines !== undefined && this.baselineWidth > 0
+      && this.baselineText !== view.retainedText) {
+      // The newest window against the LAST DRAWN one: every undrawn snapshot in
+      // between is skipped without destroying the baseline, so the visible row
+      // is preserved by the TOTAL proven eviction (never re-applied twice).
+      const eviction = retentionEviction({
+        previousText: this.baselineText,
         nextText: view.retainedText,
-        previousRenderedLines: previousLines,
-        nextRenderedLines: this.body.render(width),
-        oldScrollTop: this.scrollView.scrollTop,
+        previousRenderedLines: this.baselineLines,
+        nextRenderedLines: this.body.render(this.baselineWidth),
       })
-      this.scrollView.rebaseTo(target)
+      if (eviction !== undefined) {
+        this.scrollView.rebaseTo(this.scrollView.scrollTop + this.baselineEviction - eviction)
+        selectionEviction = eviction - this.baselineEviction
+        this.baselineEviction = eviction
+      }
     }
     // The anchor the next frame paints is the ANCHOR REBASE result, so a lost
     // current match can fall back to a match provable from what the user sees.
     this.search.setVisibleAnchor(this.scrollView.scrollTop)
-    this.search.setSource(view.retainedText, searchable)
+    this.search.setSource(view.retainedText, searchable, selectionEviction)
     this.invalidate()
     this.intents.requestRender()
   }
@@ -605,6 +619,20 @@ export class JobInspectorPanel extends VStack {
    *  frame could no longer show. Never mutates the layout from `render()`. */
   onFramePainted(): void {
     if (this.disposed) return
+    // The frame is committed: the window it painted becomes the ONE baseline
+    // every later snapshot is mapped against. A placeholder phase has no
+    // baseline at all.
+    const painted = this.search.renderedEpoch()
+    if (painted === undefined) {
+      this.baselineLines = undefined
+      this.baselineWidth = 0
+      this.baselineEviction = 0
+    } else if (painted.text !== this.baselineText || painted.width !== this.baselineWidth) {
+      this.baselineText = painted.text
+      this.baselineWidth = painted.width
+      this.baselineLines = painted.lines
+      this.baselineEviction = 0
+    }
     if (this.search.mode !== 'inactive' && this.chrome.plan.searchRows === 0) {
       this.exitSearch()
       return

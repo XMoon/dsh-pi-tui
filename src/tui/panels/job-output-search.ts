@@ -23,6 +23,7 @@ import {
   truncateToWidth,
   visibleWidth,
   type AltScreenSearchMatch,
+  type AltScreenSearchSegment,
   type Component,
   type Focusable,
   type Text,
@@ -39,24 +40,33 @@ export interface JobOutputSearchCounts {
   readonly total: number
 }
 
-/** One retained-window RENDER epoch: the rendered Output rows and the query's
- *  provable matches inside them, kept only while width + source + query hold.
- *  The SELECTION identity is deliberately NOT part of it — it survives a source
- *  replacement (see {@link JobOutputSearch.selectedKeyValue}). */
+/** One retained-window RENDER epoch: the rendered Output rows, the query's
+ *  provable matches inside them and the source TEXT they were rendered from,
+ *  kept only while width + source + query hold. The SELECTION identity is
+ *  deliberately NOT part of it — it survives a source replacement (see
+ *  {@link JobOutputSearch.selectedGeometry}). */
 interface JobOutputSearchEpoch {
   readonly sourceKey: string
+  readonly text: string
   readonly width: number
   readonly lines: readonly string[]
   readonly matches: readonly AltScreenSearchMatch[]
 }
 
-/** The UI-local identity of one rendered match (`AltScreenSearchIndex` result).
- *  Not exported by the fork, so it is re-derived here from the same segment
- *  geometry the index exposes. */
-const matchKey = (match: AltScreenSearchMatch): string => {
-  const first = match.segments[0]
-  const last = match.segments[match.segments.length - 1]
-  return first && last ? `${first.row}:${first.startCol}:${last.row}:${last.endCol}` : ''
+/** The rendered geometry of one match: the row/column span of every segment.
+ *  This is a RENDER-COORDINATE fact, so it may only be carried to another epoch
+ *  through a PROVEN row mapping (see {@link JobOutputSearch.setSource}). */
+type MatchGeometry = readonly AltScreenSearchSegment[]
+
+/** Structural compare of two segment geometries (row + columns, in order). */
+function sameGeometry(left: MatchGeometry, right: MatchGeometry): boolean {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!
+    const b = right[index]!
+    if (a.row !== b.row || a.startCol !== b.startCol || a.endCol !== b.endCol) return false
+  }
+  return true
 }
 
 /** How a pending selection is derived on the next epoch rebuild. `none` keeps
@@ -99,20 +109,33 @@ function longestLineOverlap(previous: readonly string[], next: readonly string[]
  * viewport clamps to the new window — the retained preview never fabricates a
  * GAP and never claims bytes it can no longer read.
  */
-export function rebaseRetainedAnchor(input: {
+export interface RetentionRebaseInput {
   readonly previousText: string
   readonly nextText: string
   readonly previousRenderedLines: readonly string[]
   readonly nextRenderedLines: readonly string[]
-  readonly oldScrollTop: number
-}): number {
-  const { previousText, nextText, previousRenderedLines, nextRenderedLines, oldScrollTop } = input
-  const clamped = Math.max(0, oldScrollTop)
-  if (nextText.startsWith(previousText)) return clamped
+}
+
+/**
+ * How many rendered rows the new bounded window evicted from the FRONT of the
+ * reference window, or `undefined` when no overlap can be proven at all (a
+ * width re-wrap, a placeholder phase, an unrelated window). A pure append
+ * proves ZERO eviction. This is the ONE mapping the anchor rebase and the
+ * search-hit identity both follow.
+ */
+export function retentionEviction(input: RetentionRebaseInput): number | undefined {
+  const { previousText, nextText, previousRenderedLines, nextRenderedLines } = input
+  if (nextText.startsWith(previousText)) return 0
   const overlap = longestLineOverlap(previousRenderedLines, nextRenderedLines)
-  if (overlap <= 0) return clamped
-  const evictedRows = previousRenderedLines.length - overlap
-  return Math.max(0, clamped - evictedRows)
+  if (overlap <= 0) return undefined
+  return previousRenderedLines.length - overlap
+}
+
+/** The rebased top offset for one retention change (see {@link retentionEviction}). */
+export function rebaseRetainedAnchor(input: RetentionRebaseInput & { readonly oldScrollTop: number }): number {
+  const clamped = Math.max(0, input.oldScrollTop)
+  const evictedRows = retentionEviction(input)
+  return evictedRows === undefined ? clamped : Math.max(0, clamped - evictedRows)
 }
 
 /** The ONE visible SearchRow of the Job workspace: the real `Input` (focused
@@ -179,11 +202,15 @@ export class JobOutputSearch {
   private pendingSelection: PendingSelection = 'none'
   private epoch: JobOutputSearchEpoch | undefined
   private revealPending = false
-  /** The selected hit's UI-local identity, carried ACROSS source replacements:
-   *  a pure append keeps the rendered rows, so the same occurrence is still
-   *  provable by its key and MUST stay current. Only a hit that genuinely cannot
-   *  be proven in the new window falls back to the visible anchor. */
-  private selectedKeyValue: string | undefined
+  /** The selected hit's identity, carried ACROSS source replacements as a
+   *  RENDER geometry plus the PROVEN row eviction since it was captured: a pure
+   *  append shifts by zero, a truncated window shifts by exactly the proven
+   *  eviction count, and a change with no provable mapping drops the identity so
+   *  the fallback re-selects from the visible anchor. A raw coordinate key alone
+   *  is NOT enough — an eviction can land a DIFFERENT occurrence on the old
+   *  coordinates. */
+  private selectedGeometry: MatchGeometry | undefined
+  private geometryShift = 0
   private selectedIndexValue = -1
 
   constructor(text: Text, visible: (width: number) => boolean) {
@@ -210,22 +237,28 @@ export class JobOutputSearch {
     return this.sourceTextValue
   }
 
-  /** The rendered width of the last measured epoch (undefined before the first
-   *  Output render). The retention rebase reuses it to compare rendered rows. */
-  get renderedWidth(): number | undefined {
-    return this.epoch?.width
-  }
-
-  /** The rendered rows of the last measured epoch. */
-  get renderedLines(): readonly string[] | undefined {
-    return this.epoch?.lines
+  /** The last measured render epoch: the source text it was rendered from, its
+   *  width and its rendered rows. The panel uses it as the ONE anchor/selection
+   *  baseline — the window that was actually DRAWN, never an undrawn snapshot. */
+  renderedEpoch(): { readonly text: string; readonly width: number; readonly lines: readonly string[] } | undefined {
+    const epoch = this.epoch
+    return epoch === undefined ? undefined : { text: epoch.text, width: epoch.width, lines: epoch.lines }
   }
 
   /** Replace the ONLY searchable source. Placeholder phases pass
-   *  `searchable = false` and are never indexed. */
-  setSource(text: string, searchable: boolean): void {
+   *  `searchable = false` and are never indexed. `evictedRows` is the INCREMENTAL
+   *  proven row eviction between the previous window and this one (`0` for a pure
+   *  append, `undefined` when nothing can be proven): it moves the carried
+   *  selection geometry with the content instead of trusting old coordinates. */
+  setSource(text: string, searchable: boolean, evictedRows: number | undefined = undefined): void {
     const key = searchable ? text : '#placeholder'
     if (key === this.sourceKeyValue && searchable === this.searchableValue) return
+    if (evictedRows === undefined) {
+      this.selectedGeometry = undefined
+      this.geometryShift = 0
+    } else {
+      this.geometryShift += evictedRows
+    }
     this.sourceKeyValue = key
     this.sourceTextValue = searchable ? text : ''
     this.searchableValue = searchable
@@ -366,9 +399,19 @@ export class JobOutputSearch {
     }
     let selectedIndex = -1
     if (matches.length > 0) {
-      const exactIndex = this.selectedKeyValue === undefined
+      // The carried hit, moved by the PROVEN eviction: the same occurrence in
+      // the new window's coordinates. A row that no longer exists (negative) or
+      // a geometry another occurrence now occupies cannot match.
+      const predicted = this.selectedGeometry === undefined
+        ? undefined
+        : this.selectedGeometry.map(segment => ({
+            row: segment.row - this.geometryShift,
+            startCol: segment.startCol,
+            endCol: segment.endCol,
+          }))
+      const exactIndex = predicted === undefined
         ? -1
-        : matches.findIndex(match => matchKey(match) === this.selectedKeyValue)
+        : matches.findIndex(match => sameGeometry(match.segments, predicted))
       if (this.pendingSelection === 'query') {
         selectedIndex = nearestIndex(this.anchorRow)
       } else if (this.pendingSelection === 'next') {
@@ -385,9 +428,13 @@ export class JobOutputSearch {
     }
     this.pendingSelection = 'none'
     this.selectedIndexValue = selectedIndex
-    this.selectedKeyValue = selectedIndex >= 0 ? matchKey(matches[selectedIndex]!) : undefined
+    this.selectedGeometry = selectedIndex >= 0
+      ? matches[selectedIndex]!.segments.map(segment => ({ ...segment }))
+      : undefined
+    this.geometryShift = 0
     this.epoch = {
       sourceKey: this.sourceKeyValue,
+      text: this.sourceTextValue,
       width,
       lines,
       matches,
