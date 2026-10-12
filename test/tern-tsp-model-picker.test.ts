@@ -12,7 +12,7 @@ import { connect } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 // The fact-row readability rule (the assertion reads the wire's own values and
 // only the bound from the implementation).
-import { displayWidth, factLineColumns } from '../src/tui/tsp/model-picker-state.ts'
+import { ALL_SCOPES_ID, displayWidth, factLineColumns } from '../src/tui/tsp/model-picker-state.ts'
 import { runOwned } from '../src/runtime/process/tasks.ts'
 import type {
   ModelApplyOutcome,
@@ -188,8 +188,8 @@ test('native Model B2: provider scope, radio-row draft and the single explicit A
   browse(pane, 'scope:a')
   await waitUntil('scope filters', () => props(pane).scope === 'scope:a')
   assert.equal(m.writes.length, 0, 'a scope click is never a write')
-  browse(pane, 'scope:all')
-  await waitUntil('scope clears', () => props(pane).scope === 'scope:all')
+  browse(pane, ALL_SCOPES_ID)
+  await waitUntil('scope clears', () => props(pane).scope === ALL_SCOPES_ID)
   browse(pane, SAME_A)
   await waitUntil('provider A', () => props(pane).selected === SAME_A)
   // The effort rows dispatch `onClick` through the SDK into the SAME admission
@@ -216,7 +216,7 @@ test('native Model K2: Enter writes ONLY from the focused Primary Action', async
   assert.equal(m.writes.length, 0, 'Enter on the model list is not a write')
   // Zone `effort`: Tab reaches the Primary Action; Enter then commits once.
   pane.key('\t')
-  await waitUntil('primary zone', () => sheetText(pane).includes('Enter: apply'))
+  await waitUntil('primary zone', () => String(actionOf(pane, 'apply')?.label).startsWith('▸'))
   assert.equal(
     actionOf(pane, 'apply')?.label,
     '▸ Save default',
@@ -772,7 +772,7 @@ test('native Model: Esc returns to the zone and page it came from', async (t) =>
   pane.key('\u001b[Z')
   await waitUntil('primary from the model list', () => String(actionOf(pane, 'apply')?.label).startsWith('▸'))
   pane.key('\u001b')
-  await waitUntil('back on the model list', () => sheetText(pane).includes('Tab: actions'))
+  await waitUntil('back on the model list', () => sheetText(pane).includes('Tab: effort'))
   assert.equal(props(pane).focus, 'list')
   assert.equal(m.writes.length, 0)
   // details -> Primary -> Esc stays on the details page.
@@ -1041,7 +1041,7 @@ test('native Model: the wide column keeps the shell and never pushes a candidate
       `${scenario.name}: the drill-down entry stays offered at every width`)
     assert.ok(
       inline
-        || (text.includes('Provider:') && text.includes('ID:') && text.includes('Tab: actions')),
+        || (text.includes('Provider:') && text.includes('ID:') && /Tab: (effort|actions)/.test(text)),
       `${scenario.name}: the bounded column still carries the identity-first summary (${text.slice(0, 120)})`,
     )
     const reasoning = scenario.d.directory.groups[0]!.models[0]!.reasoning
@@ -1298,6 +1298,104 @@ test('native Model: the explicit effort page keeps page, zone, focus and Esc ali
   await waitUntil('Esc closes from the settled list state', () => picker(pane) === undefined)
 })
 
+test('native Model: a provider called all and a scope-shaped effort id stay unambiguous', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  // A catalogue may advertise a provider whose ID is literally `all`, and an
+  // effort whose ID starts with the scope prefix (or IS the every-provider id).
+  const tricky: ModelPickerDirectory = {
+    current: { provider: 'all', model: 'm' },
+    directory: {
+      default: { provider: 'all', model: 'm' },
+      routableProviders: ['all', 'z'],
+      groups: [
+        {
+          id: 'all',
+          name: 'Provider all',
+          models: [
+            {
+              id: 'm',
+              name: 'M',
+              reasoning: {
+                efforts: [
+                  { id: ALL_SCOPES_ID, name: 'Scope-shaped' },
+                  { id: 'scope:other', name: 'Prefixed' },
+                ],
+              },
+            },
+          ],
+        },
+        { id: 'z', name: 'Z', models: [{ id: 'm', name: 'M' }] },
+      ],
+      failures: [],
+    },
+  }
+  await m.ready(tricky)
+  // The every-provider entry and the `all` PROVIDER are distinct wire ids, and
+  // filtering by the provider `all` really filters (it is not the sentinel).
+  const scopes = (props(pane).scopes as Array<Record<string, unknown>>).map((entry) => String(entry.id))
+  assert.ok(scopes.includes(ALL_SCOPES_ID), `the every-provider entry: ${JSON.stringify(scopes)}`)
+  assert.ok(scopes.includes('scope:all'), 'the provider literally called `all` has its own entry')
+  assert.equal(props(pane).scope, ALL_SCOPES_ID, 'the panel starts on every provider')
+  browse(pane, 'scope:all')
+  await waitUntil('the `all` provider filters', () => props(pane).scope === 'scope:all')
+  assert.equal(props(pane).items.length, 1, 'the `all` provider keeps exactly its own rows')
+  assert.equal(m.writes.length, 0, 'a scope click is never a write')
+  browse(pane, ALL_SCOPES_ID)
+  await waitUntil('every provider again', () => props(pane).scope === ALL_SCOPES_ID)
+  // On the EFFORT page the row is a candidate first: both scope-shaped ids really
+  // change the draft instead of filtering providers.
+  action(pane, 'effort-page')
+  await waitUntil('effort page', () => props(pane).title === 'Reasoning Effort')
+  browse(pane, ALL_SCOPES_ID)
+  await waitUntil('the every-provider-shaped candidate takes the draft',
+    () => props(pane).selected === ALL_SCOPES_ID)
+  assert.equal(props(pane).scope, ALL_SCOPES_ID, 'the page never turned it into a provider filter')
+  browse(pane, 'scope:other')
+  await waitUntil('the prefixed candidate takes the draft', () => props(pane).selected === 'scope:other')
+  assert.equal(m.writes.length, 0, 'a candidate row is never a write')
+  m.handle.close()
+})
+
+test('native Model: the keyboard hint names where the keyboard goes, never a guessed action', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  await m.ready()
+  // The list hint names the zone Tab reaches NEXT: the effort selector whenever
+  // the highlighted model advertises efforts.
+  assert.ok(sheetText(pane).includes('Tab: effort'), sheetText(pane).slice(0, 160))
+  // Inside the action bar, Enter runs the action the BAR focused (the ▸ cue names
+  // it): the hint must not claim it applies.
+  pane.key('\u001b[Z')
+  await waitUntil('bar focused on the primary', () => String(actionOf(pane, 'apply')?.label).startsWith('▸'))
+  assert.ok(sheetText(pane).includes('←→ · Enter'), sheetText(pane).slice(0, 160))
+  assert.ok(!sheetText(pane).includes('Enter: apply'), 'the hint never names a business action')
+  // Focus Close and press Enter: the FOCUSED action runs, which is what the hint
+  // promised (the bar's own cue said Close).
+  for (let step = 0; step < 5 && !String(actionOf(pane, 'close')?.label).startsWith('▸'); step += 1) {
+    pane.key('\u001b[D')
+    await settle(10)
+  }
+  await waitUntil('Close takes the bar focus', () => String(actionOf(pane, 'close')?.label).startsWith('▸'))
+  assert.ok(sheetText(pane).includes('←→ · Enter'), 'the hint stays true for any focused action')
+  pane.key('\r')
+  await waitUntil('Enter ran the focused Close', () => picker(pane) === undefined)
+  // A model with NO efforts: Tab goes straight to the actions.
+  const plain = await mounted(t)
+  await resize(plain.pane, 1280)
+  await plain.ready({
+    current: { provider: 'a', model: 'same' },
+    directory: {
+      default: { provider: 'a', model: 'same' },
+      routableProviders: ['a'],
+      groups: [{ id: 'a', name: 'A', models: [{ id: 'same', name: 'Twin' }] }],
+      failures: [],
+    },
+  })
+  assert.ok(sheetText(plain.pane).includes('Tab: actions'), sheetText(plain.pane).slice(0, 160))
+  plain.handle.close()
+})
+
 test('native Model: the paged wide column keeps the bounded identity and the hint', async (t) => {
   const m = await mounted(t, { sessionless: false })
   // A long configured selection plus eight widest-glyph labels: the effort rows
@@ -1316,7 +1414,7 @@ test('native Model: the paged wide column keeps the bounded identity and the hin
   const text = sheetText(m.pane)
   assert.ok(text.includes('Provider:'), `the bounded column keeps the identity: ${text.slice(0, 200)}`)
   assert.ok(text.includes('ID:'), text.slice(0, 200))
-  assert.ok(text.includes('Tab: actions'), 'the bounded column keeps the keyboard hint')
+  assert.ok(/Tab: (effort|actions)/.test(text), 'the bounded column keeps the keyboard hint')
   // The configured facts follow the identity (the rest stays on the Details
   // page, which the action bar offers) and a truncated tail is marked.
   assert.ok(text.includes('Current:'), `the configured facts follow the identity: ${text.slice(0, 200)}`)

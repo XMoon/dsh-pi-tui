@@ -21,7 +21,6 @@ import type {
 import { PROVIDER_DEFAULT, projectModelDirectory } from '../pickers/model-directory.ts'
 import { actionIntent, keyIntent, rowIntent, type ModelPickerIntent } from './model-picker-intents.ts'
 import {
-  ALL_SCOPES,
   detailCursor,
   detailFactItems,
   draftedEffort,
@@ -87,7 +86,7 @@ export class TspModelPicker {
       phase: 'loading',
       page: 'models',
       zone: 'models',
-      scope: ALL_SCOPES,
+      scope: undefined,
       query: '',
       cursor: 0,
       selected: undefined,
@@ -147,10 +146,10 @@ export class TspModelPicker {
     panel.failures = projection.failures
     panel.efforts = seedDrafts(projection.models, panel.efforts)
     // A scope whose provider vanished from the new read must not filter every
-    // row away: fall back to the all-providers scope.
-    if (panel.scope !== ALL_SCOPES
+    // row away: fall back to the every-provider scope (`undefined`).
+    if (panel.scope !== undefined
       && !projection.models.some((row) => row.providerId === panel.scope)) {
-      panel.scope = ALL_SCOPES
+      panel.scope = undefined
     }
     if (panel.selected === undefined) {
       const configured = panel.rows.find(
@@ -378,9 +377,11 @@ export class TspModelPicker {
         return
       case 'scope': {
         // A provider filter changes BROWSE only: it never touches authority and
-        // never discards another model's draft.
+        // never discards another model's draft. `undefined` is the every-provider
+        // scope entry (it filters nothing); any other value must be a provider the
+        // current read actually advertises.
         const providerIds = new Set(panel.rows.map((row) => row.providerId))
-        if (intent.scope !== ALL_SCOPES && !providerIds.has(intent.scope)) return
+        if (intent.scope !== undefined && !providerIds.has(intent.scope)) return
         panel.scope = intent.scope
         this.align(panel)
         this.change(panel)

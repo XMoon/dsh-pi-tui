@@ -39,8 +39,9 @@ export interface ModelPickerPanel {
   phase: ModelPickerPhase
   page: ModelPickerPage
   zone: ModelPickerZone
-  /** The scope filter (`all` or one provider id) — browse state, never authority. */
-  scope: string
+  /** The scope filter (a provider id, or `undefined` for every provider) —
+   *  browse state, never authority. */
+  scope: ModelPickerScope
   query: string
   cursor: number
   /** The highlighted model's stable row id. */
@@ -150,10 +151,22 @@ export function wrapColumns(text: string, columns: number): readonly string[] {
 
 /* ------------------------------------------------------------------- scope */
 
-/** The provider-scope filter's "every provider" value (the panel's own state;
- *  the WIRE id of that scope is {@link scopeId}'s `scope:all`). */
-export const ALL_SCOPES = 'all'
+/**
+ * The panel's provider-scope filter: the provider ID to filter, or `undefined`
+ * for "every provider". The every-provider case is the ABSENCE of a provider
+ * rather than a magic string, so a catalogue that advertises a provider literally
+ * called `all` can never be confused with it — the wire ids below keep the two
+ * namespaces separate as well.
+ */
+export type ModelPickerScope = string | undefined
+
 const SCOPE_PREFIX = 'scope:'
+/**
+ * The wire id of the EVERY-PROVIDER scope entry. A provider scope is always
+ * `scope:` plus the provider ID, so this colon-free id can never be produced for
+ * any provider ID and the two ids can never collide.
+ */
+export const ALL_SCOPES_ID = 'scope-all'
 
 /** The wire/local id of one provider scope. The prefix keeps a scope click
  *  distinguishable from a model-row click (a JSON array) on the same channel. */
@@ -161,8 +174,13 @@ export function scopeId(providerId: string): string {
   return SCOPE_PREFIX + providerId
 }
 
-/** The PROVIDER a scope id filters, or `undefined` when the id is not a scope. */
-export function scopeProviderId(id: string): string | undefined {
+/**
+ * The provider a scope id filters: `null` for the every-provider scope, and
+ * `undefined` when the id is not a scope id at all. Callers map `null` to the
+ * every-provider filter, so no provider ID (not even `all`) is special.
+ */
+export function scopeProviderId(id: string): string | null | undefined {
+  if (id === ALL_SCOPES_ID) return null
   return id.startsWith(SCOPE_PREFIX) ? id.slice(SCOPE_PREFIX.length) : undefined
 }
 
@@ -186,7 +204,7 @@ export function failureRowId(providerId: string): string {
 export function visibleModels(panel: ModelPickerPanel): readonly ModelPickerModelRow[] {
   const query = panel.query.toLowerCase()
   return panel.rows.filter((row) =>
-    (panel.scope === ALL_SCOPES || row.providerId === panel.scope) &&
+    (panel.scope === undefined || row.providerId === panel.scope) &&
     `${row.providerName} ${row.providerId} ${row.modelName} ${row.modelId}`.toLowerCase().includes(query),
   )
 }
@@ -261,16 +279,24 @@ export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFa
   ]
 }
 
-/** The single-line keyboard hint of the current zone (rendered by the view and
- *  counted by the layout budget, so the two can never disagree). */
+/**
+ * The single-line keyboard hint of the current zone (rendered by the view and
+ * counted by the layout budget, so the two can never disagree).
+ *
+ * It never names a BUSINESS action: in the action bar `Enter` runs whichever
+ * action that bar has FOCUSED — the `▸ label` cue says which — so the hint only
+ * explains how the bar is driven instead of claiming Enter applies. In the list
+ * the hint names the zone `Tab` reaches NEXT, which is the effort selector
+ * whenever the highlighted model advertises efforts (mirrors the frozen
+ * `tabZone` cycle). Every hint stays inside one worst-case line so it never eats
+ * the layout budget.
+ */
 export function zoneHintText(panel: ModelPickerPanel): string {
-  // Every hint stays within one worst-case line, so the hint never eats the
-  // layout budget (the action bar's shape cue carries the focus itself).
   if (panel.phase === 'pending') return 'Selecting…'
   if (panel.phase === 'error') return 'Retry first'
   if (panel.zone === 'effort') return '↑↓ draft'
-  if (panel.zone === 'primary-action') return 'Enter: apply'
-  return 'Tab: actions'
+  if (panel.zone === 'primary-action') return '←→ · Enter'
+  return modelChoices(highlightedModel(panel)).length > 0 ? 'Tab: effort' : 'Tab: actions'
 }
 
 /* --------------------------------------------------------------- action bar */
