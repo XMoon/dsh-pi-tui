@@ -324,6 +324,13 @@ A real Tern pane smoke is documented in
 (headless `tern serve` + `tern ctl`, `TERN_TSP_RECORD` recording,
 `tern ctl key/shot`).
 
+The generic real-pane harness — headless `tern serve` + `tern ctl`, real pointer
+and key input, the real node tree, PNG captures and the clipping/click oracle —
+is `scripts/tern-pane-drive.mjs` with the pure `scripts/tern-pane-geometry.mjs`
+oracle; a flow module mounts the surface under test. See
+[`tern-pane-harness.md`](./tern-pane-harness.md). It is operator-run (it needs the
+external Tern CLI) and is deliberately not part of `pnpm test`.
+
 Evidence levels — do not merge these into a stronger claim:
 
 - A scripted TTY that answers the official handshake is **not** a real Tern
