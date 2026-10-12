@@ -378,7 +378,19 @@ test('D-04 a 1,500-character command summary stays ONE truncated row that still 
   assert.match(plainRows(harness.vt)[summary]!, /…/, 'the long identity is elided, never wrapped')
   assert.match(plainRows(harness.vt)[summary]!, /↗ Command/, 'the entry survives the elision')
 
-  // The elided summary and the painted entry both enter the Command page.
+  // The synthetic ellipsis is the truncation marker, NOT a summary cell: it must
+  // stay inert (the same contract the reading tabs follow).
+  const plainSummary = plainRows(harness.vt)[summary]!
+  const ellipsisCol = plainSummary.indexOf('…')
+  assert.ok(ellipsisCol > 0, 'the summary really is elided')
+  const ellipsisCell = visibleWidth(plainSummary.slice(0, ellipsisCol))
+  press(harness.vt, summary, ellipsisCell)
+  release(harness.vt, summary, ellipsisCell)
+  await flush(6)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the summary ellipsis opens nothing')
+  assert.deepEqual(harness.copied, [], 'and it never copies')
+
+  // The painted summary text and the painted entry both still enter the page.
   await click(harness.vt, summary, 4)
   assert.match(view(harness.vt), /Copy All \[C\]/, 'the elided summary still opens the page')
   const button = bodyRow(harness.vt, 'Copy All [C]')
@@ -386,6 +398,13 @@ test('D-04 a 1,500-character command summary stays ONE truncated row that still 
   await flush(6)
   assert.deepEqual(harness.copied, [label], 'Copy All still delivers the WHOLE original document')
   assert.equal(harness.observation.records.length, 1, 'and never opens a second observer')
+
+  // The painted `↗ Command` entry is the other positive control on this row.
+  harness.vt.sendInput('\x1b')
+  await settle(harness.vt)
+  const entrySummary = bodyRow(harness.vt, 'pnpm build --flag=value')
+  await click(harness.vt, entrySummary, cellIndexOf(harness.vt, entrySummary, '↗ Command') + 1)
+  assert.match(view(harness.vt), /Copy All \[C\]/, 'the painted entry still opens the page')
 })
 
 // ── D-05: no faked Command affordance ─────────────────────────────────────
@@ -657,6 +676,15 @@ test('D-13b an 8-column tab row keeps its truncation ellipsis inert (real press/
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ label: 'echo hello', text: 'retained body' })
   await settle(harness.vt)
+
+  // The summary row is truncated as well at this width: its ellipsis is inert.
+  const summaryRow = bodyRow(harness.vt, 'Command')
+  const summaryRowText = plainRows(harness.vt)[summaryRow]!
+  assert.match(summaryRowText, /…$/, 'the summary row really is truncated')
+  press(harness.vt, summaryRow, visibleWidth(summaryRowText) - 1)
+  release(harness.vt, summaryRow, visibleWidth(summaryRowText) - 1)
+  await flush(6)
+  assert.ok(!/Full co/.test(view(harness.vt)), 'the summary ellipsis never opens the Command page')
 
   const tabs = bodyRow(harness.vt, '[Out]')
   const row = plainRows(harness.vt)[tabs]!

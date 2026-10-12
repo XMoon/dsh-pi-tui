@@ -381,8 +381,10 @@ const readingFactsText = (
 ): string => position.total > 0 ? `${note} · rows ${position.start}-${position.end}/${position.total}` : note
 
 /** `${lead}${gap}${affordance}` with the affordance right-aligned on the row.
- *  Returns the painted line, the cell where the lead's own painted text ends
- *  (never the padding in between) and the affordance's exact cell span. */
+ *  Returns the painted line, the cell where the lead's own painted text ends and
+ *  the affordance's exact cell span. `leadEnd` is a HIT range, so when the row had
+ *  to truncate the lead the synthetic trailing `…` is excluded: it is the
+ *  truncation marker, never a label cell (the same rule as the reading tabs). */
 const withTrailingAffordance = (
   lead: string,
   affordance: string,
@@ -390,12 +392,18 @@ const withTrailingAffordance = (
 ): { readonly line: string; readonly leadEnd: number; readonly span?: { readonly start: number; readonly end: number } } => {
   const affordanceWidth = visibleWidth(affordance)
   if (affordanceWidth >= width) {
-    return { line: truncateToWidth(lead, width, '…', false), leadEnd: Math.min(width, visibleWidth(lead)) }
+    const truncated = visibleWidth(lead) > width
+    return {
+      line: truncateToWidth(lead, width, '…', false),
+      leadEnd: truncated ? Math.max(0, width - 1) : visibleWidth(lead),
+    }
   }
-  const paintedLead = truncateToWidth(lead, width - affordanceWidth - 1, '…', false)
-  const leadEnd = visibleWidth(paintedLead)
-  const gap = width - leadEnd - affordanceWidth
-  const start = leadEnd + gap
+  const room = width - affordanceWidth - 1
+  const paintedLead = truncateToWidth(lead, room, '…', false)
+  const paintedLeadWidth = visibleWidth(paintedLead)
+  const leadEnd = visibleWidth(lead) > room ? Math.max(0, paintedLeadWidth - 1) : paintedLeadWidth
+  const gap = width - paintedLeadWidth - affordanceWidth
+  const start = paintedLeadWidth + gap
   return {
     line: `${paintedLead}${' '.repeat(gap)}${affordance}`,
     leadEnd,
