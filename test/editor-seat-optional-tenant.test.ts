@@ -1153,7 +1153,7 @@ test('sizes: a resize cycle keeps the tenant projected and focused at every targ
 
 /** A minimal ADVANCED interactive overlay probe: the real public host mount
  * (`showAdvancedInteractiveOverlay`) with focus/blur counters as the sink. */
-function advancedOverlayProbe(text: string, onFocused?: () => void): {
+function advancedOverlayProbe(text: string, onFocused?: () => void, onBlurred?: () => void): {
   component: AdvancedInteractiveComponent
   focusCount(): number
   blurCount(): number
@@ -1167,7 +1167,10 @@ function advancedOverlayProbe(text: string, onFocused?: () => void): {
         state.focus += 1
         onFocused?.()
       },
-      onBlur: () => { state.blur += 1 },
+      onBlur: () => {
+        state.blur += 1
+        onBlurred?.()
+      },
       dispose: () => {},
     },
     focusCount: () => state.focus,
@@ -2509,4 +2512,67 @@ test('B-45: an overlay auto-focused while the stale tenant is retired keeps the 
   )
   assert.equal(hidden.blurCount(), 1, 'the seat fallback must not steal the keyboard back')
   assert.equal(app.focusSeatForTest(), 'overlay')
+})
+
+test('B-46: a successor superseded INSIDE its own initial suspension hides the roots and keeps the live frame', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let tenantIsCurrent = true
+  let superseded: Promise<unknown> | undefined
+  let third: Promise<unknown> | undefined
+  const successorController = new AbortController()
+  let abortArmed = false
+  // A REAL capturing root whose onBlur aborts the successor WHILE that successor's
+  // initial suspension is running: its own settlement then hands the seat to the
+  // queued third flow mid-suspension.
+  const root = advancedOverlayProbe('reentrant-root', undefined, () => {
+    if (!abortArmed) return
+    abortArmed = false
+    successorController.abort()
+  })
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      superseded = app.askQuestions(
+        [{ id: 'q-b', question: 'superseded successor?', options: [{ label: 'Yes' }] }],
+        successorController.signal,
+      )
+      third = app.askQuestions([{ id: 'q-c', question: 'third after mid-suspension?', options: [{ label: 'Yes' }] }])
+      abortArmed = true
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('reentrant-root'), `the root must be up first:\n${viewport(vt)}`)
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+  tenantIsCurrent = false
+
+  const failed = app.askQuestions([{ id: 'q-fail', question: 'failing flow?', options: [{ label: 'Yes' }] }])
+  await assert.rejects(failed, /stale tenant close boom/)
+  await assert.rejects(superseded!)
+  await vt.waitForRender()
+  assert.ok(
+    viewport(vt).includes('third after mid-suspension?'),
+    `the flow queued behind the superseded one must own the seat:\n${viewport(vt)}`,
+  )
+  assert.ok(
+    !viewport(vt).includes('reentrant-root'),
+    `a successor superseded mid-suspension may not leave the inherited roots painted:\n${viewport(vt)}`,
+  )
+  const liveFrame = (app as unknown as { seatFallbackComponent(): unknown }).seatFallbackComponent()
+  assert.notEqual(liveFrame, undefined, 'the live successor frame must be built')
+  assert.equal(
+    app.focusedComponentForTest(),
+    liveFrame,
+    'the keyboard must belong to the LIVE frame, never the retired successor it superseded',
+  )
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await settleOrTimeout(third!), [{ id: 'q-c', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('reentrant-root'), `the root must be restored afterwards:\n${viewport(vt)}`)
 })
