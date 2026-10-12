@@ -562,6 +562,42 @@ test('B-05c the Action Bar stops advertising Stop while a Find is active and res
   app.stop()
 })
 
+// ── B-05e: the Action Bar does not promise keys the search state consumes ──
+
+test('B-05e the Action Bar drops the inert End/Find hints while the query is being edited', async () => {
+  const { vt, app } = startApp({}, {}, 200, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: numberedLines(0, 99) })
+  await vt.waitForRender()
+  vt.sendInput('\x1b[5~')
+  await vt.waitForRender()
+  const bar = (): string => rawView(vt).at(-1) ?? ''
+  assert.match(bar(), /Follow PAUSED · End resume/)
+  assert.match(bar(), /Find Ctrl\+F \//)
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/)
+  assert.match(bar(), /Follow PAUSED/)
+  assert.ok(!bar().includes('End resume'),
+    `End belongs to the query Input while editing, so the bar must not promise it:\n${bar()}`)
+  assert.ok(!bar().includes('Find Ctrl+F'),
+    `the Find entry cannot re-enter while already editing:\n${bar()}`)
+  assert.ok(!bar().includes('stop'))
+
+  vt.sendInput('\r') // NAVIGATE: End really resumes, Find really re-enters
+  await vt.waitForRender()
+  assert.match(bar(), /Follow PAUSED · End resume/)
+  assert.match(bar(), /Find Ctrl\+F \//)
+  assert.ok(!bar().includes('stop'), 'NAVIGATE keeps the read-only result keys')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.match(bar(), /stop/, 'leaving the search restores Stop')
+  app.stop()
+})
+
 // ── B-05d: the fork's own search key never opens a second overlay ──────────
 
 test('B-05d Ctrl+Shift+F (the fork search chord) opens the Job Find, never the fork search overlay', async () => {
@@ -914,21 +950,55 @@ test('B-10b an intermediate snapshot that never reached a frame never moves the 
   vt.sendInput('\x1b[5~')
   await vt.waitForRender()
   assert.equal(bodyTop(vt), 'line 130')
-  // The first eviction is rendered (and is provably rebased)...
+  // TWO windows land BEFORE the next frame (no render in between): only the
+  // first has the rendered lines of its own revision, so only its 5-row eviction
+  // is provable. The workspace must keep that last PROVEN offset — the visible
+  // top drifts FORWARD by the one unprovable eviction and must never subtract
+  // the wrong one (which would show the EARLIER `line 125`).
   observation.latest()!.emit({ text: numberedLines(5, 199) })
-  await vt.waitForRender()
-  assert.equal(bodyTop(vt), 'line 130', 'the single-snapshot rebase preserves the row')
-  // ...then TWO windows land before the next frame: the second one has no
-  // rendered lines of its own, so the workspace must keep the last PROVEN
-  // offset (it may drift forward by the unprovable eviction) and must never
-  // subtract the wrong eviction count (which would show an EARLIER row).
   observation.latest()!.emit({ text: numberedLines(10, 199) })
   await vt.waitForRender()
-  const topIndex = Number(bodyTop(vt).split(' ')[1])
-  assert.ok(topIndex >= 130,
-    `a snapshot without a rendered epoch must never move the anchor BACKWARD (top=${topIndex})`)
+  assert.equal(bodyTop(vt), 'line 135',
+    'an unrendered intermediate window must not be rebased against another revision')
   assert.match(view(vt), /Follow PAUSED/)
   assert.ok(!/\[GAP\]/.test(view(vt)), 'no fabricated GAP')
+  app.stop()
+})
+
+// ── B-10b2: a surviving current hit stays current across a newer window ────
+
+test('B-10b2 the current result survives a newer retained window when its row is still provable', async () => {
+  // Two hits inside ONE viewport: step to the second, then let a newer (pure
+  // append) snapshot arrive. The row is unchanged, so the hit is still provable
+  // and MUST stay current — a streaming Job must not reset `n`/`N` on every push.
+  const lines = Array.from({ length: 12 }, (_, index) => `line ${String(index).padStart(3, '0')}`)
+  lines[5] = 'needle one'
+  lines[8] = 'needle two'
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ text: lines.join('\n') })
+  await vt.waitForRender()
+
+  vt.sendInput('\x06')
+  await vt.waitForRender()
+  vt.sendInput('needle')
+  await vt.waitForRender()
+  assert.match(view(vt), /1\/2/)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('n')
+  await vt.waitForRender()
+  assert.match(view(vt), /2\/2/, 'the second hit is current')
+
+  harness.observation.latest()!.emit({ text: `${lines.join('\n')}\nline 012\nline 013` })
+  await vt.waitForRender()
+  const painted = view(vt)
+  assert.match(painted, /2\/2/,
+    `a newer window must not reset the provable current hit:\n${painted}`)
+  assert.match(painted, /Find Output: needle/)
+  assert.match(painted, /Follow PAUSED/)
   app.stop()
 })
 

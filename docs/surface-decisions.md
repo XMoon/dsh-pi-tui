@@ -1648,10 +1648,13 @@ only the search (keeping the paused viewport next to the still-open Job, with it
 query remembered for the next `Ctrl+F`); the next `Esc` is the existing Back to
 the Task Browser. `End` while a result view is up leaves the search and returns to
 the tail as well — and the physical focus returns from the hidden Search row to
-the workspace root. While a Find owns the ordinary keys the Action Bar does not
-advertise Stop: the Search row consumes ordinary letters while editing and the
-read-only result view keeps them inert, so advertising `s stop` there would promise
-a key that cannot act; leaving the search restores it.
+the workspace root. The Action Bar only promises keys the current search state
+really accepts: while a Find owns the ordinary keys it does not advertise Stop
+(the Search row consumes ordinary letters while editing and the read-only result
+view keeps them inert), and while the query is being EDITED it also drops the
+`End resume` suffix and the Find entry hint, because `End`, `Home` and the Find
+chord belong to the query Input there; the result view keeps `End resume` and the
+Find re-entry, and leaving the search restores the normal bar.
 
 The retained window is the ONLY source any of this may read. When the port's
 bounded tail evicts old bytes, a paused viewport is re-anchored onto the longest
@@ -1666,9 +1669,11 @@ independently co-visible. The Action Bar's `rows a-b/N` is the position inside
 THIS retained preview, never a Job-history line number, and it yields to the
 disclosure when the row is narrow. Search indexes are rebuilt for the current
 window/width/query only; a match that left the window cannot leave a stale
-highlight or `i/N` behind, and when the current match itself cannot be proven in
-the new window the selection falls back to the nearest PROVABLE match at or after
-the visible anchor rather than to an old ordinal.
+highlight or `i/N` behind. A surviving current hit stays current across a newer
+window while its row is still provable (a pure append never resets `n`/`N`); only
+when the current match itself cannot be proven in the new window does the
+selection fall back to the nearest PROVABLE match at or after the visible anchor
+rather than to an old ordinal.
 
 Not yet claimed: the clickable Command reader with exact selection/copy and the
 Output copy action (B1-C). Search, follow and the retention anchor above are
