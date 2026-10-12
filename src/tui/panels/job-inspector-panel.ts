@@ -1,7 +1,10 @@
 /**
  * The selected-Job workspace presenter (Phase 3B / B1-A): the typed Header,
- * the retained Output body and the pinned bottom Action Bar of the Job
- * fullscreen workspace.
+ * the retained Output body, a transient notice row and the pinned bottom Action
+ * Bar of the Job fullscreen workspace. The notice row renders the app's OWN live
+ * notice (the ONE notice authority) while the workspace owns the terminal, so a
+ * Stop settlement stays visible where the user is looking — never a second Stop
+ * state.
  *
  * The panel IS the layout root and the keyboard focus target of the ONE
  * short-lived `TuiAltScreen` a Job view opens (the opener calls
@@ -23,6 +26,7 @@
 
 import { ScrollView, Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
+import { color } from '../theme/runtime.ts'
 import type { JobInspectorState } from '../../app/surface/task-runtime.ts'
 
 /** The pure, non-authoritative display projection of the ONE captured state. */
@@ -124,6 +128,10 @@ export interface JobInspectorPanelIntents {
   readonly rows: () => number
   /** Repaint through the owning surface (the panel never paints itself). */
   readonly requestRender: () => void
+  /** The app's LIVE transient notice (the ONE notice authority), read per frame.
+   *  The workspace renders it on its OWN chrome row, so a Stop settlement stays
+   *  visible without leaving the workspace — and no second notice state exists. */
+  readonly notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
   /** `Esc` — the opener's ONE close intent. */
   readonly onClose: () => void
   /** The live Stop capability (never a cached boolean). */
@@ -192,19 +200,21 @@ class JobInspectorHeader implements Component {
     const command = `${kind}: ${oneLine(view.label)}`
     const lines: string[] = []
     if (width < COMPACT_WIDTH || rows < COMPACT_ROWS) {
-      // Short/narrow terminal: at most TWO rows. The STATUS is never shortened
-      // and every fact marker is appended whole while the row still carries it;
-      // the identity prefix is kept only when it fits beside them, and the second
-      // row carries the descriptive facts when there are any, else the
-      // Command/Label identity (never a body-injected error text).
+      // Short/narrow terminal: at most THREE rows, in PRIORITY order. The STATUS
+      // and every fact marker come first (never shortened), then the Command/Label
+      // identity the locked UI always shows, and only then the descriptive facts
+      // (the markers already say WHAT happened, so this row is the first one the
+      // row budget may drop). The identity prefix is kept only when it fits beside
+      // the status.
       let head = view.status
       for (const marker of markerTokens(view)) {
         if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
       }
       const withIdentity = `${identity} · ${head}`
       lines.push(visibleWidth(withIdentity) <= width ? withIdentity : head)
+      lines.push(command)
       const facts = flagTexts(view)
-      lines.push(facts !== '' ? facts : command)
+      if (facts !== '') lines.push(facts)
     } else {
       // The identity never pushes the status out of its row, and the markers
       // never push the (unbounded) fact text out of theirs.
@@ -256,6 +266,29 @@ class JobInspectorActionBar implements Component {
   }
 }
 
+/** The app's live transient notice as ONE workspace chrome row: the row exists
+ *  only while a notice is live (ZERO rows otherwise), so the pinned Action Bar
+ *  always stays the last row. The wording/level come from the ONE notice
+ *  authority (the app), never from a second Stop state. */
+class JobInspectorNoticeRow implements Component {
+  private readonly notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
+
+  constructor(notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined) {
+    this.notice = notice
+  }
+
+  render(width: number): string[] {
+    const live = this.notice()
+    if (live === undefined) return []
+    const line = live.kind === 'info' ? color.textDim(`ℹ ${live.text}`) : color.error(`✗ ${live.text}`)
+    return [truncateToWidth(line, width, '…', true)]
+  }
+
+  invalidate(): void {
+    // Nothing cached: the notice is read live on every frame.
+  }
+}
+
 /** The retained-body text of one view (the ScrollView's only child). */
 const bodyText = (view: JobInspectorView): string => {
   if (view.phase === 'unavailable') return BODY_UNAVAILABLE
@@ -286,6 +319,9 @@ export class JobInspectorPanel extends VStack {
       // may reach zero rows on a very short terminal.
       { component: header, shrink: 0 },
       { component: new ScrollView(body, { follow: 'end', primary: true, scrollbar: 'auto' }), basis: 0, grow: 1 },
+      // The transient notice row sits ABOVE the pinned Action Bar and renders
+      // zero rows when nothing is live.
+      { component: new JobInspectorNoticeRow(intents.notice), shrink: 0 },
       { component: bar, shrink: 0 },
     ])
     this.header = header

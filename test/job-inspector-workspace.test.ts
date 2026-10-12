@@ -88,6 +88,10 @@ class JobObservationDouble implements JobObservationPort {
   /** Whether `open` emits its first snapshot synchronously (the official
    *  follow stream does). */
   syncEmit = true
+  /** The settlement the next `stop` returns (default: requested). */
+  stopOutcome: JobStopOutcome = { kind: 'requested' }
+  /** Set to make the next `stop` throw instead of settling. */
+  stopFailure: Error | undefined
 
   open(_sessionId: string | undefined, jobId: string, listener: (snapshot: JobObservedSnapshot) => void): () => void {
     if (this.openFailure !== undefined) throw new Error(this.openFailure)
@@ -112,7 +116,8 @@ class JobObservationDouble implements JobObservationPort {
 
   async stop(_sessionId: string, jobId: string): Promise<JobStopOutcome> {
     this.stops.push(jobId)
-    return { kind: 'requested' }
+    if (this.stopFailure !== undefined) throw this.stopFailure
+    return this.stopOutcome
   }
 
   forJob(jobId: string): number[] {
@@ -339,6 +344,7 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
       {
         rows: () => budget.rows,
         requestRender: () => {},
+        notice: () => undefined,
         onClose: () => {},
         canStop: () => true,
         onStop: () => { stops += 1 },
@@ -359,8 +365,11 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
     if (budget.width >= 80) {
       assert.match(painted, /Job job-a · bash · failed/, `the identity must stay visible at ${budget.width}x${budget.rows}`)
     }
+    // The Command/Label summary is part of the locked workspace UI: a short or
+    // narrow screen may drop the descriptive fact text, never the Command row.
+    assert.match(painted, /Command: pnpm build --watch/,
+      `the command identity must be shown at every budget (${budget.width}x${budget.rows})`)
     if (budget.width >= 80 && budget.rows >= 10) {
-      assert.match(painted, /Command: pnpm build --watch/, `the command identity must be shown at ${budget.width}x${budget.rows}`)
       assert.match(painted, /progress: building 3\/8/, 'the typed progress row must be shown on a tall screen')
     }
     // The pinned chrome never exceeds the granted row budget: the Action Bar is
@@ -388,6 +397,7 @@ test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capabil
   const panel = new JobInspectorPanel(openingRow(), {
     rows: () => 24,
     requestRender: () => {},
+    notice: () => undefined,
     onClose: () => { closes += 1 },
     canStop: () => live,
     onStop: () => {},
@@ -420,6 +430,7 @@ test('A-01d a long Job identity and a long error text never hide the status or t
     {
       rows: () => 24,
       requestRender: () => {},
+      notice: () => undefined,
       onClose: () => {},
       canStop: () => false,
       onStop: () => {},
@@ -614,6 +625,44 @@ test('A-05 ONE observer pushes every snapshot into the painted workspace and Sto
   vt.sendInput('s')
   await vt.waitForRender()
   assert.deepEqual(harness.observation.stops, ['job-a'], 'Stop dispatches the ONE port mutation')
+  app.stop()
+})
+
+test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own notice row) with no optimistic state change', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  const headerBefore = view(vt)
+
+  // An unproven settlement: the workspace must SAY so where the user is looking.
+  harness.observation.stopOutcome = { kind: 'indeterminate', message: 'the state will decide' }
+  vt.sendInput('s')
+  await flush()
+  await vt.waitForRender()
+  const first = view(vt)
+  assert.match(first, /could not confirm stopping/, `the settlement failure must be visible in the workspace:\n${first}`)
+  // …and the Job facts were NOT rewritten by the local Stop (no optimistic state).
+  assert.match(first, /Job job-a · bash · running/)
+  assert.match(first, /retained job-a/)
+
+  // A throwing Stop dispatch is reported the same way, replacing the notice.
+  harness.observation.stopFailure = new Error('kill admission refused')
+  vt.sendInput('s')
+  await flush()
+  await vt.waitForRender()
+  const second = view(vt)
+  assert.match(second, /could not stop job job-a/, `the dispatch failure must be visible in the workspace:\n${second}`)
+  assert.match(second, /Job job-a · bash · running/, 'still no optimistic state change')
+  assert.deepEqual(harness.observation.stops, ['job-a', 'job-a'], 'each press dispatches exactly one port Stop')
+  // The pinned Action Bar stays the last row even with the notice row present.
+  const barRow = rawView(vt).findIndex(line => /Esc back/.test(line))
+  assert.equal(barRow, 23, 'the Action Bar stays pinned to the physical bottom')
+  assert.equal(headerBefore.includes('Esc back'), true)
   app.stop()
 })
 
@@ -994,6 +1043,34 @@ test('A-09e a Save Location request whose abandonment callback presents a Questi
   vt.sendInput('\r')
   await innerQuestion
   await vt.waitForRender()
+  app.stop()
+})
+
+test('A-09k an ALREADY-aborted Approval never preempts the Job workspace', async () => {
+  const { vt, app } = startApp()
+  const handle = app.openJobInspector({
+    initial: openingRow(),
+    canStop: () => false,
+    onStop: () => {},
+    onClose: () => {},
+  })
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true)
+  const controller = new AbortController()
+  controller.abort()
+  // The approvals owner settles a pre-aborted request `cancelled` synchronously and
+  // never mounts a prompt: it must not kick the user out of the workspace either.
+  const outcome = await app.showApprovalPrompt({ toolName: 'bash', reason: 'cancelled long ago', signal: controller.signal })
+  assert.equal(outcome, 'cancelled')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, true,
+    'the workspace keeps the physical surface for a request that can never appear')
+  const painted = view(vt)
+  assert.match(painted, /Job job-a · bash · running/, `the workspace must stay visible:\n${painted}`)
+  assert.ok(!/cancelled long ago/.test(painted), 'no approval frame may be mounted')
+  handle.close()
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest() instanceof JobInspectorPanel, false)
   app.stop()
 })
 

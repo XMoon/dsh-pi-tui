@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Esc` returns to the same Task Center with its selected row, draft and scroll
   state, and the surface that was showing before (regular or fullscreen) is
   restored unchanged — leaving the workspace never rewrites the user's display
-  preference.
+  preference. A Stop that is refused or cannot be confirmed now reports its
+  result on the workspace's own notice row, instead of only on the surface the
+  user has left.
 - The Footer's Performance item gains the whole-Session rate and shows both
   scopes in the default layout: the speed placement now defaults to
   `speed-both` (`R5 116 · All 44 tok/s`), with `speed-all` (`All 44 tok/s`)

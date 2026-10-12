@@ -10654,6 +10654,17 @@ export class TuiApp {
     return [...this.installedCommandCompletions]
   }
 
+  /**
+   * The app's LIVE transient notice, for the ACTIVE screen's own chrome: the Job
+   * workspace renders it on a row of its own while it owns the terminal, so a
+   * Stop settlement stays visible there. It is the SAME notice the transcript
+   * chrome renders (one authority, one lifetime timer) — never a second
+   * presentation state.
+   */
+  private currentNotice(): { readonly text: string; readonly kind: 'info' | 'error' } | undefined {
+    return this.notifyText === '' ? undefined : { text: this.notifyText, kind: this.notifyKind }
+  }
+
   /** Headless-test hook: the CURRENT transient notice text ('' = none). */
   notifyTextForTest(): string {
     return this.notifyText
@@ -19747,6 +19758,7 @@ export class TuiApp {
     const panel = new JobInspectorPanel(options.initial, {
       rows: () => this.terminal.rows,
       requestRender: () => this.requestRender(),
+      notice: () => this.currentNotice(),
       onClose: () => record.close(),
       canStop: options.canStop,
       onStop: options.onStop,
@@ -20222,7 +20234,12 @@ export class TuiApp {
     // callback can never lease a screen that would coexist with this approval; a
     // newer blocking owner started by a callback is rejected by the approval
     // owner's own stage fence, not by this line.
-    this.abandonWorkspaceForBlockingOwner()
+    //
+    // An ALREADY-ABORTED request is never a blocking owner: the approvals owner
+    // settles it `cancelled` synchronously without mounting a prompt, so
+    // preempting the workspace for it would kick the user out of a Job view for
+    // an interaction that can never appear.
+    if (request.signal?.aborted !== true) this.abandonWorkspaceForBlockingOwner()
     return this.approvals.showPrompt(request, agentInputWait)
   }
 
