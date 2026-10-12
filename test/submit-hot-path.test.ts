@@ -4887,6 +4887,22 @@ test('collision recovery clears only the COMMAND health record, never a same-id 
 // an advertised command the fresh session's catalog really lacks must hand the
 // COMPLETE submitted line back to the editor instead of dropping it.
 
+/** Wrap the editor-recall reseed so every hydration commit's snapshot AND the
+ *  recall it commits are captured at that exact moment: a later reseed can
+ *  otherwise repair an earlier loss and hide it, so the decisive assertion must
+ *  read the commit that actually dropped (or kept) the input. */
+function probeRecallCommits(
+  app: TuiApp,
+): { readonly entries: readonly string[]; readonly recall: readonly string[] }[] {
+  const commits: { readonly entries: readonly string[]; readonly recall: readonly string[] }[] = []
+  const original = app.resetInputHistory.bind(app)
+  app.resetInputHistory = ((entries: readonly string[], owner?: string) => {
+    original(entries, owner)
+    commits.push({ entries: [...entries], recall: [...app.getInputHistory()] })
+  }) as typeof app.resetInputHistory
+  return commits
+}
+
 test('a fresh /new session keeps the same-name skill wrapper alive AND executable (its own Direct mirror is not a Host collision)', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, {
     busyEnter: 'queue',
@@ -5005,6 +5021,66 @@ test('a new draft typed while an advertised-miss command settles is preserved, n
   assert.equal(harness.host.followedUp.length, 0, 'the refused line is never sent to the model')
 })
 
+test('a Ctrl+S steer written while the fresh session hydrates is preserved by the reseed', async (t) => {
+  // The scope is not the only session-scoped history writer: a Ctrl+S steer
+  // persists a row through the SAME owner without passing `rememberInput`, so
+  // the hydration snapshot carries a row the scope never saw. That row must
+  // survive the reseed — only a scope occurrence's OWN row may be claimed.
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-steer-row-window-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'steer-window-session-a', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'steer-window-session-a' })
+  const file = historyFilePath(home, home)
+  const hydrationCommits = probeRecallCommits(mounted.app)
+  let releaseNewWhenIdle!: () => void
+  const newWhenIdle = new Promise<void>(resolve => { releaseNewWhenIdle = resolve })
+  harness.onCreateSession(() => { harness.host.whenIdleGate = newWhenIdle })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the runner must register the /new transition command')
+  try {
+    // A switch that writes NO history row of its own, so the window's rows are
+    // exactly the two submissions below.
+    void (newHandler as () => Promise<unknown>)()
+    assert.equal(await drainUntil(() => harness.host.cancelCalls >= 1, 5_000), true,
+      'the fresh session is published and its hydration is still pending')
+    const freshSessionId = harness.createdSessionIds[0]
+    assert.ok(freshSessionId !== undefined, 'the fresh session id is known')
+    // 1. the Enter submission (rememberInput ⇒ a scope occurrence)
+    mounted.app.setDraft('entered')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => loadHistoryRecords(file)
+      .some(row => row.content === 'entered' && row.sessionId === freshSessionId), 10_000), true,
+    'the Enter submission persists under the fresh session')
+    // 2. the Ctrl+S steer: a history row with NO scope occurrence (the real
+    //    Ctrl+S path never calls rememberInput).
+    mounted.app.setDraft('steered')
+    ;(mounted.app as unknown as {
+      actionDispatcher: { dispatch(action: string, data?: string): boolean }
+    }).actionDispatcher.dispatch('app.input.steer')
+    assert.equal(await drainUntil(() => loadHistoryRecords(file)
+      .some(row => row.content === 'steered' && row.sessionId === freshSessionId), 10_000), true,
+    'the steer persists its own row under the fresh session')
+  } finally {
+    releaseNewWhenIdle()
+  }
+  assert.equal(await drainUntil(() => hydrationCommits.length > 0, 5_000), true,
+    'the fresh session hydration committed')
+  const commit = hydrationCommits[0]!
+  assert.deepEqual(commit.entries, ['steered', 'entered'],
+    `the snapshot carries BOTH writers' rows: ${JSON.stringify(commit.entries)}`)
+  // DECISIVE: read on the commit itself — a later reseed could repair the recall.
+  assert.deepEqual(commit.recall, ['steered', 'entered'],
+    `the scope occurrence claims its own row only; the steer row survives the reseed: ${JSON.stringify(commit.recall)}`)
+})
+
 test('inputs accepted while the fresh /new session hydrates survive ↑ recall, in order and exactly once', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-new-hydration-history-')
@@ -5032,12 +5108,7 @@ test('inputs accepted while the fresh /new session hydrates survive ↑ recall, 
   // The hydration-commit probe (the repo's real-consumer patch pattern): record
   // every editor-recall reseed the presentation owner commits, so the test can
   // wait for the fresh session's hydration to have run before it inspects ↑.
-  const hydrationCommits: (readonly string[])[] = []
-  const originalReset = mounted.app.resetInputHistory.bind(mounted.app)
-  mounted.app.resetInputHistory = ((entries: readonly string[], owner?: string) => {
-    hydrationCommits.push([...entries])
-    originalReset(entries, owner)
-  }) as typeof mounted.app.resetInputHistory
+  const hydrationCommits = probeRecallCommits(mounted.app)
 
   let releaseNewWhenIdle!: () => void
   const newWhenIdle = new Promise<void>(resolve => { releaseNewWhenIdle = resolve })
@@ -5053,7 +5124,7 @@ test('inputs accepted while the fresh /new session hydrates survive ↑ recall, 
     // fresh owner was already PUBLISHED while its hydration has not committed.
     assert.equal(await drainUntil(() => harness.host.cancelCalls >= 1, 5_000), true,
       'the /new transition must retire the old owner after publishing the fresh one')
-    assert.deepEqual(hydrationCommits, [], 'the fresh session hydration must still be pending')
+    assert.equal(hydrationCommits.length, 0, 'the fresh session hydration must still be pending')
     // The publication→hydration window: the editor accepts a submission for the
     // FRESH session, and the UI recall records it synchronously.
     mounted.app.setDraft('/wf longer-than-one-line prompt')
@@ -5069,9 +5140,10 @@ test('inputs accepted while the fresh /new session hydrates survive ↑ recall, 
   // disk snapshot) …
   assert.equal(await drainUntil(() => hydrationCommits.length > 0, 5_000), true,
     'the fresh session hydration must commit')
-  // … and the accepted input is recalled exactly once, in front of the snapshot.
-  assert.deepEqual([...mounted.app.getInputHistory()], ['/wf longer-than-one-line prompt'],
-    'the hydration reconcile keeps the accepted input, newest first, without duplicates')
+  // … and the recall the commit itself produced still holds it (a later reseed
+  // could repair the loss, so the decisive read is the committing one).
+  assert.deepEqual(hydrationCommits[0]?.recall, ['/wf longer-than-one-line prompt'],
+    `the hydration reconcile keeps the accepted input, newest first, without duplicates: ${JSON.stringify(hydrationCommits[0]?.recall)}`)
   // H1 sink: the REAL ↑ gesture recalls it into the editor.
   assert.equal(mounted.app.getDraft(), '', 'the editor is empty before the recall')
   vt.sendInput('\x1b[A')
@@ -5119,12 +5191,7 @@ test('submissions the fresh session already persisted are not duplicated by the 
   const harness = makeHarness(home, { id: 'covered-session-a', events: sessionEvents('resumed answer') })
   const mounted = await mountRunner(context, home, harness, { sessionId: 'covered-session-a' })
 
-  const hydrationCommits: (readonly string[])[] = []
-  const originalReset = mounted.app.resetInputHistory.bind(mounted.app)
-  mounted.app.resetInputHistory = ((entries: readonly string[], owner?: string) => {
-    hydrationCommits.push([...entries])
-    originalReset(entries, owner)
-  }) as typeof mounted.app.resetInputHistory
+  const hydrationCommits = probeRecallCommits(mounted.app)
 
   let releaseNewWhenIdle!: () => void
   const newWhenIdle = new Promise<void>(resolve => { releaseNewWhenIdle = resolve })
@@ -5157,10 +5224,11 @@ test('submissions the fresh session already persisted are not duplicated by the 
   }
   if (transition !== undefined) await transition
   assert.ok(hydrationCommits.length > 0, 'the fresh session hydration committed')
-  assert.deepEqual(hydrationCommits[0], ['newest persisted', 'second persisted', 'first persisted'],
-    `the hydration snapshot is the fresh session's own persisted rows: ${JSON.stringify(hydrationCommits[0])}`)
-  assert.deepEqual([...mounted.app.getInputHistory()], ['newest persisted', 'second persisted', 'first persisted'],
-    'every covered row appears exactly once — the three scope-bound entries never double the snapshot')
+  const commit = hydrationCommits[0]!
+  assert.deepEqual(commit.entries, ['newest persisted', 'second persisted', 'first persisted'],
+    `the hydration snapshot is the fresh session's own persisted rows: ${JSON.stringify(commit.entries)}`)
+  assert.deepEqual(commit.recall, ['newest persisted', 'second persisted', 'first persisted'],
+    `every covered row appears exactly once: ${JSON.stringify(commit.recall)}`)
 })
 
 test('a deferred start keeps its FIRST prompt in ↑ after the first-session hydration', async (t) => {
@@ -5184,12 +5252,7 @@ test('a deferred start keeps its FIRST prompt in ↑ after the first-session hyd
   const harness = makeHarness(home)
   const mounted = await mountRunner(context, home, harness, {})
 
-  const hydrationCommits: (readonly string[])[] = []
-  const originalReset = mounted.app.resetInputHistory.bind(mounted.app)
-  mounted.app.resetInputHistory = ((entries: readonly string[], owner?: string) => {
-    hydrationCommits.push([...entries])
-    originalReset(entries, owner)
-  }) as typeof mounted.app.resetInputHistory
+  const hydrationCommits = probeRecallCommits(mounted.app)
 
   assert.deepEqual([...mounted.app.getInputHistory()], [], 'a deferred start begins with no recall rows')
   mounted.app.setDraft('first prompt of a deferred start')
@@ -5202,8 +5265,8 @@ test('a deferred start keeps its FIRST prompt in ↑ after the first-session hyd
     'the first-session hydration committed')
   assert.equal(await drainUntil(() => harness.host.followedUp.length > 0, 5_000), true,
     'the first prompt reached the fresh agent')
-  assert.deepEqual([...mounted.app.getInputHistory()], ['first prompt of a deferred start'],
-    'the first prompt survives the empty first-session snapshot')
+  assert.deepEqual(hydrationCommits[0]?.recall, ['first prompt of a deferred start'],
+    `the first prompt survives the empty first-session snapshot: ${JSON.stringify(hydrationCommits[0]?.recall)}`)
   const file = historyFilePath(home, home)
   assert.equal(await drainUntil(() => loadHistoryRecords(file)
     .some(row => row.content === 'first prompt of a deferred start' && row.sessionId === sessionId), 10_000), true,
@@ -5239,12 +5302,7 @@ test('observational: the CWD-level skip spans Sessions while the recall window k
   assert.equal(await drainUntil(() => loadHistoryRecords(file)
     .some(row => row.content === 'same text' && row.sessionId === 'cwd-dedupe-session-a'), 10_000), true,
   'session A owns the cwd file\'s last row')
-  const hydrationCommits: (readonly string[])[] = []
-  const originalReset = mounted.app.resetInputHistory.bind(mounted.app)
-  mounted.app.resetInputHistory = ((entries: readonly string[], owner?: string) => {
-    hydrationCommits.push([...entries])
-    originalReset(entries, owner)
-  }) as typeof mounted.app.resetInputHistory
+  const hydrationCommits = probeRecallCommits(mounted.app)
   let releaseNewWhenIdle!: () => void
   const newWhenIdle = new Promise<void>(resolve => { releaseNewWhenIdle = resolve })
   harness.onCreateSession(() => { harness.host.whenIdleGate = newWhenIdle })
@@ -5277,8 +5335,9 @@ test('observational: the CWD-level skip spans Sessions while the recall window k
   assert.deepEqual(loadHistoryRecords(file).map(row => [row.content, row.sessionId]),
     [['same text', 'cwd-dedupe-session-a'], ['fresh text', freshSessionId]],
     'the CWD-level anchor spans Sessions: the identical repeat writes NO row for the fresh Session')
-  assert.deepEqual([...mounted.app.getInputHistory()], ['fresh text', 'same text'],
-    'the recall window still shows every input the user really submitted, in submission order')
+  // DECISIVE: the recall as the reseed committed it.
+  assert.deepEqual(hydrationCommits[0]?.recall, ['fresh text', 'same text'],
+    `the recall window still shows every input the user really submitted: ${JSON.stringify(hydrationCommits[0]?.recall)}`)
 })
 
 test('after /new fully settles, an ordinary submission is recalled by ↑ exactly once (STABLE control)', async (t) => {
@@ -5298,12 +5357,7 @@ test('after /new fully settles, an ordinary submission is recalled by ↑ exactl
   const harness = makeHarness(home, { id: 'stable-session-a', events: sessionEvents('resumed answer') })
   const mounted = await mountRunner(context, home, harness, { sessionId: 'stable-session-a' })
 
-  const hydrationCommits: (readonly string[])[] = []
-  const originalReset = mounted.app.resetInputHistory.bind(mounted.app)
-  mounted.app.resetInputHistory = ((entries: readonly string[], owner?: string) => {
-    hydrationCommits.push([...entries])
-    originalReset(entries, owner)
-  }) as typeof mounted.app.resetInputHistory
+  const hydrationCommits = probeRecallCommits(mounted.app)
 
   mounted.app.setDraft('/new')
   ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
