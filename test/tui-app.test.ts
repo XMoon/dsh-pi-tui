@@ -2764,6 +2764,92 @@ test('a written occurrence whose row is beyond the recall window is not re-inlin
   app.stop()
 })
 
+test('a sessionless occurrence another owner wrote never re-enters the new Session', async () => {
+  // F6: a deferred `/help` writes a SESSIONLESS row. The occurrence IS settled,
+  // but its row is not part of any Session's projection, so the reseed that
+  // adopts the pool must not re-inline it.
+  const { vt, app, submitted, settleAt } = startApp()
+  await submitThroughEditor(app, vt, '/help')          // the sessionless pool occurrence
+  await submitThroughEditor(app, vt, 'first B prompt') // the occurrence that creates B
+  assert.deepEqual(submitted, ['/help', 'first B prompt'])
+  settleAt(0, undefined, 'written')                    // the row is sessionless
+  app.beginInputHistoryScope('B')                      // the pool is adopted by B
+  app.resetInputHistory([], 'B')
+  assert.deepEqual(app.getInputHistory(), ['first B prompt'],
+    'a row written under another identity adds nothing to the new Session')
+  app.stop()
+})
+
+test('a cap-evicted settlement keeps its fact and expires behind the window', async () => {
+  // F2-R5: the settlement queue is bounded, so the OLDEST settlement is evicted
+  // once 100 newer ones arrive. The evicted occurrence is still settled (its
+  // durable fact lives outside the queue) and it was settled before every
+  // retained append, so it expires behind the window instead of being promoted
+  // to the newest end.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'old Enter')
+  settleAt(0, 'session-b', 'skipped')                  // oldest settlement: evicted below
+  const rows: string[] = []
+  for (let index = 1; index <= 100; index += 1) {
+    const text = `steer ${index}`
+    rows.push(text)
+    app.settleScopeInput({ owner: 'session-b', outcome: 'written', text })
+  }
+  assert.deepEqual(submitted, ['old Enter'])
+  const newestFirst = [...rows].reverse()             // steer 100 … steer 1
+  app.resetInputHistory(newestFirst, 'session-b')
+  assert.deepEqual(app.getInputHistory(), newestFirst,
+    'the evicted occurrence must not displace a real row: only the newest 100 rows are recalled')
+  app.stop()
+})
+
+test('an Enter accepted after another writer\'s row keeps its own occurrence and rank', async () => {
+  // F7: a steer writes a row WITHOUT updating the scope, so a later identical
+  // Enter is NOT a consecutive duplicate of the scope head — it is a real new
+  // occurrence that must survive the reseed (the old head check dropped it).
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('a')
+  settleAt(0, 'session-b', 'skipped')
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'b' })
+  await submit('a')                                   // accepted, still unsettled
+  assert.deepEqual(submitted, ['a', 'a'])
+  app.resetInputHistory(['b'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['a', 'b', 'a'],
+    'the late occurrence keeps its own token and rank around the other writer\'s row')
+  app.stop()
+})
+
+test('the recall reconcile is linear in the scope and the window', async () => {
+  // F8: the frozen plan bounds this reconcile at O(100). The rank lookup is one
+  // map built once, and the reconstruction walks the window and the occurrences
+  // with a single cursor, so the visited positions stay linear in both.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  for (let index = 1; index <= 100; index += 1) await submit(`pending ${index}`)
+  assert.equal(submitted.length, 100)
+  const rows: string[] = []
+  for (let index = 1; index <= 100; index += 1) {
+    const text = `written ${index}`
+    rows.push(text)
+    app.settleScopeInput({ owner: 'session-b', outcome: 'written', text })
+  }
+  app.resetInputHistory([...rows].reverse(), 'session-b')
+  const recalled = app.getInputHistory()
+  assert.equal(recalled.length, 100, 'the seed caps the recall at 100 entries')
+  assert.equal(recalled[0], 'pending 100', 'the newest occurrence is recalled first')
+  assert.ok(app.reconcileStepsForTest() <= 4 * (100 + 100),
+    `the reconcile must visit a linear number of positions: ${app.reconcileStepsForTest()}`)
+  void settleAt
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)

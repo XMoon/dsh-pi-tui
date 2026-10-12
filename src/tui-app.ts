@@ -2630,9 +2630,24 @@ export class TuiApp {
    * settled submission, produced by the session-history owner from the SAME
    * synchronous stack as its append (or from its policy skip). The order is the
    * APPEND order, which is the file's row order — the authoritative order of the
-   * rows the reseed snapshot carries.
+   * rows the reseed snapshot carries. This queue is bounded, so it is NOT the
+   * authority for "was this occurrence settled"; that fact lives in
+   * {@link scopeSettled}.
    */
   private readonly scopeSettlements: ScopeSettlement[] = []
+  /**
+   * The DURABLE per-occurrence settlement fact of the OPEN scope, keyed by the
+   * occurrence token: which outcome settled it and the session id its row
+   * carried. Bounded by the scope's own occurrences (never by the queue), so a
+   * settlement the queue evicted can neither resurrect the occurrence nor lose
+   * it.
+   */
+  private readonly scopeSettled = new Map<number, { readonly owner: string | undefined; readonly outcome: 'written' | 'skipped' }>()
+  /**
+   * The number of positions the last recall reconcile visited — a HEADLESS-TEST
+   * HOOK pinning the frozen plan's O(100) bound (never read by production code).
+   */
+  private reconcileSteps = 0
   /** The next occurrence token (monotonic per process; only equality matters). */
   private scopeTokenSeq = 0
   /**
@@ -6315,11 +6330,10 @@ export class TuiApp {
       if (this.inputHistory.length > TuiApp.INPUT_HISTORY_LIMIT) this.inputHistory.pop()
     }
     if (!this.scopeOpen) return undefined
-    // The OPEN scope has its OWN predecessor: while the mirror still holds the
-    // outgoing Session's rows, its head is not this scope's predecessor, so
-    // Session A's last row can never swallow B's first identical submission. An
-    // empty scope has no predecessor at all.
-    if (this.scopeInputs[0]?.text === trimmed) return undefined
+    // EVERY accepted Enter is an occurrence: a repeat of an earlier submission is
+    // not detectable here anyway (a steer can write between two identical Enters),
+    // and the consecutive-duplicate compression belongs to the final seed, which
+    // sees every writer in append order.
     this.scopeTokenSeq += 1
     const token = this.scopeTokenSeq
     this.scopeInputs.unshift({ owner: this.scopeOwner, token, text: trimmed })
@@ -6341,18 +6355,12 @@ export class TuiApp {
    */
   settleScopeInput(settlement: ScopeSettlement): void {
     if (!this.scopeOpen) return
+    // The durable fact FIRST: it outlives the queue's cap for every occurrence.
+    if (settlement.token !== undefined) {
+      this.scopeSettled.set(settlement.token, { owner: settlement.owner, outcome: settlement.outcome })
+    }
     this.scopeSettlements.push(settlement)
-    // Bounded like every other scope structure: a window with more settlements
-    // than the recall cap is outside the contract.
     if (this.scopeSettlements.length > TuiApp.INPUT_HISTORY_LIMIT) this.scopeSettlements.shift()
-  }
-
-  /** The rank of one occurrence token in the scope's submission order
-   *  (0 = newest), `undefined` when it is not a scope occurrence. */
-  private scopeRankOf(token: number | undefined): number | undefined {
-    if (token === undefined) return undefined
-    const index = this.scopeInputs.findIndex(entry => entry.token === token)
-    return index === -1 ? undefined : index
   }
 
   /**
@@ -6408,48 +6416,84 @@ export class TuiApp {
       this.seedInputHistory(entries)
       return
     }
-    // The settlements THIS Session's rows produced, in append order. The
-    // snapshot's newest written-count rows are exactly those rows, in reverse:
-    // the append order IS the file order, so no text is ever matched to guess
-    // which occurrence a row belongs to.
+    // The settlements THIS Session's rows produced, in append order, plus the
+    // tokens they carry. The snapshot's newest written-count rows are exactly
+    // those appends, in reverse: the append order IS the file order, so no text
+    // is ever matched to guess which occurrence a row belongs to.
     const settlements = this.scopeSettlements.filter(settlement => settlement.owner === owner)
-    const writtenCount = settlements.filter(settlement => settlement.outcome === 'written').length
+    const retainedTokens = new Set<number>()
+    let writtenCount = 0
+    for (const settlement of settlements) {
+      if (settlement.outcome === 'written') writtenCount += 1
+      if (settlement.token !== undefined) retainedTokens.add(settlement.token)
+    }
     const covered = Math.min(writtenCount, entries.length)
-    // The window list in the DISK order: a written settlement contributes its
-    // own row, a skipped one contributes the text of the occurrence it skipped,
-    // and a settlement of a writer whose row is not part of this Session's
-    // projection contributes nothing.
-    const window: { readonly text: string; readonly token: number | undefined }[] = []
+    // Occurrence token → rank (0 = newest), built ONCE: every lookup below is a
+    // map read, so the reconstruction stays linear in the scope and the window.
+    const ranks = new Map<number, number>()
+    for (let index = 0; index < this.scopeInputs.length; index += 1) {
+      ranks.set(this.scopeInputs[index]!.token, index)
+    }
+    // The window in the DISK order (newest first), each position tagged with the
+    // occurrence rank it carries (`undefined` = another writer's row).
+    const windowTexts: string[] = []
+    const windowRanks: (number | undefined)[] = []
     let writeSeen = 0
     for (let index = settlements.length - 1; index >= 0; index -= 1) {
       const settlement = settlements[index]!
+      const rank = settlement.token === undefined ? undefined : ranks.get(settlement.token)
       if (settlement.outcome === 'written') {
         writeSeen += 1
         // Writes older than the recall window have no row in the projection at
         // all (exactly like the baseline snapshot).
-        if (writeSeen <= covered) window.push({ text: entries[writeSeen - 1]!, token: settlement.token })
-        continue
+        if (writeSeen > covered) continue
+        windowTexts.push(entries[writeSeen - 1]!)
+      } else {
+        if (rank === undefined) continue
+        windowTexts.push(this.scopeInputs[rank]!.text)
       }
-      const rank = this.scopeRankOf(settlement.token)
-      if (rank === undefined) continue
-      window.push({ text: this.scopeInputs[rank]!.text, token: settlement.token })
+      windowRanks.push(rank)
     }
-    // The still-unsettled occurrences keep their own rank in the scope's
-    // submission order: a settled submission always precedes an unsettled one
-    // among the writers that share the submit turn, so an unsettled occurrence
-    // precedes every row those writers produced and follows the settled scope
-    // occurrences newer than it (which is what the scope order records).
-    const settled = new Set(settlements.map(settlement => settlement.token).filter(token => token !== undefined))
-    for (const entry of this.scopeInputs) {
-      if (settled.has(entry.token)) continue
-      const insertion = window.findIndex(position => position.token === undefined
-        || (this.scopeRankOf(position.token) ?? -1) > (this.scopeRankOf(entry.token) ?? -1))
-      if (insertion === -1) window.push({ text: entry.text, token: entry.token })
-      else window.splice(insertion, 0, { text: entry.text, token: entry.token })
+    // The occurrences the window does not carry, in submission order (newest
+    // first): a never-settled occurrence is NEWER than every settled submission
+    // of the writers that share the submit turn, while an occurrence whose
+    // settlement the cap evicted was settled strictly BEFORE every retained one,
+    // so it expires BEHIND the whole window.
+    const before: number[] = []
+    const after: number[] = []
+    for (let index = 0; index < this.scopeInputs.length; index += 1) {
+      const token = this.scopeInputs[index]!.token
+      if (retainedTokens.has(token)) continue
+      const settled = this.scopeSettled.get(token)
+      if (settled === undefined) before.push(index)
+      else if (settled.outcome === 'skipped' && settled.owner === owner) after.push(index)
     }
-    this.seedInputHistory([...window.map(position => position.text), ...entries.slice(covered)])
+    // ONE ordered cursor: an occurrence the window does not carry is emitted just
+    // before the first position that is another writer's row or an older
+    // occurrence — no search inside either loop.
+    this.reconcileSteps = 0
+    const merged: string[] = []
+    let next = 0
+    for (let index = 0; index < windowTexts.length; index += 1) {
+      this.reconcileSteps += 1
+      const windowRank = windowRanks[index]
+      while (next < before.length && (windowRank === undefined || before[next]! < windowRank)) {
+        this.reconcileSteps += 1
+        merged.push(this.scopeInputs[before[next]!]!.text)
+        next += 1
+      }
+      merged.push(windowTexts[index]!)
+    }
+    while (next < before.length) {
+      this.reconcileSteps += 1
+      merged.push(this.scopeInputs[before[next]!]!.text)
+      next += 1
+    }
+    for (const rank of after) merged.push(this.scopeInputs[rank]!.text)
+    this.seedInputHistory([...merged, ...entries.slice(covered)])
     this.scopeInputs.length = 0
     this.scopeSettlements.length = 0
+    this.scopeSettled.clear()
     this.scopeOpen = false
     this.scopeOwner = owner
   }
@@ -6470,6 +6514,7 @@ export class TuiApp {
     if (this.scopeOwner !== undefined) {
       this.scopeInputs.length = 0
       this.scopeSettlements.length = 0
+      this.scopeSettled.clear()
     }
     this.scopeOwner = owner
     this.scopeOpen = true
@@ -6478,6 +6523,13 @@ export class TuiApp {
   /** The current input history (newest first) for persistence. */
   getInputHistory(): readonly string[] {
     return [...this.inputHistory]
+  }
+
+  /** HEADLESS-TEST HOOK: the number of positions the LAST recall reconcile
+   *  visited. Production never reads it; it exists so the frozen plan's O(100)
+   *  bound is pinned by a number instead of by the shape of the code. */
+  reconcileStepsForTest(): number {
+    return this.reconcileSteps
   }
 
   /**
