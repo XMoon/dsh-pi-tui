@@ -224,11 +224,15 @@ reconciles them:
   ordinary transition, the fork adoption and the first-session creation. A
   REPLACED owner's entries are dropped with the scope, so Session A's input can
   never cross into Session B's recall;
-- `rememberInput()` appends every accepted input to the scope while it is open,
-  using the scope's OWN newest accepted entry as its consecutive-duplicate
-  anchor. The mirror keeps its own, unchanged duplicate rule, so an input
-  identical to the outgoing Session's last row is still recalled after the
-  reseed;
+- `rememberInput()` records every accepted input in the scope while it is open —
+  it never compresses a repeat away, because only the FINAL seed can see where
+  another writer's row lands between two identical submissions. The scope's own
+  cap counts RUNS of consecutive identical text, exactly like the editor/mirror
+  recall it feeds, and keeps a run's oldest occurrence (the only one that can
+  append) plus its newest (which carries the run's rank), so a long run of pending
+  duplicates costs constant state and can never evict an older, distinct
+  occurrence. The mirror keeps its unchanged duplicate rule, so an input identical
+  to the outgoing Session's last row is still recalled after the reseed;
 - EVERY accepted Enter — each editor seat, a sessionless or local command, a
   `!`/`!!` shell line — becomes an occurrence with its own internal OCCURRENCE
   TOKEN that rides its submission into the persistence record. The token — never
@@ -245,12 +249,18 @@ reconciles them:
   action, an application extension steer): their row is kept where the disk put
   it and is never claimed by a scope occurrence;
 - the settled FACT of an occurrence is kept per token, independently of the
-  session id its row carries and of the bounded settlement queue: a pool
-  occurrence written sessionless is settled but is not part of the new Session's
-  projection (it adds nothing), and a settlement the queue's cap evicted still
-  leaves its occurrence settled — the evicted ones are strictly older than every
-  retained append, so an evicted SKIP expires behind the whole window instead of
-  being promoted to the newest end;
+  session id its row carries and of the capped settlement queue. It exists only
+  for occurrences the scope still holds — a fact is dropped together with the
+  occurrence the cap removed, and a late settlement of a dropped occurrence adds
+  nothing — so the metadata stays bounded by the scope, never by how many
+  submissions the window saw. The number of appends each row owner produced is
+  kept separately and is NEVER evicted, which is what tells the reseed how many of
+  the snapshot's newest rows the window owns: the appends whose settlements the cap
+  evicted are still emitted, in disk order. A pool occurrence written sessionless is
+  settled but is not part of the new Session's projection (it adds nothing), and
+  because the evicted settlements are strictly older than every retained append, an
+  evicted SKIP expires behind the whole window instead of being promoted to the
+  newest end;
 - `resetInputHistory(entries, owner)` commits that owner's reseed from that
   evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
   occurrence token → rank is built once, the snapshot's newest written-count rows
