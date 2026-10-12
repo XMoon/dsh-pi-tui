@@ -237,14 +237,23 @@ reconciles them:
   consecutive dedupe) emits no settlement and stays in the recall: the file
   policy governs the FILE, and the UI recall never silently drops an input the
   user really submitted;
-- `resetInputHistory(entries, owner)` commits that owner's reseed: the recall is
-  the scope's submission order, where an occurrence written under THIS owner
-  consumes one of the snapshot's newest rows (append order = submission order)
-  and an occurrence written under another identity (a sessionless pool row) is
-  dropped without consuming one; the snapshot rows left over are the earlier
-  windows' rows and follow. Occurrence counts and non-consecutive repeats
-  survive (`a → b → a` stays intact). The sessionless boot seed passes no owner:
-  it only seeds the pool and leaves the scope open.
+- `resetInputHistory(entries, owner)` commits that owner's reseed by keeping
+  EVERY snapshot row and giving each scope occurrence its own rank. The scope is
+  not the only session-scoped writer: a raw Ctrl+S steer, an editor steer action
+  and an application extension steer all persist through the same history owner
+  (`makeSteerPersist` → `InputHistory.persist`) without ever passing
+  `rememberInput`, so the snapshot can carry rows no scope occurrence owns.
+  Walking the scope newest-first, an occurrence written under THIS owner claims
+  its own row — the scope's rows are appended in submission order, so rows of the
+  other writers that sit between two of them are emitted in place — while a
+  still-pending or policy-skipped occurrence is inlined at its own rank. An
+  occurrence written under another identity (a sessionless pool row) is not part
+  of this Session's projection and is dropped without claiming a row. A row older
+  than the recall window (the 100-row cap) is not present at all, and the
+  occurrence is inlined like a pending one. Occurrence counts, non-consecutive
+  repeats (`a → b → a` stays intact) and the relative order of every writer
+  survive. The sessionless boot seed passes no owner: it only seeds the pool and
+  leaves the scope open.
 
 While a reseed is still pending, the outgoing Session's rows remain recallable
 (`resetForGeneration` is an invalidation signal, not a confirmed switch); they
