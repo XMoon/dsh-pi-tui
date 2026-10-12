@@ -4106,11 +4106,6 @@ export class TuiApp {
    * keybindings — the slot is held until the FINAL dispose() (see
    * tui/process-slot.ts). */
   stop(): void {
-    // The stop boundary is a terminal-ownership boundary: a leased Job workspace
-    // screen must be released FIRST (through the same close path Esc uses), so
-    // the screens stopped below are the only remaining physical owners and no Job
-    // screen keeps a terminal input handler alive.
-    this.jobWorkspace?.close()
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
     this.leaveTerminalPresentation()
@@ -4121,6 +4116,17 @@ export class TuiApp {
     const schemeDisposers = this.schemeDisposers
     this.schemeDisposers = []
     runSyncDisposalSteps('tui stop', [
+      // The stop boundary is a terminal-ownership boundary: a leased Job
+      // workspace screen is released FIRST (through the same close path Esc
+      // uses), so every screen stopped below is the only remaining physical
+      // owner and no Job screen keeps a terminal input handler alive. It is an
+      // INDEPENDENT step like every other one here: a throwing workspace close
+      // (a throwing observer release / owner notification) must never truncate
+      // the terminal release, the modal cancellations or the scheme cleanup. A
+      // close that synchronously restores the return surface only re-asserts
+      // presentation, which the `leaveTerminalPresentation` closing step below
+      // releases again.
+      () => this.jobWorkspace?.close(),
       () => this.clearNotify(),
       // Issue #8: the exit-confirmation timer dies with the surface — a stopped
       // TUI must never fire a stale disarm into a dead footer.
@@ -5014,6 +5020,21 @@ export class TuiApp {
     // chance, and the three blocking entries leave the workspace BEFORE it could
     // swallow a key they need.
     if (this.jobWorkspace !== undefined) {
+      // The EFFECTIVE exit request is Host-reserved and keeps its own admission
+      // even here: physical Escape stays the workspace's close (the reserved-Esc
+      // rule outranks a remap), while any other effective exit key runs the ONE
+      // host exit admission — including its same-key confirmation — instead of
+      // being swallowed. It is dispatched HERE because the ladder below is
+      // deliberately skipped for the workspace, and a focused Task Browser would
+      // otherwise consume the key first. No other host action is admitted.
+      if (!matchesKey(data, 'escape') && this.keybindings.matches(data, 'app.exit.request')) {
+        const resolution = this.keybindings.resolve(data, this.keybindingContext())
+        if (resolution !== undefined && resolution.action === 'app.exit.request') {
+          return this.dispatchResolvedAction(
+            'app.exit.request', data, resolution.key, undefined, resolution.source,
+          ) ? { consume: true } : undefined
+        }
+      }
       this.clearExitConfirmation()
       this.jobWorkspace.panel.handleInput(data)
       return { consume: true }
@@ -20287,6 +20308,16 @@ export class TuiApp {
     // focuses on the restored surface — never on a screen the workspace still
     // owns, and never with the Job swallowing the user's answer keys.
     this.jobWorkspace?.close()
+    // The abandonment above runs the workspace's owner callback, which can
+    // synchronously present a NEWER Question. That newer flow already owns the
+    // seat, and a callback's newer operation always wins: this OLDER request
+    // joins the existing FIFO instead of overwriting it, so both promises keep a
+    // live owner and neither flow is clobbered (the queue advances through the
+    // ONE handover authority when the newer flow settles).
+    if (this.activeQuestions !== undefined) {
+      this.questionQueue.push(state)
+      return
+    }
     // M6: a question owns the seat now — any pending leader sequence is
     // cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
@@ -20635,33 +20666,45 @@ export class TuiApp {
       return Promise.reject(cancellationError('save location cancelled'))
     }
     return new Promise<SaveLocationResult>((resolve, reject) => {
-      // Early-reject BEFORE constructing the prompt: a rejected request must
-      // never start the prompt's completion work (the component's async
-      // refresh would otherwise stay live with no owner to dispose it).
-      if (signal?.aborted === true) {
-        reject(cancellationError('save location aborted'))
-        return
+      // The abort fact is re-read through this accessor: a synchronous callback
+      // run by the workspace abandonment below can abort the request, and a
+      // narrowed property read could not observe it.
+      const isAborted = (): boolean => signal?.aborted === true
+      // ONE refusal ladder, evaluated BEFORE the prompt is constructed and
+      // RE-EVALUATED after the workspace abandonment below: a synchronous
+      // callback that creates a NEWER blocking owner always wins, so this request
+      // is refused (and no prompt is ever constructed) instead of replacing the
+      // newer owner's seat or mounting behind its input routing. A rejection
+      // BEFORE construction is deliberate: a refused request must never start the
+      // prompt's completion work (the component's async refresh would otherwise
+      // stay live with no owner to dispose it).
+      const refusal = (): string | undefined => {
+        if (isAborted()) return 'save location aborted'
+        if (this.activeSaveLocation !== undefined) return 'a save location prompt is already active'
+        if (this.activeQuestions !== undefined || this.approvals.isActive()) {
+          return 'a host question or approval is active'
+        }
+        return undefined
       }
-      // One prompt on screen at a time; a second request while one is active
-      // is refused (the caller notifies — the prompt is a narrow interaction,
-      // not a queueable flow).
-      if (this.activeSaveLocation !== undefined) {
-        reject(cancellationError('a save location prompt is already active'))
-        return
-      }
-      // A Host question or approval owns the seat: a Save Location request
-      // is refused — the prompt must never replace a Host modal's seat and
-      // leave it pending behind the prompt's input routing (the Host modal
-      // wins; the caller notifies).
-      if (this.activeQuestions !== undefined || this.approvals.isActive()) {
-        reject(cancellationError('a host question or approval is active'))
+      const earlyRefusal = refusal()
+      if (earlyRefusal !== undefined) {
+        reject(cancellationError(earlyRefusal))
         return
       }
       // Phase 3B / B1-A modal precedence: leave the Job workspace BEFORE the
       // prompt state (and its frame) exists, so the Save Location prompt mounts
       // on the restored surface and the workspace can never swallow its keys.
-      // The refusal checks above already decided this request may proceed.
       this.jobWorkspace?.close()
+      if (this.disposed) {
+        // The abandonment disposed the surface: the caller must never hang.
+        reject(cancellationError('save location cancelled'))
+        return
+      }
+      const lateRefusal = refusal()
+      if (lateRefusal !== undefined) {
+        reject(cancellationError(lateRefusal))
+        return
+      }
       const state: SaveLocationState = {
         prompt: new SaveLocationPrompt(
           request,

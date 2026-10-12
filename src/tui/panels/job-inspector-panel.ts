@@ -136,24 +136,37 @@ export interface JobInspectorPanelIntents {
  *  spaces for DISPLAY only (the `View` keeps the original text). */
 const oneLine = (text: string): string => text.replace(/\r?\n/g, ' ')
 
-/** The bracketed fact markers of one view: independent and co-visible, never a
- *  mutually exclusive status switch. */
-const flagMarkers = (view: JobInspectorView): string => [
-  view.gapBefore ? '[GAP]' : '',
-  view.observationError === undefined ? '' : '[ERROR]',
-  view.settled ? '[SETTLED]' : '',
-].filter(Boolean).join(' ')
+/** The bracketed fact markers of one view, in priority order: independent and
+ *  co-visible, never a mutually exclusive status switch. */
+const markerTokens = (view: JobInspectorView): string[] => [
+  ...(view.gapBefore ? ['[GAP]'] : []),
+  ...(view.observationError === undefined ? [] : ['[ERROR]']),
+  ...(view.settled ? ['[SETTLED]'] : []),
+]
 
-/** The fact texts of one view, in the same order. With markers they stay
- *  terse (`[ERROR] <reason>`); without them each fact carries its own label
- *  (the short-terminal row has no marker to pair with). */
-const flagDetails = (view: JobInspectorView, withMarkers: boolean): string => [
-  view.gapBefore ? (withMarkers ? '[GAP] Earlier output evicted' : 'Earlier output evicted') : '',
-  view.observationError === undefined
-    ? ''
-    : (withMarkers ? `[ERROR] ${oneLine(view.observationError)}` : `error: ${oneLine(view.observationError)}`),
-  view.settled ? (withMarkers ? '[SETTLED]' : 'settled') : '',
-].filter(Boolean).join('   ')
+/** The same markers as ONE row. */
+const flagMarkers = (view: JobInspectorView): string => markerTokens(view).join(' ')
+
+/** The DESCRIPTIVE facts of one view (the markers already say WHAT happened):
+ *  the eviction note and the follow-stream error text. */
+const flagTexts = (view: JobInspectorView): string => [
+  ...(view.gapBefore ? ['Earlier output evicted'] : []),
+  ...(view.observationError === undefined ? [] : [`error: ${oneLine(view.observationError)}`]),
+].join('   ')
+
+/** `${reserved}   ${flexText}` with the RESERVED head's room claimed FIRST, so a
+ *  long flexible field is the ONLY thing a narrow row truncates. */
+const withReservedHead = (reserved: string, flexText: string, width: number): string => {
+  const room = width - visibleWidth(reserved) - 3
+  return room >= 8 ? `${reserved}   ${truncateToWidth(flexText, room, '…')}` : reserved
+}
+
+/** `${prefix} · ${status}` with the STATUS's room claimed first, so a long Job
+ *  identity can never push the status out of the row. */
+const withReservedStatus = (prefix: string, status: string, width: number): string => {
+  const room = width - visibleWidth(status) - 3
+  return room >= 8 ? `${truncateToWidth(prefix, room, '…')} · ${status}` : status
+}
 
 /** The bounded typed header: Job identity, status, progress, the independent
  *  gap/error/settled facts, and the command-or-label identity. */
@@ -175,30 +188,34 @@ class JobInspectorHeader implements Component {
     const rows = Math.max(1, Math.floor(this.rows()))
     const budget = Math.max(1, rows - HEADER_RESERVED_ROWS)
     const kind = COMMAND_KINDS.has(view.kind) ? 'Command' : 'Label'
-    // The status + the fact markers are the two facts a short row must never
-    // lose: they are assembled FIRST and the identity prefix is kept only when
-    // it still fits beside them.
-    const statusWithMarkers = flagMarkers(view) === '' ? view.status : `${view.status}  ${flagMarkers(view)}`
-    const identity = `Job ${view.jobId} · ${view.kind} · `
+    const identity = `Job ${view.jobId} · ${view.kind}`
     const command = `${kind}: ${oneLine(view.label)}`
     const lines: string[] = []
     if (width < COMPACT_WIDTH || rows < COMPACT_ROWS) {
-      // Short/narrow terminal: at most TWO rows. The second row carries the fact
-      // details when there are any, else the Command/Label identity (never a
-      // body-injected error text).
-      lines.push(
-        visibleWidth(identity) + visibleWidth(statusWithMarkers) <= width
-          ? `${identity}${statusWithMarkers}`
-          : statusWithMarkers,
-      )
-      const details = flagDetails(view, false)
-      lines.push(details !== '' ? details : command)
+      // Short/narrow terminal: at most TWO rows. The STATUS is never shortened
+      // and every fact marker is appended whole while the row still carries it;
+      // the identity prefix is kept only when it fits beside them, and the second
+      // row carries the descriptive facts when there are any, else the
+      // Command/Label identity (never a body-injected error text).
+      let head = view.status
+      for (const marker of markerTokens(view)) {
+        if (visibleWidth(head) + visibleWidth(marker) + 1 <= width) head += ` ${marker}`
+      }
+      const withIdentity = `${identity} · ${head}`
+      lines.push(visibleWidth(withIdentity) <= width ? withIdentity : head)
+      const facts = flagTexts(view)
+      lines.push(facts !== '' ? facts : command)
     } else {
-      lines.push(`${identity}${view.status}`)
+      // The identity never pushes the status out of its row, and the markers
+      // never push the (unbounded) fact text out of theirs.
+      lines.push(withReservedStatus(identity, view.status, width))
       if (view.progress !== undefined) lines.push(`progress: ${oneLine(view.progress)}`)
       if (view.detail !== undefined) lines.push(`detail: ${oneLine(view.detail)}`)
-      const markers = flagDetails(view, true)
-      if (markers !== '') lines.push(markers)
+      const markers = flagMarkers(view)
+      if (markers !== '') {
+        const facts = flagTexts(view)
+        lines.push(facts === '' ? markers : withReservedHead(markers, facts, width))
+      }
       lines.push(command)
     }
     return lines.slice(0, budget).map(line => truncateToWidth(line, width, '…', true))
