@@ -3043,3 +3043,47 @@ test('B-55: a failed Approval mount across a re-entrant fullscreen swap never po
   assert.equal(tenant.keys.length, keysBefore + 1, 'input reaches the live owner on the swapped screen')
   assert.equal(closeCalls, 0)
 })
+
+test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog mounted', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let chainStarted = false
+  const root = advancedOverlayProbe('swap-root-ok', undefined, () => {
+    if (chainStarted) return
+    chainStarted = true
+    // The SYMMETRIC path to B-55: the same re-entrant swap inside the mount's
+    // physical transition, but NO throw — the mount completes and the Approval
+    // commits as the active owner.
+    app.setFullscreen(true)
+  })
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+  const rootOwner = app.focusedComponentForTest()
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'swap during mount' })
+  await vt.waitForRender()
+  assert.ok(
+    viewport(vt).includes('bash'),
+    `the active Approval must be physically mounted on the swapped screen:\n${viewport(vt)}`,
+  )
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the approval owns the seat on the swapped screen')
+  assert.notEqual(
+    app.focusedComponentForTest(),
+    app.seatEditorForTest().component,
+    'the interleaved swap may not hand the live Approval keyboard to the editor',
+  )
+  assert.notEqual(
+    app.focusedComponentForTest(),
+    rootOwner,
+    'the surviving root stays suppressed under the Approval, it does not keep the keyboard',
+  )
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(approval), 'allowed-once', 'the approval stays answerable after the swap')
+  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the settled approval leaves no frame behind')
+  await vt.waitForRender()
+  assert.equal(app.assertOverlayForestForTest(), undefined)
+  assert.ok(viewport(vt).includes('swap-root-ok'), `the surviving root must be restored:\n${viewport(vt)}`)
+  rootLease.close()
+  await vt.waitForRender()
+})

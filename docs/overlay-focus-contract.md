@@ -190,7 +190,9 @@ When you add or change an overlay path, cover the family it belongs to:
 - **Fullscreen lifecycle**: the logical graph, visibility intent, focus intent,
   z-order and modal suspensions survive; non-remountable overlays are closed
   first; the owner is derived from logical intent (physical focus can be
-  overwritten by the outer `setFocus(editor)`).
+  overwritten by the outer `setFocus(editor)`); a swap that interleaves with an
+  overlay's own mount must still leave that overlay projected and, when it was the
+  pre-swap keyboard owner, focused (see §11).
 - **Approval**: it is a remountable logical node; the overlays it suppresses
   must never flash or receive focus through a rebuild; replaced frames are
   disposed; the stage identity is re-read after the park hook, after the Save
@@ -583,6 +585,13 @@ or over the editor seat.
   unwinds the broker node by identity instead. Either way a mount whose caller
   never received a handle can never survive as a ghost modal, a half-committed,
   keyboard-owning suppressor, or a cleanup that removes somebody else's entry.
+  The SYMMETRIC window (no throw) is the same mount interleaved with a fullscreen
+  swap that a plugin callback started: the swap's remount pass runs BEFORE this
+  node's remount callback exists, so registering late must CREATE that projection
+  immediately and finish the swap's keyboard restore. The broker keeps a pre-swap
+  keyboard owner whose remountable projection is not back yet PENDING across its
+  restore pass, so such a mount ends as a visible, focused, answerable Approval
+  instead of an invisible active owner whose keyboard silently went to the editor.
 - **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
   rides the caller's `close()` as the FIRST independent step of the `tui
   dispose` batch, so a throwing tenant cleanup neither skips the
@@ -595,7 +604,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-55: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-56: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -628,4 +637,6 @@ escapes the mount (the registered node unwound, the surviving root intact and th
 healthy tenant restored afterwards), a QUEUED approval whose mount fails rejecting
 its own promise instead of waiting forever, a re-entrant fullscreen swap inside the
 failed mount (the failed Approval unwound on the swapped screen while the
-re-mounted surviving root is never popped as a ghost), and input routing).
+re-mounted surviving root is never popped as a ghost), a swap interleaved with the
+Approval mount itself (the dialog stays physically mounted, focused and answerable
+on the new screen while the suppressed root stays suppressed), and input routing).

@@ -2429,7 +2429,21 @@ export class TuiApp {
     projectActivity: () => this.projectActivity(),
     terminalSize: () => ({ columns: this.terminal.columns, rows: this.terminal.rows }),
     showApprovalOverlay: (frame) => this.showOverlayOnHost(frame, { width: '100%', maxHeight: '100%' }, { remountable: true }),
-    setOverlayRemount: (handle, remount) => { this.overlayRemounts.set(handle, remount) },
+    setOverlayRemount: (handle, remount) => {
+      this.overlayRemounts.set(handle, remount)
+      // Phase 3A / PR-B: a fullscreen swap that runs INSIDE this overlay's own
+      // mount (a plugin focus/blur callback) completes BEFORE this callback
+      // exists, so the swap's remount pass skipped this logical node and left its
+      // projection detached — the node would stay active but invisible on the new
+      // screen. Create that projection now and finish the swap's focus restore,
+      // exactly as its own pass would have (the broker kept the pre-swap owner
+      // pending for this case).
+      if (this.overlayBroker.hasProjection(handle)) return
+      runSyncDisposalSteps('late overlay remount', [
+        remount,
+        () => this.overlayBroker.restoreFocusAfterSwap(),
+      ])
+    },
     clearOverlayRemount: (handle) => { this.overlayRemounts.delete(handle) },
     rebindApprovalOverlay: (handle, frame) => this.rebindOverlayRaw(handle, frame, { width: '100%', maxHeight: '100%' }),
     focusEditorSeat: () => this.focusSeatOwner(),
