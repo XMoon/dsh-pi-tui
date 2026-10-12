@@ -57,6 +57,8 @@ export default async function (h) {
     `${effortRows.length} row(s): ${effortRows.map((node) => h.descendantsText(node)).join(' | ')}`)
   h.measure('wide footer bar', box(h.classNodes(snap, 'pk-bar')[0] ?? {}))
 
+  h.capture('lg-models-1280x800', 'the wide three-column shell: scopes, list, full details card, inline effort rows')
+
   // A2: the pointer paths a headless test cannot prove.
   const headClicked = await h.click(snap.chains, head)
   h.check('a REAL pointer click on the card HEAD opens the read-only page',
@@ -145,18 +147,19 @@ export default async function (h) {
     h.texts(snap).join(' | '))
   h.check('the bounded column renders no inline effort rows', h.classNodes(snap, 'sf-row').length === 0,
     `${h.classNodes(snap, 'sf-row').length} row(s)`)
+  h.capture('lg-bounded-column-1280x800', 'the bounded column itself, before any navigation')
   const boundedBody = snap.nodes.find((node) => (node.class ?? '').split(' ').includes('sf-card-body'))
   const boundedLine = inside(snap, boundedBody, 'sf-text')
   const boundedClicked = boundedLine === undefined ? false : await h.click(snap.chains, boundedLine)
   h.check('a REAL click on the bounded card body opens the model overview',
     boundedClicked && h.has(h.snapshot(), 'Model overview'), `clicked=${boundedClicked}`)
-  h.capture('lg-bounded-card-1280x800', 'the bounded column entry opened the model overview')
+  h.capture('lg-bounded-overview-1280x800', 'the bounded column entry opened the model overview')
   await h.key('Escape', 800)
   await h.key('Tab', 700)
   await h.key('Return', 900)
   h.check('the bounded card Enter opens the same page the pointer opened',
     h.has(h.snapshot(), 'Model overview'), h.texts(h.snapshot()).join(' | '))
-  h.capture('lg-bounded-keyboard-1280x800', 'the bounded card Enter opened the model overview')
+  h.capture('lg-bounded-keyboard-1280x800', 'the bounded card Enter opened the same model overview')
 
   h.measure('frames rendered', String(frames(h).length))
   h.measure('events the subject received', JSON.stringify(records(h).filter((row) => row.event).map((row) => row.event.ev + (row.event.item === undefined ? '' : `:${row.event.item}`))))
