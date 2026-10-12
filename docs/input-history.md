@@ -228,10 +228,12 @@ reconciles them:
   it never compresses a repeat away, because only the FINAL seed can see where
   another writer's row lands between two identical submissions. The scope's own
   cap counts RUNS of consecutive identical text, exactly like the editor/mirror
-  recall it feeds, and keeps a run's oldest occurrence (the only one that can
-  append) plus its newest (which carries the run's rank), so a long run of pending
-  duplicates costs constant state and can never evict an older, distinct
-  occurrence. The mirror keeps its unchanged duplicate rule, so an input identical
+  recall it feeds, and keeps a run's oldest occurrence plus its newest (which
+  carries the run's rank), so a long run of pending duplicates costs constant state
+  and can never evict an older, distinct occurrence. (A steer, a shell line or any
+  other writer's row can land between two identical submissions and move the
+  CWD-level consecutive dedupe anchor, so a later run member can legitimately
+  append: its row is simply re-emitted from the snapshot.) The mirror keeps its unchanged duplicate rule, so an input identical
   to the outgoing Session's last row is still recalled after the reseed;
 - EVERY accepted Enter — each editor seat, a sessionless or local command, a
   `!`/`!!` shell line — becomes an occurrence with its own internal OCCURRENCE
@@ -257,10 +259,12 @@ reconciles them:
   kept separately and is NEVER evicted, which is what tells the reseed how many of
   the snapshot's newest rows the window owns: the appends whose settlements the cap
   evicted are still emitted, in disk order. A pool occurrence written sessionless is
-  settled but is not part of the new Session's projection (it adds nothing), and
-  because the evicted settlements are strictly older than every retained append, an
-  evicted SKIP expires behind the whole window instead of being promoted to the
-  newest end;
+  settled but is not part of the new Session's projection (it adds nothing). A
+  skipped occurrence whose settlement the cap evicted keeps its rank as well: the
+  owner's append count at settlement time is durable, so the skip still lands at the
+  append boundary it recorded — after the rows that preceded it and before those
+  that followed, whether or not their own settlements survived the cap (only a skip
+  whose whole boundary lies outside the covered window falls at its end);
 - `resetInputHistory(entries, owner)` commits that owner's reseed from that
   evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
   occurrence token → rank is built once, the snapshot's newest written-count rows
