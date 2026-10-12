@@ -3475,6 +3475,12 @@ export class TuiApp {
           this.refreshTranscriptWindowHint()
           this.rebuildMessages('theme-keymap')
         }
+        // The footer copy is DERIVED from the effective keymap too (the
+        // `↓ view` affordance gate), so a rebuild must RECOMPOSE it here —
+        // a plain repaint would keep the previous text until some unrelated
+        // geometry or status change. Guarded: the initial manager build runs
+        // before the footer text exists.
+        if (this.footer !== undefined) this.renderFooter()
         this.requestRender()
       },
       onLeaderStateChange: () => this.renderFooter(),
@@ -14128,9 +14134,26 @@ export class TuiApp {
    * (`tasksActive`, `?N`, `!N`) are never touched by this gate. This
    * predicate is a PRESENTATION fact only — routing keeps its single owner
    * in `handleInputCore`, and the hint may never authorize a route.
+   *
+   * The hint advertises a TRIGGER — literally the `↓` one — so it also tracks
+   * the effective keymap instead of only the seat/modal state:
+   *
+   * - an explicit `app.tasks.open: false` removes every rule of the action,
+   *   including this host's synthesized conditional `↓` composition rule
+   *   (effective-keymap rebuild step 3), and a conflict-deactivated or
+   *   shadowed composition rule leaves the same gap;
+   * - a DIFFERENT action bound to `↓` takes that key away from this one (the
+   *   read model shadows the conditional rule), so the action keeping some
+   *   other remapped trigger must not keep promising `↓`.
+   *
+   * `keysFor` is the effective read model (deactivated and shadowed rules
+   * excluded) and the single source for the action's LIVE keys; `↓` is the
+   * canonical KeyId the composition rule declares. A keymap rebuild
+   * recomposes the footer (`onInvalidate`), so this fact is never stale.
    */
   private taskBrowserAvailable(): boolean {
-    return this.tasksActive
+    return this.keybindings.keysFor('app.tasks.open').includes('down')
+      && this.tasksActive
       && this.activeQuestions === undefined
       && !this.approvals.hasPending()
       && this.activeSaveLocation === undefined

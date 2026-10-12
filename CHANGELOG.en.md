@@ -28,7 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer advertises the Task Center `↓ view` (the narrow-screen `↓`), which
   could not act there. The hint returns once the modal settles, the editor is
   empty and the other conditions still hold; the parked `?N` and failure `!N`
-  figures stay visible throughout.
+  figures stay visible throughout. The hint is also withheld while
+  `app.tasks.open` is explicitly disabled or while `↓` has been given to
+  another action (a keymap change applies immediately) — the footer never
+  promises a key the router no longer resolves.
 
 ## [0.5.1] - 2026-10-08
 

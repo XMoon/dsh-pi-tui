@@ -2,7 +2,9 @@
  * PR-E modal affordance tests (Phase 3A Track C): the footer's Task Center
  * `↓ view` (and the compact `↓` form) must be advertised only where the ↓
  * task-browser trigger can really fire — an EMPTY prompt-mode seat editor
- * with active tasks and NO Question / Approval / Save Location capture.
+ * with active tasks, NO Question / Approval / Save Location capture, and an
+ * EFFECTIVE `app.tasks.open` trigger in the live keymap (an explicit `false`
+ * removes the host's conditional ↓ composition rule as well).
  * The upstream owner is `TuiApp.taskBrowserAvailable()`, the single
  * classifier behind both the full and the compact builtin task item.
  *
@@ -359,4 +361,82 @@ test('the full, responsive-compact and fullscreen footers hide and restore the h
   await fullscreenQuestion
   screen = await view(vt)
   assert.ok(screen.includes('↓ view'), `the fullscreen hint must return after settle:\n${screen}`)
+})
+
+test('an explicitly disabled app.tasks.open drops the ↓ hint on every surface and never routes', async () => {
+  // The keymap's own `false` contract: it removes EVERY source of the action's
+  // keys — including the host's conditional `↓` composition rule. The footer
+  // hint is a claim about that trigger, so it must follow the same fact;
+  // otherwise it promises a key the router no longer resolves.
+  const { vt, app, opened } = startApp()
+  oneRunningTask(app)
+  let screen = await view(vt)
+  assert.ok(screen.includes('↓ view'), `precondition — the default map advertises ↓:\n${screen}`)
+
+  // The PRODUCTION reconfiguration seam (`/keybindings reload`, the settings
+  // appliers): the keymap rebuild itself must recompose the footer — no
+  // geometry change and no status patch are involved.
+  app.applyUserKeybindings({ 'app.tasks.open': false }, () => {})
+  screen = await view(vt)
+  assert.ok(screen.includes('1 task running'), `the task badge itself must survive:\n${screen}`)
+  assert.ok(!screen.includes('↓ view'), `a disabled action must not advertise the ↓ hint:\n${screen}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 0, 'the disabled ↓ must not dispatch the task browser')
+
+  // The SECOND consumer of the same flag: the responsive compact item (the
+  // same 28-column point the other density cases use). With the trigger
+  // available this row compacts to `[1t·↓]`.
+  vt.resize(28, 24)
+  screen = await view(vt)
+  assert.ok(screen.includes('1 task running'), `the compact viewport keeps the badge:\n${screen}`)
+  assert.ok(!screen.includes('[1t·↓]') && !screen.includes('↓ view'),
+    `the compact item must drop the ↓ too:\n${screen}`)
+
+  // ...and the fullscreen footer.
+  vt.resize(100, 24)
+  app.setFullscreen(true)
+  screen = await view(vt)
+  assert.ok(!screen.includes('↓ view'), `the fullscreen footer must drop the ↓ too:\n${screen}`)
+  app.setFullscreen(false)
+  await vt.waitForRender()
+
+  // Positive control: re-enabling the action restores BOTH the hint and the
+  // real ↓ route — again through the keymap rebuild alone, at a width whose
+  // compact row must now carry the ↓.
+  vt.resize(28, 24)
+  screen = await view(vt)
+  assert.ok(!screen.includes('[1t·↓]'), `precondition — still withheld before the rebuild:\n${screen}`)
+  app.applyUserKeybindings({}, () => {})
+  screen = await view(vt)
+  assert.ok(screen.includes('[1t·↓]'), `re-enabling must restore the compact ↓:\n${screen}`)
+  vt.resize(100, 25)
+  screen = await view(vt)
+  assert.ok(screen.includes('↓ view'), `re-enabling must restore the hint:\n${screen}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 1, 'the restored ↓ must reach the Task Center sink')
+})
+
+test('a ↓ taken by another action drops the hint even while app.tasks.open keeps a trigger', async () => {
+  // The hint advertises the `↓` TRIGGER, not "the action still exists". A user
+  // remap of app.tasks.open ADDS a trigger and leaves the conditional ↓ in
+  // place (additive contract), so the hint stays honest; a DIFFERENT action
+  // bound to ↓ shadows the composition rule, and the hint must go.
+  const { vt, app, opened } = startApp()
+  oneRunningTask(app)
+
+  app.applyUserKeybindings({ 'app.tasks.open': 'ctrl+g' }, () => {})
+  let screen = await view(vt)
+  assert.ok(screen.includes('↓ view'), `a pure remap keeps the conditional ↓:\n${screen}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 1, 'the conditional ↓ still reaches the Task Center sink')
+
+  app.applyUserKeybindings({ 'app.tasks.open': 'ctrl+g', 'app.history.search': 'down' }, () => {})
+  screen = await view(vt)
+  assert.ok(!screen.includes('↓ view'), `a ↓ owned by another action must drop the hint:\n${screen}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened(), 1, 'the stolen ↓ must not reach the task browser')
 })
