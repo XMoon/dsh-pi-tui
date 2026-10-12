@@ -1578,7 +1578,12 @@ child id) leaves the Task Center for a dedicated fullscreen Job workspace: a
 typed header (Job identity, status, progress, the independent gap/error/settled
 facts, and one `Command:`/`Label:` identity row), a retained-output body, and a
 pinned bottom Action Bar (`<tasks.stop key> stop · Esc back`, degrading to
-`Esc back` alone when the row cannot carry more). The workspace is its own
+`Esc back` alone when the row cannot carry more). Between the body and that bar
+a TRANSIENT notice row renders the app's own live notice while the workspace owns
+the terminal, so a Stop settlement (a refused or unproven stop in particular) is
+visible without leaving the Job view; it renders zero rows when nothing is live,
+and it reuses the single app notice and its lifetime rather than a second Stop
+state. The workspace is its own
 screen, so the main transcript, the original editor and the footer never take
 part in its layout, and the previous screen (regular or transcript fullscreen)
 is paused with the Task Browser kept alive underneath — `Esc` returns to the
