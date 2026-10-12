@@ -35,24 +35,27 @@ export function runSyncDisposalSteps(label: string, steps: readonly (() => void)
 /**
  * The same non-truncating attempt, for a batch that rolls back a PRIMARY failure:
  * every rollback step is attempted in caller-provided order, then the PRIMARY
- * value is thrown — aggregated by IDENTITY with the collected rollback
- * failure(s), the primary first. An independent rollback obligation must never
- * be skipped because an earlier one threw, and the caller's own thrown value
- * must stay intact (a user `AggregateError` stays ONE entry, never flattened).
+ * value is thrown — aggregated by IDENTITY with the collected rollback failures,
+ * the primary first and the rollback values FLAT, in step order
+ * (`AggregateError([primary, r1, r2])`). One rollback obligation must never be
+ * skipped because an earlier one threw, and every value a step threw stays ONE
+ * entry — a user `AggregateError` is never flattened into its `.errors`. The step
+ * loop is inlined (not delegated to {@link runSyncDisposalSteps}, which would
+ * nest its own aggregate one level down).
  */
 export function runSyncDisposalStepsWithPrimary(
   label: string,
   primary: unknown,
   steps: readonly (() => void)[],
 ): never {
-  let rollbackFailure: unknown
-  let failed = false
-  try {
-    runSyncDisposalSteps(label, steps)
-  } catch (error) {
-    rollbackFailure = error
-    failed = true
+  const failures: unknown[] = []
+  for (const step of steps) {
+    try {
+      step()
+    } catch (error) {
+      failures.push(error)
+    }
   }
-  if (failed) throw new AggregateError([primary, rollbackFailure], label)
-  throw primary
+  if (failures.length === 0) throw primary
+  throw new AggregateError([primary, ...failures], label)
 }

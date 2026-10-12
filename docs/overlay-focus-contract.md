@@ -193,7 +193,10 @@ When you add or change an overlay path, cover the family it belongs to:
   overwritten by the outer `setFocus(editor)`).
 - **Approval**: it is a remountable logical node; the overlays it suppresses
   must never flash or receive focus through a rebuild; replaced frames are
-  disposed.
+  disposed; the stage identity is re-read after the park hook, after the Save
+  cancellation and inside the mount, so a settled prompt's tail can never cancel
+  the newer Save Location a cleanup opened, and a throwing mount can never latch
+  the stage or leak its frame (see §11).
 - **Session / teardown**: a child overlay (Job viewer) closes before its parent
   (Task Browser); callbacks capture the owning session identity; a parent that
   was disposed WITHOUT its closer must still notify its owner (see §10).
@@ -543,15 +546,25 @@ or over the editor seat.
   path re-validates the subject too, so a parked, finalized or stale tenant
   receives nothing.
 - **Approval mount fence.** `ApprovalRuntime.showNext()` commits `active =
-  pending` BEFORE the park / save cancellation / mount, and `mount()`
-  re-validates `active === pending && !settled && !isDisposed()` AFTER
-  `showApprovalOverlay` returned: a losing mount hides only the handle it
-  created, disposes only the frame it created, registers no fullscreen rebind
-  and never publishes over the newer prompt. A FAILED park takes the same
+  pending` BEFORE the park / save cancellation / mount, and re-reads that same
+  stage identity (`ownsStage`) after EVERY mount-phase hook that can run a
+  callback: after the park hook (a caller cleanup that settles THIS prompt and
+  opens a newer Save Location must not have that prompt cancelled by this tail),
+  after the Save cancellation (the prompt's disposal can settle or replace this
+  prompt), and in `mount()` after `showApprovalOverlay` returned: a losing mount
+  hides only the handle it created, disposes only the frame it created, registers
+  no fullscreen rebind and never publishes over the newer prompt. A FAILED
+  presentation — a throwing park hook OR a throwing mount — takes one shared
   identity-fenced path: this prompt is latched settled, its abort binding is
-  released, its active ownership is cleared only while it is still the active
-  one, and the host's `rollbackApprovalPark` completes the seat publish and the
-  repaint as independent steps.
+  released, its active ownership is cleared only while it is still the active one,
+  the frame this mount created is disposed (it is not published as
+  `responsiveFrame` yet, so this mount is its only owner) and the host completes
+  the seat publish / repaint and the queue advance as independent steps. The ONE
+  overlay mount funnel (`showOverlayOnHost`) fails closed too: a mount that throws
+  after the broker registered its logical node unwinds exactly that node — by
+  identity, a no-op when it was never registered — before the failure propagates,
+  so a mount whose caller never received a handle can never survive as a
+  half-committed, keyboard-owning suppressor.
 - **Final disposal.** `TuiApp.dispose()` pre-retires the optional identity and
   rides the caller's `close()` as the FIRST independent step of the `tui
   dispose` batch, so a throwing tenant cleanup neither skips the
@@ -564,7 +577,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-46: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-49: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -588,4 +601,7 @@ presentation that cannot dequeue over the newer successor that preempted it, a
 successor that takes its own initial suspension, an auto-focused overlay that
 keeps the keyboard against the seat fallback, a successor superseded INSIDE its
 own initial suspension (the inherited roots stay hidden and the live frame keeps
-the keyboard), and input routing).
+the keyboard), a settled approval that never cancels the Save Location its own
+cleanup opened, a throwing physical mount that releases the failed approval and
+keeps the queue and the optional seat usable, the flat identity/order contract of
+multiple rollback failures, and input routing).

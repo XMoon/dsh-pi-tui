@@ -236,32 +236,16 @@ export class ApprovalRuntime {
       this.host.beforeApprovalMount()
     } catch (error) {
       // Phase 3A / PR-B: the park's stale-tenant retirement ran a throwing
-      // caller cleanup. The approval must never stay half-committed, but the
-      // rollback is IDENTITY FENCED and releases THIS prompt's own bindings as
-      // independent obligations: this prompt is latched settled and its abort
-      // listener is removed (it leaves every owner slot here, so nothing else
-      // would ever unbind the caller's signal), the active slot is cleared only
-      // while THIS prompt still owns it (a cleanup that synchronously settled
-      // this prompt and opened a NEWER approval keeps its ownership, or 'y'/'n'
-      // could no longer settle the newer prompt), the host completes the
-      // abandoned presentation's seat/publish/render obligations, and the
-      // ORIGINAL failure propagates (aggregated with a rollback failure).
-      pending.settled = true
-      if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
-        pending.request.signal.removeEventListener('abort', pending.onAbort)
-      }
-      const owned = this.active === pending
-      if (owned) this.active = undefined
-      // TWO INDEPENDENT obligations, and neither may truncate the other: the host
-      // completes the abandoned presentation's seat/publish/render rollback, and a
-      // legally queued successor must still be presented through the existing
-      // queue authority (only while THIS prompt was the one releasing it). The
-      // ORIGINAL failure propagates first, aggregated by identity with theirs.
-      runSyncDisposalStepsWithPrimary('approval park rollback', error, [
-        () => this.host.rollbackApprovalPark(),
-        () => { if (owned) this.showNext() },
-      ])
+      // caller cleanup. The approval must never stay half-committed.
+      this.rollbackFailedPresentation('approval park rollback', pending, error)
     }
+    // The park hook can also run a caller cleanup that settles THIS prompt
+    // WITHOUT throwing (it aborts the approval and opens a newer owner). The
+    // logical precommit above must not survive as side effects of a settled
+    // prompt: its own release already cleared the active slot, so this tail must
+    // not cancel the Save Location prompt that cleanup just opened, nor mount
+    // this frame.
+    if (!this.ownsStage(pending)) return
     // A Host approval is authoritative over a Client-local Save Location
     // prompt: showing the approval settles the prompt as cancelled (the
     // caller's owned workflow classifies it and notifies nothing) — the
@@ -269,11 +253,67 @@ export class ApprovalRuntime {
     // routing (the same rule as presenting a question).
     this.host.cancelActiveSaveLocation()
     this.host.clearFullscreenPointerGestures()
-    this.mount(pending)
+    // The prompt's disposal aborts its completion port, whose subscribers can
+    // synchronously settle or replace THIS approval: a replaced prompt must not
+    // mount its frame over the newer owner (the post-mount fence below cannot
+    // undo an overlay that is already physically up).
+    if (!this.ownsStage(pending)) return
+    try {
+      this.mount(pending)
+    } catch (error) {
+      // Phase 3A / PR-B MOUNT FAILURE: the physical mount runs a synchronous
+      // focus transition (a plugin onBlur/onFocus), which may throw. The prompt
+      // is already committed as active, so this failure releases exactly its own
+      // bindings and resources (see `rollbackFailedPresentation`); `mount()` has
+      // already disposed the frame it created and the host has unwound the
+      // partially committed overlay node.
+      this.rollbackFailedPresentation('approval mount rollback', pending, error)
+    }
     // M6: a capturing surface owns the input now — any pending leader
     // sequence is cancelled (focus-transition cancellation).
     this.host.cancelLeader()
     this.host.projectActivity()
+  }
+
+  /**
+   * Whether THIS prompt still owns the input stage: it is the active one, not
+   * settled, and the surface is alive. Re-read after EVERY mount-phase hook that
+   * can synchronously run a plugin/focus callback (the park, the Save
+   * cancellation, the physical mount) — a settled or replaced prompt must not
+   * keep acting on the stage its newer owner took.
+   */
+  private ownsStage(pending: PendingApproval): boolean {
+    return this.active === pending && pending.settled !== true && !this.host.isDisposed()
+  }
+
+  /**
+   * Phase 3A / PR-B: release THIS prompt after a failed presentation (a throwing
+   * park hook or a throwing physical mount). The rollback is IDENTITY FENCED and
+   * its obligations are INDEPENDENT: the prompt is latched settled and its abort
+   * listener removed (it leaves every owner slot here, so nothing else would ever
+   * unbind the caller's signal), the active slot is cleared only while THIS prompt
+   * still owns it (a cleanup that synchronously settled this prompt and opened a
+   * NEWER approval keeps its ownership, or 'y'/'n' could no longer settle the
+   * newer prompt), the host completes the abandoned presentation's
+   * seat/publish/render obligations, a legally queued successor is still presented
+   * through the existing queue authority, and the ORIGINAL failure propagates
+   * (aggregated by identity with a rollback failure).
+   */
+  private rollbackFailedPresentation(
+    label: string,
+    pending: PendingApproval,
+    primary: unknown,
+  ): never {
+    pending.settled = true
+    if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
+      pending.request.signal.removeEventListener('abort', pending.onAbort)
+    }
+    const owned = this.active === pending
+    if (owned) this.active = undefined
+    runSyncDisposalStepsWithPrimary(label, primary, [
+      () => this.host.rollbackApprovalPark(),
+      () => { if (owned) this.showNext() },
+    ])
   }
 
   /** Build and mount the approval dialog for one prompt on the active screen. */
@@ -283,7 +323,18 @@ export class ApprovalRuntime {
     // fullscreen swap rebinds the SAME logical node (with a fresh surface), so
     // the overlays it suppresses stay suppressed and never get revealed/
     // focused/re-hidden (no fabricated focus transition).
-    const handle = this.host.showApprovalOverlay(frame)
+    let handle: OverlayHandle
+    try {
+      handle = this.host.showApprovalOverlay(frame)
+    } catch (error) {
+      // The physical mount threw: the host has already unwound the overlay node
+      // it prepared, and this frame is not published as `responsiveFrame` yet, so
+      // this mount is its only owner — dispose it as an independent obligation so
+      // a dispose failure cannot hide the original failure.
+      runSyncDisposalStepsWithPrimary('approval overlay mount', error, [
+        () => frame.dispose(),
+      ])
+    }
     // Phase 3A / PR-B MOUNT FENCE: the physical mount can synchronously run a
     // plugin callback (onFocus/onBlur) that settles this prompt, replaces it
     // with a newer one, or disposes the surface. Only the STILL-current prompt
@@ -292,7 +343,7 @@ export class ApprovalRuntime {
     // newer prompt. The frame is deliberately NOT published as
     // `responsiveFrame` before the fence, so a settling callback cannot dispose
     // it a second time.
-    if (this.active !== pending || pending.settled === true || this.host.isDisposed()) {
+    if (!this.ownsStage(pending)) {
       runSyncDisposalSteps('approval mount fence', [
         () => handle.hide(),
         () => frame.dispose(),
