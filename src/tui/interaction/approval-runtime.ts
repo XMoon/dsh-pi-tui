@@ -250,11 +250,22 @@ export class ApprovalRuntime {
       if (pending.onAbort !== undefined && pending.request.signal !== undefined) {
         pending.request.signal.removeEventListener('abort', pending.onAbort)
       }
-      if (this.active === pending) this.active = undefined
+      const owned = this.active === pending
+      if (owned) this.active = undefined
       try {
         this.host.rollbackApprovalPark()
       } catch (rollbackFailure) {
         throw new AggregateError([error, rollbackFailure], 'approval park rollback')
+      }
+      // A legally queued successor must not be stranded by this failure: hand the
+      // input stage on through the EXISTING queue authority (only while this
+      // prompt was the one releasing it).
+      if (owned) {
+        try {
+          this.showNext()
+        } catch (nextFailure) {
+          throw new AggregateError([error, nextFailure], 'approval park rollback')
+        }
       }
       throw error
     }

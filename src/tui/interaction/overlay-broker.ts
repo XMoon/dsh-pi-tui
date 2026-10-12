@@ -121,6 +121,8 @@ export class OverlayBroker {
   /** The node that owned the keyboard before a screen swap. */
   private swapFocusOwner: ManagedOverlayNode | undefined
   private zSequence = 0
+  /** Monotonic count of physical focus transitions (see `focusPhysical`). */
+  private focusTransitionSeq = 0
   private idSequence = 0
   private readonly deps: OverlayBrokerDeps
 
@@ -731,7 +733,21 @@ export class OverlayBroker {
   private focusPhysical(node: ManagedOverlayNode, options?: { preserveOrder?: boolean }): void {
     if (node.raw === undefined) return
     if (options?.preserveOrder !== true) node.zOrder = ++this.zSequence
+    // Phase 3A / PR-B: ONE monotonic count of every time this broker actually
+    // handed the keyboard to a specific overlay. The seat arbitration samples it
+    // around the optional-tenant re-validation: a revision that moved DURING that
+    // call means a NEWER focus intent won, while an owner the broker is RELEASING
+    // right now (its transition already happened before the call) must not veto
+    // the seat fallback. Observation only — the broker stays the sole
+    // focus-intent authority.
+    this.focusTransitionSeq += 1
     node.raw.focus(options)
+  }
+
+  /** How many times this broker handed the keyboard to a specific overlay (see
+   * {@link focusPhysical} — the seat arbitration's intent-observation seam). */
+  focusTransitionRevision(): number {
+    return this.focusTransitionSeq
   }
 
   /** The frontmost visible node that asked for the keyboard (`resumeFocus`).

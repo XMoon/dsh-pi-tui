@@ -13748,7 +13748,7 @@ export class TuiApp {
    * the original failure then propagates.
    */
   private parkOptionalSeatOrRollback(
-    state: { suspendedOverlays: Set<OverlayHandle> },
+    abandon: () => void,
     steps: readonly (() => void)[],
   ): void {
     try {
@@ -13756,16 +13756,18 @@ export class TuiApp {
     } catch (error) {
       // The rollback COMPLETES the independent obligations the park would have
       // finished. Each `steps` entry (state latch, abort binding, identity fenced
-      // slot clear, prompt release) is attempted on its own, any suspension root
-      // a callback acquired while this state still owned the seat is handed back
-      // (the exception leaves this presentation, so its own fence never runs),
+      // slot clear, prompt release) is attempted on its own, the presentation's
+      // OWN abandonment obligation runs (the exception leaves this presentation,
+      // so its `abandonIfDead` fence never does): a Question advances its FIFO
+      // successor, and any suspension root a callback acquired while the state
+      // still owned the seat is handed back,
       // the seat projects the live owner again (the retired tenant stops being
       // painted/focused), the derived seat is re-published (a hostless TuiApp
       // only mirrors it through the render funnel's host branch) and the frame
       // repaints — all before the original failure propagates.
       this.rollbackBlockingPresentation(error, [
         ...steps,
-        () => this.releaseAbandonedSuspension(state),
+        abandon,
         () => this.mountSeatChild(),
         () => this.publishFocusSeat(),
         () => this.requestRender(),
@@ -16726,17 +16728,16 @@ export class TuiApp {
     // blocker whose frame is not ready yet falls back to the seat editor,
     // exactly like the pre-tenant path (the blocker focuses its own frame
     // right after).
-    const stale = this.optionalSeat !== undefined && !this.optionalSeat.finalized
-      && !this.optionalSeat.isCurrent()
+    const transitionsBefore = this.overlayBroker.focusTransitionRevision()
     this.revalidateOptionalSeat()
     // The retirement runs the caller's cleanup, which may synchronously hand the
-    // keyboard to a NEWER owner — including a RE-focus of an overlay that was
-    // already focused, so comparing the component identity is NOT enough. While
-    // a managed overlay holds the keyboard after such a retirement, the fallback
-    // must not steal it back; when nothing was retired the pre-existing fallback
-    // semantics are unchanged (the broker's suspension/resume paths rely on
-    // them).
-    if (stale && this.overlayBroker.hasFocusedOverlay()) return
+    // keyboard to a NEWER owner — a capturing overlay that focused itself, or an
+    // already focused one re-requesting focus. Comparing the broker's focus
+    // INTENT revision (not the focus holder) is what distinguishes that from an
+    // owner the broker is RELEASING right now: that transition already happened
+    // before this call and must not veto the seat fallback (otherwise the fork's
+    // own unfocus fallback restores the preFocus of the retired component).
+    if (this.overlayBroker.focusTransitionRevision() !== transitionsBefore) return
     this.activeScreen.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
   }
 
@@ -19943,11 +19944,16 @@ export class TuiApp {
     // Parking re-projects the seat and may RETIRE a stale tenant, whose caller
     // cleanup can throw (rolled back below) or synchronously settle/replace
     // THIS flow: never continue into a suspension/seat mount for a dead flow.
-    this.parkOptionalSeatOrRollback(state, [
-      () => { state.settled = true },
-      () => this.releaseAbortBinding(state),
-      () => { if (this.activeQuestions === state) this.activeQuestions = undefined },
-    ])
+    this.parkOptionalSeatOrRollback(
+      // A legally queued successor takes the seat through the ONE queue authority;
+      // only without one are the roots this state acquired handed back.
+      () => { if (!this.advanceQuestionQueue(state)) this.releaseAbandonedSuspension(state) },
+      [
+        () => { state.settled = true },
+        () => this.releaseAbortBinding(state),
+        () => { if (this.activeQuestions === state) this.activeQuestions = undefined },
+      ],
+    )
     if (this.abandonIfDead(this.questionFlowIsLive(state), state)) return
     // A Host question is authoritative over a Client-local Save Location
     // prompt: presenting a question settles the prompt as cancelled (the
@@ -20033,11 +20039,72 @@ export class TuiApp {
     return { consume: true }
   }
 
+  /**
+   * Phase 3A / PR-B: advance the Question FIFO past already-settled entries and
+   * hand the seat to the next live flow. This is the ONE queue authority: the
+   * normal settlement AND a failed presentation's rollback use it, so a legally
+   * queued flow can never be stranded by a caller cleanup failure.
+   * @param settled - the flow that is releasing the seat.
+   * @returns whether a queued flow became the active one.
+   */
+  private advanceQuestionQueue(settled: QuestionState): boolean {
+    let next: QuestionState | undefined
+    do {
+      next = this.questionQueue.shift()
+    } while (next !== undefined && next.settled === true)
+    if (next === undefined) return false
+    this.handOverQuestion(settled, next)
+    return true
+  }
+
+  /**
+   * Hand the seat, the suspension graph and the focus order to the next flow.
+   * Ownership TRANSFER: the editor and the suspended overlays are never restored
+   * between two queued flows (a restore would flash the editor row and reveal
+   * overlays that must stay hidden under the question).
+   */
+  private handOverQuestion(settled: QuestionState, target: QuestionState): void {
+    // Ownership transfer: the seat and the suspended overlays pass to the
+    // next flow directly — the editor and the overlays are NEVER restored
+    // between two queued flows (a restore would flash the editor row and
+    // reveal overlays that must stay hidden under the question).
+    runSyncDisposalSteps('question settlement handover', [
+      () => { target.suspendedOverlays = settled.suspendedOverlays },
+      () => { target.flow.setStatus(target.status) },
+      () => { settled.suspendedOverlays = new Set() },
+      () => {
+        const frame = new QuestionFrame(target.flow, () => this.terminal.rows)
+        target.frame = frame
+        // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS
+        // into the seat — the settled flow's frame is simply unmounted
+        // (its lifetime belongs to the settled question state, never the
+        // seat).
+        this.editorSeat.replace(frame)
+      },
+      () => { this.activeQuestions = target },
+      () => { (this.fullscreen ?? this.tui).setFocus(target.frame!) },
+      // The next queued flow owns the seat (follow-up P1).
+      () => this.setFocusSeat('overlay'),
+      // The wait that owns the surface CHANGED — a different flow, possibly
+      // with a different `agentInputWait` — while the phase stays
+      // `waiting-question`, so the activity projection (and with it the
+      // effective pane state) must be re-derived here, exactly like the
+      // final-restoration branch.
+      () => this.projectActivity(),
+      // PR-D (external review P2): the handover installed a DIFFERENT
+      // QuestionFrame in the seat (its height can differ) while the seat
+      // stays 'overlay', so this is the only place that can re-derive the
+      // widget grant and the footer capacity — through the HOST render
+      // funnel, not the raw screen.
+      () => this.requestRender(),
+    ])
+  }
+
   /** Resolve the question flow with its answers, or reject on cancel/abort. */
   private settleQuestions(state: QuestionState, answers: TuiQuestionAnswer[] | undefined): void {
     if (this.activeQuestions !== state || state.settled === true) return
     state.settled = true
-    let next: QuestionState | undefined
+    let advanced = false
     // M3-6 PR3: the pre-handover presentation cleanup is NON-TRUNCATING; the
     // handover decision reads the LIVE queue AFTER those callbacks (so a queued
     // request synchronously cancelled/enqueued by a callback is respected and
@@ -20060,49 +20127,9 @@ export class TuiApp {
       // aborted by a callback above is already settled (its abort listener
       // fired) — skip it instead of mounting a cancelled flow the seat could
       // never settle again.
+      () => { advanced = this.advanceQuestionQueue(state) },
       () => {
-        do {
-          next = this.questionQueue.shift()
-        } while (next !== undefined && next.settled === true)
-      },
-      () => {
-        const target = next
-        if (target !== undefined) {
-          // Ownership transfer: the seat and the suspended overlays pass to the
-          // next flow directly — the editor and the overlays are NEVER restored
-          // between two queued flows (a restore would flash the editor row and
-          // reveal overlays that must stay hidden under the question).
-          runSyncDisposalSteps('question settlement handover', [
-            () => { target.suspendedOverlays = state.suspendedOverlays },
-            () => { target.flow.setStatus(target.status) },
-            () => { state.suspendedOverlays = new Set() },
-            () => {
-              const frame = new QuestionFrame(target.flow, () => this.terminal.rows)
-              target.frame = frame
-              // Re-vendor lifecycle follow-up P1: the next flow only PROJECTS
-              // into the seat — the settled flow's frame is simply unmounted
-              // (its lifetime belongs to the settled question state, never the
-              // seat).
-              this.editorSeat.replace(frame)
-            },
-            () => { this.activeQuestions = target },
-            () => { (this.fullscreen ?? this.tui).setFocus(target.frame!) },
-            // The next queued flow owns the seat (follow-up P1).
-            () => this.setFocusSeat('overlay'),
-            // The wait that owns the surface CHANGED — a different flow, possibly
-            // with a different `agentInputWait` — while the phase stays
-            // `waiting-question`, so the activity projection (and with it the
-            // effective pane state) must be re-derived here, exactly like the
-            // final-restoration branch.
-            () => this.projectActivity(),
-            // PR-D (external review P2): the handover installed a DIFFERENT
-            // QuestionFrame in the seat (its height can differ) while the seat
-            // stays 'overlay', so this is the only place that can re-derive the
-            // widget grant and the footer capacity — through the HOST render
-            // funnel, not the raw screen.
-            () => this.requestRender(),
-          ])
-        } else {
+        if (advanced) return
           // Final restoration: the editor FIRST, then the suspended overlays —
           // a restored capturing overlay focuses itself through
           // setHidden(false), so the editor must not be re-focused afterwards.
@@ -20134,7 +20161,6 @@ export class TuiApp {
             // capacity) through the host render funnel.
             () => this.requestRender(),
           ])
-        }
       },
       () => this.settle(state, answers),
     ])
@@ -20258,12 +20284,17 @@ export class TuiApp {
     // must never be a keyboard target while the prompt owns the seat. A
     // throwing stale-tenant cleanup rolls the intent back (and releases the
     // prompt) instead of leaving an unpresented owner behind.
-    this.parkOptionalSeatOrRollback(state, [
-      () => { state.settled = true },
-      () => this.releaseAbortBinding(state),
-      () => { if (this.activeSaveLocation === state) this.activeSaveLocation = undefined },
-      () => state.prompt.dispose(),
-    ])
+    this.parkOptionalSeatOrRollback(
+      // A Save Location has no queue: only hand back what the failed prompt
+      // acquired.
+      () => this.releaseAbandonedSuspension(state),
+      [
+        () => { state.settled = true },
+        () => this.releaseAbortBinding(state),
+        () => { if (this.activeSaveLocation === state) this.activeSaveLocation = undefined },
+        () => state.prompt.dispose(),
+      ],
+    )
     // Mirror of `presentQuestion`: every step below that can run a synchronous
     // callback is followed by an identity fence, so a cleanup callback that
     // cancels or replaces THIS prompt can never mount a dead frame or hide a
