@@ -717,6 +717,18 @@ export class OverlayBroker {
     if (wasHidden && !node.nonCapturing && options?.preserveOrder !== true) {
       node.zOrder = ++this.zSequence
     }
+    // Phase 3A / PR-B: showing a HIDDEN CAPTURING overlay hands it the keyboard
+    // inside the fork's own `setHidden(false)` — the contract `focus()` relies on
+    // above, with `preserveFocus` as the internal-restore exception. That handoff
+    // must be counted HERE as well: the seat arbitration samples this revision
+    // around its re-validation, so an auto-focus it cannot see would let the
+    // fallback steal the keyboard back from a newer owner. The fork's internal
+    // UNFOCUS fallback is deliberately not counted — the broker preempts it by
+    // moving the keyboard first (see `unfocus` / `releaseKeyboard`), so it never
+    // hands the seat to a newer explicit owner.
+    if (wasHidden && !node.nonCapturing && options?.preserveFocus !== true) {
+      this.focusTransitionSeq += 1
+    }
     node.raw.setHidden(false, options)
   }
 

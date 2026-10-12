@@ -12,7 +12,7 @@
  */
 
 import { matchesKey, type OverlayHandle, type TuiInputListenerResult } from '@xmoon76/pi-tui'
-import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { ResponsiveOverlayFrame } from '../components/frame.ts'
 import {
   ApprovalDialogSurface,
@@ -252,22 +252,15 @@ export class ApprovalRuntime {
       }
       const owned = this.active === pending
       if (owned) this.active = undefined
-      try {
-        this.host.rollbackApprovalPark()
-      } catch (rollbackFailure) {
-        throw new AggregateError([error, rollbackFailure], 'approval park rollback')
-      }
-      // A legally queued successor must not be stranded by this failure: hand the
-      // input stage on through the EXISTING queue authority (only while this
-      // prompt was the one releasing it).
-      if (owned) {
-        try {
-          this.showNext()
-        } catch (nextFailure) {
-          throw new AggregateError([error, nextFailure], 'approval park rollback')
-        }
-      }
-      throw error
+      // TWO INDEPENDENT obligations, and neither may truncate the other: the host
+      // completes the abandoned presentation's seat/publish/render rollback, and a
+      // legally queued successor must still be presented through the existing
+      // queue authority (only while THIS prompt was the one releasing it). The
+      // ORIGINAL failure propagates first, aggregated by identity with theirs.
+      runSyncDisposalStepsWithPrimary('approval park rollback', error, [
+        () => this.host.rollbackApprovalPark(),
+        () => { if (owned) this.showNext() },
+      ])
     }
     // A Host approval is authoritative over a Client-local Save Location
     // prompt: showing the approval settles the prompt as cancelled (the

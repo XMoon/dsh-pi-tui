@@ -212,6 +212,12 @@ When you add or change an overlay path, cover the family it belongs to:
   focus / screen-swap entry and re-project the live winner; give it no
   host-classified protocol delivery; never let the tenant become a second
   focus/currentness authority (see §11).
+- **A failed blocking presentation**: keep the rollback steps, the FIFO advance
+  and the caller's promise settlement INDEPENDENT (a throwing step surfaces
+  aggregated, never truncating); commit the successor fact BEFORE the handover
+  runs; gate the advance on the failed state still owning the seat; and give a
+  successor handed over from a never-presented flow its OWN initial suspension
+  (see §11).
 - **Assertions to add**: `assertOverlayForestForTest()` after reentrant
   operations; focus/blur counts around internal restores; the logical
   `remountOrder` front after a reentrant mount; no shadow state (`wasFocused`,
@@ -403,7 +409,12 @@ or over the editor seat.
   re-validation and skips its fallback only when that revision moved DURING the
   call (a capturing overlay focused itself, or an already focused one
   re-requested focus — comparing the focused component's identity would miss
-  both). An owner the broker is RELEASING right now moved its revision before the
+  both). That revision counts EVERY keyboard handoff the broker performs: its
+  explicit `focus()` AND the auto-focus the fork performs inside
+  `setHidden(false)` for a hidden capturing overlay (a cleanup's `show()` /
+  `focus()`), which never passes through the broker's focus seam — an uncounted
+  handoff would let the fallback steal the keyboard back from that newer owner.
+  An owner the broker is RELEASING right now moved its revision before the
   call and therefore never vetoes the fallback — which is exactly what keeps the
   fork's own unfocus fallback from restoring the `preFocus` of a just-retired
   component. Whenever nothing was retired the pre-existing fallback semantics are
@@ -432,7 +443,26 @@ or over the editor seat.
   acquired (`releaseAbandonedSuspension`): a callback inside its window can open a
   newer overlay that the broker appended to its set, and dropping the state
   without resuming them would strand live roots hidden with nobody left to
-  restore them. Without all of this, a caller-side cleanup failure would leave an
+  restore them. Neither obligation may truncate the other: a throwing rollback
+  step (seat remount, focus setter, repaint) still lets the queue advance run, and
+  an approval's `showNext()` failing still lets the host rollback run — both
+  failures surface by identity with the primary one. The advance is GATED on the
+  failed state still owning the seat when its park failed: a cleanup that aborted
+  it through the normal path already handed the seat — and with it the queue
+  authority — to a NEWER successor, and dequeuing "on behalf of" the abandoned
+  flow would overwrite that live successor and leave it pending forever. The
+  successor fact is committed BEFORE the handover runs (`shiftLiveQuestion()`,
+  then `handOverQuestion`): a throwing handover step has already installed and
+  logically committed its successor, so "the handover returned normally" must
+  never decide whether the settlement's restoration runs — that would clear the
+  live successor's owner slot and strand its promise. The handover transfers the
+  predecessor's suspension graph only when that predecessor actually PRESENTED it
+  (`frame` is installed immediately after its initial suspension); a FAILED
+  initial presentation (its park threw before that line) owns no graph over the
+  already visible roots, so the successor takes its OWN `suspendVisibleRoots`
+  once it is committed as the live owner, while every root the predecessor's
+  window did acquire travels with the set and is never dropped.
+  Without all of this, a caller-side cleanup failure would leave an
   unpresented modal blocking every later request while a retired component stayed
   painted.
 - **PARK is committed before the blocker's first callback.** A Question commits
@@ -525,7 +555,7 @@ or over the editor seat.
   this seam — `openHistorySearch()` keeps its own managed overlay and its own
   PARK semantics, and it is deliberately not an optional tenant.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-40b: activation and
+Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-45: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -542,5 +572,9 @@ aggregation, Save preemption by a Question and by an Approval, an Approval +
 Question overlap, a capturing-overlay handoff, the untouched History overlay, the
 `↓ view` affordance withheld while an ACTIVE tenant owns the seat, a broker
 release that must not resurrect a just-retired tenant, a failed presentation that
-advances a QUEUED successor (Question handover and approval `showNext`), and
-input routing).
+advances a QUEUED successor (Question handover and approval `showNext`), a
+DOUBLY-failing approval park that still presents its queued successor, a throwing
+handover step that cannot clear the successor it installed, a failed
+presentation that cannot dequeue over the newer successor that preempted it, a
+successor that takes its own initial suspension, an auto-focused overlay that
+keeps the keyboard against the seat fallback, and input routing).

@@ -2238,3 +2238,275 @@ test('B-40b: a failed Approval presentation advances its QUEUED successor', asyn
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(queued!), 'allowed-once', 'the queued successor must be answerable')
 })
+
+// ---------------------------------------------------------------------------
+// Delta review round 3: a FAILED presentation's rollback obligations. The park
+// rollback and the queue advance are independent; the successor fact is read
+// BEFORE the handover runs; the advance is gated on still owning the seat; a
+// successor handed over from a never-presented flow takes its OWN suspension;
+// and the seat's focus-intent observation counts the fork's auto-focus.
+// ---------------------------------------------------------------------------
+
+test('B-41: a doubly-failing Approval park still presents its QUEUED successor', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let queued: Promise<unknown> | undefined
+  let tenantIsCurrent = true
+  // Set by the stale tenant's ONE cleanup: the park's own `mountSeatChild` runs
+  // BEFORE it, the rollback's afterwards.
+  let retireRan = false
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      retireRan = true
+      queued = app.showApprovalPrompt({ toolName: 'fs', reason: 'queued approval' })
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  tenantIsCurrent = false
+
+  const mountProto = TuiApp.prototype as unknown as { mountSeatChild(): void }
+  const originalMount = mountProto.mountSeatChild
+  // Fail the ROLLBACK's own step (the first `mountSeatChild` after the
+  // retirement): the park's failure and the rollback's failure are independent,
+  // so the queue advance must still present the successor.
+  let rollbackFailed = 0
+  mountProto.mountSeatChild = function (this: unknown): void {
+    if (retireRan && rollbackFailed === 0) {
+      rollbackFailed += 1
+      throw new Error('rollback mount boom')
+    }
+    originalMount.call(this)
+  }
+  let caught: unknown
+  try {
+    const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'failing approval' })
+    try {
+      await settleOrTimeout(failed)
+    } catch (error) {
+      caught = error
+    }
+  } finally {
+    mountProto.mountSeatChild = originalMount
+  }
+  assert.ok(
+    caught instanceof AggregateError && caught.errors.length === 2,
+    `the park failure and the rollback failure must both surface by identity: ${String(caught)}`,
+  )
+  const surfaces = (caught as AggregateError).errors as Error[]
+  assert.equal(surfaces[0].message, 'stale tenant close boom', 'the park failure stays the PRIMARY value')
+  assert.equal(surfaces[1].message, 'rollback mount boom', 'the throwing step is the collected ROLLBACK failure')
+  assert.equal(rollbackFailed, 1, 'the rollback step ran (and failed) exactly once')
+  await vt.waitForRender()
+  assert.ok(!viewport(vt).includes('bash'), 'the failed approval must never be presented')
+  assert.ok(
+    viewport(vt).includes('fs'),
+    `a rollback failure may not skip the INDEPENDENT queue advance:\n${viewport(vt)}`,
+  )
+  vt.sendInput('y')
+  assert.equal(
+    await settleOrTimeout(queued!),
+    'allowed-once',
+    'the queued successor must stay answerable after the double failure',
+  )
+})
+
+test('B-42: a throwing handover step cannot clear the successor it already installed', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const proto = TuiApp.prototype as unknown as { projectActivity(): void }
+  const original = proto.projectActivity
+  let armed = false
+  proto.projectActivity = function (this: unknown): void {
+    if (armed) throw new Error('handover project boom')
+    original.call(this)
+  }
+  try {
+    const first = app.askQuestions([{ id: 'q1', question: 'first flow?', options: [{ label: 'Yes' }] }])
+    const second = app.askQuestions([{ id: 'q2', question: 'second flow?', options: [{ label: 'Yes' }] }])
+    await vt.waitForRender()
+    assert.ok(viewport(vt).includes('first flow?'), `the first flow owns the seat:\n${viewport(vt)}`)
+    vt.sendInput('\r')
+    armed = true
+    let caught: unknown
+    try {
+      vt.sendInput('\r')
+    } catch (error) {
+      caught = error
+    } finally {
+      armed = false
+    }
+    assert.ok(caught instanceof Error, `the handover failure must surface: ${String(caught)}`)
+    assert.deepEqual(await settleOrTimeout(first), [{ id: 'q1', selected: ['Yes'] }])
+    await vt.waitForRender()
+    assert.ok(
+      viewport(vt).includes('second flow?'),
+      `the successor the throwing handover installed must keep the seat:\n${viewport(vt)}`,
+    )
+    vt.sendInput('\r')
+    vt.sendInput('\r')
+    assert.deepEqual(
+      await settleOrTimeout(second),
+      [{ id: 'q2', selected: ['Yes'] }],
+      'the installed successor must stay answerable',
+    )
+  } finally {
+    proto.projectActivity = original
+  }
+})
+
+test('B-43: a failed presentation never dequeues over the newer Question that preempted it', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const controller = new AbortController()
+  let newer: Promise<unknown> | undefined
+  let third: Promise<unknown> | undefined
+  let closeCalls = 0
+  let tenantIsCurrent = true
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      // Abort the flow being presented: ITS OWN release hands the seat to the
+      // newer flow below (the normal path, not this rollback), which then queues
+      // the third one behind itself.
+      controller.abort()
+      newer = app.askQuestions([{ id: 'q-new', question: 'newer successor?', options: [{ label: 'Yes' }] }])
+      third = app.askQuestions([{ id: 'q-third', question: 'third queued?', options: [{ label: 'Yes' }] }])
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  tenantIsCurrent = false
+
+  const failed = app.askQuestions(
+    [{ id: 'q-old', question: 'preempted flow?', options: [{ label: 'Yes' }] }],
+    controller.signal,
+  )
+  await assert.rejects(failed)
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the stale tenant is retired exactly once')
+  assert.ok(!viewport(vt).includes('preempted flow?'), 'the failed flow must never mount')
+  assert.ok(viewport(vt).includes('newer successor?'), `the newer owner must keep the seat:\n${viewport(vt)}`)
+  assert.ok(
+    !viewport(vt).includes('third queued?'),
+    'the failed presentation must not dequeue a queued flow over the newer owner',
+  )
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(
+    await settleOrTimeout(newer!),
+    [{ id: 'q-new', selected: ['Yes'] }],
+    'the newer owner must stay answerable',
+  )
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('third queued?'), `the queued flow must take the seat next:\n${viewport(vt)}`)
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await settleOrTimeout(third!), [{ id: 'q-third', selected: ['Yes'] }])
+})
+
+test('B-44: a successor handed over from a failed presentation takes its OWN initial suspension', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let tenantIsCurrent = true
+  let queued: Promise<unknown> | undefined
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      queued = app.askQuestions([{ id: 'q-next', question: 'queued successor?', options: [{ label: 'Yes' }] }])
+      throw new Error('stale tenant close boom')
+    },
+  }))
+  await vt.waitForRender()
+  // A REAL capturing root is up: the failing flow's park fails BEFORE its own
+  // suspension, so the successor cannot inherit any graph over it.
+  const root = advancedOverlayProbe('pre-existing-root')
+  app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('pre-existing-root'), `the capturing root must be up first:\n${viewport(vt)}`)
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+  tenantIsCurrent = false
+
+  const failed = app.askQuestions([{ id: 'q-fail', question: 'failing flow?', options: [{ label: 'Yes' }] }])
+  await assert.rejects(failed, /stale tenant close boom/)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('queued successor?'), `the successor must be presented:\n${viewport(vt)}`)
+  assert.ok(
+    !viewport(vt).includes('pre-existing-root'),
+    `a successor handed over from a never-presented flow must take its own suspension:\n${viewport(vt)}`,
+  )
+  const blurWhileSuspended = root.blurCount()
+  assert.equal(blurWhileSuspended, 1, 'the suspension releases the root keyboard exactly once')
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await settleOrTimeout(queued!), [{ id: 'q-next', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('pre-existing-root'), `the root must be restored:\n${viewport(vt)}`)
+  assert.equal(root.focusCount(), 2, 'the root reclaims the keyboard exactly once on restore')
+  assert.equal(root.blurCount(), blurWhileSuspended, 'no further root blur on restore')
+})
+
+test('B-45: an overlay auto-focused while the stale tenant is retired keeps the keyboard', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let tenantIsCurrent = true
+  let closeCalls = 0
+  const hidden = advancedOverlayProbe('hidden-then-shown')
+  let hiddenLease: { hide(): void; show(): void } | undefined
+  const tenant = makeTenant()
+  openOptional(app, () => ({
+    component: tenant.component,
+    isCurrent: () => tenantIsCurrent,
+    close: () => {
+      closeCalls += 1
+      // A HIDDEN capturing overlay re-shown by the cleanup auto-focuses inside
+      // the fork's own setHidden(false) — a newer keyboard owner the seat
+      // fallback of the VERY focus entry that retires this tenant must not steal
+      // back.
+      hiddenLease!.show()
+    },
+  }))
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), tenant.component, 'the tenant owns the keyboard first')
+
+  hiddenLease = app.showAdvancedInteractiveOverlay(hidden.component)
+  await vt.waitForRender()
+  assert.equal(hidden.focusCount(), 1, 'the overlay auto-focuses when first shown')
+  // The live component that owns the keyboard while this overlay is up (the
+  // managed wrapper the host projection reports — never the raw plugin object).
+  const hiddenOwner = app.focusedComponentForTest()
+  assert.notEqual(hiddenOwner, null)
+  assert.notEqual(hiddenOwner, app.seatEditorForTest().component, 'the overlay owns the keyboard when shown')
+  hiddenLease.hide()
+  await vt.waitForRender()
+  assert.equal(hidden.blurCount(), 1, 'hiding the overlay releases its keyboard exactly once')
+
+  const covering = advancedOverlayProbe('covering-again')
+  const coveringLease = app.showAdvancedInteractiveOverlay(covering.component)
+  await vt.waitForRender()
+  assert.equal(covering.focusCount(), 1, 'the covering root owns the keyboard')
+
+  tenantIsCurrent = false
+  // Releasing the covering overlay runs the seat-owner focus entry, which is
+  // exactly what retires the stale tenant (and where the cleanup re-shows the
+  // hidden overlay).
+  coveringLease.blur()
+  await vt.waitForRender()
+  assert.equal(closeCalls, 1, 'the focus entry retires the stale tenant exactly once')
+  assert.equal(hidden.focusCount(), 2, 'the re-shown overlay auto-focuses')
+  assert.equal(
+    app.focusedComponentForTest(),
+    hiddenOwner,
+    'the newer auto-focus must survive the seat fallback of the same focus entry',
+  )
+  assert.equal(hidden.blurCount(), 1, 'the seat fallback must not steal the keyboard back')
+  assert.equal(app.focusSeatForTest(), 'overlay')
+})
