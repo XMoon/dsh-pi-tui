@@ -29,7 +29,7 @@
  *      TERN_PANE_OUT=<path>  artifact directory (default: <repo>/temp/tern-pane)
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -38,6 +38,17 @@ import { RUN_MARKER, isRepeatableCommand, runDirectoryVerdict, shellQuote } from
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '..')
+
+/**
+ * The subject launcher, and the token sent as `run`. `run` takes ONE path-shaped
+ * argument and resolves it against the SERVER's cwd, so the driver starts `tern
+ * serve` in the run directory and sends `./launch.sh`. A spaced absolute path is
+ * refused outright (`expected run <command>`), and double-quoting one is accepted
+ * but starts nothing — both measured against the real client, see
+ * `docs/tern-pane-harness.md`.
+ */
+const RUN_SCRIPT_NAME = 'launch.sh'
+const RUN_SCRIPT = `./${RUN_SCRIPT_NAME}`
 
 function usage(exitCode) {
   console.log('Drive a UI under test inside a real, headless Tern pane.')
@@ -51,6 +62,28 @@ function usage(exitCode) {
   process.exit(exitCode)
 }
 
+/** The marker a previous run left, when it is readable: who claims this directory. */
+function readRunMarker(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    // A missing or half-written marker is not a claim. Anything else is a bug in
+    // this file, and swallowing it here would silently disable the guard below.
+    if (error?.code === 'ENOENT' || error instanceof SyntaxError) return undefined
+    throw error
+  }
+}
+
+/** `kill(pid, 0)` only probes: `ESRCH` means the run is gone, `EPERM` means it is alive. */
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
 /**
  * The harness handle a flow receives: the control channel, real input, the real
  * node tree, captures, the subject launcher and the result ledger. It resolves
@@ -59,16 +92,20 @@ function usage(exitCode) {
  */
 async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
   // The run directory is wiped on every start: take it over only when it is
-  // empty, absent, or already carries this driver's marker.
+  // empty, absent, or already carries this driver's marker — and only when the
+  // marker's run is not still alive.
+  const entryNames = existsSync(root) ? readdirSync(root) : []
   const verdict = runDirectoryVerdict({
     root,
     repo,
     cwd: process.cwd(),
     home: homedir(),
-    entries: existsSync(root) ? readdirSync(root) : [],
+    entries: entryNames,
+    holder: readRunMarker(join(root, RUN_MARKER)),
+    isAlive: processIsAlive,
   })
   if (!verdict.ok) {
-    throw new Error(`${verdict.reason}; point --out at a fresh or harness-owned directory`)
+    throw new Error(`${verdict.reason}; point --out at a fresh directory, or delete the whole ${root} if that run is really gone`)
   }
   rmSync(root, { recursive: true, force: true })
   mkdirSync(join(root, 'shots'), { recursive: true })
@@ -89,7 +126,7 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
   }
   // A read, or an idempotent set, may be retried: a lost reply costs nothing.
   function ctl(...args) {
-    if (!isRepeatableCommand(args[0])) {
+    if (!isRepeatableCommand(args)) {
       throw new Error(`tern ctl ${args.join(' ')} is not repeatable; send it with send()`)
     }
     for (let i = 0; i < 6; i += 1) {
@@ -124,7 +161,11 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
     return reply
   }
 
-  const serve = spawn(ternBin, ['serve', '--control', endpoint, '--out', join(root, 'shots')], { stdio: ['ignore', 'pipe', 'pipe'] })
+  // The server's cwd is the run directory: `run` takes ONE path-shaped token and
+  // resolves it against that cwd, which is how a run directory containing spaces
+  // still starts its subject (a spaced absolute path is refused, and quoting it is
+  // accepted but silently runs nothing — measured, see docs/tern-pane-harness.md).
+  const serve = spawn(ternBin, ['serve', '--control', endpoint, '--out', join(root, 'shots')], { stdio: ['ignore', 'pipe', 'pipe'], cwd: root })
   serve.stdout.on('data', (d) => log(`serve.out ${String(d).trim()}`))
   serve.stderr.on('data', (d) => log(`serve.err ${String(d).trim()}`))
   const stopServe = () => serve.kill('SIGKILL')
@@ -231,12 +272,12 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
     // Keep a copy of the subject with the run: the artifacts must be auditable
     // without the machine that produced them.
     copyFileSync(subject, join(root, `subject${extname(subject)}`))
-    writeFileSync(join(root, 'launch.sh'), `#!/bin/bash
+    writeFileSync(join(root, RUN_SCRIPT_NAME), `#!/bin/bash
 export TERN_PANE_DIR=${shellQuote(root)}
 cd ${shellQuote(repo)} || exit 1
 exec node --import tsx/esm ${shellQuote(subject)} 2>> ${shellQuote(join(root, 'subject.err'))}
 `, { mode: 0o755 })
-    send('run', join(root, 'launch.sh'))
+    send('run', RUN_SCRIPT)
     return ready === undefined ? true : waitFor(ready, { timeoutMs: readyTimeoutMs })
   }
 
@@ -270,7 +311,7 @@ exec node --import tsx/esm ${shellQuote(subject)} 2>> ${shellQuote(join(root, 's
   }
 
   return {
-    ctl, log, sleep, root, results, repo, ready: await readyForCommands(),
+    ctl, send, log, sleep, root, results, repo, ready: await readyForCommands(),
     check, measure, finish,
     snapshot, waitFor, vis, texts, has, textNode, classNodes, descendantsText,
     key, resize, css, click, clickAt, shot, capture,

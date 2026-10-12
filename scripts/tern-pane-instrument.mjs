@@ -25,7 +25,7 @@ export const RUN_MARKER = 'tern-pane-run.json'
  * @param entries  `root`'s top-level names, `[]` when it does not exist
  * @returns `{ ok: true }` or `{ ok: false, reason }`
  */
-export function runDirectoryVerdict({ root, repo, cwd, home, entries = [] }) {
+export function runDirectoryVerdict({ root, repo, cwd, home, entries = [], holder, isAlive }) {
   if (typeof root !== 'string' || root === '') return { ok: false, reason: 'the run directory is empty' }
   const prefix = root.endsWith(sep) ? root : root + sep
   for (const guarded of [repo, cwd, home]) {
@@ -34,20 +34,33 @@ export function runDirectoryVerdict({ root, repo, cwd, home, entries = [] }) {
       return { ok: false, reason: `${root} holds ${guarded}` }
     }
   }
+  // Ownership is not exclusivity: a second harness pointed at the same run
+  // directory would wipe the first one's evidence and fight it for the socket.
+  if (holder !== undefined && Number.isInteger(holder.pid) && isAlive?.(holder.pid) === true) {
+    return { ok: false, reason: `${root} is held by a live run (pid ${holder.pid})` }
+  }
   if (entries.length === 0) return { ok: true }
   if (entries.includes(RUN_MARKER)) return { ok: true }
   return { ok: false, reason: `${root} is not a harness run directory (no ${RUN_MARKER})` }
 }
 
 /**
- * Commands whose repetition cannot be observed: reads and idempotent sets. A
- * command that is not here — `click`, `key`, `run` — is delivered exactly once.
+ * Commands whose repetition cannot be observed: bare reads and idempotent sets.
+ * The decision is on the WHOLE command shape, never on the name alone — a bare
+ * `a11y` reads the accessibility tree, while `a11y click <selector>` clicks and
+ * `a11y increment <selector>` edits, and `perf on|off|reset|mark` restarts the
+ * measurement collection. Those are delivered exactly once, like `click`, `key`
+ * and `run`.
  */
-const REPEATABLE_COMMANDS = new Set([
-  'tree', 'dump', 'pick', 'state', 'stats', 'layers', 'a11y', 'menus', 'system', 'perf', 'shot', 'resize', 'css',
-])
+const BARE_READS = new Set(['tree', 'dump', 'pick', 'state', 'stats', 'layers', 'menus', 'system'])
 
-export const isRepeatableCommand = (command) => REPEATABLE_COMMANDS.has(command)
+export function isRepeatableCommand(args) {
+  const [command, ...rest] = Array.isArray(args) ? args : [args]
+  if (BARE_READS.has(command)) return true
+  if (command === 'a11y') return rest.length === 0
+  if (command === 'perf') return rest.length === 0 || rest[0] === 'since'
+  return command === 'shot' || command === 'resize' || command === 'css'
+}
 
 /**
  * Quote a path for the generated `launch.sh`. The run directory, the repository
