@@ -2,8 +2,10 @@
 
 > **Status: FROZEN v1 (Owner-confirmed 2026-10-14, after reviewing these frames
 > in a real terminal).** `D1`–`D4` and `D6` were accepted as recommended; `D5`
-> was amended by the Owner to **`∙ Running`** — the Title Case word plus the
-> EAW-neutral one-cell `∙` anchor, replacing the ambiguous `●`.
+> was amended by the Owner to a Title Case word plus ONE shared status marker,
+> and the marker glyph is `‣` (U+2023): EAW-neutral, one cell, and not already
+> owned by the transcript (`∙` is the assistant bullet and a working frame).
+> See the spec §4.1.
 >
 > **The BEFORE frames are real product output.** They were painted by the real
 > `TuiApp` + `VirtualTerminal` composition at commit `7ccaa20a` and read back
@@ -111,7 +113,7 @@ Scope: TUI settings document · Refreshed 09:41 · Config ready
                                                                     Change…  Copy value [C]
 ⋮
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Esc close · ↑↓ select · Enter open
+↑↓ select · Enter open · Esc close
 ```
 What changes on this frame: the surface word becomes `Settings` in bold `textStrong` instead of all-caps `SETTINGS` in `primary`; the pane titles become Title Case and the rows pane stops calling itself `SETTINGS`; the focused pane is marked with the same `[Label]` + bold `primary` device the Job tabs use; the cursor is now `primary` while the selected row stays bold `textStrong`; the detail values are painted with real tokens; the action bar uses ` · ` and lowercase bare key letters.
 
@@ -162,7 +164,7 @@ Categories (3)          Rows (2)                                    [Details]
                                                                     Change…  Copy value [C]
 ⋮
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Esc back · Enter change · ↑↓ scroll · r refresh · c copy value
+Enter change · ↑↓ scroll · r refresh · c copy value · Esc back
 ```
 The commit `Status` row is the important one: today `Verified · …` and `Not saved · …` paint the same terminal-default ink, so a successful write and a refused write look identical. The target keeps the sentences and gives the status word its semantic token (`success` / `error` / `warning`), with the explanation left `textDim`.
 
@@ -195,7 +197,7 @@ Scope: TUI settings document · Refreshed 09:41 · Config ready
   Other settings
 
 ────────────────────────────────────────────────────────────────────────────────
-Esc close · ↑↓ select · Enter open
+↑↓ select · Enter open · Esc close
 ```
 At 10 rows the chrome keeps header + diagnostic line + one pane-header row + the pinned bar, and the two rules survive because the body still clears the budget. This frame is the reason the diagnostic line must drop **whole trailing facts** rather than truncate: the left detail shortening is what forces that rule.
 
@@ -243,7 +245,7 @@ Description The palette family used by the
             display name.
 ⋮
 ────────────────────────────────────────────
-Esc back · Enter change · ↑↓ scroll
+Enter change · ↑↓ scroll · Esc back
 ```
 The BEFORE bar ends `Enter change…` — a hint cut mid-word, because the Settings bar truncates its single string while the Job bar drops whole segments. The AFTER bar drops the lowest-priority segments instead (`c copy value`, then `r refresh`) and every painted segment stays a complete `Key verb` pair.
 
@@ -317,6 +319,7 @@ This pair exists because it is the strongest single argument for the target ink 
 | 9 | Bar truncated mid-hint (`Enter change…`) | whole-segment drop by priority | a half-word is a lie about what the key does |
 | 10 | Bar ` \| ` separator; `R refresh`, `C copy value` | ` · `; `r refresh`, `c copy value` | cross-reference consensus (` · `) and no bare uppercase letters that read as ⇧ |
 | 11 | Diagnostic line truncated (`Refreshed …`) | trailing facts drop whole | never cut a fact in half |
+| 11 | Bar started with `Esc close` / `Esc back` | `Esc close` / `Esc back` moves to the TAIL | D8: the family puts `Esc` last everywhere — every overlay already does, and the two workspaces follow |
 | — | Pane geometry `22 / 42 / 2`, breakpoints `108`/`76`, row-budget order, every write/confirm/status semantic | unchanged | this PR is vocabulary only |
 
 ## 4. Job
@@ -370,7 +373,7 @@ Esc back | S / Shift+S stop | Follow ON | Find Ctrl+F / Ctrl+Shift+F / | C copy 
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                                                             ∙ Running
+Job · job-a · bash                                                                                             ‣ Running
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product                                                                       ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -409,7 +412,7 @@ line 041
 line 042
 line 043
 Retained preview · not full history                                                                         rows 7-40/40
-Esc back · s stop · Follow on · Find Ctrl+F · c copy output · v command · PgUp/PgDn
+s stop · Follow on · Find Ctrl+F · c copy output · v command · PgUp/PgDn · Esc back
 ```
 The tab strip is deliberately unchanged: `[Output]` in bold `primary` is the device the Settings pane focus now adopts. What changes: the header identity, the status word, the meta labels, and the facts row (whose two flanking rules are removed — the disclosure becomes a dim status line with the position right-aligned).
 
@@ -443,7 +446,7 @@ Esc back | Follow ON | [GAP] | Find Ctrl+F / Ctrl+Shift+F / | C copy output | V 
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                                              ∙ Failed [GAP] [SETTLED]
+Job · job-a · bash                                                                              ‣ Failed [GAP] [SETTLED]
 Progress: 3/8 checks · Detail: Building components · Earlier output evicted
 Command  pnpm build && pnpm test:product                                                                       ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -462,9 +465,9 @@ line 012
 build failed
 ⋮
 Retained preview · not full history                                                                         rows 1-13/13
-Esc back · Follow on · [GAP] · Find Ctrl+F · c copy output · v command · PgUp/PgDn
+Follow on · [GAP] · Find Ctrl+F · c copy output · v command · PgUp/PgDn · Esc back
 ```
-`● FAILED [GAP] [SETTLED]` becomes `∙ Failed [GAP] [SETTLED]`: the word is the signal, the colour is secondary, and `●` (U+25CF, East-Asian-Width *ambiguous*) is replaced by the EAW-neutral `∙` (U+2219), which keeps a one-cell glyph anchor without risking a two-cell paint on CJK-width terminals (Owner amendment to D5). The bracketed machine markers stay uppercase — that is the role ALL-CAPS keeps. Note the bar correctly advertises no Stop for a settled job in both frames.
+`● FAILED [GAP] [SETTLED]` becomes `‣ Failed [GAP] [SETTLED]`: the word is the signal, the colour is secondary, and `●` (U+25CF, East-Asian-Width *ambiguous*) is replaced by the EAW-neutral `‣` (U+2023), which keeps a one-cell glyph anchor without risking a two-cell paint on CJK-width terminals (Owner amendment to D5). The bracketed machine markers stay uppercase — that is the role ALL-CAPS keeps. Note the bar correctly advertises no Stop for a settled job in both frames.
 
 
 ### 4.3 Wide 120×40 — Command page
@@ -484,7 +487,7 @@ Esc output | C copy all | Find Ctrl+F / Ctrl+Shift+F / | PgUp/PgDn
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                                                             ∙ Running
+Job · job-a · bash                                                                                             ‣ Running
 Progress: 3/8 checks · Detail: Building components
 Full command                                                                                                Copy All [C]
 Output  [Command] ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -493,7 +496,7 @@ pnpm build && pnpm test:product
   --watch would go here, wrapped by the reader
 ⋮
 rows 1-1/1
-Esc output · c copy all · Find Ctrl+F · PgUp/PgDn
+c copy all · Find Ctrl+F · PgUp/PgDn · Esc output
 ```
 The page label `Full command` is stated once (summary row) instead of twice (summary row *and* status line); the status line keeps only the real position fact. `Copy All [C]` already follows the target affordance grammar (`Verb [Key]`).
 
@@ -517,7 +520,7 @@ Esc back | S stop | Follow ON | Retained preview · not full history
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                     ∙ Running
+Job · job-a · bash                                                     ‣ Running
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product                               ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────
@@ -526,7 +529,7 @@ line 011
 line 012
 line 013
 line 014
-Esc back · s stop · Follow on · Retained preview · not full history
+s stop · Follow on · Retained preview · not full history · Esc back
 ```
 This frame proves why the proposal's "keep facts out of the action bar" rule cannot be adopted literally: at `80×10` the reading-facts row is not granted (`FACTS_MIN_ROWS = 12`), so the retained-output disclosure has nowhere else to live. The target keeps it on the bar, distinguishable from the hints because a fact reads `<Noun> <state>` and never starts with a key name.
 
@@ -560,7 +563,7 @@ Esc back | S stop | Follow ON
 **AFTER — 60×20 target (real tokens)**
 
 ```text
-Job · job-a · bash                                 ∙ Running
+Job · job-a · bash                                 ‣ Running
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product
 [Out]  Cmd ─────────────────────────────────────────────────
@@ -579,7 +582,7 @@ line 021
 line 022
 line 023
 line 024
-Esc back · s stop · Follow on
+s stop · Follow on · Esc back
 ```
 
 **BEFORE — 44×20 real output**
@@ -609,7 +612,7 @@ Esc back | S stop | Follow ON
 **AFTER — 44×20 target (real tokens)**
 
 ```text
-Job · job-a · bash                 ∙ Running
+Job · job-a · bash                 ‣ Running
 Progress: 3/8 checks
 Command  pnpm build && pnpm test:product
 [Out]  Cmd ─────────────────────────────────
@@ -628,7 +631,7 @@ line 021
 line 022
 line 023
 line 024
-Esc back · s stop · Follow on
+s stop · Follow on · Esc back
 ```
 At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…` so that the `↗ Command` affordance can fit. The target drops the affordance instead (the summary row is itself clickable, and `v command` stays advertised), so the command fits in full. This is the "an affordance yields to its content" rule.
 
@@ -638,7 +641,7 @@ At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…`
 | # | Before | After | Why |
 |---|---|---|---|
 | 1 | `JOB  job-a · bash` (`JOB` all-caps `textStrong`) | `Job · job-a · bash` | one header grammar with Settings: `Surface · trail · trail` |
-| 2 | `● RUNNING` / `● FAILED` | `∙ Running` / `∙ Failed` with the status token | the word carries the state; `●` (U+25CF, EAW-ambiguous) becomes the EAW-neutral `∙` (U+2219) so a CJK-width terminal cannot shift the right-aligned group. Owner amendment to D5: keep a one-cell glyph anchor, and it is the SAME marker for every status — no per-status glyph set (`✓`/`✕`/`⊘`/`⏳`/`◐`/`○` are all rejected) |
+| 2 | `● RUNNING` / `● FAILED` | `‣ Running` / `‣ Failed` with the status token | the word carries the state; `●` (U+25CF, EAW-ambiguous) becomes the EAW-neutral `‣` (U+2023) so a CJK-width terminal cannot shift the right-aligned group. Owner amendment to D5: keep a one-cell glyph anchor (`‣`), and it is the SAME marker for every status — no per-status glyph set (`✓`/`✕`/`⊘`/`⏳`/`◐`/`○` are all rejected) |
 | 3 | `[GAP] [SETTLED] [ERROR]` | unchanged (uppercase bracketed machine markers) | the single role ALL-CAPS keeps |
 | 4 | `progress:` / `detail:` | `Progress:` / `Detail:` | labelled fact grammar `<Label>: <value>` |
 | 5 | Affordance always painted on the summary row | affordance yields when content + affordance cannot both fit | never truncate the content to keep a redundant affordance |
@@ -647,6 +650,7 @@ At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…`
 | 8 | Bar ` \| `; `Follow ON`; `S stop`; `V command` | ` · `; `Follow on`; `s stop`; `v command` | one separator, Title Case words, no bare uppercase letters |
 | 9 | Command page repeats `Full command` in the status line | stated once | a status line states only facts not already stated above it |
 | 10 | Facts drop after every hint | safety facts outrank verbs and browsing hints | a disclosure must survive a tight row |
+| 11 | Bar started with `Esc back` / `Esc output` | both move to the TAIL | D8: the family puts `Esc` last everywhere (all overlays already do) |
 | — | Follow/End, Find, search layering, copy sinks, Stop admission, body floor, tab hit map, observer lease | unchanged | vocabulary only |
 
 ## 5. Measured ink inventory (BEFORE) → target role
@@ -671,7 +675,7 @@ painting source line.
 | Settings rules | `border` | role 15 `border` |
 | Job `JOB` | `textStrong` | role 1 `textStrong` bold |
 | Job id / ` · kind` | `textMuted` / `textDim` | roles 2 `textDim` |
-| Job status word + dot | `primary`/`warning`/`error`, ALL-CAPS, `●` | role 9, Title Case, no dot |
+| Job status word + dot | `primary`/`warning`/`error`, ALL-CAPS, `●` | role 9: Title Case word + the one shared `‣` marker |
 | Job machine markers | `warning`/`error`/`textDim` | role 10, unchanged |
 | Job meta facts | `textDim` | role 11 `textMuted` |
 | Job summary / `Full command` | `textMuted` | role 4/5 `textDim` |

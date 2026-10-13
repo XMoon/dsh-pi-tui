@@ -1,8 +1,9 @@
 # TUI design language (v1)
 
 > **Status: FROZEN v1 (Owner-confirmed 2026-10-14).** §1.3 records the six
-> decisions and the one Owner amendment (`D5`: `∙ Running`, not a bare word).
-> Any later change to the vocabulary follows §11.1 and lands in this file first.
+> decisions and the two Owner amendments (`D5`: the status keeps a glyph marker;
+> `D7`: that marker is `‣`, not `∙`). Any later change to the vocabulary follows
+> §11.1 and lands in this file first.
 >
 > Baseline: branch `next`, commit `7ccaa20a`. This document was derived from the
 > real `VirtualTerminal` frames of the running product (`docs/tui-design-language-samples.md`
@@ -54,11 +55,45 @@ alternative; this is the frozen outcome, and the rollout plan may start.
 | D2 | Wide-screen column boundary | **2-cell gutter only** (no vertical glyph, no header filler rule) | accepted: zero added width, and no new EAW-ambiguous glyph role (§6.3) |
 | D3 | Navigation cursor | **`>`** (U+003E) | accepted: already the measured geometry in both workspaces; `›`/`❯` are EAW-safe but already own other roles (icon semantics / legacy list cursor / transcript user marker); Pi's `→` is EAW-ambiguous and rejected (§4.3) |
 | D4 | Action-bar separator | **` · `** (U+00B7) | accepted: all three reference TUIs join hint segments with it, and it is already this repo's dominant idiom; the `─` rule grandfathers the same EAW class (§4.2) |
-| D5 | Status presentation | **`∙ Running`** — Title Case word plus ONE marker (`∙`, U+2219) shared by every status | **Owner amendment**: the word is the signal, but the glyph anchor is kept; `●` (U+25CF, EAW-ambiguous) is replaced by the EAW-neutral `∙` so a CJK-width terminal cannot shift the right-aligned group, and the marker is **not** specialised per status (`✓` for done, `✕` for failed, `⊘` for cancelled …) — state is carried by the word and its token, never by a second glyph set (§4.1) |
+| D5 | Status presentation | **a Title Case word plus ONE shared status marker** (glyph settled by D7 below) | **Owner amendment**: the word is the signal, but the glyph anchor is kept; `●` (U+25CF, EAW-ambiguous) must go, and the marker is **not** specialised per status (`✓` for done, `✕` for failed, `⊘` for cancelled …) — state is carried by the word and its token, never by a second glyph set (§4.1) |
 | D6 | Job reading-facts row | **remove the two flanking rules** | accepted: a rule marks a boundary and a text line is never flanked (§6.2) |
 
 Re-opening any of these is a spec change (§11.1): edit this table in the same PR,
 and note a user-visible consequence in the changelog.
+
+### 1.4 Family-consistency decisions (same review)
+
+Checking the frozen target against the rest of the family showed places where
+the *target itself* would still leave two conventions standing. They were
+decided in the same review; these are rules, not open questions.
+
+| # | Decision | Rule | Why |
+|---|---|---|---|
+| D7 | Status marker glyph | **`‣` (U+2023)**, one marker for every status | `∙` (U+2219) is already the transcript's assistant bullet and a working frame; one glyph must not carry two meanings in one family (§4.1) |
+| D8 | `Esc` position | **the last segment everywhere** — workspace bar and overlay hint alike | every overlay (picker, approval, history, task, output viewer, configurator) already puts `Esc` last, and so do Pi/Kimi/OMP; the two workspaces move to match rather than creating a second order (§7.2) |
+| D9 | Overlay adoption | overlays adopt the workspace devices: selection, current marker, title placement, count alignment, placeholder ink, list layout and sizing ladder (§12.2) | otherwise "one active signal per region" only holds on two screens |
+| D10 | Overlay sizing ladder | four steps — narrow `64`, standard `72`, wide `88`, full `100%` — each with its height rule; per-surface exceptions listed explicitly (§12.2) | today's 64/72/76/88/100% × 24/28/26 is a per-surface accident |
+| D11 | Placeholder / loading / failure ink | new **role 16** `placeholder` = `textDim`; a *failed* placeholder's word uses `error`; loading is text, never animation; an unselectable row is `textDim` plus a reason word | today a failed catalog load and an empty list paint the same `textMuted` |
+| D12 | Case | labels, verbs and segments = Title Case; explanations and sentences = sentence case (§4.1) | the earlier "Title Case or sentence case" was undecidable |
+| D13 | `Esc` verb | names the real effect of the key on that surface (`back`, `close`, `cancel`, `output`) and stays constant within one surface | a single fixed word would make the hint lie about where the user lands |
+| D14 | Six additive rules | see below | each removes a place where two surfaces could legitimately disagree |
+
+D14 in full:
+
+1. **Machine chip vs active device.** A bracketed ALL-CAPS chip (`[ACTIVE]`,
+   `[TRACKED]`, `[GAP]`) is a machine label; the active device is Title Case and
+   bold `primary` (`[Output]`, `[Rows (2)]`). They must not be swapped.
+2. **Notice row = role 17** (new): info `textMuted`, error `error`, with the
+   `ℹ` / `✗` prefixes added to the glyph inventory.
+3. **The status marker appears only on a standalone status group.** An inline
+   fact (`Config ready`, `Loading models…`, `rows 7-40/40`) never carries it.
+4. **A list's second-level text has two allowed layouts** — a right-aligned value
+   column (workspace lists) or an indented description line (overlay lists) —
+   chosen by width; they are the same roles, not two role sets.
+5. **Counters are role 12 with a lowercase unit suffix** (`3/8`, `rows 7-40/40`,
+   `2 editable rows`, `CH91.9%`, `t3/s7`).
+6. **Chrome never animates.** Loading is a word (`Loading models…`); the `∙`/`◦`
+   working pair belongs to the transcript's working indicator.
 
 ## 2. Direction: "one active signal, quiet chrome"
 
@@ -136,13 +171,15 @@ can be reviewed against a frame:
 | 6 | Active glyph (navigation cursor) | `primary` | no | `> ` leading a list row |
 | 7 | Active label (focused pane / active tab) | `primary` | yes | `[Rows (2)]`, `[Output]` |
 | 8 | Selected row text | `textStrong` | yes | the selected row's label and value |
-| 9 | Status word (+ the shared marker `∙`) | `success` / `warning` / `error` / `textDim` | no | `∙ Running`, `∙ Failed`, `Completed`, `Ready`, `Stale` |
+| 9 | Status word (+ the shared marker `‣`) | `success` / `warning` / `error` / `textDim` | no | `‣ Running`, `‣ Failed`, `Completed`, `Ready`, `Stale` |
 | 10 | Machine marker | `warning` / `error` / `textMuted` | no | `[GAP]`, `[ERROR]`, `[SETTLED]` |
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
 | 13 | Action hint | `textMuted` | no | `Esc back`, `Enter details` |
 | 14 | Affordance (clickable/keyed verb) | `primary` | no | `↗ Command`, `Copy All [C]`, `Change…` |
 | 15 | Rule / gutter | `border` | no | `─`, 2-cell column gutter |
+| 16 | Placeholder / empty state | `textDim`, and `error` for the word of a *failed* one | no | `No matching commands`, `Model catalog unavailable: …`, `Waiting for retained output…` |
+| 17 | Notice | `textMuted` (info) / `error` (error) | no | `ℹ Copy sent`, `✗ Copy failed` |
 
 Corrections this table makes to the current code:
 
@@ -218,8 +255,12 @@ chrome rules budget of §6.2.
 
 ### 4.1 Case
 
-- **User-visible words are Title Case or sentence case; there is no ALL-CAPS
-  role for words.** `SETTINGS` → `Settings`, `JOB` → `Job`, `CATEGORIES (3)` →
+- **Labels, verbs and segments are Title Case; explanations and sentences are
+  sentence case.** `Value`, `Change…`, `Retry save`, `Follow on`,
+  `Categories (3)`, `Esc back`, `Not saved` are labels/verbs; `Ready · on-open
+  snapshot`, `read-only here · Other settings edits this row`,
+  `Retained preview · not full history` are sentences. There is no ALL-CAPS role
+  for words: `SETTINGS` → `Settings`, `JOB` → `Job`, `CATEGORIES (3)` →
   `Categories (3)`, `DETAILS` → `Details`, `RUNNING` → `Running`,
   `Config READY` → `Config ready`.
 - ALL-CAPS is reserved for two non-prose roles: **bracketed machine markers**
@@ -231,18 +272,21 @@ chrome rules budget of §6.2.
   an unknown wire value: `running`→`Running`, `stopping`→`Stopping`,
   `completed`→`Completed`, `failed`→`Failed`, `killed`→`Killed`,
   `timed_out`→`Timed out`, `lost`→`Lost`.
-- **A status group carries exactly ONE marker, and it is `∙` (U+2219) for every
-  status — no per-status glyph.** Owner decision D5: the written word is the
-  signal, the marker is only a secondary anchor, and it must be EAW neutral
-  (`●` U+25CF is ambiguous and may paint two cells under `cjk-ambiguous-width`,
-  which would shift a right-aligned status group).
-  - The marker takes the word's token (`∙ Running`, `∙ Failed`), so the pair is
+- **A status group carries exactly ONE marker, and it is `‣` (U+2023) for every
+  status — no per-status glyph.** Owner decisions D5 + D7: the written word is
+  the signal, the marker is only a secondary anchor, and the marker must be EAW
+  neutral. `∙` (U+2219) is *not* used here even though it is also neutral,
+  because the transcript already paints it as the assistant bullet and as a
+  working frame; `●` (U+25CF) is ambiguous and may paint two cells under
+  `cjk-ambiguous-width`, which would shift a right-aligned status group.
+  - The marker takes the word's token (`‣ Running`, `‣ Failed`), so the pair is
     one coloured unit.
   - **Do not introduce a status glyph set.** No `✓` for completed, `✕` for
     failed, `⊘` for cancelled, `⏳` for pending, `◐` for stopping, `○` for done.
     Adding a second glyph for a state would (a) reintroduce the ambiguous-width
-    hazard, and (b) make the shape — not the word — the thing the reader learns,
-    which is exactly the fragmentation this document exists to remove.
+    hazard and (b) make the shape — not the word — the thing the reader learns.
+  - **Only a standalone status group carries the marker.** An inline fact
+    (`Config ready`, `Loading models…`, `rows 7-40/40`) never does.
   - A status with no word (a glyph-only state) is not allowed in chrome.
 - Multiple words in one hint stay lowercase after the key: `Esc back`,
   `Enter details`, `C copy value`.
@@ -309,6 +353,7 @@ Measured, still in use and *not* introduced by v1:
 | `─` U+2500 | every rule, the editor's top/bottom border, history's stacked divider |
 | ` · ` U+00B7 | the fact/hint separator across the chrome (D4 makes this the only separator) |
 | `↗` U+2197 | the Job `↗ Command` affordance |
+| `←` U+2190 | the current-value suffix `← current` (D9) and the read-gutter/line-number joins |
 | `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
 | `◆` U+25C6 | the footer configurator's move-mode marker |
 | `▏` U+258F | the footer configurator's text-edit cursor |
@@ -327,11 +372,12 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 |---|---|---|
 | Navigation cursor | `> ` (2 cells) | one per list; D3 |
 | Active/current label | `[Label]` | focus, active tab, current pane |
-| Current-value marker (candidate list only) | `[← current]` | never shares the cursor's meaning |
-| Status marker | `∙` (U+2219) | the ONE marker for every status; one cell, EAW neutral; replaces `●`; D5 |
+| Current-value marker | `← current` at the row end | row-end suffix in `textDim`; never shares the cursor's meaning |
+| Status marker | `‣` (U+2023) | the ONE marker for a standalone status group; one cell, EAW neutral; D5+D7 |
 | Disclosure | `▸` / `▾` | collapse state only, never "selected" |
 | Rule | `─` | boundary only |
 | Fact + action-bar separator | ` · ` | D4; the single separator for segments and facts |
+| Notice prefix | `ℹ` / `✗` | info / error notice rows; both EAW neutral; D14 |
 | Ellipsis | `…` | truncation of *content* only, never inside an action hint |
 
 ## 5. The active device
@@ -363,12 +409,18 @@ current value (candidates)  label  [← current]      row-end marker, no colour
    the existing theme device instead of keeping their own. The Host
    `SearchablePicker` still hardcodes a bold `'→ '` (§11.4).
 3. **Selection ≠ current.** The keyboard cursor and the authoritative current
-   value are different facts and get different markers. The Job workspace has no
-   list selection; the Settings candidate list keeps the row-end marker.
-4. **Disabled / read-only / pending / failed** are words, not just inks: the
+   value are different facts and get different markers. The current value is a
+   **row-end `← current` suffix in `textDim`** (D9) — not a badge word, not a
+   leading gutter, and never `primary` (the cursor already owns primary on that
+   row). The Job workspace has no list selection.
+4. **Overlays use the same three devices** (D9): `> ` + bold `textStrong` for
+   selection, `[Label]` + bold `primary` for the active tab/mode, and the
+   row-end `← current` suffix. A picker must not invent `→`, a badge word or a
+   leading `✓`.
+5. **Disabled / read-only / pending / failed** are words, not just inks: the
    detail pane's `Status` field, the read-only note and the `[Retry save]` verb
    already express them; unavailable candidates keep `[unavailable]`.
-5. Focus is never carried by colour alone — the brackets are the shape signal,
+6. Focus is never carried by colour alone — the brackets are the shape signal,
    and in a single-pane (narrow) layout the breadcrumb names the level instead
    of inventing a second device.
 
@@ -467,14 +519,25 @@ anchor, without inventing a fourth meaning for `primary`.
 
 ### 7.2 Ordering and degradation
 
-Segment order is fixed: **escape/back first**, then the primary action, then
-navigation, then secondary verbs, then pure browsing hints.
+Segment order is fixed: the surface's own actions first (the primary action, then
+navigation, then secondary verbs, then pure browsing hints), and **`Esc` last**
+(D8) — every overlay in the family already puts it last, as do Pi, Kimi and
+oh-my-pi, so the two fullscreen workspaces move to match instead of keeping a
+second order.
+
+The `Esc` verb **names the real effect of the key on that surface** (D13):
+`Esc back` returns to the parent page, `Esc close` leaves the surface, `Esc
+cancel` abandons an in-progress action, `Esc output` returns from the Command
+page to Output. One surface keeps one verb; the verb must never be chosen for
+cosmetic uniformity, because a hint that names the wrong destination is a lie.
 
 The bar **drops whole segments by ascending priority**, then compacts a
 segment that declares a `short` form, and only truncates as the last resort with
 one segment left. `job-inspector-panel.ts:698-715` is the reference
 implementation; the Settings bar (which today truncates mid-hint —
-`Esc back | ↑↓/Pg keys scroll | Enter change…` at 44 columns) adopts it.
+`Esc back | ↑↓/Pg keys scroll | Enter change…` at 44 columns) adopts it. `Esc`
+carries the highest priority in every surface, so moving it to the tail does not
+make it droppable.
 
 Safety-relevant facts (`[GAP]`, `[ERROR]`, the retained-not-full disclosure) are
 never dropped before a secondary verb or a browsing hint.
@@ -620,7 +683,7 @@ Enforce only what is cheap and low-false-positive; the rest is review.
    - no action-bar row contains `…` while more than one segment is painted;
    - a `Status` value of `Verified` and of `Not saved` do not paint the same
      token;
-   - a status group paints the shared `∙` marker only — no second, per-status
+   - a status group paints the shared `‣` marker only — no second, per-status
      glyph (item 1's glyph inventory already rejects the ambiguous per-status
      sets by width class; assert it as a frame fact too).
 3. **Degradation-ladder test**: for each size in the frozen matrix, assert the
@@ -646,6 +709,12 @@ is next touched for another reason** (never by a mass search/replace):
 | legacy settings list | `settingsListTheme.cursor = '›'` (`runtime.ts:141`) | next settings-list restyle |
 | `SearchablePicker` | hardcoded `'→ '` cursor in bold, not `primary`, and `→` is EAW-ambiguous (`searchable-picker.ts:547,825`); `selectListTheme.selectedPrefix` is unused by it | next picker change |
 | picker hint lines | all-lowercase key names (`'↑↓ navigate · enter select · esc close'`) instead of §4.1's `Enter select · Esc close` | next picker hint edit |
+| picker title row | the count is a title suffix (`Models  3/8`) instead of role 12 right-aligned, and the title carries no ink of its own (D9/D10) | next picker change |
+| picker group headers | bold `textMuted` where role 5 is `textDim` for the label and `textMuted` for its count (D9) | next picker change |
+| picker failure placeholder | `Model catalog unavailable: …` is painted `noMatch` (`textMuted`) instead of `error` for the failure word (D11) | next picker change |
+| all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
+| `/model` current marker | a trailing badge word `current` instead of the row-end `← current` suffix (§5.1.3) | next model-picker change |
+| task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
 | task browser / history | `│` column split for a master/detail pair (`task-panel.ts:907`, `history-panel.ts:621`) | next change to that panel |
 | task quick panel, plugin-manager | already follow the ` · ` hint separator, but their hints capitalise bare keys (`S stop`) and the task browser writes `Tab/⇧Tab` with an EAW-ambiguous arrow | next change to that bar |
@@ -656,8 +725,8 @@ is next touched for another reason** (never by a mass search/replace):
 | editor seat borders | `warning` for plan mode, `accent` for a subagent viewer seat (`tui-app.ts:12850`, `:13093`) | next editor-seat change |
 | transcript disclosure | three shapes for one semantic: `🐋/🐳` (Focus), `▸/▾` (Activity/cluster), hardcoded `▼/▶` (sub-call/workflow, `tui-app.ts:16415,16663,16706`) | next disclosure change |
 | transcript `🐋` | the same glyph is the assistant bullet (`icons.ts:80`) and the Focus-collapsed disclosure (`:74`) | next icon-registry change |
-| workflow member rows | colour-only status glyphs `!`/`•`/`●` with no word (`tui-app.ts:470-478`); must become word + the shared `∙` | next workflow-rendering change |
-| task browser / task quick panel | per-status glyph set `?`/`◐`/`×`/`○`/`●` (`task-panel.ts:110-118`) where D5 allows only the shared `∙` + a word; `○` (U+25CB) and `●` are also EAW-ambiguous | next change to that panel |
+| workflow member rows | colour-only status glyphs `!`/`•`/`●` with no word (`tui-app.ts:470-478`); must become word + the shared `‣` | next workflow-rendering change |
+| task browser / task quick panel | per-status glyph set `?`/`◐`/`×`/`○`/`●` (`task-panel.ts:110-118`) where D5+D7 allow only the shared `‣` + a word; `○` (U+25CB) and `●` are also EAW-ambiguous | next change to that panel |
 | viewer subject bar | `● running` / `○ inactive` (`viewer-subject-bar.ts:88-90`) — same per-status glyph debt, and both glyphs are EAW-ambiguous | next subject-bar change |
 | failed generic tool | the result text stays unpainted/`textDim`; only the `[error]` pill carries the colour | next tool-card change |
 | chrome-wide ambiguous glyphs | ` · `, `─`, `↗`, `▼`/`▶`, `◆`, `▏`, `⇧`, `×`, `○`, `◐`, `●`; measured list in §4.3 | only if CJK-width terminals become a supported target (D5 already removed the Job status `●`) |
@@ -674,8 +743,25 @@ A new surface picks one and must justify any deviation.
 | **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
 
 Shared minimum spec for Workspace and Overlay: identity, one body, one bottom
-bar, `Esc` first, whole-segment hint drops, no mid-word truncation, role table
-respected.
+bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected.
+
+### 12.2 Overlay specifics (D9, D10)
+
+An overlay is the same vocabulary in a rounded `Frame` instead of a full terminal:
+
+| Item | Rule |
+|---|---|
+| Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent allowed models`) is role 2. |
+| Count / status | role 12, **right-aligned on the title row** (`Models` … `3/8`), exactly as a workspace header aligns its badge. Not a title suffix. |
+| Selection | `> ` in `primary` + the row's text in bold `textStrong` (§5). |
+| Current value | row-end `← current` in `textDim` (§5.1.3). Remove badge words (`current`, `default`) and leading `✓` gutters. |
+| Group header | role 5: the group label in `textDim`, its count in `textMuted`, joined by ` · ` (`Directory · 12`). Never bold. |
+| Second-level text | an indented description line (2 cells after the cursor gutter) in `textDim`, wrapped at the list width; a right-aligned value column is the workspace form of the same roles (D14.4). |
+| Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |
+| Placeholder / loading / failure | role 16: `textDim`; a failed one names the failure and paints that word `error` (`Model catalog unavailable: …`); loading is a word (`Loading models…`), never animation. |
+| Bottom row | inside the frame; `Esc` is its **last** segment (D8) and the hint line uses ` · ` (D4). |
+| Sizing ladder | **narrow `64` · standard `72` · wide `88` · full `100%`** columns, choosing the first step that fits the terminal; height is `min(rows − 2, cap)` with the cap owned by the step (`24` for narrow/standard, `28` for wide, the terminal for full). Per-surface exceptions are allowed but must be listed in the surface's own doc, not chosen ad hoc. |
+| Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus-contract.md` budget rules stay authoritative. |
 
 ## 13. Reference alignment and deliberate divergences
 
@@ -707,7 +793,7 @@ line numbers.
 | Surface identity ink | kimi paints the dialog title `primary` + bold; oh-my-pi insets it in the top rule in `accent` | `textStrong` bold, no colour. This repo already uses `primary` for links *and* inline code *and* selection (`markdownTheme.code`, picker prefixes), so a blue title would make "blue" mean brand + clickable + current at once. Keeping the identity weight-only keeps `primary` = active/actionable |
 | Selected row's text | pi/oh-my-pi paint it with their accent token | bold `textStrong`; only the cursor glyph is `primary`. Same reason as above, and it matches this repo's existing picker device |
 | Hint overflow | kimi truncates the whole line; pi truncates + one documented whole-segment drop; oh-my-pi's native path wraps and its ANSI footer clips in a height-1 row | **whole-segment drop by priority, never mid-word** (already implemented in Job). At a pinned height 1, wrapping is impossible and line truncation is what produces today's `Esc back · ↑↓/Pg keys scroll · Enter change…` |
-| Status word case + marker | pi sentence case; oh-my-pi Title Case with `●`/`✓`/`✕`/`⊘` glyphs; kimi lowercase | Title Case word plus one EAW-neutral `∙` anchor (D5, Owner-amended) — the glyphs all three use (`●`, `✓`, `✕`, `⊘`, `⏳`) are EAW-ambiguous or emoji-class, which this repo's width gate rejects |
+| Status word case + marker | pi sentence case; oh-my-pi Title Case with `●`/`✓`/`✕`/`⊘` glyphs; kimi lowercase with a row-end `← current` | Title Case word plus one EAW-neutral `‣` anchor (D5 + D7) — the glyphs all three use (`●`, `✓`, `✕`, `⊘`, `⏳`) are EAW-ambiguous or emoji-class, which this repo's width gate rejects |
 | Cursor glyph shape | pi `→`, oh-my-pi `❯`/`>`, kimi `❯` (and kimi forbids inventing `>`/`→` for its own dialogs) | `>` for this repo (D3): `→` is EAW-ambiguous, `❯` already owns the transcript's user marker, `›` already owns two icon semantics |
 | "Never colour alone" | **no reference states this rule** (one paints a disabled row by colour only) | adopted anyway (§3.3.3) because our palette proves colour is unreliable here: `borderFocus` and `warning` are the same hex |
 | Rules on a status line | kimi forbids an inner rule; oh-my-pi freely adds `├──┤` dividers | at most one rule per boundary and never flanking a text line (D6) |
