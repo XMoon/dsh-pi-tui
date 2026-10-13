@@ -174,9 +174,9 @@ const MEDIUM_ROWS_WIDTH = 40
 const COLUMN_GAP = 2
 
 /** The minimum column count of the two-column (medium) projection. */
-export const SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS = 96
+export const SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS = 76
 /** The minimum column count of the three-column (wide) projection. */
-const WIDE_MIN_COLUMNS = 150
+const WIDE_MIN_COLUMNS = 108
 
 /** The frozen responsive breakpoints of THIS component (not a project rule). */
 function layoutForWidth(width: number): SettingsLayout {

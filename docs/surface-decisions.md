@@ -1970,10 +1970,10 @@ of any kind.
   a single key scheme holds on wide, medium and narrow terminals. A new open
   always starts on L0.
 - **Responsive three / two / one projection.** Width only decides how many panes
-  of the current level are painted: `>=150` columns render the three-column
-  `Categories | Settings | Details` layout; `96..149` derive their two columns
+  of the current level are painted: `>=108` columns render the three-column
+  `Categories | Settings | Details` layout; `76..107` derive their two columns
   purely from the current level (`focus === 'categories'` → `Categories |
-  Settings`, otherwise `Settings | Details`); `<96` renders the current level
+  Settings`, otherwise `Settings | Details`); `<76` renders the current level
   alone. Hidden panes are neither painted nor addressable — they publish no hit
   target and own no wheel — and row text is laid out against the pane width it
   is actually painted in, so the medium rows column may differ between L0 and
