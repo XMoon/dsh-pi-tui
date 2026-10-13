@@ -84,6 +84,8 @@ export interface SettingsWorkspaceSource {
 export interface SettingsWorkspacePanelIntents {
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
+  /** The live terminal column budget (the projection's width). */
+  readonly columns: () => number
   readonly requestRender: () => void
   /** The ONE app-owned transient notice (never a second notice store). */
   readonly notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
@@ -779,7 +781,19 @@ export class SettingsWorkspacePanel implements Component {
    *  allocation matters here, and that is a pure function of the height (the
    *  width only chooses the projection). */
   private bodyFloor(): number {
-    return planSettingsChrome(this.chrome?.width ?? 0, this.intents.rows(), this.intents.notice() !== undefined).bodyRows
+    return planSettingsChrome(this.projectionWidth(), this.intents.rows(), this.intents.notice() !== undefined).bodyRows
+  }
+
+  /** The projection width: the last painted frame's, else the LIVE terminal
+   *  width — a key may arrive before the first paint, and the layout it belongs
+   *  to must never be guessed from a missing frame. */
+  private projectionWidth(): number {
+    return this.chrome?.width ?? this.intents.columns()
+  }
+
+  /** The current projection (see {@link projectionWidth}). */
+  private currentLayout(): SettingsLayout {
+    return layoutForWidth(this.projectionWidth())
   }
 
   // ── keyboard ─────────────────────────────────────────────────────────────
@@ -793,8 +807,14 @@ export class SettingsWorkspacePanel implements Component {
     // the LIVE height — a key may arrive BEFORE the first paint, and reading the
     // last render's plan would then swallow it.
     if (this.bodyFloor() < 1) return
-    if (matchesKey(data, 'tab')) return this.cycleFocus(1)
-    if (matchesKey(data, 'shift+tab')) return this.cycleFocus(-1)
+    // Tab/Shift+Tab cycle the keyboard FOCUS OWNER, which only exists in the
+    // wide/medium projection. In the narrow single-column projection the three
+    // values are PAGE LEVELS, so the documented Enter/Esc drill-down is the ONLY
+    // navigation — Tab must never jump Categories -> Detail past Rows (§4.3/§5).
+    if (this.currentLayout() !== 'narrow') {
+      if (matchesKey(data, 'tab')) return this.cycleFocus(1)
+      if (matchesKey(data, 'shift+tab')) return this.cycleFocus(-1)
+    }
     if (matchesKey(data, 'up')) return this.move(-1)
     if (matchesKey(data, 'down')) return this.move(1)
     if (matchesKey(data, 'pageUp')) return this.page(-1)
@@ -864,7 +884,10 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private horizontal(direction: 1 | -1): void {
-    if (this.focus !== 'categories') return
+    // ←/→ is the MEDIUM header category control (§5): wide switches categories
+    // with ↑↓/Enter, and the narrow projection uses the per-level Enter/Esc
+    // drill-down — its categories page keeps ↑↓ + Enter only.
+    if (this.currentLayout() !== 'medium' || this.focus !== 'categories') return
     this.moveCategory(direction)
   }
 
