@@ -2065,13 +2065,14 @@ and nothing else does.
   runtime-first, so the persisted value can still read `auto` while its write is in
   flight, and neither a late answer nor an already-queued scheme report may colour
   over the newer choice. Derived applies (a detection's own answer, a report, the
-  plugin-unload fallback) never record the intent. The detection is also issued for
-  the screen that owned the terminal: leaving the workspace before it settles drops
-  the result, and the stored `auto` preference then follows the next scheme report or
-  the next boot. Because a screen hand-off RELEASES the observation the screen owned,
-  the surface that takes the terminal over re-samples once when the latest intent still
-  follows the terminal, so "chose auto, then left immediately" cannot lose the initial
-  detection. Mode 2031 is per screen: the leased workspace screen joins the same tracking
+  plugin-unload fallback) never record the intent. The detection is issued for the screen
+  that owned the terminal, and a screen hand-off RELEASES that observation with it — the
+  answer is dropped rather than trusted about a screen the user has left. Every hand-off
+  completion (both directions of a fullscreen swap, the Job/Settings workspace opens and
+  the return to the surface they paused) re-samples ONCE when the latest intent still
+  follows the terminal, awaiting the abandoned observation so it starts a fresh one on the
+  screen that now owns the terminal. A stale answer therefore cannot colour a new screen
+  AND an in-flight query is never simply lost. Mode 2031 is per screen: the leased workspace screen joins the same tracking
   sync, so `auto` chosen INSIDE the workspace subscribes the screen that really owns the
   terminal (and a manual choice releases it) instead of waiting for the lease to end.
 - **Navigation never loses identity.** Selection is the stable row/category id,

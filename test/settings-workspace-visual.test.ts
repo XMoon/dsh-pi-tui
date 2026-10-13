@@ -2535,3 +2535,76 @@ test('B-32 re-entering the choice reveals the highlighted candidate again', asyn
   assert.ok(h.view().includes('> L9-'), `and it is the visible highlighted candidate:\n${h.view()}`)
   h.dispose()
 })
+
+
+/** Neutralize the environment gates so a detection really queries the terminal. */
+function clearThemeEnv(): void {
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+}
+
+function restoreThemeEnv(): void {
+  for (const key of ['NO_COLOR', 'FORCE_COLOR', 'CI'] as const) {
+    if (themeEnvSaved[key] === undefined) delete process.env[key]
+    else process.env[key] = themeEnvSaved[key]
+  }
+  if (themeEnvSaved.COLORFGBG === undefined) delete process.env.COLORFGBG
+  else process.env.COLORFGBG = themeEnvSaved.COLORFGBG
+}
+
+const themeEnvSaved = {
+  NO_COLOR: process.env.NO_COLOR,
+  FORCE_COLOR: process.env.FORCE_COLOR,
+  CI: process.env.CI,
+  COLORFGBG: process.env.COLORFGBG,
+}
+
+const TERMINAL_QUERY = '\x1b]11;?\x07'
+const queryCount = (writes: readonly string[]): number => writes.join('').split(TERMINAL_QUERY).length - 1
+
+/** Model a boot-shaped observation already in flight for the CURRENT screen. */
+const startPendingObservation = (h: Harness): Promise<void> => {
+  h.app.noteThemeSelection('auto')
+  const pending = h.app.autoDetectTheme({ shouldApply: () => h.app.themeFollowsTerminal() })
+  assert.equal(queryCount(h.writes()), 1, 'the observation is issued for the screen that owns the terminal')
+  return pending
+}
+
+test('B-33 entering Transcript Fullscreen re-samples the observation the main screen lost', async () => {
+  clearThemeEnv()
+  try {
+    const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
+    const pending = startPendingObservation(h)
+    h.app.setFullscreen(true)
+    await pending
+    await settle(h)
+    assert.ok(queryCount(h.writes()) > 1, `the entering fullscreen screen issues a FRESH observation:\n${JSON.stringify(h.writes())}`)
+    h.vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    await settle(h)
+    assert.equal(h.app.currentTheme(), 'light', 'and the screen that took the terminal over applies its answer')
+    h.dispose()
+  } finally {
+    restoreThemeEnv()
+  }
+})
+
+test('B-34 entering the Settings workspace re-samples the observation the return screen lost', async () => {
+  clearThemeEnv()
+  try {
+    const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
+    const pending = startPendingObservation(h)
+    await h.open()
+    await pending
+    await settle(h)
+    assert.ok(queryCount(h.writes()) > 1, `the entering workspace screen issues a FRESH observation:\n${JSON.stringify(h.writes())}`)
+    h.vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    await settle(h)
+    assert.equal(h.app.currentTheme(), 'light', 'and the workspace screen applies its answer')
+    assert.match(h.view().replace(/\s+/gu, ' '), /Runtime light/, 'the Detail names the runtime fact it applied')
+    h.dispose()
+  } finally {
+    restoreThemeEnv()
+  }
+})
