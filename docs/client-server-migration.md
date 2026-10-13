@@ -3095,9 +3095,25 @@ still reaches the Remote graph only through the dynamic
   Verified by `test/remote-config-port.test.ts` (external same-field write during
   the refresh window preserves the external value; two serialized whole-document
   writes reconcile against revision 1 then 2; an empty diff still dispatches
-  nothing). B2-B's `Verified` state additionally re-reads the target field after
-  the dispatch, so a `not-saved`/`unverified` outcome can never be presented as a
-  save.
+  nothing) and over the real wire by `test/remote-m3a-semantics-smoke.test.ts`.
+- **A committed write is never re-labelled by a failed REFRESH.** After a
+  successful official `settings.mutate`, the mirror needs an authoritative
+  `describe()` to publish the new state, and that read can fail. The two failure
+  classes are deliberately separated by the `refreshFailure` policy of
+  `RemoteConfigMirror.mutate`: `reject` (the default, used by every direct
+  sub-domain caller) keeps the failure, because a caller that re-reads the mirror
+  afterwards must never present a last-known value as the committed one (the
+  subagent model-selection toggle reverts its row from exactly such a read); the
+  whole-document `RemoteTuiSettingsConfig.replace` uses `record`, which reports the
+  committed write as committed, marks the snapshot non-current (`readiness()`
+  reports `stale`/`unavailable`) and records the cause. B2-B's `Verified` state
+  re-reads the target field after the dispatch and classifies on `readiness()`
+  FIRST, so a refusal, an accepted-but-unverified commit and a verified one stay
+  three distinct outcomes. Covered by `test/remote-config-port.test.ts` (both
+  directions plus the subagent negative control), `remote-m3a-semantics-smoke.test.ts`
+  (the real Host plane refuses a moved revision; the Remote-assembled `/settings`
+  workspace commits and verifies) and the L6 workspace suite (the `Commit accepted ·
+  verification unavailable` wording).
 - **Currentness is semantic (§9.1).** `ConfigPort.configReadiness()` exposes
   `ready | stale | unavailable` (Direct is always `ready`; Remote reports the
   mirror). `/settings` announces a non-`ready` backend explicitly and the

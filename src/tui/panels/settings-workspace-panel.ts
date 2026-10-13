@@ -87,8 +87,11 @@ export interface SettingsWorkspaceEdit {
   readonly primary: 'runtime' | 'persisted'
   /** The live runtime fact (the applied palette name / the live preset). */
   readonly runtime: string
-  /** The persisted document fact, or undefined when the document is unreadable. */
-  readonly persisted?: string
+  /** The persisted document fact AS THE READ PROVED IT: the stored value, `not
+   *  set` when the readable document carries no value, or an explicit
+   *  `unknown — …` when there was no document to read. The panel never guesses
+   *  which of those it is. */
+  readonly persisted: string
 }
 
 /**
@@ -820,8 +823,10 @@ export class SettingsWorkspacePanel implements Component {
   /**
    * The L2 choice projection. The HEADING is pinned whenever at least one
    * candidate fits beside it (a candidate list whose subject scrolled away could
-   * not be confirmed knowingly); only the candidates themselves scroll. On a
-   * one-row body the heading is dropped rather than hiding the candidates.
+   * not be confirmed knowingly); only the candidates scroll, and a long or CJK
+   * candidate label WRAPS instead of being truncated — while choosing, the list
+   * is the only place the candidate identity is visible. On a one-row body the
+   * heading is dropped rather than hiding the candidates.
    */
   private choiceLines(
     row: SettingsWorkspaceRow,
@@ -833,39 +838,57 @@ export class SettingsWorkspacePanel implements Component {
     const options = row.edit?.options ?? []
     const headingRows = scrollViewport >= 2 ? 1 : 0
     const listViewport = Math.max(0, scrollViewport - headingRows)
-    const offset = this.rebaseChoice(options.length, listViewport)
+    const blocks = this.choiceBlocks(row, width)
+    const flattened = blocks.flat()
+    const offset = this.rebaseChoice(blocks, listViewport)
     // Every content line is composed UNPADDED (the frame's own composition pass
     // is the only fit), exactly like the category/row lines.
     const content: string[] = []
     if (headingRows === 1) content.push(color.textStrong(`Choose ${row.label}`))
-    if (options.length === 0 && listViewport > 0) {
-      // No candidate source at all: the choice states it instead of painting an
-      // empty list with a confirm button.
-      content.push(color.error('No candidate is available for this setting right now.'))
-    }
-    for (let i = 0; i < listViewport; i += 1) content.push(this.choiceLine(options[offset + i], offset + i))
+    for (let i = 0; i < listViewport; i += 1) content.push(flattened[offset + i] ?? '')
     const lines = [...content]
     const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
     if (pinned === 1) lines.push(painted.text)
     const optionRows: { value: string; line: number; endCol: number }[] = []
-    for (let i = 0; i < listViewport; i += 1) {
-      const option = options[offset + i]
+    let cursor = 0
+    for (const [index, block] of blocks.entries()) {
+      const start = cursor
+      cursor += block.length
+      const option = options[index]
       if (option === undefined) continue
-      optionRows.push({ value: option.value, line: headingRows + i, endCol: width })
+      for (let line = Math.max(start, offset); line < Math.min(cursor, offset + listViewport); line += 1) {
+        optionRows.push({ value: option.value, line: headingRows + line - offset, endCol: width })
+      }
     }
-    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows }
+    // `content` is the CANDIDATE list the wheel and the rebase both scroll (the
+    // pinned heading is not scrollable content and the action row is not content
+    // at all), so `maxOffset` is the real candidate extent.
+    return { lines, content: flattened, viewport: listViewport, buttons: painted.painted, optionRows }
   }
 
-  /** One painted candidate row: the highlight is presentation, the VALUE is the
-   *  identity, and the source state is stated rather than implied. */
-  private choiceLine(option: SettingsWorkspaceEditOption | undefined, index: number): string {
-    if (option === undefined) return ''
+  /** One painted candidate, wrapped to the pane width: the first line carries the
+   *  highlight marker, continuation lines the same two-cell indent. The VALUE is
+   *  the identity; the source state is stated rather than implied. */
+  private choiceBlocks(row: SettingsWorkspaceRow, width: number): string[][] {
     const phase = this.editPhase
-    const selected = phase.kind === 'choosing' && index === phase.index
-    const marker = selected ? '> ' : '  '
-    const marks = [option.current ? '← current' : '', option.available ? '' : 'unavailable'].filter(Boolean).join(' · ')
-    const text = `${marker}${sanitizedPhysicalLine(option.label)}${marks === '' ? '' : `  [${marks}]`}`
-    return selected ? color.textStrong(text) : color.text(text)
+    const options = row.edit?.options ?? []
+    if (options.length === 0) {
+      // No candidate source at all: the choice states it instead of painting an
+      // empty list with a confirm button.
+      return [[color.error('No candidate is available for this setting right now.')]]
+    }
+    return options.map((option, index) => {
+      const selected = phase.kind === 'choosing' && index === phase.index
+      const marker = selected ? '> ' : '  '
+      const marks = [option.current ? '← current' : '', option.available ? '' : 'unavailable'].filter(Boolean).join(' · ')
+      const body = `${sanitizedPhysicalLine(option.label)}${marks === '' ? '' : `  [${marks}]`}`
+      const chunks = wrapTextWithAnsi(body, Math.max(1, width - 2))
+      const rows = chunks.length === 0 ? [''] : chunks
+      return rows.map((chunk, line) => {
+        const text = `${line === 0 ? marker : '  '}${chunk}`
+        return selected ? color.textStrong(text) : color.text(text)
+      })
+    })
   }
 
   /** The writable field the panel is CHOOSING for, or undefined in every other
@@ -875,20 +898,32 @@ export class SettingsWorkspacePanel implements Component {
     return this.editPhase.kind === 'choosing' ? this.editPhase.field : undefined
   }
 
-  /** Keep the highlighted candidate inside the granted choice viewport: only a
-   *  CANDIDATE or VIEWPORT change may pull it back (a wheel may scroll the list
-   *  so the highlight leaves the viewport — a plain repaint must never fight
-   *  that, while a real shrink must reveal the highlight again). */
-  private rebaseChoice(optionCount: number, viewport: number): number {
+  /** Keep the highlighted candidate REVEALED: only a CANDIDATE or VIEWPORT change
+   *  may pull the list back (a wheel may scroll it so the highlight leaves the
+   *  viewport — a plain repaint must never fight that, while a real shrink must
+   *  reveal the highlight again). A multi-line candidate reveals as a whole when
+   *  it fits, otherwise its first line. */
+  private rebaseChoice(blocks: readonly (readonly string[])[], viewport: number): number {
     const phase = this.editPhase
     if (phase.kind !== 'choosing') return 0
-    const index = Math.min(Math.max(0, phase.index), Math.max(0, optionCount - 1))
+    let total = 0
+    const starts: number[] = []
+    for (const block of blocks) {
+      starts.push(total)
+      total += block.length
+    }
+    const index = Math.min(Math.max(0, phase.index), Math.max(0, blocks.length - 1))
+    const start = starts[index] ?? 0
+    const end = start + (blocks[index]?.length ?? 1)
     if (index !== this.lastChoiceIndex || viewport !== this.lastChoiceViewport) {
-      this.choiceOffset = rebaseOffset(this.choiceOffset, index, optionCount, viewport)
+      let next = this.choiceOffset
+      if (start < next) next = start
+      if (end > next + viewport) next = Math.max(start, end - viewport)
+      this.choiceOffset = clampOffset(next, total, viewport)
       this.lastChoiceIndex = index
       this.lastChoiceViewport = viewport
     } else {
-      this.choiceOffset = clampOffset(this.choiceOffset, optionCount, viewport)
+      this.choiceOffset = clampOffset(this.choiceOffset, total, viewport)
     }
     return this.choiceOffset
   }
@@ -969,7 +1004,7 @@ export class SettingsWorkspacePanel implements Component {
       // The two facts are NEVER conflated: which one `Value` expresses is stated
       // by the reader (`primary`), and the OTHER one is named explicitly.
       if (edit.primary === 'persisted') field('Runtime', edit.runtime)
-      else field('Persisted', edit.persisted ?? 'unknown — the settings document is unreadable')
+      else field('Persisted', edit.persisted)
       const status = this.editStatus(edit.field)
       if (status !== undefined) field('Status', status)
     }

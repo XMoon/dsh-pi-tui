@@ -625,8 +625,22 @@ class RemoteConfigMirror {
    * surfacing the conflict. Callers that build their ops directly from the
    * current mirror (provider profiles, permission presets, …) omit it and keep
    * the refreshed revision.
+   *
+   * `refreshFailure` owns the ONE ambiguity left: the official mutate may have
+   * committed while the post-settlement refresh could not complete. `reject`
+   * (default) keeps that as a failed write, which is what a caller that RE-READS
+   * the mirror afterwards needs — it must never mistake a last-known value for the
+   * committed one (`RemoteSubagentModelSelectionConfig.set`). `record` reports the
+   * committed write as committed, marks the snapshot non-current and records the
+   * cause; the whole-document `replace` uses it so its consumer re-reads the
+   * authority itself and reports accepted-but-unverified instead of a refusal.
    */
-  async mutate(ns: string, ops: readonly RemoteSettingsPathOp[], baseRevision?: number): Promise<void> {
+  async mutate(
+    ns: string,
+    ops: readonly RemoteSettingsPathOp[],
+    baseRevision?: number,
+    refreshFailure: 'reject' | 'record' = 'reject',
+  ): Promise<void> {
     await this.enqueueWrite(async () => {
       await this.ensureCurrent()
       const snapshot = this.lastKnown()
@@ -660,8 +674,18 @@ class RemoteConfigMirror {
       }
       const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
       if (!result.ok) throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
-      // Authoritative refresh AFTER the official settlement.
-      await this.describe()
+      // Authoritative refresh AFTER the official settlement. The write is already
+      // committed; a FAILED refresh is a currentness uncertainty, not a refusal —
+      // `readiness()` reports the real state in both of its failure modes.
+      if (refreshFailure === 'reject') {
+        await this.describe()
+        return
+      }
+      try {
+        await this.describe()
+      } catch (error) {
+        this.recordFailure(error)
+      }
     })
   }
 
@@ -877,7 +901,10 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
     // mirror first and would otherwise re-authorize this diff against a newer
     // document (silently superseding a concurrent external write).
     const ops = diffTuiSettings(descriptor.value, descriptor.user, doc)
-    await this.mirror.mutate(TUI_SETTINGS_NS, ops, descriptor.revision)
+    // `record`: this port's consumer re-reads the authority itself and classifies a
+    // commit it cannot confirm as unverified, so a failed post-settlement refresh
+    // must not be reported as a refusal.
+    await this.mirror.mutate(TUI_SETTINGS_NS, ops, descriptor.revision, 'record')
   }
 }
 

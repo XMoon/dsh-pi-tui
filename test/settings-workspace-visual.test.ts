@@ -26,7 +26,10 @@ import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../src/tui-app.ts'
 import { currentPalette, setTheme } from '../src/tui/theme/runtime.ts'
+import { darkColors } from '../src/domain/display/theme.ts'
 import { ThemeRegistry } from '../src/extension/internal/theme-registry.ts'
+import { createDirectSettingsFixture } from './support/direct-settings-fixture.ts'
+import { themePickerRows } from '../src/app/surface/theme-selection.ts'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -76,10 +79,16 @@ interface HarnessOptions {
    * a case can throw the real conflict/failure or silently ignore the write to
    * model an authority that did not accept it.
    */
-  applyReplace?: (next: TuiSettingsDoc) => void
+  applyReplace?: (next: TuiSettingsDoc) => unknown
   /** Hold every owned task until `releaseOwned()` runs it: a settlement really
    *  held across a teardown, like the clipboard's held strategy. */
   holdOwned?: boolean
+  /**
+   * The REAL settings port to drive instead of the hand-rolled document object:
+   * an L6 case passes `createDirectSettingsFixture().settings` so the whole
+   * UI -> adapter -> SettingsForms -> authoritative re-read chain is production.
+   */
+  tuiSettings?: { get(): TuiSettingsDoc; replace(doc: TuiSettingsDoc): unknown }
 }
 
 interface Harness {
@@ -100,6 +109,8 @@ interface Harness {
   readonly replaced: () => readonly TuiSettingsDoc[]
   /** Every runner capability the commands called, in order. */
   readonly calls: () => readonly string[]
+  /** Every `diag.warn` the commands recorded (the write-owner failure trail). */
+  readonly warnings: () => readonly { readonly message: string; readonly fields?: Record<string, unknown> }[]
   /** Every byte the app wrote to the terminal (the raw write sink). */
   readonly writes: () => readonly string[]
   /** Run every owned task the harness is holding (`holdOwned`). */
@@ -115,6 +126,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const writes: string[] = []
   const replaced: TuiSettingsDoc[] = []
   const calls: string[] = []
+  const warnings: { message: string; fields?: Record<string, unknown> }[] = []
   const held: Array<() => void> = []
   let reads = 0
   let replacements = 0
@@ -154,7 +166,10 @@ function setup(options: HarnessOptions = {}): Harness {
   const base: Record<string, unknown> = {
     ctx,
     app,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    diag: (() => {
+      const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
+      return { ...diag, warn: (message: string, fields?: Record<string, unknown>) => { warnings.push({ message, ...fields === undefined ? {} : { fields } }); diag.warn(message, fields) } }
+    })(),
     cwd: '/ws',
     sessionCwd: () => '/ws',
     progressUpdatesState: { mode: 'milestones' },
@@ -183,7 +198,7 @@ function setup(options: HarnessOptions = {}): Harness {
     refreshStatus: () => { calls.push('refreshStatus') },
     tuiSettings: options.settingsService === false
       ? undefined
-      : {
+      : options.tuiSettings ?? {
           get: () => {
             reads += 1
             if (options.throwOnGet === true) throw new Error('settings read exploded')
@@ -193,7 +208,7 @@ function setup(options: HarnessOptions = {}): Harness {
             replacements += 1
             replaced.push(next)
             if (options.applyReplace === undefined) Object.assign(doc, next)
-            else options.applyReplace(next)
+            else return options.applyReplace(next)
           },
         },
     extensions: options.themes === undefined ? undefined : { themes: options.themes },
@@ -201,7 +216,7 @@ function setup(options: HarnessOptions = {}): Harness {
     createPluginManagerSubmenu: () => ({ render: () => [], dispose: () => {} }),
     config: {
       configReadiness: () => options.readiness ?? 'ready',
-      footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: [] }) },
+      footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
     },
@@ -239,6 +254,7 @@ function setup(options: HarnessOptions = {}): Harness {
     replacements: () => replacements,
     replaced: () => replaced,
     calls: () => calls,
+    warnings: () => warnings,
     writes: () => writes,
     releaseOwned: () => {
       const list = held.splice(0)
@@ -1819,4 +1835,247 @@ test('B-12 the writable rows reach the choice and confirm at every responsive br
     assert.match(h.view(), /Status\s+Verified/)
     h.dispose()
   }
+})
+
+// ── B2-B round 2: the qualified paths and the reviewer's P2 regressions ────
+
+test('B-13 the REAL Direct adapter drives the workspace write end to end (UI → path ops → authoritative re-read → Verified)', async () => {
+  const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: 'symbols' })
+  const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  press(h, row, cellIndexOf(h, row, 'light'))
+  release(h, row, cellIndexOf(h, row, 'light'))
+  await settle(h)
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+
+  assert.equal(fixture.calls.length, 1, 'exactly one real SettingsForms mutation')
+  // ONE path-scoped op: the changed field only — nothing inherited is pinned into
+  // the profile (the W-11 whole-document preservation property, through the real
+  // adapter rather than a hand-rolled replace).
+  assert.deepEqual(fixture.calls[0]!.ops, [{ op: 'set', path: ['theme'], value: 'light' }])
+  assert.equal(fixture.calls[0]!.ns, 'tui-app')
+  assert.equal(fixture.calls[0]!.revision, 7, 'the fence is the revision the diff was reconciled against')
+  assert.equal(fixture.document().theme, 'light', 'the committed document carries the new value')
+  assert.equal(fixture.document().iconStyle, 'symbols', 'and every other field is untouched')
+  assert.match(h.view(), /Verified · the authoritative read agrees/)
+  assert.equal(h.app.currentTheme(), 'light', 'the runtime palette changed with it')
+  h.dispose()
+})
+
+test('B-14 the Persisted fact distinguishes a readable document without a value from an unreadable one', async () => {
+  // A readable document with no stored preset: `not set`, never "unreadable".
+  const readable = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, displayPreset: 'full' })
+  await openDetail(readable, 'display-preset')
+  assert.match(readable.view(), /Persisted\s+not set/, `the readable document states the absence: ${readable.view()}`)
+  readable.dispose()
+
+  // No document at all: an explicit unknown, and no write verb is offered as a save.
+  const missing = setup({ columns: 200, rows: 40, settingsService: false })
+  await openDetail(missing, 'display-preset')
+  assert.match(missing.view(), /Persisted\s+unknown — the TUI settings document could not be read/)
+  missing.dispose()
+})
+
+test('B-15 a long CJK candidate wraps in the choice list instead of losing its identity', async () => {
+  const label = `汉${'字'.repeat(30)}`
+  const themes = new ThemeRegistry()
+  themes.register({ id: 'long-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
+  const value = themePickerRows(themes).find(row => row.displayName === label)?.value
+  assert.ok(value !== undefined, 'the plugin theme is selectable')
+  // 24 rows so the settled Status line stays inside the granted viewport after the
+  // wrapped Value/Source block; the width is what this case is about.
+  const h = setup({ columns: 44, rows: 24, doc: { theme: 'dark' }, themes })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  assert.match(h.view(), /Choose Configured theme/)
+  for (const [index, line] of h.vt.getViewport().entries()) {
+    assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
+  }
+  // The whole label is readable: the wrapped candidate block carries it, and every
+  // one of its rows is a real hit target (never a truncated label with a hidden tail).
+  const rows = h.rowsPlain()
+  const start = rows.findIndex(line => line.includes('汉字'))
+  assert.ok(start > 1, `the candidate must be painted: ${h.view()}`)
+  const painted = rows.slice(start)
+    .filter(line => line.includes('汉字') || line.trimStart().startsWith('字'))
+    .map(line => line.trim())
+    .join('')
+  assert.ok(painted.includes(label), `the whole label must be readable: ${h.view()}`)
+  press(h, start + 1, 4)
+  release(h, start + 1, 4)
+  await settle(h)
+  assert.equal(h.replacements(), 0, 'selecting a candidate through its wrapped tail writes nothing')
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+  assert.equal(h.doc.theme, value, 'the confirmed value is the untouched source-qualified identity')
+  assert.match(h.view(), /Status\s+Verified/)
+  h.dispose()
+})
+
+test('B-16 the wheel really scrolls the candidate list', async () => {
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' } })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  assert.match(h.view(), /> dark/, 'the current candidate is revealed first')
+  // One candidate row is granted at 44x8: the wheel must reach the rest of the list.
+  wheel(h, 4, 10, true)
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('> dark'), `the wheel scrolled the highlighted candidate out of the viewport: ${h.view()}`)
+  assert.match(h.view(), /light/, 'and the next candidate is visible')
+  // The candidate navigation still works and reveals the highlight again.
+  await key(h, '\x1b[B')
+  assert.match(h.view(), /> light/)
+  h.dispose()
+})
+
+test('B-17 choosing auto drops the plugin-theme record, so a later HMR unload cannot force dark over it', async () => {
+  const themes = pluginThemes()
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes })
+  // The plugin palette is the LIVE one when the user opens the workspace.
+  h.app.applyPluginPalette('plugin:acme/solarized', darkColors)
+  assert.equal(h.app.activePluginTheme(), 'plugin:acme/solarized', 'the plugin theme is recorded as applied')
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const autoRow = rowOf(h, 'auto')
+  press(h, autoRow, cellIndexOf(h, autoRow, 'auto'))
+  release(h, autoRow, cellIndexOf(h, autoRow, 'auto'))
+  await settle(h)
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+  assert.equal(h.doc.theme, 'auto')
+  assert.match(h.view(), /Verified · the authoritative read agrees/)
+  // The unload hook only falls back while the unloaded value is STILL the recorded
+  // active theme; a stale record would force dark and stop the terminal tracking.
+  assert.equal(h.app.activePluginTheme(), undefined, 'the left plugin theme is no longer the active fallback owner')
+  h.dispose()
+})
+
+test('B-18 a late OSC answer never overrides a newer choice, while it still applies to an unchallenged auto', async () => {
+  const saved = {
+    NO_COLOR: process.env.NO_COLOR,
+    FORCE_COLOR: process.env.FORCE_COLOR,
+    CI: process.env.CI,
+    COLORFGBG: process.env.COLORFGBG,
+  }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+  const lightReply = '\x1b]11;rgb:ffff/ffff/ffff\x1b\\'
+  // Enter is the same confirm the painted [Confirm] publishes; a second click on
+  // the same cell would be the terminal's double-click word selection instead.
+  const confirmChoice = async (h: Harness): Promise<void> => {
+    assert.match(h.view(), /\[Confirm\]/, 'the choice publishes its confirm')
+    await key(h, '\r')
+    await settle(h)
+  }
+  try {
+    // POSITIVE CONTROL: an unchallenged `auto` accepts the terminal's answer.
+    const auto = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
+    await openDetail(auto, 'theme')
+    await key(auto, '\r')
+    await key(auto, '\x1b[A') // dark -> auto
+    await confirmChoice(auto)
+    assert.equal(auto.doc.theme, 'auto')
+    auto.vt.sendInput(lightReply)
+    await settle(auto)
+    assert.equal(auto.app.currentTheme(), 'light', 'the answer of a still-current auto applies')
+    auto.dispose()
+
+    // REGRESSION (F2): a newer explicit choice wins even while its persistence is
+    // still in flight — the guard is the synchronous intent, never the document.
+    let writes = 0
+    const raced = setup({
+      columns: 140,
+      rows: 40,
+      doc: { theme: 'dark' },
+      applyReplace: (next) => {
+        writes += 1
+        if (writes === 1) {
+          Object.assign(raced.doc, next)
+          return undefined
+        }
+        // The explicit write is still IN FLIGHT: the port promise settles only once
+        // the document really changed.
+        return new Promise<void>(resolve => {
+          setTimeout(() => {
+            Object.assign(raced.doc, next)
+            resolve()
+          }, 300)
+        })
+      },
+    })
+    await openDetail(raced, 'theme')
+    await key(raced, '\r')
+    await key(raced, '\x1b[A') // dark -> auto
+    await confirmChoice(raced)
+    assert.equal(raced.doc.theme, 'auto', 'the auto preference committed')
+    await key(raced, '\r') // reopen the choice (still on auto)
+    await key(raced, '\x1b[B') // auto -> dark
+    await confirmChoice(raced)
+    assert.equal(raced.app.currentTheme(), 'dark', 'the explicit choice applied runtime-first')
+    assert.equal(raced.doc.theme, 'auto', 'while its persistence is still in flight')
+    raced.vt.sendInput(lightReply)
+    await settle(raced)
+    assert.equal(raced.app.currentTheme(), 'dark', 'the late answer of the replaced auto must not colour the surface')
+    await new Promise(resolve => setTimeout(resolve, 360))
+    await settle(raced)
+    assert.equal(raced.doc.theme, 'dark', 'and the explicit choice really landed')
+    assert.match(raced.view(), /Verified · the authoritative read agrees/)
+    raced.dispose()
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('B-19 a dispatched write that fails after the workspace closed still leaves a diagnostic', async () => {
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes: pluginThemes(),
+    holdOwned: true,
+    applyReplace: () => { throw new Error('settings namespace "tui-app" changed since it was read') },
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  press(h, row, cellIndexOf(h, row, 'light'))
+  release(h, row, cellIndexOf(h, row, 'light'))
+  await settle(h)
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+  assert.match(h.view(), /Saving…/, 'the write is held in flight')
+  assert.deepEqual(h.warnings(), [], 'nothing is reported before it settles')
+
+  // Leave the workspace, THEN let the write fail.
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  assert.ok(!h.view().includes('SETTINGS ·'), 'the workspace is closed')
+  h.releaseOwned()
+  await settle(h)
+
+  const warnings = h.warnings()
+  assert.equal(warnings.length, 1, `the real failure must stay diagnosable: ${JSON.stringify(warnings)}`)
+  assert.equal(warnings[0]!.message, 'settings write')
+  assert.equal(warnings[0]!.fields?.field, 'theme')
+  assert.equal(warnings[0]!.fields?.outcome, 'not-saved')
+  assert.match(String(warnings[0]!.fields?.reason), /changed since it was read/)
+  assert.ok(!h.view().includes('Not saved'), 'and it never repaints the surface the user left')
+  h.dispose()
 })

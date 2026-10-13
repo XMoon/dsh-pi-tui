@@ -2001,8 +2001,11 @@ and nothing else does.
   `[Cancel]` cancels with ZERO writes. Only an explicit confirm dispatches, and a
   candidate whose source is gone (an unloaded `plugin:` theme) is listed as
   `unavailable` and refused at confirm and at retry. The choice heading is pinned
-  so the field being changed stays named and the candidates alone scroll; the
-  candidate IDENTITY is the source-qualified value, never the label. One commit at
+  so the field being changed stays named and the candidates alone scroll; a long or
+  CJK candidate WRAPS rather than being truncated (while choosing, the list is the
+  only place the candidate identity is visible) and every one of its painted rows is
+  a real hit target, while the wheel and the rebase both scroll the candidate list
+  itself. The candidate IDENTITY is the source-qualified value, never the label. One commit at
   a time: while a write is pending the edit verbs are not painted, and the panel
   holds exactly one request identity, so a superseded or post-close settlement can
   never repaint.
@@ -2010,7 +2013,10 @@ and nothing else does.
   Detail names the live runtime fact (`Runtime` for the theme palette —
   `app.currentTheme()`/`app.activePluginTheme()`, never the configured value) and
   the stored preference (`Persisted`, or `Value` where the row's primary value IS
-  the persisted one). The commit status is field-scoped and shown only on the row
+  the persisted one). The stored fact is the one the READ proved: the value, `not
+  set` for a readable document that carries no value, or an explicit
+  `unknown — …` when there was no document to read — the panel never guesses which
+  of those it is. The commit status is field-scoped and shown only on the row
   that owns the phase: `Saving…`, `Verified · the authoritative read agrees`,
   `Not saved · <real reason>` or `Commit accepted · verification
   unavailable · <reason>`. `Verified` requires a completed mutation, a
@@ -2032,13 +2038,18 @@ and nothing else does.
   (`applied locally, but the configuration is stale so it could not be stored`).
   A refused write leaves the runtime ahead of the document and says so instead of
   silently rolling the applied palette back.
-- **The theme `auto` apply is the terminal query.** Choosing `auto` persists and
-  verifies FIRST, then starts the one OSC 11 detection with a guard that reads the
-  committed document, so a later explicit choice can never be overridden by a late
-  answer. As before, the detection is issued for the screen that owned the
-  terminal: leaving the workspace before it settles drops the result (the stored
-  `auto` preference remains and the next scheme report or the next boot applies
-  it).
+- **The theme `auto` apply is the terminal query.** Choosing `auto` drops the
+  plugin-theme record FIRST (the unload fallback of a theme the user has left must
+  never force `dark` and stop the terminal tracking over a stored `auto`), starts
+  the one OSC 11 detection and enables tracking — starting the detection IS the
+  apply, exactly like `/display`'s runtime-first policy. The settled answer is
+  guarded by the SYNCHRONOUS latest choice of this command factory, never by the
+  asynchronous document: an explicit theme applies runtime-first, so the persisted
+  value can still read `auto` while its write is in flight, and a late answer must
+  never colour over the newer choice (the legacy `/settings` path keeps the same
+  per-open guard). The detection is issued for the screen that owned the terminal:
+  leaving the workspace before it settles drops the result, and the stored `auto`
+  preference then follows the next scheme report or the next boot.
 - **Navigation never loses identity.** Selection is the stable row/category id,
   and width changes only re-project the layout: the level, the category and the
   row survive a resize in both directions, and the list rebases to keep the
