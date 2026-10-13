@@ -2121,6 +2121,13 @@ test('B-20 a FAILED candidate never steals the intent of a pending auto query', 
     assert.match(h.view(), /Not saved · the palette could not be applied/)
     assert.equal(h.doc.theme, 'auto', 'and the stored preference is untouched')
     assert.equal(h.app.currentTheme(), 'dark', 'the runtime kept the previous palette')
+    // The unload fallback fires only while the unloaded value is STILL the recorded
+    // active theme (extension-runtime.ts's own condition): a palette that was never
+    // applied must not become that owner, or its later unload would force dark and
+    // stop the terminal tracking over the stored `auto`.
+    const wouldForceDarkFallback = (selectable: string): boolean => h.app.activePluginTheme() === selectable
+    assert.equal(wouldForceDarkFallback(brokenValue), false,
+      'a never-applied palette must not become the unload-fallback owner')
 
     // ...so the pending auto query still owns the surface and its answer applies.
     h.vt.sendInput(lightReply)
