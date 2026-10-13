@@ -15,7 +15,7 @@ import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
 import { SelectedMarquee } from '../components/marquee.ts'
-import { singlePhysicalLine } from '../presentation/lines.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   isTaskItemActive,
   isTaskItemFailure,
@@ -833,20 +833,22 @@ export class TaskBrowserPanel implements Component, Focusable {
     // that cannot work there.
     const retrySuffix = this.mode === 'quick' ? '' : ' · R retry'
     // The banner is one physical row: a transport/refresh error message
-    // (Error.message) may carry CR/LF AND arbitrary length, so it is
-    // projected and width-truncated before it enters the row budget (a
-    // direct embedding without a clipping frame must never wrap it into
-    // extra terminal rows). The raw `refreshError` state stays untouched.
-    const refreshErrorText = this.refreshError === undefined ? undefined : singlePhysicalLine(this.refreshError)
+    // (Error.message) may carry CR/LF, arbitrary length AND terminal escape
+    // sequences, so it is projected and width-truncated before it enters the
+    // row budget (a direct embedding without a clipping frame must never wrap
+    // it into extra terminal rows). The raw `refreshError` state stays
+    // untouched.
+    const refreshErrorText = this.refreshError === undefined ? undefined : sanitizedPhysicalLine(this.refreshError)
     const refreshErrorLine = refreshErrorText === undefined ? undefined
       : truncateToWidth(`${refreshErrorText}${retrySuffix}`, safeWidth, '…')
     // Hoisted chrome texts: the short-grant degradation rebuilds from
     // them without the unconditionally-kept blank spacers. The header
     // embeds caller/durable text (e.g. the Workflow scoped Task Center's
-    // run name and phase label), so it is projected before truncation —
-    // one returned row is one physical row.
+    // run name and phase label), so it is projected to a single SAFE
+    // physical row (escape/control bytes removed) before truncation — one
+    // returned row is one physical row.
     const headerText = this.options.header === undefined ? undefined
-      : truncateToWidth(singlePhysicalLine(this.headerText()), safeWidth, '…')
+      : truncateToWidth(sanitizedPhysicalLine(this.headerText()), safeWidth, '…')
     const searchEmpty = this.getFilter() === ''
     const searchRowText = !searchOn ? '' : (() => {
       const searchLine = this.searchInput.render(Math.max(1, safeWidth - 2))[0] ?? ''
@@ -882,11 +884,12 @@ export class TaskBrowserPanel implements Component, Focusable {
 
     const rows = this.filtered
     if (rows.length === 0) {
-      // Caller-provided no-match text: projected AND width-truncated —
-      // the same single-row contract as the refresh-error banner (a long
-      // dynamic message must never wrap into extra terminal rows).
+      // Caller-provided no-match text: projected to a single SAFE physical
+      // row AND width-truncated — the same single-row contract as the
+      // refresh-error banner (a long dynamic message must never wrap into
+      // extra terminal rows, and must never carry an escape sequence).
       const noMatchText = this.refreshError === undefined
-        ? truncateToWidth(singlePhysicalLine(this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
+        ? truncateToWidth(sanitizedPhysicalLine(this.options.noMatchText ?? 'No matching tasks'), safeWidth, '…')
         : 'Could not load tasks'
       push(color.textDim(noMatchText), { kind: 'inert' })
       if (this.refreshError !== undefined) push(color.textMuted(refreshErrorLine!), { kind: 'inert' })
@@ -1215,9 +1218,11 @@ export class TaskBrowserPanel implements Component, Focusable {
     const available = Math.max(1, width - leftWidth)
     const labelBudget = Math.max(0, available - treeWidth - suffixWidth - tailWidth - 1)
     // Single-row contract: the main task row owns exactly one physical
-    // row, so its label is projected BEFORE measurement/truncation. The
-    // raw `item.label` (runtime truth) stays untouched.
-    const rowLabel = singlePhysicalLine(item.label)
+    // row, so its label is projected to a single SAFE physical row
+    // (CR/LF collapsed AND terminal escape/control bytes removed) BEFORE
+    // measurement/truncation. A Host Job/Subagent label is arbitrary
+    // external text; the raw `item.label` (runtime truth) stays untouched.
+    const rowLabel = sanitizedPhysicalLine(item.label)
     const label = this.marquee.render({ key: item.value, text: rowLabel, maxWidth: labelBudget, selected })
     const tone = item.ancestorContext === true ? color.textDim : selected ? color.textStrong : color.text
     const left = leftPrefix + tree + tone(label) + (selected ? color.textStrong(suffix) : color.text(suffix))
@@ -1249,10 +1254,12 @@ export class TaskBrowserPanel implements Component, Focusable {
     // Single-row contract: every semantic line detailLines returns is
     // budgeted as one physical terminal row (the wide side pane and the
     // compact inline detail both truncate these). Dynamic text (label,
-    // parentLabel, detail, …) is projected HERE, once, so no embedded
-    // CR/LF can leak past the row budget or the hit map. The item's raw
-    // fields are never rewritten.
-    return lines.map(singlePhysicalLine)
+    // parentLabel, detail, the Stop confirmation embedding the label, …)
+    // is projected HERE, once, to a single SAFE physical row (CR/LF
+    // collapsed AND terminal escape/control bytes removed), so neither an
+    // embedded CR/LF nor a Host OSC/CSI can leak past the row budget, the
+    // hit map or the terminal. The item's raw fields are never rewritten.
+    return lines.map(sanitizedPhysicalLine)
   }
 
   private renderInlineDetail(item: TaskPanelItem, width: number): string[] {

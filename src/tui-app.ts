@@ -10406,9 +10406,18 @@ export class TuiApp {
         chromeHeight += hint.render(this.terminal.columns).length
       }
       if (this.notifyText !== '') {
+        // The notice text is caller/Host-supplied (a Task Browser Stop or a
+        // Subagent interrupt settlement embeds the official Job/Subagent
+        // label, and an Error.message may carry arbitrary bytes), so it
+        // crosses ONE display boundary here — before the theme's own
+        // styling — and is projected to a single SAFE physical row. The
+        // STORED notice (`notifyText` / `currentNotice()`) stays the
+        // caller's raw string: this is the render projection, never a
+        // rewrite of the notice or of `notify()`'s public semantics.
+        const noticeText = sanitizedPhysicalLine(this.notifyText)
         const line = this.notifyKind === 'info'
-          ? color.textDim(`ℹ ${this.notifyText}`)
-          : color.error(`✗ ${this.notifyText}`)
+          ? color.textDim(`ℹ ${noticeText}`)
+          : color.error(`✗ ${noticeText}`)
         const notice = new TranscriptGutterComponent(new Text(line, 0, 0))
         this.messagesView.addChild(notice)
         chromeHeight += notice.render(this.terminal.columns).length

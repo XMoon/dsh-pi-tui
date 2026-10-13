@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { TaskBrowserPanel } from '../src/tui/panels/task-panel.ts'
 import type { TaskPanelItem } from '../src/app/surface/task-presentation.ts'
 
@@ -530,4 +531,133 @@ test('Quick Tasks stale banner does not advertise the Full-only R retry', () => 
   const fullView = full.render(80).join('\n')
   assert.ok(fullView.includes('catalog failed · R retry'), `Full must keep the retry verb:\n${fullView}`)
   full.dispose()
+})
+
+// ── Host-text terminal display safety (independent fix PR) ─────────────────
+//
+// A Task Center row is a projection of arbitrary Host/external text (a Job or
+// Subagent label, a parent label, a Job detail, an Error.message). The panel
+// is the LAST boundary before the terminal, so every dynamic text must be
+// projected to one SAFE physical row there — before the theme's color.* is
+// applied, so legitimate SGR survives.
+
+/** The task's verified hostile fixture: an OSC 52 clipboard write (with a
+ *  base64 payload), readable text, and a CSI erase. */
+const HOSTILE = '\x1b]52;c;UFdORUQ=\x07echo ok\x1b[2J'
+
+const hostileFree = (text: string): boolean =>
+  !text.includes(']52;c;') && !text.includes('UFdORUQ=') && !text.includes('\x1b[2J')
+
+test('S-01 a hostile Job label is projected to one safe row in the list, the detail and the Stop confirmation', () => {
+  const item: TaskPanelItem = { ...job('job:hostile'), label: `bash · ${HOSTILE}` }
+  let stopped: string | undefined
+  const panel = new TaskBrowserPanel([item], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+    onStop: value => { stopped = value },
+  }, () => {}, () => {}, () => {})
+
+  for (const width of [60, 80, 100, 120, 160]) {
+    const lines = panel.render(width)
+    const plain = lines.join('\n')
+    assert.ok(hostileFree(plain), `width ${width}: no Host OSC/CSI/payload may reach the frame:\n${plain}`)
+    assert.ok(plain.includes('echo ok'), `width ${width}: the readable label content stays visible:\n${plain}`)
+    // One returned element is one physical terminal row: a CR/LF here would
+    // wrap past the row budget and the mouse hit map.
+    assert.ok(lines.every(line => !line.includes('\n') && !line.includes('\r')),
+      `width ${width}: every rendered element is exactly one physical row`)
+    // A long hostile label is still truncated to the row budget on a narrow
+    // terminal (the sanitize step must not defeat the width contract).
+    const labelRow = lines.find(line => line.includes('echo ok'))
+    assert.ok(labelRow !== undefined, `width ${width}: the label row must render`)
+    assert.ok(visibleWidth(labelRow) <= width,
+      `width ${width}: the label row overflows its budget: ${JSON.stringify(labelRow)}`)
+  }
+
+  // The S → Y confirmation embeds the label on the detail pane: it must show
+  // the readable text and still Stop the RAW row identity.
+  panel.handleInput('S')
+  const confirm = panel.render(120).join('\n')
+  assert.match(confirm, /Stop bash · echo ok\?/, `the confirmation must carry the sanitized label:\n${confirm}`)
+  assert.ok(hostileFree(confirm), 'the confirmation carries no Host sequence')
+  panel.handleInput('y')
+  assert.equal(stopped, 'job:hostile', 'Stop still targets the raw row identity, never the display text')
+  assert.ok(item.label.includes('\x1b]52;c;'), 'the runtime row label is never rewritten')
+  panel.dispose()
+})
+
+test('S-01b a long hostile-bearing label is really truncated to a narrow grant, still safely', () => {
+  // 50 readable cells + a sentinel + the hostile sequence: at 60 columns the
+  // row must actually DROP the tail (proving truncation really ran), while
+  // never emitting the Host bytes; at 160 columns the same label is long
+  // enough to fit, so the narrow case is not a short-label no-op.
+  const item: TaskPanelItem = { ...job('job:long'), label: `bash · ${'x'.repeat(50)}SENTINEL${HOSTILE}` }
+  const panel = new TaskBrowserPanel([item], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks', marqueeNow: () => 0,
+  }, () => {}, () => {}, () => {})
+
+  const narrow = panel.render(60)
+  const narrowRow = narrow.find(line => line.includes('xxxx'))
+  assert.ok(narrowRow !== undefined, `the long row must paint:\n${narrow.join('\n')}`)
+  assert.ok(visibleWidth(narrowRow) <= 60, 'the long label row stays inside the 60-column grant')
+  assert.ok(!narrow.join('\n').includes('SENTINEL'),
+    `the tail beyond the narrow grant must be really dropped:\n${narrow.join('\n')}`)
+  assert.ok(hostileFree(narrow.join('\n')), 'no Host sequence leaks even from a truncated label')
+  assert.ok(narrow.every(line => !line.includes('\n') && !line.includes('\r')),
+    'a truncated label still owns exactly one physical row')
+
+  const wide = panel.render(160)
+  assert.ok(wide.join('\n').includes('SENTINEL'),
+    `the same label must be long enough to fit a wide grant:\n${wide.join('\n')}`)
+  assert.ok(wide.join('\n').includes('echo ok'), 'the wide grant shows the readable hostile-fixture text')
+  assert.ok(hostileFree(wide.join('\n')), 'the wide grant is safe too')
+  panel.dispose()
+})
+
+test('S-04 the projection preserves ordinary text, one-row geometry and theme ANSI', () => {
+  const item: TaskPanelItem = { ...job('job:plain'), label: 'bash · 构建 🚀 done' }
+  const panel = new TaskBrowserPanel([item], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  const lines = panel.render(100)
+  const plain = lines.join('\n')
+  assert.ok(plain.includes('构建 🚀 done'), `ordinary CJK/emoji must survive verbatim:\n${plain}`)
+  assert.ok(lines.every(line => !line.includes('\n') && !line.includes('\r')), 'no element carries a row break')
+  // The theme's own ANSI is applied AFTER the Host-text projection, so a
+  // legal SGR color must never be stripped with the Host's sequences.
+  assert.ok(lines.some(line => /\x1b\[/.test(line)), 'theme SGR codes must survive')
+  panel.dispose()
+
+  // A CR/LF (or tab) inside a dynamic label never adds a physical row.
+  const multiline: TaskPanelItem = { ...job('job:ml'), label: 'alpha\r\nbeta\ngamma' }
+  const two = new TaskBrowserPanel([multiline], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks',
+  }, () => {}, () => {}, () => {})
+  const rendered = two.render(100)
+  assert.ok(rendered.every(line => !line.includes('\n') && !line.includes('\r')),
+    'CR/LF must not leak a physical row break')
+  assert.ok(rendered.join('\n').includes('alpha beta gamma'),
+    `the whole label stays visible on one row:\n${rendered.join('\n')}`)
+  assert.ok(multiline.label.includes('\r\n'), 'the raw item label keeps its CR/LF')
+  two.dispose()
+})
+
+test('S-04 the Task Center chrome (header, refresh banner, no-match text) is projected too', () => {
+  const listed = new TaskBrowserPanel([{ ...job('job:a'), label: 'bash · build' }], 10, {
+    mode: 'full', enableSearch: true, header: `Tasks · ${HOSTILE}`,
+    refreshError: `catalog failed · ${HOSTILE}`,
+  }, () => {}, () => {}, () => {})
+  const listedView = listed.render(120).join('\n')
+  assert.ok(hostileFree(listedView), `chrome must not carry a Host sequence:\n${listedView}`)
+  assert.ok(listedView.includes('Tasks · echo ok'), 'the header keeps its readable content')
+  assert.ok(listedView.includes('catalog failed · echo ok'), 'the refresh banner keeps its readable content')
+  listed.dispose()
+
+  // Empty list: the caller's no-match text is the dynamic row.
+  const empty = new TaskBrowserPanel([], 10, {
+    mode: 'full', enableSearch: true, header: 'Tasks', noMatchText: `nothing · ${HOSTILE}`,
+  }, () => {}, () => {}, () => {})
+  const emptyView = empty.render(120).join('\n')
+  assert.ok(hostileFree(emptyView), `the no-match row must not carry a Host sequence:\n${emptyView}`)
+  assert.ok(emptyView.includes('nothing · echo ok'), 'the no-match text keeps its readable content')
+  empty.dispose()
 })
