@@ -1960,12 +1960,25 @@ applied, exactly as the B1-C section above records.
 row / detail navigation over a detached snapshot, with no configuration write
 of any kind.
 
-- **Responsive three / two / one projection.** `>=150` columns render the
-  three-column `Categories | Settings | Details` layout; `96..149` render the
-  two-column `Settings | Details` layout with the category switch in the header
-  (keyboard `←`/`→` and painted mouse arrows); `<96` renders a single-column
-  `categories → rows → detail` drill-down. The single width breakpoint table is
-  the panel's own freeze, not a project-wide rule.
+- **Post-B2-A navigation decision: three levels, not focus owners.** The
+  workspace always has exactly three levels — L0 `categories`, L1 `rows`, L2
+  `detail` — and the panel's `focus` is the only navigation state. `Enter`
+  advances one level, `Esc`/`Backspace` steps one level back, and only L0's
+  `Esc` closes the workspace, at EVERY width. `↑`/`↓` act on the current level.
+  `Tab`/`Shift+Tab` and `←`/`→` are not navigation keys: the earlier
+  medium-only Tab focus cycle and header `← category →` switch were retired, so
+  a single key scheme holds on wide, medium and narrow terminals. A new open
+  always starts on L0.
+- **Responsive three / two / one projection.** Width only decides how many panes
+  of the current level are painted: `>=150` columns render the three-column
+  `Categories | Settings | Details` layout; `96..149` derive their two columns
+  purely from the current level (`focus === 'categories'` → `Categories |
+  Settings`, otherwise `Settings | Details`); `<96` renders the current level
+  alone. Hidden panes are neither painted nor addressable — they publish no hit
+  target and own no wheel — and row text is laid out against the pane width it
+  is actually painted in, so the medium rows column may differ between L0 and
+  L1. The single width breakpoint table is the panel's own freeze, not a
+  project-wide rule.
 - **The pilot rows are real read facts.** Appearance shows `Configured theme`
   and `Icon style`; Display shows `Transcript display` (the LIVE
   `runner.displayPreset()`, with the persisted `.displayPreset` named as a
@@ -1974,16 +1987,24 @@ of any kind.
   missing document is `unavailable` and a `get()` throw is a `read-error`, never
   a fabricated default. The theme row's `value` is the source-qualified
   configured identity (`plugin:…`/`file:…`) and its summary is the friendly
-  display name — the raw identity is what `C` copies.
+  display name — the raw identity is what `C` copies. The header is a pure level
+  breadcrumb (`Categories` / `<Category> · Rows` / `<Category> / <Row>`) with a
+  read-only marker; it paints no interactive cell.
 - **Browse never writes.** Rows carry no `Apply`/`Save`/draft, and the Detail
   states that it is a read-only preview edited through `Other settings`.
   `R` re-reads the same authorities without creating a polling subscription or
   a shadow store.
 - **Navigation never loses identity.** Selection is the stable row/category id,
-  and width changes only re-project the layout: a wide detail stays the narrow
-  detail, a wide category focus stays the narrow categories level, and the list
-  rebases to keep the selected row visible instead of scrolling the whole
-  screen.
+  and width changes only re-project the layout: the level, the category and the
+  row survive a resize in both directions, and the list rebases to keep the
+  selected row visible instead of scrolling the whole screen.
+- **Mouse follows the last painted frame.** A click selects the clicked item and
+  takes ITS level's focus (a category click never advances into the rows, and a
+  row click never advances into the detail — only `Enter` does); the painted
+  `Copy value`/legacy button acts on the item it is painted for regardless of
+  the keyboard level, and a click is refused unless the release re-proves the
+  press-time kind, id, painted row, cell range, state version, level and
+  category. Wheel events scroll only the pane under the pointer.
 - **The legacy complete editor stays reachable.** The permanently visible
   `Other settings` category holds one row, `Open existing settings…`. Activating
   it retires the workspace (restoring the surface it paused) and only then opens

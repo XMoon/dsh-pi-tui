@@ -2,9 +2,10 @@
  * Phase 3B / B2-A — the fullscreen Settings workspace panel.
  *
  * ONE client-local component owns the whole read-only Settings surface: the
- * category / row / detail responsive layout (wide three-column, medium
- * two-column, narrow three-level drill-down), the per-open selection and
- * scroll state, the keyboard navigation and the last-painted mouse hit map.
+ * three-level `categories → rows → detail` navigation shared by EVERY width,
+ * the responsive projection that only decides how many panes of the current
+ * level are visible (wide three columns, medium two, narrow one), the per-open
+ * selection and scroll state, and the last-painted mouse hit map.
  * It is the layout ROOT of the temporary Settings alt screen
  * (`TuiApp.openSettingsWorkspace`), so every key arrives on its own
  * {@link SettingsWorkspacePanel.handleInput} and every click on the alt
@@ -35,7 +36,9 @@ import { color } from '../theme/runtime.ts'
 /** The three frozen B2-A categories. */
 export type SettingsWorkspaceCategoryId = 'appearance' | 'display' | 'other'
 
-/** The narrow-layout drill-down level; also the wide/medium focus owner. */
+/** The navigation level: `categories` (L0) → `rows` (L1) → `detail` (L2).
+ *  This is the SAME state in every width — the layout only decides which
+ *  panes of the current level are visible. */
 export type SettingsWorkspacePage = 'categories' | 'rows' | 'detail'
 
 /** The stable identity of one readonly pilot row. */
@@ -89,7 +92,8 @@ export interface SettingsWorkspacePanelIntents {
   readonly requestRender: () => void
   /** The ONE app-owned transient notice (never a second notice store). */
   readonly notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
-  /** Esc at the outermost narrow level, or Esc/Backspace in wide/medium. */
+  /** Esc/Backspace from the outermost level (`categories`); every layout
+   *  steps one level back before it can close. */
   readonly onClose: () => void
   /** The compatibility bridge: open the existing complete settings editor. */
   readonly onOpenLegacy: () => void
@@ -128,8 +132,16 @@ interface PaneBoxes {
   detail?: PaneBox
 }
 
+/** One pane the current frame actually paints: its level and absolute geometry.
+ *  Hidden panes of the two-pane medium projection simply have no entry. */
+interface PaneLayout {
+  readonly page: SettingsWorkspacePage
+  readonly x: number
+  readonly width: number
+}
+
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'copy' | 'legacy' | 'pane' | 'category-prev' | 'category-next'
+  readonly kind: 'category' | 'row' | 'copy' | 'legacy' | 'pane'
   /** The stable identity: a category id, a row id or the pane name. */
   readonly id: string
   /** Absolute panel row of the painted cell. */
@@ -153,10 +165,11 @@ const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   other: 'Other settings',
 }
 
-const FOCUS_ORDER: readonly SettingsWorkspacePage[] = ['categories', 'rows', 'detail']
-
 const WIDE_CATEGORY_WIDTH = 22
 const WIDE_ROWS_WIDTH = 42
+/** The medium projection's leading categories column (L0 only). */
+const MEDIUM_CATEGORY_WIDTH = 22
+/** The medium projection's leading rows column (L1/L2). */
 const MEDIUM_ROWS_WIDTH = 40
 const COLUMN_GAP = 2
 
@@ -170,13 +183,6 @@ function layoutForWidth(width: number): SettingsLayout {
   if (width >= WIDE_MIN_COLUMNS) return 'wide'
   if (width >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS) return 'medium'
   return 'narrow'
-}
-
-/** The initial focus owner at a given terminal width: wide/medium start on the
- *  row list (their category switch is visible), narrow on the category list
- *  (its drill-down root). */
-export function settingsWorkspaceInitialFocus(columns: number): SettingsWorkspacePage {
-  return columns >= SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS ? 'rows' : 'categories'
 }
 
 /**
@@ -294,7 +300,9 @@ export class SettingsWorkspacePanel implements Component {
   private snapshot: SettingsWorkspaceSnapshot
   private categoryId: SettingsWorkspaceCategoryId = 'appearance'
   private rowId: SettingsWorkspaceRowId
-  private focus: SettingsWorkspacePage
+  /** The ONE navigation level, shared by every width; a new open always starts
+   *  on L0 so the first Enter/Esc means the same thing at any terminal size. */
+  private focus: SettingsWorkspacePage = 'categories'
   private categoryOffset = 0
   private rowOffset = 0
   private detailOffset = 0
@@ -329,17 +337,10 @@ export class SettingsWorkspacePanel implements Component {
   private readonly source: SettingsWorkspaceSource
   private readonly intents: SettingsWorkspacePanelIntents
 
-  constructor(
-    source: SettingsWorkspaceSource,
-    intents: SettingsWorkspacePanelIntents,
-    /** The initial focus owner: wide/medium start on the row list, narrow on
-     *  the category list (its drill-down root). */
-    focus: SettingsWorkspacePage,
-  ) {
+  constructor(source: SettingsWorkspaceSource, intents: SettingsWorkspacePanelIntents) {
     this.source = source
     this.intents = intents
     this.snapshot = source.readSnapshot()
-    this.focus = focus
     this.rowId = this.firstRowOf(this.categoryId)
   }
 
@@ -360,7 +361,7 @@ export class SettingsWorkspacePanel implements Component {
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
-    if (plan.headerRows === 1) lines.push(...this.renderHeader(plan, targets))
+    if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
     if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
     if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0)
@@ -375,35 +376,19 @@ export class SettingsWorkspacePanel implements Component {
 
   invalidate(): void {}
 
-  private renderHeader(plan: SettingsChromePlan, targets: HitTarget[]): string[] {
-    const layout = plan.layout
+  /** The ONE level breadcrumb, identical in every layout: `Categories` →
+   *  `<Category> · Rows` → `<Category> / <Row label>`. It paints no hit target:
+   *  the header is no longer a category focus owner or switch. */
+  private renderHeader(plan: SettingsChromePlan): string[] {
     const row = this.selectedRow()
-    const right = layout === 'wide' ? 'Read-only preview' : 'Read-only'
-    if (layout === 'medium') {
-      // The medium header carries the ONLY visible category switch: the arrows
-      // are real painted mouse targets, and their focus is expressed by the
-      // brackets rather than by colour alone.
-      const arrowText = this.focus === 'categories' ? '[← category →]' : '← category →'
-      const prefix = `SETTINGS · ${CATEGORY_LABELS[this.categoryId]}  `
-      const left = `${color.primary('SETTINGS')}${color.textMuted(' · ')}${color.text(CATEGORY_LABELS[this.categoryId])}  ${this.focus === 'categories' ? color.borderFocus(arrowText) : color.textMuted(arrowText)}`
-      const arrowStart = visibleWidth(prefix)
-      const room = plan.width - visibleWidth(right) - 1
-      if (arrowStart + visibleWidth(arrowText) <= room) {
-        const prev = arrowText.indexOf('←')
-        const next = arrowText.indexOf('→')
-        targets.push({ kind: 'category-prev', id: 'category', row: 0, startCol: arrowStart + prev, endCol: arrowStart + prev + 1 })
-        targets.push({ kind: 'category-next', id: 'category', row: 0, startCol: arrowStart + next, endCol: arrowStart + next + 1 })
-      }
-      return [composeEdge(left, color.textMuted(right), plan.width)]
-    }
-    const title = layout === 'narrow'
-      ? this.focus === 'categories'
-        ? 'SETTINGS · Categories'
-        : this.focus === 'rows'
-          ? `SETTINGS · ${CATEGORY_LABELS[this.categoryId]} · Rows`
-          : `SETTINGS · ${CATEGORY_LABELS[this.categoryId]} / ${row?.label ?? '—'}`
-      : `SETTINGS · ${CATEGORY_LABELS[this.categoryId]}`
+    const breadcrumb = this.focus === 'categories'
+      ? 'Categories'
+      : this.focus === 'rows'
+        ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
+        : `${CATEGORY_LABELS[this.categoryId]} / ${row?.label ?? '—'}`
+    const title = `SETTINGS · ${breadcrumb}`
     const lead = `${color.primary('SETTINGS')}${color.textMuted(title.slice('SETTINGS'.length))}`
+    const right = plan.layout === 'wide' ? 'Read-only preview' : 'Read-only'
     return [composeEdge(lead, color.textMuted(right), plan.width)]
   }
 
@@ -434,18 +419,39 @@ export class SettingsWorkspacePanel implements Component {
     return this.renderColumnBody(plan, bodyTop, targets, panes)
   }
 
+  /** The panes the CURRENT navigation level projects at this width: wide paints
+   *  all three, medium paints the current level's list plus its adjacent pane,
+   *  narrow paints the current level alone. Hidden panes are neither painted nor
+   *  addressable, and no second "visible window" state is stored. */
+  private visiblePaneLayout(plan: SettingsChromePlan): readonly PaneLayout[] {
+    if (plan.layout === 'wide') {
+      const rowsX = WIDE_CATEGORY_WIDTH + COLUMN_GAP
+      const detailX = rowsX + WIDE_ROWS_WIDTH + COLUMN_GAP
+      return [
+        { page: 'categories', x: 0, width: WIDE_CATEGORY_WIDTH },
+        { page: 'rows', x: rowsX, width: WIDE_ROWS_WIDTH },
+        { page: 'detail', x: detailX, width: Math.max(1, plan.width - detailX) },
+      ]
+    }
+    // Medium L0 is `categories | rows`; L1/L2 are `rows | detail`. The leading
+    // pane therefore has a different width per level, and every row line is laid
+    // out against the pane it is REALLY painted in.
+    const lead: PaneLayout = this.focus === 'categories'
+      ? { page: 'categories', x: 0, width: MEDIUM_CATEGORY_WIDTH }
+      : { page: 'rows', x: 0, width: MEDIUM_ROWS_WIDTH }
+    const trailX = lead.width + COLUMN_GAP
+    const trail: PaneLayout = this.focus === 'categories'
+      ? { page: 'rows', x: trailX, width: Math.max(1, plan.width - trailX) }
+      : { page: 'detail', x: trailX, width: Math.max(1, plan.width - trailX) }
+    return [lead, trail]
+  }
+
   private renderColumnBody(
     plan: SettingsChromePlan,
     bodyTop: number,
     targets: HitTarget[],
     panes: PaneBoxes,
   ): string[] {
-    const wide = plan.layout === 'wide'
-    const categoryWidth = wide ? WIDE_CATEGORY_WIDTH : 0
-    const rowsWidth = wide ? WIDE_ROWS_WIDTH : MEDIUM_ROWS_WIDTH
-    const rowsX = wide ? categoryWidth + COLUMN_GAP : 0
-    const detailX = rowsX + rowsWidth + COLUMN_GAP
-    const detailWidth = Math.max(1, plan.width - detailX)
     // The shared pane-header line is a grant of its own: below two body rows it
     // would consume the ONLY body row, so the real content wins and the header
     // is dropped (the Action Bar still names the current pane).
@@ -453,94 +459,96 @@ export class SettingsWorkspacePanel implements Component {
     const contentTop = bodyTop + (showPaneHeader ? 1 : 0)
     const contentRows = Math.max(0, plan.bodyRows - (showPaneHeader ? 1 : 0))
     this.paintedViewport = Math.max(1, contentRows)
+    const layout = this.visiblePaneLayout(plan)
 
-    const rows = this.currentRows()
-    const selectedRowIndex = this.indexOfRow(rows)
-    if (selectedRowIndex !== this.lastRowIndex || contentRows !== this.lastRowViewport) {
-      this.rowOffset = rebaseOffset(this.rowOffset, selectedRowIndex, rows.length, contentRows)
-      this.lastRowIndex = selectedRowIndex
-      this.lastRowViewport = contentRows
-    } else {
-      this.rowOffset = clampOffset(this.rowOffset, rows.length, contentRows)
-    }
-    if (wide) {
-      const selectedCategoryIndex = CATEGORY_ORDER.indexOf(this.categoryId)
-      if (selectedCategoryIndex !== this.lastCategoryIndex || contentRows !== this.lastCategoryViewport) {
-        this.categoryOffset = rebaseOffset(this.categoryOffset, selectedCategoryIndex, CATEGORY_ORDER.length, contentRows)
-        this.lastCategoryIndex = selectedCategoryIndex
-        this.lastCategoryViewport = contentRows
-      } else {
-        this.categoryOffset = clampOffset(this.categoryOffset, CATEGORY_ORDER.length, contentRows)
-      }
-    }
-    const categories = wide
-      ? CATEGORY_ORDER.slice(this.categoryOffset, this.categoryOffset + contentRows)
-      : []
-
-    const detail = this.detailLines(detailWidth, contentRows)
-    const out: string[] = []
-    if (showPaneHeader) {
-      let head = ''
-      if (wide) {
-        head += fit(this.paneHeader('CATEGORIES', CATEGORY_ORDER.length, this.focus === 'categories'), categoryWidth)
-          + ' '.repeat(COLUMN_GAP)
-      }
-      head += fit(this.paneHeader('SETTINGS', rows.length, this.focus === 'rows'), rowsWidth) + ' '.repeat(COLUMN_GAP)
-      head += fit(this.paneHeader('DETAILS', undefined, this.focus === 'detail'), detailWidth)
-      out.push(head)
-    }
-
-    // Real item targets precede the pane fallback so a click resolves to the row.
+    // ONLY the visible panes are projected: a hidden pane can never publish a
+    // hit target, own the wheel or rebase a scroll it is not showing.
+    const paneLines = new Map<SettingsWorkspacePage, readonly string[]>()
     const itemHits: HitTarget[] = []
-    if (wide) {
-      panes.categories = {
-        x: 0,
-        width: categoryWidth,
-        contentTop,
-        contentRows,
-        maxOffset: Math.max(0, CATEGORY_ORDER.length - contentRows),
+    let detailProjection: DetailProjection | undefined
+    for (const pane of layout) {
+      if (pane.page === 'categories') {
+        const selected = CATEGORY_ORDER.indexOf(this.categoryId)
+        if (selected !== this.lastCategoryIndex || contentRows !== this.lastCategoryViewport) {
+          this.categoryOffset = rebaseOffset(this.categoryOffset, selected, CATEGORY_ORDER.length, contentRows)
+          this.lastCategoryIndex = selected
+          this.lastCategoryViewport = contentRows
+        } else {
+          this.categoryOffset = clampOffset(this.categoryOffset, CATEGORY_ORDER.length, contentRows)
+        }
+        const visible = CATEGORY_ORDER.slice(this.categoryOffset, this.categoryOffset + contentRows)
+        for (let i = 0; i < visible.length; i += 1) {
+          itemHits.push({ kind: 'category', id: visible[i]!, row: contentTop + i, startCol: pane.x, endCol: pane.x + pane.width })
+        }
+        paneLines.set('categories', visible.map(id => this.categoryLine(id)))
+        continue
       }
-      for (let i = 0; i < categories.length; i += 1) {
-        itemHits.push({ kind: 'category', id: categories[i]!, row: contentTop + i, startCol: 0, endCol: categoryWidth })
+      if (pane.page === 'rows') {
+        const rows = this.currentRows()
+        const selected = this.indexOfRow(rows)
+        if (selected !== this.lastRowIndex || contentRows !== this.lastRowViewport) {
+          this.rowOffset = rebaseOffset(this.rowOffset, selected, rows.length, contentRows)
+          this.lastRowIndex = selected
+          this.lastRowViewport = contentRows
+        } else {
+          this.rowOffset = clampOffset(this.rowOffset, rows.length, contentRows)
+        }
+        const visible = rows.slice(this.rowOffset, this.rowOffset + contentRows)
+        for (let i = 0; i < visible.length; i += 1) {
+          const row = visible[i]!
+          itemHits.push({ kind: 'row', id: row.id, row: contentTop + i, startCol: pane.x, endCol: pane.x + pane.width })
+        }
+        // The summary truncates against the pane width this list is ACTUALLY
+        // painted in; medium L0 and L1 give the same list different widths.
+        paneLines.set('rows', visible.map(row => this.rowLine(row, pane.width)))
+        continue
       }
+      const detail = this.detailLines(pane.width, contentRows)
+      detailProjection = detail
+      if (detail.button !== undefined) {
+        itemHits.push({
+          kind: detail.button.kind,
+          id: this.rowId,
+          row: contentTop + Math.max(0, contentRows - 1),
+          startCol: pane.x,
+          endCol: pane.x + visibleWidth(detail.button.text),
+        })
+      }
+      paneLines.set('detail', detail.lines)
     }
-    panes.rows = { x: rowsX, width: rowsWidth, contentTop, contentRows, maxOffset: Math.max(0, rows.length - contentRows) }
-    for (let i = 0; i < rows.length - this.rowOffset && i < contentRows; i += 1) {
-      const row = rows[this.rowOffset + i]
-      if (row === undefined) break
-      itemHits.push({ kind: 'row', id: row.id, row: contentTop + i, startCol: rowsX, endCol: rowsX + rowsWidth })
+
+    for (const pane of layout) {
+      let maxOffset = Math.max(0, CATEGORY_ORDER.length - contentRows)
+      if (pane.page === 'rows') maxOffset = Math.max(0, this.currentRows().length - contentRows)
+      else if (pane.page === 'detail') {
+        maxOffset = detailProjection === undefined ? 0 : Math.max(0, detailProjection.content.length - detailProjection.viewport)
+      }
+      panes[pane.page] = { x: pane.x, width: pane.width, contentTop, contentRows, maxOffset }
     }
-    panes.detail = {
-      x: detailX,
-      width: detailWidth,
-      contentTop,
-      contentRows,
-      maxOffset: Math.max(0, detail.content.length - detail.viewport),
-    }
-    if (detail.button !== undefined) {
-      itemHits.push({
-        kind: detail.button.kind,
-        id: this.rowId,
-        row: contentTop + Math.max(0, contentRows - 1),
-        startCol: detailX,
-        endCol: detailX + visibleWidth(detail.button.text),
-      })
-    }
+    // Real item targets precede the pane fallback so a click resolves to the row.
     targets.push(...itemHits)
     // The pane fallback must cover the pane's WHOLE painted area (every content
-    // row), so a click anywhere in a column can take that column's focus.
-    for (let i = 0; i < contentRows; i += 1) {
-      targets.push({ kind: 'pane', id: 'rows', row: contentTop + i, startCol: rowsX, endCol: rowsX + rowsWidth })
-      targets.push({ kind: 'pane', id: 'detail', row: contentTop + i, startCol: detailX, endCol: detailX + detailWidth })
-      if (wide) targets.push({ kind: 'pane', id: 'categories', row: contentTop + i, startCol: 0, endCol: categoryWidth })
+    // row), so a click anywhere in a visible column can take that column's focus.
+    for (const pane of layout) {
+      for (let i = 0; i < contentRows; i += 1) {
+        targets.push({ kind: 'pane', id: pane.page, row: contentTop + i, startCol: pane.x, endCol: pane.x + pane.width })
+      }
     }
 
+    const out: string[] = []
+    if (showPaneHeader) {
+      const head = layout.map((pane) => {
+        const title = pane.page === 'categories'
+          ? `CATEGORIES (${CATEGORY_ORDER.length})`
+          : pane.page === 'rows'
+            ? `SETTINGS (${this.currentRows().length})`
+            : 'DETAILS'
+        return fit(this.paneHeader(title, this.focus === pane.page), pane.width)
+      })
+      out.push(head.join(' '.repeat(COLUMN_GAP)))
+    }
     for (let i = 0; i < contentRows; i += 1) {
-      let line = ''
-      if (wide) line += fit(this.categoryLine(categories[i]), categoryWidth) + ' '.repeat(COLUMN_GAP)
-      line += fit(this.rowLine(rows[this.rowOffset + i]), rowsWidth) + ' '.repeat(COLUMN_GAP)
-      line += fit(detail.lines[i] ?? '', detailWidth)
-      out.push(line)
+      out.push(layout.map(pane => fit((paneLines.get(pane.page) ?? [])[i] ?? '', pane.width)).join(' '.repeat(COLUMN_GAP)))
     }
     return out
   }
@@ -588,7 +596,7 @@ export class SettingsWorkspacePanel implements Component {
       for (let i = 0; i < visible.length; i += 1) {
         const row = visible[i]!
         targets.push({ kind: 'row', id: row.id, row: bodyTop + i, startCol: 0, endCol: width })
-        out.push(fit(this.rowLine(row), width))
+        out.push(fit(this.rowLine(row, width), width))
       }
       return padBody(out, viewport, width)
     }
@@ -607,8 +615,7 @@ export class SettingsWorkspacePanel implements Component {
     return out
   }
 
-  private paneHeader(label: string, count: number | undefined, focused: boolean): string {
-    const text = count === undefined ? label : `${label} (${count})`
+  private paneHeader(text: string, focused: boolean): string {
     const marked = focused ? `[${text}]` : text
     return focused ? color.borderFocus(marked) : color.textMuted(marked)
   }
@@ -621,11 +628,10 @@ export class SettingsWorkspacePanel implements Component {
     return selected ? color.textStrong(text) : color.text(text)
   }
 
-  private rowLine(row: SettingsWorkspaceRow | undefined): string {
+  private rowLine(row: SettingsWorkspaceRow | undefined, width: number): string {
     if (row === undefined) return ''
     const selected = row.id === this.rowId
     const marker = selected ? '> ' : '  '
-    const width = this.paneRowWidth()
     // The configured NAME is measured UNPADDED and owns its cells first (the
     // frozen hierarchy: the name stays identifiable, the list SUMMARY is what
     // truncates). Only a name that alone fills the pane drops the summary; the
@@ -639,14 +645,6 @@ export class SettingsWorkspacePanel implements Component {
     const gap = Math.max(1, width - leadCells - visibleWidth(value))
     const painted = lead + ' '.repeat(gap) + value
     return selected ? color.textStrong(painted) : color.text(painted)
-  }
-
-  private paneRowWidth(): number {
-    const chrome = this.chrome
-    if (chrome === undefined) return MEDIUM_ROWS_WIDTH
-    if (chrome.layout === 'wide') return WIDE_ROWS_WIDTH
-    if (chrome.layout === 'medium') return MEDIUM_ROWS_WIDTH
-    return chrome.width
   }
 
   /** The detail pane projection: scrollable content plus the pinned action row. */
@@ -706,36 +704,20 @@ export class SettingsWorkspacePanel implements Component {
 
   private renderActionBar(plan: SettingsChromePlan): string {
     const copyable = this.selectedRow()?.value !== undefined
-    // Below the body floor every navigation/clipboard action is refused, so the
-    // bar must advertise ONLY the Esc/back semantics it really honours.
-    if (this.bodyFloor() < 1) {
-      const back = plan.layout === 'narrow'
-        ? this.focus === 'detail' ? 'Esc rows' : this.focus === 'rows' ? 'Esc categories' : 'Esc close'
-        : 'Esc close'
-      return fit(color.textDim(back), plan.width)
-    }
+    // The ONE Esc semantics of the unified hierarchy: L0 closes, every inner
+    // level steps back. Below the body floor every navigation/clipboard action is
+    // refused, so only this Esc/back hint is still honest.
+    const back = this.focus === 'categories' ? 'Esc close' : 'Esc back'
+    if (this.bodyFloor() < 1) return fit(color.textDim(back), plan.width)
     let hints: string
-    if (plan.layout === 'wide') {
-      // Each focus owner advertises exactly the keys it honours: `C` and `←→
-      // category` are inert outside their owner, and Enter inspects (never
-      // opens) on the row list.
-      hints = this.focus === 'categories'
-        ? 'Esc close | Tab next pane | ↑↓ choose | Enter open'
-        : this.focus === 'rows'
-          ? 'Esc close | Tab next pane | ↑↓ choose | Enter inspect | R refresh'
-          : `Esc close | Tab pane | ↑↓/PgDn scroll | ${copyable ? 'C copy value' : 'PgUp/PgDn scroll'}`
-    } else if (plan.layout === 'medium') {
-      hints = this.focus === 'categories'
-        ? 'Esc close | ←→ category | ↑↓ select | Tab pane'
-        : this.focus === 'rows'
-          ? 'Esc close | Tab pane | ↑↓ select | Enter inspect | R refresh'
-          : `Esc close | Tab pane | ↑↓/PgDn scroll | ${copyable ? 'C copy value' : 'PgUp/PgDn scroll'}`
-    } else if (this.focus === 'categories') {
-      hints = 'Esc close | ↑↓ select | Enter open'
+    if (this.focus === 'categories') {
+      hints = `${back} | ↑↓ select | Enter open`
     } else if (this.focus === 'rows') {
-      hints = 'Esc categories | ↑↓ select | Enter details'
+      hints = `${back} | ↑↓ select | Enter details | R refresh`
     } else {
-      hints = copyable ? 'Esc rows | ↑↓/Pg keys scroll | C copy value' : 'Esc rows | ↑↓/Pg keys scroll'
+      hints = copyable
+        ? `${back} | ↑↓/Pg keys scroll | R refresh | C copy value`
+        : `${back} | ↑↓/Pg keys scroll | R refresh`
     }
     return fit(color.textDim(hints), plan.width)
   }
@@ -807,22 +789,16 @@ export class SettingsWorkspacePanel implements Component {
     // the LIVE height — a key may arrive BEFORE the first paint, and reading the
     // last render's plan would then swallow it.
     if (this.bodyFloor() < 1) return
-    // Tab/Shift+Tab cycle the keyboard FOCUS OWNER, which only exists in the
-    // wide/medium projection. In the narrow single-column projection the three
-    // values are PAGE LEVELS, so the documented Enter/Esc drill-down is the ONLY
-    // navigation — Tab must never jump Categories -> Detail past Rows (§4.3/§5).
-    if (this.currentLayout() !== 'narrow') {
-      if (matchesKey(data, 'tab')) return this.cycleFocus(1)
-      if (matchesKey(data, 'shift+tab')) return this.cycleFocus(-1)
-    }
+    // The level is the ONLY navigation state: `↑↓` act on the current level and
+    // `Enter` advances one level. `Tab`/`Shift+Tab` and `←`/`→` are deliberately
+    // ignored — no focus cycle and no category switch — so they can neither
+    // change the level nor reach the hidden editor.
     if (matchesKey(data, 'up')) return this.move(-1)
     if (matchesKey(data, 'down')) return this.move(1)
     if (matchesKey(data, 'pageUp')) return this.page(-1)
     if (matchesKey(data, 'pageDown')) return this.page(1)
     if (matchesKey(data, 'home')) return this.jump(-1)
     if (matchesKey(data, 'end')) return this.jump(1)
-    if (matchesKey(data, 'left')) return this.horizontal(-1)
-    if (matchesKey(data, 'right')) return this.horizontal(1)
     if (matchesKey(data, 'enter')) return this.confirm()
     if (data === 'r' || data === 'R') return this.refresh()
     if (data === 'c' || data === 'C') return this.copy()
@@ -830,29 +806,23 @@ export class SettingsWorkspacePanel implements Component {
     // hidden editor, transcript or a host composer action.
   }
 
+  /** Esc/Backspace: step one level back in EVERY layout; only L0 closes. The
+   *  frame before the first paint resolves the same way, because the level (not
+   *  the projection) is the state. */
   private goBack(): void {
-    if (this.currentLayout() === 'narrow') {
-      if (this.focus === 'detail') {
-        this.focus = 'rows'
-        this.bumpRevision()
-        this.intents.requestRender()
-        return
-      }
-      if (this.focus === 'rows') {
-        this.focus = 'categories'
-        this.bumpRevision()
-        this.intents.requestRender()
-        return
-      }
+    if (this.focus === 'detail') {
+      this.focus = 'rows'
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
+    if (this.focus === 'rows') {
+      this.focus = 'categories'
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
     }
     this.intents.onClose()
-  }
-
-  private cycleFocus(direction: 1 | -1): void {
-    const index = FOCUS_ORDER.indexOf(this.focus)
-    this.focus = FOCUS_ORDER[(index + direction + FOCUS_ORDER.length) % FOCUS_ORDER.length]!
-    this.bumpRevision()
-    this.intents.requestRender()
   }
 
   private move(delta: number): void {
@@ -881,14 +851,6 @@ export class SettingsWorkspacePanel implements Component {
     const rows = this.currentRows()
     if (rows.length === 0) return
     this.selectRow(rows[direction < 0 ? 0 : rows.length - 1]!.id)
-  }
-
-  private horizontal(direction: 1 | -1): void {
-    // ←/→ is the MEDIUM header category control (§5): wide switches categories
-    // with ↑↓/Enter, and the narrow projection uses the per-level Enter/Esc
-    // drill-down — its categories page keeps ↑↓ + Enter only.
-    if (this.currentLayout() !== 'medium' || this.focus !== 'categories') return
-    this.moveCategory(direction)
   }
 
   private moveCategory(delta: number): void {
@@ -1021,23 +983,21 @@ export class SettingsWorkspacePanel implements Component {
   private activate(target: HitTarget): void {
     switch (target.kind) {
       case 'category':
-        this.selectCategory(target.id as SettingsWorkspaceCategoryId)
         // A real item click takes ITS column's keyboard focus (the §5
-        // "click the corresponding column" contract); in the narrow
-        // single-column projection the same click is the drill-down gesture
-        // (the same step as Enter).
-        this.takeColumnFocus(this.currentLayout() === 'narrow' ? 'rows' : 'categories')
+        // "click the corresponding column" contract) and selects the item; only
+        // Enter advances the level, so a single click never opens the detail.
+        this.selectCategory(target.id as SettingsWorkspaceCategoryId)
+        this.takeColumnFocus('categories')
         return
       case 'row': {
         this.selectRow(target.id as SettingsWorkspaceRowId)
         // The row's `open-legacy` action is the ONE navigation verb (never an
-        // edit); in narrow the click continues into the Detail level, while
-        // wide/medium keep the row list as the keyboard owner.
+        // edit) and the painted row IS its target, exactly like Enter.
         if (this.selectedRow()?.action === 'open-legacy') {
           this.intents.onOpenLegacy()
           return
         }
-        this.takeColumnFocus(this.currentLayout() === 'narrow' ? 'detail' : 'rows')
+        this.takeColumnFocus('rows')
         return
       }
       case 'copy':
@@ -1047,16 +1007,6 @@ export class SettingsWorkspacePanel implements Component {
       case 'legacy':
         this.takeColumnFocus('detail')
         this.intents.onOpenLegacy()
-        return
-      case 'category-prev':
-        // The header arrows ARE the medium category control: like every other
-        // real item, they take their column's keyboard focus before acting.
-        this.takeColumnFocus('categories')
-        this.moveCategory(-1)
-        return
-      case 'category-next':
-        this.takeColumnFocus('categories')
-        this.moveCategory(1)
         return
       case 'pane':
         this.takeColumnFocus(target.id as SettingsWorkspacePage)

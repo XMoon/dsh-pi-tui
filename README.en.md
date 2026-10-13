@@ -339,11 +339,14 @@ Common entry points:
 
 Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics.
 
-`/settings` opens a real full-screen workspace: three columns on wide terminals
-(categories / settings rows / details), two columns on medium ones, and a
-single-column `categories → rows → detail` drill-down on narrow ones (`Enter`
-descends, `Esc` steps back one level, and the Action Bar stays pinned to the last
-physical row). It presents the real Appearance / Display facts read-only: the
+`/settings` opens a real full-screen workspace where the three-, two- and
+single-column layouts are projections of the SAME `categories → rows → detail`
+levels: wide terminals show all three columns, medium ones show
+`categories + rows` or `rows + details` for the current level, and narrow ones
+show only the current level. At every width `Enter` descends, `Esc` (`Backspace`
+too) steps back one level, and only `Esc` at the outermost level closes the
+workspace; `Tab` and `←`/`→` are not navigation keys. The Action Bar stays pinned
+to the last physical row. It presents the real Appearance / Display facts read-only: the
 theme's source-qualified raw value plus its friendly name, Icon style, the live
 Transcript display preset alongside the persisted preference last read, the live
 Thinking detail state, and each row's configuration Scope and backend readiness.

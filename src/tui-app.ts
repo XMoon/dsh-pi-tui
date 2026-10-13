@@ -146,7 +146,6 @@ import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
 import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
 import {
   SettingsWorkspacePanel,
-  settingsWorkspaceInitialFocus,
   type SettingsWorkspaceSource,
 } from './tui/panels/settings-workspace-panel.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
@@ -20530,15 +20529,14 @@ export class TuiApp {
           },
         })
       },
-    }, settingsWorkspaceInitialFocus(this.terminal.columns))
+    })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
-      // The header's category arrows, the row cells and the Detail's Copy button
-      // are plain painted cells (no mouse-handling component), so their same-cell
-      // press/click arrives here and the panel re-proves the press-time painted
-      // identity before acting.
+      // The row cells and the Detail's Copy button are plain painted cells (no
+      // mouse-handling component), so their same-cell press/click arrives here
+      // and the panel re-proves the press-time painted identity before acting.
       onCellPress: (x, y) => panel.onCellPress(x, y),
       onCellClick: (x, y) => panel.onCellClick(x, y),
     })

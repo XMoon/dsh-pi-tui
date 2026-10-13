@@ -299,8 +299,11 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。
 
-`/settings` 打开一个真正的全屏工作区：宽屏三栏（分类 / 设置行 / 详情）、中屏两栏、
-窄屏单栏逐级下钻（`Enter` 进入下一级、`Esc` 逐级返回，底部操作栏始终固定在最后一行）。
+`/settings` 打开一个真正的全屏工作区，三栏 / 两栏 / 单栏只是同一套
+`分类 → 设置行 → 详情` 三层的投影：宽屏同时显示三栏，中屏按当前层显示
+`分类 + 设置行` 或 `设置行 + 详情`，窄屏只显示当前层。所有宽度上 `Enter` 进入下一级、
+`Esc`（`Backspace` 同义）逐级返回，只有最外层 `Esc` 才关闭工作区；`Tab` 与 `←`/`→`
+不承担导航，底部操作栏始终固定在最后一行。
 它只读地展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好
 名称、Icon style、Transcript display 的运行时当前值与上次读到的持久偏好、Thinking
 detail 的当前运行态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、
