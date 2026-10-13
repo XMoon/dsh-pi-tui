@@ -21053,7 +21053,9 @@ export class TuiApp {
     // A newer DELIBERATE selection owns the surface: the runtime owner's intent
     // outranks this answer whatever guard the caller passed, because the persisted
     // document can still read `auto` while an explicit choice's write is in flight.
-    if (!this.themeFollowsTerminal()) return
+    // NO recorded intent keeps the documented default (a direct caller's answer
+    // applies) — `themeIntent` is only ever written by a real selection.
+    if (this.themeIntent !== undefined && !this.themeFollowsTerminal()) return
     const guard = this.autoDetectGuard
     const apply = (): boolean => guard === undefined || guard()
     const rgb = background
