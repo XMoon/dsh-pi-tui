@@ -478,3 +478,54 @@ test('A0 cancellation: a pointer press does not survive a Question park/restore 
   assert.equal(h.app.getDraft(), '', 'a gesture taken before the park must never accept after it')
   assert.ok(rowOf(h.vt, 'Input history') >= 0, 'the restored seat stays open')
 })
+
+test('A0 fullscreen mouse: a right or middle SGR button can never select, drag or activate', async () => {
+  const h = startApp([
+    row('alpha prompt', 3, '/work/a', 'id-a'),
+    row('beta prompt', 2, '/work/a', 'id-b'),
+  ])
+  await openFullscreenHistory(h)
+  const alphaRow = rowOf(h.vt, 'alpha prompt')
+  const betaRow = rowOf(h.vt, 'beta prompt')
+  const actionRow = rowOf(h.vt, '[Use selected]')
+  assert.ok(alphaRow >= 0 && betaRow >= 0 && actionRow >= 0,
+    `the frame must paint results and actions:\n${view(h.vt)}`)
+  const marker = (): string => rawView(h.vt).find(line => line.includes('›')) ?? ''
+  const markerBefore = marker()
+  assert.ok(markerBefore.includes('alpha prompt'), 'the first result is selected')
+  // SGR button codes: 1 = middle, 2 = right (lowercase `m` = release).
+  for (const button of [1, 2] as const) {
+    h.vt.sendInput(`\x1b[<${button};5;${betaRow + 1}M`)
+    h.vt.sendInput(`\x1b[<${button};5;${betaRow + 1}m`)
+    h.vt.sendInput(`\x1b[<${button};5;${actionRow + 1}M`)
+    h.vt.sendInput(`\x1b[<${button};5;${actionRow + 1}m`)
+    await h.vt.waitForRender()
+    await flush(2)
+    assert.equal(marker(), markerBefore, `button ${button} must not move the result selection`)
+    assert.equal(h.app.getDraft(), '', `button ${button} must never accept`)
+    assert.ok(rowOf(h.vt, 'Input history') >= 0, `button ${button} must not close the seat`)
+  }
+  // The LEFT button is unaffected in the same frame.
+  const betaCol = colOf(h.vt, betaRow, 'beta')
+  press(h.vt, betaRow, betaCol + 1)
+  release(h.vt, betaRow, betaCol + 1)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(marker().includes('beta prompt'), 'the left button still selects')
+})
+
+test('A0 fullscreen mouse: the drag copies through the RELEASE cell, not the last motion cell', async () => {
+  const h = startApp([row('abc\ndefghij', 1, '/work/a', 'p1')])
+  await openFullscreenHistory(h)
+  const headingRow = rowOf(h.vt, 'Preview ')
+  const firstRow = headingRow + 1
+  assert.ok(headingRow >= 0, `the Preview heading must paint:\n${view(h.vt)}`)
+  // press (row 0, col 0) → drag (row 1, col 1) → release (row 1, col 3).
+  press(h.vt, firstRow, 0)
+  drag(h.vt, firstRow + 1, 1)
+  release(h.vt, firstRow + 1, 3)
+  await h.vt.waitForRender()
+  await flush(4)
+  assert.deepEqual(h.copied, ['abc\ndefg'],
+    'the release position finalizes the copied range (through the released cell)')
+})

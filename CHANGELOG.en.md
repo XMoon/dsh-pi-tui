@@ -24,11 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode and any unexpanded paste content exactly as they were. The session identity
   is captured when the seat opens; after a session switch it neither accepts nor
   copies the previous session's content, and a search that resolves for that
-  previous session is not shown as a current result. The mouse is Fullscreen-only: clicking a
-  result only selects it, the wheel scrolls only the region under the pointer, and a
-  Preview drag copies an exact fragment of the original text (a drag that leaves the
-  preview, or a window-width change mid-drag, cancels instead of copying); the regular
-  main screen
+  previous session is not shown as a current result. A window resize keeps the Preview on
+  the same passage of the original text. The mouse is Fullscreen-only and left-button only:
+  clicking a result only selects it, the wheel scrolls only the region under the pointer,
+  and a Preview drag copies an exact fragment of the original text, ending at the released
+  cell (a drag that leaves the preview, or a window-width change mid-drag, cancels instead
+  of copying); the regular main screen
   stays keyboard-only and the terminal's own selection and scrollback are untouched.
 - `/settings` now opens a dedicated full-screen settings workspace in which two
   rows — `Configured theme` and `Transcript display` — can really be changed. Wide

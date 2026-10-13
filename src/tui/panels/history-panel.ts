@@ -52,6 +52,7 @@ import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import {
   buildSourceTextVisualLayout,
+  sourceTextPointOffset,
   sourceTextRowSelectionColumns,
   sourceTextSelectionRange,
   type SourceTextVisualLayout,
@@ -362,6 +363,19 @@ export function formatRelativeAge(ts: number, now: number = Date.now()): string 
   return `${Math.floor(months / 12)}y`
 }
 
+/** The visual row that PAINTS the given source offset, so a re-wrap can put the
+ *  reader back on the same text: the first row whose hard-break end reaches past
+ *  the offset (a row boundary therefore belongs to the NEXT row — the text that
+ *  starts there). */
+function previewRowAtOffset(layout: SourceTextVisualLayout, offset: number): number {
+  const rows = layout.rows
+  if (rows.length === 0) return 0
+  for (let row = 0; row < rows.length; row += 1) {
+    if (offset < rows[row]!.hardBreakEnd) return row
+  }
+  return rows.length - 1
+}
+
 /** Truncate one plain line to the frame width (styles are applied AFTER the
  *  clamp, so a clipped line can never leak an open escape sequence). */
 function clampLine(text: string, width: number): string {
@@ -400,8 +414,17 @@ export class HistoryPanel implements Component, Focusable {
   private frame: HistoryMouseFrame | undefined
   /** The pressed pointer gesture, valid only until its release/click. */
   private gesture: HistoryPointerGesture | undefined
-  /** The Preview scroll position: the source VISUAL row painted first. */
+  /** The Preview scroll position: the source VISUAL row painted first. It is
+   *  DERIVED from {@link previewAnchorOffset} at every width, never treated as
+   *  the authority across a rewrap. */
   private previewTop = 0
+  /** The resize ANCHOR: the source UTF-16 offset of the first painted source
+   *  row. A narrower/wider terminal re-wraps the source, and the reader must
+   *  stay on the same TEXT, not on the same visual row number. */
+  private previewAnchorOffset = 0
+  /** The width {@link previewTop} / {@link previewAnchorOffset} were resolved
+   *  at (0 = no Preview laid out yet). */
+  private previewAnchorWidth = 0
   /** The result identity the current Preview anchor belongs to: a NEW selected
    *  result starts at the top, a repaint of the SAME one keeps the anchor. */
   private previewResultId: string | undefined
@@ -571,6 +594,15 @@ export class HistoryPanel implements Component, Focusable {
     // a click must never act on another session's page, and the fork keeps
     // dispatching to the component until the next revalidation retires it.
     if (this.disposed || !this.pointerEnabled() || !this.tenantIsCurrent()) return undefined
+    // Only the LEFT button may start, extend or finish a History gesture: a
+    // right or middle press must fall through to the terminal's own handling
+    // (e.g. the Windows right-click paste path) and can never select a result,
+    // start a Preview drag or activate `[Use selected]`. A drag/release that
+    // carries no button code is the legacy SGR spelling of a left gesture and
+    // stays valid.
+    const leftButton = event.button === 'left'
+      || (event.button === 'none' && (event.type === 'drag' || event.type === 'release'))
+    if (event.type !== 'wheel' && !leftButton) return undefined
     // A Preview drag's RELEASE always ends the gesture, whatever geometry the
     // event carries: a release that lands outside the painted Preview (or after a
     // width/height change) safely CANCELS instead of leaving a stale anchor that
@@ -671,10 +703,13 @@ export class HistoryPanel implements Component, Focusable {
    * recomputes it) — but ONLY when the release really landed inside the painted
    * Preview of the SAME last-painted frame — the same width, the same height AND
    * the same search generation: a query that committed (or a repaint) while the
-   * drag was live re-anchors the page, so its release is stale. Any other release
-   * — outside the painted rows, on another painted region, against a frame whose
-   * size moved, or across an async repaint — safely CANCELS the gesture: nothing
-   * is copied and no selection survives (plan §5.2 step 5 / §6 H3A-09).
+   * drag was live re-anchors the page, so its release is stale. The RELEASE
+   * position is the gesture's FINAL endpoint (a terminal may deliver the last
+   * motion and the release as one event), exactly like the Job Command page.
+   * Any other release — outside the painted rows, on another painted region,
+   * against a frame whose size moved, or across an async repaint — safely
+   * CANCELS the gesture: nothing is copied and no selection survives (plan §5.2
+   * step 5 / §6 H3A-09).
    */
   private finishPreviewDrag(event: TuiMouseEvent, gesture: HistoryPointerGesture): TuiMouseEventResult {
     this.gesture = undefined
@@ -691,6 +726,8 @@ export class HistoryPanel implements Component, Focusable {
       this.onResultsChanged?.()
       return { handled: true, render: true }
     }
+    // The release is the gesture's last point: resolve the range against it.
+    this.previewFocus = { row: hit.row, col: Math.max(0, event.x) }
     const range = this.previewSelectionRange()
     this.onResultsChanged?.()
     if (range === undefined) return { handled: true }
@@ -924,7 +961,15 @@ export class HistoryPanel implements Component, Focusable {
     const visual = this.previewLayoutAt(layout.width, selected?.content ?? '')
     const rows = visual.rows
     const maxTop = Math.max(0, rows.length - layout.previewRows)
+    if (this.previewAnchorWidth !== layout.width) {
+      // The wrap moved: re-derive the painted row from the SOURCE anchor so the
+      // reader keeps the same text on screen (a raw row number would land on a
+      // different passage).
+      this.previewTop = previewRowAtOffset(visual, this.previewAnchorOffset)
+      this.previewAnchorWidth = layout.width
+    }
     this.previewTop = Math.max(0, Math.min(this.previewTop, maxTop))
+    this.previewAnchorOffset = this.anchorOffsetOf(visual, this.previewTop)
     const range = this.previewSelectionRangeFor(visual)
 
     if (layout.previewHeading) {
@@ -1081,6 +1126,7 @@ export class HistoryPanel implements Component, Focusable {
     else if (matchesKey(data, 'alt+home')) this.previewTop = 0
     else this.previewTop = maxTop
     this.previewTop = Math.max(0, Math.min(this.previewTop, maxTop))
+    this.syncPreviewAnchor(layout.width, selected?.content ?? '')
     this.onResultsChanged?.()
   }
 
@@ -1091,6 +1137,7 @@ export class HistoryPanel implements Component, Focusable {
     if (id === this.previewResultId) return
     this.previewResultId = id
     this.previewTop = 0
+    this.previewAnchorOffset = 0
     this.resetPreviewSelection()
   }
 
@@ -1111,6 +1158,18 @@ export class HistoryPanel implements Component, Focusable {
     const focus = this.previewFocus
     if (anchor === undefined || focus === undefined) return undefined
     return sourceTextSelectionRange(visual, anchor, focus)
+  }
+
+  /** Re-anchor the Preview to its new first painted row after a scroll. */
+  private syncPreviewAnchor(width: number, content: string): void {
+    const visual = this.previewLayoutAt(width, content)
+    this.previewAnchorOffset = this.anchorOffsetOf(visual, this.previewTop)
+    this.previewAnchorWidth = width
+  }
+
+  /** The source offset of the first painted source row (the resize anchor). */
+  private anchorOffsetOf(visual: SourceTextVisualLayout, top: number): number {
+    return sourceTextPointOffset(visual, { row: top, col: 0 }, 'start') ?? 0
   }
 
   /** The cached Preview layout at one width: rebuilt only when the selected
@@ -1159,6 +1218,7 @@ export class HistoryPanel implements Component, Focusable {
     const rows = this.previewLayoutAt(layout.width, content).rows.length
     const maxTop = Math.max(0, rows - layout.previewRows)
     this.previewTop = Math.max(0, Math.min(this.previewTop + delta, maxTop))
+    this.syncPreviewAnchor(layout.width, content)
     return { handled: true, render: true }
   }
 
