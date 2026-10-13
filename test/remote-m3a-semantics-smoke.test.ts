@@ -20,7 +20,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
@@ -67,6 +67,8 @@ import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../src/app/re
 import { createRemoteBackendRuntime } from '../src/app/remote/runtime.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../src/runtime/remote/session-reference.ts'
 import { contextPressureOccupancy } from '../src/runtime/session-reader-port.ts'
+import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
+import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs } from '../src/runtime/direct/tui-settings-direct.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 
 const PRESET = 'm3a-smoke-preset'
@@ -100,6 +102,10 @@ async function createHostFixture(
      *  (service `settings`). OPT-IN so the fail-closed "no settings service"
      *  deployment contract stays testable. */
     readonly configPlane?: boolean
+    /** Expose the mounted `tui-app` row plugin's RESOLVED Config (its live
+     *  volatile references) on `globalThis.__m3aTuiRowConfig`, so a suite can build
+     *  the REAL production `DirectTuiSettings` over the real Host settings plane. */
+    readonly captureTuiRowConfig?: boolean
   } = {},
 ): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3a-')
@@ -191,7 +197,12 @@ async function createHostFixture(
         `import { Config } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/app/config/schema.ts')).href)}`,
         "export const name = 'm3b-tui-settings-row'",
         'export { Config }',
-        'export function apply() {}',
+        // The loader resolves `Config` and hands the RESOLVED object (with the live
+        // volatile references) to `apply`; the Direct settings proof asks for it so it
+        // can drive the production adapter against the real Host plane.
+        options.captureTuiRowConfig === true
+          ? 'export function apply(_ctx, config) { globalThis.__m3aTuiRowConfig = config }'
+          : 'export function apply() {}',
         '',
       ].join('\n'))
       // The production LAYOUT: a bundle declares the row and its base config,
@@ -367,17 +378,18 @@ interface Composed {
 
 /** The real Host + generated Client runtime, with no M3 semantic bundle yet. */
 /**
- * Mount the REAL `/settings` workspace whose settings port IS the assembled
- * Remote adapter. Mirrors the L6 visual harness shape (a sessionless surface and
- * a Proxy runner for the capabilities this command factory never touches), with
- * the ONE substitution the Remote case cannot avoid: the port comes from the
- * real wire assembly rather than a document object.
+ * Mount the REAL `/settings` workspace whose settings port is the PRODUCTION
+ * `ConfigPort` of the deployment under test — the assembled Remote adapter for
+ * the wire case, the Direct port over the real Host settings plane for the local
+ * case. Mirrors the L6 visual harness shape (a sessionless surface and a Proxy
+ * runner for the capabilities this command factory never touches); the settings
+ * port is never a hand-rolled document object.
  */
-async function mountRemoteSettingsWorkspace(
+async function mountSettingsWorkspace(
   cwd: string,
   config: {
     readonly configReadiness: () => 'ready' | 'stale' | 'unavailable'
-    readonly tuiSettings: { get(): unknown; replace(doc: unknown): unknown } | undefined
+    readonly tuiSettings: unknown
     readonly footerCustomItems: unknown
     readonly permissions: unknown
     readonly subagentModelSelection: unknown
@@ -963,7 +975,7 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
   const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
   await reference.ready
   const config = assembled.backend.config
-  const fixture = await mountRemoteSettingsWorkspace(host.anchorDir, config)
+  const fixture = await mountSettingsWorkspace(host.anchorDir, config)
   try {
     assert.equal(config.configReadiness(), 'ready', 'the Remote mirror reached the Host settings plane')
     const tuiSettings = config.tuiSettings
@@ -983,16 +995,154 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
 
     assert.match(fixture.view(), /Status\s+Verified/, `the UI verified the commit:\n${fixture.view()}`)
     // The REAL Host document changed — the mirror's re-read is not the only witness.
-    const descriptor = (host.ctx as unknown as {
-      settings: { describe(): readonly { ns: string; value?: { displayPreset?: string } }[] }
-    }).settings.describe().find(entry => entry.ns === 'tui-app')
+    const hostDescriptor = (): { readonly ns: string; readonly value?: Record<string, unknown>; readonly user?: unknown } | undefined =>
+      (host.ctx as unknown as {
+        settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
+      }).settings.describe().find(entry => entry.ns === 'tui-app')
+    const descriptor = hostDescriptor()
     assert.equal(descriptor?.value?.displayPreset, 'compact', 'the Host authority carries the new preset')
+    // The USER layer owns exactly the written field — the whole document was not
+    // pinned by the merge (W-11 through the real Host).
+    const user = descriptor?.user as Record<string, unknown> | undefined
+    assert.equal(user?.displayPreset, 'compact', 'and only that field reached the USER layer')
+    assert.equal(user?.theme, undefined, 'no other field was pinned')
     assert.equal(tuiSettings.get().displayPreset, 'compact', 'and the authoritative Remote re-read agrees')
     assert.equal(config.configReadiness(), 'ready', 'the mirror stayed current through the write')
+
+    // ── the SAME chain must also REFUSE and must report accepted-but-unverified.
+    // The Host service is patched in place (the unbound originals are restored in the
+    // finally), so the failure really happens on the production read/write path.
+    const forms = (host.ctx as unknown as {
+      settings: {
+        describe(...args: never[]): unknown
+        mutate(...args: never[]): Promise<unknown>
+      }
+    }).settings
+    const originalDescribe = forms.describe
+    const originalMutate = forms.mutate
+    let failMutate = false
+    let failRefresh = false
+    forms.mutate = function (this: unknown, ...args: never[]): Promise<unknown> {
+      if (failMutate) {
+        failMutate = false
+        throw Object.assign(new Error('settings write refused (injected)'), { code: 'settings/rejected' })
+      }
+      const accepted = originalMutate.apply(this, args)
+      // Arm the authoritative refresh from the moment THIS write is ACCEPTED (the
+      // service's own pre-write reads are already done) and keep failing until the
+      // assertion has run: the post-settlement read — the adapter's own or the
+      // invalidation-triggered one — then really cannot complete.
+      void Promise.resolve(accepted).then(() => { failRefresh = true })
+      return accepted
+    }
+    forms.describe = function (this: unknown, ...args: never[]): unknown {
+      if (failRefresh) throw new Error('settings read unavailable (injected)')
+      return originalDescribe.apply(this, args)
+    }
+    /** Reopen the choice and step ONE candidate down (the display candidates are the
+     *  fixed `full, compact, focus` vocabulary and the choice starts on the persisted
+     *  one), then confirm. */
+    const chooseNextPreset = async (): Promise<void> => {
+      await fixture.key('\r')
+      assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose Transcript display/)
+      await fixture.key('\x1b[B')
+      assert.match(fixture.view(), /> focus/, `the highlighted candidate is the next preset:\n${fixture.view()}`)
+      await fixture.key('\r')
+      await fixture.settle()
+    }
+    try {
+      // A refused official mutate is a REFUSAL: the UI says so and the Host is intact.
+      failMutate = true
+      await chooseNextPreset()
+      const refusedFrame = fixture.view().replace(/\s+/gu, ' ')
+      assert.match(
+        refusedFrame,
+        /Not saved · the display preset is applied locally, but storing it failed: settings\.mutate\(tui-app\) failed: settings write refused \(injected\)/,
+        `a refused write is reported:\n${fixture.view()}`,
+      )
+      assert.equal(hostDescriptor()?.value?.displayPreset, 'compact', 'the refused write never reached the Host')
+
+      // An ACCEPTED write whose authoritative refresh cannot complete must never be
+      // called saved. The official settings service performs its own reads around the
+      // write, so an injected read failure may surface on the write itself (a
+      // refusal) or only on the post-settlement refresh (accepted-but-unverified) —
+      // both are honest, and the invariant under test is that NEITHER is ever
+      // reported as `Verified`. The `record` policy's one-chain adapter proof (an
+      // accepted mutate + a failed post-settlement describe that resolves, records
+      // `lastRefreshFailure()` and leaves the snapshot non-current) and the workspace's
+      // `Commit accepted · verification unavailable` classification are locked in
+      // `test/remote-config-port.test.ts` and `test/settings-workspace-visual.test.ts`.
+      await chooseNextPreset()
+      const afterFrame = fixture.view().replace(/\s+/gu, ' ')
+      assert.doesNotMatch(afterFrame, /Verified · the authoritative read agrees/,
+        `a write whose authoritative readback could not complete is never Verified:\n${fixture.view()}`)
+      assert.match(afterFrame, /(Not saved · the display preset|Commit accepted · verification unavailable)/,
+        `and it states the real outcome:\n${fixture.view()}`)
+    } finally {
+      failRefresh = false
+      failMutate = false
+      forms.describe = originalDescribe
+      forms.mutate = originalMutate
+    }
   } finally {
     fixture.dispose()
     assembled.dispose()
     await runtime.dispose()
+  }
+})
+
+test('P17: the REAL Host-owned Direct settings authority drives the /settings workspace (Theme → Host commit → authoritative re-read → Verified)', async (t) => {
+  // The Direct counterpart of P16, over the SAME real Host config plane: the settings
+  // port is the production `DirectConfigPort` whose `tuiSettings` is the production
+  // `DirectTuiSettings` — built EXACTLY as `src/app/bootstrap.ts` builds it, from the
+  // mounted `tui-app` plugin's own resolved volatile Config references and the official
+  // Host `SettingsForms` service. The Host commit therefore lands in the real
+  // profile-backed document, and the UI verifies against that authority.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { configPlane: true, captureTuiRowConfig: true })
+  const rowConfig = (globalThis as { __m3aTuiRowConfig?: unknown }).__m3aTuiRowConfig
+  assert.ok(rowConfig !== undefined, 'the mounted tui-app row exposed its resolved Config references')
+  const forms = host.ctx.get('settings') as SettingsFormsLike | undefined
+  assert.ok(forms !== undefined, 'the official Host settings service is mounted')
+  const settings = new DirectTuiSettings(rowConfig as TuiConfigRefs, forms)
+  const port = new DirectConfigPort(host.ctx as never, settings, () => undefined)
+  const fixture = await mountSettingsWorkspace(host.anchorDir, port)
+  const hostDescriptor = (): { readonly ns: string; readonly value?: Record<string, unknown>; readonly user?: unknown } | undefined =>
+    (host.ctx as unknown as {
+      settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
+    }).settings.describe().find(entry => entry.ns === 'tui-app')
+  try {
+    assert.equal(port.configReadiness(), 'ready', 'Direct reads hit the in-process Host authority')
+    assert.equal(settings.get().theme, 'auto', 'the profile schema default is the live reference value')
+
+    await fixture.open()
+    await fixture.key('\r') // L0 -> L1
+    await fixture.key('\r') // L1 -> L2
+    assert.match(fixture.view(), /Configured theme/)
+    await fixture.key('\r') // L2 browse -> choice
+    assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose Configured theme/)
+    await fixture.key('\x1b[B') // auto -> dark
+    assert.match(fixture.view(), /> dark/)
+    await fixture.key('\r') // confirm
+    await fixture.settle()
+    assert.match(
+      fixture.view().replace(/\s+/gu, ' '),
+      /Status Verified · the authoritative read agrees/,
+      `the UI verified the commit:\n${fixture.view()}`,
+    )
+
+    // The REAL Host authority: the effective value, the USER layer that owns exactly
+    // the written field, the live volatile references and the profile document.
+    const descriptor = hostDescriptor()
+    assert.equal(descriptor?.value?.theme, 'dark', 'the Host effective value carries the change')
+    const user = descriptor?.user as Record<string, unknown> | undefined
+    assert.equal(user?.theme, 'dark', 'and the USER layer owns exactly that field')
+    assert.equal(user?.displayPreset, undefined, 'no other field was pinned by the write')
+    assert.equal(settings.get().theme, 'dark', 'the live Config references followed the Host commit')
+    const patch = readFileSync(join(host.workRoot, 'profile', 'cordis.patch.yml'), 'utf8')
+    assert.match(patch, /theme: dark/, `the profile document really carries it:\n${patch}`)
+  } finally {
+    fixture.dispose()
   }
 })
 
