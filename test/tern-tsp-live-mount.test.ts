@@ -712,8 +712,11 @@ test('PR4-0: non-key SDK events reach no business action while no modal seat is 
 //    pre-existing routes already decline `error` (`interaction.ts` claims only
 //    focus/edit/undo/send; both pickers require `select|activate|action` plus a known
 //    `id`), so they also hold without the fix. They are kept to catch a regression that
-//    makes an `error` act somewhere, and A-15e proves the legal focus route still does
-//    reach the seat under a modal — the contrast that shows the error route does not.
+//    makes an `error` act somewhere. A-15e carries the one genuinely discriminative
+//    contrast: the legal focus route still re-asserts focus under a modal, while the same
+//    state plus an `error` does not take that re-assert path. It does NOT show that the
+//    error failed to ENTER the seat — every consumer already declines `error`, so no
+//    black-box observation can separate a branch before the seat from one after it.
 
 interface Diagnostic {
   readonly message: string
@@ -731,9 +734,11 @@ async function mountDiagnosed(tern: ScriptedTern) {
     onFatal: error => { fatals.push(error) },
     logError: (message, fields) => { diagnostics.push({ message, fields }) },
   })
-  // A user-visible notification is a MUST-NOT for a protocol error: witness it.
-  const notify = renderer.display.notify.bind(renderer.display)
-  renderer.display.notify = (text, kind) => { notifications.push(text); notify(text, kind) }
+  // A user-visible notification is a MUST-NOT for a protocol error: witness it. Keep the
+  // UNBOUND original and forward through `.call` so the receiver stays the live `display`
+  // object (a bound patch would pin it to whatever it was bound to).
+  const notify = renderer.display.notify
+  renderer.display.notify = (text, kind) => { notifications.push(text); notify.call(renderer.display, text, kind) }
   renderer.bindInput({
     exit: () => { business.exits += 1 },
     cancel: () => { business.cancel += 1 },
