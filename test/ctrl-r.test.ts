@@ -488,18 +488,37 @@ test('H3A-15: a clipboard failure reports Copy failed, and a settle after the se
     'a stale copy settle must not notify over a closed/replacement surface')
 })
 
-test('H3A-10: Esc preserves a pending paste marker in the draft byte for byte', async (t) => {
+test('H3A-10: a REAL large-paste registry entry survives a History round trip (expanded payload identity)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app, submitted } = await makeApp(life, home)
-  const draft = 'before [paste #1 +12 lines] after'
-  app.setDraft(draft)
+  // A REAL large paste through the fork editor's bracketed-paste path: >10 lines
+  // makes the editor store the payload in its paste REGISTRY and insert a marker
+  // token (never an inline body).
+  const body = Array.from({ length: 40 }, (_, index) => `pasted line ${index}`).join('\n')
+  vt.sendInput(`before \x1b[200~${body}\x1b[201~ after`)
   await vt.waitForRender()
-  vt.sendInput('\x12')
+  // The RAW document carries the registry marker; the production WIRE form
+  // (`getDraft`, the submit/steer source) carries the expanded payload.
+  const document = app.seatTextForTest()
+  const expanded = app.getDraft()
+  assert.match(document, /\[paste #1 \+40 lines\]/, `the editor must create a REAL marker token:\n${document}`)
+  assert.ok(expanded.includes('pasted line 39'),
+    'the marker really expands through the production submit/steer wire form')
+  assert.ok(!expanded.includes('[paste #'), 'the wire form never carries registry-bound marker text')
+  const cursorBefore = (app as unknown as { editor: { getCursor(): unknown } }).editor.getCursor()
+
+  vt.sendInput('\x12') // Ctrl+R
   await vt.waitForRender()
-  vt.sendInput('\x1b')
+  assert.ok(panelVisible(vt.getViewport()), 'the History seat opens over the pasted draft')
+  vt.sendInput('\x1b') // Esc
   await vt.waitForRender()
-  assert.equal(app.getDraft(), draft, 'the paste marker survives a History round trip')
+  assert.equal(app.seatTextForTest(), document,
+    'the marker document survives a History round trip byte for byte')
+  assert.equal(app.getDraft(), expanded,
+    'the paste REGISTRY entry still resolves to the same full payload (the editor was never rebuilt)')
+  assert.deepEqual((app as unknown as { editor: { getCursor(): unknown } }).editor.getCursor(), cursorBefore,
+    'the cursor is untouched')
   assert.deepEqual(submitted, [], 'cancelling never submits the expanded paste')
 })
 
@@ -565,6 +584,8 @@ test('currentness: a session switch while a search is in flight never publishes 
   await vt.waitForRender()
   assert.ok(!strip(vt.getViewport()).includes('previous session row'),
     'a page resolved for the previous session is never published')
+  assert.ok(!strip(vt.getViewport()).includes('Loading history'),
+    'dropping the stale page also repaints the loading state away')
   // The stale seat is INERT (no acceptance, no copy, no pointer action)…
   assert.equal(app.getDraft(), '', 'the stale seat accepts nothing')
   vt.sendInput('\r')
