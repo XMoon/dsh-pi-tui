@@ -353,6 +353,19 @@ Evidence levels — do not merge these into a stronger claim:
 - Test counts are snapshot-qualified; re-running a suite on a later tree does not
   transfer to the earlier one.
 
+## Runtime gap closure and SDK upstream tracking (2026-10-13)
+
+The dated Foundation audit was followed by a bounded **F1/F2/F3 runtime-gap audit** and one independent diagnostic repair. The authoritative status and version-qualified measurements are in [Runtime gap evidence](./tern-tsp/evidence/runtime-gap-20261013.md); the cross-feature [Foundation contract](./tern-tsp/foundation.md) remains the current ownership/invariant reference. **Do not reinterpret the older** [Foundation evidence](./tern-tsp/evidence/foundation-20261013.md) **as covering these later runs.**
+
+| Item | Current state | Scope / next step |
+|---|---|---|
+| **F3-001** — stale Focus Op after credit-blocked coalescing | `CONFIRMED_DEFECT / P2 / OPEN / UPSTREAM_REPORTED` | SDK `Surface.#queue/#flush` issue: [stencil-hq/tern-sdk#48](https://github.com/stencil-hq/tern-sdk/issues/48). Proven protocol `unknown id` in Tern `0.8.3` **headless**; a user-visible input/focus failure is **not** proven. **No local workaround or released SDK fix.** |
+| **F3-002** — dropped protocol error diagnostic | **FIXED** by [PR #299](https://github.com/XMoon/dsh-pi-tui/pull/299), merged on `next@8d329ebf` | The renderer routes the client's `error{sf,s,op,msg}` into existing diagnostics; it does not repair F3-001, retry Focus, or turn the error into a fatal/user notice. |
+| **F3-003** — fallback close `keep` divergence | `RISK_UNPROVEN` | Source/targeted failure path observed; residual client output has **not** been established. No code change. |
+| F1/F2 and remaining Foundation findings | **Version-/case-qualified**; see evidence table | 14 total initial findings: 2 confirmed at audit time (one later fixed), 6 bounded risks/unknowns, 6 no-gap in tested scope; U8 (missing ACK) is an **independent unknown**, not an additional finding. |
+
+**Engineering decision:** issue/report upstream, wait for an SDK fix and separately qualify any consumable SDK update. Isolated A1/A1′ experiments are **PoC only**; the E7/E8 addendum currently has an Agent-reported summary without the raw addendum files attached to the committed evidence. The team is **not** implementing a second Frame/Focus queue, ACK watchdog, local SDK fork, or four-language upstream patch. This remains experimental TSP functionality and does not alter the PiTui default.
+
 ## Milestones and evidence ledger
 
 | PR | State | Proved | Not proved | Evidence |
