@@ -776,6 +776,16 @@ test('H3A-09: a release outside the painted Preview cancels the drag (no copy, n
   panel.handleMouse(event('drag', 2, contentRow + 1))
   panel.handleMouse(event('release', 2, height - 1))
   assert.deepEqual(copied, [], 'a release outside the painted Preview cancels too')
+  // A query that commits while the drag is live re-anchors the page: its
+  // release is stale and cancels (plan §5.2 step 5).
+  copied.length = 0
+  panel.handleMouse(event('press', 0, contentRow))
+  panel.handleMouse(event('drag', 2, contentRow + 1))
+  panel.handleInput('x')
+  await settle() // the debounced search commits (a new generation)
+  panel.render(100) // an async repaint at the SAME size
+  panel.handleMouse(event('release', 2, contentRow + 1))
+  assert.deepEqual(copied, [], 'a release of a gesture the async repaint invalidated copies nothing')
   // A width change between press and release cancels as well.
   const tall = panel.render(100).length
   panel.handleMouse(event('press', 0, contentRow))

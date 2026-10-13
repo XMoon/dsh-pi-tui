@@ -575,7 +575,7 @@ export class HistoryPanel implements Component, Focusable {
     // event carries: a release that lands outside the painted Preview (or after a
     // width/height change) safely CANCELS instead of leaving a stale anchor that
     // a later motion-only drag could extend.
-    if (event.type === 'release' && this.gesture?.kind === 'preview') return this.finishPreviewDrag(event)
+    if (event.type === 'release' && this.gesture?.kind === 'preview') return this.finishPreviewDrag(event, this.gesture)
 
     const frame = this.frame
     // Last-painted geometry only: a resize that has not been repainted (or a
@@ -669,16 +669,19 @@ export class HistoryPanel implements Component, Focusable {
    * End one Preview drag. The payload is captured SYNCHRONOUSLY from the range
    * the gesture selected (the async clipboard settlement downstream never
    * recomputes it) — but ONLY when the release really landed inside the painted
-   * Preview of the SAME last-painted frame. Any other release — outside the
-   * painted rows, on another painted region, or against a frame whose width or
-   * height moved since the paint — safely CANCELS the gesture: nothing is copied
-   * and no selection survives (plan §6 H3A-09's negative control).
+   * Preview of the SAME last-painted frame — the same width, the same height AND
+   * the same search generation: a query that committed (or a repaint) while the
+   * drag was live re-anchors the page, so its release is stale. Any other release
+   * — outside the painted rows, on another painted region, against a frame whose
+   * size moved, or across an async repaint — safely CANCELS the gesture: nothing
+   * is copied and no selection survives (plan §5.2 step 5 / §6 H3A-09).
    */
-  private finishPreviewDrag(event: TuiMouseEvent): TuiMouseEventResult {
+  private finishPreviewDrag(event: TuiMouseEvent, gesture: HistoryPointerGesture): TuiMouseEventResult {
     this.gesture = undefined
     const frame = this.frame
     const hit = frame?.hits[event.y]
     const inside = frame !== undefined
+      && gesture.generation === frame.generation
       && event.width === frame.width
       && event.height === frame.height
       && hit !== undefined
@@ -709,9 +712,9 @@ export class HistoryPanel implements Component, Focusable {
   /** Open-time init: run the initial (empty-query) search immediately. */
   start(): void {
     if (this.disposed) return
-    // allowlist: refresh() never rejects — source failures land in the panel
-    // state and a stale-subject page is dropped without any teardown call.
-    void this.refresh()
+    // `refresh()` never rejects: source failures land in the panel state and a
+    // stale-subject page is dropped without any teardown call.
+    void this.refresh() // allowlist: refresh() never rejects (see above)
   }
 
   /** Cancel and forget (called by the host through the seat lease). */
@@ -1191,14 +1194,17 @@ export class HistoryPanel implements Component, Focusable {
 
   /**
    * Drop an in-flight page whose captured subject is no longer current: it
-   * belongs to a previous session, so it is neither published nor acted on. This
-   * does NOT retire the seat: the lifecycle stays CALLER-owned (the host's next
-   * revalidation entry retires a stale tenant through its ONE close path), and a
-   * synchronous teardown call here would be the only way `refresh()` could
-   * reject — the fire-and-forget search contract is that it never does.
+   * belongs to a previous session, so it is neither published nor acted on. The
+   * pending state still ends and the seat repaints through the ORDINARY result
+   * channel — a "Loading history…" row that this drop invalidated must never stay
+   * painted. This does NOT retire the seat: the lifecycle stays CALLER-owned (the
+   * host's next revalidation entry retires a stale tenant through its ONE close
+   * path), and a synchronous teardown call here would be the only way `refresh()`
+   * could reject — the fire-and-forget search contract is that it never does.
    */
   private dropStalePage(): void {
     this.state.loading = false
+    this.onResultsChanged?.()
   }
 
   private scheduleSearch(): void {
