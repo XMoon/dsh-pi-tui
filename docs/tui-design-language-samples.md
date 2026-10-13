@@ -1,8 +1,9 @@
 # TUI design language — before/after samples (v1)
 
-> **Status: PROPOSED.** The visual decisions marked `D1`–`D6` in
-> `docs/tui-design-language.md` §1.3 are not frozen until the Owner confirms
-> them; these samples are the material for that confirmation.
+> **Status: FROZEN v1 (Owner-confirmed 2026-10-14, after reviewing these frames
+> in a real terminal).** `D1`–`D4` and `D6` were accepted as recommended; `D5`
+> was amended by the Owner to **`∙ Running`** — the Title Case word plus the
+> EAW-neutral one-cell `∙` anchor, replacing the ambiguous `●`.
 >
 > **The BEFORE frames are real product output.** They were painted by the real
 > `TuiApp` + `VirtualTerminal` composition at commit `7ccaa20a` and read back
@@ -369,7 +370,7 @@ Esc back | S / Shift+S stop | Follow ON | Find Ctrl+F / Ctrl+Shift+F / | C copy 
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                                                               Running
+Job · job-a · bash                                                                                             ∙ Running
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product                                                                       ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -442,7 +443,7 @@ Esc back | Follow ON | [GAP] | Find Ctrl+F / Ctrl+Shift+F / | C copy output | V 
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                                                Failed [GAP] [SETTLED]
+Job · job-a · bash                                                                              ∙ Failed [GAP] [SETTLED]
 Progress: 3/8 checks · Detail: Building components · Earlier output evicted
 Command  pnpm build && pnpm test:product                                                                       ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -463,7 +464,7 @@ build failed
 Retained preview · not full history                                                                         rows 1-13/13
 Esc back · Follow on · [GAP] · Find Ctrl+F · c copy output · v command · PgUp/PgDn
 ```
-`● FAILED [GAP] [SETTLED]` becomes `Failed [GAP] [SETTLED]`: the word is the signal, the colour is secondary, and `●` (U+25CF, East-Asian-Width *ambiguous*) is dropped because a CJK-width terminal may paint it two cells. The bracketed machine markers stay uppercase — that is the one role ALL-CAPS keeps. Note the bar correctly advertises no Stop for a settled job in both frames.
+`● FAILED [GAP] [SETTLED]` becomes `∙ Failed [GAP] [SETTLED]`: the word is the signal, the colour is secondary, and `●` (U+25CF, East-Asian-Width *ambiguous*) is replaced by the EAW-neutral `∙` (U+2219), which keeps a one-cell glyph anchor without risking a two-cell paint on CJK-width terminals (Owner amendment to D5). The bracketed machine markers stay uppercase — that is the role ALL-CAPS keeps. Note the bar correctly advertises no Stop for a settled job in both frames.
 
 
 ### 4.3 Wide 120×40 — Command page
@@ -483,7 +484,7 @@ Esc output | C copy all | Find Ctrl+F / Ctrl+Shift+F / | PgUp/PgDn
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                                                               Running
+Job · job-a · bash                                                                                             ∙ Running
 Progress: 3/8 checks · Detail: Building components
 Full command                                                                                                Copy All [C]
 Output  [Command] ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -516,7 +517,7 @@ Esc back | S stop | Follow ON | Retained preview · not full history
 **AFTER — target (real tokens)**
 
 ```text
-Job · job-a · bash                                                       Running
+Job · job-a · bash                                                     ∙ Running
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product                               ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────
@@ -559,7 +560,7 @@ Esc back | S stop | Follow ON
 **AFTER — 60×20 target (real tokens)**
 
 ```text
-Job · job-a · bash                                   Running
+Job · job-a · bash                                 ∙ Running
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product
 [Out]  Cmd ─────────────────────────────────────────────────
@@ -608,7 +609,7 @@ Esc back | S stop | Follow ON
 **AFTER — 44×20 target (real tokens)**
 
 ```text
-Job · job-a · bash                   Running
+Job · job-a · bash                 ∙ Running
 Progress: 3/8 checks
 Command  pnpm build && pnpm test:product
 [Out]  Cmd ─────────────────────────────────
@@ -637,7 +638,7 @@ At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…`
 | # | Before | After | Why |
 |---|---|---|---|
 | 1 | `JOB  job-a · bash` (`JOB` all-caps `textStrong`) | `Job · job-a · bash` | one header grammar with Settings: `Surface · trail · trail` |
-| 2 | `● RUNNING` / `● FAILED` | `Running` / `Failed` with the status token | the word carries the state; the dot is an ambiguous-width glyph |
+| 2 | `● RUNNING` / `● FAILED` | `∙ Running` / `∙ Failed` with the status token | the word carries the state; `●` (U+25CF, EAW-ambiguous) becomes the EAW-neutral `∙` (U+2219) so a CJK-width terminal cannot shift the right-aligned group. Owner amendment to D5: keep a one-cell glyph anchor |
 | 3 | `[GAP] [SETTLED] [ERROR]` | unchanged (uppercase bracketed machine markers) | the single role ALL-CAPS keeps |
 | 4 | `progress:` / `detail:` | `Progress:` / `Detail:` | labelled fact grammar `<Label>: <value>` |
 | 5 | Affordance always painted on the summary row | affordance yields when content + affordance cannot both fit | never truncate the content to keep a redundant affordance |

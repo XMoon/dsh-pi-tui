@@ -3,11 +3,11 @@
 > Companion to `docs/tui-design-language.md` (the spec) and
 > `docs/tui-design-language-samples.md` (the before/after frames).
 >
-> **Status: PROPOSED.** No PR below may start before the Owner confirms the six
-> decisions in the spec's §1.3 (`D1`–`D6`). The plan is written for a coding agent
-> that has not read the investigation: every PR states its scope, its explicit
-> non-goals, the exact tests to run, the evidence it must attach, and how to roll
-> it back.
+> **Status: FROZEN v1 (Owner-confirmed 2026-10-14, see the spec's §1.3).** PR0 is
+> complete (this document set); PR1 may start. The plan is written for a coding
+> agent that has not read the investigation: every PR states its scope, its
+> explicit non-goals, the exact tests to run, the evidence it must attach, and
+> how to roll it back.
 
 ## 0. Ground rules for every PR in this rollout
 
