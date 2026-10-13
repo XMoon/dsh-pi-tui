@@ -3072,6 +3072,32 @@ still reaches the Remote graph only through the dynamic
   transient failure is RECORDED (never swallowed): `readiness()` stays `stale`,
   `lastRefreshFailure()` carries the cause, and the next invalidation, write
   pre-flight or explicit read retries.
+- **Whole-document writes carry the revision they were RECONCILED against.**
+  `RemoteTuiSettingsConfig.replace()` diffs the caller's document against the
+  mirrored descriptor and passes THAT descriptor's `revision` to the queued
+  `settings.mutate`, even though the queue's pre-flight `ensureCurrent()` may
+  have refreshed the mirror first. The alternative — re-reading the fence after
+  the refresh — re-authorizes a decision taken against the older document and
+  lets its op silently supersede a concurrent external write to the same field
+  instead of surfacing the official revision conflict; the refresh therefore
+  exists to make the write DISPATCHABLE (and to fail closed when it cannot), not
+  to move the fence. Consumers are `TuiSettingsConfig.replace()` callers that
+  reconcile a whole document (`/settings`, `/footer`, `/keybindings`,
+  notification/terminal-progress/wheel/display preferences): each already builds
+  its document inside `serializeTuiSettingsMutation`, so a same-client sequence
+  reconciles against the revision the previous write's authoritative refresh
+  committed and never conflicts spuriously. Callers that build their ops directly
+  from the current mirror (provider profiles, keybindings sections, permission
+  presets, preset default, subagent model selection) keep the refreshed revision —
+  only the diff-based whole-document writer opts into the base fence. A write whose
+  reconciled base moved is refused with the real `settings.mutate(tui-app) failed:
+  revision <base> != <current>` error; it is never applied to the newer document.
+  Verified by `test/remote-config-port.test.ts` (external same-field write during
+  the refresh window preserves the external value; two serialized whole-document
+  writes reconcile against revision 1 then 2; an empty diff still dispatches
+  nothing). B2-B's `Verified` state additionally re-reads the target field after
+  the dispatch, so a `not-saved`/`unverified` outcome can never be presented as a
+  save.
 - **Currentness is semantic (§9.1).** `ConfigPort.configReadiness()` exposes
   `ready | stale | unavailable` (Direct is always `ready`; Remote reports the
   mirror). `/settings` announces a non-`ready` backend explicitly and the
