@@ -47,7 +47,7 @@ Run directories were reported retained, under gitignored `temp`. The assistant d
 
 ### Historical worktree evidence (separately scoped)
 
-- K12 `wrap-ux/temp/overlay-root-spike/runs/k12-final`: Tern 0.8.3, `total` 31, `failed` 0, `informational` 16; A5 independently read ledger and recorded eight tree JSON/PNG snapshots. This evidence is historical output **not uncommitted production source**. Do not turn a documented UI example into an SDK type requirement.
+- K12 `wrap-ux/temp/overlay-root-spike/runs/k12-final`: Tern 0.8.3, `total` 31, `failed` 0, `informational` 16; A5 independently read ledger and recorded eight tree JSON/PNG snapshots. This is historical run output, **not** production source. Do not turn a documented UI example into an SDK type requirement.
 - `/preset` Gate A `preset-ux/temp/tern-pane-hTfjc1`: Tern 0.8.2, `total` 113, `failed` 0, `informational` 29; raw run read later for historical record. Irrelevant to a cross-feature foundation qualification.
 - Fact-wrap spike: Tern 0.8.2 reported that newlines embedded in a single item's `detail` do not create guaranteed multiple selectable-row height. This is a *product-specific client observation*, not a rule mandating particular text budgeting across TSP.
 - `docs/tern-tsp/evidence/pr4-a-preset.md` does not record the exact client build; do not infer its version as a verified fact from a neighboring run.
