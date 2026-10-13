@@ -848,3 +848,141 @@ test('pointer: a repaint-free page replacement neither transfers the selection n
     'a press on a row whose id no longer exists is rejected')
   assert.equal(panel.selected()?.id, 'id-b', 'the rejected press never re-selects from the stale hit map')
 })
+
+test('H3A-09: the RELEASE position is the drag endpoint (a terminal may fold the last motion into it)', async () => {
+  const source = new FakeSource()
+  source.rows = [row('abc\ndefghij', 1, '/a', 'p')]
+  const copied: string[] = []
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    onCopy: (text) => copied.push(text),
+  })
+  panel.start()
+  await settle()
+  const painted = plain(panel.render(100))
+  const height = painted.length
+  const contentRow = painted.findIndex(line => line.includes('Preview ')) + 1
+  const event = (
+    type: 'press' | 'drag' | 'release',
+    x: number,
+    y: number,
+  ): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+    type, button: 'left', x, y, screenX: x, screenY: y, width: 100, height,
+    shift: false, alt: false, ctrl: false,
+  })
+  // press (row 0, col 0) → drag (row 1, col 1) → RELEASE (row 1, col 3): the
+  // copied range must end at the release column, not the last drag column.
+  panel.handleMouse(event('press', 0, contentRow))
+  panel.handleMouse(event('drag', 1, contentRow + 1))
+  panel.handleMouse(event('release', 3, contentRow + 1))
+  assert.deepEqual(copied, ['abc\ndefg'],
+    'the release position finalizes the selection (through the released cell)')
+})
+
+test('pointer: a right or middle button can never start a History gesture', async () => {
+  const source = new FakeSource()
+  source.rows = [row('abc\ndefghij', 1, '/a', 'p'), row('second entry', 2, '/a', 'q')]
+  const copied: string[] = []
+  const { panel, accepted } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    onCopy: (text) => copied.push(text),
+  })
+  panel.start()
+  await settle()
+  const painted = plain(panel.render(100))
+  const height = painted.length
+  const contentRow = painted.findIndex(line => line.includes('Preview ')) + 1
+  const secondRow = painted.findIndex(line => line.includes('second entry'))
+  const actionRow = painted.findIndex(line => line.includes('[Use selected]'))
+  assert.ok(secondRow >= 0 && actionRow >= 0 && contentRow > 0,
+    `the frame must paint rows and actions:\n${painted.join('\n')}`)
+  const event = (
+    type: 'press' | 'drag' | 'release' | 'click',
+    button: 'left' | 'middle' | 'right',
+    x: number,
+    y: number,
+  ): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+    type, button, x, y, screenX: x, screenY: y, width: 100, height,
+    shift: false, alt: false, ctrl: false,
+  })
+  const selectedBefore = panel.selected()?.id
+  for (const button of ['right', 'middle'] as const) {
+    assert.equal(panel.handleMouse(event('press', button, 4, secondRow)), undefined,
+      `a ${button} press on a result row must be refused`)
+    assert.equal(panel.handleMouse(event('click', button, 4, secondRow)), undefined,
+      `a ${button} click on a result row must be refused`)
+    assert.equal(panel.handleMouse(event('press', button, 4, contentRow)), undefined,
+      `a ${button} press in the Preview must not start a drag`)
+    assert.equal(panel.handleMouse(event('press', button, 4, actionRow)), undefined,
+      `a ${button} press on an action must be refused`)
+  }
+  assert.equal(panel.selected()?.id, selectedBefore, 'no non-left press moved the selection')
+  assert.equal(accepted(), undefined, 'no non-left action accepted anything')
+  assert.deepEqual(copied, [], 'no non-left gesture copied anything')
+  // The left button still works in the same frame.
+  panel.handleMouse(event('press', 'left', 0, contentRow))
+  panel.handleMouse(event('release', 'left', 2, contentRow))
+  assert.deepEqual(copied, ['abc'], 'the left button still drags and copies')
+})
+
+test('H3A-12: a resize keeps the Preview on the same SOURCE text (real re-wrap, ASCII and CJK)', async () => {
+  // Each source LINE is 80 cells: it paints ONE visual row at 100 columns and
+  // TWO at 40, so a raw visual-row anchor would land on a different passage.
+  const ascii = (index: number): string => `L${String(index).padStart(2, '0')}${'-'.repeat(77)}`
+  const source = new FakeSource()
+  source.rows = [row(Array.from({ length: 40 }, (_, index) => ascii(index)).join('\n'), 1, '/a', 'p')]
+  let columns = 100
+  const { panel } = makePanel(source, {
+    geometry: { columns: () => columns, rows: () => 30, chromeRows: () => 2 },
+  })
+  panel.start()
+  await settle()
+  const firstPreviewRow = (): string => {
+    const lines = plain(panel.render(columns))
+    const heading = lines.findIndex(line => line.includes('Preview '))
+    return lines[heading + 1] ?? ''
+  }
+  panel.render(100)
+  assert.equal(firstPreviewRow(), ascii(0), 'the Preview starts at the first source line')
+  for (let step = 0; step < 10; step += 1) panel.handleInput('\x1b[1;3B') // Alt+Down
+  assert.equal(firstPreviewRow(), ascii(10), 'ten source rows down at 100 columns')
+  columns = 40
+  assert.equal(firstPreviewRow(), ascii(10).slice(0, 40),
+    'after the re-wrap the SAME source line is at the top (not the same visual row number)')
+  columns = 100
+  assert.equal(firstPreviewRow(), ascii(10),
+    'growing back re-derives the same source row from the anchor')
+
+  // CJK: 60 double-width chars wrap at 50 chars (100 cells) and 20 chars
+  // (40 cells) per row, so each source line is 2 rows then 3.
+  const cjk = (index: number): string => `${String(index).padStart(2, '0')}${'中文行'.repeat(20)}`
+  const cjkSource = new FakeSource()
+  cjkSource.rows = [row(Array.from({ length: 20 }, (_, index) => cjk(index)).join('\n'), 1, '/a', 'p2')]
+  let cjkColumns = 100
+  const { panel: cjkPanel } = makePanel(cjkSource, {
+    geometry: { columns: () => cjkColumns, rows: () => 30, chromeRows: () => 2 },
+  })
+  cjkPanel.start()
+  await settle()
+  const cjkFirstRow = (): string => {
+    const lines = plain(cjkPanel.render(cjkColumns))
+    const heading = lines.findIndex(line => line.includes('Preview '))
+    return lines[heading + 1] ?? ''
+  }
+  cjkPanel.render(100)
+  for (let step = 0; step < 10; step += 1) cjkPanel.handleInput('\x1b[1;3B') // 5 source lines = 10 rows
+  const head = cjkFirstRow()
+  // The row must be a REAL prefix of the anchored source line (never of the line
+  // a raw visual-row reuse would have landed on).
+  assert.ok(head.length >= 10 && cjk(5).startsWith(head),
+    `the anchored CJK line must be at the top:\n${JSON.stringify(head)}`)
+  assert.ok(!cjk(2).startsWith(head), 'the raw visual row would have shown another source line')
+  cjkColumns = 40
+  const wrapped = cjkFirstRow()
+  assert.ok(wrapped.length >= 10 && cjk(5).startsWith(wrapped),
+    `the CJK re-wrap keeps the same source line at the top:\n${JSON.stringify(wrapped)}`)
+  assert.ok(!cjk(2).startsWith(wrapped), 'the re-wrap never jumps to another source line')
+  assert.ok(wrapped.length < head.length, 'the narrower wrap really shortens the painted row')
+})

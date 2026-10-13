@@ -2129,6 +2129,10 @@ the seat shows the History surface.
   footer with the hint folded into the header) LONG before it drops the visible
   selected result; a grant too small for any body row disables acceptance of an
   unpainted row.
+- **The Preview keeps its place across a re-wrap.** The scroll anchor is the
+  SOURCE UTF-16 offset of the first painted source row (`previewAnchorOffset`),
+  and the visual row is derived from it at every width, so narrowing or widening
+  the terminal keeps the reader on the same TEXT instead of the same row number.
 - **The Preview is the copy authority.** List labels are single sanitized lines;
   the Preview is built from the shared neutral source-text layout
   (`src/tui/components/source-text-layout.ts`, extracted from the Job Command
@@ -2141,11 +2145,15 @@ the seat shows the History surface.
   against its last painted frame (width/height, painted result identity, search
   generation). A result click selects; the explicit `[Use selected]` and
   `[Copy all]` cells act, and each action is bound to the result ID it was
-  pressed for. A Preview drag copies only when its RELEASE lands inside the
-  painted Preview of the same last-painted frame — a release outside it, on
-  another painted region, or after a width/height change safely cancels (no copy,
-  no surviving selection), and an ended gesture can never be extended or
-  resurrected by a later motion event. The regular main screen writes no mouse mode and installs no
+  pressed for. Only the LEFT button may start, extend or finish a gesture: a
+  right or middle press falls through to the terminal's own handling (e.g. the
+  Windows right-click paste path) and can never select, drag or activate a
+  button. A Preview drag copies only when its RELEASE lands inside the painted
+  Preview of the same last-painted frame, and the release position IS the final
+  endpoint (a terminal may fold the last motion into the release event) — a
+  release outside it, on another painted region, or after a width/height change
+  safely cancels (no copy, no surviving selection), and an ended gesture can
+  never be extended or resurrected by a later motion event. The regular main screen writes no mouse mode and installs no
   bridge: the panel refuses every pointer event there, and the terminal's native
   selection/scrollback is untouched.
 - **Draft and cancellation.** Accept writes the accepted `content` into the
