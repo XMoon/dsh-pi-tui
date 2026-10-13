@@ -774,38 +774,29 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return !lifecycleIntent
   }
 
-  /**
-   * Record ONE client protocol rejection through the renderer's diagnostics sink.
-   *
-   * The client answers a refused protocol operation with `error`: `msg` is always
-   * present, while `sf`/`s`/`op`/`sheet`/`id` are all OPTIONAL (pinned SDK
-   * `wire.ts` `ErrorEvent`/`decodeEvent`). The SDK itself neither interprets nor
-   * consumes it (`Surface.dispatch` has no `error` branch), so this is the ONE
-   * place the application can see it at all. Never fabricate a field the client
-   * did not send, never attribute another surface's error to this renderer, and
-   * never log the raw wire object (the diagnostics contract takes structured
-   * fields only).
-   */
-  const logProtocolError = (event: { readonly sf?: string; readonly s?: number; readonly op?: number; readonly msg: string }): void => {
-    if (event.sf !== undefined && event.sf !== surface.id) return
-    options.logError?.('tsp renderer: client rejected protocol operation', {
-      ...(event.sf === undefined ? {} : { sf: event.sf }),
-      ...(event.s === undefined ? {} : { s: event.s }),
-      ...(event.op === undefined ? {} : { op: event.op }),
-      msg: event.msg,
-    })
-  }
-
   /** Route one input: exit intents act; everything else waits for the bind. */
   const routeInput = (input: SessionInput): boolean => {
     if (input.type === 'event') {
       // The client REFUSED a protocol operation (Tern answers a rejected operation
-      // with `error`). An `error` is never modal, picker, focus or business input —
-      // record it and stop here so it can never reach the seat or a presenter (and
-      // never re-assert focus, settle a modal, repaint or write). It is NOT fatal
-      // and is never retried.
+      // with `error`): `msg` is always present, while `sf`/`s`/`op`/`sheet`/`id` are
+      // all OPTIONAL (pinned SDK `wire.ts` `ErrorEvent`/`decodeEvent`). The SDK itself
+      // neither interprets nor consumes it (`Surface.dispatch` has no `error` branch),
+      // so this is the ONE place the application can see it at all. Record ONLY the
+      // fields the client actually sent (never fabricate `sf`/`s`/`op`, never log the
+      // raw wire object), never attribute another surface's error to this renderer
+      // (a `msg`-only error is a session-level fact), and never branch on the optional
+      // `id`. An `error` is never modal, picker, focus or business input: stopping here
+      // means it cannot reach the seat or a presenter, re-assert focus, settle a modal,
+      // repaint or write. It is NOT fatal and is never retried.
       if (input.event.ev === 'error') {
-        logProtocolError(input.event)
+        if (input.event.sf === undefined || input.event.sf === surface.id) {
+          options.logError?.('tsp renderer: client rejected protocol operation', {
+            ...(input.event.sf === undefined ? {} : { sf: input.event.sf }),
+            ...(input.event.s === undefined ? {} : { s: input.event.s }),
+            ...(input.event.op === undefined ? {} : { op: input.event.op }),
+            msg: input.event.msg,
+          })
+        }
         return false
       }
       // PR3-B B3 (§3.5.5): the modal seat gates events addressed at the
