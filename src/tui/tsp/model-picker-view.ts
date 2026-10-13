@@ -5,15 +5,20 @@
  * this module never mutates state, never writes and never reads the SDK.
  *
  * Layout contract (Owner-frozen):
- *  - the model LIST page at wide width (`lg` + a full side preview): provider
- *    scopes + model list + a Model Details card whose Reasoning Effort is a list
- *    of native radio rows. The details card opens the read-only Full details
- *    page; when the budget cannot hold the whole column, the SAME card becomes
- *    the bounded `Open model & effort ›` entry into the model's Overview;
+ *  - the model LIST page at a pane that really gets the native SIDE preview
+ *    (`lg` + `preview: 'side'`): provider scopes + model list + a Model Details
+ *    card whose Reasoning Effort is a list of native radio rows. The details
+ *    card opens the read-only Full details page; when the budget cannot hold the
+ *    whole column, the SAME card becomes the bounded `Open model & effort ›`
+ *    entry into the model's Overview;
  *  - everywhere else the same picker renders `preview: 'none'`: the compact
- *    layout opens the model's OVERVIEW (identity + details entry + every effort
- *    candidate in the native main list) and the read-only Full details page. No
- *    overlay, no `ui.el`, no self-drawn button, no global action menu.
+ *    layout opens the model's OVERVIEW (short identity + every effort candidate
+ *    in the native main list) and the read-only Full details page;
+ *  - the read-only Full details page is a native `overlay` Reader (`ui.text`
+ *    with the client's own wrapping and a native scroll container), not a picker:
+ *    a picker row is ONE ellipsized line and cannot carry a long value. No
+ *    overlay ON TOP of a picker, no `ui.el`, no self-drawn button, no global
+ *    action menu.
  * @module tui/tsp/model-picker-view
  */
 import { ui, span, type Node } from '@stencil-hq/tern'
@@ -25,8 +30,7 @@ import {
   ALL_SCOPES_ID,
   OVERVIEW_ENTRY_HEAD,
   actionKeyboardLive,
-  detailCursor,
-  detailFactItems,
+  detailReaderFacts,
   overviewItems,
   overviewSelected,
   wideIdentityLines,
@@ -51,7 +55,8 @@ import {
 } from './model-picker-state.ts'
 
 export interface ModelPickerViewDeps {
-  /** True for the `lg` shell (`cols >= 120`): scopes + list + details column. */
+  /** True when the pane really gets the native SIDE preview (the MEASURED
+   *  `nativeSidePreview` rule): scopes + list + details column. */
   readonly wide: boolean
   /** True when the side preview presents the WHOLE details card and effort set. */
   readonly previewFull: boolean
@@ -319,6 +324,57 @@ function widePreview(
   ]
 }
 
+/**
+ * The key PREFIX of the Reader's scrollable content column.
+ *
+ * The FULL key carries the panel serial and the frame revision (exactly like the
+ * picker's own key), so a node id of a RETIRED frame is never reused by a later
+ * Reader: the layer region's root id is the fixed region name and the root's own
+ * key never reaches its children, so a constant child key would make the Reader's
+ * ids stable across revisions and panels. The presenter resolves the column by
+ * this prefix from the very frame it built and hands its real wire id to the one
+ * Surface owner, so the native scroll op addresses a node this frame really built
+ * instead of a guessed id.
+ */
+export const MODEL_DETAILS_BODY_KEY_PREFIX = 'model-details-body-'
+const MODEL_DETAILS_READER_KEY = 'model-details-reader'
+const MODEL_DETAILS_BACK_KEY = 'model-details-back'
+
+/**
+ * The read-only Reader: the `details` page's ONE node tree, in the layer region,
+ * as a native `overlay` instead of a picker.
+ *
+ * A picker row renders ONE measured line and ellipsizes the rest, so it cannot
+ * be a reading surface for a long value; the overlay's body is a native scroll
+ * container the app addresses with the SDK's `scroll` op, and `ui.text` wraps at
+ * the width the client really has instead of at a pre-computed column budget.
+ * The `Back` row is the page's one interactive node (bound to the SAME `back`
+ * intent `Esc` uses); the page has no candidate, no writer and no second action,
+ * so it can never write and never needs a second input authority.
+ */
+function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node {
+  const row = highlightedModel(panel)
+  const facts = row === undefined ? [] : detailReaderFacts(panel, row)
+  // The frame-scoped suffix is what keeps a retired Reader's node ids retired.
+  const scope = `${panel.serial}-rev-${panel.revision}`
+  return ui.overlay(
+    { key: `${MODEL_DETAILS_READER_KEY}-${scope}`, head: 'Full model details', size: 'lg', modal: true },
+    ui.row(
+      { key: `${MODEL_DETAILS_BACK_KEY}-${scope}`, onClick: deps.bind({ kind: 'back' }) },
+      ui.text(span('Back', 'accent')),
+    ),
+    ui.col(
+      { key: `${MODEL_DETAILS_BODY_KEY_PREFIX}${scope}` },
+      ...(row === undefined
+        ? [ui.text(span('No model is selected.', 'muted'))]
+        : facts.flatMap((fact) => [
+            ui.text(span(fact.label, 'muted')),
+            ui.text({ key: fact.id, text: fact.value, wrap: fact.wrap }),
+          ])),
+    ),
+  )
+}
+
 function modelListPicker(
   panel: ModelPickerPanel,
   deps: ModelPickerViewDeps,
@@ -328,25 +384,14 @@ function modelListPicker(
   const row = highlightedModel(panel)
   const page = panel.page
   // The three-column selector shell (provider scopes + model list + details
-  // column) belongs to the model LIST page at wide width. The Overview and the
-  // Full details page are CONTENT pages of the model itself: they show their own
-  // rows and must not repeat a scope column or a side summary beside themselves.
+  // column) belongs to the model LIST page at wide width. The Overview is a
+  // CONTENT page of the model itself: it shows its own rows and must not repeat
+  // a scope column or a side summary beside itself.
   const side = page === 'models' && deps.wide
-  const facts = page === 'details' && row !== undefined
-    ? detailFactItems(panel, row, deps.wide)
-    : undefined
   const items = page === 'models'
     ? modelItems(panel, !deps.wide)
-    : page === 'overview'
-      ? overviewItems(panel, deps.wide)
-      : facts ?? []
-  const selected = page === 'models'
-    ? panel.selected
-    : page === 'overview'
-      ? overviewSelected(panel, deps.wide)
-      // The details page selects its presentation cursor, so the native list
-      // scrolls to the fact row being read.
-      : facts?.[detailCursor(panel, row, deps.wide)]?.id
+    : overviewItems(panel)
+  const selected = page === 'models' ? panel.selected : overviewSelected(panel)
   const props: PickerProps & { readonly key: string } = {
     key,
     title: pageTitle(page),
@@ -403,8 +448,16 @@ function modelListPicker(
  * The whole layer for one frame. The node id carries the panel serial AND the
  * revision, so an event or `onClick` from an earlier frame can only ever be
  * refused by `targets`/admission — never silently applied to the new one.
+ *
+ * The read-only `details` page REPLACES the picker with the native Reader (the
+ * page is the SAME logical page and the same layer; it is not a second
+ * simultaneously-active surface), so the layer region never carries a picker
+ * whose rows could be operated behind the reader.
  */
 export function modelPickerLayer(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node {
   const key = `model-${panel.serial}-rev-${panel.revision}`
-  return ui.col({ key: `model-layer-${panel.serial}-rev-${panel.revision}` }, modelListPicker(panel, deps, key))
+  return ui.col(
+    { key: `model-layer-${panel.serial}-rev-${panel.revision}` },
+    panel.page === 'details' ? detailsReader(panel, deps) : modelListPicker(panel, deps, key),
+  )
 }

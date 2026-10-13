@@ -203,6 +203,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enlarged UI fonts (the pre-existing Owner-accepted limitation), plus wheel/IME,
   themes and the Remote path — see the real-pane and not-verified sections of
   `docs/tern-tsp/model-selection.md`.
+- The experimental TSP renderer's `/model` fixes two visible usability problems.
+  **The wide shell is now MEASURED**: it is used only on a window wide enough for
+  the native client to keep the preview column beside the list (measured from about
+  1040px; the previous `cols >= 120` was about 960px, where the client paints the
+  preview under the list and the effort candidates fall outside the visible
+  region), while an ordinary split or narrow window always uses the compact model
+  list → that model's Overview. **The Overview now leads with effort**: its first
+  screen is the model's short name and every advertised Reasoning Effort
+  candidate, with `View full model details ›` and the one-line Provider/ID/
+  Current/Default summaries after them, so a long value can no longer push the
+  candidates off the first screen with a stack of continuation rows. **The full
+  details page is now a native Reader**: instead of a picker pre-split into
+  one-line fragments, it is a native `overlay` with ONE complete value per field
+  wrapped by the client at the real width (an unbroken provider/model/effort slug
+  or model ID by character, a description by word with its blank lines preserved),
+  with `PageUp`/`PageDown`, `Home`/`End` and `↑`/`↓` driving the native scroll
+  through the app to the very end and only its visible `Back` row or `Esc`
+  returning to the page it came from; the page has no submit entry at all and a
+  forged submit is refused. That `Back` row is never dead: while a re-read runs or
+  has failed it (and the `Esc` and scroll keys that share its intent) still return
+  to the origin page with its context, and only an admitted write keeps owning the
+  panel. Re-verified in a real Tern pane (0.8.3): the preview
+  mode boundary at 1020/1040/1050px, the split pane's effort-first Overview, and
+  the Reader's complete values, keyboard scrolling and return all pass; see
+  `docs/tern-tsp/evidence/model-responsive-reader-20261013.md`.
 
 - The fullscreen Settings workspace now speaks the same visual language as the
   rest of the TUI: the header reads `Settings · <trail>` (a bold identity word and

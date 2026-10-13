@@ -150,6 +150,47 @@ export async function waitForPicker(
   throw new Error(`timed out waiting for ${label}`)
 }
 
+/* ----------------------------------------------------------- reader page wire */
+
+/**
+ * The read-only Reader's mounted `overlay` (the `details` page), or `undefined`
+ * while the page is a picker. The page REPLACES the picker, so a mounted picker
+ * and a mounted Reader can never both describe the same layer.
+ */
+export function readerNode(pane: TspPane, prefix = MODEL_LAYER_PREFIX): WireNode | undefined {
+  return layerNodes(pane, prefix).find((node) => node.k === 'overlay' && node.p.head === 'Full model details')
+}
+
+/** The Reader's scrollable body: the node the presenter addresses with the SDK's
+ *  `scroll` op, found by the key it was built from (never a guessed path). */
+export function readerBodyNode(pane: TspPane, prefix = MODEL_LAYER_PREFIX): WireNode | undefined {
+  return layerNodes(pane, prefix).find((node) => node.k === 'col' && node.id.includes('model-details-body'))
+}
+
+/** The Reader's ONE interactive node: its visible `Back` row. */
+export function readerBackNode(pane: TspPane, prefix = MODEL_LAYER_PREFIX): WireNode {
+  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'row' && entry.id.includes('model-details-back'))
+  assert.ok(node, `no reader Back row in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
+  return node
+}
+
+/** One Reader value node's COMPLETE text, by the key it was built from. */
+export function readerValue(pane: TspPane, key: string, prefix = MODEL_LAYER_PREFIX): string | undefined {
+  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'text' && entry.id.endsWith(`.${key}`))
+  return typeof node?.p.text === 'string' ? node.p.text : undefined
+}
+
+/** Every `scroll` op the SDK really sent, in order: the wire is the observation
+ *  point (a renderer-local call is not the client's viewport). */
+export function scrollOps(pane: TspPane): Array<{ readonly id: string; readonly to: string }> {
+  const out: Array<{ id: string; to: string }> = []
+  for (const frame of pane.frames())
+    for (const op of frame.ops) {
+      if (op[0] === 'scroll') out.push({ id: String(op[1]), to: String(op[2]) })
+    }
+  return out
+}
+
 const sf = (pane: TspPane): string => pane.frames().at(-1)!.sf
 
 /** Send one picker action-bar action (the pane does this when its action bar is used). */
@@ -191,6 +232,11 @@ export function sendActivate(pane: TspPane, item: string, id = pickerNode(pane)?
 
 /** Click a node the way the pane does: an action whose `act` is the node's own
  *  `actions.click` mapping (auto-set by the SDK for `onClick`). */
+export function clickNodeById(pane: TspPane, id: string, act = 'click'): void {
+  // The EXACT id, so a caller can deliver an event from a RETIRED frame and prove
+  // the current one never routes it.
+  pane.event({ ev: 'action', sf: sf(pane), id, act })
+}
 export function clickNode(pane: TspPane, node: WireNode): void {
   pane.event({ ev: 'action', sf: sf(pane), id: node.id, act: 'click' })
 }

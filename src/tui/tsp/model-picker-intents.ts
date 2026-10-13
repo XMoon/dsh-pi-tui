@@ -11,11 +11,10 @@
  * and what `Enter` on the model list does, never what may be written.
  * @module tui/tsp/model-picker-intents
  */
-import type { Key } from '@stencil-hq/tern'
+import type { Key, ScrollTo } from '@stencil-hq/tern'
 import {
   applyOffered,
   detailCardOffered,
-  detailFactItems,
   draftedEffort,
   inlineEffortOffered,
   overviewItems,
@@ -43,8 +42,7 @@ export type ModelPickerIntent =
   | { readonly kind: 'overview-cursor'; readonly delta: -1 | 1 }
   | { readonly kind: 'overview-select'; readonly item: string }
   | { readonly kind: 'activate-overview' }
-  | { readonly kind: 'fact-cursor'; readonly delta: -1 | 1 }
-  | { readonly kind: 'fact-select'; readonly item: string }
+  | { readonly kind: 'reader-scroll'; readonly step: ScrollTo }
   | { readonly kind: 'query'; readonly query: string; readonly cursor: number }
   | { readonly kind: 'action-focus'; readonly delta: -1 | 1 }
   | { readonly kind: 'activate-action' }
@@ -109,8 +107,9 @@ function tabZone(panel: ModelPickerPanel, layout: ModelPickerLayout, direction: 
   // Tab/Shift+Tab must never move the keyboard there: both stay in the bar,
   // where ←→ switches between Retry and the always-enabled Cancel.
   if (panel.phase === 'error') return 'primary-action'
-  // The read-only Full details page and the model's Overview are CONTENT pages:
-  // their main list plus the action bar. Neither renders a side region.
+  // The model's Overview is a CONTENT page: its main list plus the action bar.
+  // (The read-only Reader never reaches this ring at all — it paints no second
+  // region, so {@link keyIntent} consumes `Tab` there as a no-op.)
   if (panel.page !== 'models') {
     return panel.zone === 'primary-action' ? 'models' : 'primary-action'
   }
@@ -149,6 +148,23 @@ function queryIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent | und
 }
 
 /**
+ * The Reader's own keys: they move the native scroll container the app addresses
+ * (the SDK's `scroll` op) and never change a draft, a page or a write. Returns
+ * `undefined` for every other key, so the READ-ONLY page has no other keyboard
+ * behaviour at all — not even `Tab`, which has no second region to reach.
+ */
+function readerScrollIntent(key: Key): ModelPickerIntent | undefined {
+  const step: ScrollTo | undefined = key.name === 'up' ? 'line-up'
+    : key.name === 'down' ? 'line-down'
+      : key.name === 'page_up' ? 'page-up'
+        : key.name === 'page_down' ? 'page-down'
+          : key.name === 'home' ? 'start'
+            : key.name === 'end' ? 'end'
+              : undefined
+  return step === undefined ? undefined : { kind: 'reader-scroll', step }
+}
+
+/**
  * K2: the frozen key contract.
  *
  * Returns `undefined` for a key the panel does not consume — the orchestrator
@@ -162,6 +178,11 @@ export function keyIntent(
   // The original application cancel owner keeps Ctrl+C in every state.
   if (key.ctrl === true && key.name === 'c') return undefined
   if (key.name === 'escape') {
+    // The read-only Reader's `Esc` IS its visible `Back` row, in every phase but
+    // an admitted write: the row is on screen, so the key must not disagree with
+    // it (and closing the whole panel there would drop the page context the
+    // origin can restore).
+    if (panel.page === 'details' && panel.phase !== 'pending') return { kind: 'back' }
     // Esc is NEVER swallowed. An admitted write, a running (re-)read and a failed
     // read all leave the close action as the only reachable one, and in the failed
     // read the zone/page Esc would return to is inert (`tabZone` keeps the keyboard
@@ -183,11 +204,19 @@ export function keyIntent(
     return { kind: 'close' }
   }
   // While the read runs the query stays editable (frozen §4.5) and every other
-  // key is refused; an admitted write refuses everything but Esc/Ctrl+C.
+  // key is refused; an admitted write refuses everything but Esc/Ctrl+C. The
+  // read-only Reader's own scroll keys are VIEW operations on the page the user is
+  // looking at, so they follow the same rule as its visible Back and stay
+  // available while the read merely runs or has failed.
   if (panel.phase === 'loading') {
+    if (panel.page === 'details') return readerScrollIntent(key)
     return panel.page === 'models' ? queryIntent(panel, key) : undefined
   }
   if (panel.phase === 'pending') return undefined
+  // The read-only Reader is ONE region: it has no side column, no selector and no
+  // action bar to move to, so `Tab` is consumed as a no-op instead of re-emitting
+  // a zone the page does not paint. `Esc`/`Back` (handled above) is its way out.
+  if (panel.page === 'details') return readerScrollIntent(key)
   if (key.name === 'tab') return { kind: 'zone', zone: tabZone(panel, layout, key.shift === true ? -1 : 1) }
   // The action bar owns Enter and the bar-internal focus movement. Enter only
   // ever activates the FOCUSED action; the Primary Action remains the sole write.
@@ -200,24 +229,15 @@ export function keyIntent(
   // A failed read owns no browsable list: only the action bar (Tab) is live.
   if (panel.phase === 'error') return undefined
   // The Overview's main list is the model's own page: its arrows move the ROW
-  // cursor (over every identity continuation line, the details entry and the
-  // effort candidates) and Enter acts on the row it is really on. Enter on a
-  // static identity row is inert; on an effort row it drafts; on the details
-  // entry it opens the read-only page.
+  // cursor (over the identity summary, the effort section and the details entry)
+  // and Enter acts on the row it is really on. Enter on a
+  // static summary row is inert; on an effort row it drafts; on the details
+  // entry it opens the read-only Reader.
   if (panel.page === 'overview') {
     if (key.name === 'up' || key.name === 'down') {
       return { kind: 'overview-cursor', delta: key.name === 'up' ? -1 : 1 }
     }
     return key.name === 'enter' ? { kind: 'activate-overview' } : undefined
-  }
-  // The details page's rows are inert FACTS, so its arrows only keep the native
-  // list scrolled to the row being read (a long description must stay
-  // reachable); they never change the browsed model and never write.
-  if (panel.page === 'details') {
-    if (key.name === 'up' || key.name === 'down') {
-      return { kind: 'fact-cursor', delta: key.name === 'up' ? -1 : 1 }
-    }
-    return undefined
   }
   // The wide Model Details card is the model list's `detail-card` zone, and its
   // Enter must open exactly what its own label and its own pointer target open:
@@ -318,10 +338,12 @@ export function actionIntent(
  * The event KIND (`select` / `activate`) carries no distinct intent here: the
  * SDK sends `activate` for a click on the row that is already selected, and the
  * frozen contract makes both shapes idempotent on every page — highlighting at
- * the wide model list, entering the model's Overview at a compact width,
- * activating the Overview row it really names, and only moving the read cursor
- * on the details page. The event's `item` is the routing authority in every
- * case, never the previous cursor.
+ * the wide model list, entering the model's Overview at a compact width, and
+ * activating the Overview row it really names. The event's `item` is the routing
+ * authority in every case, never the previous cursor. The read-only Reader has
+ * NO selectable row of its own (its one interactive node is the `Back` row,
+ * which the SDK dispatches as its own `onClick`), so a row event can never act
+ * on that page.
  *
  * A candidate row carries its OWN wire namespace ({@link
  * model-picker-state.effortItemId}), and that is the only place a candidate
@@ -338,15 +360,8 @@ export function rowIntent(
     // The Overview's rows are the REAL rows of the page the user is looking at:
     // only an id that row set currently carries may act, so a stale or forged
     // row can neither draft an effort nor open the details page.
-    return overviewItems(panel, layout.wide).some((row) => row.id === item)
+    return overviewItems(panel).some((row) => row.id === item)
       ? { kind: 'overview-select', item }
-      : undefined
-  }
-  if (panel.page === 'details') {
-    const row = highlightedModel(panel)
-    if (row === undefined) return undefined
-    return detailFactItems(panel, row, layout.wide).some((fact) => fact.id === item)
-      ? { kind: 'fact-select', item }
       : undefined
   }
   if (panel.page !== 'models') return undefined

@@ -21,7 +21,6 @@ import {
 } from '../pickers/model-directory.ts'
 import {
   clampColumns,
-  factRowItems,
   oneLine,
   PICKER_GLYPH_PX,
   wrapColumns,
@@ -93,16 +92,10 @@ export interface ModelPickerPanel {
   rows: readonly ModelPickerModelRow[]
   failures: readonly ModelPickerFailureRow[]
   /**
-   * The details page's presentation cursor (an index into its inert fact rows).
-   * It only keeps the native list scrolled to the row the user is reading, so a
-   * long description's tail stays reachable from the keyboard.
-   */
-  factCursor: number
-  /**
    * The Overview page's presentation cursor: an index into the MAIN LIST rows
-   * (identity fact continuations, the details entry and the effort candidates).
-   * It is the ROW the keyboard/pointer is on and is never itself a business
-   * candidate: only activating an effort row changes that model's draft.
+   * (the identity summary, the effort section and the details entry). It is the
+   * ROW the keyboard/pointer is on and is never itself a business candidate:
+   * only activating an effort row changes that model's draft.
    */
   overviewCursor: number
   /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
@@ -333,60 +326,80 @@ export function zoneHintText(panel: ModelPickerPanel, layout: ModelPickerLayout)
 
 /* ------------------------------------------------------------ overview page */
 
+/** The wire id of the Overview's effort section head — the row that names what
+ *  the candidates below it are. It is deliberately not an effort candidate id,
+ *  so the section label and a candidate can never be confused; it routes
+ *  nowhere, and activating it only moves the row cursor. */
+export const OVERVIEW_EFFORT_ID = 'overview-effort'
+
 /** The wire id of the Overview's single operation row (the read-only Full
  *  details entry). It is deliberately not an effort candidate id, so the two
  *  row kinds can never be confused. */
 export const OVERVIEW_DETAILS_ID = 'overview-details'
 
-/** The inert row a model with no advertised effort metadata gets, so the
- *  Overview's effort section is never silently missing. Its id is routed
- *  nowhere: activating it changes nothing. */
-export const OVERVIEW_NO_EFFORT_ID = 'overview-no-effort'
+/**
+ * One fact as a single PROVABLE line: every whitespace run — an explicit LF,
+ * CRLF, CR or Unicode separator included — folds into one space, so the native
+ * row can only ever render ONE line and the client's own ellipsis is the width
+ * bound. The complete value stays readable in the Reader, which is why the
+ * Overview never spends continuation rows on it: the model's effort candidates
+ * must stay on the first screen at every width.
+ */
+function summaryFact(id: string, label: string, value: string): PickerItem {
+  return { id, label, detail: oneLine(value) }
+}
 
 /**
- * The Overview page's MAIN LIST rows, in order: the model's complete identity
- * facts (wrapped into continuation rows by the shared
- * {@link factRowItems} rule, so a long provider/ID is never readable only
- * through an ellipsis), the single `View full model details ›` operation row,
- * and the model's advertised effort candidates — or one inert
- * `Reasoning effort Not available` row when the model advertises none.
+ * The Overview page's MAIN LIST rows, in the frozen priority order:
+ *
+ *  1. the model's SHORT identity (one ellipsized line — the complete value is a
+ *     Reader fact), so the target model stays identifiable without pushing the
+ *     effort candidates off the first screen;
+ *  2. the `Reasoning effort` section, carrying every advertised candidate (or
+ *     the explicit `Not available` statement when the model advertises none);
+ *  3. the single `View full model details ›` operation row;
+ *  4. the remaining configured facts (provider, ID, Current/Default) as
+ *     single-line summaries.
  *
  * The Overview is the model's OWN page at every width (`preview: 'none'`), so
  * everything a user has to act on lives in this native list instead of a
  * preview region the client may hide.
  */
-export function overviewItems(panel: ModelPickerPanel, wide: boolean): PickerItem[] {
+export function overviewItems(panel: ModelPickerPanel): PickerItem[] {
   const row = highlightedModel(panel)
   if (row === undefined) return []
   const draft = draftedEffort(panel, row)
   const choices = modelChoices(row)
   return [
-    ...factRowItems('overview-model', 'Model', row.modelName, wide),
-    ...factRowItems('overview-provider', 'Provider', `${row.providerName} (${row.providerId})`, wide),
-    ...factRowItems('overview-id', 'ID', row.modelId, wide),
-    ...configuredFacts(panel).flatMap((fact) => factRowItems(fact.id, fact.label, fact.detail, wide)),
+    summaryFact('overview-model', 'Model', row.modelName),
+    {
+      id: OVERVIEW_EFFORT_ID,
+      label: 'Reasoning effort',
+      ...(choices.length === 0 ? { detail: 'Not available' } : {}),
+    },
+    ...choices.map((choice) => ({
+      id: effortItemId(choice.value),
+      label: choice.label,
+      detail: 'draft',
+      mark: choice.value === draft ? { text: '●' } : { text: '○' },
+    })),
     { id: OVERVIEW_DETAILS_ID, label: 'View full model details ›' },
-    ...(choices.length === 0
-      ? [{ id: OVERVIEW_NO_EFFORT_ID, label: 'Reasoning effort', detail: 'Not available' }]
-      : choices.map((choice) => ({
-          id: effortItemId(choice.value),
-          label: choice.label,
-          detail: 'draft',
-          mark: choice.value === draft ? { text: '●' } : { text: '○' },
-        }))),
+    summaryFact('overview-provider', 'Provider', `${row.providerName} (${row.providerId})`),
+    summaryFact('overview-id', 'ID', row.modelId),
+    ...configuredFacts(panel).map((fact) => summaryFact(fact.id, fact.label, fact.detail)),
   ]
 }
 
 /** The Overview cursor, clamped to the rows the page currently offers. */
-export function overviewCursorIndex(panel: ModelPickerPanel, wide: boolean): number {
-  const count = overviewItems(panel, wide).length
+export function overviewCursorIndex(panel: ModelPickerPanel): number {
+  const count = overviewItems(panel).length
   return Math.min(Math.max(panel.overviewCursor, 0), Math.max(0, count - 1))
 }
 
 /** The row the Overview's native list has selected: the REAL row at the cursor,
- *  never a fixed draft item, so the keyboard can read every continuation line. */
-export function overviewSelected(panel: ModelPickerPanel, wide: boolean): string | undefined {
-  return overviewItems(panel, wide)[overviewCursorIndex(panel, wide)]?.id
+ *  never a fixed draft item, so the keyboard can read every row it offers. */
+export function overviewSelected(panel: ModelPickerPanel): string | undefined {
+  return overviewItems(panel)[overviewCursorIndex(panel)]?.id
 }
 
 /* --------------------------------------------------------------- action bar */
@@ -510,48 +523,112 @@ export function stepActionFocus(
 
 /* ------------------------------------------------------------- details page */
 
-/** The model-details page's inert fact rows (compact or wide).
+/** One label/value pair of the read-only Reader.
  *
- *  EVERY fact value goes through {@link factRowItems}: a row renders ONE line and
- *  ellipsizes what does not fit, so a long name/provider/ID/configured value can
- *  only be read completely when its continuation rows exist AND each fragment
- *  fits the row's own measured one-line slot. `wide` selects the slot/bound of
- *  the layout the page is rendered in. The values are the directory's own — this
- *  page never rewrites or re-derives what the writer sends. */
-export function detailFactItems(
+ *  The value is the COMPLETE, untouched fact — never pre-split into rows: the
+ *  native client wraps it at the width the layout really has, which is the only
+ *  width the presenter cannot measure. `wrap` selects how a value with no usable
+ *  break opportunity behaves: `char` for machine identifiers (`provider/model/
+ *  effort` slugs and model IDs, which may carry no space at all) and `word` for
+ *  prose (the description and the transient status), where breaking inside a
+ *  word would be the wrong reading order. */
+export interface ModelPickerReaderFact {
+  readonly id: string
+  readonly label: string
+  readonly value: string
+  readonly wrap: 'word' | 'char'
+}
+
+/**
+ * The Reader's facts, in the order a user reads them: the model identity, the
+ * configured Current/Default selections (whose values carry their own effort
+ * from the ONE directory DTO), the advertised description, the current draft
+ * effort and the transient status.
+ *
+ * The values are the directory's own — this page never rewrites, re-derives or
+ * re-flows what the writer sends, and it never invents an effort a model does
+ * not advertise.
+ */
+export function detailReaderFacts(
   panel: ModelPickerPanel,
   row: ModelPickerModelRow,
-  wide: boolean,
-): PickerItem[] {
+): readonly ModelPickerReaderFact[] {
   const description = advertisedDescription(panel, row)
   const draft = draftedEffort(panel, row)
   const draftLabel = modelChoices(row).find((choice) => choice.value === draft)?.label
   return [
-    ...factRowItems('fact-model', 'Model', row.modelName, wide),
-    ...factRowItems('fact-provider', 'Provider', `${row.providerName} (${row.providerId})`, wide),
-    ...factRowItems('fact-id', 'ID', row.modelId, wide),
-    // The configured facts come from the ONE directory DTO, so a Default effort
-    // is never lost when the default is not the current model.
-    ...configuredFacts(panel).flatMap((fact) => factRowItems(fact.id, fact.label, fact.detail, wide)),
-    // A long description is wrapped into complete, readable rows.
-    ...(description === undefined ? [] : factRowItems('fact-description', 'Description', description, wide)),
-    ...(draftLabel === undefined ? [] : factRowItems('fact-draft', 'Draft effort', draftLabel, wide)),
-    ...(panel.notice === '' ? [] : factRowItems('fact-notice', 'Status', panel.notice, wide)),
+    { id: 'reader-model', label: 'Model', value: row.modelName, wrap: 'char' },
+    { id: 'reader-provider', label: 'Provider', value: `${row.providerName} (${row.providerId})`, wrap: 'char' },
+    { id: 'reader-id', label: 'ID', value: row.modelId, wrap: 'char' },
+    ...configuredFacts(panel).map((fact) => ({
+      id: `reader-${fact.id}`,
+      label: fact.label,
+      value: fact.detail,
+      wrap: 'char' as const,
+    })),
+    ...(description === undefined
+      ? []
+      : [{ id: 'reader-description', label: 'Description', value: description, wrap: 'word' as const }]),
+    ...(draftLabel === undefined
+      ? []
+      : [{ id: 'reader-draft', label: 'Draft effort', value: draftLabel, wrap: 'char' as const }]),
+    ...(panel.notice === ''
+      ? []
+      : [{ id: 'reader-status', label: 'Status', value: panel.notice, wrap: 'word' as const }]),
   ]
 }
 
-/** The details page's cursor, clamped to the rows it currently offers. */
-export function detailCursor(
-  panel: ModelPickerPanel,
-  row: ModelPickerModelRow | undefined,
-  wide: boolean,
-): number {
-  if (row === undefined) return 0
-  const count = detailFactItems(panel, row, wide).length
-  return Math.min(Math.max(panel.factCursor, 0), Math.max(0, count - 1))
-}
-
 /* ------------------------------------------------------------ layout budget */
+
+/**
+ * The measured pane width, in CSS px, at and above which the native client
+ * really paints the picker's preview column BESIDE the list.
+ *
+ * MEASURED against the real client (`tern 0.8.3`) with a model that advertises
+ * four effort candidates, reading the client's own preview mode classes plus the
+ * published-effort rows' containment.
+ *
+ * The probe ran BEFORE this rule existed (it drove the then-current presenter,
+ * which asked for the side column at `cols >= 120`), so the table below is a
+ * CLIENT calibration: it says where the client's breakpoint is, not what this
+ * presenter emits now. The SHIPPED rule's acceptance — the presenter's claim
+ * against the client's own mode at each pane — is the real-pane flow's matrix
+ * recorded in `docs/tern-tsp/evidence/model-responsive-reader-20261013.md`:
+ *
+ * | pane      | `cols` | preview classes        | inline effort rows visible |
+ * |-----------|--------|------------------------|----------------------------|
+ * | 980x640   | 122    | `pv-side pv-below-auto`| 0 of 4 (clipped below)     |
+ * | 1020x640  | 127    | `pv-side pv-below-auto`| 0 of 4                     |
+ * | 1040x640  | 129    | `pv-side`              | 4 of 4                     |
+ * | 1050x700  | 131    | `pv-side`              | 4 of 4                     |
+ * | 1100x640  | 137    | `pv-side`              | 4 of 4                     |
+ * | 1280x800  | 160    | `pv-side`              | 4 of 4                     |
+ *
+ * The client's breakpoint is the SHEET width (`980px`), which the pane reaches
+ * at `1040px` of window; below it the client still emits `pv-side` but paints
+ * the preview UNDER the list, where the effort rows are clipped away. That is
+ * exactly the pane the `models lg + side preview` shape must not claim, so the
+ * bar is set at the measured boundary rather than at the old `cols >= 120`
+ * (which is 960px: below the boundary in every font).
+ *
+ * Only `SessionCaps.cols`/`cell` describe geometry (the SDK reports no sheet
+ * box), so the pane width is RECONSTRUCTED as `cols * cell.w`. Measured on the
+ * same run: the reconstruction never over-estimates the pane (`1200px` pane ->
+ * `150 * 8 = 1200`, `1040px` pane -> `129 * 8 = 1032`), so it errs towards the
+ * compact layout, which is the safe direction.
+ */
+export const SIDE_PREVIEW_MIN_PANE_PX = 1040
+
+/**
+ * Whether the current pane gets the native SIDE preview column: the ONE layout
+ * threshold of the `/model` presenter. A pane that does not reach it uses the
+ * compact picker (`md`, `preview: 'none'`) and reaches every effort candidate
+ * through the model's Overview, so a candidate is never operated while the
+ * client paints it outside the visible region.
+ */
+export function nativeSidePreview(cols: number, cellWidth: number): boolean {
+  return cols * cellWidth >= SIDE_PREVIEW_MIN_PANE_PX
+}
 
 /**
  * The wide preview's own line budget: every rendered character is priced at the
