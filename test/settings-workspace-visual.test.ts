@@ -1119,3 +1119,29 @@ test('F11 narrow Tab/Shift+Tab never bypass the drill-down and Left/Right never 
   assert.match(medium.rowsPlain()[0]!, /Display/, 'Right still switches the category in medium')
   medium.dispose()
 })
+
+test('F12 pre-paint keys use the real projection (narrow Back, medium focus cycle)', async () => {
+  // Deliberately do NOT await a paint: the first keys arrive before the initial
+  // frame, exactly when the projection must come from the LIVE terminal width.
+  const narrow = setup({ columns: 80, rows: 24, doc: { theme: 'dark' } })
+  narrow.invoke('settings')
+  narrow.vt.sendInput('\r') // categories -> rows (the live narrow layout)
+  narrow.vt.sendInput('\x1b') // rows -> categories, NEVER a full close
+  await narrow.vt.waitForRender()
+  assert.ok(narrow.view().includes('SETTINGS'), `the pre-paint Esc must not close the workspace:\n${narrow.view()}`)
+  assert.match(narrow.rowsPlain()[0]!, /SETTINGS · Categories/, 'the pre-paint Esc returns to categories')
+  // After a paint the same sequence behaves identically.
+  await key(narrow, '\r')
+  await key(narrow, '\x1b')
+  assert.match(narrow.rowsPlain()[0]!, /Categories/)
+  assert.ok(narrow.view().includes('SETTINGS'))
+  narrow.dispose()
+
+  // A medium pre-paint Tab must use the LIVE medium layout (not a narrow guess).
+  const medium = setup({ columns: 120, rows: 24, doc: { theme: 'dark' } })
+  medium.invoke('settings')
+  medium.vt.sendInput('\t')
+  await medium.vt.waitForRender()
+  assert.match(medium.rowsPlain()[rowOf(medium, 'DETAILS')]!, /\[DETAILS\]/, 'the pre-paint Tab cycles the medium focus owner')
+  medium.dispose()
+})

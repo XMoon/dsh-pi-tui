@@ -652,7 +652,7 @@ export class SettingsWorkspacePanel implements Component {
   /** The detail pane projection: scrollable content plus the pinned action row. */
   private detailLines(width: number, viewport: number): DetailProjection {
     const row = this.selectedRow()
-    const includeTitle = this.chrome?.layout !== 'narrow'
+    const includeTitle = this.currentLayout() !== 'narrow'
     const button = row === undefined
       ? undefined
       : row.value !== undefined
@@ -831,7 +831,7 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private goBack(): void {
-    if (this.chrome?.layout === 'narrow') {
+    if (this.currentLayout() === 'narrow') {
       if (this.focus === 'detail') {
         this.focus = 'rows'
         this.bumpRevision()
@@ -1026,7 +1026,7 @@ export class SettingsWorkspacePanel implements Component {
         // "click the corresponding column" contract); in the narrow
         // single-column projection the same click is the drill-down gesture
         // (the same step as Enter).
-        this.takeColumnFocus(this.chrome?.layout === 'narrow' ? 'rows' : 'categories')
+        this.takeColumnFocus(this.currentLayout() === 'narrow' ? 'rows' : 'categories')
         return
       case 'row': {
         this.selectRow(target.id as SettingsWorkspaceRowId)
@@ -1037,7 +1037,7 @@ export class SettingsWorkspacePanel implements Component {
           this.intents.onOpenLegacy()
           return
         }
-        this.takeColumnFocus(this.chrome?.layout === 'narrow' ? 'detail' : 'rows')
+        this.takeColumnFocus(this.currentLayout() === 'narrow' ? 'detail' : 'rows')
         return
       }
       case 'copy':
