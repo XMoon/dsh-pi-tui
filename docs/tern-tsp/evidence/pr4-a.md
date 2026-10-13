@@ -1,5 +1,13 @@
 # Tern TSP PR4-A Model evidence — the native Model B2 selection UI
 
+> **Navigation (2026-10-13).** This file records the PR4-A measurements as they
+> were taken; its content is NOT rewritten. The later Model-Responsive / Reader
+> revision — the measured side-preview threshold, the Overview's priority order and
+> the read-only Reader that replaced the pre-split details rows — is evidenced in
+> [model-responsive-reader-20261013.md](./model-responsive-reader-20261013.md),
+> which supersedes this file wherever it describes the `details` page as a Picker
+> page, the `cols >= 120` wide rule, or `pv-side` as proof of a side column.
+
 > **Status: PR open, increments accepted — the STAGE GATES ARE NOT CLOSED.**
 > This file is the durable summary of PR4-A Model (native `/model` model + Reasoning
 > Effort selection inside the experimental TSP renderer). It records what is

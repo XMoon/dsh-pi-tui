@@ -354,13 +354,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render: () => render(),
     canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
     notify: (text, kind) => display.notify(text, kind),
+    // The ONE Surface owner performs the native scroll the Reader's keys ask
+    // for. The presenter names a wire id of the frame IT built; the SDK stays
+    // here and is never handed to the business/Host side.
+    nativeScroll: (id, to) => { surface.scroll(id, to) },
   })
   presetPicker = new TspPresetPicker({
     render: () => render(),
     canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
     notify: (text, kind) => display.notify(text, kind),
   })
-  modelPicker.resize(session.caps.cols)
+  modelPicker.resize(session.caps.cols, session.caps.cell.w)
   /**
    * The ONE layer, and the two presenters that may claim it. Opening either
    * one retires the other FIRST, so the renderer's `layer` region can never
@@ -804,7 +808,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // away from an open form, so the seat's own focus is re-asserted; every
       // other event keeps its existing (unhandled) course.
       if (input.event.ev === 'resize' && input.event.sf === surface.id && typeof input.event.cols === 'number') {
-        modelPicker?.resize(input.event.cols)
+        // The SDK has already folded this event into `caps` (cols AND the cell
+        // size), so the presenter's layout rule reads the live geometry.
+        modelPicker?.resize(input.event.cols, session.caps.cell.w)
         render()
       }
       if (seat.hasModalSeat()) { if (seat.handleEvent(input.event)) applyFocus(true); return false }

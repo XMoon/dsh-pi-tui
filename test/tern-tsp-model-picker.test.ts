@@ -15,14 +15,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { connect } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
-// The fact-row readability rule (the assertion reads the wire's own values and
-// only the bound from the shared implementation).
-import { displayWidth, factLineColumns } from '../src/tui/tsp/picker-text.ts'
 import {
   ALL_SCOPES_ID,
   OVERVIEW_DETAILS_ID,
-  OVERVIEW_NO_EFFORT_ID,
+  OVERVIEW_EFFORT_ID,
   effortItemId,
+  nativeSidePreview,
   scopeId,
 } from '../src/tui/tsp/model-picker-state.ts'
 import { runOwned } from '../src/runtime/process/tasks.ts'
@@ -71,15 +69,19 @@ test('production /model: a pane with the picker but without native Rows/Cards st
  *  immediately, but a credit-gated frame may still be in flight and an event read
  *  from the previous frame is (by design) refused as a stale receiver. */
 async function resize(pane: TspPane, cols: number): Promise<void> {
-  const before = picker(pane)?.id
+  // One frame per resize is the evidence: a picker page's node id moves with the
+  // revision, but the read-only Reader's ids are stable, so the frame count is
+  // what proves the resized layout was really committed.
+  const before = pane.frameCount()
   sendResize(pane, cols)
-  await waitUntil('the resized frame is committed', () => picker(pane)?.id !== before)
+  await waitUntil('the resized frame is committed', () => pane.frameCount() > before)
 }
 
 // The wire observation helpers: the REAL reconciled node tree of the frames.
 import {
   cardNode,
   clickNode as click,
+  clickNodeById,
   layerNodes,
   pickerAction as actionOf,
   pickerNode as picker,
@@ -90,6 +92,11 @@ import {
   sendResize,
   sendSelect as browse,
   hasEffortCard,
+  readerBackNode,
+  readerBodyNode,
+  readerNode,
+  readerValue,
+  scrollOps,
   sheetText,
   wireNodes as nodes,
 } from './support/tsp-picker-wire.ts'
@@ -145,14 +152,30 @@ async function enterOverview(pane: TspPane): Promise<void> {
   await waitUntil('the model Overview', () => props(pane).title === 'Model overview')
 }
 
-/** Open the read-only Full details page however the CURRENT layout offers it:
- *  the full wide card, or the Overview's own details row (compact, and the wide
- *  bounded column that enters the Overview first). */
+/**
+ * The suite's NORMAL WIDE pane: 160 terminal columns at the fixture's 8px cell =
+ * 1280px, comfortably past the measured native side-preview boundary (1040px).
+ * The fixture's own pane is 120 columns = 960px, which the real client paints
+ * with the preview UNDER the list — a COMPACT pane, and exactly the split the
+ * wide shell must not claim.
+ */
+const WIDE_COLS = 160
+
+/** Whether the read-only Reader is the mounted page (it REPLACES the picker, so
+ *  the page is read from the wire, never from picker props). */
+function inDetails(pane: TspPane): boolean {
+  return readerNode(pane) !== undefined
+}
+
+/** Open the read-only Reader however the CURRENT layout offers it: the full wide
+ *  card, or the Overview's own details row (compact, and the wide bounded column
+ *  that enters the Overview first). */
 async function openDetails(pane: TspPane): Promise<void> {
+  if (inDetails(pane)) return
   if (props(pane).title !== 'Model overview') {
     if (props(pane).size === 'lg') {
       click(pane, cardNode(pane, 'model-details'))
-      await waitUntil('a page opened from the card', () => props(pane).title !== 'Models')
+      await waitUntil('a page opened from the card', () => props(pane).title !== 'Models' || inDetails(pane))
     } else {
       await enterOverview(pane)
     }
@@ -161,7 +184,35 @@ async function openDetails(pane: TspPane): Promise<void> {
     await walkList(pane, OVERVIEW_DETAILS_ID)
     pane.key('\r')
   }
-  await waitUntil('the read-only Full details page', () => props(pane).title === 'Full model details')
+  await waitUntil('the read-only Reader', () => inDetails(pane))
+}
+
+/** Leave the Reader the way the page really offers: its visible `Back` row. */
+async function backFromDetails(pane: TspPane): Promise<void> {
+  click(pane, readerBackNode(pane))
+  await waitUntil('the Reader closed', () => !inDetails(pane))
+}
+
+/** Send an action AT whatever node the layer mounts — the picker, or the Reader
+ *  that replaces it on the details page (a forged receiver must be addressable
+ *  there too). */
+function forge(pane: TspPane, act: string, value?: string): void {
+  const id = picker(pane)?.id ?? readerNode(pane)?.id
+  assert.ok(id, 'a model layer node must be mounted')
+  action(pane, act, value, id)
+}
+
+/** Every fact VALUE the mounted Reader carries, keyed by the stable key the view
+ *  built it from (`reader-model`, `reader-fact-current`, …). */
+function readerFacts(pane: TspPane): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const node of nodes(pane)) {
+    if (node.k !== 'text') continue
+    const at = String(node.id).lastIndexOf('.reader-')
+    if (at < 0) continue
+    out.set(String(node.id).slice(at + 1), String(node.p.text ?? ''))
+  }
+  return out
 }
 
 /** The `▸` focus cue of one action bar entry, per pane. */
@@ -246,6 +297,11 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
     runOwned: (label, task, options) =>
       runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
   })
+  // Every case starts on the suite's NORMAL WIDE pane: the fixture's own pane is
+  // a 960px compact one (see WIDE_COLS). A compact case resizes down explicitly.
+  const firstFrame = picker(pane)?.id
+  sendResize(pane, WIDE_COLS)
+  await waitUntil('the wide pane is committed', () => picker(pane)?.id !== firstFrame)
   return {
     pane,
     renderer,
@@ -410,9 +466,9 @@ test('native Model: a REAL scope action filters, and a scope-shaped row select n
   await settle(30)
   await walkList(pane, OVERVIEW_DETAILS_ID)
   pane.key('\r')
-  await waitUntil('the read-only details page', () => props(pane).title === 'Full model details')
-  assert.equal(props(pane).scopes, undefined, 'the details page advertises no scope column either')
-  action(pane, 'scope', 'scope:b')
+  await waitUntil('the read-only details page', () => inDetails(pane))
+  assert.equal(picker(pane), undefined, 'the Reader REPLACES the picker: no scope column and no action bar')
+  forge(pane, 'scope', 'scope:b')
   await settle(30)
   pane.key('\u001b')
   await waitUntil('Esc returns to the Overview it came from', () => props(pane).title === 'Model overview')
@@ -512,18 +568,27 @@ test('native Model: the action bar per page and phase offers only what it can ru
   assert.deepEqual(actionIds(pane), ['back', 'apply'])
   assert.deepEqual(actionLabels(pane), ['Back', 'Save default'])
   assert.equal(actionOf(pane, 'close'), undefined, 'the Overview footer carries no Cancel')
-  // The read-only Full details page is Back ALONE: no cancel entry, no write.
+  // The read-only Full details page is the native Reader: no picker, therefore no
+  // action bar at all — no cancel entry, no write and no selectable row.
   await walkList(pane, OVERVIEW_DETAILS_ID)
   pane.key('\r')
-  await waitUntil('details page', () => props(pane).title === 'Full model details')
-  assert.deepEqual(actionIds(pane), ['back'])
-  assert.deepEqual(actionLabels(pane), ['Back'])
-  assert.equal(actionOf(pane, 'close'), undefined, 'the read-only page footer carries no Cancel')
-  assert.equal(actionOf(pane, 'apply'), undefined, 'the read-only page carries no write')
+  await waitUntil('details page', () => inDetails(pane))
+  assert.equal(picker(pane), undefined, 'the Reader replaces the picker instead of carrying its bar')
+  // Read the Reader's OWN subtree from the wire: a picker-prop read would be
+  // vacuous here, because the helpers return `{}` while no picker is mounted.
+  const readerSubtree = layerNodes(pane)
+  assert.equal(readerSubtree.some((node) => node.k === 'picker'), false, 'the Reader subtree carries no picker')
+  assert.equal(readerSubtree.some((node) => Array.isArray(node.p.actions)), false, 'nor any action bar')
+  assert.equal(readerSubtree.some((node) => 'scopes' in node.p), false, 'nor any scope column')
+  assert.deepEqual(
+    readerSubtree.filter((node) => node.p.actions !== undefined).map((node) => node.id),
+    [readerBackNode(pane).id],
+    'its ONE interactive node is the visible Back row',
+  )
   // The panel's own dismissal authority stays ADMITTED there (the client's
   // backdrop gesture is the same intent Esc uses), it is just not a button.
-  action(pane, 'close')
-  await waitUntil('a backdrop-style close still dismisses the panel', () => picker(pane) === undefined)
+  forge(pane, 'close')
+  await waitUntil('a backdrop-style close still dismisses the panel', () => readerNode(pane) === undefined)
   m.handle.close()
   // A LIVE subject names the same action differently: it switches the Session.
   const live = await mounted(t, { sessionless: false })
@@ -572,23 +637,27 @@ test('native Model: the Overview lists the identity, the details entry and every
   await resize(pane, 100)
   await waitUntil('compact', () => props(pane).size === 'md')
   await enterOverview(pane)
-  // The page's MAIN LIST rows: the complete identity facts, the single operation
-  // row, then the model's own candidates (the configured draft marked). A detail
-  // longer than the row's one-line slot continues on its own row.
+  // The page's MAIN LIST rows, in the frozen priority order: the model's SHORT
+  // identity, the effort section (its head plus every advertised candidate), the
+  // single operation row, and the remaining configured facts as one-line
+  // summaries. A long value never spends continuation rows here — it is a Reader
+  // fact, which is what keeps every candidate on the first screen.
   assert.deepEqual(rowIds(pane), [
     'overview-model',
-    'overview-provider',
-    'overview-id',
-    'fact-default',
-    'fact-default-2',
-    OVERVIEW_DETAILS_ID,
+    'overview-effort',
     effortItemId('\u0000provider-default'),
     effortItemId('low'),
     effortItemId('high'),
+    OVERVIEW_DETAILS_ID,
+    'overview-provider',
+    'overview-id',
+    'fact-default',
   ])
   assert.equal(joinedDetail(pane, 'overview-model'), 'Twin')
   assert.equal(joinedDetail(pane, 'overview-provider'), 'A(a)')
   assert.equal(joinedDetail(pane, 'overview-id'), 'same')
+  assert.equal(joinedDetail(pane, 'fact-default'), 'a/same/high')
+  assert.equal(detailOf(pane, OVERVIEW_EFFORT_ID), undefined, 'the section head is a label, not a value')
   const candidate = (id: string): Record<string, unknown> | undefined =>
     ((props(pane).items ?? []) as Array<Record<string, unknown>>).find((item) => String(item.id) === id)
   assert.equal((candidate(effortItemId('high'))?.mark as { text?: string } | undefined)?.text, '●')
@@ -607,12 +676,12 @@ test('native Model: the Overview lists the identity, the details entry and every
     (candidate(effortItemId('low'))?.mark as { text?: string } | undefined)?.text === '●')
   assert.equal(m.writes.length, 0, 'an effort row never writes')
   assert.equal(props(pane).title, 'Model overview', 'a candidate row never leaves the page')
-  // The details entry opens the read-only page.
+  // The details entry opens the read-only Reader.
   await walkList(pane, OVERVIEW_DETAILS_ID)
   pane.key('\r')
-  await waitUntil('details from the Overview', () => props(pane).title === 'Full model details')
+  await waitUntil('details from the Overview', () => inDetails(pane))
   // A pointer activation on the same rows resolves the same way.
-  action(pane, 'back')
+  await backFromDetails(pane)
   await waitUntil('back on the Overview', () => props(pane).title === 'Model overview')
   browse(pane, effortItemId('high'))
   await waitUntil('the pointer row drafted High', () =>
@@ -654,16 +723,16 @@ test('native Model: the wide details card opens the read-only page and Back retu
   // `›` affordance.
   assert.equal(cardNode(pane, 'model-details').p.head, 'Twin ›')
   click(pane, cardNode(pane, 'model-details'))
-  await waitUntil('the read-only details page', () => props(pane).title === 'Full model details')
-  assert.equal(props(pane).preview, 'none', 'a content page has no side preview')
-  assert.equal(props(pane).scopes, undefined, 'a content page has no scope column')
-  assert.equal(actionOf(pane, 'apply'), undefined, 'the read-only page has no write')
+  await waitUntil('the read-only details page', () => inDetails(pane))
+  assert.equal(picker(pane), undefined, 'the Reader is not a picker: no preview region, no scope column')
+  assert.equal(readerBodyNode(pane) !== undefined, true, 'the Reader carries its scrollable body')
+  assert.equal(readerBackNode(pane).p.actions !== undefined, true, 'its Back row is a real pointer target')
   // A forged apply from this page is refused on the wire.
-  action(pane, 'apply')
+  forge(pane, 'apply')
   await settle(30)
   assert.equal(m.writes.length, 0, 'a forged apply on the read-only page is refused')
-  assert.equal(props(pane).title, 'Full model details', 'and it cannot navigate either')
-  action(pane, 'back')
+  assert.equal(inDetails(pane), true, 'and it cannot navigate either')
+  await backFromDetails(pane)
   await waitUntil('back on the model list', () => props(pane).title === 'Models')
   assert.equal(props(pane).scope, 'scope:a', 'the scope survived the round trip')
   assert.equal(props(pane).selected, SAME_A, 'the highlight survived too')
@@ -673,7 +742,7 @@ test('native Model: the wide details card opens the read-only page and Back retu
   pane.key('\t')
   await waitUntil('the details card zone', () => props(pane).focus === 'preview')
   pane.key('\r')
-  await waitUntil('details from the keyboard', () => props(pane).title === 'Full model details')
+  await waitUntil('details from the keyboard', () => inDetails(pane))
   pane.key('\u001b')
   await waitUntil('Esc returns to the model list', () => props(pane).title === 'Models')
   assert.equal(props(pane).focus, 'list')
@@ -692,14 +761,14 @@ test('native Model: the compact model list and the details page never offer a wr
   assert.equal(m.writes.length, 0, 'a forged apply on the compact list is refused')
   assert.equal(picker(pane)!.id, listFrame, 'and it cannot even re-render the list')
   await openDetails(pane)
-  assert.equal(actionOf(pane, 'apply'), undefined, 'the details page commits nothing')
-  const detailsFrame = picker(pane)!.id
-  action(pane, 'apply')
+  assert.equal(picker(pane), undefined, 'the Reader carries no picker, so no action bar and no write')
+  const detailsNode = readerNode(pane)?.id
+  forge(pane, 'apply')
   await settle(30)
   assert.equal(m.writes.length, 0, 'a forged apply on the details page is refused')
-  assert.equal(picker(pane)!.id, detailsFrame, 'and it cannot navigate either')
+  assert.equal(readerNode(pane)?.id, detailsNode, 'and it cannot navigate or even re-render either')
   // Only the Overview carries the write back, and it is the same one writer.
-  action(pane, 'back')
+  await backFromDetails(pane)
   await waitUntil('back on the Overview', () => props(pane).title === 'Model overview')
   assert.ok(actionOf(pane, 'apply'), 'the Overview owns the one write')
 })
@@ -715,6 +784,11 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
   t.after(() => renderer.dispose())
   renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
   assert.ok(renderer.modelPresentation)
+  // This case writes from the model list's Primary Action, which exists only on
+  // the wide shell: mount it on a real side-preview pane. The panel opens INSIDE
+  // the loop below, so the resize is delivered before any handle exists.
+  sendResize(pane, WIDE_COLS)
+  await settle(30)
   for (const outcome of ['rejected', 'cancelled', 'unsupported', 'indeterminate', 'superseded'] as const) {
     let resolve!: (outcome: ModelApplyOutcome) => void
     const handle = renderer.modelPresentation.open({
@@ -832,28 +906,30 @@ test('native Model: resize keeps the panel and the compact pages stay reachable'
     'a directory without failed providers lists none',
   )
   assert.equal((props(pane).strip as { label?: string } | undefined)?.label, 'Default model')
-  // Details is a compact PAGE of the same picker, not an overlay.
+  // Details is the native READER replacing the picker: the complete values are
+  // `ui.text` nodes the client wraps at its own real width, not pre-split rows.
   await enterOverview(pane)
   await walkList(pane, OVERVIEW_DETAILS_ID)
   pane.key('\r')
-  await waitUntil('details page', () => props(pane).title === 'Full model details')
-  assert.equal(nodes(pane).some((n) => n.k === 'overlay'), false, 'no overlay is used')
-  const facts = props(pane).items as Array<Record<string, unknown>>
+  await waitUntil('details page', () => inDetails(pane))
+  assert.equal(picker(pane), undefined, 'the Reader is not a picker page')
+  assert.equal(readerValue(pane, 'reader-description'), 'Note.', 'the Reader carries the real description')
   assert.equal(
-    facts.find((item) => item.label === 'Description')?.detail,
-    'Note.',
-    'the details page carries the real description',
+    nodes(pane).some((n) => n.k === 'text' && n.p.wrap === 'word'),
+    true,
+    'a prose value is wrapped by the client (`word`), never pre-split by us',
   )
-  // Its static fields are inert: Enter cannot write from them.
+  // Its only interactive node is Back: Enter cannot write from the page.
   pane.key('\r')
   await settle(20)
-  assert.equal(m.writes.length, 0, 'static detail rows never write')
+  assert.equal(m.writes.length, 0, 'the Reader never writes')
   // Back restores the Overview; the effort candidate is chosen THERE now.
-  action(pane, 'back')
+  await backFromDetails(pane)
   await waitUntil('back to the Overview', () => props(pane).title === 'Model overview')
-  pane.key('\u001b[B')
-  await waitUntil('draft moved to the provider default', () =>
-    props(pane).selected === effortItemId('\u0000provider-default'))
+  // The effort section sits ABOVE the details entry now, so the cursor walks the
+  // page's real rows instead of assuming what follows the details entry.
+  await walkList(pane, effortItemId('\u0000provider-default'))
+  assert.equal(m.writes.length, 0, 'moving the cursor never writes')
   assert.equal(m.writes.length, 0, 'choosing a draft never writes')
   pane.key('\r')
   await waitUntil('the candidate took the draft', () => props(pane).title === 'Model overview')
@@ -954,6 +1030,9 @@ test('production /model: sessionless pending save, close/reopen and settled defa
       'classified /model opens native picker',
       () => props(boot.pane).state === 'ready',
     )
+    // The wide shell (and its `subtitle` slot) is the pane past the measured
+    // native side-preview boundary; the fixture's own pane is compact.
+    await resize(boot.pane, WIDE_COLS)
     assert.equal(props(boot.pane).subtitle, 'Default model')
     assert.equal(actionOf(boot.pane, 'apply')?.label, 'Save default')
     assert.equal(saved.length, 0)
@@ -1007,6 +1086,7 @@ test('production /model: failed default remains indeterminate and reconciles fro
     await waitUntil('renderer ready', () => boot.pane.output.text().includes('dock.composer'))
     boot.pane.key('/model\r')
     await waitUntil('picker ready', () => props(boot.pane).state === 'ready')
+    await resize(boot.pane, WIDE_COLS)
     // Shift+Tab wraps straight onto the Primary Action.
     boot.pane.key('\u001b[Z')
     boot.pane.key('\r')
@@ -1044,6 +1124,7 @@ test('production /model: a failed read offers a real Retry through the original 
     boot.pane.key('\r')
     await waitUntil('the original read owner is asked again', () => reads === 2)
     await waitUntil('hydrated by the retry', () => props(boot.pane).state === 'ready')
+    await resize(boot.pane, WIDE_COLS)
     assert.equal(props(boot.pane).subtitle, 'Default model')
     assert.equal(reads, 2, 'one Retry is exactly one additional read')
     assert.equal(boot.harness.createdSessions.length, 0)
@@ -1075,6 +1156,7 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
     await waitFor('real Agent turn', () => fixture.pane.output.text().includes('model-live-ok'))
     fixture.pane.key('/model\r')
     await waitFor('live native directory', () => props(fixture.pane).state === 'ready')
+    await resize(fixture.pane, WIDE_COLS)
     assert.match(String(props(fixture.pane).subtitle), /Session model/)
     assert.equal(records.length, 0)
     // The live Session's one write entry says exactly what it does: it switches
@@ -1114,16 +1196,13 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
     assert.equal(props(fixture.pane).size, 'lg', 'the wide shell is kept')
     assert.equal(props(fixture.pane).preview, 'side', 'the details column is kept')
     click(fixture.pane, cardNode(fixture.pane, 'model-details'))
-    await waitFor('details page', () => props(fixture.pane).title === 'Full model details')
-    const facts = props(fixture.pane).items as Array<{ id?: string; label?: string; detail?: string }>
-    // Every fact value is wrapped into complete rows, so a value longer than the
-    // row bound continues on its own rows; the FULL value is what must be read.
-    const current = facts.filter((item) => String(item.id).startsWith('fact-current'))
-    assert.equal(current[0]?.label, 'Current')
+    await waitFor('details page', () => readerNode(fixture.pane) !== undefined)
+    // The Reader carries the COMPLETE value, wrapped by the client; the Current
+    // fact is read from the Session the picker re-opened on.
     assert.equal(
-      current.map((item) => item.detail).join('').replace(/\s+/g, ''),
+      readerValue(fixture.pane, 'reader-fact-current'),
       `scripted/${DIRECT_TSP_MODEL_TWO}`,
-      'the details page reads the new Current from the Session',
+      'the Reader reads the new Current from the Session',
     )
     fixture.pane.key('\u001b')
     fixture.pane.key('\u001b')
@@ -1169,7 +1248,7 @@ test('native Model: Esc returns to the zone and page it came from', async (t) =>
   await enterOverview(pane)
   await walkList(pane, OVERVIEW_DETAILS_ID)
   pane.key('\r')
-  await waitUntil('details page', () => props(pane).title === 'Full model details')
+  await waitUntil('details page', () => inDetails(pane))
   pane.key('\u001b')
   await waitUntil('Esc returns to the Overview', () => props(pane).title === 'Model overview')
   pane.key('\u001b')
@@ -1223,13 +1302,16 @@ test('native Model: every visible action is keyboard reachable and never a no-op
   sp.key('\r')
   await waitUntil('Enter ran the focused Back', () => props(sp).title === 'Models')
   assert.equal(second.writes.length, 0, 'no bar action ever wrote here')
-  // The read-only details page: Back alone, and Tab really reaches it.
+  // The read-only Reader: its ONE visible Back row is the page's only operation,
+  // and Tab is a consumed no-op because the page paints no second region.
   await openDetails(sp)
-  assert.deepEqual(actionIds(sp), ['back'], 'the read-only footer is Back alone')
+  assert.equal(picker(sp), undefined, 'the Reader carries no action bar to reach')
+  const readerBefore = readerNode(sp)?.id
   sp.key('\t')
-  await waitUntil('the details Back is focused', () => focusCue(sp, 'back'))
-  sp.key('\r')
-  await waitUntil('keyboard returned to the Overview', () => props(sp).title === 'Model overview')
+  await settle(20)
+  assert.equal(readerNode(sp)?.id, readerBefore, 'Tab cannot move the keyboard anywhere on the Reader')
+  await backFromDetails(sp)
+  await waitUntil('the Back row returned to the Overview', () => props(sp).title === 'Model overview')
   second.handle.close()
 })
 
@@ -1317,14 +1399,18 @@ test('native Model: the keyboard hint names where the keyboard goes, never a gue
   const detailsPane = await mounted(t)
   await detailsPane.ready()
   await openDetails(detailsPane.pane)
-  assert.equal(props(detailsPane.pane).preview, 'none')
   const detailsText = sheetText(detailsPane.pane)
+  assert.equal(picker(detailsPane.pane), undefined, 'the Reader is not a picker page')
   assert.ok(!detailsText.includes('Tab: details') && !detailsText.includes('Tab: effort'),
-    'the details page renders no side-column hint')
-  // Its static facts still reach the keyboard's own way out: Tab lands on Back.
+    'the Reader renders no side-column hint')
+  assert.ok(!detailsText.includes('←→ · Enter'), 'and no action-bar hint either')
+  // It paints ONE region, so `Tab` is consumed as a no-op instead of promising a
+  // second zone; the visible `Back` row is the page's own way out.
+  const readerBefore = readerNode(detailsPane.pane)?.id
   detailsPane.pane.key('\t')
-  await waitUntil('the details bar owns the keyboard',
-    () => String(actionOf(detailsPane.pane, 'back')?.label).startsWith('▸'))
+  await settle(20)
+  assert.equal(readerNode(detailsPane.pane)?.id, readerBefore, 'Tab cannot leave the Reader')
+  await backFromDetails(detailsPane.pane)
   detailsPane.handle.close()
 })
 
@@ -1432,16 +1518,22 @@ test('native Model: a failed read keeps the keyboard in the one bar it can opera
   const details = await mounted(t)
   await details.ready()
   await openDetails(details.pane)
+  const readerFrames = details.pane.frameCount()
   details.handle.setLoadError('catalog is unreachable')
-  await waitUntil('the read failed under the details page', () => props(details.pane).state === 'error')
-  assert.equal(actionOf(details.pane, 'back'), undefined, 'a failed read offers no page action')
-  assert.equal(actionOf(details.pane, 'apply'), undefined, 'a failed read offers no write')
-  assert.ok(actionOf(details.pane, 'retry'), 'a failed read offers the read-only Retry')
+  // A failed (re-)read under the Reader has no picker bar to operate: the page
+  // keeps its content and reports the failure as its own Status fact.
+  await waitUntil('the failure is reported as a Reader fact', () =>
+    readerValue(details.pane, 'reader-status') === 'catalog is unreachable')
+  assert.equal(picker(details.pane), undefined, 'a failed read under the Reader offers no bar at all')
+  assert.ok(details.pane.frameCount() > readerFrames, 'the Reader really repainted for it')
+  // `Tab` still has nowhere to go, and the Reader's own Back/Esc return to the
+  // page it came from: the failure is a fact ON that page, so the visible row must
+  // never be a dead control and `Esc` must not close the panel out from under it.
   details.pane.key('\t')
-  await waitUntil('the details bar focused Retry',
-    () => String(actionOf(details.pane, 'retry')?.label).startsWith('▸'))
-  details.pane.key('\r')
-  await waitUntil('the details page Retry ran too', () => details.retries() === 1)
+  await settle(20)
+  details.pane.key('\u001b')
+  await waitUntil('Esc returns to the page the Reader came from',
+    () => props(details.pane).title === 'Models' && props(details.pane).state === 'error')
   details.handle.close()
 })
 
@@ -1505,17 +1597,17 @@ test('native Model: no page renders the removed global action surface', async (t
   titles.add(String(props(pane).title))
   await walkList(pane, OVERVIEW_DETAILS_ID)
   pane.key('\r')
-  await waitUntil('details', () => props(pane).title === 'Full model details')
-  titles.add(String(props(pane).title))
+  await waitUntil('details', () => inDetails(pane))
+  titles.add(String(readerNode(pane)?.p.head))
   assert.deepEqual([...titles].sort(), ['Full model details', 'Model overview', 'Models'])
   // The removed wire shapes are refused even when forged.
-  const frame = picker(pane)!.id
-  action(pane, 'details')
-  action(pane, 'effort-page')
-  action(pane, 'strip', 'strip-more')
-  browse(pane, 'more:details')
+  const readerFrame = readerNode(pane)!.id
+  forge(pane, 'details')
+  forge(pane, 'effort-page')
+  forge(pane, 'strip', 'strip-more')
+  browse(pane, 'more:details', readerFrame)
   await settle(30)
-  assert.equal(picker(pane)!.id, frame, 'the removed surface cannot even re-render a page')
+  assert.equal(readerNode(pane)!.id, readerFrame, 'the removed surface cannot even re-render a page')
   assert.equal(m.writes.length, 0)
 })
 
@@ -1632,7 +1724,7 @@ test('native Model: the single summary line is exactly one line for a descriptio
   m.handle.close()
 })
 
-test('native Model: every Details fact is complete and wrap-bounded', async (t) => {
+test('native Model: every Details fact reaches the Reader COMPLETE and wraps by kind', async (t) => {
   const m = await mounted(t, { sessionless: false })
   const longProvider = 'Advertised provider name '.repeat(20)
   const modelId = 'anthropic/claude-3.7-sonnet:thinking'
@@ -1646,32 +1738,28 @@ test('native Model: every Details fact is complete and wrap-bounded', async (t) 
     configuredEffort: 'high',
   }))
   await openDetails(m.pane)
-  const rowsOf = (prefix: string): Array<Record<string, unknown>> =>
-    (props(m.pane).items as Array<Record<string, unknown>>)
-      .filter((item) => String(item.id).startsWith(prefix))
-  const readable = (prefix: string): string =>
-    rowsOf(prefix).map((row) => String(row.detail)).join('').replace(/\s+/g, '')
-  // The row renderer ellipsizes what one row cannot show, so EVERY fact must
-  // continue on its own rows until its complete value is readable.
-  assert.equal(readable('fact-model'), 'BudgetModel', 'the model name')
-  assert.equal(readable('fact-provider'), `${longProvider}(p)`.replace(/\s+/g, ''), 'provider and provider id')
-  assert.equal(readable('fact-id'), modelId, 'the model id')
-  assert.equal(readable('fact-current'), `p/${modelId}/high`, 'the live Current value')
-  assert.equal(readable('fact-default'), `p/${modelId}/high`, 'the persisted Default value')
-  assert.equal(readable('fact-description'), description.replace(/\s+/g, ''), 'the description')
+  const facts = readerFacts(m.pane)
+  // The Reader carries the directory's own value VERBATIM: nothing is
+  // ellipsized, re-flowed or re-derived, and a value with no break opportunity is
+  // wrapped by the CLIENT (`char`) instead of being pre-split by the presenter.
+  assert.equal(facts.get('reader-model'), 'Budget Model', 'the model name')
+  assert.equal(facts.get('reader-provider'), `${longProvider} (p)`, 'provider and provider id')
+  assert.equal(facts.get('reader-id'), modelId, 'the model id')
+  assert.equal(facts.get('reader-fact-current'), `p/${modelId}/high`, 'the live Current value')
+  assert.equal(facts.get('reader-fact-default'), `p/${modelId}/high`, 'the persisted Default value')
+  assert.equal(facts.get('reader-description'), description, 'the description')
   // The fixture's declared default id (`high`) is not one of its advertised ids,
   // so the draft seeds from the first advertised choice.
-  assert.equal(readable('fact-draft'), 'Minimal', 'the draft effort')
-  assert.ok(rowsOf('fact-provider').length > 1, 'a long value really continues over rows')
-  const wideSlot = props(m.pane).size === 'lg'
-  for (const item of props(m.pane).items as Array<Record<string, unknown>>) {
-    assert.ok(
-      displayWidth(String(item.detail)) <= factLineColumns(wideSlot, String(item.label)),
-      `every fact row fits its own one-line slot: ${String(item.id)} :: ${String(item.detail)}`,
-    )
+  assert.equal(facts.get('reader-draft'), 'Minimal', 'the draft effort')
+  // The kind decides how a value with no break opportunity behaves: identifiers
+  // may break anywhere, prose must not break inside a word.
+  for (const key of ['reader-model', 'reader-provider', 'reader-id', 'reader-fact-current', 'reader-fact-default', 'reader-draft']) {
+    assert.equal(nodes(m.pane).find((node) => node.id.endsWith(`.${key}`))?.p.wrap, 'char', `${key} wraps by char`)
   }
+  assert.equal(nodes(m.pane).find((node) => node.id.endsWith('.reader-description'))?.p.wrap, 'word', 'prose wraps by word')
   // The write outcome is the Status fact, and it is complete there too.
-  await backToModels(m.pane)
+  await backFromDetails(m.pane)
+  await waitUntil('back on the model list', () => props(m.pane).title === 'Models')
   // Shift+Tab wraps the ring straight onto the Primary Action.
   m.pane.key('\u001b[Z')
   await waitUntil('primary action focused', () => String(actionOf(m.pane, 'apply')?.label).startsWith('▸'))
@@ -1680,16 +1768,16 @@ test('native Model: every Details fact is complete and wrap-bounded', async (t) 
   m.settleWrite('rejected')
   await waitUntil('rejected and ready', () => props(m.pane).state === 'ready' && props(m.pane).title === 'Models')
   await openDetails(m.pane)
-  assert.equal(readable('fact-notice'), 'Rejected.', 'the full write notice is readable')
+  assert.equal(readerValue(m.pane, 'reader-status'), 'Rejected.', 'the full write notice is readable')
   m.handle.close()
 })
 
-test('native Model: a compact fact row clips nothing, not even an unbroken glyph run', async (t) => {
+test('native Model: an unbroken value reaches the Reader whole, to be wrapped by the client', async (t) => {
   const m = await mounted(t, { sessionless: false })
-  // The reviewer's compact counterexample: the SDK renders a compact fact row's
-  // `detail` on ONE measured line and cannot break an unbroken run, so a bound
-  // wider than the row's own slot shows an ellipsis (the old fixed 24 columns did
-  // exactly that at this width).
+  // The reviewer's counterexample: a picker row renders its `detail` on ONE
+  // measured line and cannot break an unbroken run, so the old pre-split rows had
+  // to guess a per-row column bound. The Reader carries the run ONCE, with the
+  // client's own `char` wrapping, so no bound can clip it.
   const providerName = `${'W'.repeat(240)} tail`
   await resize(m.pane, 100)
   await waitUntil('compact', () => props(m.pane).size === 'md')
@@ -1699,27 +1787,10 @@ test('native Model: a compact fact row clips nothing, not even an unbroken glyph
     effortNames: ['Minimal', 'Low'],
   }))
   await openDetails(m.pane)
-  const items = props(m.pane).items as Array<Record<string, unknown>>
-  const provider = items.filter((item) => String(item.id).startsWith('fact-provider'))
-  assert.ok(provider.length > 3, `the provider value really continues: ${provider.length}`)
-  for (const item of items) {
-    assert.ok(
-      displayWidth(String(item.detail)) <= factLineColumns(false, String(item.label)),
-      `compact fact row ${String(item.id)} fits its one-line slot: ${String(item.detail)}`,
-    )
-  }
-  // The continuation rows are the ones the 24-column bound used to clip.
-  const continuation = provider.filter((item) => String(item.label) === '')
-  assert.ok(continuation.length > 2, 'the value continues on label-less rows')
-  assert.ok(
-    continuation.every((item) => displayWidth(String(item.detail)) <= factLineColumns(false, '')),
-    'a label-less row uses the full compact row bound',
-  )
-  assert.equal(
-    provider.map((item) => String(item.detail)).join('').replace(/\s+/g, ''),
-    `${providerName} (p)`.replace(/\s+/g, ''),
-    'the complete provider value is present across the rows',
-  )
+  assert.equal(readerValue(m.pane, 'reader-provider'), `${providerName} (p)`, 'the unbroken run is complete')
+  const nodesOfProvider = nodes(m.pane).filter((node) => node.id.endsWith('.reader-provider'))
+  assert.equal(nodesOfProvider.length, 1, 'and it is ONE node, never a stack of continuation rows')
+  assert.equal(nodesOfProvider[0]?.p.wrap, 'char', 'the client is told it may break the run')
   m.handle.close()
 })
 
@@ -1795,11 +1866,14 @@ test('native Model: seven short-labeled candidates keep the wide preview', async
   m.handle.close()
 })
 
-test('native Model: an explicit blank line in a description is budgeted', async (t) => {
+test('native Model: a description of explicit blank lines reaches the Reader raw', async (t) => {
   const m = await mounted(t)
-  // The renderer preserves explicit newlines, so a description of two visible
-  // characters CAN occupy fourteen lines.
-  const blank = `x\n${'\n'.repeat(12)}x`
+  // The renderer preserves explicit newlines, so THREE visible characters plus
+  // five LF and five CRLF breaks CAN occupy eleven native lines: no column budget
+  // of ours may fold, trim or re-split them, and the client's own line rendering is
+  // measured in the real pane (LF + CRLF + a blank line = four lines at a 16px
+  // line, on the shipped presenter).
+  const blank = `x\n${'\n'.repeat(4)}x\r\n${'\r\n'.repeat(4)}y`
   const five = budgetDirectory({
     providerName: 'p',
     modelId: 'm',
@@ -1812,22 +1886,20 @@ test('native Model: an explicit blank line in a description is budgeted', async 
   assert.equal(props(m.pane).preview, 'side', 'the details column is kept')
   assert.ok(hasEffortCard(m.pane),
     'the effort selector stays inline: a long description never decides it')
-  // The complete description stays readable through the details page.
+  // The complete description stays readable through the Reader, RAW: its explicit
+  // blank lines are the client's to render, never a column budget of ours.
   await openDetails(m.pane)
-  const rows = (props(m.pane).items as Array<Record<string, unknown>>)
-    .filter((item) => String(item.id).startsWith('fact-description'))
-  assert.equal(rows.length, 14, 'every rendered line is budgeted, blank ones included')
   assert.equal(
-    rows.map((row) => String(row.detail)).join('\n').replace(/\s+/g, ''),
-    blank.replace(/\s+/g, ''),
-    'the blank lines and the visible text all reach the details page',
+    readerValue(m.pane, 'reader-description'),
+    blank,
+    'the blank lines and the visible text all reach the Reader untouched',
   )
   m.handle.close()
 })
 
 /* -------------------------------------------------- content/readability paths */
 
-test('native Model: a long description is readable on the compact details page', async (t) => {
+test('native Model: a long description reaches the Reader as ONE complete value', async (t) => {
   const m = await mounted(t)
   const long = 'A deliberately long description that must be readable in full, 中文描述也需要完整可读，并且带上 emoji 🚀 结尾。'
   await m.ready({
@@ -1843,17 +1915,16 @@ test('native Model: a long description is readable on the compact details page',
   await resize(m.pane, 100)
   await waitUntil('compact', () => props(m.pane).size === 'md')
   await openDetails(m.pane)
-  const rows = (props(m.pane).items as Array<Record<string, unknown>>)
-    .filter((item) => String(item.id).startsWith('fact-description'))
-  assert.ok(rows.length > 1, 'a long description is wrapped into several complete rows')
+  // The COMPLETE value lives in ONE node the client wraps at the width the layout
+  // really has; the presenter never pre-splits it into rows again.
   assert.equal(
-    rows.map((row) => String(row.detail)).join('').replace(/\s+/g, ''),
-    long.replace(/\s+/g, ''),
-    'the wrapped rows carry every character of the description',
+    readerValue(m.pane, 'reader-description'),
+    long,
+    'the Reader carries every character of the description',
   )
-  for (const row of rows) {
-    assert.ok(String(row.detail).length <= 40, `row ${String(row.id)} fits one line`)
-  }
+  const valueNodes = nodes(m.pane).filter((node) => node.id.endsWith('.reader-description'))
+  assert.equal(valueNodes.length, 1, 'the value is ONE node, never a stack of pre-split rows')
+  assert.equal(valueNodes[0]?.p.wrap, 'word', 'prose is wrapped by the client, not clamped by us')
 })
 
 test('native Model: description wrapping never splits a grapheme or a column', async (t) => {
@@ -1876,24 +1947,16 @@ test('native Model: description wrapping never splits a grapheme or a column', a
   await resize(m.pane, 100)
   await waitUntil('compact', () => props(m.pane).size === 'md')
   await openDetails(m.pane)
-  const rowsOf = (): string[] => (props(m.pane).items as Array<Record<string, unknown>>)
-    .filter((item) => String(item.id).startsWith('fact-description'))
-    .map((item) => String(item.detail))
-  const rows = rowsOf()
-  // Whitespace is the wrapper's to spend (a word wrap consumes its break
-  // space), so exactness is asserted on the non-whitespace content: no
-  // character may be lost, duplicated or corrupted.
-  const dense = (text: string): string => text.replace(/\s+/g, '')
-  assert.equal(dense(rows.join('')), dense(tricky), 'the wrapped rows reproduce every character')
-  assert.ok(rows.length > 1, 'it really wrapped')
-  for (const row of rows) {
-    assert.doesNotMatch(row, /[\uD800-\uDBFF]$/, `row ends on a high surrogate: ${row}`)
-    assert.doesNotMatch(row, /^[\uDC00-\uDFFF]/, `row starts on a low surrogate: ${row}`)
-  }
-  assert.ok(rows[rows.length - 1]!.endsWith('🚀z'), 'the emoji moved to a later line intact')
-  // The CJK description: two display columns per grapheme, so a 40-column line
-  // holds at most 20 graphemes.
-  action(m.pane, 'back')
+  // The unbroken run and its trailing grapheme reach the client EXACTLY as the
+  // directory published them: wrapping (and never splitting a grapheme) is the
+  // client's job at the layout width, so the presenter must not pre-chop them.
+  assert.equal(readerValue(m.pane, 'reader-description'), tricky, 'the unbroken run arrives intact')
+  assert.equal(
+    nodes(m.pane).filter((node) => node.id.endsWith('.reader-description')).length,
+    1,
+    'one complete value node, never a stack of pre-split rows',
+  )
+  await backFromDetails(m.pane)
   await waitUntil('back on the Overview', () => props(m.pane).title === 'Model overview')
   action(m.pane, 'back')
   await waitUntil('back on the list', () => props(m.pane).title === 'Models')
@@ -1902,12 +1965,8 @@ test('native Model: description wrapping never splits a grapheme or a column', a
     props(m.pane).title === 'Model overview' && joinedDetail(m.pane, 'overview-provider') === 'B(b)')
   await walkList(m.pane, OVERVIEW_DETAILS_ID)
   m.pane.key('\r')
-  await waitUntil('CJK details page', () => props(m.pane).title === 'Full model details')
-  const cjkRows = rowsOf()
-  assert.equal(dense(cjkRows.join('')), dense(cjk), 'the CJK description is reproduced exactly')
-  for (const row of cjkRows) {
-    assert.ok([...row].length <= 20, `a CJK row holds at most 20 graphemes: ${row}`)
-  }
+  await waitUntil('CJK details page', () => inDetails(m.pane))
+  assert.equal(readerValue(m.pane, 'reader-description'), cjk, 'the CJK description is reproduced exactly')
 })
 
 test('native Model: Current and Default facts come from the directory, not the row', async (t) => {
@@ -1919,32 +1978,28 @@ test('native Model: Current and Default facts come from the directory, not the r
       default: { provider: 'b', model: 'same', reasoningEffort: 'low' },
     },
   })
-  // The wide column keeps the identity; the FULL facts live on the read-only
-  // details page the card opens.
+  // The wide column keeps the identity; the FULL facts live in the read-only
+  // Reader the card opens.
   assert.equal(props(live.pane).preview, 'side')
   assert.match(sheetText(live.pane), /Provider: A/, 'the identity keeps its value')
   assert.match(sheetText(live.pane), /\(a\)/)
-  const liveFacts = async (): Promise<Array<[string?, string?]>> => {
+  const liveFacts = async (): Promise<Map<string, string>> => {
     await openDetails(live.pane)
-    const rows = props(live.pane).items as Array<Record<string, unknown>>
-    action(live.pane, 'back')
+    const facts = readerFacts(live.pane)
+    await backFromDetails(live.pane)
     await waitUntil('back to the list', () => props(live.pane).title === 'Models')
-    return rows
-      .filter((item) => String(item.id).startsWith('fact-'))
-      .map((item) => [String(item.label), String(item.detail)] as [string?, string?])
+    return facts
   }
   const facts = await liveFacts()
-  assert.ok(facts.some(([, detail]) => detail === 'a/same/high'), `live Current fact: ${JSON.stringify(facts)}`)
-  assert.ok(facts.some(([, detail]) => detail === 'b/same/low'), 'the persisted default keeps its own effort')
+  assert.equal(facts.get('reader-fact-current'), 'a/same/high', `live Current fact: ${JSON.stringify([...facts])}`)
+  assert.equal(facts.get('reader-fact-default'), 'b/same/low', 'the persisted default keeps its own effort')
   live.handle.close()
   const sessionless = await mounted(t)
   await sessionless.ready()
   await openDetails(sessionless.pane)
-  const plainFacts = (props(sessionless.pane).items as Array<Record<string, unknown>>)
-    .filter((item) => String(item.id).startsWith('fact-'))
-    .map((item) => [String(item.label), String(item.detail)] as [string?, string?])
-  assert.ok(plainFacts.every(([label]) => label !== 'Current'), 'a sessionless panel never paints a Current fact')
-  assert.ok(plainFacts.some(([, detail]) => detail === 'a/same/high'))
+  const plainFacts = readerFacts(sessionless.pane)
+  assert.equal(plainFacts.has('reader-fact-current'), false, 'a sessionless panel never paints a Current fact')
+  assert.equal(plainFacts.get('reader-fact-default'), 'a/same/high')
 })
 
 test('native Model: a model without efforts has no selector and says so on the Overview', async (t) => {
@@ -1984,12 +2039,12 @@ test('native Model: a model without efforts has no selector and says so on the O
   await resize(pane, 100)
   await waitUntil('compact', () => props(pane).size === 'md')
   await enterOverview(pane)
-  assert.equal(rowIds(pane).includes(OVERVIEW_NO_EFFORT_ID), true, 'the absence is stated')
+  assert.equal(rowIds(pane).includes(OVERVIEW_EFFORT_ID), true, 'the absence is stated')
   const inert = ((props(pane).items ?? []) as Array<Record<string, unknown>>)
-    .find((item) => String(item.id) === OVERVIEW_NO_EFFORT_ID)
+    .find((item) => String(item.id) === OVERVIEW_EFFORT_ID)
   assert.equal(inert?.label, 'Reasoning effort')
   assert.equal(inert?.detail, 'Not available')
-  await walkList(pane, OVERVIEW_NO_EFFORT_ID)
+  await walkList(pane, OVERVIEW_EFFORT_ID)
   pane.key('\r')
   await settle(30)
   assert.equal(props(pane).title, 'Model overview', 'the inert effort row never leaves the page')
@@ -2136,8 +2191,8 @@ test('native Model: the Overview runs only the rows it really offers', async (t)
   assert.equal(props(pane).title, 'Model overview', 'and the page stays where it was')
   // The rows it DOES offer really run.
   browse(pane, OVERVIEW_DETAILS_ID)
-  await waitUntil('the offered details row runs', () => props(pane).title === 'Full model details')
-  action(pane, 'back')
+  await waitUntil('the offered details row runs', () => inDetails(pane))
+  await backFromDetails(pane)
   await waitUntil('back on the Overview', () => props(pane).title === 'Model overview')
   // Boundary: a search that matches NOTHING has no highlighted model, so no
   // content page can be opened and no write can be offered.
@@ -2247,7 +2302,7 @@ test('native Model: the bounded wide card enters the Overview from both pointer 
   assert.ok(sheetText(full.pane).includes('Enter: details'), sheetText(full.pane).slice(0, 200))
   full.pane.key('\r')
   await waitUntil('Enter opened the read-only details page',
-    () => props(full.pane).title === 'Full model details')
+    () => inDetails(full.pane))
   assert.equal(full.writes.length, 0)
   full.handle.close()
 })
@@ -2289,5 +2344,216 @@ test('native Model: a resize out of a wide side zone never operates an invisible
   assert.equal(props(d.pane).focus, 'list', 'and the keyboard lands on the visible list')
   assert.equal(d.writes.length, 0)
   d.handle.close()
+  m.handle.close()
+})
+
+/* ------------------------------------------- measured layout / Reader contract */
+
+test('native Model: the wide shell is claimed only for a pane past the measured side-preview boundary', async (t) => {
+  // The pure rule first: the presenter reconstructs the pane width from the only
+  // geometry the SDK reports (`cols` * the cell width) and compares it against the
+  // MEASURED native side-preview boundary (1040px — the pane whose sheet reaches
+  // the client's own 980px breakpoint; at 1020px the client paints `pv-side` but
+  // puts the preview UNDER the list, where the inline effort rows are clipped).
+  assert.equal(nativeSidePreview(129, 8), false, '1032px is below the boundary')
+  assert.equal(nativeSidePreview(130, 8), true, '1040px reaches it')
+  assert.equal(nativeSidePreview(120, 8), false, 'the old cols>=120 rule was 960px: always below it')
+  assert.equal(nativeSidePreview(104, 10), true, 'the cell width is what makes the width, not the column count')
+  assert.equal(nativeSidePreview(103, 10), false, 'one cell short of it is still a compact pane')
+  assert.equal(nativeSidePreview(160, 4), false, 'a narrow cell at many columns is still a narrow pane')
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  // Just below the boundary: the compact picker, no preview region and no write.
+  await resize(pane, 129)
+  await waitUntil('just below the boundary', () => props(pane).size === 'md')
+  assert.equal(props(pane).preview, 'none', 'the pane below the boundary never asks for a side preview')
+  assert.deepEqual(actionIds(pane), ['close', 'retry'], 'and the compact list commits nothing')
+  assert.equal(hasEffortCard(pane), false, 'so no inline effort row can be operated off-screen')
+  // At the boundary: the wide shell really paints the side column and its
+  // selector, which is what makes the inline draft reachable.
+  await resize(pane, 130)
+  await waitUntil('at the boundary', () => props(pane).size === 'lg')
+  assert.equal(props(pane).preview, 'side', 'the boundary pane gets the native side preview')
+  assert.ok(hasEffortCard(pane), 'and with it the inline effort selector')
+  assert.deepEqual(actionIds(pane), ['close', 'retry', 'apply'], 'the wide list owns the one write')
+  assert.equal(m.writes.length, 0)
+  m.handle.close()
+})
+
+test('native Model: the Reader owns the native scroll op and only the Reader does', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  await openDetails(pane)
+  const body = readerBodyNode(pane)
+  assert.ok(body, 'the Reader mounts its scrollable body')
+  const before = scrollOps(pane).length
+  // REAL key bytes, decoded by the shipped SDK: PageDown/PageUp/Home/End/arrows.
+  const steps: ReadonlyArray<readonly [string, string]> = [
+    ['\u001b[6~', 'page-down'],
+    ['\u001b[5~', 'page-up'],
+    ['\u001b[H', 'start'],
+    ['\u001b[F', 'end'],
+    ['\u001b[B', 'line-down'],
+    ['\u001b[A', 'line-up'],
+  ]
+  for (const [bytes, expected] of steps) {
+    pane.key(bytes)
+    await waitUntil(`the Reader asked to scroll ${expected}`,
+      () => scrollOps(pane).at(-1)?.to === expected)
+    assert.equal(scrollOps(pane).at(-1)?.id, body.id,
+      `${expected} addresses the Reader body the SDK really assigned`)
+  }
+  assert.equal(scrollOps(pane).length, before + steps.length, 'each key is exactly one op')
+  assert.equal(m.writes.length, 0, 'scrolling the Reader never writes')
+  // The NEGATIVE control: away from the Reader the same keys must not move any
+  // scroll container (there is no reader body in the frame to address).
+  await backFromDetails(pane)
+  await waitUntil('back on the model list', () => props(pane).title === 'Models')
+  const quiet = scrollOps(pane).length
+  for (const bytes of ['\u001b[6~', '\u001b[F', '\u001b[B']) pane.key(bytes)
+  await settle(30)
+  assert.equal(scrollOps(pane).length, quiet, 'no Reader, no scroll op')
+  m.handle.close()
+})
+
+test('native Model: the Reader survives a resize and Back returns to its real origin', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  // Entered from the Overview (the compact path), then resized INTO the wide
+  // shell while the Reader is open: the page must survive and return to the
+  // Overview it was entered from, not to the list the layout would now offer.
+  await resize(pane, 100)
+  await waitUntil('compact', () => props(pane).size === 'md')
+  await enterOverview(pane)
+  await walkList(pane, OVERVIEW_DETAILS_ID)
+  pane.key('\r')
+  await waitUntil('the Reader from the Overview', () => inDetails(pane))
+  const facts = readerFacts(pane)
+  const model = facts.get('reader-model')
+  await resize(pane, WIDE_COLS)
+  await waitUntil('the Reader survives the resize', () =>
+    inDetails(pane) && props(pane).title === undefined)
+  assert.deepEqual(readerFacts(pane), facts, 'the Reader shows the same facts at the new width')
+  await backFromDetails(pane)
+  await waitUntil('Back returns to the Overview it came from', () => props(pane).title === 'Model overview')
+  // And the wide card path returns to the model list.
+  action(pane, 'back')
+  await waitUntil('back on the list', () => props(pane).title === 'Models')
+  await openDetails(pane)
+  assert.equal(readerValue(pane, 'reader-model'), model, 'the same model is still described')
+  await backFromDetails(pane)
+  await waitUntil('Back returns to the model list', () => props(pane).title === 'Models')
+  m.handle.close()
+})
+
+test('native Model: the Overview lists every advertised candidate and invents none', async (t) => {
+  const none = await mounted(t)
+  await none.ready({
+    ...directory,
+    directory: {
+      ...directory.directory,
+      groups: directory.directory.groups.map((group) => ({
+        ...group,
+        models: group.models.map(({ reasoning: _reasoning, ...model }) => model),
+      })),
+    },
+  })
+  await resize(none.pane, 100)
+  await waitUntil('compact', () => props(none.pane).size === 'md')
+  await enterOverview(none.pane)
+  // NEGATIVE control: a model that advertises nothing gets the explicit
+  // `Not available` statement and NOT a single phantom candidate.
+  assert.equal(rowIds(none.pane).filter((id) => id.startsWith('effort:')).length, 0, 'no phantom effort')
+  assert.equal(detailOf(none.pane, OVERVIEW_EFFORT_ID), 'Not available')
+  none.handle.close()
+  // POSITIVE control: seven advertised candidates are all listed, and choosing
+  // the last one drafts it — no candidate is dropped or synthesised.
+  const seven = await mounted(t)
+  const names = Array.from({ length: 7 }, (_, index) => `Effort ${index + 1}`)
+  await seven.ready(budgetDirectory({ modelId: 'm', effortNames: names }))
+  await resize(seven.pane, 100)
+  await waitUntil('compact', () => props(seven.pane).size === 'md')
+  await enterOverview(seven.pane)
+  const listed = rowIds(seven.pane).filter((id) => id.startsWith('effort:'))
+  assert.equal(listed.length, 7, 'exactly the seven advertised efforts (this model declares a default)')
+  await walkList(seven.pane, effortItemId('e7'))
+  seven.pane.key('\r')
+  await waitUntil('the last candidate drafts', () => {
+    const items = (props(seven.pane).items ?? []) as Array<Record<string, unknown>>
+    return (items.find((item) => String(item.id) === effortItemId('e7'))?.mark as { text?: string } | undefined)?.text === '●'
+  })
+  assert.equal(seven.writes.length, 0, 'drafting the last candidate never writes')
+  seven.handle.close()
+})
+
+test('native Model: a retired Reader frame can never act on a later one', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  await openDetails(pane)
+  const staleBack = readerBackNode(pane).id
+  const staleBody = readerBodyNode(pane)?.id
+  await backFromDetails(pane)
+  await waitUntil('back on the model list', () => props(pane).title === 'Models')
+  await openDetails(pane)
+  const freshBack = readerBackNode(pane).id
+  const freshBody = readerBodyNode(pane)?.id
+  // The layer region's root id is the fixed region name and the root's own key
+  // never reaches its children, so a CONSTANT child key would make the Reader's
+  // ids stable across revisions and panels. They must be frame-scoped instead.
+  assert.notEqual(freshBack, staleBack, "the Reader never reuses a retired frame's Back id")
+  assert.notEqual(freshBody, staleBody, 'and never reuses its scroll container id either')
+  // A retired receiver is refused ON THE WIRE: its id is simply absent from the
+  // current frame, so neither the SDK's own dispatch nor the presenter routes it.
+  clickNodeById(pane, staleBack)
+  await settle(30)
+  assert.equal(inDetails(pane), true, 'the retired Back click cannot navigate the new Reader')
+  assert.equal(picker(pane), undefined, 'and it cannot page the surface away either')
+  // The CURRENT frame's Back row still works, so the negative above is not a
+  // vacuous "nothing works".
+  await backFromDetails(pane)
+  await waitUntil('the live Back row still returns', () => props(pane).title === 'Models')
+  m.handle.close()
+})
+
+test('native Model: the Reader keeps its own view keys through a running or failed read', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  await openDetails(pane)
+  // A FAILED re-read: the page keeps its content, reports the failure as its own
+  // Status fact, and its visible Back row must still return to its origin.
+  m.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the failure is a Reader fact', () =>
+    readerValue(pane, 'reader-status') === 'catalog is unreachable')
+  const failedQuiet = scrollOps(pane).length
+  pane.key('\u001b[F')
+  await waitUntil('the Reader still scrolls under a failed read',
+    () => scrollOps(pane).length === failedQuiet + 1)
+  await backFromDetails(pane)
+  await waitUntil('the visible Back row really returned', () =>
+    props(pane).title === 'Models' && props(pane).state === 'error')
+  // A RUNNING re-read: the same rule, and `Esc` is the visible row's own intent —
+  // the panel must survive it (closing would drop the page context).
+  await m.ready()
+  await openDetails(pane)
+  // The phase itself is renderer-local and the Reader paints no picker, so the
+  // loading state is proved by WHERE the keys land afterwards: the model list
+  // reports it, and a closed panel would report nothing at all.
+  m.handle.setLoading()
+  await settle(30)
+  const runningQuiet = scrollOps(pane).length
+  pane.key('\u001b[F')
+  await waitUntil('the Reader still scrolls while the read runs',
+    () => scrollOps(pane).length === runningQuiet + 1)
+  pane.key('\u001b')
+  await waitUntil('Esc returned to the model list instead of closing the panel', () =>
+    props(pane).title === 'Models' && props(pane).state === 'loading')
+  // The other phase admission is unchanged: a running read still refuses every
+  // browse and every write.
+  assert.equal(props(pane).query, '', 'and it did not turn the key into a search edit')
   m.handle.close()
 })

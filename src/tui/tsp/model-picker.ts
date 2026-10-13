@@ -11,7 +11,7 @@
  * (intent-bound node construction).
  * @module tui/tsp/model-picker
  */
-import { View, type Key, type Node, type TspEvent } from '@stencil-hq/tern'
+import { View, type Key, type Node, type ScrollTo, type TspEvent } from '@stencil-hq/tern'
 import type {
   ModelPresentation,
   ModelPickerDirectory,
@@ -23,8 +23,6 @@ import { actionIntent, keyIntent, rowIntent, type ModelPickerIntent } from './mo
 import {
   OVERVIEW_DETAILS_ID,
   applyOffered,
-  detailCursor,
-  detailFactItems,
   draftedEffort,
   effortValue,
   focusedAction,
@@ -32,6 +30,7 @@ import {
   inlineEffortOffered,
   modelChoices,
   modelRowId,
+  nativeSidePreview,
   overviewCursorIndex,
   overviewItems,
   seedDrafts,
@@ -42,28 +41,39 @@ import {
   type ModelPickerLayout,
   type ModelPickerPanel,
 } from './model-picker-state.ts'
-import { modelPickerLayer } from './model-picker-view.ts'
+import { MODEL_DETAILS_BODY_KEY_PREFIX, modelPickerLayer } from './model-picker-view.ts'
 
 export class TspModelPicker {
   private readonly render: () => void
   private readonly canInteract: () => boolean
   private readonly notify: ModelPresentation['notify']
+  /** The ONE Surface owner's native scroll op, addressed by a wire id of the
+   *  frame this presenter built. The presenter never owns a Surface. */
+  private readonly nativeScroll: (id: string, to: ScrollTo) => void
   private panel: ModelPickerPanel | undefined
   private serial = 0
   /** The current frame's event targets: node id -> the revision it was built
    *  for. An event whose id is absent (a retired frame) is never routed. */
   private targets = new Map<string, { panel: ModelPickerPanel; revision: number }>()
+  /** The wire id of the Reader's scrollable body in the frame last built, when
+   *  that frame carries one: resolved from the SDK's OWN id assignment (never a
+   *  guessed path) while the frame is indexed for event routing. Its key carries
+   *  the frame's serial/revision, so a retired frame's id is never reused. */
+  private readerBodyId: string | undefined
   private cols = 120
+  private cellWidth = 8
   private suspended = false
 
   constructor(deps: {
     render(): void
     canInteract(): boolean
     notify: ModelPresentation['notify']
+    nativeScroll(id: string, to: ScrollTo): void
   }) {
     this.render = deps.render
     this.canInteract = deps.canInteract
     this.notify = deps.notify
+    this.nativeScroll = deps.nativeScroll
   }
 
   readonly presentation: ModelPresentation = {
@@ -104,7 +114,6 @@ export class TspModelPicker {
       directory: undefined,
       rows: [],
       failures: [],
-      factCursor: 0,
       overviewCursor: 0,
       efforts: new Map(),
     }
@@ -183,17 +192,25 @@ export class TspModelPicker {
     return this.current() !== undefined
   }
 
-  resize(cols: number): void {
+  resize(cols: number, cellWidth: number): void {
     this.cols = cols
+    this.cellWidth = cellWidth
     // A width flip re-lays the SAME panel (the browse state, the page and every
     // draft survive it); `change` keeps the visible page and zone coherent with
     // the new layout.
     if (this.panel !== undefined) this.change(this.panel)
   }
 
-  /** The frozen `cols >= 120` rule for the wide shell (scopes + list + details). */
+  /**
+   * Whether this pane really gets the native SIDE preview column
+   * ({@link nativeSidePreview}): the MEASURED client breakpoint reconstructed
+   * from the only geometry the SDK reports (`cols` + the cell width). Below it
+   * the client paints the preview UNDER the list, where an inline effort row is
+   * outside the visible region — the compact layout and the model's Overview are
+   * then the only structures whose candidates are really reachable.
+   */
   private wide(): boolean {
-    return this.cols >= 120
+    return nativeSidePreview(this.cols, this.cellWidth)
   }
 
   /**
@@ -224,7 +241,6 @@ export class TspModelPicker {
     if (row === undefined) {
       panel.page = 'models'
       if (panel.zone !== 'primary-action') panel.zone = 'models'
-      panel.factCursor = 0
       panel.overviewCursor = 0
       return
     }
@@ -285,6 +301,23 @@ export class TspModelPicker {
       this.close(panel)
       return
     }
+    // The READ-ONLY Reader's own view operations are pure VIEW navigation: its
+    // visible `Back` row (and the `Esc` that is the same intent) and its scroll
+    // keys change no draft, start no read and write nothing, so a merely running
+    // or failed read must never leave the visible Back row dead. An ADMITTED
+    // WRITE still owns the panel: nothing navigates or scrolls under it.
+    if (panel.page === 'details' && panel.phase !== 'pending') {
+      if (intent.kind === 'back') {
+        panel.page = panel.detailsReturn
+        panel.zone = 'models'
+        this.change(panel)
+        return
+      }
+      if (intent.kind === 'reader-scroll') {
+        if (this.readerBodyId !== undefined) this.nativeScroll(this.readerBodyId, intent.step)
+        return
+      }
+    }
     // An admitted write owns the panel: nothing may browse or re-write it.
     if (panel.phase === 'pending') return
     // A running (re-)read still admits the search box and this panel's close
@@ -327,17 +360,12 @@ export class TspModelPicker {
     switch (intent.kind) {
       case 'back': {
         // Back and Esc are the same intent for a content page: the Overview
-        // returns to the model list, and the read-only Full details page returns
-        // to the page it was really entered from (the wide card -> the model
-        // list, the Overview's own details row -> the Overview).
+        // returns to the model list. (The read-only Reader's own Back was already
+        // handled above, where it is exempt from the phase gates; reaching this
+        // case with `page === 'details'` would mean an admitted write, which the
+        // gate above has already refused.)
         if (panel.page === 'overview') {
           panel.page = 'models'
-          panel.zone = 'models'
-          this.change(panel)
-          return
-        }
-        if (panel.page === 'details') {
-          panel.page = panel.detailsReturn
           panel.zone = 'models'
           this.change(panel)
           return
@@ -367,18 +395,17 @@ export class TspModelPicker {
         panel.detailsReturn = panel.page === 'overview' ? 'overview' : 'models'
         panel.page = 'details'
         panel.zone = 'models'
-        panel.factCursor = 0
         this.change(panel)
         return
       }
       case 'overview-cursor': {
         // The Overview's cursor is a ROW position over the page's real rows
-        // (identity continuation lines, the details entry, the effort
-        // candidates). Moving it changes no draft and never writes.
+        // (the identity summary, the effort section and the details entry).
+        // Moving it changes no draft and never writes.
         if (panel.page !== 'overview') return
-        const count = overviewItems(panel, layout.wide).length
+        const count = overviewItems(panel).length
         if (count === 0) return
-        panel.overviewCursor = (overviewCursorIndex(panel, layout.wide) + intent.delta + count) % count
+        panel.overviewCursor = (overviewCursorIndex(panel) + intent.delta + count) % count
         this.change(panel)
         return
       }
@@ -388,14 +415,13 @@ export class TspModelPicker {
         // only move the cursor; an effort row drafts (and only a value the model
         // really advertises); the details row opens the read-only page.
         if (panel.page !== 'overview') return
-        const index = overviewItems(panel, layout.wide).findIndex((row) => row.id === intent.item)
+        const index = overviewItems(panel).findIndex((row) => row.id === intent.item)
         if (index < 0) return
         panel.overviewCursor = index
         if (intent.item === OVERVIEW_DETAILS_ID) {
           panel.detailsReturn = 'overview'
           panel.page = 'details'
           panel.zone = 'models'
-          panel.factCursor = 0
         } else {
           const value = effortValue(intent.item)
           const row = highlightedModel(panel)
@@ -411,31 +437,9 @@ export class TspModelPicker {
         // Enter acts on the row the cursor is REALLY on — the same admission the
         // pointer uses, so the two can never resolve different rows.
         if (panel.page !== 'overview') return
-        const item = overviewItems(panel, layout.wide)[overviewCursorIndex(panel, layout.wide)]?.id
+        const item = overviewItems(panel)[overviewCursorIndex(panel)]?.id
         if (item === undefined) return
         this.act(panel, panel.revision, { kind: 'overview-select', item })
-        return
-      }
-      case 'fact-cursor': {
-        // The Full details page's inert fact rows: the cursor only keeps the
-        // native list scrolled to the row being read. It never writes.
-        const cursorRow = highlightedModel(panel)
-        if (cursorRow === undefined || panel.page !== 'details') return
-        const count = detailFactItems(panel, cursorRow, layout.wide).length
-        if (count === 0) return
-        panel.factCursor = (detailCursor(panel, cursorRow, layout.wide) + intent.delta + count) % count
-        this.change(panel)
-        return
-      }
-      case 'fact-select': {
-        // A pointer click on the details page only moves the read cursor.
-        const cursorRow = highlightedModel(panel)
-        if (cursorRow === undefined || panel.page !== 'details') return
-        const index = detailFactItems(panel, cursorRow, layout.wide)
-          .findIndex((fact) => fact.id === intent.item)
-        if (index < 0) return
-        panel.factCursor = index
-        this.change(panel)
         return
       }
       case 'retry':
@@ -589,6 +593,7 @@ export class TspModelPicker {
 
   renderLayer(): Node | undefined {
     this.targets.clear()
+    this.readerBodyId = undefined
     const panel = this.current()
     if (panel === undefined) return undefined
     if (this.suspended) {
@@ -605,10 +610,17 @@ export class TspModelPicker {
     // Every node in the model layer belongs to this panel, so an event whose
     // `id` is ANY node of the frame (the picker, its scope column, a card, a row)
     // is routed here; a node from an earlier frame is absent and never routed.
+    // The SAME walk records the Reader body's real wire id — the id the SDK
+    // assigned this frame — so the native scroll op can only ever address a node
+    // this frame really built.
     for (const root of View.from({ layer }).regions) {
       const visit = (node: typeof root): void => {
         if (node === undefined) return
         this.targets.set(node.id, { panel, revision })
+        const key = node.props['key']
+        if (typeof key === 'string' && key.startsWith(MODEL_DETAILS_BODY_KEY_PREFIX)) {
+          this.readerBodyId = node.id
+        }
         for (const child of node.children) visit(child)
       }
       visit(root)

@@ -30,17 +30,52 @@ unavailable in TSP.
 | Page | Title | Content | Write |
 |---|---|---|---|
 | `models` | `Models` | provider scopes (wide) + the provider-grouped model list, plus the wide side column | wide only |
-| `overview` | `Model overview` | the highlighted model's identity, its details entry and its effort candidates, all in the native main list | yes |
-| `details` | `Full model details` | the model's complete wrapped facts (identity, Current/Default, description, draft effort, status) | **never** |
+| `overview` | `Model overview` | the highlighted model's SHORT identity, its effort section (every advertised candidate), then its details entry and the remaining configured facts, all in the native main list | yes |
+| `details` | `Full model details` | the model's COMPLETE values in the native **Reader** (an `overlay` the client wraps at its own width and the app scrolls), read-only | **never** |
 
 `overview` is the model's OWN page, never a global menu: it always describes
-exactly one model, and closing it (`Back` / `Esc`) returns to the model list.
+exactly one model, and closing it (`Back` / `Esc`) returns to the model list. The
+read-only `details` page is a logical page of the same flow, but it is PAINTED as
+the native Reader instead of a picker (see "The read-only Reader").
 
-### The wide model list (`cols >= 120`) and its side column
+### The wide model list and its side column (MEASURED pane width)
 
 The wide shell is piped as provider scopes + model list + a Model Details column,
-and it is KEPT at every width that reaches `lg` (content never collapses the
-shell):
+and it is KEPT on every pane that really gets the native SIDE preview (content
+never collapses the shell):
+
+Whether the pane really gets it is a MEASURED pixel breakpoint, not a column
+count. The client keeps the preview BESIDE the list only once its own sheet is
+wide enough; below that it still emits the `pv-side` class but paints the preview
+UNDER the list, where the inline effort row is outside the visible region.
+
+The table below is a CLIENT calibration, taken in a real pane (`tern 0.8.3`,
+default font) with a model that advertises four candidates BEFORE this rule
+existed (the probe drove the then-current presenter, which asked for the side
+column at `cols >= 120`). It says where the CLIENT's breakpoint is — not what the
+shipped presenter emits, which is the "real-pane verification" table's own matrix
+further down:
+
+| pane | `cols` (`cell.w` 8) | client's own preview mode | inline effort rows visible |
+|---|---|---|---|
+| 980x640 | 122 | `pv-side pv-below-auto` | 0 of 4 |
+| 1020x640 | 127 | `pv-side pv-below-auto` | 0 of 4 |
+| 1040x640 | 129 | `pv-side` | 4 of 4 |
+| 1050x700 | 131 | `pv-side` | 4 of 4 |
+| 1100x640 | 137 | `pv-side` | 4 of 4 |
+| 1280x800 | 160 | `pv-side` | 4 of 4 |
+
+The presenter knows only `SessionCaps.cols`/`cell` (the SDK reports no sheet box),
+so the pane width is reconstructed as `cols * cell.w` and compared against the
+measured `1040px` (`SIDE_PREVIEW_MIN_PANE_PX`). That reconstruction
+UNDER-estimates the pane by the client's own chrome (measured: a 1040px pane is
+129 columns = 1032px), so the boundary pane itself still goes compact — one cell
+of margin, in the safe direction. Read against the shipped rule, the calibration
+therefore means: every pane up to and including 1040px goes COMPACT (`md`,
+`preview: 'none'`, every candidate in the Overview), and the side shell starts one
+cell later, where the client is measured to really paint it. The earlier `cols >= 120` rule was 960px in
+this environment: always below the boundary, which is what pushed the preview (and
+the inline selector) under the list on an ordinary split pane.
 
 - In the FULL column (`widePreviewFits` holds) the Model Details card head is the
   model name plus an app-rendered `›`. The card NODE carries the app's pointer
@@ -73,19 +108,24 @@ not open anything).
 
 ### The compact model list and the compact/bounded Overview
 
-At `cols < 120` the same picker renders `preview: 'none'`:
+On every pane below the measured side-preview threshold (and at every compact
+width) the same picker renders `preview: 'none'`:
 
 - the model list carries the provider-grouped rows and the inert failed-provider
   rows, and **no write action at all**: a row `select` or `activate` atomically
   selects that row and opens its Overview;
-- the Overview's main list carries the wrapped identity facts, the single
-  `View full model details ›` operation row, and the model's advertised effort
-  candidates (marked `●`/`○`) — or one inert `Reasoning effort / Not available`
-  row when the model advertises none. Arrow keys move a ROW cursor across every
-  identity continuation line (so a long value is really readable), `Enter` /
-  a click drafts on an effort row, opens the Full details page on the details
-  row, and is inert on a static identity row;
-- the Full details page is read-only and its only action is `Back`.
+- the Overview's main list is ordered for the high-frequency task: the model's
+  SHORT identity (one client-ellipsized line), the `Reasoning effort` section with
+  EVERY advertised candidate (marked `●`/`○`) — or the same section carrying
+  `Not available` when the model advertises none — then the single
+  `View full model details ›` operation row, and only then the remaining
+  configured facts (`Provider`, `ID`, `Current`, `Default`) as single-line
+  summaries. Arrow keys move a ROW cursor over every row, `Enter` / a click drafts
+  on an effort row, opens the read-only Reader on the details row, and is inert on
+  a static row. The COMPLETE values never cost rows here: they are Reader facts,
+  which is what keeps every candidate on the first screen at every width;
+- the read-only `details` page is the native Reader (see below) and its only
+  operation is its own `Back` row.
 
 The compact picker shows the open-time subject (`Default model` / `Session model`)
 once, on the native `strip`'s own line, because that is the picker's only
@@ -95,8 +135,48 @@ no operation chip and no clickable entry, and it is not the removed global actio
 strip. The subject is never duplicated into the title, and at `lg` it uses the
 picker's `subtitle` instead — so it has exactly one complete slot per layout.
 
-The Overview is also what the wide BOUNDED column opens, so `cols` never decides
-whether the full content is reachable.
+The Overview is also what the wide BOUNDED column opens, so the pane width never
+decides whether the full content is reachable.
+
+### The read-only Reader (`details`)
+
+The `details` page REPLACES the picker in the same layer with a native
+`ui.overlay` (`size: 'lg'`, `modal: true`) instead of painting a picker page:
+
+- a picker ROW renders ONE measured line and ellipsizes what does not fit, so it
+  cannot be a reading surface for a long value — the previous revision pre-split
+  every fact into continuation rows, which a real report showed as fragmented,
+  unlabelled pieces of an ID. The Reader therefore renders each fact as its label
+  plus ONE `ui.text({ text, wrap })` value node the CLIENT wraps at the width the
+  layout really has: `char` for machine identifiers (a `provider/model/effort`
+  slug or a model id may carry no break opportunity at all) and `word` for prose
+  (the description and the transient status). Nothing is pre-wrapped, truncated or
+  re-derived: the value is the directory's own string, every explicit break it
+  carries (LF, CRLF and a blank line alike) is rendered as its own line by the
+  client, and the page never uses Markdown for a field that is not defined as
+  Markdown;
+- the overlay's body is a NATIVE scroll container, and the app owns the keyboard:
+  the Reader maps `↑`/`↓`, `PageUp`/`PageDown` and `Home`/`End` onto the SDK's
+  `scroll` op for the body node it really built (the renderer resolves that node's
+  wire id from the frame it rendered, so no id is ever guessed). There is no
+  scroll position, cursor or height mirror in the app, and `Tab` is a consumed
+  no-op on this page because it paints exactly ONE region;
+- its one interactive node is a visible `Back` row bound to the SAME `back`
+  intent `Esc` uses, so `Back` and `Esc` can never disagree about where the page
+  returns: the wide details card enters it from the model list and the Overview's
+  own details row enters it from the Overview, and `detailsReturn` keeps that
+  origin across a resize. It carries no candidate, no draft and no writer. The row
+  is the FIRST row of the scrollable body, so it is visible at the top of the page
+  and travels with the content: after scrolling to a long value's tail, `Home` (or
+  `Esc`, which is the same intent) is the way back — the row is never a dead
+  control, because the page's own view keys are exempt from the phase gates.
+
+The page's facts, in reading order: `Model`, `Provider`, `ID`, the configured
+`Current`/`Default` (whose values carry their own effort from the ONE directory
+DTO), the advertised `Description`, the current `Draft effort`, and the transient
+`Status` when there is one. The complete values live HERE; the Overview only ever
+shows one-line summaries of them, so a long value can never push an effort
+candidate off the model's first screen.
 
 ### Scope and candidate namespaces
 
@@ -108,10 +188,13 @@ the two are told apart by **channel**, not by shape:
   plus the provider ID. A value that names no scope at all, or a provider the
   current read does not advertise (including a failed provider's disabled scope),
   is refused with no state change. Only the model list page carries a scope
-  column, so a scope action on the Overview or the details page fails closed.
+  column, so a scope action on the Overview fails closed — and the read-only
+  Reader is not a picker at all, so it renders no scope column to filter with.
 - A row `select` / `activate` carrying a scope-shaped id is NOT a scope click: it
   acts only on an id the CURRENT page really renders (`visibleModels` on the model
-  list, the Overview's own row set, the details page's own fact set). This is what
+  list, the Overview's own row set). The Reader has NO selectable row of its own
+  (its one interactive node is its `Back` row), so a row event on that page
+  resolves nowhere. This is what
   keeps a catalogue that advertises a provider literally named `all` — or a model
   whose effort id IS `scope-all` or starts with the scope prefix — unambiguous.
 - An effort candidate row carries its own `effort:` namespace, on the Overview
@@ -136,10 +219,11 @@ submits the advertised id. `Switch` / `Save default` are the same single `apply`
 action id the earlier revision used, and neither operation is split in two.
 
 The write action exists exactly where the owned page carries it: the wide model
-list and the Overview (`applyOffered`). The compact model list and the Full
-details page have NO write, and a forged `action { act: 'apply' }` from them is
-refused on the wire before any state change (the same admission the visible bar
-uses). On a wide model list whose search matches NO model the write entry stays
+list and the Overview (`applyOffered`). The compact model list has NO write, and
+the read-only Reader paints no action bar at all, so no page operation can be
+reached from it: a forged `action { act: 'apply' }` is refused on the wire before
+any state change (the same admission the visible bar uses), and only the panel's
+dismissal authority (`close`, the same intent `Esc` uses) stays admitted there. On a wide model list whose search matches NO model the write entry stays
 VISIBLE but disabled — the plan's "no writable primary" is met by
 non-operability rather than by hiding the entry — and a forged
 `action { act: 'apply' }` is refused there too: the admission entry gates the
@@ -165,24 +249,37 @@ walk the zones the CURRENT page really paints, in a ring:
 | `models` `lg`, full preview, model advertises no efforts | `models → detail-card → primary-action` |
 | `models` `lg`, bounded preview | `models → detail-card → primary-action` |
 | `models` `md` | `models → primary-action` |
-| `overview`, `details` | `models → primary-action` |
+| `overview` | `models → primary-action` |
+| `details` (the Reader) | ONE region: `Tab` is a consumed no-op |
 | `pending` (admitted write) | the bar holds the keyboard (`Esc` only) |
-| `loading` (running re-read) | the model list keeps its search box on the model list page (everything else is refused but `Esc`); the content pages admit only `Esc` |
-| `error` (failed read) | the bar holds the keyboard (`Tab`/`Shift+Tab` both stay there) |
+| `loading` (running re-read) | the model list keeps its search box on the model list page (everything else is refused but `Esc`); the Overview admits only `Esc`; the Reader keeps its own `Back`/`Esc`/scroll keys |
+| `error` (failed read) | the bar holds the keyboard (`Tab`/`Shift+Tab` both stay there) — except on the Reader, which has no bar and keeps its own `Back`/`Esc`/scroll keys |
 
 `Esc` is never swallowed. On a content page it is exactly the visible `Back`
-(`overview → models`, `details → detailsReturn`); inside the action bar it
+(`overview → models`, `details → detailsReturn` — the Reader's own visible row
+and `Esc` are the same intent); inside the action bar it
 returns to the zone the bar was entered from; in the side regions it returns to
 the model list; on the model list it closes the panel. An admitted write, a
 running (re-)read and a failed read all close.
+
+**The Reader is the one exception, and it is deliberate.** Its `Back` row is a
+VISIBLE control on a read-only page, so it is never a dead one: `Back` (and the
+`Esc` that is the same intent, and the page's own scroll keys) are pure VIEW
+operations that change no draft, start no read and write nothing, so they stay
+available while a (re-)read merely runs or has failed — the page keeps describing
+a real model and the failure is reported as its own `Status` fact. Closing the
+whole panel there would drop the page context its origin can restore. The other
+phases keep their original admission exactly: an ADMITTED WRITE still owns the
+panel (nothing navigates or scrolls under it), and a running read still refuses
+every browse, every draft and every write.
 
 | Zone | `↑↓` | `Tab` / `Shift+Tab` | `Enter` | `Esc` |
 |---|---|---|---|---|
 | model list | browse models (search box text stays editable) | → the next painted zone | full wide column: focus the `detail-card` zone; compact or bounded: open the highlighted model's Overview — **never writes** | close |
 | `detail-card` | — | → the effort zone (only while painted), then the bar | open the read-only Full details page (full column) or the model's Overview (bounded column), matching the card's own head and hint — **never writes** | back to the model list |
 | `effort` (wide inline rows) | change the draft | → the bar / ← the details card | confirm the draft onto the Primary Action — **never writes** | back to the model list |
-| `overview` | move the ROW cursor over every identity, details and effort row | → the bar | draft on an effort row, open the details entry, inert on a static fact — **never writes** | `Back` to the model list |
-| `details` | move the read cursor (keeps a long value scrollable) | → the bar (only `Back`) | inert — **never writes** | `Back` to the page it came from |
+| `overview` | move the ROW cursor over every `Model`/effort/configured-fact row | → the bar | draft on an effort row, open the details entry, inert on a static fact — **never writes** | `Back` to the model list |
+| `details` (the Reader) | `↑↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the Reader's native body (also while a read runs or has failed) | — (one region) | inert — **never writes** | `Back`/`Esc` to the page it came from |
 | action bar | — | → the next zone in the ring | **the only key that writes**, once, when the FOCUSED action is the enabled Primary | return to the zone/page the bar was entered from (a failed read closes) |
 
 The wide side regions are focused through the SDK's own `focus: 'preview'` and
@@ -200,15 +297,16 @@ Question/Approval modal owns the keyboard before the Model panel.
 The native action bar lays its buttons on ONE line and does not wrap them, and the
 bar has no scroll port of its own, so the bar is SHORT AND FIXED and the frozen
 table caps it per page: no more than `Cancel` (+ `Retry`) (+ the one write) on the
-model list, `Back` + the one write on the Overview, and `Back` ALONE on the
-read-only page.
+model list, and `Back` + the one write on the Overview. The read-only `details`
+page has NO picker and therefore NO action bar at all: its `Back` is the Reader's
+own visible row (see "The read-only Reader").
 
 | Page / phase | Action bar (left to right) |
 |---|---|
 | `models`, wide | `Cancel`, `Retry` (only while part of the directory failed), `Switch` / `Save default` |
 | `models`, compact | `Cancel`, `Retry` (only while part of the directory failed) — **no write** |
 | `overview` | `Back`, `Switch` / `Save default` — **no `Cancel`** |
-| `details` | `Back` alone — **no `Cancel`, no write** |
+| `details` (the Reader) | none — the page is not a picker; its `Back` row is its own node |
 | `error` | `Cancel`, read-only `Retry` |
 | `loading` | `Cancel`, a disabled `Switch` / `Save default` |
 | `pending` | `Close`, a disabled `Selecting…` |
@@ -250,6 +348,10 @@ instead of walking the keyboard into an inert list. A partial failure keeps the
 reached providers usable, lists the failed provider as an inert row (compact) or
 an error-dot scope (wide), and offers `Retry` on the model list itself.
 
+A failed read on the READER reports the failure as its own `Status` fact and keeps
+its `Back`/`Esc` working (see above); `Retry` itself belongs to the pages that
+paint an action bar, so a user returns to the model list or the Overview to run it.
+
 Pending saves disable every mutation entry (including the effort rows, the
 Overview's rows and the Primary Action) and keep `Cancel` available; closing does
 not cancel an admitted business operation. Rejected, cancelled and unsupported
@@ -264,8 +366,8 @@ revision are never routed again.
 The wide column keeps its action-first structure and its budget: the identity is
 pre-wrapped to at most two provable lines per field, and the Reasoning Effort
 radio rows own the remaining vertical space. The complete description and the
-extended facts never decide whether the selector stays inline — they live on the
-Full details page and in the Overview's continuation rows.
+extended facts never decide whether the selector stays inline — they live in the
+read-only Reader, and the Overview keeps one-line summaries of them.
 
 The fit is decided by a PROVABLE budget: the pane renders proportional text, so a
 terminal column count is not a line count (`'W'.repeat(34)` wraps into two native
@@ -292,26 +394,30 @@ becomes the bounded entry into the Overview, which is always reachable and alway
 shows every candidate, and neither this document nor the implementation claims
 the wide column is visually safe there.
 
-A fact row on the details page and in the Overview is a SINGLE measured 18px
-line: the SDK ellipsizes what does not fit and never breaks an unbroken fragment
-(a long id or glyph run), so "the row is 36px tall" is not a readability budget.
-Every fact value is therefore pre-wrapped to the row's OWN one-line slot — the
-measured slot minus the width of the label that row shares its line with, priced
-at the 20px widest-glyph column bound — with the Owner-frozen caps of 11 columns
-(compact) and 21 (wide) as upper bounds: the label-less rows of the narrowest
-supported pane give 11 columns for compact (286px slot at a 400px pane; the cap
-applies) and 17 for the wide side-preview list (366px slot at 1040px, the
-narrowest pane that keeps the details column beside the list; 1100px gives 426px).
-A row that carries a label gets a tighter bound from that label's own width. Every
-value continues over as many rows as it needs, so no fact can be read only through
-an ellipsis — including on the Overview's main list, which uses the same rule.
+A SUMMARY row (the Overview's facts and the bounded column's lines) is a SINGLE
+measured 18px line: the SDK ellipsizes what does not fit and never breaks an
+unbroken fragment (a long id or glyph run), so "the row is 36px tall" is not a
+readability budget. A summary value therefore folds every whitespace run into one
+space and lets the CLIENT ellipsize it — the complete value is never read from a
+summary row. The Overview's configured facts (`Provider`, `ID`, `Current`,
+`Default`) are exactly that: one ellipsized line each, never a stack of
+continuation rows, which is what keeps every effort candidate on the first screen.
+
+The bounded wide column still pre-wraps its identity/fact lines to the shared
+{@link factRowItems} rule below, because that column is a SHORTCUT into the
+Overview rather than a reading surface: the measured slot (286px compact / 366px
+wide) minus the width of the label the row shares its line with, priced at the
+20px widest-glyph bound, with the Owner-frozen caps of 11 columns (compact) and 21
+(wide) as upper bounds. That rule is shared with the `/preset` presenter and is
+UNCHANGED by this revision; the `/model` READER (the `details` page) does not use
+it and does not pre-wrap at all.
 
 The single optional summary line of the wide column is ALWAYS exactly one rendered
 line: any whitespace run — an explicit `LF`, `CRLF`, `CR` or Unicode line
 separator included — folds into one space before it is clamped to the column
-bound, and the full text stays on the Full details page (`Description`, `Status`).
+bound, and the full text stays in the Reader (`Description`, `Status`).
 The card head is folded and clamped the same way; the complete name stays readable
-in the list row and on the Full details page.
+in the list row and in the Reader.
 
 ### What these numbers do and do not guarantee
 
@@ -327,21 +433,27 @@ layout capability, which is out of scope here; reverse-engineering the client's
 CSS is explicitly not done.
 
 What has to hold in every environment is reachability, not a pixel promise: a long
-fact value must have a complete reading path (its wrapped rows plus the native
-list's own scrolling — the HISTORICAL PR4-A real-pane run checks exactly that by
-walking the presentation cursor per width on the surfaces it measured), and every
-Effort candidate must have a reachable path — the
-Overview lists every candidate in EVERY layout (it is entered from the compact
-model list, and from the wide column whenever the budget cannot prove the inline
-selector), and the wide inline rows are the selector exactly while
-`widePreviewFits` proves they all fit. The restructured Overview's own row cursor
-is covered headlessly (the real-pane run below measured page/footer/pointer
-behaviour, not a per-width cursor walk on that page). The run does NOT certify
-enlarged UI fonts
-at the wide layout, IME, themes or the Remote path: those stay `NOT_VERIFIED`.
-Row granularity is therefore a COMPATIBILITY measure for the one-line native row —
-a wrapped value is readable on its own rows — never a layout system of its own,
-and it is not lowered further to paper over geometry the presenter cannot see.
+fact value must have a complete reading path, and every Effort candidate must have
+a reachable path. The Reader carries each value ONCE and the client wraps it at
+the layout's own real width (so no bound of ours can clip it), the app drives the
+native scroll container with the SDK's `scroll` op, and the Overview lists every
+candidate in EVERY layout — it is entered from the compact model list, and from the
+wide column whenever the budget cannot prove the inline selector. The wide inline
+rows are the selector exactly while `widePreviewFits` proves they all fit.
+
+The LAYOUT THRESHOLD is measured, and the measurement is recorded rather than
+assumed: the pane width is reconstructed from `cols`/`cell` and compared against
+the boundary the real client showed (1040px), one cell of margin in the safe
+direction. A pane whose real geometry differs from this environment's (a different
+font, a changed DPI, a browser zoom) can therefore be classified compact while the
+client would in fact have room for the side column — which costs the inline
+selector, never correctness, because the Overview remains the reachable path.
+Classifying such a pane WIDE while the client paints below the list is the
+direction that is not taken: that is the defect this revision fixes. The run does
+NOT certify enlarged UI fonts at the wide layout, `PageUp`/`PageDown` through the
+client's own control channel (the harness silently drops that name; the byte-level
+mapping is covered by the headless suite), physical wheel/trackpad scrolling, IME,
+themes or the Remote path: those stay `NOT_VERIFIED`.
 
 ### The action bar's measured limit
 
@@ -410,26 +522,35 @@ node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs
 ```
 
 The native Model suite drives the real runner, classifier, command handler and
-SDK over a scripted tty and asserts on the reconciled wire tree: the wide/compact
-layout props, the open-time subject per layout slot, the real `action('scope', …)`
+SDK over a scripted tty and asserts on the reconciled wire tree: the measured
+layout rule at its own boundary (129 columns compact / 130 wide at the fixture's
+cell, plus the cell-width dependence) and the wide/compact props, the open-time
+subject per layout slot, the real `action('scope', …)`
 filter with its refused shapes (a scope-shaped row `select`, an unknown or
 disabled provider, a valueless action, a content page, a loading/failed read),
 a radio-row `onClick` that only drafts, the compact row `select`/`activate` that
-opens THAT row's Overview atomically, the Overview's row set and its Enter
+opens THAT row's Overview atomically, the Overview's priority row set (short
+identity, effort section, details entry, then the configured summaries) and its Enter
 semantics (inert static row, drafting effort row, details entry), the wide
 details card and the bounded `Open model & effort ›` card (which opens the
 Overview from BOTH its pointer handler and its `detail-card` zone Enter, while
-the full card opens the read-only page from both), the read-only details
-page and its `Back`, the K2 zone walk with Enter refused outside the Primary
-Action, the page-by-page action bar (and its refusal on the compact list and the
-details page), `Esc` returning to the zone/page it came from, a resize that keeps
-the page and the draft AND a resize that leaves the `detail-card`/`effort` zones
+the full card opens the read-only page from both), the read-only Reader and its
+`Back` row (its complete values, its `wrap` kinds, and the SDK `scroll` ops its
+own PageUp/PageDown/Home/End keys emit for the body node it really built — with
+the negative control that the same keys emit none away from the Reader), the K2
+zone walk with Enter refused outside the Primary
+Action, the page-by-page action bar (and its refusal on the compact list), `Esc`
+returning to the zone/page it came from, a resize that keeps
+the page and the draft (the Reader included) AND a resize that leaves the
+`detail-card`/`effort` zones
 for the really visible list without changing any invisible draft, a loading panel
 that keeps the search editable and closes
 on `Esc`, the pending/refusal/indeterminate settlements (a refusal keeps the page
 it happened on), the read-error Retry through the original read owner, the
-Current/Default facts of a live versus sessionless subject, wrapped long/CJK
-descriptions, grapheme search, modal precedence, stale receivers, legacy-pane
+Current/Default facts of a live versus sessionless subject, long unbroken/CJK/
+emoji descriptions as ONE complete Reader value, effort candidate sets of 0, 1
+and 7+ (with no phantom candidate), grapheme search, modal precedence, stale
+receivers, legacy-pane
 refusal, a pane with `picker` but without `row`/`card`, a same-name Host command,
 and one live Direct Session selection that CHANGES the model (verified through
 the real Session log and an authoritative reopen). `test/model-picker.test.ts`
@@ -454,14 +575,30 @@ node's own rect is never mistaken for a visibility proof, and the ledger separat
 `check` (a claim the run must prove) from `measure` (informational). The run
 directory keeps `assertions.json`, `run.log`, the node trees, the PNGs and copies
 of the flow and subject — see
-[the harness guide](../tern-pane-harness.md); the capturing run recorded
-`tern 0.8.2 (44c7f76)` and 28 assertions + 4 measurements with **0 failures**.
+[the harness guide](../tern-pane-harness.md). The Model-Responsive / Reader
+revision's capturing run recorded the client as `tern 0.8.3 (e2b8656)` and
+finished with **0 failures**; the per-pane matrix, the scroll evidence and the
+artifact layout are in
+[the reader evidence](./evidence/model-responsive-reader-20261013.md).
 
 | Verified (all as harness `check`s) | Result |
 |---|---|
-| boot + shell | the production picker mounts in a real pane; the wide shell renders the subject and asks for the native `pv-side` preview |
-| the wide column | the Model Details card head reads `Budget Mod… ›`; the footer is exactly `Cancel` + `Switch`; the inline selector renders all FOUR candidate rows (`○Default ●e1 ○e2 ○e3` — three advertised efforts plus the provider-default sentinel) |
-| the wide card's pointer hit | a real click on the card HEAD *and* on a nested BODY TEXT line (`sf-card-body > sf-text`, clicked at the centre of the fragment the client really shows) each opened the read-only page, whose footer is `Back` ALONE — the client attributes body-text clicks to the CARD node |
+| boot + shell | the production picker mounts in a real pane; the wide shell renders the subject, asks for the native `pv-side` preview, and the client really paints the SIDE column (no `pv-below-auto`) |
+| the MEASURED boundary | at 1020x640 (127 columns) the presenter asks for `md` + `preview: 'none'` and the client paints `pv-none` with no inline row; at 1040x640 (129 columns) it is still compact — the one-cell margin of the `cols * cell` reconstruction; at 1050x700 (131 columns) it asks for `lg` + `side` and the client paints the real side column with all four candidate rows contained in it |
+| the plan's §7.2 matrix, on THIS revision | 1100x640 and the short 1280x600 stay `lg` + real side with all four candidates contained and the footer contained; 900x640 and 560x640 are compact (`pv-none`, no inline row), open their Overview with `Back` + the one write contained, start the effort section on the first screen, and reach the Reader from the Overview's details row by pointer and back |
+| the Overview's one-line summaries | for the long-identity model every Overview row is one native line (36px measured), so a 199-character ID or a long Current/Default can never wrap into a stack of rows and push the candidates off the screen |
+| the wide column | the Model Details card head reads `Budget Mod… ›`; the footer is exactly `Cancel` + `Switch`; the inline selector renders all FOUR candidate rows (`○Default ●e1 ○e2 ○e3` — three advertised efforts plus the provider-default sentinel) and every row is inside the region the client paints it in |
+| the Reader page | a click on the card HEAD *and* on a nested BODY TEXT line each opened the native `overlay`; the page paints NO picker at all (no action bar, no selectable row), and its long description is ONE client-wrapped value node (the client's own dump caps a node at 200 characters, so completeness is asserted on the wire and reachability on the pane) |
+| the app-driven scroll | `Down` and `End` on the Reader each emitted one SDK `scroll` op for the body node the presenter really built, whose id is FRAME-SCOPED (`layer.model-details-reader-<serial>-rev-<rev>.model-details-body-<serial>-rev-<rev>`), and the CLIENT's own value node moved from `y=326` to `y=-568`; `Home` returned it to `y=326`, and 24 real line keys parked it in between (captured). The same keys away from the Reader emitted no op |
+| every break kind renders | a `Status` value carrying LF, CRLF and an explicit blank line is rendered as FOUR native lines by the client (`64px` against the page's own `16px` line), so LF/CRLF/blank lines are honoured by the real client and not only by our wire (the client's node dump normalizes whitespace, so the dump is deliberately not the proof) |
+| the Reader's return | its visible `Back` row (a REAL click) and `Esc` each returned to the page it was entered from, and the short 1000x400 split pane still opened it and still scrolled to the tail — as did the short wide 1280x600 pane |
+| pointer/wheel scroll — OWNER EXEMPTION | this harness's control channel exposes NO pointer/wheel input (the lane probes three shapes and records the accepted set as `[]`), so the plan's pointer-scroll item cannot be discharged here; the same capability is verified through the app's own keys (`Down`/`Up`/`Home`/`End` at the top, the middle and the tail) |
+| CJK/emoji glyphs | with `Noto Sans/Serif CJK` + `Noto Color Emoji` resolved by fontconfig, the long-value capture shows the CJK run as real glyphs and the rocket emoji in colour; before those fonts existed the same fixture rendered fallback blocks, which is recorded as an environment fact rather than a product result |
+| the Reader's own view keys through a FAILED read (real pane) | the subject's own phase control made the read report a failure while the Reader was open: the failure appeared as the page's own `Status` fact, a scroll key still moved the CLIENT's viewport, and the visible `Back` row (a real click) returned to the model list — the row is never a dead control |
+| the same rule for a RUNNING read (headless) | the headless suite covers the loading phase (a scroll key still emits the op; `Esc` returns to the origin with the panel still mounted and still loading), because the real-pane subject drives the failed phase only |
+| no reused Reader frame (headless) | every Reader node id carries the frame's serial/revision, so a Back event from a retired Reader frame is refused rather than acting on a later one |
+| the Overview's priority | at the split pane its first screen leads with `Model`, then `Reasoning effort` and every candidate (`Default`, `e1`, `e2`, `e3`) BEFORE the `View full model details ›` entry |
+| the wide card's pointer hit | a real click on the card HEAD *and* on a nested BODY TEXT line (`sf-card-body > sf-text`, clicked at the centre of the fragment the client really shows) each opened the read-only page |
 | real `select` / `activate` | a click on a NOT-selected row sends `select {item:"[\"shortp\",\"m2\"]"}`; clicking the now-selected row sends `activate`; the wide list only highlights (no page change, no write in either case) |
 | the compact list at 400x600 | its footer renders `Cancel` alone (frames `Models:close`), i.e. no write from the list |
 | the Overview at 400x600 | `Enter` opens it; its footer is `Back` + `Switch` (frame `{title:"Model overview", actions:[back, apply]}`) — no `Cancel` |
@@ -473,7 +610,16 @@ What remains `NOT_VERIFIED` and is NOT claimed as passing:
 
 - the +25% / +50% enlarged-UI-font matrix at the 400px floor and at the wide
   layout — the pre-existing Owner-accepted limitation above;
-- physical wheel/trackpad, IME, OS focus, dark themes, screen readers, terminal
+- `PageUp`/`PageDown` through the client's own control channel: this client's
+  `key` command accepts `PageDown` but delivers no key for it (measured; `Down`,
+  `Up`, `Home` and `End` are delivered), so the flow drives the same `scroll` op
+  with those and the byte-level `CSI 5~`/`CSI 6~` mapping is covered headlessly;
+- **pointer/wheel scrolling of the Reader body**: this harness's control channel
+  exposes no pointer/wheel input at all (measured; the lane records `[]` for the
+  shapes it tries), so the plan's pointer-scroll item is an explicit OWNER
+  EXEMPTION — the same capability is verified through the app's own keys, which is
+  what the app owns the keyboard for;
+- IME, OS focus, dark themes, screen readers, terminal
   scaling, directories beyond the scripted sizes, the shipped full-profile/HMR and
   the Remote TSP application success path. The harness is a headless client: it
   says nothing about OS-level input methods, window focus or desktop font
