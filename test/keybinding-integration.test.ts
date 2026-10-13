@@ -617,15 +617,19 @@ test('app.input.submit remap does NOT leak into question free-text Inputs (X037)
 
 test('app.input.submit remap does NOT leak into the history search Input (X037)', async () => {
   const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    // Ctrl+R opens the seat; a source must be wired for it to open at all.
+    historySearchSource: {
+      search: async () => ({
+        results: [{ id: 'a', content: 'alpha', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+        exhausted: true,
+      }),
+    },
+  })
   app.start()
   startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
   await vt.waitForRender()
-  // Ctrl+R opens the panel; a source must be wired for it to open at all.
-  ;(app as unknown as { historySearchSource: unknown }).historySearchSource = {
-    query: async () => ({ rows: [{ text: 'alpha' }, { text: 'beta' }] }),
-  }
   app.openHistorySearch()
   await vt.waitForRender()
   vt.sendInput('a')

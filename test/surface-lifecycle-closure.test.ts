@@ -333,13 +333,20 @@ test('A-02 the returned closer is idempotent and a self-reentrant onClose cannot
 })
 
 test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a remountable lease', async () => {
-  // Two REMOUNTABLE overlays: the Ctrl+R History search (the plan's named
-  // negative control) and the extension lease on top of it.
+  // Phase 3B / B3-A: the Ctrl+R History surface is an EDITOR-SEAT tenant, not an
+  // overlay node, so the managed graph holds only the real overlays — and the
+  // tenant still survives the swap on the shared seat mount.
   const { vt, app } = startApp({
-    historySearchSource: { search: async () => ({ results: [], exhausted: true }) },
+    historySearchSource: {
+      search: async () => ({
+        results: [{ id: 'h1', content: 'history entry', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+        exhausted: true,
+      }),
+    },
   })
   app.openHistorySearch()
   await vt.waitForRender()
+  assert.ok(view(vt).includes('Input history'), `the History tenant must be painted:\n${view(vt)}`)
   const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'lease overlay' }] })
   await vt.waitForRender()
   let closes = 0
@@ -350,7 +357,7 @@ test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a
     onClose: () => { closes += 1 },
   })
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 3, 'the two remountable overlays plus the viewer')
+  assert.equal(app.overlayGraphState().handles, 2, 'the remountable lease plus the viewer (History is NOT an overlay)')
   assert.ok(view(vt).includes('retained body'))
 
   app.setFullscreen(true)
@@ -359,16 +366,20 @@ test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a
   const afterSwap = view(vt)
   assert.ok(!afterSwap.includes('job detail'), `the non-remountable viewer must not survive the swap:\n${afterSwap}`)
   assert.ok(afterSwap.includes('lease overlay'), `the remountable lease must survive the swap:\n${afterSwap}`)
-  assert.equal(app.overlayGraphState().handles, 2,
-    'BOTH remountable overlays (extension lease + History) must survive; neither is finalized')
+  // The capturing lease overlay covers the seat HEADER row, so the tenant is
+  // identified by its own query/results rows.
+  assert.ok(afterSwap.includes('Results · 1 match'), `the SAME History seat tenant must survive the swap:\n${afterSwap}`)
+  assert.equal(app.overlayGraphState().handles, 1, 'only the remountable lease survives; neither overlay is finalized')
 
   app.setFullscreen(false)
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2, 'both remountable overlays survive the trip back')
+  assert.equal(app.overlayGraphState().handles, 1, 'the remountable lease survives the trip back')
+  assert.ok(view(vt).includes('Results · 1 match'), 'the History seat tenant survives the trip back too')
   lease.close()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 1,
-    'the History overlay survived the swap (it is the only node left after the lease closes)')
+  assert.equal(app.overlayGraphState().handles, 0,
+    'the History tenant is still not an overlay node after the lease closes')
+  assert.ok(view(vt).includes('Results · 1 match'), 'closing an overlay never closes the History seat tenant')
   app.stop()
 })
 

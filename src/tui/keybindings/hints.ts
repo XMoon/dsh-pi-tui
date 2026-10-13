@@ -20,6 +20,19 @@ import type { KeyId } from '@xmoon76/pi-tui'
  */
 export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'
 
+/**
+ * The History editor-seat tenant's FIXED labels (Phase 3B / B3-A).
+ *
+ * The seat is a per-surface COMPONENT contract, not a Host command: it owns no
+ * keymap action, so these labels can never come from `keyHint`/`keysFor`. They
+ * also cannot go stale under a remap, because no remap exists for them. They
+ * live HERE, with the key-label vocabulary, because the host-keybindings gate
+ * only sanctions key labels owned by this tree: a panel or renderer module must
+ * not hard-code the chords itself.
+ */
+export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑↓'
+export const HISTORY_COPY_LABEL = 'Alt+C'
+
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {
   enter: 'Enter',
