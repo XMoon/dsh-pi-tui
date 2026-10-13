@@ -553,7 +553,10 @@ projection; B2-B gave exactly two of its rows (`Configured theme`,
   `Commit accepted · verification unavailable`, and a success whose readback readably
   disagrees is a failure. The terminal detections and the live scheme listener are
   fenced on the runtime owner's own deliberate-selection intent
-  (`TuiApp.noteThemeSelection()`), never on the asynchronous document. The Detail names the runtime and the
+  (`TuiApp.noteThemeSelection()`), never on the asynchronous document; the leased
+  workspace screen joins that tracking sync while it owns the terminal, and a detection
+  released by a screen hand-off is re-sampled once on the surface that takes over when the
+  intent still follows the terminal. The Detail names the runtime and the
   persisted fact separately, and the panel keeps no second truth store.
 - **The Detail projection is ambiguity-free.** Terminal sequences and unknown
   controls are stripped at the display boundary, but CR/LF/TAB render as visible

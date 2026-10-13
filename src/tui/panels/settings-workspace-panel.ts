@@ -454,9 +454,10 @@ export class SettingsWorkspacePanel implements Component {
   private editRequestId = 0
   /** The candidate viewport offset of the choice projection. */
   private choiceOffset = 0
-  /** The candidate index/viewport the choice list was last rebased against. */
+  /** The candidate index/viewport/WIDTH the choice list was last rebased against. */
   private lastChoiceIndex = -1
   private lastChoiceViewport = -1
+  private lastChoiceWidth = -1
   private readonly source: SettingsWorkspaceSource
   private readonly intents: SettingsWorkspacePanelIntents
 
@@ -844,7 +845,7 @@ export class SettingsWorkspacePanel implements Component {
     const listViewport = Math.max(0, scrollViewport - headingRows)
     const blocks = this.choiceBlocks(row, width)
     const flattened = blocks.flat()
-    const offset = this.rebaseChoice(blocks, listViewport)
+    const offset = this.rebaseChoice(blocks, listViewport, width)
     // Every content line is composed UNPADDED (the frame's own composition pass
     // is the only fit), exactly like the category/row lines.
     const content: string[] = []
@@ -902,13 +903,13 @@ export class SettingsWorkspacePanel implements Component {
     return this.editPhase.kind === 'choosing' ? this.editPhase.field : undefined
   }
 
-  /** Keep the highlighted candidate REVEALED: only a CANDIDATE or VIEWPORT change
-   *  may pull the list back (a wheel may scroll it so the highlight leaves the
-   *  viewport — a plain repaint must never fight that, while a real shrink must
-   *  reveal the highlight again). A multi-line candidate reveals as a whole when it
+  /** Keep the highlighted candidate REVEALED: only a CANDIDATE, VIEWPORT or LAYOUT WIDTH
+   *  change may pull the list back (a wheel may scroll it so the highlight leaves the
+   *  viewport — a plain repaint must never fight that, while a real shrink or a narrower
+   *  pane that re-flows the wrapped candidates must reveal the highlight again). A multi-line candidate reveals as a whole when it
    *  fits; when it is TALLER than the viewport its HEAD is revealed, never a
    *  marker-less continuation tail — the identity must be visible before a confirm. */
-  private rebaseChoice(blocks: readonly (readonly string[])[], viewport: number): number {
+  private rebaseChoice(blocks: readonly (readonly string[])[], viewport: number, width: number): number {
     const phase = this.editPhase
     if (phase.kind !== 'choosing') return 0
     let total = 0
@@ -920,7 +921,7 @@ export class SettingsWorkspacePanel implements Component {
     const index = Math.min(Math.max(0, phase.index), Math.max(0, blocks.length - 1))
     const start = starts[index] ?? 0
     const end = start + (blocks[index]?.length ?? 1)
-    if (index !== this.lastChoiceIndex || viewport !== this.lastChoiceViewport) {
+    if (index !== this.lastChoiceIndex || viewport !== this.lastChoiceViewport || width !== this.lastChoiceWidth) {
       let next = this.choiceOffset
       if (end - start > viewport) {
         // Taller than the granted list rows: the HEAD (marker + label prefix) is
@@ -933,6 +934,7 @@ export class SettingsWorkspacePanel implements Component {
       this.choiceOffset = clampOffset(next, total, viewport)
       this.lastChoiceIndex = index
       this.lastChoiceViewport = viewport
+      this.lastChoiceWidth = width
     } else {
       this.choiceOffset = clampOffset(this.choiceOffset, total, viewport)
     }
