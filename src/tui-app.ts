@@ -4175,6 +4175,10 @@ export class TuiApp {
     // hear Mode 2031 reports again now that its screens are live (the screens
     // themselves re-enable the mode in start()).
     this.refreshSchemeRegistrations()
+    // A stop/start round trip is a screen hand-off on the SAME object: the shared completion
+    // point re-samples a terminal observation that stop() released, so a restarted surface
+    // cannot stay on a stale palette until some later report.
+    this.completeScreenHandoff()
   }
 
   /**
@@ -4368,6 +4372,12 @@ export class TuiApp {
       () => this.tui.stop(),
       () => this.fullscreen?.stop(),
       () => { this.fullscreen = undefined },
+      // Those stops RELEASED the OSC 11 observation the screen was running, and a later
+      // start() restarts the SAME screen object, so the identity check in
+      // completeScreenHandoff() cannot notice the loss (exactly like the external-editor
+      // suspend): mark it here so the restarted surface re-samples once when the latest
+      // intent still follows the terminal.
+      () => { if (this.autoDetectScreen !== undefined) this.themeResamplePending = true },
       // A synchronous sink on the retirement write (or on a screen stop) may
       // have re-entered with a NEW acquisition. A lifecycle operation that ends
       // by stopping the screen must end with ownership RELEASED, so the latch
