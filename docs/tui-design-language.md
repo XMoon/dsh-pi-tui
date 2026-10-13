@@ -1,0 +1,687 @@
+# TUI design language (v1)
+
+> **Status: PROPOSED — §1.3 lists the decisions that are NOT frozen until the
+> Owner confirms them.** Everything else in this file is the working spec.
+>
+> Baseline: branch `next`, commit `7ccaa20a`. This document was derived from the
+> real `VirtualTerminal` frames of the running product (`docs/tui-design-language-samples.md`
+> records them) and from the current source owners linked below — not from the
+> proposal's concept drawings.
+>
+> Companion documents: `docs/tui-design-language-samples.md` (before/after
+> frames, wide → narrow), `docs/tui-design-language-rollout.md` (per-PR plan).
+
+## 1. Scope and authority
+
+### 1.1 What this governs
+
+The **visual vocabulary** of first-party TUI surfaces: information layering,
+ink/colour assignment, case, glyph choice, the active-selection device, rules
+and gutters, the header/body/status/action-bar responsibilities, and the order
+in which chrome degrades on small terminals.
+
+Applies to: the transcript, editor, footer, pickers, overlays, Settings, the Job
+workspace, and every new surface.
+
+### 1.2 What this never changes (STOP conditions)
+
+This is a presentation contract. It must never silently change:
+
+- Phase 3B surface contracts: pane placement, input ladder, `Back`/`Stop`/`Copy`/
+  `Find`/`Follow` semantics, admission, authority, or the real write path
+  (`docs/surface-decisions.md`, the Phase 3B plans).
+- The row-budget owners (`planSettingsChrome`, `planChrome`) and every hit map /
+  `PaneBox` geometry. Vocabulary may change; measured geometry may not drift
+  without a test update in the same PR.
+- The live theme owner (`src/tui/theme/runtime.ts`) and the palette vocabulary
+  (`src/domain/display/theme.ts`). v1 adds **no** colour token.
+- The vendored fork (`packages/pi-tui/**`). Nothing here justifies a divergence.
+- The transcript's right-gutter contract (`docs/transcript-gutter.md`).
+
+If a requested visual change needs a new layout/focus authority, a second theme
+state, a fork change, or a public extension API change, **stop** and ask for an
+Owner amendment instead of doing it under this document.
+
+### 1.3 Pending Owner decisions
+
+These are recorded here so a coding agent does not treat them as final.
+
+| # | Decision | Recommended | Alternative | Rationale |
+|---|---|---|---|---|
+| D1 | Direction | **"One active signal, quiet chrome"** (§2) | OMP-style denser dashboard | §2.1; the surfaces are line-oriented full-width alt-screen roots, and a dashboard needs a geometry authority this repo forbids |
+| D2 | Wide-screen column boundary | **2-cell gutter only** (no vertical glyph) | `│` rule, or per-pane header filler rules | `│` U+2502 is EAW-ambiguous — see §4.3 |
+| D3 | Navigation cursor | **`>`** (U+003E) | `›` (U+203A), `❯` (U+276F) | `>` and `›` are both 1 cell and EAW-neutral; `>` is already the measured geometry in both workspaces, whereas `›` already owns two icon semantics (`icons.ts` `tool-shell`/`slash-command`) and the legacy list cursor, and `❯` already owns the transcript's user marker. Pi's `→` is EAW-ambiguous and is rejected (§4.3) |
+| D4 | Action-bar separator | **` · `** (U+00B7) | ` \| ` (ASCII) | all three reference TUIs join hint segments with ` · `, and it is already this repo's dominant separator in prose/fact lines (`task-panel`, `plugin-manager`, both workspace meta rows); `\|` exists only in the two workspace bars. ` · ` is EAW-ambiguous — but so is the `─` rule painted on the same frame, so choosing `\|` here would buy no real CJK safety (§4.3) |
+| D5 | Status presentation | **`Running` (Title Case), no `●`** | `Running` + `∙`; or keep `RUNNING` + `●` | `●` U+25CF is EAW-ambiguous (2 cells in CJK-width terminals) and the *word* is the real signal; §4.1/§4.3 |
+| D6 | Job reading-facts row flanks | **remove the two flanking rules** | keep them | §6.2 rules budget; the disclosure stays as a dim status line |
+
+Once confirmed, the recommendation becomes the rule and this section is
+replaced by a one-line "frozen at <date>" note.
+
+## 2. Direction: "one active signal, quiet chrome"
+
+### 2.1 Why
+
+The family already agrees on **architecture**: a fullscreen workspace is a
+layout root with one compact header, one body, one pinned bottom bar, and no
+border box (`Frame` is for overlays only — `src/tui/components/frame.ts`).
+Both workspaces already compute their whole chrome from one per-frame plan.
+
+The problem is not too much decoration. The measured problem is that the family
+has **two competing "active" devices and no shared ink ladder**:
+
+- Settings marks the focused pane with `[TITLE]` painted `borderFocus`
+  (`settings-workspace-panel.ts:760`), whose hex `#E8A838` **is** the `warning`
+  token. Ordinary focus therefore reads as an amber warning.
+- The Job workspace marks the active tab with `[Output]` painted
+  `textStrong(…, 'primary')` (`job-inspector-panel.ts:433`) — a different device
+  and a different colour for the same semantic.
+- The editors of the two surfaces picked different inks for the same role:
+  Settings brands itself with `primary` (`:514`); Job brands itself with
+  `textStrong` (`:572`). Detail field labels are `textDim`, while the detail
+  *values* are left unpainted and render in the terminal's default foreground —
+  so a custom or light palette's `text` token is ignored there, and the
+  `Status` field renders "Verified" and "Not saved" in exactly the same colour.
+
+A "quiet" goal is not checkable. So the direction is stated as two rules that
+can be reviewed against a frame:
+
+1. **One active signal per region.** Within one screen region there is exactly
+   one thing the eye should read as "here / current / actionable", and it uses
+   exactly one device: the `[Label]` device (brackets + bold `primary`, §5.1.1)
+   or the `>` cursor glyph in `primary` (§5.1.2).
+2. **Chrome is quieter than content, and every role has one ink.** Text ink is
+   assigned by role from a fixed ladder (§3.3); a role never borrows another
+   role's ink to "make it pop".
+
+### 2.2 What the direction rejects
+
+- A boxed/panelised dashboard: it would fight the alt-screen layout root, cost
+  horizontal space for borders, and compete with the overlay `Frame` vocabulary.
+- "Quiet" as *dimming everything*: the current UI is already dim; the failures
+  above are ambiguity and missing emphasis, not excess ink.
+- One shared layout framework: the two workspaces keep their own row budgets;
+  only vocabulary, the action-bar row layout, and the degradation order unify.
+- Copying another product's chrome. Kimi/OMP/Pi are evidence that these
+  conventions are mainstream (§4, §5, §7); their specific glyphs are not
+  inherited where the repo's own width rules (EAW) disagree.
+
+## 3. The role vocabulary
+
+### 3.1 The six layers
+
+| Layer | Question it answers | Where it lives |
+|---|---|---|
+| L1 Identity | Which surface am I in? | header left |
+| L2 Context | Where inside it? | breadcrumb, meta line, kind |
+| L3 Content | What am I reading / changing? | body, values, log text |
+| L4 Active | Where is my cursor / what is current? | cursor + brackets + bold `primary` |
+| L5 Status | What state is it in? | status words, markers, notices |
+| L6 Chrome | What is structural only? | rules, gutters, hints, counts |
+
+### 3.2 Role → token table (v1, frozen)
+
+`textMuted` (#6B6B6B dark) is *weaker* than `textDim` (#888888); the ladder is
+`textStrong` > `text` > `textDim` > `textMuted` > `border`.
+
+| # | Role | Painted with | Bold | Examples |
+|---|---|---|---|---|
+| 1 | Surface identity | `textStrong` | yes | `Settings`, `Job` |
+| 2 | Context trail | `textDim` | no | `Categories`, `Appearance · Rows`, `job-a · bash` |
+| 3 | Content (primary) | `text` | no | log lines, `Value` value, unselected list label |
+| 4 | Content (secondary fact) | `textDim` | no | `Source`, `Runtime`, `Scope`, `Description`, list summary column |
+| 5 | Field / column label | `textDim` | no | `Value`, `Categories (3)`, `Rows (2)`, `Details`, `Output`, `Command` |
+| 6 | Active glyph (navigation cursor) | `primary` | no | `> ` leading a list row |
+| 7 | Active label (focused pane / active tab) | `primary` | yes | `[Rows (2)]`, `[Output]` |
+| 8 | Selected row text | `textStrong` | yes | the selected row's label and value |
+| 9 | Status word | `success` / `warning` / `error` / `textDim` | no | `Running`, `Failed`, `Completed`, `Ready`, `Stale` |
+| 10 | Machine marker | `warning` / `error` / `textMuted` | no | `[GAP]`, `[ERROR]`, `[SETTLED]` |
+| 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
+| 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
+| 13 | Action hint | `textMuted` | no | `Esc back`, `Enter details` |
+| 14 | Affordance (clickable/keyed verb) | `primary` | no | `↗ Command`, `Copy All [C]`, `Change…` |
+| 15 | Rule / gutter | `border` | no | `─`, 2-cell column gutter |
+
+Corrections this table makes to the current code:
+
+- **Identity is `textStrong`, never `primary`** (`SETTINGS` moves
+  `primary` → `textStrong`). `primary` then means exactly one thing —
+  *active or actionable* — instead of also meaning *brand*.
+- **The cursor glyph is `primary`, the selected row's text is bold
+  `textStrong`.** Today the workspaces paint the cursor in the *same* ink as the
+  row it marks (`> Appearance`, both `textStrong`), so the cursor disappears
+  into the row. The theme objects already split the two roles
+  (`settingsListTheme.cursor = color.primary('›')`,
+  `selectListTheme.selectedPrefix = color.primary`,
+  `selectListTheme.selectedText = chalk.bold`); roles 6+8 adopt that split.
+  The Host `SearchablePicker` does *not*: it hardcodes `'→ '` wrapped in
+  `selectedText` (`searchable-picker.ts:547,825`), so its cursor is bold with no
+  colour and uses an EAW-ambiguous glyph — recorded as debt in §11.4.
+- **`borderFocus` is not an ordinary-focus colour.** It is the attention /
+  approval colour (palette comment: "approval panel"; the reference study found
+  Kimi's token of the same name carries the same comment). Ordinary focus and
+  the active tab both use `primary`. `borderFocus` stays for approvals.
+- **Content values are painted `color.text`**, never left unpainted. Leaving
+  them out makes them the terminal's default foreground and bypasses the
+  palette (verified in `docs/tui-design-language-samples.md`). One exception is
+  deliberate and stays: whatever a user typed (transcript text) keeps its own
+  record bytes.
+- **Secondary facts are one layer below their group's primary content**, not all
+  at the same weight: in the Settings detail pane only the primary field's value
+  is `text`; `Source`/`Runtime`/`Persisted`/`Scope`/`Freshness`/`Description`/
+  `Issue` values are `textDim`.
+- **A status word carries its semantic token.** `Verified` → `success`,
+  `Not saved` → `error`, `Outcome unknown` → `warning`, `Saving…` → `textDim`.
+  Today all four are the same colour.
+- **A status token is only painted when the state is not the calm default.**
+  `Ready` is `textMuted` (normal), `Stale` is `warning`, `Unavailable` is
+  `error`; `Completed` is `textDim` (normal), `Running` is `primary`.
+
+### 3.3 Ink ladder invariants
+
+1. A subordinate role's ink is never stronger than the role it supports
+   (context ≤ identity, label ≤ its value's importance, hint ≤ the hint's action).
+2. `primary` encodes exactly one semantic — *active or actionable*. A region may
+   show it on its active devices (the cursor glyph, the bracketed active label,
+   the affordance group) but never on static text.
+3. Colour is never the only signal: every coloured role also has a word or a
+   shape (brackets, cursor, `[marker]`).
+   This rule is **new** relative to the reference TUIs (none of them states it;
+   one of them paints a disabled row by colour alone) — see §13.
+
+### 3.4 How the transcript maps onto the role table
+
+The transcript is a *content* surface, not chrome, so two of its markers stay
+outside the role table and are **not** restyled by this document:
+
+- the user marker `❯ ` in `roleUser` (plus the optional `roleUserBg` bubble) —
+  a role marker, not a cursor;
+- the assistant bullet `∙` in `primary` (`iconPrefix('assistant-bullet')`).
+
+What the table does govern there: card/context headers are role 2/11
+(`textDim` for tool/focus, `textMuted` for context-cluster chrome — both legal
+"quieter than content" inks, with `textDim` preferred where the header must be
+read), error words carry `error` (§11.4 records the generic-tool exception),
+folded-body text is role 3/4, and the transcript's own `── … ──` compacted
+marker is a role-15 *content* rule, which is why it is not counted against the
+chrome rules budget of §6.2.
+
+## 4. Words and glyphs
+
+### 4.1 Case
+
+- **User-visible words are Title Case or sentence case; there is no ALL-CAPS
+  role for words.** `SETTINGS` → `Settings`, `JOB` → `Job`, `CATEGORIES (3)` →
+  `Categories (3)`, `DETAILS` → `Details`, `RUNNING` → `Running`,
+  `Config READY` → `Config ready`.
+- ALL-CAPS is reserved for two non-prose roles: **bracketed machine markers**
+  (`[GAP]`, `[SETTLED]`, `[ERROR]`) and **acronyms / unit abbreviations**
+  (`TTFB`, `CH91.9%`, `R5 116 tok/s` in the footer stats, `PS>` as a shell
+  prompt). It is never used to give a *word* emphasis.
+  (Case of the markers is a low-risk sub-choice; see D5 and the samples doc.
+  Lowercase `[gap]` is the alternative if the owner prefers calm.)
+- Status words are a fixed display map, with the raw status as the fallback for
+  an unknown wire value: `running`→`Running`, `stopping`→`Stopping`,
+  `completed`→`Completed`, `failed`→`Failed`, `killed`→`Killed`,
+  `timed_out`→`Timed out`, `lost`→`Lost`.
+- Multiple words in one hint stay lowercase after the key: `Esc back`,
+  `Enter details`, `C copy value`.
+- **Key tokens are Capitalized; a bare letter is lowercase.** `Esc`, `Enter`,
+  `PgUp`, `Shift+S` are capitalized, but an unmodified single letter is written
+  `r refresh`, `c copy value`, `s stop` — because `R` reads as ⇧R and this repo
+  already spells a shifted chord `Shift+S` (`formatKeyId`). The reference study
+  found the same rationale in oh-my-pi's key formatter. This is a small
+  user-visible wording change (`R refresh` → `r refresh`) and is part of the
+  frozen rule set; every advertised key must still come from the live keymap
+  (§7.1).
+
+### 4.2 Breadcrumbs and separators
+
+- **One separator per job** (this is the rule that removes the current
+  ` · ` vs ` / ` vs ` | ` mixture):
+  - ` · ` joins breadcrumb segments, facts **and action-bar hint segments**:
+    `Appearance · Rows`, `job-a · bash`,
+    `Retained preview · not full history · rows 7-40/40`,
+    `Esc back · Enter details · r refresh`. (D4 — all three reference TUIs use
+    ` · ` for exactly this, and it is already the dominant idiom in this repo.)
+  - `: ` introduces one labelled fact in a prose line: `Scope: …`,
+    `Progress: 3/8 checks`.
+  - ` / ` joins alternatives *inside one key token*: `PgUp/PgDn`, `Ctrl+F`.
+    It never joins fields.
+  - Two spaces separate a fixed column label from its value within one row
+    (`Command  pnpm build`; `Value       Solarized` uses the padded label column
+    of the detail pane).
+- A breadcrumb names the **trail**: `Categories` → `Appearance · Rows` →
+  `Appearance · Configured theme`. The level word appears where the trail has
+  no other name.
+- The surface identity is joined to the trail with ` · `:
+  `Settings · Appearance · Rows`, `Job · job-a · bash`.
+
+### 4.3 Glyph safety (EAW) — hard rule
+
+`test/icons.test.ts` already rejects East-Asian-Width **ambiguous** glyphs, hard
+coded as `SAFE_EAW = {'neutral','narrow','halfwidth'}`, because VTE/WezTerm
+`cjk-ambiguous-width` paints ambiguous glyphs **two** cells while
+`visibleWidth()` measures them as one.
+
+**v1 extends that rule to all chrome glyphs the design language introduces**:
+every cursor, separator, bracket, marker or rule glyph is ASCII or EAW
+neutral/narrow/halfwidth. Measured classes (`get-east-asian-width`
+`eastAsianWidthType`):
+
+| Glyph | Class | Verdict |
+|---|---|---|
+| `>` `\|` `/` `:` `(` `)` `[` `]` | ASCII/narrow | safe |
+| `›` U+203A, `❯` U+276F, `»` U+00BB | neutral | safe |
+| `∙` U+2219, `◦` U+25E6, `▸` U+25B8, `▾` U+25BE | neutral | safe |
+| `●` U+25CF, `·` U+00B7, `•` U+2022, `←` U+2190, `↗` U+2197 | **ambiguous** | CJK hazard |
+| `─` U+2500, `│` U+2502 | **ambiguous** | CJK hazard |
+
+**Grandfathered, accepted limitation:** the full-width rule glyph `─` and the
+` · ` separator are *already* used across the chrome, and the `─` rule is drawn
+on nearly every fullscreen frame — so a `cjk-ambiguous-width` terminal is
+already outside the supported contract for this chrome. v1 therefore does not
+mass-migrate them, and does not pretend that swapping one ambiguous separator
+for an ASCII one fixes the frame. The forward-looking rule is narrower and
+checkable:
+
+**Do not add a new ambiguous-glyph role, and do not put an ambiguous glyph in a
+new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` cursor
+(U+2192, ambiguous) is rejected in favour of D3's `>`.
+
+### 4.4 Canonical glyph inventory
+
+| Role | Glyph | Notes |
+|---|---|---|
+| Navigation cursor | `> ` (2 cells) | one per list; D3 |
+| Active/current label | `[Label]` | focus, active tab, current pane |
+| Current-value marker (candidate list only) | `[← current]` | never shares the cursor's meaning |
+| Disclosure | `▸` / `▾` | collapse state only, never "selected" |
+| Rule | `─` | boundary only |
+| Fact + action-bar separator | ` · ` | D4; the single separator for segments and facts |
+| Ellipsis | `…` | truncation of *content* only, never inside an action hint |
+
+## 5. The active device
+
+One device, three uses:
+
+```text
+selection in a list         > Appearance            cursor glyph in primary
+                            (the row's own text is bold textStrong)
+focused pane / active tab   [Rows (2)] / [Output]   brackets + bold primary
+current value (candidates)  label  [← current]      row-end marker, no colour
+```
+
+### 5.1 Rules
+
+1. **Focus / active = `[Label]` in bold `primary`.** Unfocused = `Label` in
+   `textDim`. This single device replaces both `borderFocus` brackets
+   (Settings) and the tone-overridden tab paint (Job). It costs the same cells
+   as today's Settings device and makes Settings' pane focus and Job's tab focus
+   visually identical.
+2. **Selection = a `primary` cursor glyph in a 2-cell gutter + bold
+   `textStrong` on the row's text.** The two halves carry different meanings:
+   the glyph says *where the keyboard is* (an active/actionable thing, so
+   `primary`), the bold text says *which row it is* (emphasis, not a second
+   colour). The theme objects already split the two halves
+   (`settingsListTheme.cursor = color.primary('›')`,
+   `selectListTheme.selectedPrefix = color.primary`,
+   `selectListTheme.selectedText = chalk.bold`), so the workspaces converge on
+   the existing theme device instead of keeping their own. The Host
+   `SearchablePicker` still hardcodes a bold `'→ '` (§11.4).
+3. **Selection ≠ current.** The keyboard cursor and the authoritative current
+   value are different facts and get different markers. The Job workspace has no
+   list selection; the Settings candidate list keeps the row-end marker.
+4. **Disabled / read-only / pending / failed** are words, not just inks: the
+   detail pane's `Status` field, the read-only note and the `[Retry save]` verb
+   already express them; unavailable candidates keep `[unavailable]`.
+5. Focus is never carried by colour alone — the brackets are the shape signal,
+   and in a single-pane (narrow) layout the breadcrumb names the level instead
+   of inventing a second device.
+
+### 5.2 Why the cursor keeps `primary` and the row does not
+
+All three reference TUIs colour the cursor with their accent token and
+distinguish cursor / current / selected by *position and glyph*, not by three
+colours. This repo's problem was never too little colour; it was that the
+workspaces painted the cursor in the same ink as the row it marked, so the
+cursor could not be found. Assigning `primary` to the glyph and bold
+`textStrong` to the row gives the eye one coloured anchor and one weight
+anchor, without inventing a fourth meaning for `primary`.
+
+## 6. Chrome geometry
+
+### 6.1 Surface skeleton
+
+```
+<identity> · <context trail>                     <count / status>
+<diagnostic line: facts>
+────────────────────────────────────────────────────────────────
+<optional pane header row>
+<body>
+────────────────────────────────────────────────────────────────
+<optional notice>
+<action bar>
+```
+
+- Fullscreen workspaces draw **no border box** and no vertical rules.
+- Waist rows are granted in this order and dropped in reverse:
+  identity → action bar → context trail → body floor → pane header → notice →
+  diagnostic line → count/status → rules. (Both existing planners already do
+  roughly this; §8 freezes the wording.)
+
+### 6.2 Rules budget
+
+- A rule marks a **boundary between chrome and content**. At most one rule per
+  boundary, at most two per frame.
+- **A line whose own text is the content is never flanked by rules.** The Job
+  reading-facts row's two flanking rules (`job-inspector-panel.ts:681`) are
+  therefore removed (D6); the disclosure becomes a dim status line, and the
+  boundary it used to mark is already marked by the tab row's rule above the
+  body.
+- A rule is the first thing to go when rows are scarce (`ruleRows` is already
+  budgeted this way in Settings; the same budget applies to Job).
+
+### 6.3 Columns, gutters and the pane header row
+
+- Multi-column layouts are separated by a **2-cell gutter** (existing
+  `COLUMN_GAP = 2`) and nothing else (D2).
+- The pane header row is where a column declares itself: `Categories (3)`,
+  `Rows (2)`, `Details` in `textDim`, the focused one in the `[Label]` device.
+- Column boundaries must not be discoverable only by whitespace *and* the eye
+  must not need a glyph: the pane header is on every multi-column frame, and a
+  surface with more than two columns that needs stronger separation must come
+  back for an Owner amendment rather than inventing a rule style locally.
+- Two older overlays already draw a `│` split for an independently-scrolled
+  master/detail pair (`task-panel.ts:907` at ≥110 columns, `history-panel.ts:621`
+  at ≥100). v1 does **not** extend that device to the workspaces (D2) and records
+  the two as debt (§11.4): a new surface must not add a third convention.
+
+### 6.4 Insets, alignment and truncation
+
+- No outer inset; content starts at column 0 of its pane (existing behaviour).
+- A fixed label column is padded to its width (`Value` column: 12 cells at pane
+  width ≥ 26, 8 below — existing `:1003`); wrapped continuation lines align to
+  that column.
+- A list row is `cursor(2) + label + gap + value`; the **value truncates first,
+  the label owns its cells first** (existing `rowLine`).
+- Truncation of content uses `…`. **Action hints never truncate mid-word**: a
+  segment is dropped whole (§7.2).
+
+## 7. The action bar
+
+### 7.1 Grammar
+
+- A bar is a row of segments joined by ` · ` (D4).
+- **Hint segment** = `<Key> <verb>`: `Esc back`, `Enter details`, `r refresh`,
+  `c copy value`, `s stop`, `PgUp/PgDn`. Capitalized key token, lowercase verb;
+  a bare unmodified letter is lowercase (§4.1).
+- **State fact** = `<Noun> <state>`: `Follow on`, `Follow paused`,
+  `rows 7-40/40`, `Retained preview · not full history`. A fact never begins
+  with a key name, so the two segment kinds stay distinguishable on one row.
+- Keys come from the **live effective keymap**, never from a hardcoded literal
+  for a rebindable action (`componentKeymap.keyHint('tasks.stop')` is the
+  existing correct pattern; `settings-workspace-panel.ts:1185-1186` compares raw
+  characters and must move to the keymap in the V2 PR). This is the one
+  governance rule all three reference TUIs state in their own words — each of
+  them guards it (or its equivalent) in CI (§13).
+- An affordance with a key renders `Verb [Key]` (`Copy All [C]`); a
+  **direct action with no key renders `Verb`** (`Retry save` — click-only); an
+  affordance that opens a further step renders `Verb…` (`Change…`). The current
+  whole-word brackets (`[Change…]`) are replaced by this rule, so Settings and
+  Job affordances look the same.
+- Affordances are `primary` (role 14).
+
+### 7.2 Ordering and degradation
+
+Segment order is fixed: **escape/back first**, then the primary action, then
+navigation, then secondary verbs, then pure browsing hints.
+
+The bar **drops whole segments by ascending priority**, then compacts a
+segment that declares a `short` form, and only truncates as the last resort with
+one segment left. `job-inspector-panel.ts:698-715` is the reference
+implementation; the Settings bar (which today truncates mid-hint —
+`Esc back | ↑↓/Pg keys scroll | Enter change…` at 44 columns) adopts it.
+
+Safety-relevant facts (`[GAP]`, `[ERROR]`, the retained-not-full disclosure) are
+never dropped before a secondary verb or a browsing hint.
+
+### 7.3 Facts on the action bar
+
+The proposal suggested keeping facts out of the action bar. **That is not
+implementable at every width**: the Job reading-facts row is granted only at
+`width ≥ 100 && rows ≥ 12` and keeping ≥ 6 body rows
+(`job-inspector-panel.ts:110-112, 211-215`), so at `80×10` the bar is the only
+place the retained disclosure can live (verified: the captured 80×10 frame shows
+`Esc back | S stop | Follow ON | Retained preview · not full history`).
+
+v1 therefore allows state facts on the bar under §7.1's shape rule, and requires
+that when the dedicated facts row *is* granted, the bar does not repeat it
+(the existing `facts.readingFacts` gate).
+
+## 8. Responsive degradation ladder
+
+Frozen order of what yields as space shrinks (both workspaces already follow it;
+this is the wording a new surface must match):
+
+1. Vertical rules / extra decoration — never drawn.
+2. Full-width rules — dropped below the body floor (`bodyWithoutRules < 5`).
+3. Diagnostic line (`Scope:`/`Refreshed`, `Progress:`/`Detail:`) — dropped when
+   it would leave fewer than 3 body rows.
+4. Notice row — dropped when it would leave fewer than 2 body rows.
+5. Pane/tab header row — dropped with the body floor.
+6. Count/status in the header — dropped whole, never truncated
+   (`composeEdge` already drops the right region before the left).
+7. Individual action-bar segments — dropped whole, lowest priority first.
+8. Right-side affordances — yield to their content: at narrow widths the
+   `↗ Command` affordance is dropped before the command text is cut to nothing.
+
+Invariants that hold at every size:
+
+- The action bar is the physical last row and is never budgeted away.
+- A body row is reserved from 3 terminal rows up.
+- The breadcrumb (identity + trail) survives; only the right-hand badge yields.
+- No "minimum terminal size" gate; a 44-column frame stays fully reachable.
+- Layout math uses terminal cells (`visibleWidth`), never string length, and
+  never requires East-Asian ambiguous width to be 1 (§4.3).
+
+## 9. Theme and accessibility
+
+- **No new palette tokens in v1.** The role table maps onto the existing
+  `ColorPalette`. If a genuine gap appears, re-valuing `borderFocus` or adding a
+  token requires dark + light + custom fallback + contrast review + live-theme
+  switch tests in the same PR.
+- Never read the palette at module scope: styles come from `color.*` /
+  `taskStatusColor()` / the theme factories at render time, so live theme
+  switches (`setTheme`) keep working. `settingsListTheme()` is a function for
+  exactly this reason (`runtime.ts:136-144`).
+- Every state must be readable in monochrome: colour is a second signal
+  (§3.3.3).
+- `emoji` / `symbols` / `minimal` is an **icon density** setting, not a layout
+  setting. Switching it must not change cursor width, hit targets, or the
+  chrome glyphs in the inventory (§4.4) — those are chrome, not icons.
+- Custom themes must not be able to break the frame: a palette missing the
+  optional search tokens is already filled by `withSearchCurrentTokens`.
+
+## 10. Reuse map
+
+Use these; do not build a parallel owner.
+
+| Need | Existing owner | Rule |
+|---|---|---|
+| Colours, bold/dim/italic | `src/tui/theme/runtime.ts` (`color`, `hexPaint`) | the only ink source |
+| Palette vocabulary, built-ins | `src/domain/display/theme.ts` | no new token in v1 |
+| Job status → colour | `taskStatusColor()` (`runtime.ts:116-128`) | extend the *wording* map next to it; do not fork the colour map |
+| Picker / settings-list / editor / markdown palettes | `selectListTheme`, `settingsListTheme()`, `editorTheme`, `markdownTheme` | restyle through these, never by re-painting their components. Note one exception: `SearchablePicker` hardcodes its `'→ '` cursor inline (`searchable-picker.ts:547,825`) instead of asking the theme, so a picker-cursor change touches that file (§11.4) |
+| Semantic structural icons | `src/tui/icons.ts` (`iconFor`, `iconPrefix`, `iconLead`) + `src/domain/display/icons.ts` | chrome punctuation (cursor/brackets/rule) is **not** an icon and does not enter the registry |
+| Overlay shells | `src/tui/components/frame.ts` (`Frame`, `FocusForwardingFrame`, `ResponsiveOverlayFrame`) | overlays keep the rounded frame; fullscreen workspaces never use it |
+| Single physical row safety | `src/tui/presentation/lines.ts` (`sanitizedPhysicalLine`, `escapedPhysicalLine`) | every chrome string passes through it |
+| Per-frame row budget | `planSettingsChrome` / `planChrome` in the owning panel | keep; do not share |
+| Real-frame tests | `test/settings-workspace-visual.test.ts`, `test/job-workspace-visual.test.ts`, `test/virtual-terminal.ts` | extend; never add a second screenshot framework |
+
+**Explicitly not to be built:** a CSS-in-TS layer, a token store, a
+`SurfaceManager`/`WorkspaceRenderer`/layout DSL, a second focus manager, a modal
+manager, a generic multi-layer component tree, a whole-repo regex gate for
+chrome (see §11.3).
+
+**The only extraction v1 authorizes** is the action-bar row layout: the Job
+`ActionBarSegment` + `renderActionBarRow` pair already implements §7.2 and the
+Settings bar needs exactly it. Extracting it to
+`src/tui/presentation/action-bar.ts` (pure, stateless, no palette capture) is
+justified by two real consumers. Do not extract anything else until a second
+real consumer exists.
+
+## 11. Anti-degradation governance
+
+### 11.1 One canonical spec
+
+- This file is the single source of truth for visual vocabulary.
+- `AGENTS.md` links here from its TUI section (one line, "read before adding or
+  restyling a surface"); `docs/README.md` lists it in the map.
+- `docs/surface-decisions.md` and the Phase 3B plans keep owning *business*
+  decisions. They must not restate this vocabulary, and this file must not
+  restate their contracts. On conflict: stop and ask the Owner.
+- New vocabulary (a new glyph role, a new status ink, a new device) requires a
+  change to this file **in the same PR** that introduces it. New *usage* of
+  existing vocabulary does not.
+
+### 11.2 The PR visual checklist
+
+Copy into every PR that changes a visible surface:
+
+```text
+[ ] Which archetype(s) from docs/tui-design-language.md does this surface map to?
+[ ] Role → token: does every painted string use its §3.2 token (no borrowed ink)?
+[ ] Exactly one active signal per region (one [Label]/`> item` in primary)?
+[ ] Can the reviewer distinguish selected / current / focused / disabled /
+    pending / failed from the frame alone?
+[ ] Header = where I am, body = what I see, status line = current facts,
+    action bar = what I can do — no responsibility moved?
+[ ] Do the advertised keys come from the live effective keymap?
+[ ] Action bar: whole-segment drops only; no partial word; safety facts kept?
+[ ] New glyphs: ASCII or EAW neutral/narrow/halfwidth (§4.3)?
+[ ] Wide / medium / narrow / short / CJK: full interaction still reachable
+    (frozen matrix: 200×50, 120×40, 100×40, 80×24, 80×10, 72×24, 44×20)?
+[ ] Dark / light / custom, and icons symbols / minimal checked?
+[ ] No new shadow authority, focus owner, fork divergence, or duplicate layout
+    framework? No new palette token?
+[ ] before/after frames from the real VirtualTerminal included, plus a real
+    terminal check per docs/tmux-testing.md. Unrun items are marked NOT_RUN.
+```
+
+Visual beauty is an Owner/Reviewer judgement. "All tests pass" never closes a
+visual item, and an unrun screenshot must never be reported as PASS.
+
+### 11.3 Machine checks
+
+Enforce only what is cheap and low-false-positive; the rest is review.
+
+1. **Chrome glyph width gate** (new, small): extend the existing width-gate
+   pattern of `test/icons.test.ts` with the canonical chrome glyph inventory
+   (§4.4) — each entry must be 1 cell under `visibleWidth()` *and* EAW
+   neutral/narrow/halfwidth. This makes §4.3 regression-proof.
+2. **Frame invariants in the two existing visual suites** (add, don't duplicate):
+   - at most one bracketed active label per painted frame;
+   - the action bar is the last physical row at every size in the matrix;
+   - the body floor is ≥ 1 from 3 rows up;
+   - no action-bar row contains `…` while more than one segment is painted;
+   - a `Status` value of `Verified` and of `Not saved` do not paint the same
+     token.
+3. **Degradation-ladder test**: for each size in the frozen matrix, assert the
+   dropped/kept set matches §8 (this is the test that catches "someone made the
+   header taller").
+4. **Snapshot policy**: snapshot only stable, spec-level frames; normalize
+   timestamps, job ids and durations. Do not add a whole-frame ASCII snapshot
+   that fails on every cosmetic change.
+5. **No whole-repo regex gate.** A repo-wide search for `>`/`|` would flag
+   transcript, Markdown and tool output that legitimately contain them. Any
+   automated check is scoped to the canonical glyph inventory and to chrome
+   consumers with real visual tests.
+
+### 11.4 Known deviations and migration triggers
+
+Recorded debt, intentionally not fixed in v1. Each migrates **when that surface
+is next touched for another reason** (never by a mass search/replace):
+
+| Surface | Deviation | Trigger |
+|---|---|---|
+| plugin-manager panel | selection marker `▸ ` in `accent` (`plugin-manager/panel.ts:280`) | next plugin-manager change |
+| footer configurator | cursor `›` in `primary` (`footer/configurator.ts:940`) | next configurator change |
+| legacy settings list | `settingsListTheme.cursor = '›'` (`runtime.ts:141`) | next settings-list restyle |
+| `SearchablePicker` | hardcoded `'→ '` cursor in bold, not `primary`, and `→` is EAW-ambiguous (`searchable-picker.ts:547,825`); `selectListTheme.selectedPrefix` is unused by it | next picker change |
+| picker hint lines | all-lowercase key names (`'↑↓ navigate · enter select · esc close'`) instead of §4.1's `Enter select · Esc close` | next picker hint edit |
+| approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
+| task browser / history | `│` column split for a master/detail pair (`task-panel.ts:907`, `history-panel.ts:621`) | next change to that panel |
+| task quick panel, plugin-manager | already follow the ` · ` hint separator; only their cursor/status inks deviate | next change to that bar |
+| keybindings UI | `Saving…` painted `accent` | next keybindings UI change |
+| history panel | paints **no** colour token at all (title, cursor, tabs, hints are plain) | next history-panel change |
+| editor seat borders | `warning` for plan mode, `accent` for a subagent viewer seat (`tui-app.ts:12850`, `:13093`) | next editor-seat change |
+| transcript disclosure | three shapes for one semantic: `🐋/🐳` (Focus), `▸/▾` (Activity/cluster), hardcoded `▼/▶` (sub-call/workflow, `tui-app.ts:16415,16663,16706`) | next disclosure change |
+| transcript `🐋` | the same glyph is the assistant bullet (`icons.ts:80`) and the Focus-collapsed disclosure (`:74`) | next icon-registry change |
+| workflow member rows | colour-only status glyphs `!`/`•`/`●` with no word (`tui-app.ts:470-478`) | next workflow-rendering change |
+| failed generic tool | the result text stays unpainted/`textDim`; only the `[error]` pill carries the colour | next tool-card change |
+| chrome-wide ` · ` and `─` | EAW-ambiguous; accepted limitation (§4.3) | only if CJK-width terminals become a supported target |
+
+## 12. Surface archetypes
+
+A new surface picks one and must justify any deviation.
+
+| Archetype | Skeleton | Examples |
+|---|---|---|
+| **Workspace** (fullscreen) | §6.1, own row budget, pinned action bar | Settings, Job |
+| **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers, approval dialog, history |
+| **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
+| **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
+
+Shared minimum spec for Workspace and Overlay: identity, one body, one bottom
+bar, `Esc` first, whole-segment hint drops, no mid-word truncation, role table
+respected.
+
+## 13. Reference alignment and deliberate divergences
+
+The reference study (Pi `earendil-works/pi` / `badlogic/pi-mono`, oh-my-pi
+`can1357/oh-my-pi` @ main `818dd42b73`, kimi-code `MoonshotAI/kimi-code`) was
+read as *evidence of what a mainstream TUI does*, never as a specification to
+copy. Pi and kimi-code were fetched from GitHub (their local checkouts are not
+present on this machine), so those quotes carry file+symbol rather than
+line numbers.
+
+### 13.1 Followed (consensus, and it also matches this repo)
+
+| Rule | Where the references agree | Where this repo already does it |
+|---|---|---|
+| A navigation cursor is a **glyph in a gutter**, not a colour | pi `select-list.ts` `"→ "`; oh-my-pi `select-list.ts:592` `cursor + ' '`; kimi `SELECT_POINTER = '❯'` | `src/tui/panels/settings-workspace-panel.ts:766,774,887` (`'> '`), `settingsListTheme.cursor` |
+| **Selection ≠ current** | pi `model-selector.ts` second `✓ ` gutter; kimi DESIGN §1 "当前项与选中项互相独立" | candidate list `[← current]` (`:888`) |
+| ` · ` joins metadata/hint segments | oh-my-pi `theme/symbols.ts:456` `"sep.dot": " · "`; kimi DESIGN §4; pi `settings-list.ts` hint line | both workspace meta/fact rows, `task-panel.ts:1275-1287` |
+| **Key token Capitalized, verb lowercase** | pi `keyDisplayText`; oh-my-pi `key-hint-format.ts`; kimi DESIGN §4 | `Esc back`, `Enter details` (bare letters must change, §4.1) |
+| Hints and keys come from the **keymap**, never a raw literal | pi AGENTS.md; kimi `printable-key-guard.test.ts` (CI-enforced); oh-my-pi `formatKeyHint` | `componentKeymap.keyHint('tasks.stop')` in Job; Settings still compares `'r'`/`'c'` |
+| Every row is width-clamped through the shared helpers | pi/oh-my-pi/kimi docs | `fit()` / `truncateToWidth` / `visibleWidth`; `test/icons.test.ts` |
+| A **small, counted** decoration budget | kimi DESIGN §3 "整个 dialog 全宽 `─` 仅 2 条（顶 + 底）", checklist-enforced; pi's de-facto 2 `DynamicBorder`s | `planSettingsChrome` grants 0 or 2 rules |
+| Text contrast floor ≥ 4.5:1 | pi `docs/themes.md`; kimi AGENTS.md (+3:1 chrome) | palette comments ("tuned for ≥ 4.5:1 contrast on black") |
+| `borderFocus` is approval-only | kimi `theme/colors.ts` "Focus / attention border — currently only the approval panel" | identical comment on our `ColorPalette.borderFocus` |
+
+### 13.2 Deliberate divergences
+
+| Decision | What the references do | What v1 does, and why |
+|---|---|---|
+| Surface identity ink | kimi paints the dialog title `primary` + bold; oh-my-pi insets it in the top rule in `accent` | `textStrong` bold, no colour. This repo already uses `primary` for links *and* inline code *and* selection (`markdownTheme.code`, picker prefixes), so a blue title would make "blue" mean brand + clickable + current at once. Keeping the identity weight-only keeps `primary` = active/actionable |
+| Selected row's text | pi/oh-my-pi paint it with their accent token | bold `textStrong`; only the cursor glyph is `primary`. Same reason as above, and it matches this repo's existing picker device |
+| Hint overflow | kimi truncates the whole line; pi truncates + one documented whole-segment drop; oh-my-pi's native path wraps and its ANSI footer clips in a height-1 row | **whole-segment drop by priority, never mid-word** (already implemented in Job). At a pinned height 1, wrapping is impossible and line truncation is what produces today's `Esc back · ↑↓/Pg keys scroll · Enter change…` |
+| Status word case | pi sentence case, oh-my-pi Title Case, kimi lowercase | Title Case (§4.1) — the middle choice, consistent with the metrics words already in this repo (`Committed`, `Served`) |
+| Cursor glyph shape | pi `→`, oh-my-pi `❯`/`>`, kimi `❯` (and kimi forbids inventing `>`/`→` for its own dialogs) | `>` for this repo (D3): `→` is EAW-ambiguous, `❯` already owns the transcript's user marker, `›` already owns two icon semantics |
+| "Never colour alone" | **no reference states this rule** (one paints a disabled row by colour only) | adopted anyway (§3.3.3) because our palette proves colour is unreliable here: `borderFocus` and `warning` are the same hex |
+| Rules on a status line | kimi forbids an inner rule; oh-my-pi freely adds `├──┤` dividers | at most one rule per boundary and never flanking a text line (D6) |
+
+### 13.3 What is realistically machine-checkable
+
+The study checked what each project actually gates. kimi is the strongest
+(named-chalk-colour scan, bare-printable-key scan, per-dialog exact-line
+assertions); oh-my-pi has no snapshot gate but pins exact row strings, column
+indices and theme glyph tokens; Pi gates formatting/lint only. **None of the
+three has a TUI screenshot gate, and none gates a decoration budget or a
+"colour alone" rule.**
+
+That is why §11.3 restricts this repo's automated checks to the glyph width
+gate, a handful of frame invariants in the two existing `VirtualTerminal`
+suites, and the degradation-ladder matrix — and leaves the rest to the review
+checklist.
