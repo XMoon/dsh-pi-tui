@@ -20,7 +20,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
@@ -1007,22 +1007,40 @@ test('F1-05 the medium header arrows take the category focus, so Left/Right work
 
 // ── External UI review (PR #295) P2s ───────────────────────────────────────
 
-test('A-02c a long configured value never hides the settings NAME (40-cell column and 44-cell narrow)', async () => {
+test('A-02c the list summary survives a long value and stays exact for a short one', async () => {
   const long = `file:${'w'.repeat(120)}`
+  // The medium Settings column is the FIRST 40 cells of the row line; slicing on
+  // real terminal cells keeps the assertion inside the list pane (never the
+  // Detail column).
+  // `truncateToWidth` closes a truncation with a reset; strip it so the
+  // text assertions see the painted cells alone.
+  const rowsPane = (line: string): string => stripTerminalSequences(truncateToWidth(line, 40, '', false))
   const medium = setup({ columns: 120, rows: 40, doc: { theme: long } })
   await medium.open()
-  const themeRow = rowOf(medium, 'Configured theme')
-  assert.equal(cellIndexOf(medium, themeRow, 'Configured theme'), 2, 'the name starts right after the selection marker')
-  assert.ok(/\S\s{2,}\S/.test(medium.rowsPlain()[themeRow]!), 'the truncated summary still follows the name')
-  assert.ok(!medium.rowsPlain()[themeRow]!.trimStart().startsWith('…'), 'the name is never squeezed into an ellipsis')
+  const longRow = rowsPane(medium.rowsPlain()[rowOf(medium, 'Configured theme')]!)
+  assert.ok(longRow.includes('> Configured theme'), `the name stays identifiable: ${JSON.stringify(longRow)}`)
+  // The list SUMMARY is the friendly display name (the raw `file:` identity is
+  // the Detail/copy fact), so its prefix here is the file name itself.
+  assert.ok(longRow.includes('wwww'), `the real summary prefix is painted: ${JSON.stringify(longRow)}`)
+  assert.ok(longRow.trimEnd().endsWith('…'), `the truncated summary ends in the list-pane ellipsis: ${JSON.stringify(longRow)}`)
+  // Short-value control: the exact value is painted, with no ellipsis at all.
+  medium.doc.theme = 'dark'
+  await key(medium, 'r')
+  const shortRow = rowsPane(medium.rowsPlain()[rowOf(medium, 'Configured theme')]!)
+  assert.ok(shortRow.trimEnd().endsWith('dark'), `the exact short value is visible: ${JSON.stringify(shortRow)}`)
+  assert.ok(!shortRow.includes('…'), `a fitting value is never truncated: ${JSON.stringify(shortRow)}`)
   medium.dispose()
 
-  const narrow = setup({ columns: 44, rows: 24, doc: { theme: long } })
+  const narrow = setup({ columns: 44, rows: 24, doc: { iconStyle: 'symbols', theme: long } })
   await narrow.open()
   await key(narrow, '\r') // categories -> rows
-  const narrowRow = rowOf(narrow, 'Configured theme')
-  assert.equal(cellIndexOf(narrow, narrowRow, 'Configured theme'), 2, 'the 44-cell narrow row keeps the full name')
-  assert.ok(/\S\s{2,}\S/.test(narrow.rowsPlain()[narrowRow]!), 'a truncated summary follows')
+  const iconRow = narrow.rowsPlain()[rowOf(narrow, 'Icon style')]!
+  assert.ok(iconRow.trimEnd().endsWith('symbols'), `the exact short value is visible at 44 cells: ${JSON.stringify(iconRow)}`)
+  assert.ok(!iconRow.includes('…'), `a fitting value is never truncated: ${JSON.stringify(iconRow)}`)
+  const themeRow = narrow.rowsPlain()[rowOf(narrow, 'Configured theme')]!
+  assert.ok(themeRow.includes('Configured theme') && themeRow.includes('wwww'),
+    `the long value keeps its prefix: ${JSON.stringify(themeRow)}`)
+  assert.ok(themeRow.trimEnd().endsWith('…'), `the long value truncates to the pane edge: ${JSON.stringify(themeRow)}`)
   narrow.dispose()
 })
 
