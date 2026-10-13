@@ -2343,3 +2343,40 @@ test('B-26 a choice whose candidate source vanished is dropped instead of offeri
   assert.equal(h.replacements(), 0, 'nothing was written for the vanished candidate')
   h.dispose()
 })
+
+test('B-27 a rejected write whose field an external writer moved to a THIRD value is attributed as unknown, never as a refusal', async () => {
+  // The base this request started from is `dark` and it asks for `light`; before the
+  // forced authoritative re-read an external writer lands a THIRD value. Neither the
+  // requested value (so not an acceptance) nor the base value (so not a provable
+  // refusal) is in the authority: the request's outcome cannot be attributed to it, and
+  // a regression that treats every readable mismatch as `Not saved` must fail here.
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes: pluginThemes(),
+    applyReplace: () => {
+      h.doc.theme = 'auto'
+      throw new Error('settings namespace "tui-app" changed since it was read')
+    },
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  press(h, row, cellIndexOf(h, row, 'light'))
+  release(h, row, cellIndexOf(h, row, 'light'))
+  await settle(h)
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+
+  const frame = h.view().replace(/\s+/gu, ' ')
+  assert.equal(h.doc.theme, 'auto', 'the authority now carries a third value')
+  assert.match(frame, /Outcome unknown ·/, `the outcome is not attributed:\n${h.view()}`)
+  assert.match(frame, /no longer reads the value this request started from/, 'and the reason names the third-value fact')
+  assert.doesNotMatch(frame, /Not saved/, 'this is not a provable refusal')
+  assert.doesNotMatch(frame, /Commit accepted/, 'and not a claimed acceptance either')
+  assert.ok(h.view().includes('[Retry save]'), 'a retry stays available')
+  h.dispose()
+})
