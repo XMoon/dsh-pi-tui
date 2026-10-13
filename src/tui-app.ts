@@ -146,6 +146,8 @@ import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
 import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
 import {
   SettingsWorkspacePanel,
+  type SettingsWorkspaceCommitOutcome,
+  type SettingsWorkspaceCommitRequest,
   type SettingsWorkspaceSource,
 } from './tui/panels/settings-workspace-panel.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
@@ -1543,6 +1545,14 @@ interface JobWorkspaceRecord {
  */
 export interface SettingsWorkspaceOpenOptions {
   readonly onOpenLegacy: () => void
+  /**
+   * The ONE host-write channel of a writable row (Phase 3B / B2-B). The command
+   * owns the Host semantics (apply + persist + authoritative re-read) and
+   * resolves with the REAL outcome; the workspace runs it through its owned task
+   * entry and fences the settlement against THIS screen lease. Absent = the
+   * workspace is read-only and its edit verbs report that no writer exists.
+   */
+  readonly onCommit?: (request: SettingsWorkspaceCommitRequest) => Promise<SettingsWorkspaceCommitOutcome>
   /** Fired once when the workspace is torn down by ANY path. */
   readonly onClose?: () => void
 }
@@ -20529,6 +20539,30 @@ export class TuiApp {
           },
         })
       },
+      // The ONE owned write channel of a writable row (B2-B). The command owns
+      // the Host semantics; this surface only runs it through its owned task
+      // entry and re-proves THIS workspace record before the settlement may
+      // repaint: a write that lands after the user left Settings can never
+      // address a replacement surface (the panel drops it a second time through
+      // its own request identity).
+      onCommit: (request, settle) => {
+        const commit = options.onCommit
+        const runner = this.events.runOwned
+        if (commit === undefined || runner === undefined) {
+          settle({ outcome: 'not-saved', reason: 'the settings writer is unavailable' })
+          return
+        }
+        runner('settings field write', () => commit(request), {
+          onResult: (outcome) => {
+            if (this.disposed || this.settingsWorkspace !== record) return
+            settle(outcome)
+          },
+          onError: (error) => {
+            if (this.disposed || this.settingsWorkspace !== record) return
+            settle({ outcome: 'not-saved', reason: safeErrorMessage(error) })
+          },
+        })
+      },
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       deferViewportListener: true,
@@ -20860,6 +20894,14 @@ export class TuiApp {
     // matters (F-14 — a theme switch must re-bake extension ANSI).
     this.extensionHost?.updateSurface({ themeId: theme, themeRevision: this.themeRevision })
     this.repaintAllSurfaces()
+  }
+
+  /** The theme identity the surface is currently painted with (`dark`, `light`
+   *  or `custom`). This is the RUNTIME palette fact — the persisted configured
+   *  theme is the settings document's, and the two are deliberately kept apart
+   *  by the Settings workspace's Detail. */
+  currentTheme(): string {
+    return this.currentThemeId
   }
 
   /** Apply a resolved custom palette and repaint everything. */

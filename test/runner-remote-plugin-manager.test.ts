@@ -419,7 +419,7 @@ test('L6-B: the Settings → Plugins entry hosts the SAME Remote controller/pane
   const fixture = await mountPluginManagerRunner(life)
 
   submit(fixture, '/settings')
-  await waitFor('the Settings workspace opens', () => /Read-only/.test(plain(fixture.vt.getViewport())), 20_000)
+  await waitFor('the Settings workspace opens', () => /SETTINGS · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
   await navigateToLegacySettings(fixture.vt)
   await waitFor('the Settings surface opens', () => /Type to search/.test(plain(fixture.vt.getViewport())), 20_000)
   for (const character of 'plugins') fixture.vt.sendInput(character)

@@ -70,6 +70,16 @@ interface HarnessOptions {
   themes?: ThemeRegistry
   /** The live clipboard strategy; a promise lets a case hold the settlement. */
   copySelection?: (text: string) => Promise<boolean>
+  /**
+   * The real persistence behavior of the document. The default is the Direct
+   * Host round-trip (the effective document really becomes the replacement);
+   * a case can throw the real conflict/failure or silently ignore the write to
+   * model an authority that did not accept it.
+   */
+  applyReplace?: (next: TuiSettingsDoc) => void
+  /** Hold every owned task until `releaseOwned()` runs it: a settlement really
+   *  held across a teardown, like the clipboard's held strategy. */
+  holdOwned?: boolean
 }
 
 interface Harness {
@@ -86,8 +96,14 @@ interface Harness {
   readonly reads: () => number
   /** How many settings WRITES were attempted (browsing never writes). */
   readonly replacements: () => number
+  /** Every document a write really dispatched, in order. */
+  readonly replaced: () => readonly TuiSettingsDoc[]
+  /** Every runner capability the commands called, in order. */
+  readonly calls: () => readonly string[]
   /** Every byte the app wrote to the terminal (the raw write sink). */
   readonly writes: () => readonly string[]
+  /** Run every owned task the harness is holding (`holdOwned`). */
+  readonly releaseOwned: () => void
   readonly dispose: () => void
 }
 
@@ -97,18 +113,25 @@ function setup(options: HarnessOptions = {}): Harness {
   const vt = new VirtualTerminal(columns, rows)
   const copied: string[] = []
   const writes: string[] = []
+  const replaced: TuiSettingsDoc[] = []
+  const calls: string[] = []
+  const held: Array<() => void> = []
   let reads = 0
   let replacements = 0
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
   const owned: OwnedRunner = (_label, task, runOptions) => {
-    void Promise.resolve()
-      .then(() => task())
-      .then(
-        result => runOptions.onResult?.(result),
-        error => runOptions.onError?.(error),
-      )
+    const run = (): void => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    }
+    if (options.holdOwned === true) held.push(run)
+    else run()
   }
   const events: TuiAppEvents = { onSubmit: () => {}, onExit: () => {}, runOwned: owned }
   const originalWrite = vt.write.bind(vt)
@@ -150,6 +173,14 @@ function setup(options: HarnessOptions = {}): Harness {
     listScopedCommands: () => [],
     displayPreset: () => options.displayPreset ?? 'full',
     focusEnabled: () => options.displayPreset === 'focus',
+    // The production `/display` owner would dispatch its OWN detached write;
+    // recording the call proves the B2-B writer never routes through it (a
+    // double write would be invisible in the replacement count alone).
+    setDisplayPreset: (preset: string) => {
+      calls.push(`setDisplayPreset:${preset}`)
+      return { kind: 'unchanged', preset }
+    },
+    refreshStatus: () => { calls.push('refreshStatus') },
     tuiSettings: options.settingsService === false
       ? undefined
       : {
@@ -158,13 +189,19 @@ function setup(options: HarnessOptions = {}): Harness {
             if (options.throwOnGet === true) throw new Error('settings read exploded')
             return doc
           },
-          replace: () => { replacements += 1 },
+          replace: (next: TuiSettingsDoc) => {
+            replacements += 1
+            replaced.push(next)
+            if (options.applyReplace === undefined) Object.assign(doc, next)
+            else options.applyReplace(next)
+          },
         },
     extensions: options.themes === undefined ? undefined : { themes: options.themes },
     openPluginManager: () => {},
     createPluginManagerSubmenu: () => ({ render: () => [], dispose: () => {} }),
     config: {
       configReadiness: () => options.readiness ?? 'ready',
+      footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: [] }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
     },
@@ -189,7 +226,26 @@ function setup(options: HarnessOptions = {}): Harness {
     startedApps.delete(app)
     if (!app.isDisposed()) app.dispose()
   }
-  return { vt, app, copied, doc, invoke, open, rowsPlain, view, reads: () => reads, replacements: () => replacements, writes: () => writes, dispose }
+  return {
+    vt,
+    app,
+    copied,
+    doc,
+    invoke,
+    open,
+    rowsPlain,
+    view,
+    reads: () => reads,
+    replacements: () => replacements,
+    replaced: () => replaced,
+    calls: () => calls,
+    writes: () => writes,
+    releaseOwned: () => {
+      const list = held.splice(0)
+      for (const run of list) run()
+    },
+    dispose,
+  }
 }
 
 const rowOf = (h: Harness, needle: string): number => {
@@ -587,7 +643,7 @@ test('A-11 Other settings opens the existing complete editor after retiring the 
   await key(h, '\r') // Enter on the explicit open-legacy row hands off
   const legacy = h.view()
   assert.match(legacy, /Type to search/, `the legacy SettingsList is the physical owner:\n${legacy}`)
-  assert.ok(!legacy.includes('Read-only preview'), 'the workspace is gone, not stacked underneath')
+  assert.ok(!legacy.includes('SETTINGS ·'), 'the workspace is gone, not stacked underneath')
   await key(h, '\x1b')
   assert.ok(h.view().includes('❯'), 'closing the legacy editor returns to the conversation')
   h.dispose()
@@ -1416,6 +1472,351 @@ test('UX-12 the projection table is frozen: below 76 columns one pane, 76..107 t
     assert.equal(painted.some(line => line.includes('CATEGORIES (3)')), panes === 3, `the categories pane at ${columns} columns:\n${h.view()}`)
     assert.equal(painted.some(line => line.includes('DETAILS')), panes >= 2, `the detail pane at ${columns} columns:\n${h.view()}`)
     assertRowWidths(h, columns)
+    h.dispose()
+  }
+})
+
+// ── B2-B: the Theme / Display write channel ────────────────────────────────
+//
+// Every case drives the REAL composition end to end: the registered `/settings`
+// command builds the read projection and owns the commit semantics, the real
+// `TuiApp` screen lease routes the keys and clicks, and the terminal's painted
+// cells are what the assertions read. The settings document and the theme
+// registry are the external seams; the write really travels the command's
+// serialized whole-document path and its authoritative re-read.
+
+/** Enter the L2 detail of one row: `/settings` always opens on L0. */
+async function openDetail(h: Harness, row: 'theme' | 'display-preset'): Promise<void> {
+  await h.open()
+  if (row === 'display-preset') await key(h, '\x1b[B') // Appearance -> Display
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\r') // L1 -> L2
+}
+
+test('B-01 the Theme Detail separates the runtime palette from the persisted preference and starts read-only', async () => {
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
+  await openDetail(h, 'theme')
+  assert.match(h.view(), /SETTINGS · Appearance \/ Configured theme/)
+  assert.match(h.view(), /plugin:acme\/solarized/, 'the persisted source-qualified identity is stated')
+  assert.match(h.view(), /Runtime\s+\S/, 'the live runtime palette has its own named fact')
+  assert.match(h.view(), /Solarized/)
+  assert.match(h.view(), /\[Change…\]/, 'the writable row paints its explicit edit verb')
+  assert.equal(h.replacements(), 0, 'merely reading the Detail writes nothing')
+  h.dispose()
+})
+
+test('B-02 Enter opens the L2 choice; moving the candidate writes nothing; only the explicit Confirm commits and verifies', async () => {
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes() })
+  await openDetail(h, 'theme')
+  await key(h, '\r') // L2 browse -> choice
+  assert.match(h.view(), /Choose Configured theme/)
+  const current = h.view().split('\n').find(line => line.includes('← current')) ?? h.view()
+  assert.match(current, /> dark\s+\[← current\]/, 'the candidate list marks the persisted value, never a display label')
+  assert.equal(h.replacements(), 0, 'opening the choice writes nothing')
+
+  // A candidate click only moves the highlight.
+  const lightRow = rowOf(h, 'light')
+  const lightCol = cellIndexOf(h, lightRow, 'light')
+  press(h, lightRow, lightCol)
+  release(h, lightRow, lightCol)
+  await settle(h)
+  assert.equal(h.replacements(), 0, 'choosing a candidate is a preview, never a write')
+  assert.match(h.view(), /\[Confirm\]/, 'the choice publishes its explicit confirm')
+  assert.ok(h.view().includes('> light'), 'the clicked candidate owns the highlight')
+  assert.equal(h.doc.theme, 'dark', 'the document is untouched while choosing')
+
+  // Esc cancels with zero writes (W-08).
+  await key(h, '\x1b')
+  assert.match(h.view(), /SETTINGS · Appearance \/ Configured theme/, 'Esc returns to the L2 browse detail')
+  assert.ok(!h.view().includes('Choose Configured theme'))
+  assert.equal(h.replacements(), 0, 'a cancelled choice writes nothing')
+
+  // Reopen and confirm: exactly ONE document write, verified by the re-read.
+  await key(h, '\r')
+  await key(h, '\x1b[B') // dark -> light (the builtins are always the first three candidates)
+  const confirmRow = rowOf(h, '[Confirm]')
+  const confirmCol = cellIndexOf(h, confirmRow, '[Confirm]')
+  press(h, confirmRow, confirmCol)
+  release(h, confirmRow, confirmCol)
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'exactly one document write per confirmed commit')
+  assert.equal(h.doc.theme, 'light')
+  assert.equal(h.app.currentTheme(), 'light', 'the runtime palette really changed')
+  assert.match(h.view(), /Verified · the authoritative read agrees/)
+  assert.ok(!h.view().includes('[Confirm]'), 'the choice is retired after the settlement')
+  h.dispose()
+})
+
+test('B-03 a confirmed Theme commit whose write is refused reports the real failure and never claims Verified', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes: pluginThemes(),
+    applyReplace: () => { throw new Error('settings namespace "tui-app" changed since it was read') },
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  const col = cellIndexOf(h, row, 'light')
+  press(h, row, col)
+  release(h, row, col)
+  await settle(h)
+  const confirmRow = rowOf(h, '[Confirm]')
+  const confirmCol = cellIndexOf(h, confirmRow, '[Confirm]')
+  press(h, confirmRow, confirmCol)
+  release(h, confirmRow, confirmCol)
+  await settle(h)
+
+  assert.equal(h.replacements(), 1)
+  assert.equal(h.doc.theme, 'dark', 'the stored preference really did not change')
+  assert.match(h.view(), /Not saved · settings namespace "tui-app" changed since it was read/, 'the real reason is on screen')
+  assert.ok(!h.view().includes('Verified'), 'a refused write is never verified')
+  // The apply-first runtime fact is reported as such — never rolled back silently.
+  assert.match(h.view(), /Runtime\s+light/)
+  assert.match(h.view(), /\[Retry save\]/, 'the failed row offers the explicit retry')
+  h.dispose()
+})
+
+test('B-04 Retry save re-dispatches the failed value once the write can succeed', async () => {
+  let refuse = true
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes: pluginThemes(),
+    applyReplace: (next) => {
+      if (refuse) throw new Error('temporarily unavailable')
+      Object.assign(h.doc, next)
+    },
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  const col = cellIndexOf(h, row, 'light')
+  press(h, row, col)
+  release(h, row, col)
+  await settle(h)
+  const confirmRow = rowOf(h, '[Confirm]')
+  press(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  release(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  await settle(h)
+  assert.match(h.view(), /Not saved · temporarily unavailable/)
+
+  refuse = false
+  const retryRow = rowOf(h, '[Retry save]')
+  press(h, retryRow, cellIndexOf(h, retryRow, '[Retry save]'))
+  release(h, retryRow, cellIndexOf(h, retryRow, '[Retry save]'))
+  await settle(h)
+  assert.equal(h.doc.theme, 'light')
+  assert.match(h.view(), /Verified · the authoritative read agrees/)
+  assert.ok(!h.view().includes('[Retry save]'), 'a verified row offers no retry')
+  h.dispose()
+})
+
+test('B-05 the Display preset applies through the shared runtime owner, persists exactly once and verifies', async () => {
+  const h = setup({ columns: 140, rows: 40, doc: { displayPreset: 'compact', theme: 'dark' }, displayPreset: 'full' })
+  await openDetail(h, 'display-preset')
+  assert.match(h.view(), /Value\s+full/, 'the row value IS the live runtime preset')
+  assert.match(h.view(), /Persisted\s+compact/, 'and the stored preference is named separately')
+  await key(h, '\r')
+  assert.match(h.view(), /Choose Transcript display/)
+  const row = rowOf(h, 'focus')
+  const col = cellIndexOf(h, row, 'focus')
+  press(h, row, col)
+  release(h, row, col)
+  await settle(h)
+  assert.equal(h.replacements(), 0)
+  const confirmRow = rowOf(h, '[Confirm]')
+  press(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  release(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  await settle(h)
+
+  assert.equal(h.app.displayPreset(), 'focus', 'the runtime preset changed')
+  assert.equal(h.doc.displayPreset, 'focus', 'the persisted preference changed')
+  assert.equal(h.replacements(), 1, 'the B2-B writer stores the preset exactly once')
+  assert.deepEqual(h.calls().filter(call => call.startsWith('setDisplayPreset')), [], 'the runner setter (a SECOND detached write) is never used')
+  assert.ok(h.calls().includes('refreshStatus'), 'the footer status is refreshed for the live transition')
+  assert.match(h.view(), /Verified · the authoritative read agrees/)
+  h.dispose()
+})
+
+test('B-06 a stale backend never writes and says why; the Display runtime fact still applies locally', async () => {
+  const theme = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, readiness: 'stale', themes: pluginThemes() })
+  await openDetail(theme, 'theme')
+  await key(theme, '\r')
+  const themeRow = rowOf(theme, 'light')
+  press(theme, themeRow, cellIndexOf(theme, themeRow, 'light'))
+  release(theme, themeRow, cellIndexOf(theme, themeRow, 'light'))
+  await settle(theme)
+  const themeConfirm = rowOf(theme, '[Confirm]')
+  press(theme, themeConfirm, cellIndexOf(theme, themeConfirm, '[Confirm]'))
+  release(theme, themeConfirm, cellIndexOf(theme, themeConfirm, '[Confirm]'))
+  await settle(theme)
+  assert.equal(theme.replacements(), 0, 'a non-ready backend never dispatches a Host write')
+  assert.match(theme.view(), /Not saved · the configuration is stale; the theme was not changed/)
+  assert.ok(!theme.view().includes('Verified'))
+  theme.dispose()
+
+  const display = setup({ columns: 200, rows: 40, doc: { displayPreset: 'compact' }, displayPreset: 'full', readiness: 'stale' })
+  await openDetail(display, 'display-preset')
+  await key(display, '\r')
+  const displayRow = rowOf(display, 'focus')
+  press(display, displayRow, cellIndexOf(display, displayRow, 'focus'))
+  release(display, displayRow, cellIndexOf(display, displayRow, 'focus'))
+  await settle(display)
+  const displayConfirm = rowOf(display, '[Confirm]')
+  press(display, displayConfirm, cellIndexOf(display, displayConfirm, '[Confirm]'))
+  release(display, displayConfirm, cellIndexOf(display, displayConfirm, '[Confirm]'))
+  await settle(display)
+  assert.equal(display.app.displayPreset(), 'focus', 'the Client-local runtime fact still applies')
+  assert.equal(display.replacements(), 0, 'and the stale preference is not written')
+  assert.match(display.view(), /Not saved · the display preset is applied locally, but the configuration is stale/)
+  display.dispose()
+})
+
+test('B-07 a stored theme whose source is gone is listed as unavailable and can never be confirmed', async () => {
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:gone/removed' } })
+  await openDetail(h, 'theme')
+  assert.match(h.view(), /plugin:gone\/removed/, 'the broken persisted identity is still readable')
+  await key(h, '\r')
+  assert.match(h.view(), /unavailable/, 'the gone source is marked unavailable')
+  const row = rowOf(h, '[Confirm]')
+  press(h, row, cellIndexOf(h, row, '[Confirm]'))
+  release(h, row, cellIndexOf(h, row, '[Confirm]'))
+  await settle(h)
+  assert.equal(h.replacements(), 0, 'an unavailable source is never written')
+  assert.match(h.view(), /Not saved · the selected source is no longer available/)
+  h.dispose()
+})
+
+test('B-08 the read-only rows keep their copy verb and gain no edit channel', async () => {
+  const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark', iconStyle: 'minimal' } })
+  await openDetail(h, 'theme')
+  await key(h, '\x1b') // back to L1
+  await key(h, '\x1b[B') // Configured theme -> Icon style
+  await key(h, '\r')
+  assert.match(h.view(), /Icon style/)
+  assert.match(h.view(), /\[Copy value\]/)
+  assert.ok(!h.view().includes('[Change…]'), 'a read-only row paints no edit verb')
+  assert.match(h.view(), /read-only here/)
+  const before = h.replacements()
+  await key(h, '\r')
+  assert.ok(!h.view().includes('Choose Icon style'), 'Enter on a read-only row opens no choice')
+  assert.equal(h.replacements(), before, 'and writes nothing')
+  await key(h, 'c')
+  await settle(h)
+  assert.deepEqual(h.copied, ['minimal'], 'the copy verb still carries the exact source value')
+  assert.equal(h.replacements(), before)
+  h.dispose()
+})
+
+test('B-09 a settlement held across the teardown never reaches a closed or replacement workspace', async () => {
+  const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes(), holdOwned: true })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  press(h, row, cellIndexOf(h, row, 'light'))
+  release(h, row, cellIndexOf(h, row, 'light'))
+  await settle(h)
+  const confirmRow = rowOf(h, '[Confirm]')
+  press(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  release(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  await settle(h)
+  assert.match(h.view(), /Saving…/, 'the pending phase is stated while the write is in flight')
+  assert.equal(h.replacements(), 0, 'the held write has not run yet')
+
+  // Leave the workspace while the write is in flight, THEN let it settle.
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  await key(h, '\x1b')
+  assert.ok(!h.view().includes('SETTINGS ·'), 'Esc at L0 closed the workspace')
+  h.releaseOwned()
+  await settle(h)
+  // The already-dispatched write still completes under its owner (a closed
+  // workspace must not cancel a real Host commit), but its settlement is dropped:
+  // a NEWLY opened workspace never inherits the previous instance's outcome.
+  assert.equal(h.doc.theme, 'light', 'the dispatched write really landed')
+  assert.ok(!h.app.isDisposed())
+  await h.open()
+  assert.match(h.view(), /SETTINGS · Categories/)
+  assert.ok(!h.view().includes('Verified'), 'a new instance never inherits the previous settlement')
+  assert.ok(!h.view().includes('Not saved'))
+  h.dispose()
+})
+
+test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and only the painted confirm writes', async () => {
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r')
+  await key(h, '\r')
+  for (const [index, line] of h.vt.getViewport().entries()) {
+    assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
+  }
+  await key(h, '\r') // into the choice on the narrowest projection
+  assert.match(h.view(), /Choose Configured theme/)
+  assert.match(h.view(), /\[Confirm\]/)
+  // A press against the 44-column geometry, a resize before the release: the
+  // gesture is refused (the resize is a boundary of its own).
+  const confirmRow = rowOf(h, '[Confirm]')
+  const confirmCol = cellIndexOf(h, confirmRow, '[Confirm]')
+  press(h, confirmRow, confirmCol)
+  h.vt.resize(100, 24)
+  await h.vt.waitForRender()
+  release(h, confirmRow, confirmCol)
+  await settle(h)
+  assert.equal(h.replacements(), 0, 'a straddling press never confirms')
+  assert.match(h.view(), /Choose Configured theme/, 'the choice survives the resize with its candidate')
+  h.dispose()
+})
+
+test('B-11 a write the authority did not really accept is Commit accepted · verification unavailable, never Verified', async () => {
+  // The document call RESOLVES (the Host accepted the request) but the stored
+  // value never becomes the requested one — the one shape where "the write
+  // returned" must not be reported as saved.
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes: pluginThemes(),
+    applyReplace: () => {},
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  press(h, row, cellIndexOf(h, row, 'light'))
+  release(h, row, cellIndexOf(h, row, 'light'))
+  await settle(h)
+  const confirmRow = rowOf(h, '[Confirm]')
+  press(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  release(h, confirmRow, cellIndexOf(h, confirmRow, '[Confirm]'))
+  await settle(h)
+
+  assert.equal(h.replacements(), 1)
+  assert.equal(h.doc.theme, 'dark', 'the document really still holds the old value')
+  assert.match(h.view(), /Commit accepted · verification unavailable · the authoritative document reads dark/)
+  assert.ok(!h.view().includes('Verified'), 'an unconfirmed value is never Verified')
+  assert.match(h.view(), /\[Retry save\]/, 'and the row offers the explicit retry')
+  h.dispose()
+})
+
+test('B-12 the writable rows reach the choice and confirm at every responsive breakpoint', async () => {
+  for (const [columns, rows] of [[200, 40], [120, 40], [109, 40], [108, 40], [107, 40], [76, 40], [75, 24], [60, 24]] as const) {
+    const h = setup({ columns, rows, doc: { theme: 'dark' } })
+    await openDetail(h, 'theme')
+    assert.match(h.view(), /\[Change…\]/, `the writable row offers Change at ${columns}x${rows}:\n${h.view()}`)
+    await key(h, '\r')
+    assert.match(h.view(), /Choose Configured theme/, `the choice names its field at ${columns}x${rows}:\n${h.view()}`)
+    assert.match(h.view(), /\[Confirm\]/, `the explicit confirm is painted at ${columns}x${rows}:\n${h.view()}`)
+    assertRowWidths(h, columns)
+    // The keyboard path confirms the same way the painted button does.
+    await key(h, '\x1b[B') // dark -> light
+    await key(h, '\r')
+    await settle(h)
+    assert.equal(h.replacements(), 1, `exactly one write at ${columns}x${rows}`)
+    assert.equal(h.doc.theme, 'light', `the confirmed value really landed at ${columns}x${rows}`)
+    // The status wraps at narrow widths: assert the field state, not one line.
+    assert.match(h.view(), /Status\s+Verified/)
     h.dispose()
   }
 })

@@ -346,17 +346,34 @@ levels: wide terminals show all three columns, medium ones show
 show only the current level. At every width `Enter` descends, `Esc` (`Backspace`
 too) steps back one level, and only `Esc` at the outermost level closes the
 workspace; `Tab` and `←`/`→` are not navigation keys. The Action Bar stays pinned
-to the last physical row. It presents the real Appearance / Display facts read-only: the
+to the last physical row. It presents the real Appearance / Display facts: the
 theme's source-qualified raw value plus its friendly name, Icon style, the live
-Transcript display preset alongside the persisted preference last read, the live
-Thinking detail state, and each row's configuration Scope and backend readiness.
-`R` re-reads, `C` copies the selected row's exact source value, and the copy
-notice is painted inside the workspace itself. Browsing never writes any
-configuration (real writes remain B2-B). The existing complete settings editor is
-still available: `Other settings` → `Open existing settings…` retires the
-workspace and restores the surface it paused before opening the original editor,
-so Theme, the Plugin Manager, keybindings, permissions and extension settings
-keep every existing write path.
+Transcript display preset alongside the persisted preference, the live Thinking
+detail state, and each row's configuration Scope and backend readiness. `R`
+re-reads, `C` copies the selected row's exact source value, and browsing or
+picking writes no configuration.
+
+The **`Configured theme` and `Transcript display` rows are directly editable**:
+in the L2 detail, `Enter` (or `[Change…]`) opens a candidate list, `↑`/`↓`/`Pg`/
+`Home`/`End` move the candidate, `Enter` or `[Confirm]` confirms it explicitly,
+and `Esc`/`[Cancel]` cancels without writing anything. Only buttons and
+candidates that are really painted can be clicked, and narrow or short terminals
+can still scroll, select and confirm. A confirmed change is stored through the
+existing serialized whole-document write path and then re-read from the
+authority: the detail names the live runtime fact (`Runtime`, e.g. the current
+palette) and the stored preference (`Persisted`) separately and states
+`Saving…`, `Verified`, `Not saved · <reason>` or `Commit accepted ·
+verification unavailable` — only a completed write whose authoritative re-read
+agrees is called Verified. On a non-ready backend the theme is neither applied
+nor written; a display preset may already be live locally and then says that it
+was not stored instead of pretending it was. A plugin theme is resolved again by
+its source-qualified identity at confirm time, so an unloaded plugin theme is
+listed as unavailable and refused rather than degrading into a same-named file
+theme. Icon style and Thinking detail stay read-only rows. The existing complete
+settings editor is still available: `Other settings` → `Open existing
+settings…` retires the workspace and restores the surface it paused before
+opening the original editor, so Theme, the Plugin Manager, keybindings,
+permissions and extension settings keep every existing write path.
 
 The `Icon style` option in `/settings` switches the TUI's structural icons:
 `Emoji` (default, colorful), `Symbols` (compact single-cell terminal

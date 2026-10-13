@@ -304,13 +304,24 @@ TUI 使用 DSH 提供的模型和设置服务。
 `分类 + 设置行` 或 `设置行 + 详情`，窄屏只显示当前层。所有宽度上 `Enter` 进入下一级、
 `Esc`（`Backspace` 同义）逐级返回，只有最外层 `Esc` 才关闭工作区；`Tab` 与 `←`/`→`
 不承担导航，底部操作栏始终固定在最后一行。
-它只读地展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好
-名称、Icon style、Transcript display 的运行时当前值与上次读到的持久偏好、Thinking
-detail 的当前运行态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、
-`C` 复制所选行的原始值，成功/失败提示显示在工作区自己的提示行上。浏览不会写入任何
-配置（真正写入留给 B2-B）。旧的完整设置编辑器仍然可用：`Other settings` →
-`Open existing settings…` 会先关闭工作区并恢复原界面，再打开原有编辑器，
-Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
+它展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好名称、
+Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
+态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
+原始值，浏览与选择本身不写入配置。
+
+其中**「Configured theme」和「Transcript display」两行可以直接修改**：在 L2 详情按
+`Enter`（或点击 `[Change…]`）进入候选列表，`↑↓`/`Pg`/`Home`/`End` 移动候选，`Enter`
+或点击 `[Confirm]` 明确确认，`Esc`/`[Cancel]` 取消且不写任何配置；只有实际绘制出来的
+按钮与候选行可以点击，窄屏与短屏仍可滚动、选中并确认。确认后走既有的串行整文档写入
+路径落盘，再从权威来源重读目标字段核对：详情里分别显示运行态（`Runtime`，如当前
+palette）与持久偏好（`Persisted`），并显示 `Saving…` / `Verified` / `Not saved · 原因`
+/ `Commit accepted · verification unavailable`，只有写入完成、backend `ready` 且权威
+回读一致才显示 Verified。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本
+机生效，此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按
+source-qualified 身份解析，已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成
+同名文件主题。Icon style 与 Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：
+`Other settings` → `Open existing settings…` 会先关闭工作区并恢复原界面，再打开原有编
+辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
 
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只

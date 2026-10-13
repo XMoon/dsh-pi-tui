@@ -16,7 +16,7 @@ import { SettingsList } from '@xmoon76/pi-tui'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { TuiApp } from '../../tui-app.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from '../keybindings/home-end-mode.ts'
-import { isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from '../../domain/display/preset.ts'
+import { isDisplayPreset, isDisplayPresetAvailable, type DisplayPreset, type DisplayPresetApplyResult } from '../../domain/display/preset.ts'
 import { parseProgressUpdates, parseResponseStyle } from '../../domain/communication/policy.ts'
 import { parseGitAttributionMode } from '../../domain/communication/git-attribution.ts'
 import { parseNotificationMethod, parseNotificationMode } from '../../domain/notification/settings.ts'
@@ -45,12 +45,17 @@ import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { color } from '../theme/runtime.ts'
 import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from '../pickers/theme-menu.ts'
 import { SubagentModelAllowlistPicker, allowlistSummary } from '../pickers/subagent-model-menu.ts'
-import { resolveThemeSelection } from '../../app/surface/theme-selection.ts'
+import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc } from '../../runtime/config-port.ts'
 import type {
+  SettingsWorkspaceCommitOutcome,
+  SettingsWorkspaceCommitRequest,
+  SettingsWorkspaceEdit,
+  SettingsWorkspaceEditOption,
   SettingsWorkspaceFreshness,
   SettingsWorkspaceSnapshot,
+  SettingsWorkspaceWritableField,
 } from '../panels/settings-workspace-panel.ts'
 import { displaySessionId } from './sessions.ts'
 import type {
@@ -244,13 +249,228 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /**
-   * Phase 3B / B2-A: the readonly read projection of the Settings workspace.
-   * Every call re-reads the LIVE authorities — the ConfigPort readiness and TUI
-   * settings document, the runtime display preset and the Client presentation
-   * preference — and assembles the five fixed pilot rows. It captures NO shadow
-   * store: a missing document is `unavailable` (never a persisted default), a
-   * stale backend keeps the document as `last-known`, and a throwing `get()` is
-   * the row's explicit `read-error`.
+   * Phase 3B / B2-B: the LIVE runtime palette fact of the theme row — the
+   * palette the surface is really painted with, never the persisted document
+   * value. A plugin selection reports its source-qualified display name (a gone
+   * source falls back to the raw value: the row must not lie about the stored
+   * identity).
+   */
+  const runtimeThemeFact = (): string => {
+    const plugin = app.activePluginTheme()
+    if (plugin !== undefined) return themeDisplayNameOf(plugin, runner.extensions?.themes)
+    const theme = app.currentTheme()
+    return theme === 'custom' ? 'custom palette' : theme
+  }
+
+  /**
+   * The candidate source of ONE writable pilot row. `persisted` is the exact
+   * value the authoritative document just returned; a stored value whose source
+   * is gone is still listed (the row must not lose the real stored identity) but
+   * marked unavailable, so it can never be confirmed back into a write.
+   */
+  const themeEditOf = (persistedTheme: string | undefined): SettingsWorkspaceEdit => {
+    const options: SettingsWorkspaceEditOption[] = themePickerRows(runner.extensions?.themes).map(row => ({
+      value: row.value,
+      label: row.displayName,
+      available: true,
+      current: row.value === persistedTheme,
+    }))
+    if (persistedTheme !== undefined && !options.some(option => option.value === persistedTheme)) {
+      options.push({
+        value: persistedTheme,
+        label: themeDisplayNameOf(persistedTheme, runner.extensions?.themes),
+        available: false,
+        current: true,
+      })
+    }
+    return {
+      field: 'theme',
+      primary: 'persisted',
+      options,
+      runtime: runtimeThemeFact(),
+      ...persistedTheme === undefined ? {} : { persisted: persistedTheme },
+    }
+  }
+
+  const displayEditOf = (persistedPreset: string | undefined): SettingsWorkspaceEdit => ({
+    field: 'display-preset',
+    primary: 'runtime',
+    options: (['full', 'compact', 'focus'] as const).map(preset => ({
+      value: preset,
+      label: preset,
+      available: isDisplayPresetAvailable(preset),
+      current: preset === persistedPreset,
+    })),
+    runtime: displayPresetOf(runner),
+    ...persistedPreset === undefined ? {} : { persisted: persistedPreset },
+  })
+
+  /**
+   * Phase 3B / B2-B: the authoritative re-read of ONE committed field. `expected`
+   * is the value the authority must return for the commit to count as verified; a
+   * non-`ready` backend, an unreadable document or a different value is EXPLICIT
+   * (never silently reported as saved). A theme value is compared after the
+   * canonical normalization (a legacy `custom:X` document still means `file:X`);
+   * a display preset is compared exactly.
+   */
+  const verifyCommittedField = (
+    field: SettingsWorkspaceWritableField,
+    expected: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const settings = runner.tuiSettings
+    if (settings === undefined) {
+      return { outcome: 'unverified', reason: 'no authoritative TUI settings document is readable' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the persisted value could not be re-read` }
+    }
+    let doc: TuiSettingsDoc
+    try {
+      doc = settings.get()
+    } catch (error) {
+      return { outcome: 'unverified', reason: `the persisted value could not be re-read: ${safeErrorMessage(error)}` }
+    }
+    const actual = field === 'theme' ? normalizePersistedTheme(doc.theme) : doc.displayPreset
+    if (actual !== expected) {
+      return {
+        outcome: 'unverified',
+        reason: `the authoritative document reads ${actual === undefined || actual === '' ? 'no value' : actual}`,
+      }
+    }
+    return { outcome: 'verified' }
+  }
+
+  /**
+   * Phase 3B / B2-B: commit ONE writable Settings-workspace field. The runtime
+   * fact applies through its EXISTING owner first (the established
+   * apply-first policy), then the persistence commits through the SAME
+   * whole-document serialization + USER-custom-item preservation guard every
+   * other settings writer uses, and finally the value is re-read from the
+   * authority: only a completed write whose re-read agrees is `verified`.
+   *
+   * The Display preset deliberately does NOT go through the runner's
+   * `setDisplayPreset` (which would dispatch a SECOND detached best-effort
+   * write): it applies the runtime fact through the same `TuiApp` DisplayState
+   * owner the `/display`/`/focus` commands use and persists exactly once here.
+   */
+  const commitSettingsWorkspaceField = async (
+    request: SettingsWorkspaceCommitRequest,
+  ): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (request.field === 'display-preset') return commitDisplayPreset(request.value)
+    return commitTheme(request.value)
+  }
+
+  const commitDisplayPreset = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    if (!isDisplayPreset(value) || !isDisplayPresetAvailable(value)) {
+      return { outcome: 'not-saved', reason: `the display preset "${value}" is not available in this build` }
+    }
+    const settings = runner.tuiSettings
+    // Runtime apply through the ONE shared DisplayState owner. `unchanged` still
+    // continues to persistence: the runtime being on the preset says nothing
+    // about the stored preference.
+    const applied = app.setDisplayPreset(value)
+    if (applied.kind === 'unsupported') {
+      return { outcome: 'not-saved', reason: `the display preset "${value}" is not available in this build` }
+    }
+    if (applied.kind === 'applied') runner.refreshStatus()
+    if (settings === undefined) {
+      // The runtime fact really changed (Client-local); the persisted preference
+      // has no authority to write to. Both halves are stated, neither is faked.
+      return { outcome: 'not-saved', reason: 'the display preset is applied locally, but no TUI settings document is available to store it' }
+    }
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the display preset is applied locally, but the configuration is ${readiness} so it could not be stored` }
+    }
+    try {
+      await serializeTuiSettingsMutation(settings, async () => {
+        await settings.replace(withUserFooterCustomItems({ ...settings.get(), displayPreset: value }, runner.config))
+      })
+    } catch (error) {
+      return { outcome: 'not-saved', reason: `the display preset is applied locally, but storing it failed: ${safeErrorMessage(error)}` }
+    }
+    return verifyCommittedField('display-preset', value)
+  }
+
+  const commitTheme = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
+    const settings = runner.tuiSettings
+    if (settings === undefined) {
+      return { outcome: 'not-saved', reason: 'no authoritative TUI settings document is available in this deployment' }
+    }
+    // §9.1 pre-flight: a theme is a HOST-persisted preference — with a backend
+    // that cannot vouch for its values neither the apply nor the write may be
+    // presented as a real save.
+    const readiness = runner.config.configReadiness()
+    if (readiness !== 'ready') {
+      return { outcome: 'not-saved', reason: `the configuration is ${readiness}; the theme was not changed` }
+    }
+    const builtin = value === 'auto' || value === 'dark' || value === 'light'
+    // VALUE-addressed health tracking (the unified theme protocol).
+    const themeRef = builtin ? undefined : captureExtensionHealthRef?.('theme', value)
+    if (value !== 'auto') {
+      try {
+        if (value === 'dark' || value === 'light') {
+          app.clearActivePluginTheme()
+          app.applyTheme(value)
+        } else {
+          // The source identity is resolved AGAIN at commit time: a plugin that
+          // unloaded (HMR) or a file that vanished between the choice and the
+          // confirm is refused — never redirected to a same-named other source.
+          const selection = resolveThemeSelection(value, runner.extensions?.themes)
+          if (selection === undefined) {
+            if (themeRef !== undefined) recordExtensionError?.(themeRef, new Error('theme not found'))
+            return { outcome: 'not-saved', reason: `the theme source for ${value} is no longer available` }
+          }
+          if (selection.kind === 'plugin') app.applyPluginPalette(selection.value, selection.palette)
+          else {
+            app.clearActivePluginTheme()
+            app.applyPalette(selection.palette)
+          }
+        }
+        app.trackTerminalTheme(false)
+        if (themeRef !== undefined) clearExtensionError?.(themeRef)
+      } catch (error) {
+        if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
+        return { outcome: 'not-saved', reason: `the palette could not be applied: ${safeErrorMessage(error)}` }
+      }
+    }
+    try {
+      await serializeTuiSettingsMutation(settings, async () => {
+        await settings.replace(withUserFooterCustomItems({ ...settings.get(), theme: value }, runner.config))
+      })
+    } catch (error) {
+      return { outcome: 'not-saved', reason: safeErrorMessage(error) }
+    }
+    const outcome = verifyCommittedField('theme', value)
+    // `auto` has no fallible apply step of its own: starting the terminal
+    // detection IS the apply, and it starts only once the preference is really
+    // committed — its guard then reads the AUTHORITATIVE document, so a later
+    // explicit choice can never be overridden by this query's late answer.
+    if (value === 'auto' && outcome.outcome === 'verified') {
+      app.trackTerminalTheme(true)
+      detach('theme autodetect', () => app.autoDetectTheme({
+        shouldApply: () => {
+          try {
+            return settings.get().theme === 'auto'
+          } catch {
+            return false
+          }
+        },
+      }))
+    }
+    return outcome
+  }
+
+  /**
+   * Phase 3B / B2-A: the read projection of the Settings workspace. Every call
+   * re-reads the LIVE authorities — the ConfigPort readiness and TUI settings
+   * document, the runtime display preset and the Client presentation preference —
+   * and assembles the five fixed pilot rows; the two writable rows additionally
+   * carry their candidate source and the runtime/persisted facts. It captures NO
+   * shadow store: a missing document is `unavailable` (never a persisted
+   * default), a stale backend keeps the document as `last-known`, and a throwing
+   * `get()` is the row's explicit `read-error`.
    */
   const readSettingsWorkspaceSnapshot = (): SettingsWorkspaceSnapshot => {
     const configReadiness = runner.config.configReadiness()
@@ -270,6 +490,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const unavailableNote = 'Unavailable — no authoritative config document'
     const themeRaw = doc?.theme
     const iconRaw = doc?.iconStyle
+    const persistedTheme = doc === undefined ? undefined : normalizePersistedTheme(themeRaw)
     const runtimePreset = displayPresetOf(runner)
     const persistedPreset = doc?.displayPreset
     const thinking = app.isThinkingExpanded() ? 'expanded' : 'collapsed'
@@ -291,13 +512,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           category: 'appearance',
           label: 'Configured theme',
           summary: doc === undefined ? unavailableNote : themeDisplayNameOf(themeRaw, runner.extensions?.themes),
-          ...(doc === undefined ? {} : { value: normalizePersistedTheme(themeRaw) }),
+          ...(doc === undefined ? {} : { value: persistedTheme }),
           scope: 'TUI settings document',
           freshness: configuredFreshness,
           description: doc === undefined
             ? 'The palette family of the configured TUI settings document. This preview only reads the configured value.'
             : 'The palette family used by the transcript, editor and panels. The value is the source-qualified configured identity; the summary is its display name.',
           action: 'inspect',
+          edit: themeEditOf(persistedTheme),
         },
         {
           id: 'icon-style',
@@ -322,6 +544,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           freshness: 'runtime',
           description: `The Client's live transcript display preset. ${persistedNote}`,
           action: 'inspect',
+          edit: displayEditOf(persistedPreset),
         },
         {
           id: 'thinking',
@@ -1187,7 +1410,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       handler: () => {
         app.openSettingsWorkspace(
           { readSnapshot: readSettingsWorkspaceSnapshot },
-          { onOpenLegacy: () => { openLegacySettings() } },
+          {
+            onOpenLegacy: () => { openLegacySettings() },
+            onCommit: commitSettingsWorkspaceField,
+          },
         )
         return { kind: 'success' }
       },
