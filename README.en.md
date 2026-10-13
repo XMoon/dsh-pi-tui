@@ -362,9 +362,11 @@ can still scroll, select and confirm. A confirmed change is stored through the
 existing serialized whole-document write path and then re-read from the
 authority: the detail names the live runtime fact (`Runtime`, e.g. the current
 palette) and the stored preference (`Persisted`) separately and states
-`Saving…`, `Verified`, `Not saved · <reason>` or `Commit accepted ·
-verification unavailable` — only a completed write whose authoritative re-read
-agrees is called Verified. On a non-ready backend the theme is neither applied
+`Saving…`, `Verified`, `Not saved · <reason>`, `Commit accepted ·
+verification unavailable` or `Outcome unknown · <reason>` — only a completed write
+whose authoritative re-read agrees is called Verified; a rejected write re-reads the
+authority first and reports Not saved only when it is still the previous value,
+otherwise Outcome unknown. On a non-ready backend the theme is neither applied
 nor written; a display preset may already be live locally and then says that it
 was not stored instead of pretending it was. A plugin theme is resolved again by
 its source-qualified identity at confirm time, so an unloaded plugin theme is

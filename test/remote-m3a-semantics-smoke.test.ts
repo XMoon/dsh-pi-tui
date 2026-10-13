@@ -1085,10 +1085,14 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
       const hostAfter = hostDescriptorUnpatched()
       const unverifiedFrame = fixture.view().replace(/\s+/gu, ' ')
       assert.equal(hostAfter?.displayPreset, 'focus', 'the Host authority really committed the write')
+      // The CLIENT cannot attribute the rejection (the failure may precede or follow
+      // the commit), so the outcome is stated as unknown — never an acceptance it
+      // cannot prove (the "Commit accepted" wording is reserved for a write that
+      // RETURNED SUCCESS with an unavailable readback) and never a refusal.
       assert.match(
         unverifiedFrame,
-        /Commit accepted · verification unavailable/,
-        `a write that committed while its readback could not complete is not called saved:\n${fixture.view()}`,
+        /Outcome unknown ·/,
+        `a rejected write whose readback could not complete is neither accepted nor refused:\n${fixture.view()}`,
       )
       assert.doesNotMatch(unverifiedFrame, /Not saved · the display preset/,
         `and it is not misreported as a refusal:\n${fixture.view()}`)

@@ -2018,11 +2018,17 @@ and nothing else does.
   `unknown — …` when there was no document to read — the panel never guesses which
   of those it is. The commit status is field-scoped and shown only on the row
   that owns the phase: `Saving…`, `Verified · the authoritative read agrees`,
-  `Not saved · <real reason>` or `Commit accepted · verification
-  unavailable · <reason>`. `Verified` requires a completed mutation, a
-  `configReadiness() === 'ready'` re-read and a matching authoritative value
-  (theme after canonical normalization, display preset exact); a write that
-  returned but could not be re-read is never called saved.
+  `Not saved · <real reason>`, `Commit accepted · verification unavailable ·
+  <reason>` or `Outcome unknown · <reason>`. `Verified` requires a completed
+  mutation, a `configReadiness() === 'ready'` re-read and a matching authoritative
+  value (theme after canonical normalization, display preset exact). A write that
+  returned success but could not be re-read is `Commit accepted · verification
+  unavailable`. A REJECTED write is classified on a fresh authoritative read: an
+  authority that is current and still carries the previous value REFUTES it
+  (`Not saved · <the real error>`), while one that already carries the requested
+  value — an external writer may have reached it first — or that cannot be read
+  proves nothing about THIS request and is reported as `Outcome unknown`, never as a
+  claimed acceptance and never as a refusal the authority contradicts.
 - **The write path is the existing one.** The commit runs through
   `serializeTuiSettingsMutation` over `ConfigPort.tuiSettings`, re-reads the
   document inside the queued task, preserves the raw USER `footerCustomItems`

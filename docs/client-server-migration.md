@@ -3109,7 +3109,13 @@ still reaches the Remote graph only through the dynamic
   reports `stale`/`unavailable`) and records the cause. B2-B's `Verified` state
   re-reads the target field after the dispatch and classifies on `readiness()`
   FIRST, so a refusal, an accepted-but-unverified commit and a verified one stay
-  three distinct outcomes. Covered by `test/remote-config-port.test.ts` (both
+  distinct. A failed mutate RPC is NOT treated as a refusal either: the controller
+  applies the edit and then performs its own `settings.describe()`, reporting a
+  failure of that read as an error although the write committed, so the mirror marks
+  its snapshot non-current and re-reads authority on a failed RPC and the workspace
+  attributes the outcome from that read — a current authority that does not carry the
+  value is `Not saved`, a value already in place (an external writer may have reached
+  it first) or an unreadable authority is `Outcome unknown`. Covered by `test/remote-config-port.test.ts` (both
   directions plus the subagent negative control), `remote-m3a-semantics-smoke.test.ts`
   (the real Host plane refuses a moved revision; the Remote-assembled `/settings`
   workspace commits and verifies) and the L6 workspace suite (the `Commit accepted ·

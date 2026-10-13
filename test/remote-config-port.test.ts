@@ -1092,6 +1092,28 @@ test('a committed write whose post-settlement refresh fails is not a refusal —
   assert.ok(port.lastRefreshFailure() !== undefined, 'the failed refresh is recorded, never swallowed')
   assert.notEqual(port.tuiSettings!.get().theme, 'light', 'the mirror never patches the committed value optimistically')
 
+  // An EXTERNAL writer moved the Host to the value this client is about to request
+  // WITHOUT delivering an invalidation: the diff still emits its op (its base is the
+  // mirror's previous value), the write is refused, and the forced authoritative re-read
+  // then shows that the authority already carries the requested value. That proves the
+  // VALUE is in place, never that THIS request was accepted — so a caller can only report
+  // an unknown outcome, and must not contradict the authority with a refusal either.
+  state.describeFailure = undefined
+  await port.describe()
+  assert.equal(port.configReadiness(), 'ready')
+  const entry = state.namespaces.get(TUI_NS)!
+  const external = entry.value.theme === 'dark' ? 'light' : 'dark'
+  entry.value.theme = external
+  entry.revision += 1
+  state.mutateFailure = { code: 'settings/conflict', message: 'the revision moved' }
+  await assert.rejects(
+    async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: external }) },
+    /settings\.mutate\(tui-app\) failed/u,
+  )
+  assert.equal(port.configReadiness(), 'ready', 'the forced re-read committed a current snapshot')
+  assert.equal(port.tuiSettings!.get().theme, external, 'which already carries the requested value')
+  state.mutateFailure = undefined
+
   // NEGATIVE CONTROL: a direct `mutate` consumer keeps the FAILURE. Its caller
   // re-reads the mirror and would otherwise present a last-known value as the
   // committed one (the subagent model-selection toggle does exactly that).

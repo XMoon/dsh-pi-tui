@@ -21,8 +21,10 @@
   行可点，窄屏与短屏仍可滚动、选中并确认。确认后用既有的串行整文档写入路径落盘，并在
   成功后从权威来源重读目标字段：详情分别显示运行态（`Runtime`）与持久偏好
   （`Persisted`），提交状态明确显示 `Saving…` / `Verified` / `Not saved · 原因` /
-  `Commit accepted · verification unavailable`，只有写入完成、后端 `ready` 且权威回读
-  一致才显示 Verified。后端不 ready 时主题不会被应用或写入；显示预设可能已在本机生效，
+  `Commit accepted · verification unavailable` / `Outcome unknown · 原因`，只有写入完成、
+  后端 `ready` 且权威回读一致才显示 Verified；被拒绝的写入会先重新读取权威：若权威仍
+  是旧值则明确显示 Not saved，若权威已是目标值（可能由别处先写入）或无法读取，则如实
+  显示 Outcome unknown，不冒认成功也不误报拒绝。后端不 ready 时主题不会被应用或写入；显示预设可能已在本机生效，
   此时会明确说明只是本机生效、未能保存，绝不假报保存成功。插件主题在确认时再次按
   source-qualified 身份校验，已卸载的插件主题标为 unavailable 并拒绝确认，不会被重定向
   到同名的自定义文件。Icon style 与 Thinking detail 仍是只读行（底部按钮行说明需到

@@ -544,7 +544,12 @@ projection; B2-B gave exactly two of its rows (`Configured theme`,
   an authoritative re-read that agrees with a `configReadiness() === 'ready'`
   backend. A non-ready backend refuses the theme commit before it applies
   anything; a display commit may apply the Client-local runtime fact and then
-  reports that it could not be stored. The Detail names the runtime and the
+  reports that it could not be stored. A REJECTED write is never attributed: the
+  authority is re-read (the Remote adapter forces that read on a failed RPC, whose
+  failure does not prove a refusal), and only an authority that is current and does
+  not carry the value yields `Not saved`; a value already in place or an unreadable
+  authority yields `Outcome unknown`, and the accepted-but-unreadable case yields
+  `Commit accepted · verification unavailable`. The Detail names the runtime and the
   persisted fact separately, and the panel keeps no second truth store.
 - **The Detail projection is ambiguity-free.** Terminal sequences and unknown
   controls are stripped at the display boundary, but CR/LF/TAB render as visible

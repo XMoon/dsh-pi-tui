@@ -376,11 +376,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * describe, reporting a failure of that read as an error even though the write
    * committed — and the Direct backend's failure is a real conflict. The authority is
    * therefore re-read (the Remote adapter re-reads it on the failed RPC itself):
-   *  - a current authority that already carries the requested value is
-   *    `unverified` (the value is in place, but this write never confirmed it),
-   *  - one that still carries the previous value is a real refusal (`not-saved`),
-   *  - one that cannot be read at all is explicitly `unverified`.
-   * Never a `Saved`, and never a "not saved" claim the Client cannot support.
+   *  - a current authority that still carries the previous value REFUTES the write
+   *    (`not-saved`),
+   *  - a current authority that already carries the requested value proves only that
+   *    the value is in place — an external writer may have set it before this request
+   *    was refused — so neither acceptance nor refusal is attributed to THIS commit
+   *    (`indeterminate`), and the same holds when the authority cannot be read.
+   * Never a `Saved`, and never an acceptance/refusal claim the Client cannot support.
    */
   const classifyRejectedWrite = (
     field: SettingsWorkspaceWritableField,
@@ -391,9 +393,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const readback = readCommittedField(field, expected)
     if (readback.kind === 'differs') return { outcome: 'not-saved', reason: `${prefix}${failureReason}` }
     if (readback.kind === 'agrees') {
-      return { outcome: 'unverified', reason: `${prefix}${failureReason}; the authority already reads ${expected}` }
+      return {
+        outcome: 'indeterminate',
+        reason: `${prefix}${failureReason}; the authority already reads ${expected}, so this request was either refused after that write or committed and not confirmed`,
+      }
     }
-    return { outcome: 'unverified', reason: `${prefix}${failureReason}; ${readback.reason}` }
+    return { outcome: 'indeterminate', reason: `${prefix}${failureReason}; ${readback.reason}` }
   }
 
   /**

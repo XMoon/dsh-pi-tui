@@ -27,9 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A confirmed change is stored through the existing serialized whole-document write
   path and then re-read from the authority: the Detail names the live runtime fact
   (`Runtime`) and the stored preference (`Persisted`) separately and states the
-  commit as `Saving…`, `Verified`, `Not saved · <reason>` or `Commit accepted ·
-  verification unavailable` — only a completed write whose authoritative re-read
-  agrees is called Verified. On a non-ready backend the theme is neither applied nor
+  commit as `Saving…`, `Verified`, `Not saved · <reason>`, `Commit accepted ·
+  verification unavailable` or `Outcome unknown · <reason>` — only a completed write
+  whose authoritative re-read agrees is called Verified. A REJECTED write re-reads the
+  authority first: a value that is still the previous one is reported as Not saved,
+  while a value already in place (another writer may have set it first) or an
+  authority that cannot be read is reported as Outcome unknown — never a claimed
+  success, and never a refusal the authority contradicts. On a non-ready backend the theme is neither applied nor
   written; a display preset may already be live locally and then says so instead of
   claiming a save. A plugin theme is resolved again by its source-qualified identity
   at confirm time, so an unloaded plugin theme is listed as unavailable and refused

@@ -2250,3 +2250,38 @@ test('B-23 a PENDING display commit already shows the runtime preset', async () 
   assert.equal(h.doc.displayPreset, 'compact')
   h.dispose()
 })
+
+test('B-24 a refused write whose value an external writer already set is neither accepted nor refused', async () => {
+  const h = setup({
+    columns: 200,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes: pluginThemes(),
+    applyReplace: (next) => {
+      // An external writer reached the SAME value before this request was refused; the
+      // backend then rejects our write. The authority therefore matches the requested
+      // value without this commit having been accepted.
+      h.doc.theme = next.theme
+      throw new Error('settings namespace "tui-app" changed since it was read')
+    },
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'light')
+  press(h, row, cellIndexOf(h, row, 'light'))
+  release(h, row, cellIndexOf(h, row, 'light'))
+  await settle(h)
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+
+  const frame = h.view().replace(/\s+/gu, ' ')
+  assert.equal(h.doc.theme, 'light', 'the authority really carries the requested value')
+  assert.match(frame, /Outcome unknown/, `the attribution is stated as unknown:\n${h.view()}`)
+  assert.doesNotMatch(frame, /Commit accepted/, 'this request was never accepted')
+  assert.doesNotMatch(frame, /Not saved · (settings|the)/, 'and it is not presented as a refusal either')
+  assert.match(frame, /already reads light/, 'the reachable fact (the authority matches) is reported')
+  assert.ok(h.view().includes('[Retry save]'), 'a retry stays available')
+  h.dispose()
+})
