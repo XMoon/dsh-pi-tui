@@ -788,3 +788,55 @@ test('a bracketed paste ending in an inline skill token opens the dropdown (revi
   assert.ok(view.includes('请用 /el'), `the pasted draft must be intact:\n${view}`)
   app.stop()
 })
+
+test('a terminal observation released by the external-editor suspend is re-sampled on resume', async () => {
+  const saved = {
+    NO_COLOR: process.env.NO_COLOR,
+    FORCE_COLOR: process.env.FORCE_COLOR,
+    CI: process.env.CI,
+    COLORFGBG: process.env.COLORFGBG,
+  }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+  try {
+    const { vt, app } = startApp({
+      openExternalEditor: async () => 'edited',
+      runOwned: owned,
+    } as Partial<TuiAppEventsBase>)
+    const writes: string[] = []
+    const originalWrite = vt.write.bind(vt)
+    vt.write = (data: string): void => {
+      writes.push(data)
+      originalWrite(data)
+    }
+    const queries = (): number => writes.join('').split('\x1b]11;?\x07').length - 1
+
+    // A boot-shaped observation for the active screen.
+    app.noteThemeSelection('auto')
+    const pending = app.autoDetectTheme({ shouldApply: () => app.themeFollowsTerminal() })
+    assert.equal(queries(), 1, 'the observation is issued on the active screen')
+
+    // The $EDITOR round trip stops and RESTARTS the same screen object, so its probe is
+    // released without any screen-identity change.
+    await app.launchExternalEditor()
+    await pending
+    await vt.waitForRender()
+    assert.ok(queries() > 1, `the resumed screen issues a FRESH observation:\n${JSON.stringify(writes)}`)
+
+    vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    await vt.waitForRender()
+    assert.equal(app.currentTheme(), 'light', 'and applies its answer')
+    app.stop()
+  } finally {
+    if (saved.NO_COLOR === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = saved.NO_COLOR
+    if (saved.FORCE_COLOR === undefined) delete process.env.FORCE_COLOR
+    else process.env.FORCE_COLOR = saved.FORCE_COLOR
+    if (saved.CI === undefined) delete process.env.CI
+    else process.env.CI = saved.CI
+    if (saved.COLORFGBG === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = saved.COLORFGBG
+  }
+})

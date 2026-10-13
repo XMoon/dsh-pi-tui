@@ -2608,3 +2608,28 @@ test('B-34 entering the Settings workspace re-samples the observation the return
     restoreThemeEnv()
   }
 })
+
+test('B-35 a handled hand-off leaves no stale re-sample latch for the next one', async () => {
+  clearThemeEnv()
+  try {
+    const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
+    const pending = startPendingObservation(h)
+    h.app.setFullscreen(true)
+    await pending
+    await settle(h)
+    const afterFirstHandoff = queryCount(h.writes())
+    assert.ok(afterFirstHandoff > 1, 'the first hand-off re-sampled the abandoned observation')
+    h.vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    await settle(h)
+    assert.equal(h.app.currentTheme(), 'light', 'and applied its answer')
+
+    // Nothing was in flight any more: the NEXT hand-off must not query again. A late
+    // continuation re-arming the latch would issue an extra observation here.
+    h.app.setFullscreen(false)
+    await settle(h)
+    assert.equal(queryCount(h.writes()), afterFirstHandoff, 'no stale latch fires an extra query')
+    h.dispose()
+  } finally {
+    restoreThemeEnv()
+  }
+})

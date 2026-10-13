@@ -4268,6 +4268,11 @@ export class TuiApp {
     } else {
       this.tui.stop()
     }
+    // That stop RELEASES the OSC 11 observation the screen was running (TuiBase.stop
+    // settles its pending probe). The SAME screen object comes back on resume, so the
+    // screen-identity check cannot notice the loss: mark it here, or a boot-shaped `auto`
+    // query would stay unknown until some later report a terminal may never send.
+    if (this.autoDetectScreen !== undefined) this.themeResamplePending = true
     // A synchronous sink on the retirement write may have re-entered with a
     // NEW acquisition (start()); releasing ownership HERE — after the screen is
     // stopped — keeps the latch consistent with the physical screen no matter
@@ -4296,6 +4301,10 @@ export class TuiApp {
     // The suspend stopped the active screen (clearing OSC 9;4 + its
     // keepalive): restore a still-desired busy state (plan §7/§12.7).
     this.enterTerminalPresentation()
+    // The suspend released the observation that screen owned; the resumed SAME screen
+    // re-samples once when the latest intent still follows the terminal (the shared
+    // hand-off completion point).
+    this.completeScreenHandoff()
   }
 
   /** Leave raw mode and stop rendering. The process live-TUI slot is
@@ -20934,8 +20943,13 @@ export class TuiApp {
    * a scheme report, the plugin-unload fallback).
    */
   private themeIntent: string | undefined
-  /** Whether a terminal observation was discarded because the screen that owned it went
-   *  away while the intent it was issued for was still live (see resumeReturnSurface). */
+  /**
+   * Whether an observation was released by a hand-off the completion point CANNOT detect.
+   * Every ordinary hand-off (a fullscreen swap, a workspace open/close) stops a DIFFERENT
+   * screen object, so `completeScreenHandoff()` sees the identity change SYNCHRONOUSLY —
+   * before the abandoned observation's continuation runs. The external-editor suspend
+   * restarts the SAME screen object, so only it re-arms this latch explicitly.
+   */
   private themeResamplePending = false
   /** The screen the in-flight terminal observation belongs to. A screen hand-off kills it
    *  (its stop() releases the probe), so the resumed screen must know to re-sample. */
@@ -21105,10 +21119,10 @@ export class TuiApp {
     // user is no longer looking at, so it must not colour the new one.
     if (this.activeScreen !== screen) {
       // The screen that owned the observation is gone (its stop() released the probe), so
-      // the answer can never be trusted — but the intent it was issued FOR may still be
-      // live. The surface that takes the terminal over re-samples instead, which keeps
-      // "chose auto, then left immediately" from losing the initial detection.
-      this.themeResamplePending = true
+      // the answer can never be trusted. It is NOT re-armed here: the hand-off that stopped
+      // the screen already ran `completeScreenHandoff()` synchronously (before this
+      // continuation) and scheduled the re-sample then. Latching it again would leave a
+      // stale flag that fires an unnecessary query at the next hand-off.
       return
     }
     // A newer DELIBERATE selection owns the surface: the runtime owner's intent
