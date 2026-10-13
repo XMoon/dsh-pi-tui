@@ -610,14 +610,23 @@ class RemoteConfigMirror {
   /**
    * Serialized namespace write.
    *
-   * A write first guarantees a CURRENT mirror (so the revision fence it
-   * carries was read from the live document), dispatches the official
-   * `settings.mutate` with that revision, and only then refreshes from
-   * authority. The mutate's returned view is deliberately NOT trusted as the
-   * mirror's new state: the refreshed `describe` snapshot is the only new
-   * authority, which is what makes "never an optimistic local write" true.
+   * A write first guarantees a CURRENT mirror (so it can dispatch at all),
+   * dispatches the official `settings.mutate` with the revision the CALLER's
+   * decision unit was read at, and only then refreshes from authority. The
+   * mutate's returned view is deliberately NOT trusted as the mirror's new
+   * state: the refreshed `describe` snapshot is the only new authority, which
+   * is what makes "never an optimistic local write" true.
+   *
+   * `baseRevision` is the revision of the snapshot an op set was RECONCILED
+   * against (`RemoteTuiSettingsConfig.replace` diffing a whole document). The
+   * refresh above must not replace it: re-reading the fence here would
+   * re-authorize a decision taken against the older document, letting the
+   * stale op silently supersede a concurrent external write instead of
+   * surfacing the conflict. Callers that build their ops directly from the
+   * current mirror (provider profiles, permission presets, …) omit it and keep
+   * the refreshed revision.
    */
-  async mutate(ns: string, ops: readonly RemoteSettingsPathOp[]): Promise<void> {
+  async mutate(ns: string, ops: readonly RemoteSettingsPathOp[], baseRevision?: number): Promise<void> {
     await this.enqueueWrite(async () => {
       await this.ensureCurrent()
       const snapshot = this.lastKnown()
@@ -649,7 +658,7 @@ class RemoteConfigMirror {
       if (descriptor === undefined) {
         throw new Error(`settings namespace "${ns}" is not available in this deployment`)
       }
-      const result = await settledResult(this.settings.mutate(ns, [...ops], descriptor.revision))
+      const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
       if (!result.ok) throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
       // Authoritative refresh AFTER the official settlement.
       await this.describe()
@@ -863,8 +872,12 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
       // document into the USER layer.
       throw new Error('settings entry "tui-app" exposes no form projection')
     }
+    // The ops are reconciled against THIS descriptor, so ITS revision is the
+    // fence the official mutate must check: the queued write may refresh the
+    // mirror first and would otherwise re-authorize this diff against a newer
+    // document (silently superseding a concurrent external write).
     const ops = diffTuiSettings(descriptor.value, descriptor.user, doc)
-    await this.mirror.mutate(TUI_SETTINGS_NS, ops)
+    await this.mirror.mutate(TUI_SETTINGS_NS, ops, descriptor.revision)
   }
 }
 

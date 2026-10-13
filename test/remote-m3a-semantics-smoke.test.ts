@@ -745,6 +745,39 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
     await tuiSettings.replace(before)
     assert.equal(tuiSettings.get().theme, before.theme, 'and the revert is authoritative too')
 
+    // 2b. The official revision fence itself — the property the whole-document
+    // writer relies on when it passes the revision its ops were RECONCILED
+    // against. A mutate carrying a revision the live document already moved past
+    // is REFUSED and the concurrent value is preserved, over the REAL settings
+    // plane; the adapter-level stale-diff equivalence is locked in
+    // `test/remote-config-port.test.ts`.
+    const hostSettings = (host.ctx as unknown as {
+      settings: {
+        describe(): readonly { ns: string; value?: { theme?: string }; revision?: number }[]
+        mutate(ns: string, ops: readonly { op: string; path: readonly string[]; value?: unknown }[], revision?: number): Promise<unknown>
+      }
+    }).settings
+    const anchored = hostSettings.describe().find(entry => entry.ns === 'tui-app')
+    assert.notEqual(anchored?.revision, undefined, 'the tui-app namespace is served by the real settings plane')
+    const staleRevision = anchored.revision
+    const externalTheme = anchored.value?.theme === 'dark' ? 'light' : 'dark'
+    await hostSettings.mutate('tui-app', [{ op: 'set', path: ['theme'], value: externalTheme }], undefined)
+    await assert.rejects(
+      async () => {
+        await hostSettings.mutate('tui-app', [{ op: 'set', path: ['theme'], value: 'stale-write' }], staleRevision)
+      },
+      (error: unknown) => {
+        assert.match(
+          String((error as { message?: unknown })?.message ?? error),
+          /revision|conflict|changed/u,
+          'the refusal names the moved revision',
+        )
+        return true
+      },
+    )
+    const settled = hostSettings.describe().find(entry => entry.ns === 'tui-app')
+    assert.equal(settled?.value?.theme, externalTheme, 'the stale write never reached the document')
+
     // 3. Archive over the REAL Host route: the composition carrier fetch reaches
     // `/api/session.export` for real (never a fake fetch), and the returned ZIP
     // is unpacked here to prove the whole chain carried the ACTUAL durable log
