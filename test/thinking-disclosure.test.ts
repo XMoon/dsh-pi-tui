@@ -35,6 +35,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -672,6 +673,7 @@ function setupSettings() {
       rawInput: '',
       signal: new AbortController().signal,
     })
+    await navigateToLegacySettings(vt)
   }
   const view = async (): Promise<string> => {
     await vt.waitForRender()

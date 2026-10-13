@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `/settings` now opens a dedicated full-screen settings workspace (read-only
+  preview): three columns on wide terminals (categories / settings rows /
+  details), two columns on medium ones with the category switch in the header
+  (keyboard or painted mouse arrows), and a single-column
+  `categories → rows → detail` drill-down on narrow ones (`Enter` descends,
+  `Esc` steps back one level). The Action Bar stays pinned to the last physical
+  row, and selection, scrolling and copying work with both keyboard and mouse.
+  The workspace shows the real Appearance / Display facts: the theme's
+  source-qualified raw value plus its friendly name, Icon style, the live
+  Transcript display preset alongside the persisted preference last read, the
+  live Thinking detail state, and each row's configuration Scope and backend
+  readiness (`Ready` / `Last-known` / `Unavailable` / `Read error`). `R`
+  re-reads, `C` copies only the selected row's exact source value, and the
+  copy notice is painted inside the workspace itself. Browsing writes no
+  configuration. The existing complete settings editor remains fully available:
+  `Other settings` → `Open existing settings…` retires the workspace and
+  restores the surface it paused before opening the original editor, so Theme,
+  the Plugin Manager, keybindings, permissions and extension settings keep every
+  existing write path.
 - A Job opened from the Task Center now renders in its own fullscreen workspace:
   the Job status, progress, output gaps, observation errors, terminal state and
   the retained output are presented as separate regions instead of one joined

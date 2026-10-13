@@ -26,6 +26,7 @@ import { KeybindingEditorPanel } from '../src/tui/keybindings/ui/list.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { openLegacySettingsPanel } from './support/open-legacy-settings.ts'
 
 /** Every TuiApp constructed here is disposed after each test: the process
  * slot (the vendored fork keybindings are process-global) is released only
@@ -225,8 +226,7 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
 
 /** `/settings` → filter to the Keyboard shortcuts row → Enter. */
 async function openKeyboardShortcuts(h: Harness, filter = 'keyboard'): Promise<void> {
-  h.invoke('settings')
-  await h.vt.waitForRender()
+  await openLegacySettingsPanel(h.invoke, h.vt)
   for (const character of filter) {
     h.vt.sendInput(character)
     await h.vt.waitForRender()
@@ -381,8 +381,7 @@ test('C-T07: an unavailable settings service keeps its real error, its Esc hint 
 
 test('C-T09: the Theme submenu keeps the same live grant chain (positive control)', async () => {
   const h = setup({ columns: 120, rows: 40 })
-  h.invoke('settings')
-  await h.vt.waitForRender()
+  await openLegacySettingsPanel(h.invoke, h.vt)
   for (const character of 'theme') {
     h.vt.sendInput(character)
     await h.vt.waitForRender()
@@ -472,8 +471,7 @@ test('C-T12: a mouse press acts on the painted row and a click after a resize us
 
 test('C-T10: the outer settings list keeps its own filter and navigation (baseline)', async () => {
   const h = setup({ columns: 120, rows: 40 })
-  h.invoke('settings')
-  await h.vt.waitForRender()
+  await openLegacySettingsPanel(h.invoke, h.vt)
   const marked = (): string => {
     const line = h.vt.getViewport().map(stripAnsi).find(row => row.includes('›') && row.includes('│'))
     assert.ok(line !== undefined, `no selected settings row painted:\n${viewportText(h.vt)}`)

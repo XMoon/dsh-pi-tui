@@ -41,6 +41,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -1361,11 +1362,12 @@ test('/settings keeps the keyboard-shortcuts fallback when the settings read thr
   const t = setup({ tuiSettings })
   const result = await t.runCommand('settings')
   assert.equal((result as { kind: string }).kind, 'success')
+  await navigateToLegacySettings(t.vt)
   t.vt.sendInput('keyboard')
   const view = await t.view()
   assert.match(view, /Keyboard shortcuts/)
   assert.match(view, /Unavailable/)
-  assert.equal(reads, 1, 'the settings command should make one guarded initial read')
+  assert.equal(reads, 2, 'each settings surface makes exactly one guarded initial read (the B2-A workspace snapshot, then the legacy editor)')
   t.app.stop()
 })
 

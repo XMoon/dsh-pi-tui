@@ -9,6 +9,17 @@
 
 ### 变更
 
+- `/settings` 改为打开独立的全屏设置工作区（只读预览）：宽屏三栏（分类 / 设置行 /
+  详情）、中屏两栏（分类切换在标题栏，可键盘或鼠标点击箭头）、窄屏单栏逐级下钻
+  （`Enter` 进入下一级、`Esc` 逐级返回），底部操作栏始终固定在最后一行，并可用键盘与
+  鼠标完成选择、滚动与复制。工作区展示 Appearance / Display 的真实读值：主题的
+  source-qualified 原始值与友好名称、Icon style、Transcript display 的运行时当前值与
+  上次读到的持久偏好、Thinking detail 的当前运行态，并在每个条目上标明配置来源 Scope
+  与 backend 就绪状态（`Ready` / `Last-known` / `Unavailable` / `Read error`）；`R`
+  重新读取，`C` 只复制所选行的原始值，成功/失败提示显示在工作区自己的提示行上。浏览
+  不会写入任何配置。旧的完整设置编辑器仍完整可用：`Other settings` →
+  `Open existing settings…` 先关闭工作区并恢复原界面，再打开原有编辑器，
+  Theme、Plugin Manager、键位、权限与扩展设置的写入路径不变。
 - 任务中心里的 Job 详情改为独立的全屏工作区：Job 状态、进度、输出缺口、观察错误
   与终态、以及保留输出分区呈现，不再拼成一块文本；底部固定显示 `Esc back` 与
   （仅在有意义时）Stop，并标注保留输出只是预览、不是完整历史。`Esc` 回到原任务

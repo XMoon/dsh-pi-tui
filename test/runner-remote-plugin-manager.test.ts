@@ -50,6 +50,7 @@ import type { PluginInstallEvent } from '../src/runtime/plugin-manager-port.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 process.env.NO_COLOR = ''
@@ -418,6 +419,8 @@ test('L6-B: the Settings → Plugins entry hosts the SAME Remote controller/pane
   const fixture = await mountPluginManagerRunner(life)
 
   submit(fixture, '/settings')
+  await waitFor('the Settings workspace opens', () => /Read-only/.test(plain(fixture.vt.getViewport())), 20_000)
+  await navigateToLegacySettings(fixture.vt)
   await waitFor('the Settings surface opens', () => /Type to search/.test(plain(fixture.vt.getViewport())), 20_000)
   for (const character of 'plugins') fixture.vt.sendInput(character)
   await fixture.vt.waitForRender()

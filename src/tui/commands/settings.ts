@@ -48,6 +48,10 @@ import { SubagentModelAllowlistPicker, allowlistSummary } from '../pickers/subag
 import { resolveThemeSelection } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc } from '../../runtime/config-port.ts'
+import type {
+  SettingsWorkspaceFreshness,
+  SettingsWorkspaceSnapshot,
+} from '../panels/settings-workspace-panel.ts'
 import { displaySessionId } from './sessions.ts'
 import type {
   DetachTask,
@@ -239,11 +243,120 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     }
   }
 
-  const registerSettings = (): void => {
-    registerOne({
-      name: 'settings',
-      description: 'Open the TUI settings panel',
-      handler: () => {
+  /**
+   * Phase 3B / B2-A: the readonly read projection of the Settings workspace.
+   * Every call re-reads the LIVE authorities — the ConfigPort readiness and TUI
+   * settings document, the runtime display preset and the Client presentation
+   * preference — and assembles the five fixed pilot rows. It captures NO shadow
+   * store: a missing document is `unavailable` (never a persisted default), a
+   * stale backend keeps the document as `last-known`, and a throwing `get()` is
+   * the row's explicit `read-error`.
+   */
+  const readSettingsWorkspaceSnapshot = (): SettingsWorkspaceSnapshot => {
+    const configReadiness = runner.config.configReadiness()
+    const settings = runner.tuiSettings
+    let doc: TuiSettingsDoc | undefined
+    let readIssue: string | undefined
+    if (settings !== undefined) {
+      try {
+        doc = settings.get()
+      } catch (error) {
+        readIssue = safeErrorMessage(error)
+      }
+    }
+    const configuredFreshness: SettingsWorkspaceFreshness = doc === undefined
+      ? readIssue !== undefined ? 'read-error' : 'unavailable'
+      : configReadiness === 'ready' ? 'ready' : 'last-known'
+    const unavailableNote = 'Unavailable — no authoritative config document'
+    const themeRaw = doc?.theme
+    const iconRaw = doc?.iconStyle
+    const runtimePreset = displayPresetOf(runner)
+    const persistedPreset = doc?.displayPreset
+    const thinking = app.isThinkingExpanded() ? 'expanded' : 'collapsed'
+    // The persisted fact is only a fact once the document was actually READ:
+    // an absent document or a throwing read is an UNKNOWN persistence state,
+    // never "read and not configured".
+    const persistedNote = doc !== undefined
+      ? `Persisted preference: ${persistedPreset ?? 'not set'} (last read from the TUI settings document — not the current runtime value).`
+      : readIssue !== undefined
+        ? `Persisted preference unknown — the TUI settings document could not be read (${readIssue}).`
+        : 'Persisted preference unknown — no authoritative TUI settings document is available.'
+    return {
+      configReadiness,
+      capturedAt: Date.now(),
+      ...(readIssue === undefined ? {} : { readIssue }),
+      rows: [
+        {
+          id: 'theme',
+          category: 'appearance',
+          label: 'Configured theme',
+          summary: doc === undefined ? unavailableNote : themeDisplayNameOf(themeRaw, runner.extensions?.themes),
+          ...(doc === undefined ? {} : { value: normalizePersistedTheme(themeRaw) }),
+          scope: 'TUI settings document',
+          freshness: configuredFreshness,
+          description: doc === undefined
+            ? 'The palette family of the configured TUI settings document. This preview only reads the configured value.'
+            : 'The palette family used by the transcript, editor and panels. The value is the source-qualified configured identity; the summary is its display name.',
+          action: 'inspect',
+        },
+        {
+          id: 'icon-style',
+          category: 'appearance',
+          label: 'Icon style',
+          summary: doc === undefined ? unavailableNote : iconStyleOf(iconRaw),
+          ...(doc === undefined ? {} : { value: iconRaw }),
+          scope: 'TUI settings document',
+          freshness: configuredFreshness,
+          description: doc === undefined
+            ? 'The glyph vocabulary for structural icons. This preview only reads the configured value.'
+            : 'The glyph vocabulary for structural icons (tools, subagents, disclosures). The raw configured value is preserved even when it normalizes to a built-in style.',
+          action: 'inspect',
+        },
+        {
+          id: 'display-preset',
+          category: 'display',
+          label: 'Transcript display',
+          summary: runtimePreset,
+          value: runtimePreset,
+          scope: 'Client runtime · optional TUI preference persistence',
+          freshness: 'runtime',
+          description: `The Client's live transcript display preset. ${persistedNote}`,
+          action: 'inspect',
+        },
+        {
+          id: 'thinking',
+          category: 'display',
+          label: 'Thinking detail',
+          summary: thinking,
+          value: thinking,
+          scope: 'Current TUI display state',
+          freshness: 'runtime',
+          description: 'Whether reasoning blocks render expanded or collapsed. A Client runtime presentation preference, not a persisted Host value.',
+          action: 'inspect',
+        },
+        {
+          id: 'legacy-settings',
+          category: 'other',
+          label: 'Open existing settings…',
+          summary: 'Existing settings editor',
+          scope: 'Existing settings editor',
+          freshness: 'ready',
+          description: 'Opens the existing complete settings editor; returns to the conversation when closed.',
+          action: 'open-legacy',
+        },
+      ],
+    }
+  }
+
+  /**
+   * The pre-B2-A complete settings editor, preserved VERBATIM: the original
+   * `registerSettings` handler body is the ONE owner of the legacy rows, the
+   * Theme picker, the Plugin Manager submenu, the permission/session rows, the
+   * HMR/plugin callbacks and every write path. It is called by the compatibility
+   * entry of the new Settings workspace (and only there), so it re-reads the live
+   * session scope and settings document at the moment of the handoff.
+   */
+  const openLegacySettings = (): CommandResult => {
         // The session-scoped rows and their writes belong to the exact owner
         // that was live when the panel opened; the captured scope never
         // retargets to a replacement session. Never creates a Session.
@@ -1058,8 +1171,28 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           () => { settingsOpen = false },
         )
         return { kind: 'success' }
+  }
+
+  /**
+   * `/settings` — Phase 3B / B2-A: enter the readonly fullscreen Settings
+   * workspace. The legacy complete editor stays reachable through the
+   * workspace's `Other settings` → `Open existing settings…` row, which retires
+   * the workspace FIRST and then calls {@link openLegacySettings} on the
+   * restored surface.
+   */
+  const registerSettings = (): void => {
+    registerOne({
+      name: 'settings',
+      description: 'Open the TUI settings workspace',
+      handler: () => {
+        app.openSettingsWorkspace(
+          { readSnapshot: readSettingsWorkspaceSnapshot },
+          { onOpenLegacy: () => { openLegacySettings() } },
+        )
+        return { kind: 'success' }
       },
     })
+  }
 
     // `/footer` — the interactive footer configurator (plan M3): LOCAL +
     // SESSIONLESS (usable before any session exists — the preview shows
@@ -1081,7 +1214,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // the footer configurator, and the completion catalog shows both with
     // the alias marked "(alias of /footer)". The alias rides the same
     // LOCAL/SESSIONLESS ownership sets, so it never steers while busy.
-  }
   const registerFooter = (): void => {
     registerTuiCommand({
       name: 'footer',

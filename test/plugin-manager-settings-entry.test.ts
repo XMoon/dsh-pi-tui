@@ -15,6 +15,7 @@ import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { openLegacySettingsPanel } from './support/open-legacy-settings.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -95,8 +96,7 @@ test('opening /settings alone never builds the Plugin Manager submenu', () => {
 
 test('the static Plugins / Manage… row is rendered and activating it builds the same submenu', async () => {
   const { invoke, counts, vt } = setup()
-  invoke('settings')
-  await vt.waitForRender()
+  await openLegacySettingsPanel(invoke, vt)
   assert.equal(counts.submenu, 0, 'rendering the row alone must not build the submenu')
   // Type into the Settings search box to filter down to the Plugins row.
   for (const ch of 'plugins') {

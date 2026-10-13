@@ -78,8 +78,9 @@ The callbacks to consider (not just `focus()`): Advanced `onFocus` /
 | approval rebuild | the approval is a normal remountable node | rebind | dispose the replaced frame |
 | fullscreen detach | close non-remountables; snapshot the prior physical owner | seat release/handoff (bounded, so the fork's per-hide fallback cannot fire) | derive the owner from LOGICAL intent (`frontmostFocusable`, with the prior owner as a fallback only while it still requests focus and is not explicit-hidden), then detach the raws |
 | fullscreen rebind / restore | the logical graph survives; rebind with `initialFocus:false` | rebind / one restore focus | none |
-| session switch / final teardown | close the Job workspace before its parent browser; clear refs | — | none |
+| session switch / final teardown | close the Job/Settings workspace before its parent browser; clear refs | — | none |
 | Job workspace open / close | commit the screen lease, latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the workspace panel's `Esc`/`tasks.stop` intents | `activeScreen` derives the physical owner from the lease (see §10.1) |
+| Settings workspace open / close | commit the screen lease (mutually exclusive with the Job lease), latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the Settings panel's `Esc` intents and the legacy handoff | `activeScreen` derives the physical owner from the lease (see §10.3) |
 | `custom()` done/close (factory or callback) | `settled` latch; the mounted lease is reclaimed | focus callbacks | no stale `pendingBrokerSettles` entry |
 
 ## 4. Reentrancy matrix
@@ -463,8 +464,72 @@ second global SGR parser and never installs a second selection owner, so the
 fork's scrollbar interaction, wheel routing and native selection elsewhere on the
 same screen are untouched.
 
-## 11. Optional seat tenant: PARK / REFUSE
+### 10.3 Settings workspace: a second, mutually exclusive screen lease
 
+`/settings` (Phase 3B / B2-A) opens a readonly fullscreen Settings workspace
+with the same temporary physical-screen lease as the Job workspace, and the two
+leases are MUTUALLY EXCLUSIVE.
+
+- **One lease latch for both workspaces.** `TuiApp.openSettingsWorkspace` mints a
+  short-lived `TuiAltScreen` whose layout root and keyboard focus target is the
+  `SettingsWorkspacePanel`, and commits it to `this.settingsWorkspace` BEFORE the
+  physical switch. `activeScreen` derives the physical owner from the leases
+  (`jobWorkspace.screen ?? settingsWorkspace.screen ?? fullscreen ?? tui`); the
+  refusal checks share ONE freeze depth (`workspaceLeaseFreezeDepth`), so a
+  lifecycle transition, a blocking owner's commit window, or an existing lease
+  withholds a new one and no two physical owners can ever coexist.
+- **The return surface is paused, never rebuilt**, exactly as §10.1: the screen
+  that opened the workspace is stopped with `preserveScreen: true`, its object
+  tree, overlay graph, focus, draft and scroll state survive, and closing restarts
+  the SAME instance.
+- **`Esc` is the ONE lifecycle key, with a narrow drill-down.** Wide and medium
+  layouts close on `Esc`; the narrow layout steps `detail → rows → categories` and
+  closes only from the categories level, so leaving the workspace is always one
+  reachable key (the Action Bar is pinned to the physical last row at every
+  height, down to a one-row terminal).
+- **Every key inside the workspace is consumed** by the panel (navigation,
+  refresh, copy, or inert). Ordinary typing never reaches the hidden editor, the
+  transcript or a Host composer action — the `handleInputCore` ladder hands
+  Settings the key before any Host action, mirroring the Job branch.
+- **Mouse follows the last painted frame.** The header's category arrows, the
+  row cells and the Detail's `Copy value` button are plain painted cells reached
+  through the alt screen's existing `onCellPress`/`onCellClick`: a real item
+  click takes ITS column's keyboard focus (the header arrows, the row list, the
+  Detail), and a click acts only when the release re-proves the press-time kind,
+  id, painted row, cell range AND the same state version. Refresh, selection,
+  page, category AND terminal geometry all bump that version — a resize refuses a
+  straddling gesture even when the target's own cells did not move. Wheel events
+  are the panel's own `handleMouse` and scroll only the pane under the pointer; a
+  wheel-scrolled list keeps its viewport (only a selection or viewport change
+  rebases it, so a shrink still reveals the selection). The workspace screen
+  suspends the fork's native copy-on-select: B2-A has no drag-copy contract, and
+  the panel's own `Copy value`/`C` verb is the only copy source (a plain click can
+  never put a character on the clipboard). The Action Bar advertises only the keys
+  the current focus owner and row grant actually honour: below the body floor it
+  shows the Esc/back semantics alone.
+- **The Detail projection is ambiguity-free.** Terminal sequences and unknown
+  controls are stripped at the display boundary, but CR/LF/TAB render as visible
+  `\n`/`\r`/`\t`, other controls as `\xNN`, and a literal backslash as `\\` — two
+  different raw values (a real newline vs a literal `\n`) can never look the same.
+  The copy source stays the untouched DTO value.
+- **Blocking owners pre-empt by closure** (§10.1): Question/Approval/Save run
+  `abandonWorkspaceForBlockingOwner()`, which closes the Job AND Settings leases
+  under one freeze window before committing their own state. A Settings open that
+  finds a blocking owner already active is refused.
+- **The legacy bridge closes before it opens.** The `Other settings` row runs
+  `openLegacySettings()` only after the workspace's own `close()` has retired the
+  lease and restored the return surface, so the existing `SettingsList` mounts on
+  the real return surface instead of stacking under a second physical owner; a
+  failed legacy open reports the real error on the restored surface and never
+  resurrects the closed workspace.
+- **Read projection, not a second store.** The panel holds no ConfigPort and no
+  subscription: the `/settings` command assembles a detached readonly snapshot at
+  open and at the explicit `R` refresh, and the panel renders it. Copy captures the
+  row's exact source value synchronously and the app's settlement re-proves THIS
+  workspace record before it may notify, so a late clipboard result can neither
+  repaint nor address a replacement workspace.
+
+## 11. Optional seat tenant: PARK / REFUSE
 A private Client-local caller may project ONE optional tenant into the editor
 seat. Phase 3A ships the seam and its arbitration, not a product surface:
 `TuiApp.tryOpenOptionalSeatTenant` is private and no command or extension
