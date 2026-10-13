@@ -1175,6 +1175,25 @@ test('F12 / UX-10 pre-paint keys resolve the level, never the projection: the sa
     assert.match(h.rowsPlain()[0]!, /SETTINGS · Appearance · Rows/, `the post-paint Esc returns exactly one level at ${columns}`)
     h.dispose()
   }
+
+  // Three keys BEFORE the first paint: Enter -> Enter -> Esc must land on L1
+  // (neither close nor skip a level), exactly like the painted walk.
+  for (const [columns, rows] of [[80, 24], [120, 40], [160, 40]] as const) {
+    const h = setup({ columns, rows, doc: { theme: 'dark' } })
+    h.invoke('settings')
+    h.vt.sendInput('\r') // L0 -> L1
+    h.vt.sendInput('\r') // L1 -> L2
+    h.vt.sendInput('\x1b') // L2 -> L1, NEVER a full close
+    await h.vt.waitForRender()
+    assert.ok(h.view().includes('SETTINGS'), `the pre-paint deep walk never closes at ${columns}:\n${h.view()}`)
+    assert.match(h.rowsPlain()[0]!, /SETTINGS · Appearance · Rows/, `the pre-paint deep walk lands on L1 at ${columns}`)
+    // The rest of the walk closes exactly once from the outermost level.
+    await key(h, '\x1b')
+    await key(h, '\x1b')
+    await key(h, '\x1b')
+    assert.ok(h.view().includes('❯'), `the walk closes from L0 at ${columns}`)
+    h.dispose()
+  }
 })
 
 // ── UX-01…UX-11: the unified three-level navigation contract ──────────────
@@ -1280,6 +1299,25 @@ test('UX-05 a resize keeps focus/category/row and invalidates the previous paint
   await settle(h)
   assert.deepEqual(h.copied, [], 'a press recorded against the wide geometry is refused after the resize')
   assert.match(h.rowsPlain()[0]!, /SETTINGS · Display/, 'the category and level survive the resize')
+  h.dispose()
+})
+
+test('UX-05b a resize that has NOT repainted yet still refuses the straddling press', async () => {
+  const h = setup({ columns: 80, rows: 24, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // L0 -> L1 (narrow)
+  await key(h, '\r') // L1 -> L2: the narrow Detail paints the Copy button at x=0
+  const buttonRow = rowOf(h, '[Copy value]')
+  const buttonCol = cellIndexOf(h, buttonRow, '[Copy value]')
+  press(h, buttonRow, buttonCol)
+  // The LIVE terminal is already 96 columns (medium, two panes) but NO repaint
+  // has run yet: the resize is a gesture boundary by itself, so the press-time
+  // cell must not activate even though the painted hit map is still the old one.
+  h.vt.resize(96, 24)
+  release(h, buttonRow, buttonCol)
+  await settle(h)
+  assert.deepEqual(h.copied, [], 'a release after a resize without a repaint must be refused')
+  assert.match(h.rowsPlain()[0]!, /SETTINGS · Appearance \/ Configured theme/, 'the level survives the resize')
   h.dispose()
 })
 
