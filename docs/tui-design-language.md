@@ -1,7 +1,8 @@
 # TUI design language (v1)
 
-> **Status: PROPOSED — §1.3 lists the decisions that are NOT frozen until the
-> Owner confirms them.** Everything else in this file is the working spec.
+> **Status: FROZEN v1 (Owner-confirmed 2026-10-14).** §1.3 records the six
+> decisions and the one Owner amendment (`D5`: `∙ Running`, not a bare word).
+> Any later change to the vocabulary follows §11.1 and lands in this file first.
 >
 > Baseline: branch `next`, commit `7ccaa20a`. This document was derived from the
 > real `VirtualTerminal` frames of the running product (`docs/tui-design-language-samples.md`
@@ -42,21 +43,22 @@ If a requested visual change needs a new layout/focus authority, a second theme
 state, a fork change, or a public extension API change, **stop** and ask for an
 Owner amendment instead of doing it under this document.
 
-### 1.3 Pending Owner decisions
+### 1.3 Owner decisions (confirmed 2026-10-14)
 
-These are recorded here so a coding agent does not treat them as final.
+Each decision was put to the Owner with a recommendation and at least one
+alternative; this is the frozen outcome, and the rollout plan may start.
 
-| # | Decision | Recommended | Alternative | Rationale |
-|---|---|---|---|---|
-| D1 | Direction | **"One active signal, quiet chrome"** (§2) | OMP-style denser dashboard | §2.1; the surfaces are line-oriented full-width alt-screen roots, and a dashboard needs a geometry authority this repo forbids |
-| D2 | Wide-screen column boundary | **2-cell gutter only** (no vertical glyph) | `│` rule, or per-pane header filler rules | `│` U+2502 is EAW-ambiguous — see §4.3 |
-| D3 | Navigation cursor | **`>`** (U+003E) | `›` (U+203A), `❯` (U+276F) | `>` and `›` are both 1 cell and EAW-neutral; `>` is already the measured geometry in both workspaces, whereas `›` already owns two icon semantics (`icons.ts` `tool-shell`/`slash-command`) and the legacy list cursor, and `❯` already owns the transcript's user marker. Pi's `→` is EAW-ambiguous and is rejected (§4.3) |
-| D4 | Action-bar separator | **` · `** (U+00B7) | ` \| ` (ASCII) | all three reference TUIs join hint segments with ` · `, and it is already this repo's dominant separator in prose/fact lines (`task-panel`, `plugin-manager`, both workspace meta rows); `\|` exists only in the two workspace bars. ` · ` is EAW-ambiguous — but so is the `─` rule painted on the same frame, so choosing `\|` here would buy no real CJK safety (§4.3) |
-| D5 | Status presentation | **`Running` (Title Case), no `●`** | `Running` + `∙`; or keep `RUNNING` + `●` | `●` U+25CF is EAW-ambiguous (2 cells in CJK-width terminals) and the *word* is the real signal; §4.1/§4.3 |
-| D6 | Job reading-facts row flanks | **remove the two flanking rules** | keep them | §6.2 rules budget; the disclosure stays as a dim status line |
+| # | Decision | Frozen outcome | Why / amendment |
+|---|---|---|---|
+| D1 | Direction | **"One active signal, quiet chrome"** (§2) | accepted as recommended: these are line-oriented full-width alt-screen roots, and a dashboard needs a geometry authority this repo forbids |
+| D2 | Wide-screen column boundary | **2-cell gutter only** (no vertical glyph, no header filler rule) | accepted: zero added width, and no new EAW-ambiguous glyph role (§6.3) |
+| D3 | Navigation cursor | **`>`** (U+003E) | accepted: already the measured geometry in both workspaces; `›`/`❯` are EAW-safe but already own other roles (icon semantics / legacy list cursor / transcript user marker); Pi's `→` is EAW-ambiguous and rejected (§4.3) |
+| D4 | Action-bar separator | **` · `** (U+00B7) | accepted: all three reference TUIs join hint segments with it, and it is already this repo's dominant idiom; the `─` rule grandfathers the same EAW class (§4.2) |
+| D5 | Status presentation | **`∙ Running`** — Title Case word plus a one-cell marker (`∙`, U+2219) | **Owner amendment**: the word is the signal, but the glyph anchor is kept; `●` (U+25CF, EAW-ambiguous) is replaced by the EAW-neutral `∙` so a CJK-width terminal cannot shift the right-aligned group (§4.1) |
+| D6 | Job reading-facts row | **remove the two flanking rules** | accepted: a rule marks a boundary and a text line is never flanked (§6.2) |
 
-Once confirmed, the recommendation becomes the rule and this section is
-replaced by a one-line "frozen at <date>" note.
+Re-opening any of these is a spec change (§11.1): edit this table in the same PR,
+and note a user-visible consequence in the changelog.
 
 ## 2. Direction: "one active signal, quiet chrome"
 
@@ -134,7 +136,7 @@ can be reviewed against a frame:
 | 6 | Active glyph (navigation cursor) | `primary` | no | `> ` leading a list row |
 | 7 | Active label (focused pane / active tab) | `primary` | yes | `[Rows (2)]`, `[Output]` |
 | 8 | Selected row text | `textStrong` | yes | the selected row's label and value |
-| 9 | Status word | `success` / `warning` / `error` / `textDim` | no | `Running`, `Failed`, `Completed`, `Ready`, `Stale` |
+| 9 | Status word (+ optional one-cell marker `∙`) | `success` / `warning` / `error` / `textDim` | no | `∙ Running`, `∙ Failed`, `Completed`, `Ready`, `Stale` |
 | 10 | Machine marker | `warning` / `error` / `textMuted` | no | `[GAP]`, `[ERROR]`, `[SETTLED]` |
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
@@ -217,13 +219,19 @@ chrome rules budget of §6.2.
 - ALL-CAPS is reserved for two non-prose roles: **bracketed machine markers**
   (`[GAP]`, `[SETTLED]`, `[ERROR]`) and **acronyms / unit abbreviations**
   (`TTFB`, `CH91.9%`, `R5 116 tok/s` in the footer stats, `PS>` as a shell
-  prompt). It is never used to give a *word* emphasis.
-  (Case of the markers is a low-risk sub-choice; see D5 and the samples doc.
-  Lowercase `[gap]` is the alternative if the owner prefers calm.)
+  prompt). It is never used to give a *word* emphasis. The bracketed markers
+  keep uppercase: they are the one role ALL-CAPS keeps.
 - Status words are a fixed display map, with the raw status as the fallback for
   an unknown wire value: `running`→`Running`, `stopping`→`Stopping`,
   `completed`→`Completed`, `failed`→`Failed`, `killed`→`Killed`,
   `timed_out`→`Timed out`, `lost`→`Lost`.
+- **A status may carry exactly one leading one-cell marker, and it is `∙`
+  (U+2219).** Owner decision D5: the written word is the signal, the marker is a
+  secondary anchor, and the marker must be EAW neutral — `●` (U+25CF) is
+  ambiguous and may paint two cells under `cjk-ambiguous-width`, which would
+  shift a right-aligned status group. The marker takes the word's token
+  (`∙ Running`, `∙ Failed`), and a status that has no word (a glyph-only state)
+  is not allowed in chrome.
 - Multiple words in one hint stay lowercase after the key: `Esc back`,
   `Enter details`, `C copy value`.
 - **Key tokens are Capitalized; a bare letter is lowercase.** `Esc`, `Enter`,
@@ -296,6 +304,7 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 | Navigation cursor | `> ` (2 cells) | one per list; D3 |
 | Active/current label | `[Label]` | focus, active tab, current pane |
 | Current-value marker (candidate list only) | `[← current]` | never shares the cursor's meaning |
+| Status marker | `∙` (U+2219) | one cell, EAW neutral; replaces `●`; D5 |
 | Disclosure | `▸` / `▾` | collapse state only, never "selected" |
 | Rule | `─` | boundary only |
 | Fact + action-bar separator | ` · ` | D4; the single separator for segments and facts |
@@ -667,7 +676,7 @@ line numbers.
 | Surface identity ink | kimi paints the dialog title `primary` + bold; oh-my-pi insets it in the top rule in `accent` | `textStrong` bold, no colour. This repo already uses `primary` for links *and* inline code *and* selection (`markdownTheme.code`, picker prefixes), so a blue title would make "blue" mean brand + clickable + current at once. Keeping the identity weight-only keeps `primary` = active/actionable |
 | Selected row's text | pi/oh-my-pi paint it with their accent token | bold `textStrong`; only the cursor glyph is `primary`. Same reason as above, and it matches this repo's existing picker device |
 | Hint overflow | kimi truncates the whole line; pi truncates + one documented whole-segment drop; oh-my-pi's native path wraps and its ANSI footer clips in a height-1 row | **whole-segment drop by priority, never mid-word** (already implemented in Job). At a pinned height 1, wrapping is impossible and line truncation is what produces today's `Esc back · ↑↓/Pg keys scroll · Enter change…` |
-| Status word case | pi sentence case, oh-my-pi Title Case, kimi lowercase | Title Case (§4.1) — the middle choice, consistent with the metrics words already in this repo (`Committed`, `Served`) |
+| Status word case + marker | pi sentence case; oh-my-pi Title Case with `●`/`✓`/`✕`/`⊘` glyphs; kimi lowercase | Title Case word plus one EAW-neutral `∙` anchor (D5, Owner-amended) — the glyphs all three use (`●`, `✓`, `✕`, `⊘`, `⏳`) are EAW-ambiguous or emoji-class, which this repo's width gate rejects |
 | Cursor glyph shape | pi `→`, oh-my-pi `❯`/`>`, kimi `❯` (and kimi forbids inventing `>`/`→` for its own dialogs) | `>` for this repo (D3): `→` is EAW-ambiguous, `❯` already owns the transcript's user marker, `›` already owns two icon semantics |
 | "Never colour alone" | **no reference states this rule** (one paints a disabled row by colour only) | adopted anyway (§3.3.3) because our palette proves colour is unreliable here: `borderFocus` and `warning` are the same hex |
 | Rules on a status line | kimi forbids an inner rule; oh-my-pi freely adds `├──┤` dividers | at most one rule per boundary and never flanking a text line (D6) |
