@@ -1365,6 +1365,13 @@ export class SettingsWorkspacePanel implements Component {
     this.resetChoice()
     this.editPhase = { kind: 'choosing', field: fresh.edit!.field, candidate: options[index]!.value, index }
     this.choiceOffset = 0
+    // The rebase sentinels are the LAST computed layout, not a fact about this choice:
+    // leaving them set would make the first paint of a new choice take the no-rebase
+    // branch, so re-entering the choice for a candidate below the fold would highlight it
+    // out of view (and a confirm would commit an identity the user cannot see).
+    this.lastChoiceIndex = -1
+    this.lastChoiceViewport = -1
+    this.lastChoiceWidth = -1
     this.bumpRevision()
     this.intents.requestRender()
   }

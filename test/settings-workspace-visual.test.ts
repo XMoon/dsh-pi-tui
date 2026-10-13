@@ -2513,3 +2513,25 @@ test('B-31 the same re-flow inside the two-pane layout keeps the confirmed candi
   assert.ok(h.view().includes('> L9-'), `the highlight survives the two-pane re-flow:\n${h.view()}`)
   h.dispose()
 })
+
+test('B-32 re-entering the choice reveals the highlighted candidate again', async () => {
+  const themes = longNamedThemes(10)
+  const h = setup({ columns: 108, rows: 14, doc: { theme: 'dark' }, themes })
+  themes.dispose('long0')
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  for (let index = 0; index < 10; index += 1) await key(h, '\x1b[B')
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+  assert.equal(h.doc.theme, 'plugin:acme/long9', 'the last candidate really committed')
+
+  // Re-enter the choice at UNCHANGED dimensions: the candidate is the committed value
+  // (below the fold), and the previous layout sentinels must not suppress the reveal.
+  await key(h, '\r')
+  await settle(h)
+  assert.ok(h.view().includes('> '), `the choice paints its highlight:\n${h.view()}`)
+  assert.ok(h.view().includes('> L9-'), `and it is the visible highlighted candidate:\n${h.view()}`)
+  h.dispose()
+})
