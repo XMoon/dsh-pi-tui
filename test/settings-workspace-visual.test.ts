@@ -1082,3 +1082,40 @@ test('A-05b the decorative rules yield before readable content on short screens'
   }
   live.dispose()
 })
+
+// ── External UI review round 2 (PR #295): the narrow drill-down contract ───
+
+test('F11 narrow Tab/Shift+Tab never bypass the drill-down and Left/Right never switch category', async () => {
+  const h = setup({ columns: 80, rows: 24, doc: { theme: 'dark' } })
+  await h.open()
+  assert.match(h.rowsPlain()[0]!, /SETTINGS · Categories/)
+  const before = h.view()
+  for (const data of ['\t', '\x1b[Z', '\t']) await key(h, data)
+  assert.equal(h.view(), before, 'Tab/Shift+Tab are inert on the narrow categories page')
+  assert.ok(!h.view().includes('Value'), 'the Detail is never reached directly from Categories')
+  await key(h, '\x1b[C')
+  assert.equal(h.view(), before, 'Right never switches category on the narrow categories page')
+  await key(h, '\x1b[D')
+  assert.equal(h.view(), before, 'Left neither')
+  // Positive control: the declared per-level Enter/Esc drill-down still works.
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /SETTINGS · Appearance · Rows/)
+  await key(h, '\r')
+  assert.match(h.rowsPlain()[0]!, /SETTINGS · Appearance \/ Configured theme/)
+  await key(h, '\x1b')
+  assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc returns one level')
+  await key(h, '\x1b')
+  assert.match(h.rowsPlain()[0]!, /Categories/)
+  h.dispose()
+
+  // Medium keeps the focus cycle and the header arrows.
+  const medium = setup({ columns: 120, rows: 24, doc: { theme: 'dark' } })
+  await medium.open()
+  await key(medium, '\t')
+  assert.match(medium.rowsPlain()[rowOf(medium, 'DETAILS')]!, /\[DETAILS\]/, 'Tab still cycles focus in medium')
+  await key(medium, '\t')
+  assert.match(medium.rowsPlain()[0]!, /\[← category →\]/, 'the medium category owner keeps the header arrows')
+  await key(medium, '\x1b[C')
+  assert.match(medium.rowsPlain()[0]!, /Display/, 'Right still switches the category in medium')
+  medium.dispose()
+})

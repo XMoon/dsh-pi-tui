@@ -20500,6 +20500,7 @@ export class TuiApp {
     let record: SettingsWorkspaceRecord
     const panel = new SettingsWorkspacePanel(source, {
       rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       notice: () => this.currentNotice(),
       onClose: () => record.close(),
