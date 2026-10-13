@@ -561,8 +561,9 @@ export class HistoryPanel implements Component, Focusable {
    * and otherwise resolves the event against the LAST PAINTED frame: the query
    * row forwards to the Input, a result press only selects, the explicit
    * actions act on a same-action press+release, and the Preview owns the exact
-   * source drag selection. Wheel events scroll ONLY the region under the
-   * pointer.
+   * source drag selection — whose release must land inside that same painted
+   * Preview (an outside or post-resize release cancels). Wheel events scroll
+   * ONLY the region under the pointer.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     // The pointer path never passes the Host key ladder, so THIS is the entry
@@ -570,36 +571,18 @@ export class HistoryPanel implements Component, Focusable {
     // a click must never act on another session's page, and the fork keeps
     // dispatching to the component until the next revalidation retires it.
     if (this.disposed || !this.pointerEnabled() || !this.tenantIsCurrent()) return undefined
+    // A Preview drag's RELEASE always ends the gesture, whatever geometry the
+    // event carries: a release that lands outside the painted Preview (or after a
+    // width/height change) safely CANCELS instead of leaving a stale anchor that
+    // a later motion-only drag could extend.
+    if (event.type === 'release' && this.gesture?.kind === 'preview') return this.finishPreviewDrag(event)
+
     const frame = this.frame
     // Last-painted geometry only: a resize that has not been repainted (or a
     // frame from another root) must never dispatch against stale coordinates.
     if (frame === undefined || event.width !== frame.width || event.height !== frame.height) return undefined
 
     if (event.type === 'wheel') return this.handleWheel(event, frame)
-
-    // A DRAG release is resolved BEFORE the hit lookup: a release that lands
-    // outside the painted rows must still END the gesture, or a stale preview
-    // anchor would stay live for a later motion-only drag to extend.
-    if (event.type === 'release') {
-      const gesture = this.gesture
-      // Any other gesture is resolved by the `click` the fork synthesizes right
-      // after this release for an unmoved press, and THAT handler re-proves the
-      // pressed action/identity.
-      if (gesture?.kind !== 'preview') return undefined
-      this.gesture = undefined
-      // Capture the payload SYNCHRONOUSLY from the range the gesture selected:
-      // the async clipboard settlement downstream never recomputes it. The
-      // highlight SURVIVES the release (a new press or a selection change clears
-      // it), exactly like the Job Command page.
-      const range = this.previewSelectionRange()
-      this.onResultsChanged?.()
-      if (range === undefined) return { handled: true }
-      const content = this.selected()?.content ?? ''
-      const text = content.slice(range.start, range.end)
-      if (text === '') return { handled: true }
-      this.onCopy?.(text)
-      return { handled: true, render: true }
-    }
 
     const hit = frame.hits[event.y]
     if (hit === undefined) return undefined
@@ -682,6 +665,39 @@ export class HistoryPanel implements Component, Focusable {
     return undefined
   }
 
+  /**
+   * End one Preview drag. The payload is captured SYNCHRONOUSLY from the range
+   * the gesture selected (the async clipboard settlement downstream never
+   * recomputes it) — but ONLY when the release really landed inside the painted
+   * Preview of the SAME last-painted frame. Any other release — outside the
+   * painted rows, on another painted region, or against a frame whose width or
+   * height moved since the paint — safely CANCELS the gesture: nothing is copied
+   * and no selection survives (plan §6 H3A-09's negative control).
+   */
+  private finishPreviewDrag(event: TuiMouseEvent): TuiMouseEventResult {
+    this.gesture = undefined
+    const frame = this.frame
+    const hit = frame?.hits[event.y]
+    const inside = frame !== undefined
+      && event.width === frame.width
+      && event.height === frame.height
+      && hit !== undefined
+      && hit.kind === 'preview'
+    if (!inside) {
+      this.resetPreviewSelection()
+      this.onResultsChanged?.()
+      return { handled: true, render: true }
+    }
+    const range = this.previewSelectionRange()
+    this.onResultsChanged?.()
+    if (range === undefined) return { handled: true }
+    const content = this.selected()?.content ?? ''
+    const text = content.slice(range.start, range.end)
+    if (text === '') return { handled: true }
+    this.onCopy?.(text)
+    return { handled: true, render: true }
+  }
+
   /** Drop any in-flight pointer gesture and highlighted Preview selection (a
    *  park, a close, a resize and a screen swap all invalidate the frame it was
    *  taken against). */
@@ -693,7 +709,9 @@ export class HistoryPanel implements Component, Focusable {
   /** Open-time init: run the initial (empty-query) search immediately. */
   start(): void {
     if (this.disposed) return
-    void this.refresh() // allowlist: refresh() never rejects (errors land in the panel state)
+    // allowlist: refresh() never rejects — source failures land in the panel
+    // state and a stale-subject page is dropped without any teardown call.
+    void this.refresh()
   }
 
   /** Cancel and forget (called by the host through the seat lease). */
@@ -1172,18 +1190,15 @@ export class HistoryPanel implements Component, Focusable {
   }
 
   /**
-   * Retire this panel because its captured subject is no longer current. The
-   * page in flight (or already painted) belongs to a previous session, so it is
-   * neither published nor acted on; the teardown rides the host's ONE close path
-   * (the same one Esc uses). An IDLE stale seat is still retired by the host's
-   * next revalidation entry — interpreting the session-switch publication itself
-   * as a revalidation entry, and the authoritative switch generation / no-ABA
-   * coupling, stay in B3-B.
+   * Drop an in-flight page whose captured subject is no longer current: it
+   * belongs to a previous session, so it is neither published nor acted on. This
+   * does NOT retire the seat: the lifecycle stays CALLER-owned (the host's next
+   * revalidation entry retires a stale tenant through its ONE close path), and a
+   * synchronous teardown call here would be the only way `refresh()` could
+   * reject — the fire-and-forget search contract is that it never does.
    */
-  private retireStale(): void {
+  private dropStalePage(): void {
     this.state.loading = false
-    if (this.disposed) return
-    this.onClose()
   }
 
   private scheduleSearch(): void {
@@ -1234,7 +1249,9 @@ export class HistoryPanel implements Component, Focusable {
       // source must not paint "History unavailable" into a panel that no longer
       // owns this query.
       if (generation !== this.state.generation || controller.signal.aborted) return
-      if (!this.tenantIsCurrent()) return this.retireStale()
+      // A previous subject's failure is not this session's "History
+      // unavailable": drop it silently (the seat keeps its current rows).
+      if (!this.tenantIsCurrent()) return this.dropStalePage()
       this.state.loading = false
       this.state.error = 'History unavailable'
       this.state.results = []
@@ -1246,7 +1263,7 @@ export class HistoryPanel implements Component, Focusable {
     // The result page belongs to the session captured at open: a subject that
     // moved while this search was in flight must never publish another
     // session's rows into the visible History.
-    if (!this.tenantIsCurrent()) return this.retireStale()
+    if (!this.tenantIsCurrent()) return this.dropStalePage()
     // The stable ID survives a recompute when it is still in the new page; the
     // first valid match is the fallback.
     const previous = this.selected()?.id

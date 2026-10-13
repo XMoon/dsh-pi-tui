@@ -68,6 +68,8 @@ interface Harness {
   readonly notices: string[]
   /** The MUTABLE live result page the injected source returns. */
   readonly rows: HistorySearchResult[]
+  /** EVERY terminal write chunk, in order (the mode-sequence witness). */
+  readonly writes: string[]
 }
 
 /** The REAL app with a recording clipboard capability and an owned runner that
@@ -76,6 +78,15 @@ interface Harness {
  *  painted cells. */
 function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30): Harness {
   const vt = new VirtualTerminal(columns, terminalRows)
+  // Record the PHYSICAL byte stream the surface writes: the regular-root
+  // negative must prove that no mouse mode was ever enabled, and the viewport
+  // text alone cannot witness that.
+  const writes: string[] = []
+  const originalWrite = vt.write.bind(vt)
+  vt.write = (data: string) => {
+    writes.push(data)
+    originalWrite(data)
+  }
   const copied: string[] = []
   const notices: string[] = []
   const page = [...rows]
@@ -102,7 +113,7 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
     notices.push(text)
     originalNotify(text, kind)
   }
-  return { vt, app, copied, notices, rows: page }
+  return { vt, app, copied, notices, rows: page, writes }
 }
 
 /** Trigger one more debounced search over the CURRENT page (the tests use the
@@ -264,27 +275,52 @@ test('A0 fullscreen seat preflight: a result press resolves by ID, and a page th
   assert.equal(h.app.getDraft(), '', 'a result click never accepts')
 })
 
-test('A0 negative: the regular main screen has NO application mouse (no SGR enable, no pointer actions)', async () => {
-  const h = startApp([row('alpha prompt', 3, '/work/a', 'id-a')], 80, 24)
+test('A0 negative: the regular main screen writes no mouse mode and honors no pointer action (H3A-16)', async () => {
+  // TWO rows, so a pointer action that WERE interpreted would visibly move the
+  // selection to the second one.
+  const h = startApp([
+    row('alpha prompt', 3, '/work/a', 'id-a'),
+    row('beta prompt', 2, '/work/a', 'id-b'),
+  ], 80, 24)
   await h.vt.waitForRender()
+  h.writes.length = 0 // only the regular-root History section is asserted
   h.vt.sendInput('\x12')
   await h.vt.waitForRender()
   await flush(2)
-  assert.ok(rowOf(h.vt, 'alpha prompt') >= 0, `History must open in the regular root:\n${view(h.vt)}`)
-  // No application mouse mode is enabled on the main screen, so a raw SGR click
-  // is not even a mouse report for the app — the terminal-native selection /
-  // scrollback keeps it.
-  const before = view(h.vt)
-  press(h.vt, rowOf(h.vt, 'alpha prompt'), 4)
-  release(h.vt, rowOf(h.vt, 'alpha prompt'), 4)
+  const alphaRow = rowOf(h.vt, 'alpha prompt')
+  const betaRow = rowOf(h.vt, 'beta prompt')
+  assert.ok(alphaRow >= 0 && betaRow >= 0, `History must open in the regular root:\n${view(h.vt)}`)
+  // The seat is keyboard-only here: no mouse buttons, and the ordinary footer
+  // region stays reachable.
+  assert.equal(rowOf(h.vt, 'Copy all'), -1, 'the regular root must not paint fullscreen-only mouse buttons')
+  const markerBefore = rawView(h.vt).find(line => line.includes('›')) ?? ''
+  assert.ok(markerBefore.includes('alpha prompt'), 'the first result is selected')
+  // Send a REAL SGR press/click on the OTHER row: with no application mouse it
+  // must change nothing at all.
+  press(h.vt, betaRow, 4)
+  release(h.vt, betaRow, 4)
   await h.vt.waitForRender()
   await flush(2)
-  assert.equal(h.app.getDraft(), '', 'a regular-root press must not accept')
-  assert.equal(rowOf(h.vt, 'Copy all'), -1, 'the regular root must not paint fullscreen mouse buttons')
-  assert.notEqual(view(h.vt), '', before)
+  assert.equal(rawView(h.vt).find(line => line.includes('›')) ?? '', markerBefore,
+    'a regular-root SGR click must not move the History selection')
+  assert.ok(rowOf(h.vt, 'Input history') >= 0, 'the click must not close the seat')
+  assert.equal(h.app.getDraft(), '', 'a regular-root press must never accept')
+  // NO application mouse mode was ever enabled (1000/1002/1003/1006), and the
+  // regular root never entered the alternate screen: the terminal keeps its own
+  // selection/scrollback and its native mouse reporting.
+  const mouseMode = /\x1b\[\?100[0236][hl]/
+  const altScreen = /\x1b\[\?1049[hl]/
+  const offending = h.writes.filter(chunk => mouseMode.test(chunk) || altScreen.test(chunk))
+  assert.deepEqual(offending, [],
+    `the regular root must write no mouse/alternate-screen mode:\n${JSON.stringify(offending)}`)
+  // Keyboard actions still work in the same section.
+  h.vt.sendInput('a')
+  await h.vt.waitForRender()
+  assert.ok(rawView(h.vt).some(line => line.includes('Search: > a')),
+    `the regular-root History stays fully keyboard-driven:\n${view(h.vt)}`)
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(rowOf(h.vt, 'alpha prompt') < 0, 'Esc must still close the regular-root History (keyboard-only)')
+  assert.ok(rowOf(h.vt, 'Input history') < 0, 'Esc must still close the regular-root History')
 })
 
 test('A0 fullscreen actions: [Copy all] copies the EXACT entry bytes (newline/CJK/trailing spaces)', async () => {

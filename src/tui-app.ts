@@ -7491,19 +7491,23 @@ export class TuiApp {
 
   /**
    * Whether one History panel is still the LIVE, ACTIVE, VISIBLE seat tenant —
-   * the token a copy settlement must re-prove before it may notify. Instance
-   * identity alone is NOT enough here: unlike the Job/Settings workspaces (whose
-   * lease is CLOSED when a blocking owner preempts them), the Phase-3A optional
-   * tenant is deliberately PARKED, so the same panel keeps existing while it is
-   * not painted. The record's `phase` is the lifecycle authority; physical focus
-   * is not consulted (a capturing overlay may hold the keyboard while the tenant
-   * stays the active projected seat).
+   * the token a copy settlement must re-prove before it may notify. Two facts are
+   * required, and neither replaces the other: the LIFECYCLE state (unlike the
+   * Job/Settings workspaces, whose lease is CLOSED when a blocking owner preempts
+   * them, the Phase-3A optional tenant is deliberately PARKED, so the same panel
+   * keeps existing while it is not painted — `phase` is that authority, and
+   * physical focus is not consulted because a capturing overlay may hold the
+   * keyboard while the tenant stays the active projected seat) AND the caller
+   * SUBJECT (`record.isCurrent()`: the captured session identity is still the
+   * live one — a copy started before a session switch must not report its
+   * outcome over the new session).
    */
   private historyTokenIsLive(panel: HistoryPanel): boolean {
     if (this.disposed || this.historyPanel !== panel) return false
     const record = this.optionalSeat
-    return record !== undefined && record.component === panel
-      && record.phase === 'active' && !record.finalized
+    if (record === undefined || record.component !== panel
+      || record.phase !== 'active' || record.finalized) return false
+    return record.isCurrent()
   }
 
   /** Publish the current match position for the overlay header (1-based, total). */

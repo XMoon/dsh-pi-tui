@@ -2141,7 +2141,11 @@ the seat shows the History surface.
   against its last painted frame (width/height, painted result identity, search
   generation). A result click selects; the explicit `[Use selected]` and
   `[Copy all]` cells act, and each action is bound to the result ID it was
-  pressed for. The regular main screen writes no mouse mode and installs no
+  pressed for. A Preview drag copies only when its RELEASE lands inside the
+  painted Preview of the same last-painted frame — a release outside it, on
+  another painted region, or after a width/height change safely cancels (no copy,
+  no surviving selection), and an ended gesture can never be extended or
+  resurrected by a later motion event. The regular main screen writes no mouse mode and installs no
   bridge: the panel refuses every pointer event there, and the terminal's native
   selection/scrollback is untouched.
 - **Draft and cancellation.** Accept writes the accepted `content` into the
@@ -2157,12 +2161,14 @@ the seat shows the History surface.
   `tenantIsCurrent` and evaluated at the pointer entry (the fork dispatches mouse
   events outside the Host key ladder, so nothing else would notice a session
   change first), at the acceptance/copy eligibility checks and at the async search
-  commit — a page that was in flight for a previous session is never published and
-  retires the seat through the same close path Esc uses. An IDLE stale seat is
-  still retired by the host's next revalidation entry; treating the session-switch
-  publication itself as a revalidation entry is deliberately NOT done here (it
-  would extend the Phase-3A revalidation seam and let UI teardown failure propagate
-  into the session commit).
+  commit — a page that was in flight for a previous session is never published
+  (the seat keeps its current rows and stays inert: no acceptance, no copy, no
+  pointer action) and the CALLER keeps the lifecycle: the panel never retires
+  itself from that async path, so the fire-and-forget search cannot reject. The
+  host's next revalidation entry retires the stale tenant through its ONE close
+  path; treating the session-switch publication itself as a revalidation entry is
+  deliberately NOT done here (it would extend the Phase-3A revalidation seam and
+  let UI teardown failure propagate into the session commit).
 - **Still later.** B3-B owns the full production Question/Approval FIFO
   PARK/restore, the switch-time retirement/authoritative session generation and
   ABA protection across async queries and acceptance, and the L6 integration
