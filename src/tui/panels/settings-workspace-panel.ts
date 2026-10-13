@@ -178,19 +178,25 @@ export function settingsWorkspaceInitialFocus(columns: number): SettingsWorkspac
 }
 
 /**
- * The ONE per-frame row allocation. Action Bar and Header are granted first,
- * then the body floor, then the optional freshness/scope metadata and the
- * transient notice; the visual rules are only granted when a body row survives.
+ * The ONE per-frame row allocation, in the frozen §4.4 priority order: the
+ * Action Bar and the Header are granted first, then the BODY keeps at least one
+ * real row (from three terminal rows on), then the optional notice (rows>=6,
+ * body>=2 after it) and freshness/scope metadata (rows>=8, body>=3 after it).
+ * The decorative rules are LAST: they are granted only when the body would still
+ * keep three real rows, so decoration never crowds out readable content.
  */
 function planSettingsChrome(width: number, rows: number, noticeLive: boolean): SettingsChromePlan {
   const safeRows = Math.max(1, Math.floor(rows))
   const headerRows = safeRows >= 2 ? 1 : 0
   const actionRows = 1
-  const metaRows = safeRows >= 8 && safeRows - 2 >= 4 ? 1 : 0
-  const noticeRows = safeRows >= 6 && safeRows - 2 - metaRows >= 3 && noticeLive ? 1 : 0
-  const fixed = headerRows + actionRows + metaRows + noticeRows
-  const ruleRows = safeRows - fixed >= 3 ? 2 : 0
-  const bodyRows = Math.max(0, safeRows - fixed - ruleRows)
+  // Rows the body could use once the mandatory chrome is granted.
+  const base = Math.max(0, safeRows - headerRows - actionRows)
+  // §4.4: the notice keeps the body at two rows; the metadata keeps it at three.
+  const noticeRows = safeRows >= 6 && noticeLive && base - 1 >= 2 ? 1 : 0
+  const metaRows = safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
+  const bodyWithoutRules = base - noticeRows - metaRows
+  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
+  const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
   return {
     width,
     rows: safeRows,
@@ -618,14 +624,17 @@ export class SettingsWorkspacePanel implements Component {
     const selected = row.id === this.rowId
     const marker = selected ? '> ' : '  '
     const width = this.paneRowWidth()
-    const label = `${marker}${sanitizedPhysicalLine(row.label)}`
-    const summary = sanitizedPhysicalLine(row.summary)
-    const summaryWidth = Math.min(visibleWidth(summary), Math.max(0, width - 4))
-    const labelWidth = Math.max(1, width - summaryWidth - 2)
-    const lead = fit(label, labelWidth)
-    const value = truncateToWidth(summary, Math.max(1, width - visibleWidth(lead)), '…', false)
-    const gap = Math.max(1, width - visibleWidth(lead) - visibleWidth(value))
-    const painted = lead + ' '.repeat(gap) + value
+    const label = fit(`${marker}${sanitizedPhysicalLine(row.label)}`, width)
+    const labelCells = visibleWidth(label)
+    // The configured NAME owns its cells first (the frozen hierarchy: the name
+    // stays identifiable, the list SUMMARY is what truncates). Only a label that
+    // fills the whole pane at all drops the summary.
+    const summaryCellRoom = Math.max(0, width - labelCells - 1)
+    const value = summaryCellRoom >= 1
+      ? truncateToWidth(sanitizedPhysicalLine(row.summary), summaryCellRoom, '…', false)
+      : ''
+    const gap = Math.max(1, width - labelCells - visibleWidth(value))
+    const painted = label + ' '.repeat(gap) + value
     return selected ? color.textStrong(painted) : color.text(painted)
   }
 
