@@ -7211,6 +7211,7 @@ export class TuiApp {
       // The main screen owns the terminal input handler again.
       this.refreshSchemeRegistrations()
     }
+    this.completeScreenHandoff()
     this.events.onFullscreenChange?.(enabled)
     // Re-create every remountable raw projection on the CURRENT active
     // screen, back → front by the broker's CURRENT logical z-order (not the
@@ -20438,6 +20439,7 @@ export class TuiApp {
       assertStillOpening()
       this.refreshSchemeRegistrations()
       screen.setFocus(panel)
+      this.completeScreenHandoff()
     } catch (error) {
       // A failed mount must never leave half a surface: latch/detach THIS record,
       // release its screen and panel, restore the surface that opened it, and
@@ -20675,6 +20677,7 @@ export class TuiApp {
       assertStillOpening()
       this.refreshSchemeRegistrations()
       screen.setFocus(panel)
+      this.completeScreenHandoff()
     } catch (error) {
       // A failed mount must never leave half a surface: latch/detach THIS record,
       // release its screen and panel, restore the surface that opened it, and
@@ -20722,12 +20725,26 @@ export class TuiApp {
     // DELIBERATE selection still follows the terminal, the restored screen re-samples, so
     // the runtime palette cannot stay stale until some later report that a terminal may
     // never send.
-    const abandoned = this.autoDetectScreen !== undefined && this.autoDetectScreen !== screen
-    if (this.themeFollowsTerminal() && (abandoned || this.themeResamplePending)) {
-      this.themeResamplePending = false
-      this.resampleTerminalTheme()
-    }
+    this.completeScreenHandoff()
     this.requestRender(true)
+  }
+
+  /**
+   * A screen hand-off has COMPLETED — a fullscreen swap, a workspace open, or a return to
+   * the surface a workspace paused. The observation that belonged to the previous screen
+   * died with it (`TuiBase.stop()` releases its probe), so the surface that now owns the
+   * terminal re-samples ONCE when the latest DELIBERATE selection still follows the
+   * terminal. Every hand-off calls this, not only the return path: otherwise a palette
+   * would stay stale until some later report that a terminal may never send. The screen
+   * identity check is kept — a stale answer must never colour the new screen — and the
+   * re-sample awaits the abandoned observation first, so it starts a FRESH one.
+   */
+  private completeScreenHandoff(): void {
+    if (!this.themeFollowsTerminal()) return
+    const abandoned = this.autoDetectScreen !== undefined && this.autoDetectScreen !== this.activeScreen
+    if (!abandoned && !this.themeResamplePending) return
+    this.themeResamplePending = false
+    this.resampleTerminalTheme()
   }
 
   /** Re-issue the single terminal background observation for the CURRENT screen, fenced

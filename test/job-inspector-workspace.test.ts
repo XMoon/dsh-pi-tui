@@ -1754,3 +1754,68 @@ test('A-12c a second workspace lease is refused while one is open, and a dispose
     onClose: () => {},
   }), /disposed surface/)
 })
+
+test('A-13 entering the Job workspace re-samples the observation its predecessor lost', async () => {
+  const saved = {
+    NO_COLOR: process.env.NO_COLOR,
+    FORCE_COLOR: process.env.FORCE_COLOR,
+    CI: process.env.CI,
+    COLORFGBG: process.env.COLORFGBG,
+  }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+  try {
+    const { vt, app } = startApp({}, {
+      runOwned: (_label, task, options) => {
+        void Promise.resolve()
+          .then(() => task())
+          .then(
+            result => options.onResult?.(result),
+            error => options.onError?.(error),
+          )
+      },
+    })
+    const writes: string[] = []
+    const originalWrite = vt.write.bind(vt)
+    vt.write = (data: string): void => {
+      writes.push(data)
+      originalWrite(data)
+    }
+    const queries = (): number => writes.join('').split('\x1b]11;?\x07').length - 1
+
+    // A boot-shaped observation for the screen that owns the terminal right now.
+    app.noteThemeSelection('auto')
+    const pending = app.autoDetectTheme({ shouldApply: () => app.themeFollowsTerminal() })
+    assert.equal(queries(), 1, 'the observation is issued on the main screen')
+
+    // Entering the Job workspace stops that screen, so its probe is released.
+    const handle = app.openJobInspector({
+      initial: openingRow(),
+      canStop: () => false,
+      onStop: () => {},
+      onClose: () => {},
+    })
+    await pending
+    await vt.waitForRender()
+    assert.ok(queries() > 1, `the entering Job screen issues a FRESH observation:\n${JSON.stringify(writes)}`)
+
+    vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    await vt.waitForRender()
+    assert.equal(app.currentTheme(), 'light', 'and the Job screen applies its answer')
+
+    handle.close()
+    await vt.waitForRender()
+    app.stop()
+  } finally {
+    if (saved.NO_COLOR === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = saved.NO_COLOR
+    if (saved.FORCE_COLOR === undefined) delete process.env.FORCE_COLOR
+    else process.env.FORCE_COLOR = saved.FORCE_COLOR
+    if (saved.CI === undefined) delete process.env.CI
+    else process.env.CI = saved.CI
+    if (saved.COLORFGBG === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = saved.COLORFGBG
+  }
+})
