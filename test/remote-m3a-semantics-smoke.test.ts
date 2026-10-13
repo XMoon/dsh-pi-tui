@@ -398,6 +398,8 @@ async function mountSettingsWorkspace(
   open(): Promise<void>
   key(data: string): Promise<void>
   settle(): Promise<void>
+  /** The mounted surface, for asserting the LIVE runtime fact a commit really changed. */
+  app: TuiApp
   view(): string
   dispose(): void
 }> {
@@ -476,6 +478,7 @@ async function mountSettingsWorkspace(
       await vt.waitForRender()
     },
     settle,
+    app,
     view: () => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n'),
     dispose: () => { if (!app.isDisposed()) app.dispose() },
   }
@@ -999,6 +1002,15 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
       (host.ctx as unknown as {
         settings: { describe(): readonly { ns: string; value?: Record<string, unknown>; user?: unknown }[] }
       }).settings.describe().find(entry => entry.ns === 'tui-app')
+    /** The same read through the SAVED UNBOUND original, for a case that has an
+     *  injected read failure armed on the live service. */
+    const hostDescriptorUnpatched = (): Record<string, unknown> | undefined => {
+      const descriptor = (originalDescribe.call(forms) as readonly {
+        readonly ns: string
+        readonly value?: Record<string, unknown>
+      }[]).find(entry => entry.ns === 'tui-app')
+      return descriptor?.value
+    }
     const descriptor = hostDescriptor()
     assert.equal(descriptor?.value?.displayPreset, 'compact', 'the Host authority carries the new preset')
     // The USER layer owns exactly the written field — the whole document was not
@@ -1062,22 +1074,24 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
       )
       assert.equal(hostDescriptor()?.value?.displayPreset, 'compact', 'the refused write never reached the Host')
 
-      // An ACCEPTED write whose authoritative refresh cannot complete must never be
-      // called saved. The official settings service performs its own reads around the
-      // write, so an injected read failure may surface on the write itself (a
-      // refusal) or only on the post-settlement refresh (accepted-but-unverified) —
-      // both are honest, and the invariant under test is that NEITHER is ever
-      // reported as `Verified`. The `record` policy's one-chain adapter proof (an
-      // accepted mutate + a failed post-settlement describe that resolves, records
-      // `lastRefreshFailure()` and leaves the snapshot non-current) and the workspace's
-      // `Commit accepted · verification unavailable` classification are locked in
-      // `test/remote-config-port.test.ts` and `test/settings-workspace-visual.test.ts`.
+      // A COMMITTED write whose authoritative readback cannot complete must never be
+      // called `Not saved`, and must never be called `Verified`: the official service
+      // applies the edit and then performs its OWN post-write describe, so a failure of
+      // that read reaches the client as a failed `settings.mutate` even though the write
+      // committed. The adapter re-reads the authority on that failure and the workspace
+      // classifies on it, so the Host really carrying the value and the UI reporting
+      // accepted-but-unverified are asserted TOGETHER.
       await chooseNextPreset()
-      const afterFrame = fixture.view().replace(/\s+/gu, ' ')
-      assert.doesNotMatch(afterFrame, /Verified · the authoritative read agrees/,
-        `a write whose authoritative readback could not complete is never Verified:\n${fixture.view()}`)
-      assert.match(afterFrame, /(Not saved · the display preset|Commit accepted · verification unavailable)/,
-        `and it states the real outcome:\n${fixture.view()}`)
+      const hostAfter = hostDescriptorUnpatched()
+      const unverifiedFrame = fixture.view().replace(/\s+/gu, ' ')
+      assert.equal(hostAfter?.displayPreset, 'focus', 'the Host authority really committed the write')
+      assert.match(
+        unverifiedFrame,
+        /Commit accepted · verification unavailable/,
+        `a write that committed while its readback could not complete is not called saved:\n${fixture.view()}`,
+      )
+      assert.doesNotMatch(unverifiedFrame, /Not saved · the display preset/,
+        `and it is not misreported as a refusal:\n${fixture.view()}`)
     } finally {
       failRefresh = false
       failMutate = false
@@ -1121,8 +1135,12 @@ test('P17: the REAL Host-owned Direct settings authority drives the /settings wo
     assert.match(fixture.view(), /Configured theme/)
     await fixture.key('\r') // L2 browse -> choice
     assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose Configured theme/)
+    // Pick a value that really CHANGES the runtime: the fresh TuiApp is painted dark,
+    // so `light` proves the apply reached the live surface (and `auto` would leave the
+    // terminal detection to decide).
     await fixture.key('\x1b[B') // auto -> dark
-    assert.match(fixture.view(), /> dark/)
+    await fixture.key('\x1b[B') // dark -> light
+    assert.match(fixture.view(), /> light/)
     await fixture.key('\r') // confirm
     await fixture.settle()
     assert.match(
@@ -1130,17 +1148,19 @@ test('P17: the REAL Host-owned Direct settings authority drives the /settings wo
       /Status Verified · the authoritative read agrees/,
       `the UI verified the commit:\n${fixture.view()}`,
     )
+    assert.match(fixture.view(), /Runtime\s+light/, 'the Detail names the runtime fact it applied')
+    assert.equal(fixture.app.currentTheme(), 'light', 'and the live surface really changed')
 
     // The REAL Host authority: the effective value, the USER layer that owns exactly
     // the written field, the live volatile references and the profile document.
     const descriptor = hostDescriptor()
-    assert.equal(descriptor?.value?.theme, 'dark', 'the Host effective value carries the change')
+    assert.equal(descriptor?.value?.theme, 'light', 'the Host effective value carries the change')
     const user = descriptor?.user as Record<string, unknown> | undefined
-    assert.equal(user?.theme, 'dark', 'and the USER layer owns exactly that field')
+    assert.equal(user?.theme, 'light', 'and the USER layer owns exactly that field')
     assert.equal(user?.displayPreset, undefined, 'no other field was pinned by the write')
-    assert.equal(settings.get().theme, 'dark', 'the live Config references followed the Host commit')
+    assert.equal(settings.get().theme, 'light', 'the live Config references followed the Host commit')
     const patch = readFileSync(join(host.workRoot, 'profile', 'cordis.patch.yml'), 'utf8')
-    assert.match(patch, /theme: dark/, `the profile document really carries it:\n${patch}`)
+    assert.match(patch, /theme: light/, `the profile document really carries it:\n${patch}`)
   } finally {
     fixture.dispose()
   }

@@ -152,6 +152,9 @@ function setup(options: HarnessOptions = {}): Harness {
     copySelection: options.copySelection ?? (async (text: string) => { copied.push(text); return true }),
   })
   app.start()
+  if (options.displayPreset !== undefined && options.displayPreset !== app.displayPreset()) {
+    app.setDisplayPreset(options.displayPreset as Parameters<typeof app.setDisplayPreset>[0])
+  }
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
   const commands = {
@@ -186,8 +189,8 @@ function setup(options: HarnessOptions = {}): Harness {
     currentSessionId: undefined,
     captureLiveSessionScope: () => undefined,
     listScopedCommands: () => [],
-    displayPreset: () => options.displayPreset ?? 'full',
-    focusEnabled: () => options.displayPreset === 'focus',
+    displayPreset: () => app.displayPreset(),
+    focusEnabled: () => app.displayPreset() === 'focus',
     // The production `/display` owner would dispatch its OWN detached write;
     // recording the call proves the B2-B writer never routes through it (a
     // double write would be invisible in the replacement count alone).
@@ -1989,6 +1992,7 @@ test('B-18 a late OSC answer never overrides a newer choice, while it still appl
     auto.vt.sendInput(lightReply)
     await settle(auto)
     assert.equal(auto.app.currentTheme(), 'light', 'the answer of a still-current auto applies')
+    assert.match(auto.view(), /Runtime\s+light/, 'and the Detail follows the applied runtime fact')
     auto.dispose()
 
     // REGRESSION (F2): a newer explicit choice wins even while its persistence is
@@ -2168,5 +2172,81 @@ test('B-21 a candidate taller than the list viewport reveals its HEAD, never a m
   h.vt.resize(60, 24)
   await h.vt.waitForRender()
   assert.match(h.view(), /Status\s+Verified/)
+  h.dispose()
+})
+
+test('B-22 a PENDING theme commit already shows the runtime fact it applied', async () => {
+  const themes = pluginThemes()
+  // A COMPLETE palette so the applied plugin theme is renderable, like a real one.
+  themes.register({ id: 'full-palette', name: 'FullPalette', palette: darkColors }, 'acme-owner', 'acme')
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes,
+    // The runtime apply happens before the first await; only the write is slow.
+    applyReplace: (next) => new Promise<void>(resolve => {
+      setTimeout(() => { Object.assign(h.doc, next); resolve() }, 250)
+    }),
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const row = rowOf(h, 'FullPalette')
+  press(h, row, cellIndexOf(h, row, 'FullPalette'))
+  release(h, row, cellIndexOf(h, row, 'FullPalette'))
+  await settle(h)
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+
+  assert.match(h.view(), /Status\s+Saving…/, 'the write is still in flight')
+  assert.equal(h.app.currentTheme(), 'custom', 'and the plugin palette is already live')
+  assert.match(
+    h.view(),
+    /Runtime\s+FullPalette/,
+    `the pending Detail must already show the applied runtime fact:\n${h.view()}`,
+  )
+  assert.match(h.view(), /Value\s+dark/, 'while the persisted value is still the previous one')
+
+  await new Promise(resolve => setTimeout(resolve, 320))
+  await settle(h)
+  assert.match(h.view(), /Status\s+Verified/)
+  // The theme row's primary value IS the persisted fact: `Value` + `Source`.
+  assert.match(h.view(), /Value\s+FullPalette/)
+  assert.match(h.view(), /Source\s+plugin:acme\/full-palette/)
+  h.dispose()
+})
+
+test('B-23 a PENDING display commit already shows the runtime preset', async () => {
+  const h = setup({
+    columns: 140,
+    rows: 40,
+    doc: { displayPreset: 'full', theme: 'dark' },
+    displayPreset: 'full',
+    applyReplace: (next) => new Promise<void>(resolve => {
+      setTimeout(() => { Object.assign(h.doc, next); resolve() }, 250)
+    }),
+  })
+  await openDetail(h, 'display-preset')
+  await key(h, '\r')
+  const row = rowOf(h, 'compact')
+  press(h, row, cellIndexOf(h, row, 'compact'))
+  release(h, row, cellIndexOf(h, row, 'compact'))
+  await settle(h)
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+
+  assert.match(h.view(), /Status\s+Saving…/, 'the write is still in flight')
+  assert.equal(h.app.displayPreset(), 'compact', 'and the runtime preset already changed')
+  assert.match(h.view(), /Value\s+compact/, `the pending row value IS the live runtime preset:\n${h.view()}`)
+  assert.match(h.view(), /Persisted\s+full/, 'while the stored preference is still the previous one')
+
+  await new Promise(resolve => setTimeout(resolve, 320))
+  await settle(h)
+  assert.match(h.view(), /Status\s+Verified/)
+  assert.equal(h.doc.displayPreset, 'compact')
   h.dispose()
 })

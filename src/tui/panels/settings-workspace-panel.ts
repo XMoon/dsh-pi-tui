@@ -1075,6 +1075,21 @@ export class SettingsWorkspacePanel implements Component {
     return this.snapshot.rows.find(row => row.id === this.rowId)
   }
 
+  /**
+   * Re-read the live facts WITHOUT touching the navigation, the commit phase or the
+   * scroll. The runtime owner calls this whenever the runtime fact changes (an applied
+   * palette, a cleared plugin-theme record, a new display preset): the projection is a
+   * PULL snapshot, so a runtime value the writer applied before its write settled must
+   * still reach the Detail — otherwise a pending (or slow, or failed) commit would keep
+   * claiming the previous runtime value as the live one.
+   */
+  rereadFacts(): void {
+    if (this.disposed) return
+    this.snapshot = this.source.readSnapshot()
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
   /** Re-read the same authorities; keep the stable selection when it survives. */
   private refresh(): void {
     const next = this.source.readSnapshot()
