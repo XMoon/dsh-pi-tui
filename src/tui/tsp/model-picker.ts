@@ -21,24 +21,22 @@ import type {
 import { PROVIDER_DEFAULT, projectModelDirectory } from '../pickers/model-directory.ts'
 import { actionIntent, keyIntent, rowIntent, type ModelPickerIntent } from './model-picker-intents.ts'
 import {
+  FAILURE_RETRY_ID,
   OVERVIEW_DETAILS_ID,
   applyOffered,
   draftedEffort,
   effortValue,
   focusedAction,
   highlightedModel,
-  inlineEffortOffered,
   modelChoices,
   modelRowId,
-  nativeSidePreview,
   overviewCursorIndex,
   overviewItems,
   seedDrafts,
   selectionOf,
   stepActionFocus,
   visibleModels,
-  widePreviewFits,
-  type ModelPickerLayout,
+  wideCatalog,
   type ModelPickerPanel,
 } from './model-picker-state.ts'
 import { MODEL_DETAILS_BODY_KEY_PREFIX, modelPickerLayer } from './model-picker-view.ts'
@@ -103,13 +101,11 @@ export class TspModelPicker {
       phase: 'loading',
       page: 'models',
       zone: 'models',
-      scope: undefined,
       query: '',
       cursor: 0,
       selected: undefined,
       actionFocus: undefined,
       previousZone: undefined,
-      detailsReturn: 'models',
       notice: '',
       directory: undefined,
       rows: [],
@@ -162,12 +158,6 @@ export class TspModelPicker {
     panel.rows = projection.models
     panel.failures = projection.failures
     panel.efforts = seedDrafts(projection.models, panel.efforts)
-    // A scope whose provider vanished from the new read must not filter every
-    // row away: fall back to the every-provider scope (`undefined`).
-    if (panel.scope !== undefined
-      && !projection.models.some((row) => row.providerId === panel.scope)) {
-      panel.scope = undefined
-    }
     if (panel.selected === undefined) {
       const configured = panel.rows.find(
         (row) => (panel.request.subject.sessionless ? row.isDefault : row.isCurrent),
@@ -202,41 +192,26 @@ export class TspModelPicker {
   }
 
   /**
-   * Whether this pane really gets the native SIDE preview column
-   * ({@link nativeSidePreview}): the MEASURED client breakpoint reconstructed
-   * from the only geometry the SDK reports (`cols` + the cell width). Below it
-   * the client paints the preview UNDER the list, where an inline effort row is
-   * outside the visible region — the compact layout and the model's Overview are
-   * then the only structures whose candidates are really reachable.
+   * Whether this pane paints the `lg` catalogue sheet and its compact read-only
+   * summary ({@link wideCatalog}): the ONE layout threshold of this presenter,
+   * reconstructed from the only geometry the SDK reports (`cols` + the cell
+   * width). It decides informational chrome only — never what can be reached,
+   * drafted or written.
    */
   private wide(): boolean {
-    return nativeSidePreview(this.cols, this.cellWidth)
+    return wideCatalog(this.cols, this.cellWidth)
   }
 
   /**
-   * The layout facts of the CURRENT frame: whether the wide shell is painted and
-   * whether its side column provably presents the WHOLE details card and every
-   * advertised effort. Which regions are painted decides which regions K2 may
-   * reach; it never decides business permission.
-   */
-  private layout(panel: ModelPickerPanel): ModelPickerLayout {
-    const wide = this.wide()
-    return { wide, previewFull: wide && widePreviewFits(panel, highlightedModel(panel)) }
-  }
-
-  /**
-   * Keep the visible page and the keyboard zone in agreement with the layout and
-   * with what the current read really offers.
+   * Keep the visible page and the keyboard zone in agreement with what the
+   * current read really offers.
    *
    * A model that vanished from the read leaves every content page meaningless
    * (the Overview and the Full details page both describe ONE model), so the
-   * panel falls back to the model list. The wide shell's two side regions only
-   * exist while it paints them: a bounded column has no inline effort selector,
-   * and a compact width has neither, so the keyboard must never stay parked on a
-   * region that is not on screen.
+   * panel falls back to the catalogue. The action bar is the only other zone and
+   * is painted in every phase, so it never has to be left.
    */
   private normalize(panel: ModelPickerPanel): void {
-    const layout = this.layout(panel)
     const row = highlightedModel(panel)
     if (row === undefined) {
       panel.page = 'models'
@@ -244,14 +219,6 @@ export class TspModelPicker {
       panel.overviewCursor = 0
       return
     }
-    // The Overview and the Full details page are content pages: they have
-    // exactly two regions — their own main list and the action bar.
-    if (panel.page !== 'models') {
-      if (panel.zone === 'detail-card' || panel.zone === 'effort') panel.zone = 'models'
-      return
-    }
-    if (panel.zone === 'detail-card' && !layout.wide) panel.zone = 'models'
-    if (panel.zone === 'effort' && !inlineEffortOffered(panel, layout)) panel.zone = 'models'
   }
 
   /** A modal seat took the layer: the next committed frame invalidates every
@@ -268,7 +235,7 @@ export class TspModelPicker {
     return this.targets.keys().next().value
   }
 
-  /** Keep the highlight on a row the current query/scope can actually reach. */
+  /** Keep the highlight on a row the current query can actually reach. */
   private align(panel: ModelPickerPanel): void {
     if (highlightedModel(panel) !== undefined) return
     const first = visibleModels(panel)[0]
@@ -308,7 +275,9 @@ export class TspModelPicker {
     // WRITE still owns the panel: nothing navigates or scrolls under it.
     if (panel.page === 'details' && panel.phase !== 'pending') {
       if (intent.kind === 'back') {
-        panel.page = panel.detailsReturn
+        // The Overview's own details entry is the Reader's ONLY origin, so its
+        // `Back` (and the `Esc` that is the same intent) returns there.
+        panel.page = 'overview'
         panel.zone = 'models'
         this.change(panel)
         return
@@ -332,14 +301,13 @@ export class TspModelPicker {
     // The action bar's own mechanics are phase-agnostic: the bar is rendered in
     // every phase and the FOCUSED action decides what Enter runs.
     if (intent.kind === 'action-focus') {
-      panel.actionFocus = stepActionFocus(panel, this.layout(panel), intent.delta)
+      panel.actionFocus = stepActionFocus(panel, intent.delta)
       this.change(panel)
       return
     }
     if (intent.kind === 'activate-action') {
-      const layout = this.layout(panel)
-      const focused = focusedAction(panel, layout).id
-      const activated = actionIntent(panel, focused, undefined, layout)
+      const focused = focusedAction(panel).id
+      const activated = actionIntent(panel, focused)
       if (activated !== undefined) this.act(panel, panel.revision, activated)
       return
     }
@@ -356,11 +324,10 @@ export class TspModelPicker {
       }
       return
     }
-    const layout = this.layout(panel)
     switch (intent.kind) {
       case 'back': {
         // Back and Esc are the same intent for a content page: the Overview
-        // returns to the model list. (The read-only Reader's own Back was already
+        // returns to the catalogue. (The read-only Reader's own Back was already
         // handled above, where it is exempt from the phase gates; reaching this
         // case with `page === 'details'` would mean an admitted write, which the
         // gate above has already refused.)
@@ -373,7 +340,7 @@ export class TspModelPicker {
         return
       }
       case 'open-overview': {
-        // Only the model list opens an Overview, and the row it names must be a
+        // Only the catalogue opens an Overview, and the row it names must be a
         // REAL visible row: the selection is committed atomically with the page
         // change, so the page can never describe the previously highlighted
         // model.
@@ -389,19 +356,10 @@ export class TspModelPicker {
         this.change(panel)
         return
       }
-      case 'open-details': {
-        if (panel.page !== 'models' && panel.page !== 'overview') return
-        if (highlightedModel(panel) === undefined) return
-        panel.detailsReturn = panel.page === 'overview' ? 'overview' : 'models'
-        panel.page = 'details'
-        panel.zone = 'models'
-        this.change(panel)
-        return
-      }
       case 'overview-cursor': {
         // The Overview's cursor is a ROW position over the page's real rows
-        // (the identity summary, the effort section and the details entry).
-        // Moving it changes no draft and never writes.
+        // (the effort section, its candidates and the details entry). Moving it
+        // changes no draft and never writes.
         if (panel.page !== 'overview') return
         const count = overviewItems(panel).length
         if (count === 0) return
@@ -411,15 +369,14 @@ export class TspModelPicker {
       }
       case 'overview-select': {
         // A pointer row activation is validated against the page's REAL rows and
-        // then acts by ROW ID, never by the previous cursor. Static identity rows
-        // only move the cursor; an effort row drafts (and only a value the model
+        // then acts by ROW ID, never by the previous cursor. The section head only
+        // moves the cursor; an effort row drafts (and only a value the model
         // really advertises); the details row opens the read-only page.
         if (panel.page !== 'overview') return
         const index = overviewItems(panel).findIndex((row) => row.id === intent.item)
         if (index < 0) return
         panel.overviewCursor = index
         if (intent.item === OVERVIEW_DETAILS_ID) {
-          panel.detailsReturn = 'overview'
           panel.page = 'details'
           panel.zone = 'models'
         } else {
@@ -457,37 +414,15 @@ export class TspModelPicker {
         this.change(panel)
         return
       }
-      case 'scope': {
-        // A provider filter changes BROWSE only: it never touches authority and
-        // never discards another model's draft. `undefined` is the every-provider
-        // scope entry (it filters nothing); any other value must be a provider the
-        // current read actually advertises. Only the model LIST page carries a
-        // scope column, so a scope action arriving on a content page (a stale or
-        // hostile receiver) fails closed instead of filtering a page that has no
-        // way to show or clear it.
-        if (panel.page !== 'models') return
-        const providerIds = new Set(panel.rows.map((row) => row.providerId))
-        if (intent.scope !== undefined && !providerIds.has(intent.scope)) return
-        panel.scope = intent.scope
-        this.align(panel)
-        this.change(panel)
-        return
-      }
       case 'browse-model': {
-        if (!visibleModels(panel).some((row) => modelRowId(row) === intent.rowId)) return
+        // The cursor walks the rows the list really offers: every visible model,
+        // plus the ONE partial-failure retry row (see `catalogueCursorIds`). The
+        // client keeps a disabled row selectable, so the app is what refuses every
+        // other shape here.
+        const known = visibleModels(panel).some((row) => modelRowId(row) === intent.rowId)
+          || (intent.rowId === FAILURE_RETRY_ID && panel.failures.length > 0)
+        if (!known) return
         panel.selected = intent.rowId
-        this.change(panel)
-        return
-      }
-      case 'browse-effort': {
-        const row = highlightedModel(panel)
-        if (row === undefined) return
-        if (!modelChoices(row).some((choice) => choice.value === intent.value)) return
-        panel.efforts.set(modelRowId(row), intent.value)
-        // Acting on the wide inline radio rows makes that selector the keyboard
-        // zone as well: the visible focus and the K2 zone must never disagree.
-        // The Overview has no inline selector, so its rows keep the list zone.
-        if (panel.page === 'models' && inlineEffortOffered(panel, layout)) panel.zone = 'effort'
         this.change(panel)
         return
       }
@@ -498,7 +433,7 @@ export class TspModelPicker {
         this.change(panel)
         return
       case 'apply':
-        if (!applyOffered(panel, layout)) return
+        if (!applyOffered(panel)) return
         this.apply(panel)
         return
       default:
@@ -563,7 +498,7 @@ export class TspModelPicker {
     // Ctrl+C always belongs to the original application cancel owner.
     if (key.ctrl === true && key.name === 'c') return false
     if (!this.canInteract()) return true
-    const intent = keyIntent(panel, key, this.layout(panel))
+    const intent = keyIntent(panel, key)
     if (intent !== undefined) this.act(panel, panel.revision, intent)
     return true
   }
@@ -575,18 +510,13 @@ export class TspModelPicker {
     if (target === undefined) return false
     if (event.ev === 'select' || event.ev === 'activate') {
       if (event.item !== undefined) {
-        const intent = rowIntent(target.panel, event.item, this.layout(target.panel))
+        const intent = rowIntent(target.panel, event.item, event.ev)
         if (intent !== undefined) this.act(target.panel, target.revision, intent)
       }
       return true
     }
     if (event.ev !== 'action') return false
-    const intent = actionIntent(
-      target.panel,
-      event.act,
-      event.value,
-      this.layout(target.panel),
-    )
+    const intent = actionIntent(target.panel, event.act)
     if (intent !== undefined) this.act(target.panel, target.revision, intent)
     return true
   }
@@ -601,15 +531,13 @@ export class TspModelPicker {
       panel.revision++
     }
     const revision = panel.revision
-    const layout = this.layout(panel)
     const layer = modelPickerLayer(panel, {
-      wide: layout.wide,
-      previewFull: layout.previewFull,
+      wide: this.wide(),
       bind: (intent) => () => this.act(panel, revision, intent),
     })
     // Every node in the model layer belongs to this panel, so an event whose
-    // `id` is ANY node of the frame (the picker, its scope column, a card, a row)
-    // is routed here; a node from an earlier frame is absent and never routed.
+    // `id` is ANY node of the frame (the picker, its summary, a row) is routed
+    // here; a node from an earlier frame is absent and never routed.
     // The SAME walk records the Reader body's real wire id — the id the SDK
     // assigned this frame — so the native scroll op can only ever address a node
     // this frame really built.

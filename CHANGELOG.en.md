@@ -122,76 +122,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local paging, while the main session and a viewed child each show their own
   Session's figures. A scope with no eligible sample is omitted — never
   `0 tok/s`.
-- The experimental TSP renderer's `/model` becomes a three-page task flow: choose a
-  model, look at that model, commit explicitly. At `cols >= 120` the shell stays
-  "provider scopes + model list + details column": the Model Details card head
-  carries a `›` and the card node carries the app's own pointer target, while
-  focusing the card with `Tab` and pressing `Enter` opens the read-only Full
-  details page; the column's inline Reasoning
-  Effort radio rows change only the local draft. When the column cannot present
-  everything, that same card turns into ONE `Open model & effort ›` entry whose
-  `Enter` opens the model's own **Overview**; at compact widths the model list does
-  the same (selecting a row or pressing `Enter` opens that row's Overview) and
-  carries no write at
-  all. The Overview lists the complete identity on its native main list, the
-  `View full model details ›` entry and every effort candidate — arrow keys read
-  every continuation line, `Enter` on an identity row is inert, on an effort row it
-  drafts, and on the details entry it opens the read-only page. Only the
-  explicitly named `Switch` (live session) or `Save default` (sessionless) commits,
-  once. The footer is capped per page: the model list is `Cancel` + `Retry` (only
-  while a provider read failed) + the one write; the **Overview is `Back` + the one
-  write and the read-only details page is `Back` alone** — those pages no longer
-  show `Cancel`, so a user returns to the model list to cancel (the panel's own
-  `Esc`/backdrop dismissal still works, it just no longer takes a footer button);
-  the details page never
-  writes, and a forged submit from it or from the compact model list is refused.
-  The former `More actions` page, `Action: …` strip, `Operation` block, strip zone
-  and the vague `Confirm` verb are all removed. The write is still the same single
-  business operation and the read still has the same single owner.
-  This revision was re-verified in a real Tern pane (0.8.2, real key and pointer
-  input): clicking a details card's HEAD and a BODY TEXT
-  line each opens the read-only details page; a model
-  row's first click sends `select` and a repeat/double click sends `activate`, and
-  the wide list only highlights without writing; at 400x600 and 1280x800 every
-  footer button is fully inside its bar, the 400x600 Overview shows `Back`/`Switch`
-  and the compact list shows `Cancel` only, and clicking `Switch` writes exactly
-  once. Still NOT verified: the 400px floor and the wide layout under +25% / +50%
-  enlarged UI fonts (the pre-existing Owner-accepted limitation), plus wheel/IME,
+- The experimental TSP renderer's `/model` is now ONE **list-first** catalogue at
+  every window width: the wide provider sidebar, the side details column and the
+  bounded `Open model & effort ›` card are gone. The catalogue is a single native
+  picker whose rows carry the model name, a short Provider mark, the real
+  `current`/`Default` badges, the drafted Reasoning Effort and the complete model
+  id, grouped as
+  `Current / Default` first and then by Provider, with a read-only
+  `Provider / Draft effort / Selection` summary under the list on a wide window.
+  The explicitly named `Switch` (live session) or `Save default` (sessionless)
+  commits ONCE and is offered in the footer at EVERY width, so switching the whole
+  model needs no second page; a row click only moves the highlight, and clicking
+  the highlighted row (or `Enter`) opens that model's **Overview**, whose first
+  screen is the model's own identity row, every advertised Reasoning Effort
+  candidate (`●`/`○`, or `Not available`) and the `View full model details ›`
+  entry — choosing a candidate
+  changes only the local draft. The read-only Full details page is a native Reader
+  whose facts are grouped into Identity / Configuration / Description: each value
+  is ONE complete string wrapped by the client at the real width (an unbroken
+  identifier by character, a description by word with its blank lines preserved),
+  `↑`/`↓`, `PageUp`/`PageDown` and `Home`/`End` drive the native scroll to the very
+  end, and only its visible `Back` row or `Esc` returns to the page it came from
+  (`Esc` is the way back from the tail, where the row has scrolled away). The page
+  has no submit entry at all and a forged submit is refused. A partially failed
+  read lists its providers under `Unavailable providers` with ONE read-only
+  `Retry failed providers` row, so the footer keeps its two buttons. The former
+  `More actions` page, `Action: …` strip, `Operation` block, Provider scope column,
+  the vague `Confirm` verb and the compact-list "no write" rule are all removed;
+  the write is still the same single business operation and the read still has the
+  same single owner. Re-verified in a real Tern pane (0.8.3): the presenter's own
+  layout claim against the client's preview classes at every supported size, both
+  footer buttons fully inside the bar at the 400px floor, exactly one write per
+  click, and the Reader's complete values, keyboard scrolling and return. Still NOT
+  verified: the 400px floor and the wide layout under +25% / +50% enlarged UI fonts
+  (the pre-existing Owner-accepted limitation), wheel/trackpad scrolling, IME,
   themes and the Remote path — see the real-pane and not-verified sections of
   `docs/tern-tsp/model-selection.md`.
-- The experimental TSP renderer's `/model` fixes two visible usability problems.
-  **The wide shell is now MEASURED**: it is used only on a window wide enough for
-  the native client to keep the preview column beside the list (measured from about
-  1040px; the previous `cols >= 120` was about 960px, where the client paints the
-  preview under the list and the effort candidates fall outside the visible
-  region), while an ordinary split or narrow window always uses the compact model
-  list → that model's Overview. **The Overview now leads with effort**: its first
-  screen is the model's short name and every advertised Reasoning Effort
-  candidate, with `View full model details ›` and the one-line Provider/ID/
-  Current/Default summaries after them, so a long value can no longer push the
-  candidates off the first screen with a stack of continuation rows. **The full
-  details page is now a native Reader**: instead of a picker pre-split into
-  one-line fragments, it is a native `overlay` with ONE complete value per field
-  wrapped by the client at the real width (an unbroken provider/model/effort slug
-  or model ID by character, a description by word with its blank lines preserved),
-  with `PageUp`/`PageDown`, `Home`/`End` and `↑`/`↓` driving the native scroll
-  through the app to the very end and only its visible `Back` row or `Esc`
-  returning to the page it came from; the page has no submit entry at all and a
-  forged submit is refused. That `Back` row is never dead: while a re-read runs or
-  has failed it (and the `Esc` and scroll keys that share its intent) still return
-  to the origin page with its context, and only an admitted write keeps owning the
-  panel. Re-verified in a real Tern pane (0.8.3): the preview
-  mode boundary at 1020/1040/1050px, the split pane's effort-first Overview, and
-  the Reader's complete values, keyboard scrolling and return all pass; see
-  `docs/tern-tsp/evidence/model-responsive-reader-20261013.md`.
 
 ### Fixed
 
-- The experimental TSP renderer's `/model`: clicking `All models` or a Provider
-  in the left column now really filters the model list (the provider choice
-  arrives on Tern's native `action(scope)` channel instead of being ignored as a
-  model-row selection). Model rows, effort rows and provider choices can no
-  longer be confused, and no click ever writes the model.
 - A skill's slash command no longer disappears after a new or switched Session
   (`/new`, `/resume`, `/fork`): the catalog refresh no longer treats the TUI's
   own compatibility mirror as a genuine Host command, so the skill stays in the

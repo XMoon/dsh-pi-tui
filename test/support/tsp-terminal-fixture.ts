@@ -138,10 +138,11 @@ export function installTspPane(options: {
   const frameList: TspWireFrame[] = []
   let frames = 0
   // The native-kind sets are the pane's own advertised set, exactly like the
-  // real client: the Model layer needs rows/cards, the Preset layer needs the
-  // picker alone. A case can override the advertised set verbatim (fail-closed).
+  // real client: the Model layer needs its picker, the Reader's Back row and the
+  // Reader overlay, the Preset layer needs the picker alone. A case can override
+  // the advertised set verbatim (fail-closed).
   const native = [
-    ...(options.modelPicker === true ? ['picker', 'row', 'card'] : []),
+    ...(options.modelPicker === true ? ['picker', 'row', 'overlay'] : []),
     ...(options.presetPicker === true ? ['picker'] : []),
     ...(options.modelPicker === true || options.presetPicker === true ? ['text'] : []),
   ]

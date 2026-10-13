@@ -1,594 +1,783 @@
 /**
- * The `/model` real-pane acceptance flow for the restructured native picker and
- * its Model-Responsive / Reader revision.
+ * The `/model` real-pane acceptance lane for the LIST-FIRST catalogue, its
+ * Overview and its read-only Reader — asserted against the real Tern client with
+ * real pointer clicks and real keys.
  *
- *   node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs
+ *   node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs --out temp/<run>
  *
- * What headless cannot prove, and this run does: the client's own preview MODE at
- * a given pane (the presenter reconstructs the pane width from `cols`/`cell`, and
- * only the real client says whether that pane really gets the SIDE column or the
- * preview under the list), the client's own pointer hit areas (the wide details
- * card's HEAD and its nested BODY TEXT lines, the Reader's Back row), the real
- * `select` / `activate` ordering a physical click produces, the footer BUTTONS'
- * containment in their own bar at both supported extremes, that the Reader's own
- * keyboard scroll really moves the CLIENT's viewport, and that one real click on
- * the one write reaches the writer exactly once. Every containment claim goes
- * through the visibility oracle (a node's own rect is not a visibility proof).
+ * What only the real client can prove, and this lane proves: the client's own
+ * preview MODE for the pane width the presenter reconstructs from `cols`/`cell`
+ * (`pv-below` vs `pv-none`), the client's own pointer hit areas (a model row, an
+ * effort candidate, the one write, the retry row, the Reader's Back row), the real
+ * `select` / `activate` ordering a physical click produces, the containment of the
+ * footer buttons and the rows at every supported size, that the Reader's keyboard
+ * scroll really moves the CLIENT's viewport, that a failed read is painted as the
+ * Reader's own leading line while its scroll and Back still work, and that one
+ * real click on the one write reaches the writer exactly once.
  *
- * Artifacts (assertions.json, run.log, trees, PNGs, the flow and subject copies)
- * stay in the run directory the driver creates; nothing is deleted.
+ * Every containment claim goes through the visibility oracle (`containedXY` /
+ * `visibleSpan`); a node's own rect is never a visibility proof, and an empty node
+ * list FAILS instead of passing vacuously. Artifacts stay in the run directory the
+ * driver creates; nothing is deleted.
  * @module scripts/tern-pane-model-ux
  */
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
-import { containedXY, rect, visibleSpan } from './tern-pane-geometry.mjs'
+import { containedX, containedXY, rect as rawRect, visibleSpan } from './tern-pane-geometry.mjs'
+
+/** The oracle's `rect` made TOTAL for a node the client does not paint: the
+ *  negative case (an auto-hidden column, a virtualised row, an absent value
+ *  node) must FAIL its own assertion, never throw the whole flow. */
+const rect = (node) => (node === undefined ? [0, 0, 0, 0] : rawRect(node))
+
+/* ------------------------------------------------------------ the record */
 
 /** Every row the subject recorded, re-read on each call (it appends as it runs). */
 const records = (h) => readFileSync(join(h.root, 'events.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
 const frames = (h) => records(h).filter((row) => row.frame).map((row) => row.frame)
-const actionIds = (frame) => (frame.actions ?? []).map((action) => action.id).join(',')
-const actionText = (frame) => (frame.actions ?? []).map((action) => String(action.label ?? '')).join(' | ')
-/** The first visible node of one class inside another (or the snapshot root). */
-const inside = (snap, parent, name) => (parent?.children ?? snap.nodes).find((node) => (node.class ?? '').split(' ').includes(name))
-const box = (node) => rect(node).map((n) => Math.round(n * 10) / 10).join(',')
-const classesOf = (snap) => new Set(snap.nodes.flatMap((node) => (node.class ?? '').split(' ')).filter(Boolean))
+const lastFrame = (h) => frames(h).at(-1)
+const caps = (h) => records(h).find((row) => row.caps)?.caps
+const rowEvents = (h) => records(h).filter((row) => row.event && (row.event.ev === 'select' || row.event.ev === 'activate')).map((row) => row.event)
+const actionEvents = (h) => records(h).filter((row) => row.event && row.event.ev === 'action').map((row) => row.event)
+const applies = (h) => records(h).filter((row) => row.apply)
+const retries = (h) => records(h).filter((row) => row.retry)
+const controls = (h) => records(h).filter((row) => row.control).map((row) => row.control)
+const resizes = (h) => records(h).filter((row) => row.resize).map((row) => row.resize)
 const scrolls = (h) => records(h).filter((row) => row.nativeScroll).map((row) => row.nativeScroll)
-/** The rendered text node whose value starts with `prefix` (the Reader's value
- *  nodes carry the WHOLE value, which is what the client wraps). */
+
+/* ------------------------------------------------------------- the tree */
+
+const box = (node) => (node === undefined ? 'none' : rect(node).map((n) => Math.round(n * 10) / 10).join(','))
+const actionIds = (frame) => (frame?.actions ?? []).map((action) => action.id).join(',')
+const actionLabels = (frame) => (frame?.actions ?? []).map((action) => String(action.label ?? '')).join(' | ')
+const pickerNode = (snap) => snap.nodes.find((node) => (node.class ?? '').split(' ').includes('sf-picker'))
+const pickerClasses = (snap) => (pickerNode(snap)?.class ?? '').split(' ').filter(Boolean)
+const modelRows = (h, snap) => h.classNodes(snap, 'pk-row').filter((node) => !(node.class ?? '').split(' ').includes('grp'))
+const groupRows = (h, snap) => h.classNodes(snap, 'pk-row').filter((node) => (node.class ?? '').split(' ').includes('grp'))
+const rowWithText = (h, snap, text) => modelRows(h, snap).find((node) => h.descendantsText(node).includes(text))
+const groupWithText = (h, snap, text) => groupRows(h, snap).find((node) => h.descendantsText(node).includes(text))
+const buttons = (h, snap) => h.classNodes(snap, 'pk-btn')
+const subclass = (node, name) => {
+  const out = []
+  const walk = (n) => {
+    if ((n.class ?? '').split(' ').includes(name)) out.push(n)
+    for (const child of n.children ?? []) walk(child)
+  }
+  if (node !== undefined) walk(node)
+  return out
+}
+const markText = (h, node) => subclass(node, 'pk-mark').map((n) => String(n.text ?? '')).join('')
+const scopeTokens = (snap) => [...new Set(snap.nodes.flatMap((node) => (node.class ?? '').split(' ')).filter((token) => /scope/i.test(token)))]
 const textStarting = (snap, prefix) => snap.nodes.find((node) => String(node.text ?? '').startsWith(prefix))
-/**
- * Open the Overview's `View full model details ›` row by POINTER: the row is
- * first walked into the visible region (a clipped row has no clickable fragment),
- * then clicked - `Enter` would act on the list CURSOR, which an already-visible
- * row never moves.
- */
-const openOverviewDetails = async (h) => {
-  await pressUntilRow(h, 'View full model details')
-  const snap = h.snapshot()
-  const row = h.classNodes(snap, 'pk-row')
-    .find((node) => h.descendantsText(node).includes('View full model details'))
-  return row === undefined ? false : await h.click(snap.chains, row)
+const textExactly = (snap, text) => snap.nodes.find((node) => String(node.text ?? '') === text)
+/** A text node with EXACTLY `text` inside an ancestor of class `ancestorClass`
+ *  (the Reader's overlay HEAD and its body VALUE can share a string but not a
+ *  line height, so the one-line control must be the body value). */
+const textUnder = (snap, text, ancestorClass) => snap.nodes.find((node) => String(node.text ?? '') === text
+  && (snap.chains.get(node) ?? []).some((ancestor) => (ancestor.class ?? '').split(' ').includes(ancestorClass)))
+const itemOf = (frame, id) => (frame?.items ?? []).find((item) => item.id === id)
+const FACT_COLUMN = JSON.stringify([{ id: 'effort', head: 'Effort', format: 'text', priority: 1, min: 6 }])
+/** The plan §9 acceptance sizes: each one gets a `models` / `overview` / `reader`
+ *  PNG (12 captures) in the matrix pass. */
+const SECTION9 = new Set(['1280x800', '1000x640', '560x640', '400x600'])
+/** The SHA-256 of the four source modules this run rendered, so the evidence
+ *  names the exact contract revision it was taken against. */
+const sourceHash = (h) => ['model-picker-view.ts', 'model-picker-state.ts', 'model-picker-intents.ts', 'model-picker.ts']
+  .map((name) => `${name}:${createHash('sha256').update(readFileSync(join(h.repo, 'src', 'tui', 'tsp', name))).digest('hex').slice(0, 12)}`)
+  .join(' ')
+/** The client's own capture layout: its resolved fonts, colours and THEME. */
+const layoutOf = (h, shotId) => JSON.parse(readFileSync(join(h.root, 'shots', 'serve', `${shotId}.layout.json`), 'utf8'))
+const elementAt = (h, shotId, needle) => {
+  const layout = layoutOf(h, shotId)
+  const element = layout.elements.find((entry) => String(entry.path).includes(needle))
+  return element === undefined ? undefined : { ...element, theme: layout.theme }
+}
+const themeOf = (h, shotId) => layoutOf(h, shotId).theme
+const fontAt = (h, shotId, needle) => {
+  const element = elementAt(h, shotId, needle)
+  return element === undefined
+    ? undefined
+    : { path: element.path, fontFamily: element.fontFamily, fontSize: element.fontSize, theme: element.theme }
 }
 
-/**
- * One plan §7.2 matrix size on the CURRENT revision. It asserts the presenter's
- * claim against the client's OWN preview mode, the containment of what the client
- * paints, and — for a compact size — the Overview → Reader path that pane depends
- * on, so the matrix proves reachability rather than echoing the presenter.
- */
-const matrixCell = async (h, size, expect) => {
-  // Esc back to the model LIST — never PAST it (Esc on the list dismisses the
-  // panel), so a panel that is somehow gone fails the check instead of cascading.
-  for (let step = 0; step < 3 && frames(h).at(-1)?.title !== 'Models'; step += 1) {
-    if (frames(h).at(-1)?.title === undefined) break
-    await h.key('Escape', 700)
+/* ------------------------------------------------------- shared navigations */
+
+/** Walk Esc back to the catalogue, NEVER past it (Esc on the catalogue dismisses
+ *  the panel), so a lost panel fails the next claim instead of cascading. */
+const toCatalogue = async (h) => {
+  for (let step = 0; step < 6; step += 1) {
+    const frame = lastFrame(h)
+    if (frame === undefined || frame.page === 'models') return true
+    await h.key('Escape', 800)
   }
-  h.check(`${size.w}x${size.h}: the matrix cell starts on the model list (the panel is still open)`,
-    frames(h).at(-1)?.title === 'Models', JSON.stringify(frames(h).at(-1)))
-  await h.resize(size.w, size.h)
-  await h.sleep(300)
-  let snap = h.snapshot()
-  let frame = frames(h).at(-1)
-  const buttons = h.classNodes(snap, 'pk-btn')
-  h.check(`${size.w}x${size.h}: the presenter asks for ${expect === 'wide' ? 'lg + side' : 'md + none'}`,
-    expect === 'wide' ? frame?.size === 'lg' && frame?.preview === 'side' : frame?.size === 'md' && frame?.preview === 'none',
-    JSON.stringify(frame))
-  h.check(`${size.w}x${size.h}: the client paints ${expect === 'wide' ? 'the real SIDE column' : 'no preview region at all'}`,
-    expect === 'wide'
-      ? classesOf(snap).has('pv-side') && !classesOf(snap).has('pv-below-auto') && h.classNodes(snap, 'sf-row').length === 4
-      : !classesOf(snap).has('pv-side') && !classesOf(snap).has('pv-below-auto') && h.classNodes(snap, 'sf-row').length === 0,
-    [...classesOf(snap)].filter((name) => name.startsWith('pv-')).join(','))
-  h.check(`${size.w}x${size.h}: every visible footer button is contained`,
-    buttons.length > 0 && buttons.every((node) => containedXY(snap.chains, node)),
-    buttons.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' '))
-  if (expect === 'wide') {
-    const rows = h.classNodes(snap, 'sf-row')
-    h.check(`${size.w}x${size.h}: every inline candidate is inside the column it is painted in`,
-      rows.length === 4 && rows.every((node) => containedXY(snap.chains, node)),
-      rows.map((node) => h.descendantsText(node)).join(' | '))
-    h.capture(`matrix-${size.w}x${size.h}`, `the plan matrix: ${size.w}x${size.h} wide`)
-    return
-  }
+  return lastFrame(h)?.page === 'models'
+}
+
+/** Enter the highlighted model's Overview with a real Enter. */
+const enterOverview = async (h) => {
   await h.key('Return', 900)
-  snap = h.snapshot()
-  frame = frames(h).filter((row) => row.title === 'Model overview').at(-1)
-  const overviewButtons = h.classNodes(snap, 'pk-btn')
-  h.check(`${size.w}x${size.h}: the compact list opens the Overview with Back + the one write`,
-    frame !== undefined && actionIds(frame) === 'back,apply' && overviewButtons.length === 2
-    && overviewButtons.every((node) => containedXY(snap.chains, node)),
-    JSON.stringify(frame))
-  // The effort section must start on the FIRST screen: the row ids come from the
-  // frame's own wire order, so a candidate row is never confused with a summary
-  // row that merely carries a similar label.
-  const rowIds = (frame?.rows ?? []).map(String)
-  const domRows = h.classNodes(snap, 'pk-row')
-  const effortAt = rowIds.findIndex((id) => id === 'overview-effort')
-  const paired = domRows.map((node, index) => ({ id: rowIds[index], node }))
-  const candidateRows = paired.filter((entry) => String(entry.id).startsWith('effort:'))
-  h.check(`${size.w}x${size.h}: the effort section head starts on the Overview's first screen`,
-    effortAt >= 0 && paired[effortAt] !== undefined && containedXY(snap.chains, paired[effortAt].node),
-    `${rowIds.join(',')} :: ${box(paired[effortAt]?.node)}`)
-  h.check(`${size.w}x${size.h}: every candidate row the page paints is inside its region`,
-    candidateRows.length >= 1 && candidateRows.every((entry) => containedXY(snap.chains, entry.node)),
-    candidateRows.map((entry) => `${entry.id}@${box(entry.node)}`).join(' '))
-  h.capture(`matrix-${size.w}x${size.h}`, `the plan matrix: ${size.w}x${size.h} compact Overview`)
-  // Full details stays navigable from that Overview, and the Reader returns. The
-  // row is walked into the visible region and then CLICKED: `Enter` acts on the
-  // list CURSOR (still row 0 here), and an already-visible row would otherwise
-  // never move it.
-  const detailsClicked = await openOverviewDetails(h)
-  h.check(`${size.w}x${size.h}: the Overview's details row opens the Reader by pointer`,
-    detailsClicked && h.has(h.snapshot(), 'Full model details'),
-    `clicked=${detailsClicked} :: ${h.texts(h.snapshot()).join(' | ')}`)
-  await h.key('Escape', 900)
-  h.check(`${size.w}x${size.h}: the Reader returns to the Overview it came from`,
-    h.has(h.snapshot(), 'Model overview'), h.texts(h.snapshot()).join(' | '))
+  return lastFrame(h)?.page === 'overview'
 }
 
-/** Walk the native list cursor with REAL Down keys until a row carrying `text` is
- *  on screen: a row below the fold must be reached the way a user reaches it,
- *  never assumed to be painted. The caller re-reads ONE snapshot afterwards (a
- *  node object belongs to the snapshot whose `chains` map it came from). */
-const pressUntilRow = async (h, text, tries = 14) => {
-  for (let step = 0; step < tries; step += 1) {
+/** Click the Overview's `View full model details ›` row with a real pointer. On a
+ *  SHORT pane the row can be below the Overview's own list fold, so the cursor is
+ *  walked onto it with real line keys first (the client scrolls it into view);
+ *  a row that is already visible is clicked immediately. */
+const openReaderByPointer = async (h, maxSteps = 8) => {
+  for (let step = 0; step <= maxSteps; step += 1) {
     const snap = h.snapshot()
-    const found = h.classNodes(snap, 'pk-row').find((node) => h.descendantsText(node).includes(text))
-    // A row that is merely PRESENT can still be clipped by the list scroller, so
-    // the walk stops only where the row really survives inside it.
-    if (found !== undefined && containedXY(snap.chains, found)) return
-    await h.key('Down', 300)
+    const row = rowWithText(h, snap, 'View full model details')
+    if (row !== undefined && containedXY(snap.chains, row)) return await h.click(snap.chains, row)
+    await h.key('Down', 220)
   }
+  return false
 }
+
+/**
+ * One plan §3.3 matrix size on the list-first revision. It asserts the presenter's
+ * claim against the client's OWN classes, the containment of what the client
+ * paints, and — for a narrow pane — the Overview path that pane depends on, so the
+ * matrix proves reachability instead of echoing the presenter. `cols`/`cell.w` are
+ * recorded for every size.
+ */
+const matrixCell = async (h, size) => {
+  await toCatalogue(h)
+  await h.resize(size.w, size.h)
+  const snap = h.snapshot()
+  const frame = lastFrame(h)
+  const resize = resizes(h).at(-1)
+  const cols = resize?.cols
+  const cell = resize?.cell?.w
+  const panePx = cols * cell
+  const wide = panePx >= 900
+  h.measure(`${size.w}x${size.h}: cols/cell.w/pane px`, JSON.stringify({ cols, cell, panePx }))
+  h.check(`${size.w}x${size.h}: the presenter claims ${wide ? 'lg + preview below' : 'md + preview none'} at ${panePx}px`,
+    frame?.page === 'models' && frame?.size === (wide ? 'lg' : 'md') && frame?.preview === (wide ? 'below' : 'none'),
+    JSON.stringify({ page: frame?.page, size: frame?.size, preview: frame?.preview, cols, cell, panePx }))
+  const classes = pickerClasses(snap)
+  h.check(`${size.w}x${size.h}: the client's own classes agree (${wide ? 'sz-lg pv-below' : 'sz-md pv-none'})`,
+    wide
+      ? classes.includes('sz-lg') && classes.includes('pv-below') && !classes.includes('pv-none')
+      : classes.includes('sz-md') && classes.includes('pv-none') && !classes.includes('pv-below'),
+    classes.join(' '))
+  const preview = h.classNodes(snap, 'pk-pv')
+  h.check(`${size.w}x${size.h}: the client paints ${wide ? 'the real below-list preview' : 'no preview region at all'}`,
+    wide ? preview.length === 1 && containedXY(snap.chains, preview[0]) : preview.length === 0,
+    `pk-pv=${preview.length}${preview[0] === undefined ? '' : `@${box(preview[0])}`}`)
+  const barButtons = buttons(h, snap)
+  h.check(`${size.w}x${size.h}: the footer is exactly Cancel + the one write, both contained`,
+    barButtons.length === 2 && actionIds(frame) === 'close,apply' && (frame?.actions ?? []).filter((action) => action.id === 'apply').length === 1
+    && barButtons.every((node) => containedXY(snap.chains, node)),
+    `${barButtons.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' ')} :: ${actionIds(frame)}`)
+  const rows = modelRows(h, snap)
+  const scroller = h.classNodes(snap, 'pk-scroll')[0]
+  // A list that must scroll at a SHORT pane legitimately clips the rows below its
+  // fold (the plan's short-height rule: the native list scrolls on its own and
+  // keeps the selected row). This therefore asserts what the contract really
+  // requires — the list region and its FIRST row are fully usable — and records
+  // every partially visible row with its exact visible span instead of counting it
+  // as contained. The rows below the fold are PROVED reachable with real line keys
+  // immediately below, and the count of clipped rows is a measurement, never a
+  // silent pass.
+  const rowSpans = (snapshot) => modelRows(h, snapshot).map(
+    (node) => `${h.descendantsText(node).slice(0, 24)}@${box(node)} yspan=${visibleSpan(snapshot.chains, node, 'y').toFixed(1)}`,
+  )
+  const clippedRows = rows.filter((node) => !containedXY(snap.chains, node))
+  h.check(`${size.w}x${size.h}: the catalogue's first model row is fully contained in its list region`,
+    rows.length > 0 && containedXY(snap.chains, rows[0]),
+    `scroller@${box(scroller)} :: ${rowSpans(snap).join(' | ')}`)
+  if (clippedRows.length > 0) {
+    h.measure(`${size.w}x${size.h}: model rows clipped by the list fold at this SHORT pane`,
+      clippedRows.map((node) => `${h.descendantsText(node).slice(0, 24)}@${box(node)} yspan=${visibleSpan(snap.chains, node, 'y').toFixed(1)}`).join(' | '))
+  }
+  h.check(`${size.w}x${size.h}: the catalogue paints no scope column`, scopeTokens(snap).length === 0
+    && !(frame?.propKeys ?? []).includes('scopes'), `${scopeTokens(snap).join(',')} :: ${(frame?.propKeys ?? []).join(',')}`)
+  // The ONE optional fact COLUMN. The wire declares it on every catalogue width;
+  // the client paints it from 560px up and auto-hides it at 400x600 (measured),
+  // and it paints on the FIRST group row as the table head.
+  const narrowest = size.w === 400 && size.h === 600
+  const factSlots = h.classNodes(snap, 'pk-facts')
+  const headerItem = h.classNodes(snap, 'pk-fact').find((node) => (node.class ?? '').split(' ').includes('pk-fh'))
+  const firstGroup = groupRows(h, snap)[0]
+  h.check(`${size.w}x${size.h}: the wire declares the ONE effort column at every width`,
+    JSON.stringify(frame?.columns) === FACT_COLUMN, JSON.stringify(frame?.columns))
+  h.check(`${size.w}x${size.h}: the client really paints the Effort header (auto-hidden at 400x600)`,
+    narrowest
+      ? factSlots.length === 0 && headerItem === undefined
+      : headerItem !== undefined && String(headerItem.text) === 'Effort' && containedXY(snap.chains, headerItem),
+    `slots=${factSlots.length} header=${headerItem === undefined ? 'none' : String(headerItem.text)}`)
+  h.check(`${size.w}x${size.h}: the Effort header sits on the FIRST group row`,
+    narrowest
+      ? firstGroup !== undefined && subclass(firstGroup, 'pk-fact').length === 0
+      : firstGroup !== undefined && subclass(firstGroup, 'pk-fact').some((node) => String(node.text) === 'Effort'),
+    firstGroup === undefined ? 'no group row' : h.descendantsText(firstGroup))
+  const metrics = {
+    labelWidth: rect(subclass(rowWithText(h, snap, 'Alpha Model'), 'pk-label')[0])[2],
+    factsWidth: rect(factSlots[0])[2],
+    textWidth: rect(h.classNodes(snap, 'pk-txt')[0])[2],
+  }
+  if (!narrowest) {
+    h.measure(`${size.w}x${size.h}: model-name / fact-column / text widths`, JSON.stringify(metrics))
+  }
+  // Reachability: the list's own line keys really walk to the LAST model row (the
+  // client scrolls the highlighted row into view), and the cursor is then walked
+  // back to the first row so the rest of the cell describes the same model.
+  let downSteps = 0
+  let reachedLastRow = false
+  for (let step = 0; step < 12 && !reachedLastRow; step += 1) {
+    await h.key('Down', 200)
+    downSteps += 1
+    const walked = h.snapshot()
+    const lastRow = modelRows(h, walked).at(-1)
+    reachedLastRow = lastRow !== undefined && containedXY(walked.chains, lastRow)
+  }
+  const walkedLast = modelRows(h, h.snapshot()).at(-1)
+  h.check(`${size.w}x${size.h}: the list's own line keys reach the LAST model row`,
+    reachedLastRow && walkedLast !== undefined,
+    `steps=${downSteps} :: ${walkedLast === undefined ? 'no row' : `${h.descendantsText(walkedLast).slice(0, 24)}@${box(walkedLast)}`}`)
+  for (let step = 0; step < downSteps; step += 1) await h.key('Up', 120)
+  const cellKey = `${size.w}x${size.h}`
+  const captured = narrowest
+    ? h.capture(`models-${cellKey}`, `the ${cellKey} catalogue: same rows, same one write, no preview`)
+    : size.w === 900 && size.h === 400
+      ? h.capture(`models-${cellKey}`, 'the short 900x400 catalogue: the list is squeezed before the summary line')
+      : SECTION9.has(cellKey)
+        ? h.capture(`models-${cellKey}`, `the ${cellKey} catalogue (plan §9)`)
+        : undefined
+  // ---- Overview at EVERY size, not only the narrow branch: Enter must open it,
+  // the effort head and the FIRST candidate must be contained, every advertised
+  // candidate must be LISTED, the LAST must be reachable with real line keys and
+  // Esc must return. (This preserves the short-900x400 rule the reviewer fixed:
+  // clipped candidates are recorded as measurements, never counted as contained.)
+  const opened = await enterOverview(h)
+  const overview = h.snapshot()
+  const overviewFrame = lastFrame(h)
+  const overviewIds = (overviewFrame?.items ?? []).map((item) => String(item.id))
+  const candidateIds = overviewIds.filter((id) => id.startsWith('effort:'))
+  const modelName = itemOf(frame, frame?.selected)?.label
+  const modelId = itemOf(frame, frame?.selected)?.title
+  // The page's TITLE cannot carry the identity on a narrow pane (the client
+  // ellipsizes the caption and paints no subtitle at 400/560px — measured), so the
+  // model the page configures must be visible as the FIRST main-list ROW at EVERY
+  // width. A full `title` PROP is not proof: the ROW itself is asserted painted.
+  const identityWire = (overviewFrame?.items ?? []).filter((item) => String(item.id) === 'overview-model')
+  const identityRow = rowWithText(h, overview, String(modelName))
+  const firstDomRow = modelRows(h, overview)[0]
+  h.check(`${cellKey}: the Overview leads with the model's identity row (overview-model)`,
+    identityWire.length === 1 && overviewIds[0] === 'overview-model'
+    && identityWire[0].label === modelName && identityWire[0].title === modelId,
+    JSON.stringify({ order: overviewIds, identity: identityWire[0], expected: { label: modelName, title: modelId } }))
+  h.check(`${cellKey}: the identity row is PAINTED as the first main-list row, carrying the model name`,
+    identityRow !== undefined && containedXY(overview.chains, identityRow)
+    && firstDomRow !== undefined && h.descendantsText(firstDomRow).includes(String(modelName)),
+    `identity@${box(identityRow)} firstRow=${firstDomRow === undefined ? 'none' : h.descendantsText(firstDomRow).slice(0, 44)}`)
+  const head = rowWithText(h, overview, 'Reasoning effort')
+  h.check(`${cellKey}: Enter opens the Overview under the short page title`,
+    opened && overviewFrame?.page === 'overview' && overviewFrame?.title === 'Model overview', JSON.stringify(overviewFrame))
+  h.check(`${cellKey}: the Reasoning effort head is on the Overview's first screen`,
+    head !== undefined && containedXY(overview.chains, head), head === undefined ? 'no head row' : box(head))
+  const domRows = modelRows(h, overview)
+  const paired = domRows.map((node, index) => ({ id: overviewIds[index], node }))
+  const candidates = paired.filter((entry) => String(entry.id).startsWith('effort:'))
+  // The short-pane rule again: the Overview's own list scrolls, so the contract
+  // requires the head and the FIRST candidate on the first screen and every
+  // candidate to be LISTED and reachable — a candidate below the fold is
+  // measured, not counted as contained.
+  const clippedCandidates = candidates.filter((entry) => !containedXY(overview.chains, entry.node))
+  h.check(`${cellKey}: the effort head and the FIRST candidate are contained on the first screen`,
+    candidates.length > 0 && containedXY(overview.chains, candidates[0].node),
+    `${candidateIds.length} advertised, ${candidates.length} painted: ${candidates.map((entry) => `${entry.id}@${box(entry.node)} yspan=${visibleSpan(overview.chains, entry.node, 'y').toFixed(1)}`).join(' ')}`)
+  // The WIRE must carry every advertised candidate on every pane. How many of them
+  // are PAINTED AT ONCE is the client's own virtualisation: on a TALL pane all four
+  // are mounted, while the short 900x400 pane mounts only the rows inside its
+  // scrollport (the rest scroll in — proved right below). So the painted count is
+  // an ASSERTION on every pane tall enough to show them and a MEASUREMENT, never a
+  // silent pass, on the one measured short pane.
+  const shortPane = size.h < 600
+  h.check(`${cellKey}: the Overview's main list carries all ${candidateIds.length} advertised candidates`,
+    candidateIds.length === 4 && (!shortPane || candidates.length > 0)
+    && (shortPane || candidates.length === candidateIds.length),
+    `${candidateIds.length} advertised, ${candidates.length} painted${shortPane ? ' (short pane)' : ''}`)
+  if (shortPane) {
+    h.measure(`${cellKey}: candidates the short Overview paints at once`,
+      `${candidates.length}/${candidateIds.length}`)
+  }
+  if (clippedCandidates.length > 0) {
+    h.measure(`${cellKey}: candidates clipped by the Overview's own fold at this SHORT pane`,
+      clippedCandidates.map((entry) => `${entry.id}@${box(entry.node)} yspan=${visibleSpan(overview.chains, entry.node, 'y').toFixed(1)}`).join(' '))
+  }
+  if (candidates.length < candidateIds.length) {
+    h.measure(`${cellKey}: candidates the short Overview paints at once`, `${candidates.length}/${candidateIds.length}`)
+  }
+  if (SECTION9.has(cellKey)) h.capture(`overview-${cellKey}`, `the ${cellKey} Overview: identity row + every advertised candidate (plan §9)`)
+  // Reachability bounds the first-screen finding: the Overview's own list really
+  // scrolls with real line keys, so a candidate below the fold is still reachable.
+  let candidateDowns = 0
+  let candidateReached = false
+  while (candidateDowns < 8 && !candidateReached) {
+    const walkedNow = h.snapshot()
+    const highNow = rowWithText(h, walkedNow, 'High')
+    candidateReached = highNow !== undefined && containedXY(walkedNow.chains, highNow)
+    if (!candidateReached) {
+      await h.key('Down', 250)
+      candidateDowns += 1
+    }
+  }
+  const walked = h.snapshot()
+  const last = rowWithText(h, walked, 'High')
+  h.check(`${cellKey}: the LAST effort candidate is reachable with real line keys`,
+    last !== undefined && containedXY(walked.chains, last),
+    `steps=${candidateDowns} :: ${last === undefined ? 'no High row' : box(last)}`)
+  // ---- The Reader from that Overview, by a REAL pointer click (every size).
+  const readerOpened = await openReaderByPointer(h)
+  const readerSnap = h.snapshot()
+  h.check(`${cellKey}: the details row opens the Reader by a real pointer click`,
+    readerOpened && lastFrame(h)?.page === 'details', `opened=${readerOpened} :: ${JSON.stringify(lastFrame(h)?.page)}`)
+  h.check(`${cellKey}: the Reader REPLACES the picker (no picker, no footer buttons)`,
+    h.classNodes(readerSnap, 'sf-picker').length === 0 && h.classNodes(readerSnap, 'pk-btn').length === 0,
+    `sf-picker=${h.classNodes(readerSnap, 'sf-picker').length} pk-btn=${h.classNodes(readerSnap, 'pk-btn').length}`)
+  h.check(`${cellKey}: the Reader overlay head is the MODEL NAME`,
+    modelName !== undefined && lastFrame(h)?.head === modelName,
+    `${JSON.stringify(lastFrame(h)?.head)} expected ${JSON.stringify(modelName)}`)
+  const readerBack = h.classNodes(readerSnap, 'sf-row').find((node) => h.descendantsText(node) === 'Back')
+  const readerHead = textExactly(readerSnap, 'Identity')
+  h.check(`${cellKey}: the Reader's visible Back row and first group head are contained`,
+    readerBack !== undefined && containedXY(readerSnap.chains, readerBack)
+    && readerHead !== undefined && containedXY(readerSnap.chains, readerHead),
+    `Back@${box(readerBack)} Identity@${box(readerHead)}`)
+  if (SECTION9.has(cellKey)) h.capture(`reader-${cellKey}`, `the ${cellKey} Reader top (plan §9)`)
+  await h.key('Escape', 900)
+  const returned = h.snapshot()
+  const returnedIdentity = rowWithText(h, returned, String(modelName))
+  // The Overview keeps the list's scroll position across the Reader round trip, so
+  // at a SHORT pane the identity row can sit above the fold: the return is proved
+  // by the page/title and by the identity row still being in the list (its exact
+  // span is recorded), not by it being on screen again.
+  h.check(`${cellKey}: Esc returns the Reader to the Overview it came from, identity row in the list`,
+    lastFrame(h)?.page === 'overview' && lastFrame(h)?.title === 'Model overview'
+    && returnedIdentity !== undefined,
+    JSON.stringify({ page: lastFrame(h)?.page, title: lastFrame(h)?.title, identity: box(returnedIdentity), yspan: visibleSpan(returned.chains, returnedIdentity, 'y').toFixed(1) }))
+  await h.key('Escape', 900)
+  h.check(`${cellKey}: Esc returns the Overview to the catalogue`, lastFrame(h)?.page === 'models', JSON.stringify(lastFrame(h)))
+  return { captured, metrics, narrowest, width: size.w }
+}
+
+/* ------------------------------------------------------------------- flow */
 
 export default async function (h) {
-  // ---------------------------------------------------------------- wide shell
+  // ------------------------------------------------- claim 1: boot at 1280x800
   await h.resize(1280, 800)
   const subject = join(h.repo, 'scripts', 'tern-pane-model-ux-subject.mts')
-  const booted = await h.launch(subject, { ready: 'Models' })
-  h.check('the production model picker boots inside a real Tern pane', booted, h.texts(h.snapshot()).join(' | '))
+  const booted = await h.launch(subject, { ready: 'Switch model' })
+  h.check('the production list-first model picker boots inside a real Tern pane', booted, h.texts(h.snapshot()).join(' | '))
   if (!booted) return
 
   let snap = h.snapshot()
-  h.check('the wide shell renders the models page with its subject', h.has(snap, 'Models') && h.has(snap, 'Session model'))
-  h.check('the wide shell asks for the native side preview', h.classNodes(snap, 'pv-side').length > 0)
-  h.check('the wide pane really gets the SIDE column, not the below-list fallback',
-    classesOf(snap).has('pv-side') && !classesOf(snap).has('pv-below-auto'),
-    [...classesOf(snap)].filter((name) => name.startsWith('pv-')).join(','))
-  h.check('the modeled layout it asked for is the wide one',
-    frames(h).at(-1)?.size === 'lg' && frames(h).at(-1)?.preview === 'side',
-    JSON.stringify(frames(h).at(-1)))
+  let frame = lastFrame(h)
+  const bootShot = h.capture('catalogue-1280x800', 'the wide list-first catalogue with its below-list summary')
+  h.check('boot: the presenter paints the list-first catalogue under its live title',
+    frame?.page === 'models' && frame?.title === 'Switch model', JSON.stringify(frame))
+  h.check('boot: the catalogue subtitle is the ONE hint',
+    frame?.subtitle === 'Enter: effort & details' && h.has(snap, 'Enter: effort & details'),
+    `${JSON.stringify(frame?.subtitle)} :: ${h.texts(snap).slice(0, 8).join(' | ')}`)
+  const bootClasses = pickerClasses(snap)
+  h.check('boot: the client really paints sz-lg + pv-below (never pv-hide / pv-none)',
+    bootClasses.includes('sz-lg') && bootClasses.includes('pv-below') && !bootClasses.includes('pv-hide') && !bootClasses.includes('pv-none'),
+    bootClasses.join(' '))
+  h.check('boot: the presenter asks for lg + preview below', frame?.size === 'lg' && frame?.preview === 'below',
+    JSON.stringify({ size: frame?.size, preview: frame?.preview }))
+  // The below-list summary is the HIGHLIGHTED model's real read-only facts.
+  const preview = h.classNodes(snap, 'pk-pv')
+  const kv = h.classNodes(snap, 'sf-kv')[0]
+  h.check('boot: the below-list summary is painted and contained',
+    preview.length === 1 && containedXY(snap.chains, preview[0]) && kv !== undefined,
+    `pk-pv=${preview.length}@${box(preview[0])}`)
+  const expectedSummary = JSON.stringify([
+    { k: 'Provider', v: 'Alpha Provider' },
+    { k: 'Draft effort', v: 'Medium' },
+    { k: 'Selection', v: 'current' },
+  ])
+  h.check('boot: the summary is a kv node whose items are the HIGHLIGHTED model\'s real facts',
+    JSON.stringify(frame?.summary) === expectedSummary, `${JSON.stringify(frame?.summary)} expected ${expectedSummary}`)
+  h.check('boot: the client paints those summary facts',
+    kv !== undefined && ['Provider', 'Alpha Provider', 'Draft effort', 'Medium', 'Selection', 'current'].every((text) => h.descendantsText(kv).includes(text)),
+    kv === undefined ? 'no sf-kv' : h.descendantsText(kv))
+  // The picked row: provider mark, real badges; one row per (provider, model).
+  const picked = rowWithText(h, snap, 'Alpha Model')
+  const defaulted = rowWithText(h, snap, 'Beta Model')
+  h.check('boot: the picked model row carries its provider mark and its real current badge',
+    picked !== undefined && markText(h, picked) === 'AP'
+    && subclass(picked, 'pk-badge').some((node) => String(node.text) === 'current'),
+    picked === undefined ? 'no picked row' : `${markText(h, picked)} :: ${h.descendantsText(picked)}`)
+  h.check('boot: the default row carries the Default badge and never a fake current',
+    defaulted !== undefined && subclass(defaulted, 'pk-badge').some((node) => String(node.text) === 'Default')
+    && !subclass(defaulted, 'pk-badge').some((node) => String(node.text) === 'current'),
+    defaulted === undefined ? 'no default row' : h.descendantsText(defaulted))
+  h.check('boot: every model appears exactly once (one row per provider+model)',
+    ['Alpha Model', 'Alpha Second', 'Beta Model'].every((label) => modelRows(h, snap).filter((node) => h.descendantsText(node).includes(label)).length === 1),
+    modelRows(h, snap).map((node) => h.descendantsText(node)).join(' | '))
+  // The ONE optional fact column, fed with the already-seeded draft on the wire
+  // and painted by the client in the model's own row.
+  const currentRowId = JSON.stringify(['alpha', 'm-alpha'])
+  const noEffortRowId = JSON.stringify(['alpha', 'm-alpha2'])
+  const defaultRowId = JSON.stringify(['beta', 'm-beta'])
+  h.check('boot: the catalogue declares the ONE effort column (models page only)',
+    JSON.stringify(frame?.columns) === FACT_COLUMN, JSON.stringify(frame?.columns))
+  h.check('boot: the model advertising efforts carries its drafted effort LABEL as its fact',
+    itemOf(frame, currentRowId)?.facts?.effort === 'Medium', JSON.stringify(itemOf(frame, currentRowId)?.facts))
+  h.check('boot: a model with NO effort metadata carries no facts at all',
+    itemOf(frame, noEffortRowId)?.facts === undefined && itemOf(frame, defaultRowId)?.facts === undefined,
+    `${JSON.stringify(itemOf(frame, noEffortRowId)?.facts)} / ${JSON.stringify(itemOf(frame, defaultRowId)?.facts)}`)
+  const bootFactHeader = h.classNodes(snap, 'pk-fact').find((node) => (node.class ?? '').split(' ').includes('pk-fh'))
+  h.check('boot: the client paints the Effort header and the drafted fact, both contained',
+    bootFactHeader !== undefined && String(bootFactHeader.text) === 'Effort' && containedXY(snap.chains, bootFactHeader)
+    && subclass(picked, 'pk-fact').some((node) => String(node.text) === 'Medium')
+    && subclass(defaulted, 'pk-fact').length === 0,
+    `header=${bootFactHeader === undefined ? 'none' : box(bootFactHeader)} picked=${subclass(picked, 'pk-fact').map((node) => String(node.text)).join(',')} default=${subclass(defaulted, 'pk-fact').length}`)
+  const bootGroups = groupRows(h, snap)
+  h.check('boot: the pinned Current / Default group is the FIRST group',
+    bootGroups.length >= 1 && h.descendantsText(bootGroups[0]).includes('Current / Default'),
+    bootGroups.map((node) => h.descendantsText(node)).join(' | '))
+  const bootButtons = buttons(h, snap)
+  h.check('boot: the footer is exactly Cancel + the one write, both contained',
+    bootButtons.length === 2 && actionIds(frame) === 'close,apply' && actionLabels(frame).includes('Cancel') && actionLabels(frame).includes('Switch')
+    && bootButtons.every((node) => containedXY(snap.chains, node)),
+    `${bootButtons.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' ')} :: ${actionIds(frame)}`)
+  h.check('boot: no scope column anywhere (client classes or presenter props)',
+    scopeTokens(snap).length === 0 && !(frame?.propKeys ?? []).includes('scopes'),
+    `${scopeTokens(snap).join(',')} :: ${(frame?.propKeys ?? []).join(',')}`)
 
-  const head = h.classNodes(snap, 'sf-card-head')[0]
-  h.check('the wide details card head carries its open-details affordance',
-    head !== undefined && h.descendantsText(head).includes('›'), head === undefined ? 'no sf-card-head' : h.descendantsText(head))
-  const barButtons = h.classNodes(snap, 'pk-btn')
-  h.check('the wide model-list footer renders exactly Cancel + the one write', barButtons.length === 2,
-    barButtons.map((node) => h.descendantsText(node)).join(' | '))
-  h.check('every wide footer button is fully inside its bar',
-    barButtons.every((node) => containedXY(snap.chains, node)),
-    barButtons.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' '))
-  // Three advertised efforts plus the provider-default sentinel (`effortChoicesOf`
-  // adds it when a model declares efforts but no concrete default), so FOUR rows.
-  const effortRows = h.classNodes(snap, 'sf-row')
-  h.check('every inline Reasoning Effort row is rendered in the wide column',
-    effortRows.length === 4
-    && ['Default', 'e1', 'e2', 'e3'].every((label) => h.texts(snap).includes(label)),
-    `${effortRows.length} row(s): ${effortRows.map((node) => h.descendantsText(node)).join(' | ')}`)
-  // The client keeps the side column only while it really fits the list; the rows
-  // must be inside the region the user can see (a node's rect is not a proof).
-  h.check('every inline effort row is covered by the region it is painted in',
-    effortRows.every((node) => containedXY(snap.chains, node)),
-    effortRows.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' '))
-  h.measure('wide footer bar', box(h.classNodes(snap, 'pk-bar')[0] ?? {}))
-
-  h.capture('lg-models-1280x800', 'the wide three-column shell: scopes, list, full details card, inline effort rows')
-
-  // ------------------------------------ the MEASURED side-preview boundary
-  // 1020px is 127 columns at the pane's 8px cell: the client's sheet has not
-  // reached its own breakpoint, so the preview would be painted UNDER the list and
-  // the inline effort rows would be clipped out of the visible region. The
-  // presenter must not claim the wide shell there at all.
-  await h.resize(1020, 640)
-  await h.sleep(300)
-  snap = h.snapshot()
-  const belowFrame = frames(h).at(-1)
-  h.check('a 1020px pane is NOT claimed as wide (the client would paint below the list)',
-    belowFrame?.size === 'md' && belowFrame?.preview === 'none', JSON.stringify(belowFrame))
-  h.check('and the client really paints no preview region there',
-    !classesOf(snap).has('pv-side') && !classesOf(snap).has('pv-below-auto') && h.classNodes(snap, 'sf-row').length === 0,
-    [...classesOf(snap)].filter((name) => name.startsWith('pv-')).join(','))
-  h.capture('md-models-1020x640', 'the medium split: compact picker, no preview, no inline candidate')
-
-  // 1040px is the boundary pane itself. The presenter reconstructs the pane width
-  // from `cols` * the cell width, and that reconstruction UNDER-estimates by the
-  // client's own chrome (measured: 1040px -> 129 * 8 = 1032px), so the boundary
-  // pane still goes compact. That is the safe direction, and it is measured here
-  // rather than assumed.
-  await h.resize(1040, 640)
-  await h.sleep(300)
-  const boundaryFrame = frames(h).at(-1)
-  h.measure('the 1040px boundary pane still goes compact (one cell of safety margin)',
-    JSON.stringify({ frame: boundaryFrame, cols: records(h).filter((row) => row.resize).at(-1)?.resize }))
-  h.check('the boundary pane is not claimed as wide either',
-    boundaryFrame?.size === 'md' && boundaryFrame?.preview === 'none', JSON.stringify(boundaryFrame))
-
-  // One cell further out the client's sheet is really past its breakpoint, so the
-  // SIDE column is real and every advertised candidate is inside it.
-  await h.resize(1050, 700)
-  await h.sleep(300)
-  snap = h.snapshot()
-  const sideFrame = frames(h).at(-1)
-  h.check('a 1050px pane IS claimed as wide and gets the real side column',
-    sideFrame?.size === 'lg' && sideFrame?.preview === 'side'
-    && classesOf(snap).has('pv-side') && !classesOf(snap).has('pv-below-auto'),
-    `${JSON.stringify(sideFrame)} :: ${[...classesOf(snap)].filter((name) => name.startsWith('pv-')).join(',')}`)
-  const sideRows = h.classNodes(snap, 'sf-row')
-  h.check('and every advertised candidate is really visible inside it',
-    sideRows.length === 4 && sideRows.every((node) => containedXY(snap.chains, node)),
-    `${sideRows.length} row(s): ${sideRows.map((node) => h.descendantsText(node)).join(' | ')}`)
-  h.capture('lg-models-1050x700', 'the first pane whose sheet passes the client breakpoint: the side column is real')
-
-  // Back to the documented normal wide pane for the interaction paths below. A
-  // snapshot belongs to the pane it was taken in, so it is re-read here: a click
-  // is delivered in CURRENT pane coordinates.
-  await h.resize(1280, 800)
-  await h.sleep(300)
-  snap = h.snapshot()
-
-  // A2: the pointer paths a headless test cannot prove.
-  const headClicked = await h.click(snap.chains, h.classNodes(snap, 'sf-card-head')[0])
-  h.check('a REAL pointer click on the card HEAD opens the read-only Reader',
-    headClicked && h.has(h.snapshot(), 'Full model details'), `clicked=${headClicked} :: ${h.texts(h.snapshot()).join(' | ')}`)
-  h.check('the Reader REPLACES the picker: no action bar and no picker rows at all',
-    h.classNodes(h.snapshot(), 'pk-btn').length === 0 && h.classNodes(h.snapshot(), 'pk-row').length === 0,
-    h.classNodes(h.snapshot(), 'pk-btn').map((node) => h.descendantsText(node)).join(' | '))
-  h.capture('lg-reader-1040x640', 'the card head opened the read-only Reader')
-
-  await h.key('Escape', 800)
-  h.check('Escape returns to the model list', h.has(h.snapshot(), 'Models'))
-
-  snap = h.snapshot()
-  const body = snap.nodes.find((node) => (node.class ?? '').split(' ').includes('sf-card-body'))
-  const bodyLine = inside(snap, body, 'sf-text')
-  h.check('the details card body carries nested text lines', bodyLine !== undefined,
-    body === undefined ? 'no sf-card-body' : (body.children ?? []).length + ' child(ren)')
-  const bodyClicked = bodyLine === undefined ? false : await h.click(snap.chains, bodyLine)
-  h.check('a REAL pointer click on a card BODY TEXT line opens the read-only Reader',
-    bodyClicked && h.has(h.snapshot(), 'Full model details'),
-    `clicked=${bodyClicked} :: ${h.texts(h.snapshot()).join(' | ')}`)
-  await h.key('Escape', 800)
-
-  // A3: the real select / activate ordering.
-  snap = h.snapshot()
-  const rows = h.classNodes(snap, 'pk-row').filter((node) => !(node.class ?? '').includes('grp'))
-  h.check('the model list renders its rows', rows.length === 2, `${rows.length} row(s)`)
-  const other = rows.find((node) => !(node.class ?? '').includes('sel'))
-  const selectClicked = other === undefined ? false : await h.click(snap.chains, other)
-  const sawSelect = records(h).some((row) => row.event?.ev === 'select' && String(row.event.item).includes('m2'))
-  h.check('a REAL click on a not-selected row sends select and highlights it',
-    selectClicked && sawSelect, JSON.stringify(records(h).filter((row) => row.event).slice(-3)))
-  const selected = h.snapshot()
-  const sameRow = h.classNodes(selected, 'pk-row').find((node) => (node.class ?? '').includes('sel'))
-  const activateClicked = sameRow === undefined ? false : await h.click(selected.chains, sameRow)
-  const sawActivate = records(h).some((row) => row.event?.ev === 'activate')
-  h.check('clicking the already-selected row sends activate (never a page change)',
-    activateClicked && sawActivate && h.has(h.snapshot(), 'Models'),
-    JSON.stringify(records(h).filter((row) => row.event).slice(-3)))
-  h.check('no browse click wrote anything', records(h).filter((row) => row.apply).length === 0)
-
-  // A4: the compact/Overview footers and their containment at the 400px floor.
-  // Park the highlight on the FIRST model so the write payload below is deterministic.
-  snap = h.snapshot()
-  const first = h.classNodes(snap, 'pk-row').filter((node) => !(node.class ?? '').includes('grp'))
-    .find((node) => h.descendantsText(node).includes('Budget Model'))
-  h.check('the first model row is back in the list', first !== undefined && await h.click(snap.chains, first),
-    h.texts(h.snapshot()).join(' | '))
-  await h.resize(400, 600)
-  await h.sleep(300)
-  const compact = frames(h).find((frame) => frame.title === 'Models' && actionIds(frame) === 'close')
-  h.check('the compact model list offers Cancel alone (no write)', compact !== undefined,
-    frames(h).map((frame) => `${frame.title}:${actionIds(frame)}`).join(' | '))
-  await h.key('Return', 900)
-  const overview = h.snapshot()
-  h.check('Enter opens the model overview at 400x600', h.has(overview, 'Model overview'))
-  const overviewFrame = frames(h).filter((frame) => frame.title === 'Model overview').at(-1)
-  h.check('the overview footer is Back + the one write (no Cancel)', overviewFrame !== undefined && actionIds(overviewFrame) === 'back,apply',
-    JSON.stringify(overviewFrame))
-  const overviewButtons = h.classNodes(overview, 'pk-btn')
-  h.check('every overview footer button is fully inside its bar',
-    overviewButtons.length === 2 && overviewButtons.every((node) => containedXY(overview.chains, node)),
-    overviewButtons.map((node) => `${h.descendantsText(node)}@${box(node)} span=${visibleSpan(overview.chains, node)}`).join(' '))
-  h.measure('overview footer bar', box(h.classNodes(overview, 'pk-bar')[0] ?? {}))
-  // The Overview's OWN priority: the effort section and every advertised candidate
-  // come before the details entry and the remaining configured facts.
-  const overviewTexts = h.texts(overview)
-  h.check('the Overview leads with the model then the effort candidates',
-    overviewTexts.indexOf('Model') >= 0
-    && overviewTexts.indexOf('Reasoning effort') > overviewTexts.indexOf('Model')
-    && ['e1', 'e2', 'e3', 'Default'].every((label) => overviewTexts.includes(label))
-    && overviewTexts.indexOf('View full model details ›') > overviewTexts.indexOf('e3'),
-    overviewTexts.join(' | '))
-  h.capture('md-overview-400x600', 'the frozen two-entry footer at the 400px floor')
-
-  const primary = overviewButtons.find((node) => (node.class ?? '').includes('primary'))
-  const before = records(h).filter((row) => row.apply).length
-  const primaryClicked = primary === undefined ? false : await h.click(overview.chains, primary)
-  const applied = records(h).filter((row) => row.apply)
-  h.check('one REAL click on the write reaches the writer exactly once',
-    primaryClicked && applied.length === before + 1 && applied.at(-1).apply.selection.model === 'm',
-    `clicked=${primaryClicked} applies=${JSON.stringify(applied)}`)
-  h.check('the admitted write renders Close + a disabled Selecting…',
-    frames(h).some((frame) => actionIds(frame) === 'close,apply' && actionText(frame).includes('Selecting…')),
-    frames(h).map((frame) => `${frame.title}:${actionIds(frame)}:${actionText(frame)}`).join(' | '))
-  h.check('the refusal leaves the overview usable with its buttons restored',
-    frames(h).at(-1)?.title === 'Model overview' && actionIds(frames(h).at(-1)) === 'back,apply',
-    JSON.stringify(frames(h).at(-1)))
-
-  // ------------------------------- the user's ordinary SPLIT pane (~1000px wide)
-  // The reported defect: at this pane the old rule asked for the side column, the
-  // client painted the preview below the list, and the effort entry was invisible.
-  // The compact path must reach every candidate and the one write instead.
-  await h.key('Escape', 800)
-  await h.resize(1000, 640)
-  await h.sleep(300)
-  snap = h.snapshot()
-  h.check('the ~1000px split pane is a COMPACT picker with no preview at all',
-    h.has(snap, 'Models') && !classesOf(snap).has('pv-side') && !classesOf(snap).has('pv-below-auto')
-    && frames(h).at(-1)?.size === 'md',
-    `${JSON.stringify(frames(h).at(-1))} :: ${[...classesOf(snap)].filter((name) => name.startsWith('pv-')).join(',')}`)
-  h.check('and its list offers no write (the Overview owns it)', actionIds(frames(h).at(-1)) === 'close',
-    JSON.stringify(frames(h).at(-1)))
-  await h.key('Return', 900)
-  const splitOverview = h.snapshot()
-  h.check('Enter opens the model Overview at the split pane', h.has(splitOverview, 'Model overview'))
-  const splitFrame = frames(h).filter((frame) => frame.title === 'Model overview').at(-1)
-  h.check('the Overview carries Back + the one write',
-    actionIds(splitFrame) === 'back,apply', JSON.stringify(splitFrame))
-  const splitButtons = h.classNodes(splitOverview, 'pk-btn')
-  h.check('its footer buttons are contained at the split pane',
-    splitButtons.length === 2 && splitButtons.every((node) => containedXY(splitOverview.chains, node)),
-    splitButtons.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' '))
-  h.check('every advertised effort candidate is reachable in the first screen',
-    ['e1', 'e2', 'e3', 'Default'].every((label) => h.texts(splitOverview).includes(label)),
-    h.texts(splitOverview).join(' | '))
-  h.capture('md-overview-1000x640', 'the reported split pane: the candidate is in the Overview, not in a hidden preview')
-
-  // ------------------------------- the plan's §7.2 matrix on THIS revision
-  // The four sizes the plan names that the sections above do not already cover,
-  // each driven end to end (presenter claim → client's real preview mode →
-  // containment → the Overview → Reader path) rather than inferred from a Gate A
-  // calibration taken with an older presenter.
-  for (const cell of [
-    { w: 1100, h: 640, expect: 'wide' },
-    { w: 1280, h: 600, expect: 'wide' },
-    { w: 900, h: 640, expect: 'compact' },
-    { w: 560, h: 640, expect: 'compact' },
+  // --------------------------------------------- claim 2: the full size matrix
+  let narrowShot
+  const columnMetrics = []
+  for (const size of [
+    { w: 400, h: 600 }, { w: 560, h: 640 }, { w: 900, h: 400 }, { w: 1000, h: 640 },
+    { w: 1020, h: 640 }, { w: 1040, h: 640 }, { w: 1050, h: 700 }, { w: 1100, h: 640 },
+    { w: 1280, h: 600 }, { w: 1280, h: 800 },
   ]) {
-    await matrixCell(h, cell, cell.expect)
+    const cell = await matrixCell(h, size)
+    if (cell.captured !== undefined && size.w === 400 && size.h === 600) narrowShot = cell.captured
+    columnMetrics.push({ size: `${size.w}x${size.h}`, painted: !cell.narrowest, ...cell.metrics })
   }
+  // The measured column budget: the client gives the fact column a FIXED slot
+  // while the model NAME keeps its own intrinsic width, at every painted size.
+  const labelWidths = [...new Set(columnMetrics.map((entry) => entry.labelWidth))]
+  const factsWidths = [...new Set(columnMetrics.filter((entry) => entry.painted).map((entry) => entry.factsWidth))]
+  h.check('the fact column is a FIXED client budget across every painted size',
+    factsWidths.length === 1 && factsWidths[0] > 0,
+    JSON.stringify(columnMetrics))
+  h.check('the model NAME keeps its intrinsic width at every size (even with the column hidden)',
+    labelWidths.length === 1 && labelWidths[0] > 0,
+    JSON.stringify(columnMetrics))
 
-  // ------------------------------------------------------------- the Reader
-  // A model whose identity and description cannot be read from a one-line row:
-  // the Reader must carry the COMPLETE values, the app must be able to drive the
-  // native scroll container, and Back must return to the real origin.
-  for (let step = 0; step < 3 && frames(h).at(-1)?.title !== 'Models'; step += 1) {
-    if (frames(h).at(-1)?.title === undefined) break
-    await h.key('Escape', 700)
-  }
-  h.check('the model list is the page again before the Reader section',
-    frames(h).at(-1)?.title === 'Models', JSON.stringify(frames(h).at(-1)))
+  // --------------------------------------- claim 3: row events by REAL pointer
+  h.check('row events: the matrix left the pane on the catalogue', await toCatalogue(h) && lastFrame(h)?.page === 'models',
+    JSON.stringify(lastFrame(h)))
   await h.resize(1280, 800)
-  await h.sleep(200)
+  snap = h.snapshot()
+  const otherRow = rowWithText(h, snap, 'Alpha Second')
+  const eventsBefore = rowEvents(h).length
+  const appliedBefore = applies(h).length
+  const selected = otherRow === undefined ? false : await h.click(snap.chains, otherRow)
+  const selectEvents = rowEvents(h).slice(eventsBefore)
+  h.check('one REAL pointer click on a NON-highlighted row emits select and only moves the highlight',
+    selected && selectEvents.length === 1 && selectEvents[0].ev === 'select'
+    && selectEvents[0].item === JSON.stringify(['alpha', 'm-alpha2'])
+    && lastFrame(h)?.page === 'models' && lastFrame(h)?.selected === JSON.stringify(['alpha', 'm-alpha2'])
+    && applies(h).length === appliedBefore,
+    `${JSON.stringify(selectEvents)} :: selected=${JSON.stringify(lastFrame(h)?.selected)}`)
+  snap = h.snapshot()
+  const sameRow = rowWithText(h, snap, 'Alpha Second')
+  const activateBefore = rowEvents(h).length
+  const activated = sameRow === undefined ? false : await h.click(snap.chains, sameRow)
+  const activateEvents = rowEvents(h).slice(activateBefore)
+  const activatedOverview = lastFrame(h)
+  h.check('one REAL pointer click on the HIGHLIGHTED row emits activate and enters THAT model\'s Overview',
+    activated && activateEvents.length === 1 && activateEvents[0].ev === 'activate'
+    && activateEvents[0].item === JSON.stringify(['alpha', 'm-alpha2'])
+    && activatedOverview?.page === 'overview' && activatedOverview?.title === 'Model overview'
+    && (activatedOverview?.items ?? [])[0]?.id === 'overview-model'
+    && (activatedOverview?.items ?? [])[0]?.label === 'Alpha Second',
+    `${JSON.stringify(activateEvents)} :: ${JSON.stringify({ page: activatedOverview?.page, first: (activatedOverview?.items ?? [])[0] })}`)
+  h.measure('the raw select/activate events of claim 3', JSON.stringify([...selectEvents, ...activateEvents]))
+
+  // ------------------------------------------------------------ claim 4: Overview
+  await toCatalogue(h)
+  await h.key('Up', 400)   // from Alpha Second back onto the current model
+  h.check('the catalogue cursor moved onto the current model with a real key',
+    lastFrame(h)?.selected === JSON.stringify(['alpha', 'm-alpha']), JSON.stringify(lastFrame(h)?.selected))
+  const overviewOpened = await enterOverview(h)
+  snap = h.snapshot()
+  frame = lastFrame(h)
+  h.check('Enter opens the highlighted model\'s Overview under its short page title',
+    overviewOpened && frame?.title === 'Model overview',
+    JSON.stringify({ page: frame?.page, title: frame?.title }))
+  h.check('the Overview subtitle is the model\'s provider · current',
+    frame?.subtitle === 'Alpha Provider · current', JSON.stringify(frame?.subtitle))
+  const claimIdentity = (frame?.items ?? []).find((item) => String(item.id) === 'overview-model')
+  const claimIdentityRow = rowWithText(h, snap, 'Alpha Model')
+  h.check('the Overview leads with the model identity row: name as label, complete id as title',
+    (frame?.items ?? [])[0]?.id === 'overview-model'
+    && claimIdentity?.label === 'Alpha Model' && claimIdentity?.title === 'm-alpha'
+    && claimIdentityRow !== undefined && containedXY(snap.chains, claimIdentityRow),
+    JSON.stringify({ first: (frame?.items ?? [])[0], row: box(claimIdentityRow) }))
+  h.check('the Overview then leads into Reasoning effort, every candidate, then the details entry',
+    (frame?.items ?? [])[1]?.label === 'Reasoning effort'
+    && (frame?.items ?? []).at(-1)?.label === 'View full model details ›'
+    && ['Default', 'Low', 'Medium', 'High'].every((label) => (frame?.items ?? []).some((item) => item.label === label)),
+    JSON.stringify((frame?.items ?? []).map((item) => `${item.id}:${item.label}`)))
+  h.check('the Overview declares NO effort column, so its rows paint no fact cell',
+    (frame?.columns ?? []).length === 0 && h.classNodes(snap, 'pk-fact').length === 0,
+    `columns=${JSON.stringify(frame?.columns)} pk-fact=${h.classNodes(snap, 'pk-fact').length}`)
+  const overviewButtons = buttons(h, snap)
+  h.check('the Overview footer is Back + the one write, both contained',
+    overviewButtons.length === 2 && actionIds(frame) === 'back,apply' && overviewButtons.every((node) => containedXY(snap.chains, node)),
+    `${overviewButtons.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' ')} :: ${actionIds(frame)}`)
+  const overviewShot = h.capture('overview-effort-1280x800', 'the model Overview with every advertised effort candidate (claim 4)')
+
+  const highRow = rowWithText(h, snap, 'High')
+  const writesBefore = applies(h).length
+  const draftEventsBefore = rowEvents(h).length
+  const drafted = highRow === undefined ? false : await h.click(snap.chains, highRow)
+  const draftEvents = rowEvents(h).slice(draftEventsBefore)
+  h.check('one REAL pointer click on an effort row drafts it with zero writes',
+    drafted && draftEvents.some((event) => event.ev === 'select' && event.item === 'effort:high') && applies(h).length === writesBefore,
+    `${JSON.stringify(draftEvents)} :: applies=${applies(h).length}`)
+  const draftedSnap = h.snapshot()
+  const highNow = rowWithText(h, draftedSnap, 'High')
+  const mediumNow = rowWithText(h, draftedSnap, 'Medium')
+  h.check('the draft mark really moved to the clicked candidate (● there, ○ before)',
+    highNow !== undefined && markText(h, highNow).includes('●') && mediumNow !== undefined && markText(h, mediumNow).includes('○'),
+    `High=${highNow === undefined ? '?' : markText(h, highNow)} Medium=${mediumNow === undefined ? '?' : markText(h, mediumNow)}`)
+
+  const readerOpened = await openReaderByPointer(h)
+  h.check('a REAL pointer click on the details entry enters the Reader',
+    readerOpened && lastFrame(h)?.page === 'details', JSON.stringify({ opened: readerOpened, page: lastFrame(h)?.page }))
+  h.check('the Reader REPLACES the picker and its head is the MODEL NAME',
+    h.classNodes(h.snapshot(), 'pk-btn').length === 0 && h.has(h.snapshot(), 'Alpha Model') && lastFrame(h)?.head === 'Alpha Model',
+    `buttons=${h.classNodes(h.snapshot(), 'pk-btn').length} head=${JSON.stringify(lastFrame(h)?.head)}`)
+  await h.key('Escape', 900)
+  h.check('Esc returns from the Reader to the Overview it came from',
+    lastFrame(h)?.page === 'overview' && lastFrame(h)?.title === 'Model overview'
+    && (lastFrame(h)?.items ?? [])[0]?.id === 'overview-model'
+    && (lastFrame(h)?.items ?? [])[0]?.label === 'Alpha Model', JSON.stringify(lastFrame(h)))
+
+  snap = h.snapshot()
+  const primary = buttons(h, snap).find((node) => (node.class ?? '').split(' ').includes('primary'))
+  const writeBefore = applies(h).length
+  const primaryClicked = primary === undefined ? false : await h.click(snap.chains, primary)
+  const applied = applies(h)
+  h.check('one REAL click on the primary writes EXACTLY once with the drafted effort',
+    primaryClicked && applied.length === writeBefore + 1
+    && applied.at(-1).apply.selection.provider === 'alpha' && applied.at(-1).apply.selection.model === 'm-alpha'
+    && applied.at(-1).apply.selection.reasoningEffort === 'high',
+    `clicked=${primaryClicked} applies=${JSON.stringify(applied)}`)
+  h.check('the admitted write renders its pending footer',
+    frames(h).some((entry) => (entry.actions ?? []).some((action) => action.id === 'apply' && action.label === 'Selecting…')),
+    frames(h).slice(-4).map((entry) => `${entry.title}:${actionIds(entry)}:${actionLabels(entry)}`).join(' | '))
+  // An admitted write refuses every page operation, so its bar renders Close + the
+  // disabled write and NO clickable Back: every frame that really carried the
+  // pending state is checked, not just whichever one a snapshot happens to catch.
+  const pendingFrames = frames(h).filter(
+    (entry) => (entry.actions ?? []).some((action) => action.id === 'apply' && action.label === 'Selecting…'),
+  )
+  h.check('every pending Overview frame offers no clickable Back',
+    pendingFrames.length > 0
+    && pendingFrames.every((entry) => (entry.actions ?? []).every((action) => action.id !== 'back')),
+    pendingFrames.map((entry) => actionIds(entry)).join(' | '))
+  // The (refused) write settles back to the page's own Back, which then returns.
+  let backRestored = false
+  for (let step = 0; step < 20 && !backRestored; step += 1) {
+    await h.sleep(150)
+    backRestored = (lastFrame(h)?.actions ?? []).some((action) => action.id === 'back')
+  }
+  h.check('the settled Overview restores its Back', backRestored, JSON.stringify(lastFrame(h)?.actions))
+  snap = h.snapshot()
+  const backButton = buttons(h, snap).find((node) => h.descendantsText(node) === 'Back')
+  const backClicked = backButton === undefined ? false : await h.click(snap.chains, backButton)
+  h.check('the Overview Back returns to the catalogue',
+    backClicked && lastFrame(h)?.page === 'models', `clicked=${backClicked} :: ${JSON.stringify(lastFrame(h)?.page)}`)
+  h.check('the catalogue fact column reflects the draft changed on the Overview',
+    itemOf(lastFrame(h), currentRowId)?.facts?.effort === 'High',
+    JSON.stringify(itemOf(lastFrame(h), currentRowId)?.facts))
+
+  // --------------------------------------------------------------- claim 5: Reader
+  await toCatalogue(h)
   await h.key('3', 900)
   snap = h.snapshot()
-  h.check('the long-value fixture keeps the wide shell', frames(h).at(-1)?.size === 'lg',
-    JSON.stringify(frames(h).at(-1)))
-  h.capture('lg-long-model-1280x800', 'the long-identity model in the wide shell')
-  const longHead = h.classNodes(snap, 'sf-card-head')[0]
-  const longOpened = longHead === undefined ? false : await h.click(snap.chains, longHead)
-  h.check('the long model opens its Reader', longOpened && h.has(h.snapshot(), 'Full model details'),
-    `clicked=${longOpened}`)
+  frame = lastFrame(h)
+  h.check('the long-value fixture is a live catalogue with exactly the long model',
+    frame?.page === 'models' && (frame?.items ?? []).length === 1 && String((frame?.items ?? [])[0]?.title).startsWith('provider/WWWW'),
+    JSON.stringify((frame?.items ?? []).map((item) => item.title)))
+  await enterOverview(h)
+  h.check('the long model\'s Overview opens under the short page title with its identity row painted',
+    lastFrame(h)?.page === 'overview' && lastFrame(h)?.title === 'Model overview'
+    && rowWithText(h, h.snapshot(), 'Long Model') !== undefined,
+    JSON.stringify({ page: lastFrame(h)?.page, title: lastFrame(h)?.title }))
+  const longReaderOpened = await openReaderByPointer(h)
+  h.check('the long model\'s Reader opens from the Overview', longReaderOpened && lastFrame(h)?.page === 'details',
+    `opened=${longReaderOpened} :: ${JSON.stringify(lastFrame(h)?.page)}`)
   snap = h.snapshot()
-  const readerBody = snap.nodes.find((node) => (node.class ?? '').split(' ').includes('sf-ov-body'))
-  h.check('the Reader renders a native overlay body', readerBody !== undefined, box(readerBody))
-  // The client's own node dump caps a text node at 200 characters, so the tree can
-  // never be the proof that a long value is complete (the WIRE value is asserted
-  // by the headless suite). What the real pane proves is the SHAPE and the
-  // REACHABILITY: ONE value node, wrapped by the client into many lines, with its
-  // tail reachable through the app-driven native scroll.
-  const description = textStarting(snap, 'Long description')
-  const valueNodes = snap.nodes.filter((node) => String(node.text ?? '').startsWith('Long description'))
-  h.check('the Reader carries the long description as ONE client-wrapped value',
-    description !== undefined
-    && valueNodes.length === 1
-    && String(description.text).includes('中文描述')
-    && String(description.text).includes('🚀')
-    && rect(description)[3] > 200,
-    JSON.stringify({
-      nodes: valueNodes.length,
-      dumped: String(description?.text ?? '').length,
-      rect: box(description),
-      note: 'the dump caps one node at 200 chars; the client wrapped it into many lines',
-    }))
-  const backRow = snap.nodes.find((node) => h.descendantsText(node) === 'Back')
-  h.check('the Reader renders its own visible Back row', backRow !== undefined && h.classNodes(snap, 'sf-row').length > 0,
-    box(backRow))
-  const unbroken = snap.nodes.find((node) => String(node.text ?? '').startsWith('provider/WWWW'))
-  h.check('an unbroken 180-glyph identifier reaches the client whole',
-    unbroken !== undefined && String(unbroken.text).includes('very-high'),
-    unbroken === undefined ? 'no identifier node' : box(unbroken))
-  h.capture('lg-reader-long-1280x800', 'the Reader with the complete long values')
+  h.check('the Reader head is the long model NAME', lastFrame(h)?.head === 'Long Model', JSON.stringify(lastFrame(h)?.head))
+  const idNodes = snap.nodes.filter((node) => String(node.text ?? '').startsWith('provider/WWWW'))
+  const descriptionNodes = snap.nodes.filter((node) => String(node.text ?? '').startsWith('Long description'))
+  h.check('the long unbroken id arrives as ONE client-wrapped node carrying the complete value',
+    idNodes.length === 1 && String(idNodes[0].text).includes('very-high'), `${idNodes.length} node(s)`)
+  h.check('the multi-line description arrives as ONE client-wrapped node',
+    descriptionNodes.length === 1 && String(descriptionNodes[0].text).includes('中文描述') && String(descriptionNodes[0].text).includes('🚀'),
+    `${descriptionNodes.length} node(s)`)
+  const control = textUnder(snap, 'Long Model', 'sf-ov-body')
+  const lineHeight = rect(control)[3]
+  h.check('the client really wraps both long values into many lines (measured against a one-line control)',
+    lineHeight > 0 && rect(idNodes[0])[3] >= 2 * lineHeight && rect(descriptionNodes[0])[3] >= 4 * lineHeight,
+    `line=${lineHeight} id=${box(idNodes[0])} description=${box(descriptionNodes[0])}`)
+  h.measure('the long-value line counts (height / single-line control)',
+    JSON.stringify({ lineHeight, idLines: rect(idNodes[0])[3] / lineHeight, descriptionLines: rect(descriptionNodes[0])[3] / lineHeight }))
+  const readerShot = h.capture('reader-top-1280x800', 'the Reader at the top: complete long id and description')
 
-  // The app owns the keyboard: the Reader's keys must move the CLIENT's viewport.
-  // (`Down`/`Up`/`Home`/`End` are the names this client's control channel really
-  // delivers; `PageDown` is accepted there but silently produces no key, so the
-  // page keys are proved at the byte level by the headless suite and the same
-  // scroll op is proved END-TO-END here.)
-  const beforeScroll = rect(description ?? {}).map((n) => Math.round(n))
+  const readerY = () => rect(textStarting(h.snapshot(), 'Long description'))[1]
+  const topY = readerY()
   await h.key('Down', 700)
-  h.check('a line key reaches the app as a native line scroll',
-    scrolls(h).at(-1)?.to === 'line-down', JSON.stringify(scrolls(h).slice(-2)))
+  const downY = readerY()
+  h.check('a real Down key really moves the CLIENT viewport',
+    scrolls(h).at(-1)?.to === 'line-down' && downY < topY, `${topY} -> ${downY} :: ${JSON.stringify(scrolls(h).slice(-2))}`)
   await h.key('End', 800)
-  h.check('End reaches the app as a native scroll to the end',
-    scrolls(h).at(-1)?.to === 'end', JSON.stringify(scrolls(h).slice(-2)))
-  snap = h.snapshot()
-  const afterScroll = rect(textStarting(snap, 'Long description') ?? {}).map((n) => Math.round(n))
-  h.check('the CLIENT really scrolled: the same value node moved up by more than half its height',
-    afterScroll[1] < beforeScroll[1] - 0.5 * beforeScroll[3], `${beforeScroll} -> ${afterScroll}`)
-  h.capture('lg-reader-scrolled-end-1280x800', 'after End: the viewport really moved to the tail')
-  // §7.2 wants the long value read at the TOP, the MIDDLE and the TAIL. The app
-  // owns the keyboard and this client's control channel drops `PageDown`, so the
-  // middle is reached with real line keys; the value node's own y is the proof it
-  // moved, and the capture is the human check of what is visible there.
-  await h.key('Home', 800)   // the middle is walked INTO from the top: at the tail,
-  // a line-down key is a no-op because the viewport is already at the end.
-  for (let step = 0; step < 24; step += 1) await h.key('Down', 90)
-  const middleScroll = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
-  h.check('the long value can be read in the MIDDLE, between the top and the tail',
-    middleScroll[1] < beforeScroll[1] - 20 && middleScroll[1] > afterScroll[1] + 20,
-    `${beforeScroll} -> ${middleScroll} -> ${afterScroll}`)
-  h.capture('lg-reader-middle-1280x800', 'the middle of the long value, reached with real line keys')
-  await h.key('Home', 800)
-  const homeScroll = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
-  h.check('Home brings the Reader back to the top of the value',
-    homeScroll[1] > afterScroll[1], `${afterScroll} -> ${homeScroll}`)
-
-  // A KEYBOARD-path back: Esc is the same intent as the visible row.
+  const endY = readerY()
+  h.check('a real End key really moves the CLIENT viewport to the tail',
+    scrolls(h).at(-1)?.to === 'end' && endY < downY, `${downY} -> ${endY}`)
+  h.capture('reader-tail-1280x800', 'the Reader at the tail: the long description read to its end')
   await h.key('Escape', 900)
-  h.check('Escape leaves the Reader for the model list', h.has(h.snapshot(), 'Models') && !h.has(h.snapshot(), 'Full model details'))
-  // A REAL pointer click on the visible Back row returns as well.
-  const reopenSnap = h.snapshot()
-  const reopened = h.classNodes(reopenSnap, 'sf-card-head')[0]
-  if (reopened !== undefined) await h.click(reopenSnap.chains, reopened)
-  h.check('the Reader reopens', h.has(h.snapshot(), 'Full model details'))
+  h.check('Esc returns the Reader to its origin Overview (identity row visible)',
+    lastFrame(h)?.page === 'overview' && lastFrame(h)?.title === 'Model overview'
+    && rowWithText(h, h.snapshot(), 'Long Model') !== undefined, JSON.stringify(lastFrame(h)))
+  const reopened = await openReaderByPointer(h)
   snap = h.snapshot()
-  const backNow = snap.nodes.filter((node) => h.descendantsText(node) === 'Back').at(-1)
-  const backClicked = backNow === undefined ? false : await h.click(snap.chains, backNow)
-  h.check('a REAL click on the visible Back row returns to the model list',
-    backClicked && h.has(h.snapshot(), 'Models'), `clicked=${backClicked}`)
+  const backRow = h.classNodes(snap, 'sf-row').find((node) => h.descendantsText(node) === 'Back')
+  const backRowClicked = backRow === undefined ? false : await h.click(snap.chains, backRow)
+  h.check('the visible Back row returns to the Overview as well',
+    reopened && backRowClicked && lastFrame(h)?.page === 'overview',
+    `reopened=${reopened} clicked=${backRowClicked} :: ${JSON.stringify(lastFrame(h)?.page)}`)
 
-  // A FAILED re-read ON the Reader, driven in the real pane through the subject's
-  // own phase control: the failure must be reported as the page's Status fact while
-  // the page keeps its content, its scroll keys really move the CLIENT's viewport,
-  // and its visible Back row still returns to the model list.
-  await h.key('3', 700)   // re-arm the fixture (the panel is ready again)
-  const failedSnap = h.snapshot()
-  const failedHead = h.classNodes(failedSnap, 'sf-card-head')[0]
-  const failedOpened = failedHead === undefined ? false : await h.click(failedSnap.chains, failedHead)
-  h.check('the Reader reopens for the failed-read phase check',
-    failedOpened && h.has(h.snapshot(), 'Full model details'), `clicked=${failedOpened}`)
-  await h.key('e', 700)
-  const failedStatus = 'catalog is unreachable\r\nsecond line\r\n\r\nfourth line'
-  const statusSnap = h.snapshot()
-  const statusNode = statusSnap.nodes.find((node) => String(node.text ?? '').startsWith('catalog is unreachable'))
-  h.check('a failed re-read is reported as the Reader own Status fact on the pane',
-    h.has(statusSnap, 'catalog is unreachable'), h.texts(statusSnap).slice(-6).join(' | '))
-  // The plan's LF/CRLF row. This client's node DUMP normalizes whitespace runs
-  // (measured below), so the dump can never carry the proof: the proof is the
-  // RENDERED line count — the message has three breaks (`\r\n`, `\r\n`, blank
-  // `\r\n`), so it must occupy FOUR native lines instead of one collapsed line.
-  // A one-line value of the SAME page measures the Reader's line height for us
-  // (the client's tree exposes DOM ids only for a few nodes, so this is found by
-  // its text).
-  const lineHeight = rect(statusSnap.nodes.find((node) => String(node.text ?? '') === 'Long Model') ?? {})[3]
-  h.check('and the client renders every LF/CRLF/blank-line break as its own line',
-    statusNode !== undefined && lineHeight > 0 && rect(statusNode)[3] >= 3.5 * lineHeight,
-    `${box(statusNode)} against a ${lineHeight}px line (a collapsed value is one line)`)
-  h.measure('the client normalizes whitespace in its node dump', JSON.stringify(String(statusNode?.text)))
-  const failedBefore = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
-  await h.key('End', 900)
-  const failedAfter = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
+  // ------------------------------------------------- claim 6: the failed-read phase
+  const failedOpened = await openReaderByPointer(h)
+  h.check('the Reader reopens for the failed-read phase control', failedOpened && lastFrame(h)?.page === 'details', `opened=${failedOpened}`)
+  await h.key('e', 800)
+  h.check('the subject\'s e control reported a failed read while the Reader stays open',
+    controls(h).at(-1) === 'load-error' && lastFrame(h)?.page === 'details', `${JSON.stringify(controls(h).slice(-2))} :: ${lastFrame(h)?.page}`)
+  snap = h.snapshot()
+  const notice = textStarting(snap, 'catalog is unreachable')
+  const identityHead = textExactly(snap, 'Identity')
+  h.check('the failure appears as its own LEADING line on the Reader',
+    notice !== undefined && identityHead !== undefined && containedX(snap.chains, notice) && rect(notice)[1] < rect(identityHead)[1],
+    `notice@${box(notice)} identity@${box(identityHead)}`)
+  const failedControl = textUnder(snap, 'Long Model', 'sf-ov-body')
+  const failedLineHeight = rect(failedControl)[3]
+  const failedLines = failedLineHeight > 0 ? rect(notice)[3] / failedLineHeight : 0
+  h.check('the CRLF / LF / blank-line message renders FOUR native lines (not one collapsed line)',
+    failedLineHeight > 0 && Math.abs(failedLines - 4) < 0.25,
+    `lines=${failedLines} notice=${box(notice)} line=${failedLineHeight}`)
+  h.measure('the client normalizes whitespace in its node dump', JSON.stringify(String(notice?.text)))
+  const failedTopY = readerY()
+  await h.key('End', 800)
+  const failedEndY = readerY()
   h.check('the Reader still scrolls with the CLIENT moving while the read has failed',
-    failedAfter[1] < failedBefore[1] - 50, `${failedBefore} -> ${failedAfter}`)
-  // The `Back` row is the FIRST row of the scrollable body, so it travels with the
-  // content: after scrolling to the tail the way back is `Home` (or `Esc`), and the
-  // row is then clickable again — it is never a dead control while the read fails.
+    failedEndY < failedTopY - 50, `${failedTopY} -> ${failedEndY}`)
   await h.key('Home', 800)
-  const failedBackSnap = h.snapshot()
-  const failedBack = failedBackSnap.nodes.filter((node) => h.descendantsText(node) === 'Back').at(-1)
-  const failedBackClicked = failedBack === undefined ? false : await h.click(failedBackSnap.chains, failedBack)
-  h.check('its visible Back row returns to the model list while the read has failed',
-    failedBackClicked && h.has(h.snapshot(), 'Models'), `clicked=${failedBackClicked}`)
-  await h.key('3', 700)   // ready again for the sections below
-
-  // A SHORT pane: the Reader must still open and still scroll to the tail.
-  await h.resize(1000, 400)
-  await h.sleep(300)
-  await h.key('Return', 900)
   snap = h.snapshot()
-  h.check('the split pane opens the Overview for the long model', h.has(snap, 'Model overview'))
-  // The Overview's configured facts are one-line summaries: a long value must not
-  // wrap into a stack of rows and push every candidate off the screen. The
-  // measured single-row height is 36px here, so 40px is an upper bound with slack.
-  const longRows = h.classNodes(snap, 'pk-row')
-  h.check('every Overview row stays ONE native line for the long-value model',
-    longRows.length > 0 && longRows.every((node) => rect(node)[3] <= 40),
-    longRows.map((node) => `${h.descendantsText(node).slice(0, 20)}@${box(node)}`).join(' '))
-  const shortOpened = await openOverviewDetails(h)
-  h.check('the Overview details row opens the Reader in a short pane',
-    shortOpened && h.has(h.snapshot(), 'Full model details'),
-    `clicked=${shortOpened} :: ${h.texts(h.snapshot()).join(' | ')}`)
-  const shortBefore = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
-  await h.key('End', 900)
-  const shortAfter = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
-  h.check('the short-pane Reader still scrolls to the tail with the keyboard',
-    shortAfter[1] < shortBefore[1] - 50, `${shortBefore} -> ${shortAfter}`)
-  h.capture('md-reader-short-1000x400', 'the Reader in a short split pane, scrolled to the tail')
-
-  // The plan's short WIDE pane: the Reader's truncation is recovered by scrolling
-  // there too (the same rule as the short split pane above).
-  for (let step = 0; step < 3 && frames(h).at(-1)?.title !== 'Models'; step += 1) await h.key('Escape', 700)
-  await h.resize(1280, 600)
-  await h.sleep(300)
-  h.check('the short wide pane still claims the wide shell and keeps the candidates inline',
-    frames(h).at(-1)?.size === 'lg' && h.classNodes(h.snapshot(), 'sf-row').length === 4,
-    JSON.stringify(frames(h).at(-1)))
-  const shortWideHead = h.classNodes(h.snapshot(), 'sf-card-head')[0]
-  const shortWideOpened = shortWideHead === undefined ? false : await h.click(h.snapshot().chains, shortWideHead)
-  h.check('the short wide card opens the Reader', shortWideOpened && h.has(h.snapshot(), 'Full model details'),
-    `clicked=${shortWideOpened}`)
-  const shortWideBefore = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
-  await h.key('End', 900)
-  const shortWideAfter = rect(textStarting(h.snapshot(), 'Long description') ?? {}).map((n) => Math.round(n))
-  h.check('the short wide Reader scrolls to the tail with the keyboard',
-    shortWideAfter[1] < shortWideBefore[1] - 50, `${shortWideBefore} -> ${shortWideAfter}`)
+  const failedBack = h.classNodes(snap, 'sf-row').find((node) => h.descendantsText(node) === 'Back')
+  const failedBackClicked = failedBack === undefined ? false : await h.click(snap.chains, failedBack)
+  h.check('its visible Back row returns to the Overview while the read has failed',
+    failedBackClicked && lastFrame(h)?.page === 'overview', `clicked=${failedBackClicked} :: ${JSON.stringify(lastFrame(h)?.page)}`)
+  await h.key('3', 800)   // re-arm the fixture: the phase is ready again
+  const escOpened = await openReaderByPointer(h)
+  await h.key('e', 800)
+  h.check('the Reader is failed again for the Esc check', escOpened && lastFrame(h)?.page === 'details' && controls(h).at(-1) === 'load-error',
+    `${escOpened} :: ${lastFrame(h)?.page}`)
   await h.key('Escape', 900)
-  h.check('and its Back/Esc returns to the model list', h.has(h.snapshot(), 'Models'))
+  h.check('Esc still returns to the Overview while the read has failed',
+    lastFrame(h)?.page === 'overview', JSON.stringify(lastFrame(h)?.page))
+  await h.key('3', 800)   // ready again for the sections below
 
-  // The BOUNDED wide column: one card, and pointer and key must agree on where it goes.
-  // Back to the model LIST: the Reader returned to the Overview it was entered
-  // from (its real origin), so the Overview's own Esc is one more step.
-  for (let step = 0; step < 3 && frames(h).at(-1)?.title !== 'Models'; step += 1) await h.key('Escape', 700)
-  h.check('the model list is the page again before the bounded-column section',
-    frames(h).at(-1)?.title === 'Models', JSON.stringify(frames(h).at(-1)))
-  await h.resize(1280, 800)
-  await h.sleep(200)
-  await h.key('2', 900)
+  // ---------------------------------------------------- claim 7: partial failure
+  await toCatalogue(h)
+  await h.key('4', 900)
   snap = h.snapshot()
-  h.check('the bounded column offers the one "Open model & effort" entry',
-    h.classNodes(snap, 'sf-head').some((node) => h.descendantsText(node).includes('Open model & effort')),
-    h.texts(snap).join(' | '))
-  h.check('the bounded column renders no inline effort rows', h.classNodes(snap, 'sf-row').length === 0,
-    `${h.classNodes(snap, 'sf-row').length} row(s)`)
-  h.capture('lg-bounded-column-1280x800', 'the bounded column itself, before any navigation')
-  const boundedBody = snap.nodes.find((node) => (node.class ?? '').split(' ').includes('sf-card-body'))
-  const boundedLine = inside(snap, boundedBody, 'sf-text')
-  const boundedClicked = boundedLine === undefined ? false : await h.click(snap.chains, boundedLine)
-  h.check('a REAL click on the bounded card body opens the model overview',
-    boundedClicked && h.has(h.snapshot(), 'Model overview'), `clicked=${boundedClicked}`)
-  h.capture('lg-bounded-overview-1280x800', 'the bounded column entry opened the model overview')
-  await h.key('Escape', 800)
-  await h.key('Tab', 700)
-  await h.key('Return', 900)
-  h.check('the bounded card Enter opens the same page the pointer opened',
-    h.has(h.snapshot(), 'Model overview'), h.texts(h.snapshot()).join(' | '))
-  h.capture('lg-bounded-keyboard-1280x800', 'the bounded card Enter opened the same model overview')
+  frame = lastFrame(h)
+  const order = frame?.order ?? []
+  const unavailableAt = order.findIndex((entry) => entry !== null && typeof entry === 'object' && entry.label === 'Unavailable providers')
+  h.check('the partial catalogue appends the Unavailable providers group with inert failure rows + the ONE retry row',
+    unavailableAt >= 0 && Number(order[unavailableAt].count) === 2
+    && String(order[unavailableAt + 1]).startsWith('failure:') && order[unavailableAt + 2] === 'retry-failed',
+    JSON.stringify(order))
+  const unavailableGroup = groupWithText(h, snap, 'Unavailable providers')
+  const retryRow = rowWithText(h, snap, 'Retry failed providers')
+  h.check('the client paints the Unavailable providers group head and the retry row, both contained',
+    unavailableGroup !== undefined && containedXY(snap.chains, unavailableGroup)
+    && retryRow !== undefined && containedXY(snap.chains, retryRow),
+    `group@${box(unavailableGroup)} retry@${box(retryRow)}`)
+  const retriesBefore = retries(h).length
+  const appliesBeforeRetry = applies(h).length
+  const retryClicked = retryRow === undefined ? false : await h.click(snap.chains, retryRow)
+  h.check('one REAL pointer click on the retry row reaches the retry spy exactly once and never the writer',
+    retryClicked && retries(h).length === retriesBefore + 1 && applies(h).length === appliesBeforeRetry,
+    `clicked=${retryClicked} retries=${retries(h).length} applies=${applies(h).length}`)
 
-  // The harness's own input capability, MEASURED instead of assumed: this lane can
-  // inject keys and clicks, and this client's control channel exposes no
-  // pointer/wheel input at all (every shape below is rejected). That is why the
-  // plan's "pointer scroll of the overlay body" item is an OWNER exemption rather
-  // than a PASS, and the probe is part of the lane so the claim stays reproducible.
+  // ----------------------- extras: 8-effort Overview, sessionless title/primary
+  await h.key('2', 900)
+  const wideOverview = await enterOverview(h)
+  const wideFrame = lastFrame(h)
+  h.check('the 8-effort model opens its Overview with all 9 candidates on the wire',
+    wideOverview && (wideFrame?.items ?? []).filter((item) => String(item.id).startsWith('effort:')).length === 9,
+    `${(wideFrame?.items ?? []).length} items`)
+  for (let step = 0; step < 9; step += 1) await h.key('Down', 200)
+  snap = h.snapshot()
+  const lastEffort = modelRows(h, snap).find((node) => h.descendantsText(node).includes(`Effort 8 ${'W'.repeat(8)}`))
+  h.check('the LAST of the 8 widest-glyph effort labels is reachable with real line keys',
+    lastEffort !== undefined && containedXY(snap.chains, lastEffort), lastEffort === undefined ? 'not painted' : box(lastEffort))
+  await h.key('Escape', 900)
+
+  // ------------------- the dark-theme capability probe (MEASUREMENT, never a PASS)
+  // The plan's §8 "Native rendering" row wants the same font in dark AND light,
+  // "at least dark verifiable". The client's control channel ACCEPTS `theme dark`
+  // (measured), but the client's own capture layout still resolves the LIGHT
+  // theme and its computed colours are unchanged, so a real dark render is NOT
+  // reachable through this channel and stays NOT_VERIFIED. The probe is kept in
+  // the lane so the negative result stays reproducible.
+  await h.key('1', 900)
+  await toCatalogue(h)
+  await h.resize(1280, 800)
+  let themeAccepted = false
+  try {
+    h.send('theme', 'dark')
+    themeAccepted = true
+  } catch {
+    themeAccepted = false
+  }
+  await h.sleep(500)
+  const themeProbe = h.capture('theme-probe-1280x800', 'after requesting `theme dark`: evidence of what the control channel really renders')
+  h.measure('the client `theme dark` control result (accepted but the render stays light)',
+    JSON.stringify({ accepted: themeAccepted, layoutTheme: themeOf(h, themeProbe), capsDark: caps(h)?.dark }))
+  h.measure('the light label font, for the dark/light font comparison the plan asks for',
+    JSON.stringify(fontAt(h, bootShot, 'pk-label')))
+  if (themeAccepted) {
+    h.send('theme', 'light')
+    await h.sleep(400)
+  }
+
+  // ----------------------- extras: sessionless title/primary
+  await h.key('s', 900)
+  snap = h.snapshot()
+  frame = lastFrame(h)
+  h.check('the sessionless panel uses its own title and never claims a Current',
+    frame?.title === 'Choose default model' && h.has(snap, 'Choose default model')
+    && !h.classNodes(snap, 'pk-badge').some((node) => String(node.text) === 'current'),
+    `${JSON.stringify(frame?.title)} :: badges=${h.classNodes(snap, 'pk-badge').map((node) => String(node.text)).join(',')}`)
+  h.check('the sessionless footer carries the honest Save default write',
+    actionLabels(frame).includes('Save default') && actionIds(frame) === 'close,apply',
+    `${actionIds(frame)} :: ${actionLabels(frame)}`)
+
+  // ------------------------------------- claim 8: measured capability + ledger
   const acceptedWheelShapes = []
   for (const shape of [['wheel', 400, 200, -3], ['scroll', 400, 200, -3], ['mouse', 'wheel', 400, 200, -3]]) {
     try {
@@ -599,7 +788,29 @@ export default async function (h) {
     }
   }
   h.measure('pointer/wheel control shapes this client accepted', JSON.stringify(acceptedWheelShapes))
+
+  const clientCaps = caps(h)
+  h.measure('the client capability set', JSON.stringify(clientCaps))
+  h.measure('the client version', JSON.stringify(clientCaps?.ver))
+  h.measure('the client boot theme capability (caps.dark)', JSON.stringify(clientCaps?.dark))
+  h.measure('the catalogue label font', JSON.stringify(fontAt(h, bootShot, 'pk-label')))
+  h.measure('the catalogue summary font', JSON.stringify(fontAt(h, bootShot, 'sf-kv')))
+  h.measure('the Reader title font', JSON.stringify(fontAt(h, readerShot, 'sf-ov-title')))
+  h.measure('the dark-theme probe layout (the client keeps rendering LIGHT; dark stays NOT_VERIFIED)',
+    JSON.stringify({ layoutTheme: themeOf(h, themeProbe) }))
+  h.measure('the resolved fonts per size (from the capture layouts)', JSON.stringify({
+    boot: fontAt(h, bootShot, 'sf-picker'),
+    narrow: narrowShot === undefined ? undefined : fontAt(h, narrowShot, 'sf-picker'),
+  }))
+  h.measure('every size\'s cols/cell.w as the subject received it', JSON.stringify(resizes(h)))
+  h.measure('the measured model-name / fact-column budget per size', JSON.stringify(columnMetrics))
+  h.measure('the source revision this run rendered (sha256 prefix per module)', sourceHash(h))
   h.measure('frames rendered', String(frames(h).length))
   h.measure('native scroll ops the app asked for', JSON.stringify(scrolls(h)))
-  h.measure('events the subject received', JSON.stringify(records(h).filter((row) => row.event).map((row) => row.event.ev + (row.event.item === undefined ? '' : `:${row.event.item}`))))
+  h.measure('raw row events the subject received', JSON.stringify(rowEvents(h)))
+  h.measure('raw action events the subject received', JSON.stringify(actionEvents(h)))
+  h.measure('writes that reached the subject writer', JSON.stringify(applies(h).map((row) => row.apply.selection)))
+  h.measure('retries that reached the subject read owner', String(retries(h).length))
+  h.measure('the visible catalogue rows at boot (containment oracle)', pickerClasses(h.snapshot()).join(' '))
+  h.measure('the summary region visible span at boot', visibleSpan(h.snapshot().chains, h.classNodes(h.snapshot(), 'pk-pv')[0] ?? {}).toFixed(1))
 }
