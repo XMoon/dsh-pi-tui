@@ -3167,3 +3167,108 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
   assert.ok(compat.p95 < 50,
     `no refresh lane may stall pathologically; measured p95 ${compat.p95.toFixed(3)} ms/event`)
 })
+
+// ── Task Browser Host-text safety on the REAL runner composition ───────────
+//
+// Independent fix PR: the ONE Task Browser Host-text terminal boundary. This
+// case drives the REAL production route end to end — `/tasks` → the row's
+// interrupt → bootstrap's `SessionRuntime.withWriter` writer admission →
+// `DirectSubagentPort` → `ctx.subagents.interrupt` → the app's ONE transient
+// notice line — with a HOSTILE official label, and asserts on the RAW stream
+// the TUI writes to the terminal (never a `stripTerminalSequences()` shot).
+
+test('S-03 L6: the real /tasks Subagent interrupt admits through the session writer and a hostile label never reaches the terminal stream', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-interrupt-text-safety-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-interrupt-safety-parent',
+    header: { id: 'task-interrupt-safety-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'task-interrupt-safety-child',
+    header: { id: 'task-interrupt-safety-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child answer'),
+  })
+  // The task's verified hostile fixture: OSC 52 clipboard write + readable
+  // text + CSI erase, carried by the OFFICIAL subagent label.
+  const HOSTILE = '\x1b]52;c;UFdORUQ=\x07echo ok\x1b[2J'
+  const interrupts: Array<{ childSessionId: string; authority: { kind: string; parentSessionId: string } }> = []
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child', id: child.id, label: HOSTILE, mode: 'continuable', activity: 'running',
+      hasChildren: false, parentId: parent.id, depth: 1,
+    }],
+    // The official Direct interrupt surface: a synchronous authority call.
+    interrupt: (childSessionId: string, authority: { kind: string; parentSessionId: string }): void => {
+      interrupts.push({ childSessionId, authority })
+    },
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childHandle.dispose())
+  // The interrupt branch re-reads the LIVE driver at confirmation time: the
+  // child's Agent really runs now (never inferred from the catalog).
+  ;(liveAgentOf(harness, child.id) as { status: string }).status = 'running'
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput(data)
+  }
+
+  // Capture the RAW byte stream from BEFORE the browser opens, so the hostile
+  // ROW text is in scope as well as the notice line.
+  const written: string[] = []
+  const originalWrite = vt.write.bind(vt)
+  vt.write = (data: string) => { written.push(data); originalWrite(data) }
+
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+
+  input('S')
+  await settle()
+  await vt.waitForRender()
+  input('y')
+  await settle()
+  await vt.waitForRender()
+
+  // The production-composition witness: the writer-admitted interrupt really
+  // reached `ctx.subagents` with the exact durable parent/child authority.
+  assert.deepEqual(interrupts, [{
+    childSessionId: child.id,
+    authority: { kind: 'user', parentSessionId: parent.id },
+  }], 'the writer-admitted interrupt must name the exact durable parent/child authority')
+  // The committed settlement produced the ONE transient notice from the RAW
+  // official label (the draw-boundary projection of that notice is proven by
+  // the dedicated Task Browser suite; here the full-screen `/tasks` overlay
+  // legitimately covers the transcript gutter, so the notice row is not
+  // asserted against this geometry).
+  const appWithNotice = app as unknown as { notifyTextForTest(): string }
+  assert.equal(appWithNotice.notifyTextForTest(), `stopping ${HOSTILE}`,
+    'the committed settlement must produce the notice from the official raw label')
+  const stream = written.join('')
+  assert.ok(!stream.includes(']52;c;'), 'no Host OSC reaches the terminal stream')
+  assert.ok(!stream.includes('UFdORUQ='), 'no Host clipboard payload reaches the terminal stream')
+})

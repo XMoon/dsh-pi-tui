@@ -1761,9 +1761,9 @@ never rewritten: the `View`, the Command document and every copy payload keep th
 raw `label`/`detail`/`progress`, and the Command body shows control bytes as
 visible escapes rather than executing them. A `label` carrying its own OSC 52 is
 therefore painted as plain text and can never reach the terminal stream from
-either row. (The Task Browser's own stop notices interpolate the roster label the
-same way; that pre-existing sibling is outside B1-C and is reported, not changed
-here.)
+either row. (The Task Browser's own stop notices interpolated the roster label the
+same way; that pre-existing sibling was outside B1-C and was reported there. It is
+closed by the Task Browser Host-text terminal-safety boundary recorded below.)
 
 The Command page renders a dedicated document model rather than the vendored
 `Text` renderer, because `Text` expands TAB to three spaces, word-wraps and
@@ -1952,6 +1952,52 @@ No Job fact is invented: the chrome renders only the fields
 (`label`, `detail`, `progress`, the follow-stream error, the notice text) crosses
 the SAME `chromeText()` control-sequence boundary BEFORE the theme styling is
 applied, exactly as the B1-C section above records.
+
+## Task Browser Host-text terminal-safety boundary
+
+A Task Center row is a projection of arbitrary Host/external text: the official
+Job/Subagent label, a parent label, a Job detail, a caller header and a transport
+error message. None of those bytes are trusted to be terminal-safe, and the Task
+Browser owns no second text model — the whole surface is closed at its two real
+display boundaries, both reusing the existing `sanitizedPhysicalLine()` projection
+(recognized CSI/OSC/APC sequences stripped whole, then every remaining C0/C1/DEL
+byte — ESC included — dropped, and line breaks/tabs collapsed to spaces, so no
+control byte can survive even when a sequence is not recognized and its tail
+stays as inert visible text) rather than a new sanitizer or a second
+single-line helper:
+
+- **The panel chrome** (`TaskBrowserPanel`): every dynamic field entering the
+  list row, the inline/wide detail pane (`Selected`, label, parentLabel, parent
+  id, detail, mode/status/access, and the `Stop …?  Y confirm` line that embeds
+  the label), the header (the caller's run/phase text), the stale-refresh banner
+  and the caller's no-match text is projected to one SAFE physical row BEFORE
+  `truncateToWidth`/`visibleWidth`/the theme's `color.*` are applied. Cleaning
+  after coloring would strip legitimate theme SGR, so the order is deliberate.
+- **The ONE transient notice line** (`TuiApp.notify()`'s transcript-gutter row):
+  a Task Browser Stop or a Subagent interrupt settlement embeds the same official
+  label, and a dispatch failure embeds an `Error.message`. That row is the actual
+  draw boundary and projects the notice text there, before the theme styling.
+  `TuiApp.notify()`'s public semantics are unchanged: the STORED notice
+  (`notifyText` / `currentNotice()`) stays the caller's raw string, and the Job
+  Workspace notice row keeps its own `chromeText()` projection of it.
+
+The business layer is untouched: the raw `TaskBrowserRow`/`TaskPanelItem` label,
+the `JobStopOutcome`/`SubagentInterruptOutcome` and their message text are never
+rewritten, so Stop/interrupt identity, currentness fences, once-only dispatch and
+the success/error notice levels are unchanged. Projection happens only on the way
+to the terminal; the official bytes still reach every copy verb. The production
+route is exercised end to end — `/tasks` → the row's interrupt → the composition's
+`SessionRuntime.withWriter` writer admission → the Direct subagent port →
+`ctx.subagents.interrupt` → the notice line — by the L6 regression, which drives a
+hostile official label and asserts on the raw `Terminal.write` stream.
+
+Scope honesty: this record covers the Task Browser panel and the app transient
+notice line (which is also the dock/pinned notice sink). It does not claim that
+any other surface's dynamic text is safe; each surface keeps its own documented
+boundary. In particular the Task Browser SEARCH row is the `Input` component's own
+styled render of USER/query text (the vendored editor legitimately emits its own
+cursor SGR there), not a Host Job/Subagent label, so it is outside this boundary
+and is tracked separately.
 
 ## Long user messages collapse at the presentation layer only
 
