@@ -2023,12 +2023,16 @@ and nothing else does.
   mutation, a `configReadiness() === 'ready'` re-read and a matching authoritative
   value (theme after canonical normalization, display preset exact). A write that
   returned success but could not be re-read is `Commit accepted · verification
-  unavailable`. A REJECTED write is classified on a fresh authoritative read: an
-  authority that is current and still carries the previous value REFUTES it
-  (`Not saved · <the real error>`), while one that already carries the requested
-  value — an external writer may have reached it first — or that cannot be read
-  proves nothing about THIS request and is reported as `Outcome unknown`, never as a
-  claimed acceptance and never as a refusal the authority contradicts.
+  unavailable`; one that returned success while the authority READABLY disagrees is a
+  failure (`Not saved · the write reported success, but the authoritative document
+  reads …`), never "verification unavailable" — the readback was performed and
+  disagreed. A REJECTED write is classified on a fresh authoritative read against the
+  value the request STARTED from (its base): only an authority still carrying that
+  base REFUTES it (`Not saved · <the real error>`), while a third value (someone else
+  wrote in between), the requested value already in place — an external writer may
+  have reached it first — or an unreadable authority proves nothing about THIS request
+  and is reported as `Outcome unknown`, never as a claimed acceptance and never as a
+  refusal the authority contradicts.
 - **The write path is the existing one.** The commit runs through
   `serializeTuiSettingsMutation` over `ConfigPort.tuiSettings`, re-reads the
   document inside the queued task, preserves the raw USER `footerCustomItems`
@@ -2044,18 +2048,23 @@ and nothing else does.
   (`applied locally, but the configuration is stale so it could not be stored`).
   A refused write leaves the runtime ahead of the document and says so instead of
   silently rolling the applied palette back.
-- **The theme `auto` apply is the terminal query.** Choosing `auto` drops the
-  plugin-theme record FIRST (the unload fallback of a theme the user has left must
-  never force `dark` and stop the terminal tracking over a stored `auto`), starts
-  the one OSC 11 detection and enables tracking — starting the detection IS the
-  apply, exactly like `/display`'s runtime-first policy. The settled answer is
-  guarded by the SYNCHRONOUS latest choice of this command factory, never by the
-  asynchronous document: an explicit theme applies runtime-first, so the persisted
-  value can still read `auto` while its write is in flight, and a late answer must
-  never colour over the newer choice (the legacy `/settings` path keeps the same
-  per-open guard). The detection is issued for the screen that owned the terminal:
-  leaving the workspace before it settles drops the result, and the stored `auto`
-  preference then follows the next scheme report or the next boot.
+- **The theme `auto` apply is the terminal query, fenced on ONE runtime-owned
+  intent.** Choosing `auto` drops the plugin-theme record FIRST (the unload fallback of
+  a theme the user has left must never force `dark` and stop the terminal tracking over
+  a stored `auto`), starts the one OSC 11 detection and enables tracking — starting the
+  detection IS the apply, exactly like `/display`'s runtime-first policy. Every
+  DELIBERATE selection records the runtime owner's intent
+  (`TuiApp.noteThemeSelection()`: the boot restore, the legacy `/settings` theme row,
+  the Settings workspace, the reload re-apply, the advanced host-state `setTheme`),
+  and both the settled detection (`runAutoDetect`) and the live scheme listener are
+  fenced on it instead of on the asynchronous document — an explicit theme applies
+  runtime-first, so the persisted value can still read `auto` while its write is in
+  flight, and neither a late answer nor an already-queued scheme report may colour
+  over the newer choice. Derived applies (a detection's own answer, a report, the
+  plugin-unload fallback) never record the intent. The detection is also issued for
+  the screen that owned the terminal: leaving the workspace before it settles drops
+  the result, and the stored `auto` preference then follows the next scheme report or
+  the next boot.
 - **Navigation never loses identity.** Selection is the stable row/category id,
   and width changes only re-project the layout: the level, the category and the
   row survive a resize in both directions, and the list rebases to keep the

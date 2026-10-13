@@ -37,6 +37,8 @@ function mountThemeRuntime(): ThemeHarness {
   const trackCalls: boolean[] = []
   let report: ((scheme: 'dark' | 'light') => void) | undefined
   let theme: string | undefined = 'auto'
+  /** The runtime owner's deliberate-selection intent (the real `TuiApp` keeps it). */
+  let intent: string | undefined
   const app = {
     setHomeEndMode: noop,
     setWheelScrollLines: noop,
@@ -55,6 +57,10 @@ function mountThemeRuntime(): ThemeHarness {
     applyTheme: (value: string): void => {
       applied.push(value)
     },
+    noteThemeSelection: (value: string): void => {
+      intent = value
+    },
+    themeFollowsTerminal: (): boolean => intent === 'auto',
   } as unknown as TuiApp
   const deps: SettingsRuntimeDeps = {
     surface: {
@@ -84,7 +90,10 @@ function mountThemeRuntime(): ThemeHarness {
     detectCalls,
     trackCalls,
     report: (scheme) => report?.(scheme),
-    setTheme: (value) => { theme = value },
+    // Changing the persisted preference IS a deliberate selection in production (the
+    // legacy editor, the reload re-apply, the workspace), so the helper records the
+    // runtime owner's intent exactly like those sites do.
+    setTheme: (value) => { theme = value; intent = value },
   }
 }
 

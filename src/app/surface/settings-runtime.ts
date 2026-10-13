@@ -445,6 +445,8 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     const themeRef = deps.extensions()?._recordRegistryHealthRef('theme', selectable)
     try {
       deps.surface.app.applyPluginPalette(selectable, palette)
+      // A deliberate selection: it owns the terminal detections from here on.
+      deps.surface.app.noteThemeSelection(selectable)
       if (themeRef !== undefined) deps.extensions()?._clearRegistryError(themeRef)
     } catch (error) {
       if (themeRef !== undefined) deps.extensions()?._recordRegistryError(themeRef, error)
@@ -487,7 +489,10 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     // must not override NO_COLOR / FORCE_COLOR=0 / CI by switching the user to
     // the light palette.
     if (themeOptOut()) return
-    if (deps.tuiSettings?.get().theme === 'auto') deps.surface.app.applyTheme(theme)
+    // The runtime owner's own INTENT, not the asynchronous document: a report that
+    // arrives while a newer explicit choice's write is still in flight must not colour
+    // over it.
+    if (deps.surface.app.themeFollowsTerminal()) deps.surface.app.applyTheme(theme)
   })
   // The Home/End preset is TUI-owned (TS5 §12): the application owner hands
   // the persisted raw value to the mounted surface.
@@ -499,6 +504,10 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   deps.surface.app.setWheelScrollLines(wheelScrollLinesOf(deps.tuiSettings?.get().wheelScrollLines))
   if (deps.tuiSettings?.get().fullscreen === 'on') deps.surface.app.setFullscreen(true)
   const storedTheme = deps.tuiSettings?.get().theme
+  // The runtime owner's intent starts from the RESTORED preference; every later
+  // deliberate selection updates it (legacy editor, Settings workspace, reload,
+  // advanced setTheme).
+  if (storedTheme !== undefined && storedTheme !== '') deps.surface.app.noteThemeSelection(storedTheme)
   if (storedTheme === 'auto') {
     // Follow the terminal: query once at boot, then track scheme reports.
     // The boot query is detached: a terminal that never answers (or a

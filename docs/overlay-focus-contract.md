@@ -546,10 +546,14 @@ projection; B2-B gave exactly two of its rows (`Configured theme`,
   anything; a display commit may apply the Client-local runtime fact and then
   reports that it could not be stored. A REJECTED write is never attributed: the
   authority is re-read (the Remote adapter forces that read on a failed RPC, whose
-  failure does not prove a refusal), and only an authority that is current and does
-  not carry the value yields `Not saved`; a value already in place or an unreadable
-  authority yields `Outcome unknown`, and the accepted-but-unreadable case yields
-  `Commit accepted · verification unavailable`. The Detail names the runtime and the
+  failure does not prove a refusal), and only an authority that is current and still
+  carries the value the request STARTED from yields `Not saved`; a third value, a
+  requested value already in place or an unreadable authority yields
+  `Outcome unknown`, a success whose readback could not be performed yields
+  `Commit accepted · verification unavailable`, and a success whose readback readably
+  disagrees is a failure. The terminal detections and the live scheme listener are
+  fenced on the runtime owner's own deliberate-selection intent
+  (`TuiApp.noteThemeSelection()`), never on the asynchronous document. The Detail names the runtime and the
   persisted fact separately, and the panel keeps no second truth store.
 - **The Detail projection is ambiguity-free.** Terminal sequences and unknown
   controls are stripped at the display boundary, but CR/LF/TAB render as visible

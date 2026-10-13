@@ -207,6 +207,10 @@ export function registerReloadCommand(deps: SkillsCommandDeps): void {
           // reload-time theme, never a re-read of the doc: a settings write
           // from the panel may still be in flight when the reply lands.
           const reloadTheme = doc.theme
+          // This re-apply makes the persisted preference current again: it becomes the
+          // runtime owner's deliberate intent, so a detection it starts (or a report
+          // arriving later) is fenced on the same fact as every other selection.
+          if (reloadTheme !== undefined && reloadTheme !== '') app.noteThemeSelection(reloadTheme)
           if (reloadTheme === 'auto') {
             app.clearActivePluginTheme()
             detach('theme autodetect', () => app.autoDetectTheme({
