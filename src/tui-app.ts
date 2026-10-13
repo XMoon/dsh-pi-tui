@@ -20921,8 +20921,14 @@ export class TuiApp {
    * fallback — a gone plugin must not leave its palette on screen (the
    * review's P2). */
   applyPluginPalette(name: string, palette: ColorPalette): void {
-    this.activePluginThemeName = name
+    // The record must describe the palette really ON SCREEN: `applyPalette` is the
+    // fallible step (a malformed contribution palette throws in the palette
+    // normalisation BEFORE any state changes), and a recorded-but-never-applied
+    // theme would make its later unload force the builtin dark fallback over a
+    // theme the user has selected since (a stored `auto`, for instance). Nothing
+    // reads this record during the apply itself.
     this.applyPalette(palette)
+    this.activePluginThemeName = name
   }
 
   /** Drop the plugin-theme selection (a builtin or custom-file theme is
