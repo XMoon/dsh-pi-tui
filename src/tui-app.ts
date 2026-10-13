@@ -7367,6 +7367,17 @@ export class TuiApp {
     const generation = this.generation
     let panel: HistoryPanel | undefined
     let lease: { close(): void } | undefined
+    // The ONE caller subject predicate: the same panel is still the live tenant,
+    // the surface generation is unchanged and the LIVE session identity still
+    // equals the one captured at open. The seam reads it at every revalidation
+    // entry AND the panel reads it at every ACTING entry of its own (pointer,
+    // acceptance/copy, async commit), because the fork dispatches pointer events
+    // outside the Host key ladder.
+    const isCurrent = (): boolean => panel !== undefined
+      && this.historyPanel === panel
+      && !this.disposed
+      && this.generation === generation
+      && this.historySearchSessionId?.() === sessionId
     lease = this.tryOpenOptionalSeatTenant(() => {
       const created = new HistoryPanel({
         source,
@@ -7381,6 +7392,7 @@ export class TuiApp {
         // main screen has no application mouse, so the panel refuses every
         // pointer event there.
         pointerEnabled: () => this.fullscreen !== undefined,
+        tenantIsCurrent: isCurrent,
         onResultsChanged: () => this.requestRender(),
         onCopy: (text) => this.copyHistorySelection(created, text),
         onAccept: (selection) => {
@@ -7405,10 +7417,7 @@ export class TuiApp {
       panel = created
       return {
         component: created,
-        isCurrent: () => this.historyPanel === created
-          && !this.disposed
-          && this.generation === generation
-          && this.historySearchSessionId?.() === sessionId,
+        isCurrent,
         close: () => {
           if (this.historyPanel === created) {
             this.historyPanel = undefined
@@ -7462,22 +7471,39 @@ export class TuiApp {
     const copy = this.copySelection
     const runner = this.events.runOwned
     if (copy === undefined || runner === undefined) {
-      if (this.historyPanel === panel) this.notify('Copy failed', 'error')
+      if (this.historyTokenIsLive(panel)) this.notify('Copy failed', 'error')
       return
     }
     runner('history copy', () => copy(text), {
       onResult: (ok) => {
-        if (this.disposed || this.historyPanel !== panel) return
+        if (!this.historyTokenIsLive(panel)) return
         // `true` only proves the strategy EMITTED the bytes (OSC52 has no
         // clipboard ACK), so the wording never claims the system clipboard
         // received them.
         this.notify(ok ? 'Copy sent' : 'Copy failed', ok ? 'info' : 'error')
       },
       onError: () => {
-        if (this.disposed || this.historyPanel !== panel) return
+        if (!this.historyTokenIsLive(panel)) return
         this.notify('Copy failed', 'error')
       },
     })
+  }
+
+  /**
+   * Whether one History panel is still the LIVE, ACTIVE, VISIBLE seat tenant —
+   * the token a copy settlement must re-prove before it may notify. Instance
+   * identity alone is NOT enough here: unlike the Job/Settings workspaces (whose
+   * lease is CLOSED when a blocking owner preempts them), the Phase-3A optional
+   * tenant is deliberately PARKED, so the same panel keeps existing while it is
+   * not painted. The record's `phase` is the lifecycle authority; physical focus
+   * is not consulted (a capturing overlay may hold the keyboard while the tenant
+   * stays the active projected seat).
+   */
+  private historyTokenIsLive(panel: HistoryPanel): boolean {
+    if (this.disposed || this.historyPanel !== panel) return false
+    const record = this.optionalSeat
+    return record !== undefined && record.component === panel
+      && record.phase === 'active' && !record.finalized
   }
 
   /** Publish the current match position for the overlay header (1-based, total). */
