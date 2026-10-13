@@ -281,10 +281,16 @@ chrome rules budget of §6.2.
   `cjk-ambiguous-width`, which would shift a right-aligned status group.
   - The marker takes the word's token (`‣ Running`, `‣ Failed`), so the pair is
     one coloured unit.
-  - **Do not introduce a status glyph set.** No `✓` for completed, `✕` for
-    failed, `⊘` for cancelled, `⏳` for pending, `◐` for stopping, `○` for done.
-    Adding a second glyph for a state would (a) reintroduce the ambiguous-width
-    hazard and (b) make the shape — not the word — the thing the reader learns.
+  - **Do not introduce a status glyph set.** Two different reasons, and the
+    first one alone would not be enough:
+    - `●` (U+25CF), `○` (U+25CB), `◐` (U+25D0) and `×` (U+00D7) are
+      EAW-**ambiguous**: they paint two cells under `cjk-ambiguous-width` and
+      would shift a right-aligned status group.
+    - `✓` (U+2713), `✕` (U+2715) and `⊘` (U+2298) are width-safe and are still
+      rejected: a second glyph vocabulary makes the *shape* — not the written
+      word — the thing a reader learns, and it grows without bound (`✓` for
+      done, then `✓✓`, then a spinner, then a colour…). The word carries the
+      state; the one `‣` marks that a status group is present.
   - **Only a standalone status group carries the marker.** An inline fact
     (`Config ready`, `Loading models…`, `rows 7-40/40`) never does.
   - A status with no word (a glyph-only state) is not allowed in chrome.
@@ -372,7 +378,7 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 |---|---|---|
 | Navigation cursor | `> ` (2 cells) | one per list; D3 |
 | Active/current label | `[Label]` | focus, active tab, current pane |
-| Current-value marker | `← current` at the row end | row-end suffix in `textDim`; never shares the cursor's meaning |
+| Current-value marker | `← current` at the row end | row-end suffix in `textDim`; never shares the cursor's meaning; `←` (U+2190) is a **grandfathered** ambiguous glyph (§4.3) — no neutral arrow reads as "current" without colliding with another role |
 | Status marker | `‣` (U+2023) | the ONE marker for a standalone status group; one cell, EAW neutral; D5+D7 |
 | Disclosure | `▸` / `▾` | collapse state only, never "selected" |
 | Rule | `─` | boundary only |
@@ -793,7 +799,7 @@ line numbers.
 | Surface identity ink | kimi paints the dialog title `primary` + bold; oh-my-pi insets it in the top rule in `accent` | `textStrong` bold, no colour. This repo already uses `primary` for links *and* inline code *and* selection (`markdownTheme.code`, picker prefixes), so a blue title would make "blue" mean brand + clickable + current at once. Keeping the identity weight-only keeps `primary` = active/actionable |
 | Selected row's text | pi/oh-my-pi paint it with their accent token | bold `textStrong`; only the cursor glyph is `primary`. Same reason as above, and it matches this repo's existing picker device |
 | Hint overflow | kimi truncates the whole line; pi truncates + one documented whole-segment drop; oh-my-pi's native path wraps and its ANSI footer clips in a height-1 row | **whole-segment drop by priority, never mid-word** (already implemented in Job). At a pinned height 1, wrapping is impossible and line truncation is what produces today's `Esc back · ↑↓/Pg keys scroll · Enter change…` |
-| Status word case + marker | pi sentence case; oh-my-pi Title Case with `●`/`✓`/`✕`/`⊘` glyphs; kimi lowercase with a row-end `← current` | Title Case word plus one EAW-neutral `‣` anchor (D5 + D7) — the glyphs all three use (`●`, `✓`, `✕`, `⊘`, `⏳`) are EAW-ambiguous or emoji-class, which this repo's width gate rejects |
+| Status word case + marker | pi sentence case; oh-my-pi Title Case with `●`/`✓`/`✕`/`⊘` glyphs; kimi lowercase with a row-end `← current` | Title Case word plus one EAW-neutral `‣` anchor (D5 + D7). `●`/`○`/`◐`/`×` are rejected as width-unsafe, and the width-safe `✓`/`✕`/`⊘` are rejected because a per-status glyph vocabulary makes the shape the signal |
 | Cursor glyph shape | pi `→`, oh-my-pi `❯`/`>`, kimi `❯` (and kimi forbids inventing `>`/`→` for its own dialogs) | `>` for this repo (D3): `→` is EAW-ambiguous, `❯` already owns the transcript's user marker, `›` already owns two icon semantics |
 | "Never colour alone" | **no reference states this rule** (one paints a disabled row by colour only) | adopted anyway (§3.3.3) because our palette proves colour is unreliable here: `borderFocus` and `warning` are the same hex |
 | Rules on a status line | kimi forbids an inner rule; oh-my-pi freely adds `├──┤` dividers | at most one rule per boundary and never flanking a text line (D6) |
