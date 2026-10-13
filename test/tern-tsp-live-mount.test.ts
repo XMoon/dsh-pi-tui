@@ -695,7 +695,7 @@ test('PR4-0: non-key SDK events reach no business action while no modal seat is 
   }
 })
 
-// ── A-13 (F3-002): a client protocol rejection is DIAGNOSED, nothing else ───
+// ── A-15 (F3-002): a client protocol rejection is DIAGNOSED, nothing else ───
 //
 // The client answers a refused protocol operation with `error` (`msg` required;
 // `sf`/`s`/`op`/`sheet`/`id` optional). The SDK neither interprets nor consumes it
@@ -703,15 +703,27 @@ test('PR4-0: non-key SDK events reach no business action while no modal seat is 
 // silently dropped — the confirmed diagnostic gap. These cases go through the REAL
 // SDK connect + `mountTspRenderer` + the real wire (`harnessFreeInput`), so the SDK's
 // own routing decides which events reach the iterator.
+//
+// WHICH ASSERTIONS DISCRIMINATE (stated explicitly, per review):
+//  - The DIAGNOSTIC assertions (`diagnostics.length`, `message`, `fields`) are the
+//    discriminative ones: they fail without the new branch.
+//  - The "nothing else changed" witnesses (no frame, no extra focus op, no notify, no
+//    fatal, business counters at zero) are OUTCOME witnesses, not discriminators: the
+//    pre-existing routes already decline `error` (`interaction.ts` claims only
+//    focus/edit/undo/send; both pickers require `select|activate|action` plus a known
+//    `id`), so they also hold without the fix. They are kept to catch a regression that
+//    makes an `error` act somewhere, and A-15e proves the legal focus route still does
+//    reach the seat under a modal — the contrast that shows the error route does not.
 
 interface Diagnostic {
   readonly message: string
   readonly fields: Record<string, unknown> | undefined
 }
 
-/** Mount the renderer with the diagnostics sinks observed, plus the business counters. */
+/** Mount the renderer with the diagnostics + notification sinks observed and the business counters. */
 async function mountDiagnosed(tern: ScriptedTern) {
   const diagnostics: Diagnostic[] = []
+  const notifications: string[] = []
   const business = { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 }
   const fatals: unknown[] = []
   const renderer = mountTspRenderer(await openSession(tern), {
@@ -719,6 +731,9 @@ async function mountDiagnosed(tern: ScriptedTern) {
     onFatal: error => { fatals.push(error) },
     logError: (message, fields) => { diagnostics.push({ message, fields }) },
   })
+  // A user-visible notification is a MUST-NOT for a protocol error: witness it.
+  const notify = renderer.display.notify.bind(renderer.display)
+  renderer.display.notify = (text, kind) => { notifications.push(text); notify(text, kind) }
   renderer.bindInput({
     exit: () => { business.exits += 1 },
     cancel: () => { business.cancel += 1 },
@@ -728,17 +743,19 @@ async function mountDiagnosed(tern: ScriptedTern) {
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
   })
-  return { renderer, diagnostics, business, fatals }
+  return { renderer, diagnostics, notifications, business, fatals }
 }
+
+const NO_BUSINESS = { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 }
 
 /** The `focus` ops sent so far — the side-effect witness for "an error changes nothing". */
 function focusOps(tern: ScriptedTern): string[] {
   return tern.frames.flatMap(frame => frame.ops.filter(op => op[0] === 'focus').map(op => String(op[1])))
 }
 
-test('A-13a: a local-surface protocol error is diagnosed exactly once and changes nothing else', async () => {
+test('A-15a: a local-surface protocol error is diagnosed exactly once and changes nothing else', async () => {
   const tern = new ScriptedTern()
-  const { renderer, diagnostics, business, fatals } = await mountDiagnosed(tern)
+  const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
     await settle()
     const framesBefore = tern.frames.length
@@ -747,25 +764,28 @@ test('A-13a: a local-surface protocol error is diagnosed exactly once and change
     harnessFreeInput(tern, { ev: 'error', sf: 's1', s: 5, op: 5, msg: 'unknown id layer.modal-1.answer' })
     await settle()
 
+    // Discriminative: without the new branch this stays empty.
     assert.equal(diagnostics.length, 1, 'ONE protocol rejection produces exactly ONE diagnostic')
     assert.equal(diagnostics[0]?.message, 'tsp renderer: client rejected protocol operation')
     assert.deepEqual(diagnostics[0]?.fields, { sf: 's1', s: 5, op: 5, msg: 'unknown id layer.modal-1.answer' },
       'the diagnostic carries the exact structured fields the client sent')
+    // Outcome witnesses (they also hold without the fix — see the group comment).
+    assert.deepEqual(notifications, [], 'a protocol error never raises a user notification')
     assert.equal(tern.frames.length, framesBefore, 'an error is never a reason to render')
     assert.deepEqual(focusOps(tern), opsBefore, 'an error never re-asserts focus')
-    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 },
-      'the business handlers never see a protocol error')
+    assert.deepEqual(business, NO_BUSINESS, 'the business handlers never see a protocol error')
     assert.deepEqual(fatals, [], 'a refused operation is not a fatal renderer failure')
     assert.equal(renderer.composer.getDraft(), '', 'the composer draft is untouched')
   } finally {
     await renderer.dispose()
     assert.ok(tern.closeBodies.length >= 1, 'the session still closed and released the tty')
+    assert.deepEqual(fatals, [], 'disposal reports no fatal either')
   }
 })
 
-test('A-13b: optional `sf`/`s`/`op` are never fabricated, and a foreign surface is not attributed', async () => {
+test('A-15b: optional `sf`/`s`/`op` are never fabricated, and a foreign surface is not attributed', async () => {
   const tern = new ScriptedTern()
-  const { renderer, diagnostics, business } = await mountDiagnosed(tern)
+  const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
     await settle()
     // Session-level: `msg` alone is a legal ErrorEvent. It MUST be recorded and MUST NOT
@@ -780,15 +800,19 @@ test('A-13b: optional `sf`/`s`/`op` are never fabricated, and a foreign surface 
     harnessFreeInput(tern, { ev: 'error', sf: 's2', s: 3, op: 1, msg: 'a foreign refusal' })
     await settle()
     assert.equal(diagnostics.length, 1, 'a foreign surface error is not attributed to this renderer')
-    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
+    assert.deepEqual(notifications, [])
+    assert.deepEqual(business, NO_BUSINESS)
+    assert.deepEqual(fatals, [])
   } finally {
     await renderer.dispose()
+    assert.ok(tern.closeBodies.length >= 1, 'the session still closed')
+    assert.deepEqual(fatals, [])
   }
 })
 
-test('A-13c: an error that ALSO carries an optional `id` is still an error, never a business route', async () => {
+test('A-15c: an error that ALSO carries an optional `id` is still an error, never a business route', async () => {
   const tern = new ScriptedTern()
-  const { renderer, diagnostics, business } = await mountDiagnosed(tern)
+  const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
     await settle()
     const framesBefore = tern.frames.length
@@ -800,22 +824,26 @@ test('A-13c: an error that ALSO carries an optional `id` is still an error, neve
     assert.equal(diagnostics.length, 1, 'an error with an `id` is diagnosed exactly once')
     assert.deepEqual(diagnostics[0]?.fields, { sf: 's1', s: 9, op: 0, msg: 'unknown id dock.composer' },
       'the optional `id` is NOT logged (the diagnostic contract takes sf/s/op/msg)')
+    assert.deepEqual(notifications, [])
     assert.equal(tern.frames.length, framesBefore, 'the `id` did NOT open a presenter path that renders')
     assert.deepEqual(focusOps(tern), opsBefore, 'and it did not move focus')
-    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
+    assert.deepEqual(business, NO_BUSINESS)
+    assert.deepEqual(fatals, [])
   } finally {
     await renderer.dispose()
+    assert.ok(tern.closeBodies.length >= 1, 'the session still closed')
+    assert.deepEqual(fatals, [])
   }
 })
 
-test('A-13d: a protocol error during an open modal is diagnosed without settling it or re-asserting focus', async () => {
+test('A-15d: a protocol error during an open modal is diagnosed without settling it or re-asserting focus', async () => {
   const tern = new ScriptedTern()
-  const { renderer, diagnostics, business, fatals } = await mountDiagnosed(tern)
+  const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
     await settle()
     let settled = false
     void renderer.interaction
-      .askQuestions([{ id: 'a13-q', question: 'still open?' }], undefined, undefined, false)
+      .askQuestions([{ id: 'a15-q', question: 'still open?' }], undefined, undefined, false)
       .then(() => { settled = true }, () => { settled = true })
     await settle()
     const framesWithModal = tern.frames.length
@@ -825,35 +853,54 @@ test('A-13d: a protocol error during an open modal is diagnosed without settling
     await settle()
 
     assert.equal(diagnostics.length, 1, 'the modal seat does not swallow the diagnosis')
+    assert.deepEqual(notifications, [])
     assert.equal(settled, false, 'an error never settles the modal')
     assert.equal(tern.frames.length, framesWithModal, 'an error never repaints under a modal')
     assert.deepEqual(focusOps(tern), opsBefore, 'an error never re-asserts the modal focus')
-    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
+    assert.deepEqual(business, NO_BUSINESS)
     assert.deepEqual(fatals, [])
     renderer.interaction.withdrawPending()
     await settle()
   } finally {
     await renderer.dispose()
+    assert.ok(tern.closeBodies.length >= 1, 'the session still closed')
+    assert.deepEqual(fatals, [])
   }
 })
 
-test('A-13e: the pre-existing event routes are unchanged and emit no error diagnostic', async () => {
+test('A-15e: under a modal the LEGAL focus route still re-asserts focus, while an `error` does not', async () => {
   const tern = new ScriptedTern()
-  const { renderer, diagnostics, business } = await mountDiagnosed(tern)
+  const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
     await settle()
-    const before = tern.frames.length
-    // A legal `resize` for THIS surface still reaches the model-picker resize path...
-    harnessFreeInput(tern, { ev: 'resize', sf: 's1', cols: 47, cell: { w: 8, h: 16 }, visible: true })
+    void renderer.interaction
+      .askQuestions([{ id: 'a15-q2', question: 'legal route control' }], undefined, undefined, false)
+      .then(() => {}, () => {})
     await settle()
-    // ...and the composer's own `focus` claim is still routed as before.
+    // POSITIVE CONTROL for the untouched legal route: while the seat is up, a terminal
+    // `focus` claim is re-asserted by the pre-existing modal branch (a NEW focus op).
+    const opsBeforeFocus = focusOps(tern).length
     harnessFreeInput(tern, { ev: 'focus', sf: 's1', id: 'dock.composer' })
     await settle()
-    assert.deepEqual(diagnostics, [], 'no legal event is ever reported as a protocol error')
-    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
-    assert.ok(tern.frames.length >= before, 'the legal routes still run')
+    const opsAfterFocus = focusOps(tern).length
+    assert.ok(opsAfterFocus > opsBeforeFocus,
+      `the legal modal focus route still re-asserts focus (${opsBeforeFocus} -> ${opsAfterFocus})`)
+    // ...and the SAME state + an `error` adds a diagnostic but no focus op and no repaint.
+    const framesBefore = tern.frames.length
+    harnessFreeInput(tern, { ev: 'error', sf: 's1', s: 7, op: 0, msg: 'unknown id dock.composer' })
+    await settle()
+    assert.equal(diagnostics.length, 1, 'the error is diagnosed next to the legal route')
+    assert.equal(focusOps(tern).length, opsAfterFocus, 'and it does NOT take the legal re-assert path')
+    assert.equal(tern.frames.length, framesBefore, 'nor does it render')
+    assert.deepEqual(notifications, [])
+    assert.deepEqual(business, NO_BUSINESS)
+    assert.deepEqual(fatals, [])
+    renderer.interaction.withdrawPending()
+    await settle()
   } finally {
     await renderer.dispose()
+    assert.ok(tern.closeBodies.length >= 1, 'the session still closed')
+    assert.deepEqual(fatals, [])
   }
 })
 
