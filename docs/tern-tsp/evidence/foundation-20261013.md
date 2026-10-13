@@ -30,16 +30,18 @@ Raw audit inputs are the 2026-10-13 `00-baseline.md` through `07-spike-results.m
 
 | ID | Result | Measured assertions / limit | Historical run locator |
 |---|---|---|---|
-| S1 | **Observed** `kinds=45`, features 10 (`styles`,`scroll`,`flow` included); credits 2; sample `cols=47`, cell 8×16 | 8 checks, 0 failed, 4 informational | `temp/tern-pane-lINnMe` |
+| S1 | **Observed** `kinds=45`, features 10 (`styles`,`scroll`,`flow` included); credits 2; sample `cols=47`, cell 8×16 | 9 checks, 0 failed, 4 informational | `temp/tern-pane-lINnMe` |
 | S2 | **NOT_APPLICABLE**: client's advertised 45 kinds supersets the pinned 44; cannot select a pinned-but-unadvertised kind | No valid contrast constructed | S1 result |
-| S3 | **UNKNOWN**: `focus('layer')` caret outcome cannot be inferred | Two attempted positive editor focus probes used wrong actual node IDs; no valid success control. Client **did** report `unknown id` on invented target and recognized `layer` without that error | `temp/tern-pane-EgpoNW`, `temp/tern-pane-v8BQ4y` |
-| S4 | **Observed** modal backdrop blocks pointer through-click | Same-coordinate open/closed/reopen control, background action count unchanged when covered | `temp/tern-pane-EgpoNW`, `temp/tern-pane-v8BQ4y` |
-| S5 | **Observed only in tested tree**: clicking descendants did not emit a UI event whose ID equals region root `layer` | Does **not** prove no stale `select/activate/action` across rewritten frames, other root shapes or client releases | `temp/tern-pane-v8BQ4y` |
-| S6 | **Partially observed**: frame ACKs matched sent sequence; `error(s:9)` appeared **before** `ack(s:9)` | This was an **error**, not an ordinary UI `action/select` event; displaced-frame events not constructed | `temp/tern-pane-EgpoNW` |
+| S3 | **UNKNOWN**: `focus('layer')` caret outcome cannot be inferred | Two attempted positive editor focus probes used wrong actual node IDs; no valid success control. Both runs kept a ledger: 24 checks, **1 failed** (that invalid control), 8 informational. Client **did** report `unknown id` on invented target and recognized `layer` without that error | `temp/tern-pane-EgpoNW`, `temp/tern-pane-v8BQ4y` |
+| S4 | **Observed** modal backdrop blocks pointer through-click | Same-coordinate open/closed/reopen control, background action count unchanged when covered. Ledgers: 24 checks, 1 failed (the S3 control), 8 informational each | `temp/tern-pane-EgpoNW`, `temp/tern-pane-v8BQ4y` |
+| S5 | **Observed only in tested tree**: clicking descendants did not emit a UI event whose ID equals region root `layer` | Ledger: 24 checks, 1 failed (the S3 control), 8 informational. Does **not** prove no stale `select/activate/action` across rewritten frames, other root shapes or client releases | `temp/tern-pane-v8BQ4y` |
+| S6 | **Partially observed**: frame ACKs matched sent sequence; `error(s:9)` appeared **before** `ack(s:9)` | Ledger: 24 checks, 1 failed (the S3 control), 8 informational. This was an **error**, not an ordinary UI `action/select` event; displaced-frame events not constructed | `temp/tern-pane-EgpoNW` |
 | S7 | **Observed** Picker `focus:'list'/'preview'` changes client classes `f-list/f-preview` and reverses | 8 checks, 0 failed, 4 informational. Does not prove caret/keyboard scroll | `temp/tern-pane-S3ihPs` |
 | S8 | **Observed** blob with/without `id` recognized via `r:blobs.have`, random hash missing | 7 checks, 0 failed, 2 informational; no per-blob ACK assumed | `temp/tern-pane-LTgf6h` |
 | S9 | **Observed** `media` renders success and missing-file paths differently | 11 checks, 0 failed, 5 informational; image viewer state and `Not found` negative control | `temp/tern-pane-ox3DXS` |
-| #10 | **Observed** `Tab`+`Enter` reached program as keys, no `html.button` action | Tested client/layout only; this probe **was not in K12** | `temp/tern-pane-ox3DXS` |
+| #10 | **Observed** `Tab`+`Enter` reached program as keys, no `html.button` action | Ledger: 11 checks, 0 failed, 5 informational. Tested client/layout only; this probe **was not in K12** | `temp/tern-pane-ox3DXS` |
+
+A row records `total/failed/informational` only where the run kept an assertions ledger; rows without one (S2 has no run at all) are marked instead of counted, and no count is inferred.
 
 Run directories were reported retained, under gitignored `temp`. The assistant drafting this summary **has not received their `wire.jsonl`, tree JSON or PNG bytes**, only the report; it does not claim independent visual inspection. The run author states those operations did not modify production code/test/docs or user daemon. Reproduce before depending on pixel-level details that are not preserved in the repository.
 

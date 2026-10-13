@@ -45,7 +45,7 @@ teardown → seat.dispose → retire presentational panels
  → surface.close({keep:false}) → session.close → renderer release
 ```
 
-**Current code anchors** (at baseline): `src/app/bootstrap.ts:2404–2456,3213`; `src/app/bootstrap/renderer-selection.ts:20–22,51,104–106`; `src/app/surface/runtime.ts:1015–1105,1851–1943,1950–2009`; `src/tui/tsp/session.ts:212–286,405–445,505–538,703–846,878–926`; `src/tui/tsp/transcript-view.ts:257–279`. The full stage-by-stage trail and test references are in audit `04-dsh-production-crosswalk.md` §A1 (A4-001…A4-016).
+**Current code anchors** (at baseline): `src/app/bootstrap.ts:2404–2456,3213`; `src/app/bootstrap/renderer-selection.ts:20–22,51,104–106`; `src/app/surface/runtime.ts:1015–1105,1851–1943,1950–2009`; `src/tui/tsp/session.ts:212–286,405–445,505–538,703–846,878–926`; `src/tui/tsp/transcript-view.ts:257–279`. The complete stage-by-stage investigation is recorded in the unpublished local audit report `04-dsh-production-crosswalk.md` §A1 (A4-001–A4-016). The production source anchors above remain independently verifiable.
 
 | Fact / operation | Existing authority / owner | Forbidden substitute |
 |---|---|---|
@@ -114,7 +114,7 @@ The application must route modal keys and guard semantic actions according to th
 | Real `tern serve` + `tern ctl` headless pane | Versioned client nodes, actual layout boxes, PNG, control-input events, capability replies | Physical window focus, OS/IME/real hardware interaction |
 | Real physical GUI / owner attestation | Only the explicitly exercised physical behaviors and environment | Full cross-version/full-profile/Remote qualification |
 
-A **claim** needs baseline, source/path/lines, consumer path, positive and negative evidence, remaining `UNKNOWN`, and a precise observation tier. Use test assertions as evidence of a tested proposition; do not infer tests were executed merely because they exist. A measured statement needs run path/manifest/client build and `total/failed/informational`. `check` must be capable of failing; `measure` cannot replace acceptance. A node's rect alone cannot demonstrate visual nonclipping; look at ancestor clipping + actual PNG. `ctl` failures must fail closed; irreversible key/click/run input is **one-shot**, not retryable (see harness guide).
+A **claim** needs baseline, source/path/lines, consumer path, positive and negative evidence, remaining `UNKNOWN`, and a precise observation tier. Use test assertions as evidence of a tested proposition; do not infer tests were executed merely because they exist. A measured statement needs its run path (or manifest) and the client build; when that run kept an assertions ledger, record its `total/failed/informational`, and where no ledger exists for a probe, say so explicitly instead of inferring or inventing counts. `check` must be capable of failing; `measure` cannot replace acceptance. A node's rect alone cannot demonstrate visual nonclipping; look at ancestor clipping + actual PNG. `ctl` failures must fail closed; irreversible key/click/run input is **one-shot**, not retryable (see harness guide).
 
 **Versioned client observations from 2026-10-13** are summarized under [Foundation evidence](./evidence/foundation-20261013.md). Raw run folders live under gitignored `temp/tern-pane-*` and worktrees, and **are not checked into this repository**. The evidence summary is a sourced record, not a guarantee that all raw artifacts will be independently available later. Do not claim physical GUI qualification from those artifacts.
 
