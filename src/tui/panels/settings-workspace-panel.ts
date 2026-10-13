@@ -624,17 +624,18 @@ export class SettingsWorkspacePanel implements Component {
     const selected = row.id === this.rowId
     const marker = selected ? '> ' : '  '
     const width = this.paneRowWidth()
-    const label = fit(`${marker}${sanitizedPhysicalLine(row.label)}`, width)
-    const labelCells = visibleWidth(label)
-    // The configured NAME owns its cells first (the frozen hierarchy: the name
-    // stays identifiable, the list SUMMARY is what truncates). Only a label that
-    // fills the whole pane at all drops the summary.
-    const summaryCellRoom = Math.max(0, width - labelCells - 1)
+    // The configured NAME is measured UNPADDED and owns its cells first (the
+    // frozen hierarchy: the name stays identifiable, the list SUMMARY is what
+    // truncates). Only a name that alone fills the pane drops the summary; the
+    // remainder is then handed to the (truncatable) value, right-aligned.
+    const lead = truncateToWidth(`${marker}${sanitizedPhysicalLine(row.label)}`, width, '…', false)
+    const leadCells = visibleWidth(lead)
+    const summaryCellRoom = Math.max(0, width - leadCells - 1)
     const value = summaryCellRoom >= 1
       ? truncateToWidth(sanitizedPhysicalLine(row.summary), summaryCellRoom, '…', false)
       : ''
-    const gap = Math.max(1, width - labelCells - visibleWidth(value))
-    const painted = label + ' '.repeat(gap) + value
+    const gap = Math.max(1, width - leadCells - visibleWidth(value))
+    const painted = lead + ' '.repeat(gap) + value
     return selected ? color.textStrong(painted) : color.text(painted)
   }
 
