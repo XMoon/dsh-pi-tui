@@ -1396,6 +1396,11 @@ test('C-10 a hostile ROSTER label is sanitized in the workspace notice row (Stop
   // The advertised Stop on the Output page drives the settlement notice.
   harness.vt.sendInput('s')
   await flush(6)
+  // The notice is asserted from the PAINTED frame, so wait out the fork's 16ms
+  // frame throttle AND its terminal writes before reading the viewport: the
+  // Stop's `notify()` frame is only one throttled tick away from the previous
+  // render, and the xterm write lands asynchronously.
+  await harness.vt.waitForRender()
   assert.deepEqual(harness.tasks.observation.stops, ['job-a'], 'the advertised Stop really dispatched')
   const stream = rawWritten.join('')
   assert.ok(!stream.includes(']52;c;'), 'the roster label OSC 52 never reaches the terminal from the notice row')
