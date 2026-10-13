@@ -29,6 +29,8 @@ type ThemeHarness = {
   trackCalls: boolean[]
   report(scheme: 'dark' | 'light'): void
   setTheme(theme: string | undefined): void
+  /** Record ONLY the selection intent (a write still in flight). */
+  noteSelection(value: string): void
 }
 
 function mountThemeRuntime(): ThemeHarness {
@@ -94,6 +96,9 @@ function mountThemeRuntime(): ThemeHarness {
     // legacy editor, the reload re-apply, the workspace), so the helper records the
     // runtime owner's intent exactly like those sites do.
     setTheme: (value) => { theme = value; intent = value },
+    /** Record ONLY the runtime owner's intent: a deliberate selection whose write is
+     *  still in flight, so the persisted document still reads the previous value. */
+    noteSelection: (value) => { intent = value },
   }
 }
 
@@ -104,7 +109,7 @@ test('the boot wiring samples once through autoDetectTheme and only toggles Mode
   assert.deepEqual(harness.trackCalls, [true], 'tracking is enabled without sampling again')
 })
 
-test('a live scheme report only changes the theme while the preference is auto', () => {
+test('a live scheme report only changes the theme while the latest selection follows the terminal', () => {
   const harness = mountThemeRuntime()
   harness.runtime.applyBootDisplay()
   harness.report('light')
@@ -112,7 +117,19 @@ test('a live scheme report only changes the theme while the preference is auto',
   harness.setTheme('dark')
   harness.applied.length = 0
   harness.report('light')
-  assert.deepEqual(harness.applied, [], 'a manual theme ignores live reports')
+  assert.deepEqual(harness.applied, [], 'an explicit selection ignores live reports')
+})
+
+test('a live scheme report is fenced on the selection INTENT, not on a document a pending write has not updated', () => {
+  // The regression this locks: gating the listener on the persisted document would let a
+  // report colour over a choice that applied runtime-first while its write is in flight.
+  const harness = mountThemeRuntime()
+  harness.runtime.applyBootDisplay()
+  harness.applied.length = 0
+  harness.noteSelection('dark')
+  harness.report('light')
+  assert.deepEqual(harness.applied, [],
+    'the intent already left auto although the document still reads auto')
 })
 
 test('a runtime switch from a manual theme to auto follows live reports', () => {
