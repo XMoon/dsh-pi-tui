@@ -21,7 +21,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, TuiAltScreen } from '@xmoon76/pi-tui'
 import { TuiApp, type TaskBrowserHandle, type TuiAppOptions } from '../src/tui-app.ts'
 import { OutputViewerPanel } from '../src/tui/panels/output-viewer-panel.ts'
 import { JobInspectorPanel } from '../src/tui/panels/job-inspector-panel.ts'
@@ -1642,5 +1642,101 @@ test('B2A-20 a legacy handoff never crosses a blocking owner started by its own 
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 0, 'cancelling the question must not reveal a hidden legacy overlay')
   assert.ok(!view(vt).includes('Type to search'), 'no legacy editor was ever mounted')
+  app.stop()
+})
+
+test('B2A-21 closing a workspace hands the terminal over without flushing its own document into the resumed surface', async () => {
+  const { vt, app } = startApp()
+  // The physical byte stream is the contract here: a workspace screen stopped
+  // WITHOUT `preserveScreen` exits the alternate screen and then writes its own
+  // rendered document into the regular terminal — one extra synchronized frame
+  // that flashes the departing Job/Settings chrome over the surface taking over.
+  const writes: string[] = []
+  let capturing = false
+  const originalWrite = vt.write.bind(vt)
+  vt.write = (data: string): void => {
+    if (capturing) writes.push(data)
+    originalWrite(data)
+  }
+  const captured = (): string => writes.join('')
+
+  // ── Settings: Esc is the close path the user takes ────────────────────────
+  capturing = true
+  app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+  await vt.waitForRender()
+  assert.ok(captured().includes('SETTINGS'), 'control: the live Settings document is what writes the mark')
+  writes.length = 0
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(settingsScreenOpen(app), false)
+  assert.ok(!captured().includes('SETTINGS'), `the departing Settings document must not be flushed:\n${captured()}`)
+
+  // ── Job: the same hand-over from the browser's own detail lease ───────────
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  writes.length = 0
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(jobScreenOpen(app), true, 'the Job workspace owns the surface')
+  assert.ok(captured().includes('JOB'), 'control: the live Job document is what writes the mark')
+  writes.length = 0
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(jobScreenOpen(app), false)
+  assert.ok(!captured().includes('JOB'), `the departing Job document must not be flushed:\n${captured()}`)
+  capturing = false
+  app.stop()
+})
+
+test('B2A-22 a workspace open unwind never flushes the partially started screen document into the restored surface', async () => {
+  const { vt, app } = startApp()
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  const writes: string[] = []
+  let capturing = false
+  const originalWrite = vt.write.bind(vt)
+  vt.write = (data: string): void => {
+    if (capturing) writes.push(data)
+    originalWrite(data)
+  }
+  const captured = (): string => writes.join('')
+  // The REAL start runs — the alternate screen is entered and the document is
+  // renderable — and the failure lands on the open-sequence step right after it,
+  // the same shape as a throwing `assertStillOpening()` re-entrancy fence. The
+  // unwind must release that started screen without flushing its document.
+  const originalStart = TuiAltScreen.prototype.start
+  TuiAltScreen.prototype.start = function (this: TuiAltScreen): void {
+    originalStart.call(this)
+    throw new Error('post-start open failure')
+  }
+  try {
+    // ── Job: the browser's own detail lease ─────────────────────────────────
+    harness.tasks.openTasksBrowser('full')
+    await vt.waitForRender()
+    capturing = true
+    assert.throws(() => harness.tasks.openJobView('job-a'), /post-start open failure/, 'the real mount failure is relayed')
+    await vt.waitForRender()
+    capturing = false
+    assert.equal(jobScreenOpen(app), false, 'no Job screen survives the unwind')
+    assert.ok(!captured().includes('JOB'), `the unwound Job document must not be flushed:\n${captured()}`)
+
+    // ── Settings: the same unwind on its own lease ──────────────────────────
+    writes.length = 0
+    capturing = true
+    assert.throws(
+      () => app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} }),
+      /post-start open failure/,
+    )
+    await vt.waitForRender()
+    capturing = false
+    assert.equal(settingsScreenOpen(app), false, 'no Settings screen survives the unwind')
+    assert.ok(!captured().includes('SETTINGS'), `the unwound Settings document must not be flushed:\n${captured()}`)
+    // The restored surface really owns the terminal again.
+    assert.ok(view(vt).includes('❯'), 'the conversation surface is restored')
+  } finally {
+    TuiAltScreen.prototype.start = originalStart
+  }
   app.stop()
 })

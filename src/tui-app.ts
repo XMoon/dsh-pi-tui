@@ -20390,7 +20390,7 @@ export class TuiApp {
       // physical state.
       runSyncDisposalSteps('job workspace close', [
         finalizeOnce,
-        () => screen.stop(),
+        () => screen.stop({ preserveScreen: true }),
         () => panel.dispose(),
         () => {
           // Restore ONLY while no newer physical owner exists: a callback during
@@ -20437,7 +20437,7 @@ export class TuiApp {
       const alreadyClosed = finalized
       runSyncDisposalStepsWithPrimary('job workspace open unwind', error, [
         finalizeOnce,
-        () => { if (!alreadyClosed) screen.stop() },
+        () => { if (!alreadyClosed) screen.stop({ preserveScreen: true }) },
         () => { if (!alreadyClosed) panel.dispose() },
         () => {
           if (!alreadyClosed && !this.disposed && this.jobWorkspace === undefined && this.activeScreen === returnScreen) {
@@ -20571,7 +20571,7 @@ export class TuiApp {
       // editor observes (and may legitimately mount on) the restored surface.
       runSyncDisposalSteps('settings workspace close', [
         finalizeOnce,
-        () => screen.stop(),
+        () => screen.stop({ preserveScreen: true }),
         () => panel.dispose(),
         () => {
           // Restore ONLY while no newer physical owner exists: a callback during
@@ -20650,7 +20650,7 @@ export class TuiApp {
       const alreadyClosed = finalized
       runSyncDisposalStepsWithPrimary('settings workspace open unwind', error, [
         finalizeOnce,
-        () => { if (!alreadyClosed) screen.stop() },
+        () => { if (!alreadyClosed) screen.stop({ preserveScreen: true }) },
         () => { if (!alreadyClosed) panel.dispose() },
         () => {
           if (!alreadyClosed && !this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
