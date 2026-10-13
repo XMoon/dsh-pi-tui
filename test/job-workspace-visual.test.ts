@@ -258,6 +258,10 @@ test('D-01 120x40 paints status → metadata → summary → tabs → body → f
     text: numberedLines(0, 39),
   })
   await settle(harness.vt)
+  // A metadata-row change shrinks the body viewport. onFramePainted() reads the
+  // freshly committed viewport, finds it differs from the frame's, and requests
+  // one more throttled frame to converge the reading-facts position.
+  await harness.vt.waitForRender()
 
   const status = bodyRow(harness.vt, 'JOB  job-a · bash')
   const metadata = bodyRow(harness.vt, 'progress: 3/8 checks')
