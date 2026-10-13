@@ -673,7 +673,22 @@ class RemoteConfigMirror {
         throw new Error(`settings namespace "${ns}" is not available in this deployment`)
       }
       const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
-      if (!result.ok) throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
+      if (!result.ok) {
+        // A failed write RPC does NOT prove the Host refused it: the official
+        // controller applies the edit and then performs its OWN post-write describe,
+        // reporting a failure of that read as an error even though the write
+        // committed. The last-known snapshot may therefore already be behind a
+        // committed write, so it is marked non-current AND re-read here — a consumer
+        // then sees the committed value, the previous value (a real refusal) or an
+        // explicitly non-current authority, and never has to guess.
+        this.invalidate()
+        try {
+          await this.describe()
+        } catch (error) {
+          this.recordFailure(error)
+        }
+        throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
+      }
       // Authoritative refresh AFTER the official settlement. The write is already
       // committed; a FAILED refresh is a currentness uncertainty, not a refusal —
       // `readiness()` reports the real state in both of its failure modes.

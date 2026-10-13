@@ -332,32 +332,68 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * canonical normalization (a legacy `custom:X` document still means `file:X`);
    * a display preset is compared exactly.
    */
-  const verifyCommittedField = (
-    field: SettingsWorkspaceWritableField,
-    expected: string,
-  ): SettingsWorkspaceCommitOutcome => {
+  /** The structured authoritative readback of ONE committed field. */
+  type CommittedReadback =
+    | { readonly kind: 'agrees' }
+    | { readonly kind: 'differs'; readonly actual: string | undefined }
+    | { readonly kind: 'unavailable'; readonly reason: string }
+
+  const readCommittedField = (field: SettingsWorkspaceWritableField, expected: string): CommittedReadback => {
     const settings = runner.tuiSettings
     if (settings === undefined) {
-      return { outcome: 'unverified', reason: 'no authoritative TUI settings document is readable' }
+      return { kind: 'unavailable', reason: 'no authoritative TUI settings document is readable' }
     }
     const readiness = runner.config.configReadiness()
     if (readiness !== 'ready') {
-      return { outcome: 'unverified', reason: `the configuration is ${readiness}; the persisted value could not be re-read` }
+      return { kind: 'unavailable', reason: `the configuration is ${readiness}; the persisted value could not be re-read` }
     }
     let doc: TuiSettingsDoc
     try {
       doc = settings.get()
     } catch (error) {
-      return { outcome: 'unverified', reason: `the persisted value could not be re-read: ${safeErrorMessage(error)}` }
+      return { kind: 'unavailable', reason: `the persisted value could not be re-read: ${safeErrorMessage(error)}` }
     }
     const actual = field === 'theme' ? normalizePersistedTheme(doc.theme) : doc.displayPreset
-    if (actual !== expected) {
-      return {
-        outcome: 'unverified',
-        reason: `the authoritative document reads ${actual === undefined || actual === '' ? 'no value' : actual}`,
-      }
+    return actual === expected ? { kind: 'agrees' } : { kind: 'differs', actual }
+  }
+
+  const verifyCommittedField = (
+    field: SettingsWorkspaceWritableField,
+    expected: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const readback = readCommittedField(field, expected)
+    if (readback.kind === 'agrees') return { outcome: 'verified' }
+    if (readback.kind === 'unavailable') return { outcome: 'unverified', reason: readback.reason }
+    return {
+      outcome: 'unverified',
+      reason: `the authoritative document reads ${readback.actual === undefined || readback.actual === '' ? 'no value' : readback.actual}`,
     }
-    return { outcome: 'verified' }
+  }
+
+  /**
+   * Classify a replace() REJECTION. A failed write is not proof of a refusal: the
+   * official Remote service applies the edit and then performs its own post-write
+   * describe, reporting a failure of that read as an error even though the write
+   * committed — and the Direct backend's failure is a real conflict. The authority is
+   * therefore re-read (the Remote adapter re-reads it on the failed RPC itself):
+   *  - a current authority that already carries the requested value is
+   *    `unverified` (the value is in place, but this write never confirmed it),
+   *  - one that still carries the previous value is a real refusal (`not-saved`),
+   *  - one that cannot be read at all is explicitly `unverified`.
+   * Never a `Saved`, and never a "not saved" claim the Client cannot support.
+   */
+  const classifyRejectedWrite = (
+    field: SettingsWorkspaceWritableField,
+    expected: string,
+    failureReason: string,
+    prefix: string,
+  ): SettingsWorkspaceCommitOutcome => {
+    const readback = readCommittedField(field, expected)
+    if (readback.kind === 'differs') return { outcome: 'not-saved', reason: `${prefix}${failureReason}` }
+    if (readback.kind === 'agrees') {
+      return { outcome: 'unverified', reason: `${prefix}${failureReason}; the authority already reads ${expected}` }
+    }
+    return { outcome: 'unverified', reason: `${prefix}${failureReason}; ${readback.reason}` }
   }
 
   /**
@@ -421,7 +457,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         await settings.replace(withUserFooterCustomItems({ ...settings.get(), displayPreset: value }, runner.config))
       })
     } catch (error) {
-      return { outcome: 'not-saved', reason: `the display preset is applied locally, but storing it failed: ${safeErrorMessage(error)}` }
+      return classifyRejectedWrite(
+        'display-preset',
+        value,
+        safeErrorMessage(error),
+        'the display preset is applied locally, but storing it failed: ',
+      )
     }
     return verifyCommittedField('display-preset', value)
   }
@@ -491,7 +532,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         await settings.replace(withUserFooterCustomItems({ ...settings.get(), theme: value }, runner.config))
       })
     } catch (error) {
-      return { outcome: 'not-saved', reason: safeErrorMessage(error) }
+      // The plan's failure wording is `Not saved · <the actual failure>`; a theme is a
+      // Host-persisted preference with no separate local fact to name.
+      return classifyRejectedWrite('theme', value, safeErrorMessage(error), '')
     }
     return verifyCommittedField('theme', value)
   }

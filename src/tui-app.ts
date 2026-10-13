@@ -7585,6 +7585,7 @@ export class TuiApp {
     // projection for the new mode.
     this.projectStatus({ interaction: { displayPreset: preset } })
     this.rebuildMessages('focus-disclosure')
+    this.refreshSettingsWorkspaceFacts()
     this.requestRender()
     return { kind: 'applied', preset }
   }
@@ -20876,6 +20877,14 @@ export class TuiApp {
     return requestClose
   }
 
+  /** Push the runtime facts of an open Settings workspace back through its pull
+   *  projection: the Detail's `Runtime` row is the LIVE fact, so it must follow every
+   *  runtime change — including one the workspace's own pending commit applied before
+   *  its write settled. */
+  private refreshSettingsWorkspaceFacts(): void {
+    this.settingsWorkspace?.panel.rereadFacts()
+  }
+
   /** Switch the active color theme and repaint everything. Every surface
    * re-renders from its semantic state with the NEW palette: header,
    * footer, dock, todo panel, queue pane, busy indicator, messages, and
@@ -20929,12 +20938,16 @@ export class TuiApp {
     // reads this record during the apply itself.
     this.applyPalette(palette)
     this.activePluginThemeName = name
+    // The plugin RECORD is part of the runtime fact and is assigned only once the
+    // palette is really live, so the projection follows it here as well.
+    this.refreshSettingsWorkspaceFacts()
   }
 
   /** Drop the plugin-theme selection (a builtin or custom-file theme is
    * being applied — no unload fallback applies). */
   clearActivePluginTheme(): void {
     this.activePluginThemeName = undefined
+    this.refreshSettingsWorkspaceFacts()
   }
 
   /** The plugin theme name currently applied, if any. */
@@ -20966,6 +20979,10 @@ export class TuiApp {
     this.renderFooter()
     this.working.refresh()
     this.editor.invalidate()
+    // The open Settings workspace projects the runtime fact from a PULL snapshot: a
+    // palette change must reach it at the moment it happens, not at the next explicit
+    // refresh (`R`) or settlement.
+    this.refreshSettingsWorkspaceFacts()
     this.requestRender()
   }
 
