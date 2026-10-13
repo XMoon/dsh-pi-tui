@@ -124,12 +124,16 @@ export interface SettingsWorkspaceCommitRequest {
 /**
  * The REAL outcome of one commit, as the authority proved it. `verified` is
  * earned only by a completed mutation plus an authoritative re-read that agrees;
- * `not-saved` is a refused/failed write (the runtime fact may still have been
- * applied — the command side reports that separately); `unverified` is a
- * dispatched write whose authoritative readback could not confirm the value.
+ * `not-saved` is a write the authority REFUTED (it is current and does not carry
+ * the value); `unverified` is a write that returned success while the
+ * authoritative readback could not complete; `indeterminate` is a rejected write
+ * whose outcome the backend cannot attribute — the authority already carries the
+ * requested value, or could not be read — so neither acceptance nor refusal may be
+ * claimed about THIS commit. The runtime fact may have been applied in every
+ * non-`verified` case and is reported separately.
  */
 export interface SettingsWorkspaceCommitOutcome {
-  readonly outcome: 'verified' | 'not-saved' | 'unverified'
+  readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
 }
 
@@ -989,6 +993,7 @@ export class SettingsWorkspacePanel implements Component {
     if (phase.kind !== 'settled' || phase.field !== field) return undefined
     if (phase.outcome === 'verified') return 'Verified · the authoritative read agrees'
     if (phase.outcome === 'not-saved') return `Not saved · ${phase.reason ?? 'the write was refused'}`
+    if (phase.outcome === 'indeterminate') return `Outcome unknown · ${phase.reason ?? 'the write could not be attributed'}`
     return `Commit accepted · verification unavailable${phase.reason === undefined ? '' : ` · ${phase.reason}`}`
   }
 
