@@ -2104,8 +2104,58 @@ and nothing else does.
   replacement workspace.
 - **Still read-only / still later.** `Icon style` and `Thinking detail` remain
   readable rows in this slice (their full editors stay behind `Other settings`);
-  the remaining Settings migration, B3 History and B4 Task Quick are later
-  slices, and closing B2-B on these two rows is not Gate-3B closure.
+  the remaining Settings migration and B4 Task Quick are later slices, and
+  closing B2-B on these two rows is not Gate-3B closure.
+
+## History is an Editor-seat tenant with an independent Preview (B3-A)
+
+`Ctrl+R` no longer opens a managed overlay. Phase 3B / B3-A projects the
+`HistoryPanel` into the editor seat through the Phase-3A optional tenant, so the
+live Transcript keeps rendering above it and the ordinary footer below it while
+the seat shows the History surface.
+
+- **One vertical presentation at every width.** Header (`Input history` + the
+  responsive scope tabs + the `F2` hint), query row, a `Results · N matches`
+  counter, a single-line results window capped at eight painted rows, a divider,
+  the `Preview x-y/N` heading with the copy actions, the soft-wrapped ORIGINAL
+  prompt and one trailing metadata row. The retired 100-column split/stacked
+  overlay layout, its width cap, its 7-row detail clamp and its `… more` marker
+  are gone: the Preview never truncates the source, only its viewport.
+- **The grant is live.** `planHistorySeatLayout()` derives the row budget from
+  the real terminal rows (63% normal / 80% expanded by `F2`) and the measured
+  non-History pinned chrome minus one reserved transcript row; the header, query
+  and footer hint have first claim, and the shrinkable body splits between the
+  results window and the Preview. A small grant drops the Preview (and then the
+  footer with the hint folded into the header) LONG before it drops the visible
+  selected result; a grant too small for any body row disables acceptance of an
+  unpainted row.
+- **The Preview is the copy authority.** List labels are single sanitized lines;
+  the Preview is built from the shared neutral source-text layout
+  (`src/tui/components/source-text-layout.ts`, extracted from the Job Command
+  document, whose named exports and tests are unchanged), so every painted cell
+  maps back to an exact original UTF-16 range. `Alt+C` / `[Copy all]` copy the
+  stored `content` byte for byte and the Fullscreen Preview drag copies an exact
+  original substring — never a rendered or truncated row.
+- **Pointer support is Transcript Fullscreen only.** The alt screen's existing
+  component dispatch delivers press/drag/wheel to the panel, which resolves
+  against its last painted frame (width/height, painted result identity, search
+  generation). A result click selects; the explicit `[Use selected]` and
+  `[Copy all]` cells act, and each action is bound to the result ID it was
+  pressed for. The regular main screen writes no mouse mode and installs no
+  bridge: the panel refuses every pointer event there, and the terminal's native
+  selection/scrollback is untouched.
+- **Draft and cancellation.** Accept writes the accepted `content` into the
+  CURRENT editor winner through `setEditorText` (never a submit, never the hidden
+  host editor), after the tenant lease is retired and the captured session
+  identity re-validated. `Esc` / `Ctrl+C` close the seat and leave the draft,
+  cursor, input mode and pending paste content exactly as they were; those two
+  keys are consumed by History while it is the active seat tenant, so closing it
+  can never interrupt the agent or quit the TUI.
+- **Still later.** B3-B owns the full production Question/Approval FIFO
+  PARK/restore, session-replacement generation/ABA protection across async
+  queries and acceptance, and the L6 integration closure. B3-A ships the basic
+  park/restore, the live-subject `isCurrent()` fence and the refusal path; it is
+  not Gate-3B closure.
 
 ## Task Browser Host-text terminal-safety boundary
 

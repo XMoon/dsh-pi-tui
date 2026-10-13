@@ -1,9 +1,10 @@
 /**
- * End-to-end Ctrl+R integration tests: the host opens the history panel,
- * the overlay owns its keys, Enter fills the editor WITHOUT submitting,
- * Esc leaves the draft untouched, and overlay/question precedence is
- * preserved (plan §28/§30/§33/§34/§47). A real FileHistorySearchSource
- * over a temp dsh home drives the search.
+ * End-to-end Ctrl+R integration tests (Phase 3B / B3-A): the host mounts the
+ * History panel as the OPTIONAL editor-seat tenant, the Transcript stays visible
+ * above it, Enter fills the CURRENT editor WITHOUT submitting, Esc leaves the
+ * draft/cursor/mode untouched, a live blocking owner REFUSES the request and a
+ * capturing overlay keeps its own keys. A real `FileHistorySearchSource` over a
+ * temp dsh home drives the search.
  * @module @xmoon76/dsh-pi-tui/ctrl-r.test
  */
 
@@ -11,7 +12,6 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { FileHistorySearchSource } from '../src/client/history/search.ts'
 import { historyFilePath } from '../src/client/history/store.ts'
 
@@ -43,7 +43,12 @@ function seedHistory(home: string, cwd: string, rows: Array<{ content: string; t
   })).join('\n') + '\n', { mode: 0o600 })
 }
 
-async function makeApp(life: TestLifecycle, home: string, cwd = '/work/a') {
+async function makeApp(
+  life: TestLifecycle,
+  home: string,
+  cwd = '/work/a',
+  copyImpl?: (text: string) => Promise<boolean>,
+) {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
   seedHistory(home, cwd, [
@@ -52,30 +57,41 @@ async function makeApp(life: TestLifecycle, home: string, cwd = '/work/a') {
   ])
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
+  const copied: string[] = []
+  const copySelection = copyImpl ?? (async (text: string) => {
+    copied.push(text)
+    return true
+  })
   const app = new TuiApp(vt, {
     onSubmit: (text) => submitted.push(text),
     onExit: () => {},
+    runOwned: (_label, task, options) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(result => options.onResult?.(result), error => options.onError?.(error))
+    },
   }, {
     historySearchSource: new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => cwd,
+    copySelection,
   })
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
-  return { vt, app, submitted }
+  return { vt, app, submitted, copied }
 }
 
-/** Whether the panel frame is currently painted (the "History" header).
- * The scope tabs are responsive (short labels on narrow terminals), so the
- * probe matches the title line by its stable parts only. */
+/** Whether the History seat frame is currently painted. The header is the
+ * seat's stable identity (`Input history`). */
 function panelVisible(viewport: string[]): boolean {
-  return viewport.some(line => line.includes('History') && (line.includes('Directory') || line.includes('Session')))
+  return viewport.some(line => line.includes('Input history'))
 }
+
+const strip = (lines: string[]): string => lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
 
 /** Poll until a predicate holds (bounded): deterministic settling for
- * async panel searches — no fixed wall-clock sleeps (AGENTS.md timing
- * rule: assert on the STATE, not on a delay). */
+ * async panel searches — no fixed wall-clock sleeps. */
 async function waitFor(
   probe: () => boolean,
   maxMs = 2000,
@@ -89,42 +105,61 @@ async function waitFor(
   }
 }
 
-test('Ctrl+R opens the history panel; Enter fills the editor and does NOT submit', async (t) => {
+test('Ctrl+R mounts the History seat; Enter fills the CURRENT editor and does NOT submit', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app, submitted } = await makeApp(life, home)
   app.setDraft('existing draft')
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'transcript stays visible above the seat' }])
   await vt.waitForRender()
   vt.sendInput('\x12') // Ctrl+R
   await vt.waitForRender()
-  assert.ok(panelVisible(vt.getViewport()), 'the history panel must be visible')
+  const opened = strip(vt.getViewport())
+  assert.ok(panelVisible(vt.getViewport()), `the History seat must be visible:\n${opened}`)
+  assert.ok(opened.includes('transcript stays visible above the seat'),
+    'the Transcript must stay visible above the seat (no overlay blackout)')
+  assert.ok(opened.includes('Enter use'), 'the seat action bar is painted')
   vt.sendInput('nginx')
-  // Settle on the RESULT state (the filtered row painted), never on a
-  // fixed delay: the debounce + file read must complete before Enter.
-  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  // Settle on the FILTERED result state — both the match painted AND the
+  // non-matching row gone — never on a fixed delay: acceptance stays frozen
+  // until the debounced search really commits.
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload'))
+    && !vt.getViewport().some(line => line.includes('old prompt from yesterday')))
   vt.sendInput('\r') // Enter = accept
   await vt.waitForRender()
   assert.equal(app.getDraft(), 'fix nginx reload', 'the selected history text replaces the draft')
   assert.deepEqual(submitted, [], 'accept must NEVER submit')
+  assert.ok(!panelVisible(vt.getViewport()), 'accepting restores the ordinary editor seat')
+  assert.ok(strip(vt.getViewport()).includes('fix nginx reload'), 'the restored editor paints the accepted draft')
 })
 
-test('Esc closes the panel and leaves the original draft untouched', async (t) => {
+test('Esc closes the seat and leaves the original draft, cursor and input mode untouched', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app, submitted } = await makeApp(life, home)
-  app.setDraft('my draft in progress')
+  // A shell-mode draft with a cursor: the cancellation must restore ALL of it.
+  app.setDraft('!ls -la')
   await vt.waitForRender()
+  const hostEditor = (app as unknown as { editor: { getCursor(): unknown } }).editor
+  const cursorBefore = hostEditor.getCursor()
+  const modeBefore = app.inputModeForTest()
+  assert.notEqual(modeBefore, 'prompt', 'the `!` draft opened in a shell input mode')
   vt.sendInput('\x12') // Ctrl+R
   await vt.waitForRender()
   assert.ok(panelVisible(vt.getViewport()))
   vt.sendInput('\x1b') // Esc
   await vt.waitForRender()
-  assert.ok(!panelVisible(vt.getViewport()), 'Esc must close the panel')
-  assert.equal(app.getDraft(), 'my draft in progress', 'Esc must never modify the draft')
+  assert.ok(!panelVisible(vt.getViewport()), 'Esc must close the seat')
+  assert.equal(app.getDraft(), '!ls -la', 'Esc must never modify the draft')
+  // The visible seat document is the DECODED body; `getDraft` is the
+  // serialized wire form (mode prefix + body).
+  assert.equal(app.seatTextForTest(), 'ls -la', 'the visible seat document is the original draft body')
+  assert.equal(app.inputModeForTest(), modeBefore, 'Esc must preserve the input mode')
+  assert.deepEqual(hostEditor.getCursor(), cursorBefore, 'Esc must preserve the cursor position')
   assert.deepEqual(submitted, [], 'Esc must never submit')
 })
 
-test('an active transcript-search overlay keeps its keys (Ctrl+R never opens a second panel)', async (t) => {
+test('an active transcript-search overlay keeps its keys (Ctrl+R never opens a second surface)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
@@ -147,14 +182,29 @@ test('an active transcript-search overlay keeps its keys (Ctrl+R never opens a s
   vt.sendInput('\x12') // Ctrl+R
   await vt.waitForRender()
   assert.ok(app.isSearching(), 'the search overlay stays up')
-  assert.ok(!panelVisible(vt.getViewport()), 'the history panel must NOT open over the search overlay')
+  assert.ok(!panelVisible(vt.getViewport()), 'the History seat must NOT open over the search overlay')
+})
+
+test('a live blocking Question REFUSES Ctrl+R (silent no-op, question untouched)', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app } = await makeApp(life, home)
+  const question = app.askQuestions([{ id: 'q1', question: 'block the history?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('block the history?'), 'the question owns the seat')
+  vt.sendInput('\x12') // Ctrl+R while the blocking owner is live
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()), 'a refused request must not paint History')
+  assert.ok(strip(vt.getViewport()).includes('block the history?'), 'the blocking owner is untouched')
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }], 'the question still answers normally')
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()), 'the refused History never appears after the settle')
 })
 
 test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves the scope)', async (t) => {
   const life = testLifecycle(t)
-  // Review repro: the app is constructed while the cwd is /work/a; a
-  // session switch moves the live cwd to /work/b; Ctrl+R must search
-  // /work/b, never the construction-time snapshot.
   const home = tempHome(life)
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -188,9 +238,6 @@ test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves
 
 test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch moves the scope)', async (t) => {
   const life = testLifecycle(t)
-  // The session scope's identity getter must be read at open time, never
-  // captured at construction: a switch between opens makes the next
-  // Ctrl+R search the NEW session.
   const home = tempHome(life)
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -218,7 +265,7 @@ test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch m
   await waitFor(() => vt.getViewport().some(line => line.includes('prompt from A')))
   assert.ok(!vt.getViewport().some(line => line.includes('prompt from B')),
     'the session scope must filter by the LIVE session identity')
-  vt.sendInput('\x1b') // Esc closes the panel
+  vt.sendInput('\x1b') // Esc closes the seat
   await vt.waitForRender()
   // "Session switch": the live identity moves before the next Ctrl+R.
   liveSessionId = 'ses_b'
@@ -226,14 +273,74 @@ test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch m
   await vt.waitForRender()
   await waitFor(() => vt.getViewport().some(line => line.includes('prompt from B')))
   assert.ok(!vt.getViewport().some(line => line.includes('prompt from A')),
-    'the reopened panel must search the NEW session, not the construction snapshot')
+    'the reopened seat must search the NEW session, not the construction snapshot')
 })
 
-test('Ctrl+R on a TINY terminal (8 rows) never clips the panel footer', async (t) => {
+test('H3A-14: a Question PARKS the History seat and the SAME tenant (query + selection) is restored', async (t) => {
   const life = testLifecycle(t)
-  // Round-5 repro: maxHeight 6 on an 8-row terminal; the panel's old
-  // unconditional maxRows floor pushed the framed output past the overlay
-  // and clipped the footer. The panel must fit the available height.
+  const home = tempHome(life)
+  const { vt, app } = await makeApp(life, home)
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'editor-panel', 'the History tenant owns the derived keyboard seat')
+  vt.sendInput('nginx')
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  vt.sendInput('\x1b[B') // select the second (older) row
+  await vt.waitForRender()
+  const before = strip(vt.getViewport())
+  assert.ok(before.includes('›'), 'a row is selected before the park')
+
+  const question = app.askQuestions([{ id: 'q1', question: 'park history?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('park history?'), 'the blocking owner takes the seat')
+  assert.ok(!panelVisible(vt.getViewport()), 'the PARKED History tenant is not painted')
+  assert.notEqual(app.focusSeatForTest(), 'editor-panel', 'a parked tenant is not the keyboard owner')
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.ok(panelVisible(vt.getViewport()), 'the SAME History tenant comes back after the last blocker settles')
+  assert.equal(app.focusSeatForTest(), 'editor-panel', 'the restored tenant owns the derived keyboard seat again')
+  assert.ok(strip(vt.getViewport()).includes('Search: > nginx'), 'the query survives the park/restore round trip')
+  assert.ok(strip(vt.getViewport()).includes('old prompt from yesterday'), 'the selected row survives too')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'editor', 'closing the seat derives the ordinary editor seat again')
+})
+
+test('a session switch WHILE History is open retires the seat (no prior-session surface survives)', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  seedHistory(home, '/work/a', [{ content: 'prompt from A', ts: 1, sessionId: 'ses_a' }])
+  const vt = new VirtualTerminal(80, 24)
+  let liveSessionId: string | undefined = 'ses_a'
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  }, {
+    historySearchSource: new FileHistorySearchSource({ dshHome: home }),
+    historySearchCwd: () => '/work/a',
+    historySearchSessionId: () => liveSessionId,
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('prompt from A')))
+  // The session is replaced while the seat is up: the next input re-validates
+  // the subject and the tenant is retired instead of surviving stale.
+  liveSessionId = 'ses_b'
+  vt.sendInput('x')
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()), 'a stale History tenant must be retired, not kept painted')
+})
+
+test('Ctrl+R on a TINY terminal (8 rows) keeps the header and the Esc hint, never overflowing', async (t) => {
+  const life = testLifecycle(t)
   const home = tempHome(life)
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -253,8 +360,25 @@ test('Ctrl+R on a TINY terminal (8 rows) never clips the panel footer', async (t
   vt.sendInput('\x12') // Ctrl+R
   await vt.waitForRender()
   const viewport = vt.getViewport()
-  assert.ok(viewport.some(line => line.includes('History')), 'the panel must open')
-  assert.ok(viewport.some(line => line.includes('Esc cancel')), 'the footer hint must stay visible')
+  assert.ok(viewport.some(line => line.includes('Input history')), 'the seat header must open')
+  assert.ok(viewport.some(line => line.includes('Esc cancel')), 'the Esc hint must stay visible')
+  // The seat must not paint past the terminal: the last painted row is the
+  // footer/hint region and the physical frame never exceeds the rows.
+  assert.ok(viewport.length <= 8, 'the viewport can never exceed the terminal height')
+})
+
+test('Alt+C copies the selected entry through the app clipboard owner', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app, copied } = await makeApp(life, home)
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  vt.sendInput('\x1bc') // Alt+C
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(copied, ['fix nginx reload'], 'Alt+C copies the exact stored prompt')
+  assert.equal(app.getDraft(), '', 'copying must never accept into the editor')
 })
 
 test('plugin keybindings can never claim Ctrl+R (host-reserved)', async (t) => {
@@ -288,4 +412,92 @@ test('plugin keybindings can never claim Ctrl+R (host-reserved)', async (t) => {
     key: { key: 'r', ctrl: true, alt: false, shift: false, super: false },
     action: 'open-search',
   }, 'plugin'), /reserved/, 'a plugin cannot bind Ctrl+R')
+})
+
+test('H3A-01: a second Ctrl+R while the seat is open is a no-op (ONE History instance)', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app } = await makeApp(life, home)
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  vt.sendInput('nginx')
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  vt.sendInput('\x12') // a second Ctrl+R
+  await vt.waitForRender()
+  const viewport = strip(vt.getViewport()).split('\n')
+  assert.equal(viewport.filter(line => line.includes('Input history')).length, 1,
+    'a second Ctrl+R must never open a second History surface')
+  assert.ok(strip(vt.getViewport()).includes('Search: > nginx'), 'the SAME seat keeps its query')
+})
+
+test('H3A-13: a pending Approval REFUSES Ctrl+R (silent no-op, approval untouched)', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app } = await makeApp(life, home)
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'block the history?' })
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('block the history?'), 'the approval owns the seat')
+  vt.sendInput('\x12') // Ctrl+R while the approval is pending
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()), 'a refused request must not paint History')
+  assert.ok(strip(vt.getViewport()).includes('block the history?'), 'the approval is untouched')
+  vt.sendInput('y')
+  assert.equal(await approval, 'allowed-once')
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()), 'the refused History never appears after the approval settles')
+})
+
+test('H3A-15: a clipboard failure reports Copy failed, and a settle after the seat closed stays silent', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const notices: string[] = []
+  let mode: 'fail' | 'deferred' = 'fail'
+  let release: ((ok: boolean) => void) | undefined
+  const deferred = new Promise<boolean>((resolve) => { release = resolve })
+  const { vt, app } = await makeApp(life, home, '/work/a',
+    () => (mode === 'fail' ? Promise.resolve(false) : deferred))
+  const originalNotify = app.notify.bind(app)
+  app.notify = (text: string, kind?: 'info' | 'error'): void => {
+    notices.push(text)
+    originalNotify(text, kind)
+  }
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  vt.sendInput('\x1bc') // Alt+C — the clipboard capability answers `false`
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(notices.includes('Copy failed'), 'a rejected clipboard write is reported through the owned diagnostic')
+
+  // A copy whose settlement lands AFTER the seat closed must not notify.
+  mode = 'deferred'
+  vt.sendInput('\x1b') // Esc closes the seat (the copy above already settled)
+  await vt.waitForRender()
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  vt.sendInput('\x1bc') // Alt+C — the payload is captured now, the write is pending
+  await vt.waitForRender()
+  vt.sendInput('\x1b') // Esc closes the seat before the clipboard settles
+  await vt.waitForRender()
+  const settledBefore = notices.length
+  release?.(true)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(notices.length, settledBefore,
+    'a stale copy settle must not notify over a closed/replacement surface')
+})
+
+test('H3A-10: Esc preserves a pending paste marker in the draft byte for byte', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app, submitted } = await makeApp(life, home)
+  const draft = 'before [paste #1 +12 lines] after'
+  app.setDraft(draft)
+  await vt.waitForRender()
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), draft, 'the paste marker survives a History round trip')
+  assert.deepEqual(submitted, [], 'cancelling never submits the expanded paste')
 })

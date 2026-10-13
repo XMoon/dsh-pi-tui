@@ -586,11 +586,12 @@ projection; B2-B gave exactly two of its rows (`Configured theme`,
 
 ## 11. Optional seat tenant: PARK / REFUSE
 A private Client-local caller may project ONE optional tenant into the editor
-seat. Phase 3A ships the seam and its arbitration, not a product surface:
-`TuiApp.tryOpenOptionalSeatTenant` is private and no command or extension
-service opens a tenant yet. The three BLOCKING owners (Question, Approval, Save
-Location) outrank it, and the record never becomes a second authority over them
-or over the editor seat.
+seat. Phase 3A shipped the seam and its arbitration; **Phase 3B / B3-A is its
+FIRST real tenant**: `Ctrl+R` (`TuiApp.openHistorySearch`) projects the
+`HistoryPanel` into the seat through `TuiApp.tryOpenOptionalSeatTenant`. The
+seam stays private and no extension service opens a tenant. The three BLOCKING
+owners (Question, Approval, Save Location) outrank it, and the record never
+becomes a second authority over them or over the editor seat.
 
 - **Authority.** The single record (`phase: 'active' | 'parked'`, one per-open
   `token`, one caller-owned `close`) lives in `TuiApp`. The component and its
@@ -764,6 +765,34 @@ or over the editor seat.
   protocol input, and still reaches the focused component. The ordinary-key
   path re-validates the subject too, so a parked, finalized or stale tenant
   receives nothing.
+- **One narrow exception, owned by the History tenant (B3-A).** While the
+  History tenant is ACTIVE, current and physically focused, physical Escape and
+  `Ctrl+C` are consumed as ITS cancel (close the seat, leave the draft/cursor/
+  input mode untouched) in a dedicated branch that runs BEFORE the Host
+  physical-Escape/interrupt seam and the global exit admission — closing History
+  must never interrupt the agent or quit the TUI. Every other Host-reserved input
+  keeps its owner: a REMAPPED `app.exit.request` still runs the Host admission
+  (only the physical `Ctrl+C` is the History cancel), the blocking owners above
+  still outrank the tenant, and terminal protocol chunks are still stopped by the
+  sink fence. Escape is bound per-surface, never remapped globally.
+- **The History tenant's own surface contract.** The panel is a full-width,
+  border-free seat occupant: the Transcript keeps rendering above it and the
+  ordinary footer below it (no overlay, no second screen, no
+  `overlayGraphState()` node). Its row grant comes from the LIVE terminal
+  geometry and the measured non-seat chrome with one reserved transcript row; the
+  header/query/footer are the mandatory rows, the results window is capped at
+  eight rows and the wrapped Preview owns the remainder (heading and metadata
+  yield before mandatory navigation). Pointer handling is **Transcript Fullscreen
+  only**: the alt screen's EXISTING component dispatch delivers press/drag/wheel
+  into `HistoryPanel.handleMouse`, which resolves everything against its LAST
+  PAINTED frame (width/height, painted result identity, search generation) and
+  copies exact original source offsets for a Preview drag. The regular main
+  screen installs no mouse capability at all: `handleMouse` refuses while the
+  pointer capability is disabled, no SGR/mouse mode is written, and native
+  terminal selection/scrollback stays untouched. A result click only SELECTS;
+  the explicit `[Use selected]` / `[Copy all]` actions (and Enter / `Alt+C`)
+  accept or copy, and a button pressed for one entry never acts on whatever moved
+  into its painted cells.
 - **Approval mount fence.** `ApprovalRuntime.showNext()` commits `active =
   pending` BEFORE the park / save cancellation / mount, and re-reads that same
   stage identity (`ownsStage`) after EVERY mount-phase hook that can run a

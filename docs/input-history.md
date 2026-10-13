@@ -75,8 +75,11 @@ dedicated data file keyed by the working directory. We adopt that shape.
 
 ## Ctrl+R history search
 
-`Ctrl+R` opens the input-history search panel (host-reserved key; plugins
-can never claim it). It is "find and EDIT", never "find and run":
+`Ctrl+R` replaces the EDITOR SEAT with the input-history search surface
+(host-reserved key; plugins can never claim it). It is "find and EDIT", never
+"find and run": the Transcript keeps rendering above it and the ordinary footer
+below it, and the panel is an editor-seat tenant — not an overlay and not a
+second screen.
 
 - **Scopes**: `Tab` cycles the scope; the query survives the switch.
   - `Current session` (the default when a live session exists) — only the
@@ -90,20 +93,45 @@ can never claim it). It is "find and EDIT", never "find and run":
     hidden — a session tab with no identity would always be empty.
 - **Filtering**: case-insensitive substring over the content; an empty
   query browses the most recent history.
-- **Details**: the selected row's FULL multi-line content, plus its
-  directory, timestamp and session — legacy rows honestly show
-  `Unknown (legacy history)` (never a fabricated time). The list shows
-  the prompt only; the directory prefix appears in `All directories` only.
-- **Enter** puts the selected text back into the editor (via
-  `setEditorText`) and closes the panel — it never submits. **Esc** closes
-  with the draft untouched (the panel never previews into the editor).
+- **Layout (one vertical presentation at every width)**: `Input history`
+  header with the scope tabs and the `F2` hint, the query row, a
+  `Results · N matches` counter, a single-line results window (at most eight
+  painted rows, following the selection), a divider, then the `Preview`.
+  `F2` toggles the seat between its normal (≈63% of the terminal) and expanded
+  (≈80%) target height; the real grant also reserves the live non-seat chrome
+  and one transcript row, so a small terminal drops the Preview before it drops
+  the visible selected result.
+- **Preview**: the selected row's FULL soft-wrapped multi-line content with its
+  OWN scroll position (`Alt+↑`/`Alt+↓` one row, `Alt+PgUp`/`Alt+PgDn` one page,
+  `Alt+Home`/`Alt+End` first/last) and ONE trailing metadata row (scope,
+  directory, time, session — legacy rows honestly show `Time unknown`, never a
+  fabricated time). The Preview never truncates the source with a marker. `↑`/
+  `↓`/`PgUp`/`PgDn` keep selecting in the results list; the list shows the
+  prompt only, with the directory prefix in `All directories` only.
+- **Copy**: `Alt+C` copies the EXACT stored prompt (both roots); in Transcript
+  Fullscreen the Preview heading also carries clickable `[Copy all]` and
+  `[Use selected]`.
+- **Enter** puts the selected text back into the CURRENT editor (via
+  `setEditorText`) and closes the seat — it never submits and never writes a
+  hidden host editor behind a plugin winner. **Esc**/**Ctrl+C** close it with
+  the draft, cursor, input mode and pending paste content untouched, and those
+  two keys are consumed by the seat while it is active (closing History never
+  interrupts the agent or quits the TUI).
+- **Pointer (Transcript Fullscreen only)**: clicking a result row SELECTS it
+  (it does not accept); the explicit `[Use selected]`/`[Copy all]` cells act,
+  the wheel scrolls the list or the Preview under the pointer only, and a
+  Preview drag copies the exact original source substring. The regular main
+  screen has NO application mouse: it is fully keyboard-driven and the
+  terminal's native selection/scrollback is untouched.
 - **Storage**: v2 rows carry `cwd` + `ts` + `sessionId`; v1 rows inherit
   the cwd from a v2 row that validates the file hash (Rule 1) or a
   known-cwd identity map (Rule 2). Unresolved legacy files are excluded
   from `All directories` (Rule 3 — never a guessed directory).
 - **Search source**: `src/client/history/search.ts` (replaceable; a SQLite/FTS
   backend can swap in without touching the panel) and
-  `src/tui/panels/history-panel.ts` (the overlay).
+  `src/tui/panels/history-panel.ts` (the editor-seat surface). The exact
+  original-text cell mapping the Preview drag shares with the Job Command page
+  lives in `src/tui/components/source-text-layout.ts`.
 
 ### The session-scope persist gate (deferred start)
 

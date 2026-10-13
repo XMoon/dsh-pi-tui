@@ -954,7 +954,7 @@ test('height-only resize refreshes the extension widget row budget', async () =>
   assert.equal(widgetRows(), 3)
 })
 
-test('history overlay preserves background cells outside its physical frame', async () => {
+test('History replaces the EDITOR SEAT: the transcript stays above it and no floating frame is painted', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
   ]
@@ -965,40 +965,27 @@ test('history overlay preserves background cells outside its physical frame', as
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
   app.start()
   startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'transcript marker above the seat' }])
   await vt.waitForRender()
-  const background = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.repeat(5).slice(0, 116)
-  app.setDraft(Array.from({ length: 12 }, () => background).join('\n'))
-  await vt.waitForRender()
-  const plainViewport = (): string[] => vt.getViewport()
-    .map(line => stripTerminalSequences(line).padEnd(vt.columns, ' '))
-  const before = plainViewport()
-
   app.openHistorySearch()
   await vt.waitForRender()
   await new Promise(resolve => setTimeout(resolve, 100))
   await vt.waitForRender()
-  const after = plainViewport()
-  const frameTop = after.findIndex(line => line.includes('╭'))
-  assert.ok(frameTop >= 0, `history frame must be painted:\n${after.join('\n')}`)
-  const leftBorder = after[frameTop]!.indexOf('╭')
-  const rightBorder = after[frameTop]!.indexOf('╮', leftBorder)
-  assert.ok(leftBorder > 0, 'history frame must have a background area on the left')
-  assert.ok(rightBorder > leftBorder, 'history frame right border must be present')
-  const coveredRow = frameTop + 1
-  assert.ok(before[coveredRow]!.includes(background.slice(0, 20)), 'the selected background row must contain the sentinel pattern')
-  assert.equal(
-    after[coveredRow]!.slice(0, leftBorder),
-    before[coveredRow]!.slice(0, leftBorder),
-    'cells to the left of the history frame must remain owned by the background',
-  )
-  assert.equal(
-    after[coveredRow]!.slice(rightBorder + 1),
-    before[coveredRow]!.slice(rightBorder + 1),
-    'cells to the right of the history frame must remain owned by the background',
-  )
+  const viewport = vt.getViewport().map(line => stripTerminalSequences(line))
+  const transcriptRow = viewport.findIndex(line => line.includes('transcript marker above the seat'))
+  const headerRow = viewport.findIndex(line => line.includes('Input history'))
+  assert.ok(transcriptRow >= 0, `the transcript must stay visible:\n${viewport.join('\n')}`)
+  assert.ok(headerRow > transcriptRow, `the History seat must sit BELOW the live transcript:\n${viewport.join('\n')}`)
+  // A SEAT is full-width and flush: no centered floating frame, no outer border
+  // and no horizontal margin.
+  assert.ok(viewport[headerRow]!.startsWith(' Input history'),
+    `the seat header must start at column 0:\n${JSON.stringify(viewport[headerRow])}`)
+  assert.ok(viewport.some(line => line.includes('entry alpha')), 'the results are painted')
+  assert.ok(viewport.some(line => line.includes('Esc cancel')), 'the seat action bar is painted')
+  app.stop()
 })
 
-test('history overlay reflows geometry without restarting its search state', async () => {
+test('History reflows across a resize without restarting its search state', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
@@ -1024,25 +1011,24 @@ test('history overlay reflows geometry without restarting its search state', asy
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('entry beta'), `history selection lost after grow:\n${view}`)
-  // The overlay design width is capped at 100 and the Frame consumes 4 of
-  // its columns, so the panel inner width (≤ 96) never reaches the 100-wide
-  // split threshold — the grown layout stays stacked. Assert the frame
-  // actually reflowed to span the grown width instead of a split marker.
-  const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  const frameTop = vt.getViewport().map(stripAnsi).find(line => line.includes('╭'))
-  assert.ok(frameTop !== undefined && visibleWidth(frameTop.trimEnd()) >= 100,
-    `history frame must span the grown terminal:\n${view}`)
-  assert.ok(view.includes('Current directory'), `history tabs did not reflow after grow:\n${view}`)
+  // The seat spans the terminal's CURRENT content width (never the retired
+  // 100-column overlay cap) and the header reflows with it.
+  const headerRow = vt.getViewport().map(line => stripTerminalSequences(line))
+    .find(line => line.includes('Input history'))
+  assert.ok(headerRow !== undefined, `the seat header must survive the resize:\n${view}`)
+  assert.ok(visibleWidth(headerRow!.trimEnd()) > 80,
+    `the seat must reflow to the grown width:\n${JSON.stringify(headerRow)}`)
+  assert.ok(view.includes('Current directory'), `the scope tabs did not reflow after grow:\n${view}`)
   vt.resize(50, 10)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('╭') && view.includes('╰'), `history frame must survive shrink:\n${view}`)
-  assert.ok(view.includes('type filter') && view.includes('╰'), `history footer must survive shrink:\n${view}`)
+  assert.ok(view.includes('Input history'), `the seat must survive shrink:\n${view}`)
+  assert.ok(view.includes('Esc cancel'), `the seat hint must survive shrink:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
 
-test('history overlay preserves query and selection across fullscreen rebinds', async () => {
+test('History preserves query and selection across fullscreen rebinds', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
@@ -1085,51 +1071,6 @@ test('history overlay preserves query and selection across fullscreen rebinds', 
   await vt.waitForRender()
 })
 
-test('a history-overlay click before the post-resize repaint is rejected at capped geometry', async () => {
-  const rows = [
-    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
-    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
-  ]
-  const source: import('../src/client/history/search.ts').HistorySearchSource = {
-    search: async () => ({ results: rows, exhausted: true }),
-  }
-  const vt = new VirtualTerminal(120, 40)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
-  app.start()
-  startedApps.add(app)
-  app.setFullscreen(true) // only the alt screen dispatches overlay mouse events
-  app.openHistorySearch()
-  await vt.waitForRender()
-  await new Promise(resolve => setTimeout(resolve, 100))
-  await vt.waitForRender()
-  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  const rowY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
-  assert.ok(rowY >= 0, `history rows must be painted:\n${vt.getViewport().map(strip).join('\n')}`)
-  // SGR x is 1-based; the item content starts two cells right of the frame's
-  // left border (`│` + one padding cell).
-  const leftBorder = vt.getViewport().map(strip)[rowY]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'history frame left border missing')
-  const clickX = leftBorder + 3
-  // 40 -> 41 keeps the history maxHeight clamped at 30, so only the RAW
-  // terminal dimensions change; the fence must still reject the stale click.
-  vt.resize(120, 41)
-  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}M`)
-  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}m`)
-  await new Promise(resolve => setTimeout(resolve, 30))
-  assert.ok(vt.getViewport().map(strip).some(line => line.includes('entry alpha')),
-    `a stale-geometry click must not accept a history row:\n${vt.getViewport().map(strip).join('\n')}`)
-  assert.equal(app.seatTextForTest(), '', 'the editor draft must be untouched by the stale click')
-  // After the repaint adopts the new geometry, the click accepts.
-  await vt.waitForRender()
-  const repaintedY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
-  assert.ok(repaintedY >= 0)
-  const repaintedX = (vt.getViewport().map(strip)[repaintedY]?.indexOf('│') ?? -1) + 3
-  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}M`)
-  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}m`)
-  await new Promise(resolve => setTimeout(resolve, 30))
-  assert.equal(app.seatTextForTest(), 'entry alpha', 'a fresh post-resize click must accept the entry')
-  app.stop()
-})
 
 test('task browser no-match state fits a short terminal without clipping the hint', async () => {
   const { vt, app } = startApp()
