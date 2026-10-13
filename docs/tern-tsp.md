@@ -5,6 +5,12 @@ protocol boundary, the current implementation status and its limits, and the
 evidence ledger. Per-PR measurements live under
 [`docs/tern-tsp/evidence/`](./tern-tsp/evidence/) and are linked, not copied.
 
+The shared TSP runtime, event and capability architecture is specified in
+[Foundation contract](./tern-tsp/foundation.md); the version-pinned SDK and
+official-product comparisons are in [Upstream reference](./tern-tsp/upstream-reference.md).
+The dated audit and Tern 0.8.3 evidence are in
+[Foundation audit (2026-10-13)](./tern-tsp/evidence/foundation-20261013.md).
+
 ## Scope and status
 
 - **TSP is not the Tern Luau plugin API.** TSP (Tern Surface Protocol) is an
