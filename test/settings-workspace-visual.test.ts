@@ -1004,3 +1004,63 @@ test('F1-05 the medium header arrows take the category focus, so Left/Right work
   assert.match(detail.rowsPlain()[0]!, /Display/, 'Right on the row list never switches category')
   detail.dispose()
 })
+
+// ── External UI review (PR #295) P2s ───────────────────────────────────────
+
+test('A-02c a long configured value never hides the settings NAME (40-cell column and 44-cell narrow)', async () => {
+  const long = `file:${'w'.repeat(120)}`
+  const medium = setup({ columns: 120, rows: 40, doc: { theme: long } })
+  await medium.open()
+  const themeRow = rowOf(medium, 'Configured theme')
+  assert.equal(cellIndexOf(medium, themeRow, 'Configured theme'), 2, 'the name starts right after the selection marker')
+  assert.ok(/\S\s{2,}\S/.test(medium.rowsPlain()[themeRow]!), 'the truncated summary still follows the name')
+  assert.ok(!medium.rowsPlain()[themeRow]!.trimStart().startsWith('…'), 'the name is never squeezed into an ellipsis')
+  medium.dispose()
+
+  const narrow = setup({ columns: 44, rows: 24, doc: { theme: long } })
+  await narrow.open()
+  await key(narrow, '\r') // categories -> rows
+  const narrowRow = rowOf(narrow, 'Configured theme')
+  assert.equal(cellIndexOf(narrow, narrowRow, 'Configured theme'), 2, 'the 44-cell narrow row keeps the full name')
+  assert.ok(/\S\s{2,}\S/.test(narrow.rowsPlain()[narrowRow]!), 'a truncated summary follows')
+  narrow.dispose()
+})
+
+test('A-05b the decorative rules yield before readable content on short screens', async () => {
+  // 5 rows without a notice: header + THREE real body rows + bar, no rule row.
+  const short = setup({ columns: 80, rows: 5, doc: { theme: 'dark' } })
+  await short.open()
+  const painted = short.rowsPlain()
+  assert.equal(painted.length, 5)
+  assert.match(painted.at(-1)!, /^Esc /)
+  assert.equal(painted.filter(line => /^─+$/.test(line)).length, 0, 'the decorative rules yield at 5 rows')
+  for (const label of ['Appearance', 'Display', 'Other settings']) {
+    assert.ok(painted.some(line => line.includes(label)), `the body keeps the real ${label} row:\n${short.view()}`)
+  }
+  short.dispose()
+
+  // 6 and 8 rows with a LIVE notice: the notice's body floor is honoured first.
+  const live = setup({ columns: 80, rows: 24, doc: { theme: 'dark' } })
+  await live.open()
+  await key(live, '\r')
+  await key(live, '\r')
+  await key(live, 'c')
+  await settle(live)
+  assert.ok(live.rowsPlain().some(line => line.includes('Copy sent')), 'the notice is live before the shrink')
+  for (const rows of [6, 8]) {
+    live.vt.resize(80, rows)
+    await live.vt.waitForRender()
+    const frame = live.rowsPlain()
+    assert.equal(frame.length, rows)
+    assert.match(frame.at(-1)!, /^Esc /)
+    assert.ok(frame.some(line => line.includes('Copy sent')), `the notice is still granted and painted at ${rows} rows:\n${live.view()}`)
+    assert.equal(frame.filter(line => /^─+$/.test(line)).length, 0, `the decorative rules yield at ${rows} rows:\n${live.view()}`)
+    if (rows === 8) {
+      assert.ok(frame.some(line => line.includes('Config READY')), 'the freshness/scope metadata is granted at 8 rows')
+    }
+    if (rows === 6) {
+      assert.ok(frame.some(line => line.includes('Value')), 'the body keeps real detail rows under the notice')
+    }
+  }
+  live.dispose()
+})
