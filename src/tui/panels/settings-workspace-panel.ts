@@ -318,6 +318,11 @@ export class SettingsWorkspacePanel implements Component {
     readonly revision: number
     readonly focus: SettingsWorkspacePage
     readonly categoryId: SettingsWorkspaceCategoryId
+    /** The LIVE terminal geometry at press time. A resize is a gesture boundary
+     *  by itself: the repaint that bumps {@link revision} is only SCHEDULED by
+     *  the resize, so a release arriving before it must still be refused. */
+    readonly columns: number
+    readonly rows: number
   } | undefined
   /** The last selection index AND viewport height each list was rebased
    *  against: the wheel may scroll a list so its selection leaves the viewport,
@@ -952,7 +957,14 @@ export class SettingsWorkspacePanel implements Component {
     const target = this.targetAt(x, y)
     this.pressedGesture = target === undefined
       ? undefined
-      : { target, revision: this.revision, focus: this.focus, categoryId: this.categoryId }
+      : {
+          target,
+          revision: this.revision,
+          focus: this.focus,
+          categoryId: this.categoryId,
+          columns: this.intents.columns(),
+          rows: this.intents.rows(),
+        }
   }
 
   onCellClick(x: number, y: number): void {
@@ -962,13 +974,16 @@ export class SettingsWorkspacePanel implements Component {
     const target = this.targetAt(x, y)
     if (pressed === undefined || target === undefined) return
     // The gesture must still resolve to the SAME painted target AND the same
-    // state version/page/category: a refresh, a selection change, a page switch
-    // or a category change between press and release refuses the click rather
-    // than acting on the newer snapshot.
+    // state version/level/category/terminal geometry: a refresh, a selection
+    // change, a page switch, a category change OR a resize — including one whose
+    // repaint has not run yet — refuses the click rather than acting on the
+    // newer state.
     if (
       this.revision !== pressed.revision ||
       this.focus !== pressed.focus ||
       this.categoryId !== pressed.categoryId ||
+      this.intents.columns() !== pressed.columns ||
+      this.intents.rows() !== pressed.rows ||
       target.kind !== pressed.target.kind ||
       target.id !== pressed.target.id ||
       target.row !== pressed.target.row ||
