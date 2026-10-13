@@ -109,12 +109,14 @@ row grant, hit target or write path.
 6. Buttons (role 14): `Change…`, `Retry save`, `Copy value [C]`,
    `[Confirm]`/`[Cancel]` → `Confirm`/`Cancel` — all `primary`; keep
    `layoutButtons`' whole-button drop.
-7. Action bar: route through the PR1 helper with the spec §7.2 priority order
-   (`Esc` 7, primary action 6, navigation 5, secondary verbs 4…); separator
-   ` · `; bare key letters lowercase; **hints generated from the live keymap**
-   instead of the raw `data === 'r'` comparisons
-   (`settings-workspace-panel.ts:1185-1186`) — this is the one functional-adjacent
-   change in the PR, and it must not alter which keys are accepted.
+7. Action bar: route through the PR1 helper with the spec §7.2 order — the
+   surface's own actions first and **`Esc` as the last segment** (D8), while
+   `Esc` keeps the highest drop priority (7), then the primary action 6,
+   navigation 5, secondary verbs 4…; separator ` · `; bare key letters
+   lowercase; **hints generated from the live keymap** instead of the raw
+   `data === 'r'` comparisons (`settings-workspace-panel.ts:1185-1186`) — this is
+   the one functional-adjacent change in the PR, and it must not alter which keys
+   are accepted.
 
 **Non-goals:** `planSettingsChrome` row grants and the `ruleRows`/`metaRows`
 conditions; `layoutForWidth` breakpoints (`108`/`76`) and the `22/42/2` geometry;
@@ -162,7 +164,8 @@ observation, admission, follow/find/copy or tab hit-map behaviour.
    drops the duplicated `Full command`).
 7. Action bar: PR1 helper + spec priorities; ` · ` separator; facts Title Case
    (`Follow on`, `Follow paused`); bare key letters lowercase (`s stop`,
-   `v command`); safety facts (gap/error/retained disclosure) outrank secondary
+   `v command`); **`Esc` moves to the last segment** (D8) while keeping the top
+   drop priority; safety facts (gap/error/retained disclosure) outrank secondary
    verbs and the page hint.
 
 **Non-goals:** `planChrome` grants and their thresholds (`COMPACT_*`,
@@ -215,15 +218,16 @@ doc-map lint cares about the new rows.
 Each sibling is its own small PR, taken **only when that surface is being
 touched for another reason**, and each must not invent a device:
 
-| Target | What to align | Do not touch |
+| Target | What to align (§12.2 applies to all of them) | Do not touch |
 |---|---|---|
-| `SearchablePicker` | cursor `→ ` → `>` in `primary`; hint lines to `Key verb` case; use the theme's prefix instead of the hardcoded string | the picker's row budget/`ROW_PRIORITY`, the search field, the caps |
-| history panel | title/cursor/hint ink from the role table (it currently paints no token at all); `│` split decision | its geometry, the inline/split breakpoints, the footer literal semantics |
-| task browser / quick panel | cursor and status inks; hint separator already conforms | its `│` split, the tree, the marquee, `S stop` semantics |
-| output viewer / approval dialog | hint grammar and ink; keep the approval bracketed-key device (spec §11.4) | the approval decision semantics and the 1-row stop hint |
-| footer configurator / keybindings UI | `accent` → the role table for interactive inks | the user-selectable tone vocabulary (`accent` stays available there) |
+| `SearchablePicker` | cursor `→ ` → `>` in `primary`; hint lines to `Key verb` case with `Esc` last; count moved from the title suffix to the right-aligned role 12; group headers to role 5; failure placeholder word to `error`; the theme's prefix instead of the hardcoded string | the picker's row budget/`ROW_PRIORITY`, the search field, the caps |
+| history panel | title/cursor/tab/hint ink from the role table (it currently paints no token at all); `│` split decision | its geometry, the inline/split breakpoints, the footer literal semantics |
+| task browser / quick panel | cursor and status inks (one `‣` + word, no per-status glyph set); `Esc` to the tail; hint case | its `│` split, the tree, the marquee, `S stop` semantics |
+| output viewer / approval dialog | title ink, hint grammar and case; keep the approval bracketed-key device (spec §11.4) | the approval decision semantics and the 1-row stop hint |
+| footer configurator / keybindings UI | `accent` → the role table for interactive inks; help-line verb case | the user-selectable tone vocabulary (`accent` stays available there) |
+| all overlays | the four-step sizing ladder once that overlay is touched for another reason (D10) | each surface's existing height cap until then |
 
-**Gate for the whole rollout (V4 done):** all six decisions frozen; PR1–PR4
+**Gate for the whole rollout (V4 done):** all fourteen decisions frozen; PR1–PR4
 merged; the visual checklist in `docs/code-review.md`; the matrix test and glyph
 gate green; the samples doc's "AFTER" section replaced by real frames that the
 Owner accepted in a real terminal for Settings and Job, wide + narrow, dark +
