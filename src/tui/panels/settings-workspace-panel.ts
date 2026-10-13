@@ -901,8 +901,9 @@ export class SettingsWorkspacePanel implements Component {
   /** Keep the highlighted candidate REVEALED: only a CANDIDATE or VIEWPORT change
    *  may pull the list back (a wheel may scroll it so the highlight leaves the
    *  viewport — a plain repaint must never fight that, while a real shrink must
-   *  reveal the highlight again). A multi-line candidate reveals as a whole when
-   *  it fits, otherwise its first line. */
+   *  reveal the highlight again). A multi-line candidate reveals as a whole when it
+   *  fits; when it is TALLER than the viewport its HEAD is revealed, never a
+   *  marker-less continuation tail — the identity must be visible before a confirm. */
   private rebaseChoice(blocks: readonly (readonly string[])[], viewport: number): number {
     const phase = this.editPhase
     if (phase.kind !== 'choosing') return 0
@@ -917,8 +918,14 @@ export class SettingsWorkspacePanel implements Component {
     const end = start + (blocks[index]?.length ?? 1)
     if (index !== this.lastChoiceIndex || viewport !== this.lastChoiceViewport) {
       let next = this.choiceOffset
-      if (start < next) next = start
-      if (end > next + viewport) next = Math.max(start, end - viewport)
+      if (end - start > viewport) {
+        // Taller than the granted list rows: the HEAD (marker + label prefix) is
+        // what identifies the candidate, so the tail must never be what is shown.
+        next = start
+      } else {
+        if (start < next) next = start
+        if (end > next + viewport) next = Math.max(start, end - viewport)
+      }
       this.choiceOffset = clampOffset(next, total, viewport)
       this.lastChoiceIndex = index
       this.lastChoiceViewport = viewport

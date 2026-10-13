@@ -2141,3 +2141,32 @@ test('B-20 a FAILED candidate never steals the intent of a pending auto query', 
     }
   }
 })
+
+test('B-21 a candidate taller than the list viewport reveals its HEAD, never a marker-less tail', async () => {
+  const label = `汉${'字'.repeat(30)}`
+  const themes = new ThemeRegistry()
+  themes.register({ id: 'tall-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
+  const value = themePickerRows(themes).find(row => row.displayName === label)?.value
+  assert.ok(value !== undefined)
+  // 44x8 grants ONE candidate row: the wrapped label is taller than the viewport.
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // dark -> light
+  await key(h, '\x1b[B') // light -> the tall candidate
+  const frame = h.rowsPlain().join('\n')
+  assert.match(frame, /> 汉/, `the highlighted tall candidate must show its head (marker + label prefix):\n${frame}`)
+  for (const [index, line] of h.vt.getViewport().entries()) {
+    assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
+  }
+  // The identity really is the tall candidate, and it can be confirmed knowingly.
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.theme, value, 'the tall candidate really committed')
+  assert.ok(!h.view().includes('[Retry save]'), 'and the commit is not reported as failed')
+  // The granted 44x8 viewport cannot carry the Status line: widen it and read it.
+  h.vt.resize(60, 24)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Status\s+Verified/)
+  h.dispose()
+})
