@@ -2380,3 +2380,136 @@ test('B-27 a rejected write whose field an external writer moved to a THIRD valu
   assert.ok(h.view().includes('[Retry save]'), 'a retry stays available')
   h.dispose()
 })
+
+test('B-28 the leased Settings screen joins the terminal scheme-notification sync in both directions', async () => {
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const autoRow = rowOf(h, 'auto')
+  press(h, autoRow, cellIndexOf(h, autoRow, 'auto'))
+  release(h, autoRow, cellIndexOf(h, autoRow, 'auto'))
+  await settle(h)
+  const beforeAuto = h.writes().length
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+  // The ACTIVE screen owns the terminal: subscribing on the stopped screens is not
+  // enough, or a report would never arrive while the user stays in the workspace.
+  assert.ok(
+    h.writes().slice(beforeAuto).join('').includes('\x1b[?2031h'),
+    `the leased screen subscribes to scheme reports:\n${JSON.stringify(h.writes().slice(beforeAuto))}`,
+  )
+
+  // The symmetric direction: a manual theme chosen inside the workspace must release
+  // the subscription on the screen that owns the terminal.
+  await key(h, '\r')
+  const darkRow = rowOf(h, 'dark')
+  press(h, darkRow, cellIndexOf(h, darkRow, 'dark'))
+  release(h, darkRow, cellIndexOf(h, darkRow, 'dark'))
+  await settle(h)
+  const beforeManual = h.writes().length
+  const confirmManual = rowOf(h, '[Confirm]')
+  press(h, confirmManual, cellIndexOf(h, confirmManual, '[Confirm]'))
+  release(h, confirmManual, cellIndexOf(h, confirmManual, '[Confirm]'))
+  await settle(h)
+  assert.ok(
+    h.writes().slice(beforeManual).join('').includes('\x1b[?2031l'),
+    `and releases it when the choice leaves auto:\n${JSON.stringify(h.writes().slice(beforeManual))}`,
+  )
+  h.dispose()
+})
+
+test('B-29 leaving the workspace right after choosing auto re-samples on the restored screen', async () => {
+  const saved = {
+    NO_COLOR: process.env.NO_COLOR,
+    FORCE_COLOR: process.env.FORCE_COLOR,
+    CI: process.env.CI,
+    COLORFGBG: process.env.COLORFGBG,
+  }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+  try {
+    const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
+    await openDetail(h, 'theme')
+    await key(h, '\r')
+    await key(h, '\x1b[A') // dark -> auto
+    const confirm = rowOf(h, '[Confirm]')
+    press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+    release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+    await settle(h)
+    // Leave IMMEDIATELY: the observation was issued for the workspace screen, and its
+    // stop() releases the probe, so that answer can never be trusted.
+    await key(h, '\x1b')
+    await key(h, '\x1b')
+    await key(h, '\x1b')
+    await settle(h)
+    assert.ok(!h.view().includes('SETTINGS · '), 'the workspace really closed')
+    assert.equal(h.app.currentTheme(), 'dark', 'the abandoned observation applied nothing')
+
+    // The restored screen re-sampled: answering THAT observation must reach the palette.
+    h.vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    await settle(h)
+    assert.equal(h.app.currentTheme(), 'light', 'the initial detection is not lost across the hand-off')
+    h.dispose()
+  } finally {
+    if (saved.NO_COLOR === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = saved.NO_COLOR
+    if (saved.FORCE_COLOR === undefined) delete process.env.FORCE_COLOR
+    else process.env.FORCE_COLOR = saved.FORCE_COLOR
+    if (saved.CI === undefined) delete process.env.CI
+    else process.env.CI = saved.CI
+    if (saved.COLORFGBG === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = saved.COLORFGBG
+  }
+})
+
+/** A theme registry whose names are long enough that the pane width decides how many
+ *  LINES each candidate takes. */
+function longNamedThemes(count: number): ThemeRegistry {
+  const themes = new ThemeRegistry()
+  for (let index = 0; index < count; index += 1) {
+    themes.register(
+      { id: `long${index}`, name: `L${index}-${'W'.repeat(58)}`, palette: darkColors },
+      'acme-owner',
+      'acme',
+    )
+  }
+  return themes
+}
+
+test('B-30 a narrower pane that re-flows the wrapped candidates keeps the confirmed candidate visible', async () => {
+  const themes = longNamedThemes(10)
+  const h = setup({ columns: 200, rows: 14, doc: { theme: 'dark' }, themes })
+  themes.dispose('long0') // the builtin rows still precede the plugins; keep the walk short
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  for (let index = 0; index < 10; index += 1) await key(h, '\x1b[B')
+  await settle(h)
+  assert.ok(h.view().includes('> L9-'), `the last candidate is highlighted at 200 columns:\n${h.view()}`)
+
+  // The SAME three-pane layout with a much narrower Detail pane: the candidates wrap
+  // into more lines, so the highlight's start row moves even though its INDEX does not.
+  h.vt.resize(108, 14)
+  await settle(h)
+  assert.ok(h.view().includes('> L9-'), `the highlight survives the re-flow:\n${h.view()}`)
+  h.dispose()
+})
+
+test('B-31 the same re-flow inside the two-pane layout keeps the confirmed candidate visible', async () => {
+  const themes = longNamedThemes(10)
+  const h = setup({ columns: 107, rows: 14, doc: { theme: 'dark' }, themes })
+  themes.dispose('long0')
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  for (let index = 0; index < 10; index += 1) await key(h, '\x1b[B')
+  await settle(h)
+  assert.ok(h.view().includes('> L9-'), `the last candidate is highlighted at 107 columns:\n${h.view()}`)
+
+  h.vt.resize(76, 14)
+  await settle(h)
+  assert.ok(h.view().includes('> L9-'), `the highlight survives the two-pane re-flow:\n${h.view()}`)
+  h.dispose()
+})

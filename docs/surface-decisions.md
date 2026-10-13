@@ -2005,7 +2005,11 @@ and nothing else does.
   CJK candidate WRAPS rather than being truncated (while choosing, the list is the
   only place the candidate identity is visible) and every one of its painted rows is
   a real hit target, while the wheel and the rebase both scroll the candidate list
-  itself. The candidate IDENTITY is the source-qualified value, never the label. One commit at
+  itself. A layout WIDTH change re-flows the wrapped candidates, so it takes part in the
+  reveal rebase exactly like a candidate or viewport change (while a plain repaint never
+  fights the user's own scrolling), and a source that unloads under an open choice
+  re-anchors it on the candidate VALUE. The candidate IDENTITY is the source-qualified
+  value, never the label. One commit at
   a time: while a write is pending the edit verbs are not painted, and the panel
   holds exactly one request identity, so a superseded or post-close settlement can
   never repaint.
@@ -2064,7 +2068,12 @@ and nothing else does.
   plugin-unload fallback) never record the intent. The detection is also issued for
   the screen that owned the terminal: leaving the workspace before it settles drops
   the result, and the stored `auto` preference then follows the next scheme report or
-  the next boot.
+  the next boot. Because a screen hand-off RELEASES the observation the screen owned,
+  the surface that takes the terminal over re-samples once when the latest intent still
+  follows the terminal, so "chose auto, then left immediately" cannot lose the initial
+  detection. Mode 2031 is per screen: the leased workspace screen joins the same tracking
+  sync, so `auto` chosen INSIDE the workspace subscribes the screen that really owns the
+  terminal (and a manual choice releases it) instead of waiting for the lease to end.
 - **Navigation never loses identity.** Selection is the stable row/category id,
   and width changes only re-project the layout: the level, the category and the
   row survive a resize in both directions, and the list rebases to keep the

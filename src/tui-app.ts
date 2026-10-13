@@ -20718,7 +20718,36 @@ export class TuiApp {
     if (screen.getFocusedComponent() === null) screen.setFocus(returnFocus)
     this.enterTerminalPresentation()
     this.refreshSchemeRegistrations()
+    // A detection issued from the temporary workspace screen died with it; when the latest
+    // DELIBERATE selection still follows the terminal, the restored screen re-samples, so
+    // the runtime palette cannot stay stale until some later report that a terminal may
+    // never send.
+    const abandoned = this.autoDetectScreen !== undefined && this.autoDetectScreen !== screen
+    if (this.themeFollowsTerminal() && (abandoned || this.themeResamplePending)) {
+      this.themeResamplePending = false
+      this.resampleTerminalTheme()
+    }
     this.requestRender(true)
+  }
+
+  /** Re-issue the single terminal background observation for the CURRENT screen, fenced
+   *  on the runtime-owned intent like every other detection. */
+  private resampleTerminalTheme(): void {
+    const owned = this.events.runOwned
+    if (owned === undefined) return
+    owned('theme autodetect', async () => {
+      // The observation issued for the screen that just went away may still be settling;
+      // await it so the call below starts a FRESH observation on the screen that now owns
+      // the terminal instead of joining the dead one.
+      const abandoned = this.autoDetectInFlight
+      if (abandoned !== undefined) await abandoned
+      if (this.disposed || !this.themeFollowsTerminal()) return
+      await this.autoDetectTheme({ shouldApply: () => this.themeFollowsTerminal() })
+    }, {
+      onError: (error) => {
+        if (!this.disposed) this.notify(`theme detection failed: ${safeErrorMessage(error)}`, 'error')
+      },
+    })
   }
 
   /**
@@ -20888,6 +20917,12 @@ export class TuiApp {
    * a scheme report, the plugin-unload fallback).
    */
   private themeIntent: string | undefined
+  /** Whether a terminal observation was discarded because the screen that owned it went
+   *  away while the intent it was issued for was still live (see resumeReturnSurface). */
+  private themeResamplePending = false
+  /** The screen the in-flight terminal observation belongs to. A screen hand-off kills it
+   *  (its stop() releases the probe), so the resumed screen must know to re-sample. */
+  private autoDetectScreen: TuiMainScreen | TuiAltScreen | undefined
 
   /** Record one deliberate theme selection (see {@link themeFollowsTerminal}). */
   noteThemeSelection(value: string): void {
@@ -21034,8 +21069,10 @@ export class TuiApp {
     if (themeOptOut() || this.disposed) return
     if (options?.shouldApply !== undefined) this.autoDetectGuard = options.shouldApply
     if (this.autoDetectInFlight === undefined) {
+      this.autoDetectScreen = this.activeScreen
       this.autoDetectInFlight = this.runAutoDetect().finally(() => {
         this.autoDetectInFlight = undefined
+        this.autoDetectScreen = undefined
         this.autoDetectGuard = undefined
       })
     }
@@ -21049,7 +21086,14 @@ export class TuiApp {
     // The observation belongs to the screen that owned the terminal when it was
     // issued: after a Main↔Fullscreen switch its result is about a screen the
     // user is no longer looking at, so it must not colour the new one.
-    if (this.activeScreen !== screen) return
+    if (this.activeScreen !== screen) {
+      // The screen that owned the observation is gone (its stop() released the probe), so
+      // the answer can never be trusted — but the intent it was issued FOR may still be
+      // live. The surface that takes the terminal over re-samples instead, which keeps
+      // "chose auto, then left immediately" from losing the initial detection.
+      this.themeResamplePending = true
+      return
+    }
     // A newer DELIBERATE selection owns the surface: the runtime owner's intent
     // outranks this answer whatever guard the caller passed, because the persisted
     // document can still read `auto` while an explicit choice's write is in flight.
@@ -21083,6 +21127,12 @@ export class TuiApp {
     this.followingTerminalTheme = following
     this.tui.setTerminalColorSchemeNotifications(following)
     this.fullscreen?.setTerminalColorSchemeNotifications(following)
+    // A LEASED workspace screen owns the physical terminal while it is open, so it joins
+    // the SAME state sync: `auto` chosen inside the workspace would otherwise subscribe
+    // nothing (and a switch to a manual theme would keep the subscription) until the
+    // lease ended. Job and Settings are the two leases.
+    this.jobWorkspace?.screen.setTerminalColorSchemeNotifications(following)
+    this.settingsWorkspace?.screen.setTerminalColorSchemeNotifications(following)
   }
 
   /**
