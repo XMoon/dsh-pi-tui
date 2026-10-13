@@ -131,6 +131,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     captureExtensionHealthRef,
   } = deps
 
+  /**
+   * The synchronous LATEST theme value this command factory committed. The
+   * terminal detection's guard reads THIS, never the asynchronous document: an
+   * explicit choice applies runtime-first, so the persisted value can still read
+   * `auto` while the query it replaced is in flight, and a late answer must never
+   * colour over the newer choice (the legacy `/settings` path keeps the same
+   * guard per open). It is a query guard only — never a persistence truth.
+   */
+  let latestThemeChoice: string | undefined
+
   /** Keep USER-owned Custom Text definitions out of whole-document writes that
    * start from a merged settings document. A project layer may contribute the
    * pass-through `footerCustomItems` field, but it must never be copied into
@@ -262,13 +272,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return theme === 'custom' ? 'custom palette' : theme
   }
 
+  /** The persisted document fact AS THE READ PROVED IT: the stored value, `not
+   *  set` for a readable document with no value, or an explicit unknown when there
+   *  was no document to read. The panel renders it verbatim and never guesses. */
+  const persistedFactOf = (value: string | undefined, readable: boolean): string =>
+    !readable
+      ? 'unknown — the TUI settings document could not be read'
+      : value === undefined || value === ''
+        ? 'not set'
+        : value
+
   /**
-   * The candidate source of ONE writable pilot row. `persisted` is the exact
-   * value the authoritative document just returned; a stored value whose source
+   * The candidate source of ONE writable pilot row. A stored value whose source
    * is gone is still listed (the row must not lose the real stored identity) but
    * marked unavailable, so it can never be confirmed back into a write.
    */
-  const themeEditOf = (persistedTheme: string | undefined): SettingsWorkspaceEdit => {
+  const themeEditOf = (persistedTheme: string | undefined, readable: boolean): SettingsWorkspaceEdit => {
     const options: SettingsWorkspaceEditOption[] = themePickerRows(runner.extensions?.themes).map(row => ({
       value: row.value,
       label: row.displayName,
@@ -288,11 +307,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       primary: 'persisted',
       options,
       runtime: runtimeThemeFact(),
-      ...persistedTheme === undefined ? {} : { persisted: persistedTheme },
+      persisted: persistedFactOf(persistedTheme, readable),
     }
   }
 
-  const displayEditOf = (persistedPreset: string | undefined): SettingsWorkspaceEdit => ({
+  const displayEditOf = (persistedPreset: string | undefined, readable: boolean): SettingsWorkspaceEdit => ({
     field: 'display-preset',
     primary: 'runtime',
     options: (['full', 'compact', 'focus'] as const).map(preset => ({
@@ -302,7 +321,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       current: preset === persistedPreset,
     })),
     runtime: displayPresetOf(runner),
-    ...persistedPreset === undefined ? {} : { persisted: persistedPreset },
+    persisted: persistedFactOf(persistedPreset, readable),
   })
 
   /**
@@ -357,8 +376,22 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const commitSettingsWorkspaceField = async (
     request: SettingsWorkspaceCommitRequest,
   ): Promise<SettingsWorkspaceCommitOutcome> => {
-    if (request.field === 'display-preset') return commitDisplayPreset(request.value)
-    return commitTheme(request.value)
+    const outcome = request.field === 'display-preset'
+      ? await commitDisplayPreset(request.value)
+      : await commitTheme(request.value)
+    if (outcome.outcome !== 'verified') {
+      // The write OWNER records the real failure/uncertainty: the workspace's
+      // settlement is deliberately dropped once its screen lease is gone, and a
+      // dispatched write must stay diagnosable either way (§3/§5.5 — never a
+      // silently lost failure). The value is a theme/display name, never a secret.
+      runner.diag.warn('settings write', {
+        field: request.field,
+        value: request.value,
+        outcome: outcome.outcome,
+        ...outcome.reason === undefined ? {} : { reason: outcome.reason },
+      })
+    }
+    return outcome
   }
 
   const commitDisplayPreset = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
@@ -408,7 +441,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const builtin = value === 'auto' || value === 'dark' || value === 'light'
     // VALUE-addressed health tracking (the unified theme protocol).
     const themeRef = builtin ? undefined : captureExtensionHealthRef?.('theme', value)
-    if (value !== 'auto') {
+    // SYNCHRONOUS latest choice, before any await: the terminal detection's guard
+    // must observe this new intent even while the persistence of a previous choice
+    // is still in flight (a late OSC answer may never colour over it).
+    latestThemeChoice = value
+    if (value === 'auto') {
+      // For `auto`, starting the detection IS the apply. Drop the plugin-theme
+      // record FIRST: the unload fallback of a theme the user has left must never
+      // force dark and stop the terminal tracking over the stored `auto`.
+      app.clearActivePluginTheme()
+      app.trackTerminalTheme(true)
+      detach('theme autodetect', () => app.autoDetectTheme({
+        shouldApply: () => latestThemeChoice === 'auto',
+      }))
+    } else {
       try {
         if (value === 'dark' || value === 'light') {
           app.clearActivePluginTheme()
@@ -442,24 +488,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     } catch (error) {
       return { outcome: 'not-saved', reason: safeErrorMessage(error) }
     }
-    const outcome = verifyCommittedField('theme', value)
-    // `auto` has no fallible apply step of its own: starting the terminal
-    // detection IS the apply, and it starts only once the preference is really
-    // committed — its guard then reads the AUTHORITATIVE document, so a later
-    // explicit choice can never be overridden by this query's late answer.
-    if (value === 'auto' && outcome.outcome === 'verified') {
-      app.trackTerminalTheme(true)
-      detach('theme autodetect', () => app.autoDetectTheme({
-        shouldApply: () => {
-          try {
-            return settings.get().theme === 'auto'
-          } catch {
-            return false
-          }
-        },
-      }))
-    }
-    return outcome
+    return verifyCommittedField('theme', value)
   }
 
   /**
@@ -519,7 +548,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             ? 'The palette family of the configured TUI settings document. This preview only reads the configured value.'
             : 'The palette family used by the transcript, editor and panels. The value is the source-qualified configured identity; the summary is its display name.',
           action: 'inspect',
-          edit: themeEditOf(persistedTheme),
+          edit: themeEditOf(persistedTheme, doc !== undefined),
         },
         {
           id: 'icon-style',
@@ -544,7 +573,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           freshness: 'runtime',
           description: `The Client's live transcript display preset. ${persistedNote}`,
           action: 'inspect',
-          edit: displayEditOf(persistedPreset),
+          edit: displayEditOf(persistedPreset, doc !== undefined),
         },
         {
           id: 'thinking',

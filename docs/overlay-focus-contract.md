@@ -535,7 +535,10 @@ projection; B2-B gave exactly two of its rows (`Configured theme`,
   commit that lands after the user left the workspace, or after a retry superseded
   it, can never repaint, notify or address a replacement workspace. Closing does
   NOT cancel an already dispatched Host write: it still completes under its runner
-  owner and its real failure stays diagnosable.
+  owner, and a non-`verified` outcome is recorded by the WRITE OWNER
+  (`commitSettingsWorkspaceField` warns on the runner diagnostics with the field,
+  the value and the real reason) — so the failure of a write dispatched before the
+  close stays diagnosable even though no UI sink is live any more.
 - **Write currentness is explicit, never inferred from the UI (B2-B).** A commit
   only counts as `Verified` on a completed `ConfigPort.tuiSettings` mutation plus
   an authoritative re-read that agrees with a `configReadiness() === 'ready'`

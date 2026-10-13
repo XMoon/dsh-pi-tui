@@ -30,6 +30,13 @@ import ConfigEditor from '@deepseek-ai/dsh-config-editor'
 import SettingsForms from '@deepseek-ai/dsh-settings'
 import { loadProfileDirectory, mountRootInclude } from '@deepseek-ai/dsh-app-boot'
 import { unzipEntries } from './support/zip-entries.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { TuiApp, type OwnedRunner } from '../src/tui-app.ts'
+import type { TuiCommandRunner } from '../src/commands.ts'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deepseek-ai/dsh-agent-loop-testkit'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
@@ -359,6 +366,109 @@ interface Composed {
 }
 
 /** The real Host + generated Client runtime, with no M3 semantic bundle yet. */
+/**
+ * Mount the REAL `/settings` workspace whose settings port IS the assembled
+ * Remote adapter. Mirrors the L6 visual harness shape (a sessionless surface and
+ * a Proxy runner for the capabilities this command factory never touches), with
+ * the ONE substitution the Remote case cannot avoid: the port comes from the
+ * real wire assembly rather than a document object.
+ */
+async function mountRemoteSettingsWorkspace(
+  cwd: string,
+  config: {
+    readonly configReadiness: () => 'ready' | 'stale' | 'unavailable'
+    readonly tuiSettings: { get(): unknown; replace(doc: unknown): unknown } | undefined
+    readonly footerCustomItems: unknown
+    readonly permissions: unknown
+    readonly subagentModelSelection: unknown
+  },
+): Promise<{
+  open(): Promise<void>
+  key(data: string): Promise<void>
+  settle(): Promise<void>
+  view(): string
+  dispose(): void
+}> {
+  const vt = new VirtualTerminal(120, 40)
+  const owned: OwnedRunner = (_label, task, options) => {
+    void Promise.resolve()
+      .then(() => task())
+      .then(result => options.onResult?.(result), error => options.onError?.(error))
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, runOwned: owned }, {})
+  app.start()
+  const defs: { name: string; handler?: (invocation: { rawInput: string }) => unknown }[] = []
+  const commands = {
+    register: (definition: { name: string; handler?: (invocation: { rawInput: string }) => unknown }) => {
+      defs.push(definition)
+      return () => {}
+    },
+    list: () => [],
+    find: () => undefined,
+    execute: async () => undefined,
+  }
+  const ctx = new Context()
+  ctx.provide('commands', commands as never)
+  ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
+  const base: Record<string, unknown> = {
+    ctx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    cwd,
+    sessionCwd: () => cwd,
+    progressUpdatesState: { mode: 'milestones' },
+    responseStyleState: { style: 'default' },
+    gitAttributionState: { mode: 'off' },
+    signal: new AbortController().signal,
+    commandRegistry: commands,
+    clientCommands: createClientCommandRegistry(parseCommand),
+    recordExtensionError: () => {},
+    clearExtensionError: () => {},
+    captureExtensionHealthRef: () => () => {},
+    currentSessionId: undefined,
+    captureLiveSessionScope: () => undefined,
+    listScopedCommands: () => [],
+    displayPreset: () => app.displayPreset(),
+    focusEnabled: () => app.displayPreset() === 'focus',
+    refreshStatus: () => {},
+    // THE point of this fixture: the real Remote settings port.
+    tuiSettings: config.tuiSettings,
+    config: {
+      configReadiness: () => config.configReadiness(),
+      footerCustomItems: config.footerCustomItems,
+      permissions: config.permissions,
+      subagentModelSelection: config.subagentModelSelection,
+    },
+    extensions: undefined,
+    openPluginManager: () => {},
+    createPluginManagerSubmenu: () => ({ render: () => [], dispose: () => {} }),
+    catalog: { models: { available: () => false } },
+  }
+  const runner = new Proxy(base, {
+    get: (target, property) => property in target ? target[property as string] : () => undefined,
+  }) as unknown as TuiCommandRunner
+  registerTuiCommandsWithDirectSeams(runner)
+  const settle = async (): Promise<void> => {
+    for (let index = 0; index < 8; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+    await vt.waitForRender()
+  }
+  return {
+    async open(): Promise<void> {
+      const definition = defs.find(candidate => candidate.name === 'settings')
+      assert.ok(definition?.handler !== undefined, '/settings must be registered')
+      definition.handler({ rawInput: '' })
+      await vt.waitForRender()
+    },
+    async key(data: string): Promise<void> {
+      vt.sendInput(data)
+      await vt.waitForRender()
+    },
+    settle,
+    view: () => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n'),
+    dispose: () => { if (!app.isDisposed()) app.dispose() },
+  }
+}
+
 async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
   return await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
     hostContext: host.ctx,
@@ -758,7 +868,8 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
       }
     }).settings
     const anchored = hostSettings.describe().find(entry => entry.ns === 'tui-app')
-    assert.notEqual(anchored?.revision, undefined, 'the tui-app namespace is served by the real settings plane')
+    assert.ok(anchored !== undefined, 'the tui-app namespace is served by the real settings plane')
+    assert.notEqual(anchored.revision, undefined, 'and the real descriptor carries a revision')
     const staleRevision = anchored.revision
     const externalTheme = anchored.value?.theme === 'dark' ? 'light' : 'dark'
     await hostSettings.mutate('tui-app', [{ op: 'set', path: ['theme'], value: externalTheme }], undefined)
@@ -829,6 +940,57 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
     survivor.release()
   } finally {
     reference.release()
+    assembled.dispose()
+    await runtime.dispose()
+  }
+})
+
+test('P16: the REAL /settings workspace commits through the Remote adapter over the wire and verifies by the authoritative re-read', async (t) => {
+  // The Remote ASSEMBLED UI path the acceptance requires: the command's
+  // `ConfigPort.tuiSettings` IS the Remote adapter over the real generated
+  // transport, the UI is the real `TuiApp` on a virtual terminal, and the
+  // authoritative sink is the real Host settings plane. Nothing here is a
+  // hand-rolled settings object.
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { configPlane: true })
+  await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
+  const runtime = await composeRuntime(host)
+  const assembled = await createRemoteBackendRuntime({
+    runtime: runtime.client,
+    promptSerializer: stubSerializer(),
+    fetch: runtime.host.carrier.fetch,
+  })
+  const reference = runtime.client.sessions.retain(SessionId(MAIN), { source: 'controllerOperation' })
+  await reference.ready
+  const config = assembled.backend.config
+  const fixture = await mountRemoteSettingsWorkspace(host.anchorDir, config)
+  try {
+    assert.equal(config.configReadiness(), 'ready', 'the Remote mirror reached the Host settings plane')
+    const tuiSettings = config.tuiSettings
+    assert.ok(tuiSettings !== undefined, 'the settings section is served over the wire')
+
+    await fixture.open()
+    await fixture.key('\x1b[B') // Appearance -> Display
+    await fixture.key('\r') // L0 -> L1
+    await fixture.key('\r') // L1 -> L2
+    assert.match(fixture.view(), /Transcript display/)
+    assert.match(fixture.view(), /Client runtime · optional TUI preference persistence/)
+    await fixture.key('\r') // L2 browse -> choice
+    assert.match(fixture.view(), /Choose Transcript display/)
+    await fixture.key('\x1b[B') // full -> compact
+    await fixture.key('\r') // confirm
+    await fixture.settle()
+
+    assert.match(fixture.view(), /Status\s+Verified/, `the UI verified the commit:\n${fixture.view()}`)
+    // The REAL Host document changed — the mirror's re-read is not the only witness.
+    const descriptor = (host.ctx as unknown as {
+      settings: { describe(): readonly { ns: string; value?: { displayPreset?: string } }[] }
+    }).settings.describe().find(entry => entry.ns === 'tui-app')
+    assert.equal(descriptor?.value?.displayPreset, 'compact', 'the Host authority carries the new preset')
+    assert.equal(tuiSettings.get().displayPreset, 'compact', 'and the authoritative Remote re-read agrees')
+    assert.equal(config.configReadiness(), 'ready', 'the mirror stayed current through the write')
+  } finally {
+    fixture.dispose()
     assembled.dispose()
     await runtime.dispose()
   }

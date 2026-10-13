@@ -1063,18 +1063,57 @@ test('a failed FIRST read yields no authoritative values and refuses writes with
   assert.equal(port.configReadiness(), 'unavailable', 'no committed snapshot: nothing to present')
   assert.equal(port.tuiSettings, undefined, 'the port serves no settings facade without a read')
   assert.ok(port.lastRefreshFailure() !== undefined, 'the failure is recorded for the UI')
+  assert.equal(state.namespaces.get(TUI_NS)?.value.theme, TUI_DEFAULTS.theme,
+    'the Host value is untouched: no write was dispatched without a read')
+})
 
-  // The write path names the actual reason rather than claiming a stale value.
-  const facade = {
-    get: () => ({ ...TUI_DEFAULTS }),
-    replace: async () => {},
-  }
-  state.describeFailure = undefined
+test('a committed write whose post-settlement refresh fails is not a refusal — but stays one for a rereading consumer', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, theme: 'dark' }, revision: 1 })
+  })
   await port.describe()
   assert.equal(port.configReadiness(), 'ready')
+
+  // The OTHER direction: the official mutate ITSELF is refused. That IS a refusal
+  // and must keep rejecting, with the mirror left authoritative.
+  state.mutateFailure = { code: 'settings/rejected', message: 'refused' }
+  await assert.rejects(
+    async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
+    /settings\.mutate\(tui-app\) failed: refused/u,
+  )
+  assert.equal(port.configReadiness(), 'ready', 'a refused mutate leaves the mirror current')
+  assert.equal(port.tuiSettings!.get().theme, 'dark', 'and its authoritative value intact')
+  state.mutateFailure = undefined
+
+  // The official write LANDS; only the authoritative refresh that follows it fails.
   state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
-  await assert.rejects(async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
-    /settings\.describe failed/u)
+  await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' })
+  assert.notEqual(port.configReadiness(), 'ready', 'the committed write makes the last snapshot non-current')
+  assert.ok(port.lastRefreshFailure() !== undefined, 'the failed refresh is recorded, never swallowed')
+  assert.notEqual(port.tuiSettings!.get().theme, 'light', 'the mirror never patches the committed value optimistically')
+
+  // NEGATIVE CONTROL: a direct `mutate` consumer keeps the FAILURE. Its caller
+  // re-reads the mirror and would otherwise present a last-known value as the
+  // committed one (the subagent model-selection toggle does exactly that).
+  const subagent = createBackend(current => {
+    current.namespaces.set(SUBAGENT_NS, {
+      ns: SUBAGENT_NS,
+      value: { enabled: false, allowedModels: [] },
+      revision: 1,
+    })
+  })
+  await subagent.port.describe()
+  subagent.state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
+  await assert.rejects(
+    async () => {
+      await subagent.port.subagentModelSelection.set({
+        enabled: true,
+        allowedModels: [{ provider: 'smoke', model: 'smoke-model' }],
+      })
+    },
+    /settings\.describe failed/u,
+    'the rereading consumer must not treat a stale snapshot as a committed write',
+  )
 })
 
 test('an empty replace diff is a no-op only once the mirror is current', async () => {
