@@ -54,7 +54,7 @@ alternative; this is the frozen outcome, and the rollout plan may start.
 | D2 | Wide-screen column boundary | **2-cell gutter only** (no vertical glyph, no header filler rule) | accepted: zero added width, and no new EAW-ambiguous glyph role (§6.3) |
 | D3 | Navigation cursor | **`>`** (U+003E) | accepted: already the measured geometry in both workspaces; `›`/`❯` are EAW-safe but already own other roles (icon semantics / legacy list cursor / transcript user marker); Pi's `→` is EAW-ambiguous and rejected (§4.3) |
 | D4 | Action-bar separator | **` · `** (U+00B7) | accepted: all three reference TUIs join hint segments with it, and it is already this repo's dominant idiom; the `─` rule grandfathers the same EAW class (§4.2) |
-| D5 | Status presentation | **`∙ Running`** — Title Case word plus a one-cell marker (`∙`, U+2219) | **Owner amendment**: the word is the signal, but the glyph anchor is kept; `●` (U+25CF, EAW-ambiguous) is replaced by the EAW-neutral `∙` so a CJK-width terminal cannot shift the right-aligned group (§4.1) |
+| D5 | Status presentation | **`∙ Running`** — Title Case word plus ONE marker (`∙`, U+2219) shared by every status | **Owner amendment**: the word is the signal, but the glyph anchor is kept; `●` (U+25CF, EAW-ambiguous) is replaced by the EAW-neutral `∙` so a CJK-width terminal cannot shift the right-aligned group, and the marker is **not** specialised per status (`✓` for done, `✕` for failed, `⊘` for cancelled …) — state is carried by the word and its token, never by a second glyph set (§4.1) |
 | D6 | Job reading-facts row | **remove the two flanking rules** | accepted: a rule marks a boundary and a text line is never flanked (§6.2) |
 
 Re-opening any of these is a spec change (§11.1): edit this table in the same PR,
@@ -136,7 +136,7 @@ can be reviewed against a frame:
 | 6 | Active glyph (navigation cursor) | `primary` | no | `> ` leading a list row |
 | 7 | Active label (focused pane / active tab) | `primary` | yes | `[Rows (2)]`, `[Output]` |
 | 8 | Selected row text | `textStrong` | yes | the selected row's label and value |
-| 9 | Status word (+ optional one-cell marker `∙`) | `success` / `warning` / `error` / `textDim` | no | `∙ Running`, `∙ Failed`, `Completed`, `Ready`, `Stale` |
+| 9 | Status word (+ the shared marker `∙`) | `success` / `warning` / `error` / `textDim` | no | `∙ Running`, `∙ Failed`, `Completed`, `Ready`, `Stale` |
 | 10 | Machine marker | `warning` / `error` / `textMuted` | no | `[GAP]`, `[ERROR]`, `[SETTLED]` |
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
@@ -165,9 +165,15 @@ Corrections this table makes to the current code:
   the active tab both use `primary`. `borderFocus` stays for approvals.
 - **Content values are painted `color.text`**, never left unpainted. Leaving
   them out makes them the terminal's default foreground and bypasses the
-  palette (verified in `docs/tui-design-language-samples.md`). One exception is
-  deliberate and stays: whatever a user typed (transcript text) keeps its own
-  record bytes.
+  palette (verified in `docs/tui-design-language-samples.md`).
+- **The record-bytes exception.** Raw recorded text is *not* repainted and keeps
+  the terminal's default foreground: whatever the user typed, and raw tool/Job
+  output (the Job output and command bodies, markdown code blocks, diff bodies).
+  The palette governs **derived presentation** text — labels, summaries,
+  formatted facts and detail values — and that is where "unpainted" is a defect.
+  The two must not be confused: the Settings detail pane's `Value`/`Source`/
+  `Runtime` are derived and must be painted; the Job log body is raw and must
+  stay unpainted.
 - **Secondary facts are one layer below their group's primary content**, not all
   at the same weight: in the Settings detail pane only the primary field's value
   is `text`; `Source`/`Runtime`/`Persisted`/`Scope`/`Freshness`/`Description`/
@@ -225,13 +231,19 @@ chrome rules budget of §6.2.
   an unknown wire value: `running`→`Running`, `stopping`→`Stopping`,
   `completed`→`Completed`, `failed`→`Failed`, `killed`→`Killed`,
   `timed_out`→`Timed out`, `lost`→`Lost`.
-- **A status may carry exactly one leading one-cell marker, and it is `∙`
-  (U+2219).** Owner decision D5: the written word is the signal, the marker is a
-  secondary anchor, and the marker must be EAW neutral — `●` (U+25CF) is
-  ambiguous and may paint two cells under `cjk-ambiguous-width`, which would
-  shift a right-aligned status group. The marker takes the word's token
-  (`∙ Running`, `∙ Failed`), and a status that has no word (a glyph-only state)
-  is not allowed in chrome.
+- **A status group carries exactly ONE marker, and it is `∙` (U+2219) for every
+  status — no per-status glyph.** Owner decision D5: the written word is the
+  signal, the marker is only a secondary anchor, and it must be EAW neutral
+  (`●` U+25CF is ambiguous and may paint two cells under `cjk-ambiguous-width`,
+  which would shift a right-aligned status group).
+  - The marker takes the word's token (`∙ Running`, `∙ Failed`), so the pair is
+    one coloured unit.
+  - **Do not introduce a status glyph set.** No `✓` for completed, `✕` for
+    failed, `⊘` for cancelled, `⏳` for pending, `◐` for stopping, `○` for done.
+    Adding a second glyph for a state would (a) reintroduce the ambiguous-width
+    hazard, and (b) make the shape — not the word — the thing the reader learns,
+    which is exactly the fragmentation this document exists to remove.
+  - A status with no word (a glyph-only state) is not allowed in chrome.
 - Multiple words in one hint stay lowercase after the key: `Esc back`,
   `Enter details`, `C copy value`.
 - **Key tokens are Capitalized; a bare letter is lowercase.** `Esc`, `Enter`,
@@ -304,7 +316,7 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 | Navigation cursor | `> ` (2 cells) | one per list; D3 |
 | Active/current label | `[Label]` | focus, active tab, current pane |
 | Current-value marker (candidate list only) | `[← current]` | never shares the cursor's meaning |
-| Status marker | `∙` (U+2219) | one cell, EAW neutral; replaces `●`; D5 |
+| Status marker | `∙` (U+2219) | the ONE marker for every status; one cell, EAW neutral; replaces `●`; D5 |
 | Disclosure | `▸` / `▾` | collapse state only, never "selected" |
 | Rule | `─` | boundary only |
 | Fact + action-bar separator | ` · ` | D4; the single separator for segments and facts |
@@ -595,7 +607,10 @@ Enforce only what is cheap and low-false-positive; the rest is review.
    - the body floor is ≥ 1 from 3 rows up;
    - no action-bar row contains `…` while more than one segment is painted;
    - a `Status` value of `Verified` and of `Not saved` do not paint the same
-     token.
+     token;
+   - a status group paints the shared `∙` marker only — no second, per-status
+     glyph (item 1's glyph inventory already rejects the ambiguous per-status
+     sets by width class; assert it as a frame fact too).
 3. **Degradation-ladder test**: for each size in the frozen matrix, assert the
    dropped/kept set matches §8 (this is the test that catches "someone made the
    header taller").
@@ -627,7 +642,9 @@ is next touched for another reason** (never by a mass search/replace):
 | editor seat borders | `warning` for plan mode, `accent` for a subagent viewer seat (`tui-app.ts:12850`, `:13093`) | next editor-seat change |
 | transcript disclosure | three shapes for one semantic: `🐋/🐳` (Focus), `▸/▾` (Activity/cluster), hardcoded `▼/▶` (sub-call/workflow, `tui-app.ts:16415,16663,16706`) | next disclosure change |
 | transcript `🐋` | the same glyph is the assistant bullet (`icons.ts:80`) and the Focus-collapsed disclosure (`:74`) | next icon-registry change |
-| workflow member rows | colour-only status glyphs `!`/`•`/`●` with no word (`tui-app.ts:470-478`) | next workflow-rendering change |
+| workflow member rows | colour-only status glyphs `!`/`•`/`●` with no word (`tui-app.ts:470-478`); must become word + the shared `∙` | next workflow-rendering change |
+| task browser / task quick panel | per-status glyph set `?`/`◐`/`×`/`○`/`●` (`task-panel.ts:110-118`) where D5 allows only the shared `∙` + a word; `○` (U+25CB) and `●` are also EAW-ambiguous | next change to that panel |
+| viewer subject bar | `● running` / `○ inactive` (`viewer-subject-bar.ts:88-90`) — same per-status glyph debt, and both glyphs are EAW-ambiguous | next subject-bar change |
 | failed generic tool | the result text stays unpainted/`textDim`; only the `[error]` pill carries the colour | next tool-card change |
 | chrome-wide ` · ` and `─` | EAW-ambiguous; accepted limitation (§4.3) | only if CJK-width terminals become a supported target |
 

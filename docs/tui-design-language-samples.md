@@ -638,7 +638,7 @@ At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…`
 | # | Before | After | Why |
 |---|---|---|---|
 | 1 | `JOB  job-a · bash` (`JOB` all-caps `textStrong`) | `Job · job-a · bash` | one header grammar with Settings: `Surface · trail · trail` |
-| 2 | `● RUNNING` / `● FAILED` | `∙ Running` / `∙ Failed` with the status token | the word carries the state; `●` (U+25CF, EAW-ambiguous) becomes the EAW-neutral `∙` (U+2219) so a CJK-width terminal cannot shift the right-aligned group. Owner amendment to D5: keep a one-cell glyph anchor |
+| 2 | `● RUNNING` / `● FAILED` | `∙ Running` / `∙ Failed` with the status token | the word carries the state; `●` (U+25CF, EAW-ambiguous) becomes the EAW-neutral `∙` (U+2219) so a CJK-width terminal cannot shift the right-aligned group. Owner amendment to D5: keep a one-cell glyph anchor, and it is the SAME marker for every status — no per-status glyph set (`✓`/`✕`/`⊘`/`⏳`/`◐`/`○` are all rejected) |
 | 3 | `[GAP] [SETTLED] [ERROR]` | unchanged (uppercase bracketed machine markers) | the single role ALL-CAPS keeps |
 | 4 | `progress:` / `detail:` | `Progress:` / `Detail:` | labelled fact grammar `<Label>: <value>` |
 | 5 | Affordance always painted on the summary row | affordance yields when content + affordance cannot both fit | never truncate the content to keep a redundant affordance |
@@ -665,7 +665,7 @@ painting source line.
 | Settings unselected row | `text` | role 3 `text` |
 | Settings row summary column | inherits the row ink | role 4 `textDim` |
 | Settings detail labels | `textDim` | role 5 `textDim` |
-| Settings detail values | **terminal default (unpainted)** | role 3 `text` / role 4 `textDim` |
+| Settings detail values | **terminal default (unpainted)** — derived presentation text with no ink at all | role 3 `text` / role 4 `textDim` (the palette-invisible defect of §3.2) |
 | Settings detail buttons | `accent` | role 14 `primary` |
 | Settings action bar | `textDim` | role 13 `textMuted` |
 | Settings rules | `border` | role 15 `border` |
@@ -678,7 +678,7 @@ painting source line.
 | Job affordances (`↗ Command`, `Copy All [C]`) | `primary` | role 14 `primary` |
 | Job active tab `[Output]` | bold + `primary` hex | role 7 `primary` bold |
 | Job inactive tab | `textDim` | role 5 `textDim` |
-| Job body (log text) | terminal default (unpainted) | role 3 `text` |
+| Job body (log text) | terminal default, **unpainted by design** (the record-bytes rule, §3.2) | unchanged — raw recorded output is not repainted |
 | Job facts row / action bar | `textDim` | roles 11/13 `textMuted` |
 | Job tab rule / facts-row flanks | `border` | role 15 (flanks removed) |
 
