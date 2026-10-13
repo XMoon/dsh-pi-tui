@@ -10,12 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `/settings` now opens a dedicated full-screen settings workspace (read-only
-  preview): three columns on wide terminals (categories / settings rows /
-  details), two columns on medium ones with the category switch in the header
-  (keyboard or painted mouse arrows), and a single-column
-  `categories → rows → detail` drill-down on narrow ones (`Enter` descends,
-  `Esc` steps back one level). The Action Bar stays pinned to the last physical
-  row, and selection, scrolling and copying work with both keyboard and mouse.
+  preview): wide terminals show three columns (categories / settings rows /
+  details), medium ones show the current level's two columns (`categories + rows`
+  or `rows + details`), and narrow ones a single column — all three layouts are
+  projections of the SAME `categories → rows → detail` levels. At every width
+  `Enter` descends and `Esc` (`Backspace` too) steps back one level; only `Esc` at
+  the outermost level closes the workspace, and `Tab` and `←`/`→` are not
+  navigation keys. The Action Bar stays pinned to the last physical row, and
+  selection, scrolling and copying work with both keyboard and mouse.
   The workspace shows the real Appearance / Display facts: the theme's
   source-qualified raw value plus its friendly name, Icon style, the live
   Transcript display preset alongside the persisted preference last read, the

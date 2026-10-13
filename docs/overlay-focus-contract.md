@@ -482,31 +482,43 @@ leases are MUTUALLY EXCLUSIVE.
   that opened the workspace is stopped with `preserveScreen: true`, its object
   tree, overlay graph, focus, draft and scroll state survive, and closing restarts
   the SAME instance.
-- **`Esc` is the ONE lifecycle key, with a narrow drill-down.** Wide and medium
-  layouts close on `Esc`; the narrow layout steps `detail → rows → categories` and
-  closes only from the categories level, so leaving the workspace is always one
-  reachable key (the Action Bar is pinned to the physical last row at every
-  height, down to a one-row terminal).
+- **The workspace has three levels at every width; `Esc` is the ONE lifecycle
+  key.** L0 `categories` → L1 `rows` → L2 `detail` is the panel's only navigation
+  state (the former wide/medium "focus owner" split is retired). `Enter` advances
+  one level, `Esc`/`Backspace` steps one level back, and only L0's `Esc` closes
+  the workspace — wide, medium and narrow behave identically, and a new open
+  always starts on L0. `Tab`/`Shift+Tab` and `←`/`→` are not navigation keys.
+  Leaving the workspace is therefore always one reachable key (the Action Bar is
+  pinned to the physical last row at every height, down to a one-row terminal).
+- **Width only projects panes.** Wide paints all three columns; medium derives its
+  two columns purely from the current level (`categories + rows` at L0,
+  `rows + details` otherwise); narrow paints the current level alone. No second
+  "visible window" state is stored, hidden panes are neither painted nor
+  addressable, and row text is laid out against the pane width it is actually
+  painted in.
 - **Every key inside the workspace is consumed** by the panel (navigation,
   refresh, copy, or inert). Ordinary typing never reaches the hidden editor, the
   transcript or a Host composer action — the `handleInputCore` ladder hands
-  Settings the key before any Host action, mirroring the Job branch.
-- **Mouse follows the last painted frame.** The header's category arrows, the
-  row cells and the Detail's `Copy value` button are plain painted cells reached
-  through the alt screen's existing `onCellPress`/`onCellClick`: a real item
-  click takes ITS column's keyboard focus (the header arrows, the row list, the
-  Detail), and a click acts only when the release re-proves the press-time kind,
-  id, painted row, cell range AND the same state version. Refresh, selection,
-  page, category AND terminal geometry all bump that version — a resize refuses a
-  straddling gesture even when the target's own cells did not move. Wheel events
-  are the panel's own `handleMouse` and scroll only the pane under the pointer; a
-  wheel-scrolled list keeps its viewport (only a selection or viewport change
-  rebases it, so a shrink still reveals the selection). The workspace screen
-  suspends the fork's native copy-on-select: B2-A has no drag-copy contract, and
-  the panel's own `Copy value`/`C` verb is the only copy source (a plain click can
-  never put a character on the clipboard). The Action Bar advertises only the keys
-  the current focus owner and row grant actually honour: below the body floor it
-  shows the Esc/back semantics alone.
+  Settings the key before any Host action, mirroring the Job branch. A key that
+  arrives before the first paint resolves against the LIVE level, never a guessed
+  layout.
+- **Mouse follows the last painted frame.** The row cells and the Detail's
+  `Copy value` button are plain painted cells reached through the alt screen's
+  existing `onCellPress`/`onCellClick`: a real item click takes ITS level's
+  keyboard focus (a category click never advances into the rows, a row click never
+  advances into the detail — only `Enter` does), and a click acts only when the
+  release re-proves the press-time kind, id, painted row, cell range, state
+  version, level AND category. Refresh, selection, level, category AND terminal
+  geometry all bump that version — a resize refuses a straddling gesture even when
+  the target's own cells did not move. Wheel events are the panel's own
+  `handleMouse` and scroll only the pane under the pointer (a hidden pane owns no
+  wheel); a wheel-scrolled list keeps its viewport (only a selection or viewport
+  change rebases it, so a shrink still reveals the selection). The workspace
+  screen suspends the fork's native copy-on-select: B2-A has no drag-copy
+  contract, and the panel's own `Copy value`/`C` verb is the only copy source (a
+  plain click can never put a character on the clipboard). The Action Bar
+  advertises only the keys the current level and row grant actually honour: below
+  the body floor it shows the Esc/back semantics alone.
 - **The Detail projection is ambiguity-free.** Terminal sequences and unknown
   controls are stripped at the display boundary, but CR/LF/TAB render as visible
   `\n`/`\r`/`\t`, other controls as `\xNN`, and a literal backslash as `\\` — two
