@@ -4,6 +4,8 @@
 >
 > Snapshot date: 2026-10-13. Use with [Foundation contract](./foundation.md) and [dated evidence](./evidence/foundation-20261013.md). Changes to upstream `main`, package tarballs or Tern versions require a fresh comparison.
 
+Audit IDs and report references in this document refer to unpublished local research materials (00-baseline.md through 07-spike-results.md). They are provenance identifiers, not repository paths or clickable links. For repository-accessible evidence, use the pinned source references and the dated evidence summary.
+
 ## 1. Four independent code/document sources
 
 | Source | Fixed snapshot | Applies to |
