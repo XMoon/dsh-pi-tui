@@ -565,10 +565,67 @@ test('currentness: a session switch while a search is in flight never publishes 
   await vt.waitForRender()
   assert.ok(!strip(vt.getViewport()).includes('previous session row'),
     'a page resolved for the previous session is never published')
-  assert.ok(!panelVisible(vt.getViewport()),
-    'the stale seat retires through the host close path instead of staying visibly stale')
+  // The stale seat is INERT (no acceptance, no copy, no pointer action)…
+  assert.equal(app.getDraft(), '', 'the stale seat accepts nothing')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), '', 'Enter on a stale seat is inert')
+  // …and the host's next revalidation entry retires it: the keystroke that
+  // reaches the seat retires it and lands in the NEW session's editor.
+  vt.sendInput('a')
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()), 'the next input retires the stale seat')
+  assert.equal(app.getDraft(), 'a', 'the retired seat lets the key reach the new session editor')
   // The lease was really released: a fresh Ctrl+R captures the NEW session.
   vt.sendInput('\x12')
   await vt.waitForRender()
   assert.ok(panelVisible(vt.getViewport()), 'a fresh seat opens for the new session')
+})
+
+test('currentness: a copy settling after a SESSION SWITCH notifies nothing', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  seedHistory(home, '/work/a', [{ content: 'fix nginx reload', ts: 3, sessionId: 'ses_a' }])
+  const notices: string[] = []
+  let release: ((ok: boolean) => void) | undefined
+  const deferred = new Promise<boolean>((resolve) => { release = resolve })
+  let liveSessionId: string | undefined = 'ses_a'
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (_label, task, options) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(result => options.onResult?.(result), error => options.onError?.(error))
+    },
+  }, {
+    historySearchSource: new FileHistorySearchSource({ dshHome: home }),
+    historySearchCwd: () => '/work/a',
+    historySearchSessionId: () => liveSessionId,
+    copySelection: () => deferred,
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  const originalNotify = app.notify.bind(app)
+  app.notify = (text: string, kind?: 'info' | 'error'): void => {
+    notices.push(text)
+    originalNotify(text, kind)
+  }
+  await vt.waitForRender()
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  vt.sendInput('\x1bc') // Alt+C: the payload is captured for ses_a, the clipboard write is pending
+  await vt.waitForRender()
+  // The session is replaced while the copy is in flight, with NO further input
+  // (so the tenant has not been retired by a revalidation entry yet).
+  liveSessionId = 'ses_b'
+  release?.(true)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(notices, [],
+    'a copy started for the previous session must not report its outcome over the new session')
 })

@@ -653,7 +653,7 @@ test('H3A-04: a STALE rejection after a query change never paints the error stat
   assert.ok(!lines.some(line => line.includes('History unavailable')))
 })
 
-test('H3A-09: a Preview drag that leaves the painted region never extends the selection into another region', async () => {
+test('H3A-09: a Preview drag that releases outside the painted region cancels (nothing is copied)', async () => {
   const source = new FakeSource()
   source.rows = [row('abc\ndef', 1, '/a', 'p')]
   const copied: string[] = []
@@ -677,18 +677,22 @@ test('H3A-09: a Preview drag that leaves the painted region never extends the se
   })
   panel.handleMouse(event('press', 0, firstContent))
   panel.handleMouse(event('drag', 2, firstContent + 1))
-  // The pointer leaves the Preview into the results list…
+  // The pointer leaves the Preview into the results list and releases there:
+  // plan §6 H3A-09 — the drag safely CANCELS (never copies the list underneath).
   panel.handleMouse(event('drag', 5, listRow))
   panel.handleMouse(event('release', 5, listRow))
-  assert.deepEqual(copied, ['abc\ndef'],
-    'the selection is bounded by the last real Preview point, never the list underneath')
+  assert.deepEqual(copied, [],
+    'a drag that leaves the painted Preview and releases outside it copies nothing')
+  // The cancelled gesture leaves no live anchor behind.
+  panel.handleMouse(event('release', 2, firstContent + 1))
+  assert.deepEqual(copied, [], 'the cancelled gesture cannot be resurrected')
 })
 
-test('currentness: a stale subject never acts, never publishes and retires through the host close path', async () => {
+test('currentness: a stale subject never acts and never publishes (the caller keeps the lifecycle)', async () => {
   const source = new FakeSource()
   source.manual = true
   let current = true
-  const { panel, accepted, closed } = makePanel(source, {
+  const { panel, closed } = makePanel(source, {
     pointerEnabled: () => true,
     tenantIsCurrent: () => current,
   })
@@ -697,7 +701,12 @@ test('currentness: a stale subject never acts, never publishes and retires throu
   source.resolveNext([row('previous session row', 1, '/a', 'previous')])
   await flushMicrotasks()
   assert.equal(panel.selected(), undefined, 'a previous-subject page is never published')
-  assert.equal(closed(), 1, 'the stale seat retires through the ONE host close path')
+  assert.equal(panel.hasResults(), false, 'the stale page is not shown as a result')
+  assert.equal(closed(), 0, 'the caller-owned lifecycle is never closed from the async path')
+  // The seat stays inert: no acceptance, no copy, no pointer action.
+  assert.equal(panel.canAccept(), false)
+  panel.handleInput('\r')
+  assert.equal(panel.selected(), undefined)
 })
 
 test('currentness: the pointer and acceptance entries refuse a stale subject', async () => {
@@ -730,7 +739,7 @@ test('currentness: the pointer and acceptance entries refuse a stale subject', a
   assert.equal(closed(), 0, 'refusing an action never closes the panel by itself')
 })
 
-test('pointer: a release outside the painted rows ends the gesture instead of leaving a stale anchor', async () => {
+test('H3A-09: a release outside the painted Preview cancels the drag (no copy, no surviving anchor)', async () => {
   const source = new FakeSource()
   source.rows = [row('abc\ndef', 1, '/a', 'p')]
   const copied: string[] = []
@@ -754,17 +763,29 @@ test('pointer: a release outside the painted rows ends the gesture instead of le
   })
   panel.handleMouse(event('press', 0, contentRow))
   panel.handleMouse(event('drag', 2, contentRow + 1))
-  // The release lands OUTSIDE the painted rows: it must still end the gesture.
+  // The release lands OUTSIDE the painted rows: plan §6 H3A-09 — safely CANCEL.
   panel.handleMouse(event('release', 2, height + 5))
-  assert.deepEqual(copied, ['abc\ndef'], 'the out-of-frame release copies the last valid range')
-  // A motion-only drag can no longer extend the finished gesture…
-  copied.length = 0
+  assert.deepEqual(copied, [], 'an out-of-frame release copies nothing')
+  // The cancelled gesture cannot be extended or resurrected…
   panel.handleMouse(event('drag', 3, contentRow))
-  assert.deepEqual(copied, [], 'a motion-only drag after the release copies nothing')
-  // …and a later release cannot resurrect it either.
+  assert.deepEqual(copied, [], 'a motion-only drag after the cancel copies nothing')
   panel.handleMouse(event('release', 3, contentRow))
-  assert.deepEqual(copied, [], 'a later release of the finished gesture copies nothing')
+  assert.deepEqual(copied, [], 'a later release of the cancelled gesture copies nothing')
+  // …nor can a release on a DIFFERENT painted region (the metadata row).
+  panel.handleMouse(event('press', 0, contentRow))
+  panel.handleMouse(event('drag', 2, contentRow + 1))
+  panel.handleMouse(event('release', 2, height - 1))
+  assert.deepEqual(copied, [], 'a release outside the painted Preview cancels too')
+  // A width change between press and release cancels as well.
+  const tall = panel.render(100).length
+  panel.handleMouse(event('press', 0, contentRow))
+  panel.handleMouse(event('drag', 2, contentRow + 1))
+  panel.render(70) // rewrap: every painted cell moved
+  const moved = { ...event('release', 2, contentRow + 1), width: 70, height: tall }
+  panel.handleMouse(moved)
+  assert.deepEqual(copied, [], 'a release against a frame whose width moved cancels')
   // …and the next REAL press+drag still works (row 0 col 0 → row 1 col 0).
+  panel.render(100)
   panel.handleMouse(event('press', 0, contentRow))
   panel.handleMouse(event('drag', 0, contentRow + 1))
   panel.handleMouse(event('release', 0, contentRow + 1))
