@@ -365,8 +365,10 @@ palette) and the stored preference (`Persisted`) separately and states
 `Saving…`, `Verified`, `Not saved · <reason>`, `Commit accepted ·
 verification unavailable` or `Outcome unknown · <reason>` — only a completed write
 whose authoritative re-read agrees is called Verified; a rejected write re-reads the
-authority first and reports Not saved only when it is still the previous value,
-otherwise Outcome unknown. On a non-ready backend the theme is neither applied
+authority first and reports Not saved only while it still carries the value the
+request started from; a third value, a value already in place or an unreadable
+authority is Outcome unknown, and a success whose readable readback disagrees is a
+failure rather than "verification unavailable". On a non-ready backend the theme is neither applied
 nor written; a display preset may already be live locally and then says that it
 was not stored instead of pretending it was. A plugin theme is resolved again by
 its source-qualified identity at confirm time, so an unloaded plugin theme is

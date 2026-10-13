@@ -1021,9 +1021,10 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
     assert.equal(tuiSettings.get().displayPreset, 'compact', 'and the authoritative Remote re-read agrees')
     assert.equal(config.configReadiness(), 'ready', 'the mirror stayed current through the write')
 
-    // ── the SAME chain must also REFUSE and must report accepted-but-unverified.
-    // The Host service is patched in place (the unbound originals are restored in the
-    // finally), so the failure really happens on the production read/write path.
+    // ── the SAME chain must also REFUSE over the real wire, and must never attribute a
+    // rejection it cannot prove. The Host service is patched in place (the unbound
+    // originals are restored in the finally), so the failure really happens on the
+    // production read/write path.
     const forms = (host.ctx as unknown as {
       settings: {
         describe(...args: never[]): unknown
@@ -1074,13 +1075,15 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
       )
       assert.equal(hostDescriptor()?.value?.displayPreset, 'compact', 'the refused write never reached the Host')
 
-      // A COMMITTED write whose authoritative readback cannot complete must never be
+      // A rejected write whose authoritative readback cannot complete must never be
       // called `Not saved`, and must never be called `Verified`: the official service
       // applies the edit and then performs its OWN post-write describe, so a failure of
       // that read reaches the client as a failed `settings.mutate` even though the write
-      // committed. The adapter re-reads the authority on that failure and the workspace
-      // classifies on it, so the Host really carrying the value and the UI reporting
-      // accepted-but-unverified are asserted TOGETHER.
+      // may have committed. The adapter re-reads the authority on that failure and the
+      // workspace attributes the outcome from it — here the authority already carries the
+      // requested value, which proves the value is in place but never that THIS request
+      // was accepted, so the outcome is `Outcome unknown`. The Host state and that
+      // classification are asserted TOGETHER.
       await chooseNextPreset()
       const hostAfter = hostDescriptorUnpatched()
       const unverifiedFrame = fixture.view().replace(/\s+/gu, ' ')

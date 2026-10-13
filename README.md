@@ -316,8 +316,9 @@ Icon style、Transcript display 的运行时当前值与持久偏好、Thinking 
 路径落盘，再从权威来源重读目标字段核对：详情里分别显示运行态（`Runtime`，如当前
 palette）与持久偏好（`Persisted`），并显示 `Saving…` / `Verified` / `Not saved · 原因`
 / `Commit accepted · verification unavailable` / `Outcome unknown · 原因`，只有写入完成、
-backend `ready` 且权威回读一致才显示 Verified；被拒绝的写入会先重读权威，仍是旧值才报
-Not saved，已是目标值或无法读取则如实报 Outcome unknown。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本
+backend `ready` 且权威回读一致才显示 Verified；被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，
+出现第三个值、已是目标值或无法读取则如实报 Outcome unknown；写返回成功但权威可读地不一致
+同样按失败显示，而不是"verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本
 机生效，此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按
 source-qualified 身份解析，已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成
 同名文件主题。Icon style 与 Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：

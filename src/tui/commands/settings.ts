@@ -131,16 +131,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     captureExtensionHealthRef,
   } = deps
 
-  /**
-   * The synchronous LATEST theme value this command factory committed. The
-   * terminal detection's guard reads THIS, never the asynchronous document: an
-   * explicit choice applies runtime-first, so the persisted value can still read
-   * `auto` while the query it replaced is in flight, and a late answer must never
-   * colour over the newer choice (the legacy `/settings` path keeps the same
-   * guard per open). It is a query guard only — never a persistence truth.
-   */
-  let latestThemeChoice: string | undefined
-
   /** Keep USER-owned Custom Text definitions out of whole-document writes that
    * start from a merged settings document. A project layer may contribute the
    * pass-through `footerCustomItems` field, but it must never be copied into
@@ -332,6 +322,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * canonical normalization (a legacy `custom:X` document still means `file:X`);
    * a display preset is compared exactly.
    */
+  /** The persisted value of one writable field, or undefined when unreadable. */
+  const persistedValueOf = (field: SettingsWorkspaceWritableField): string | undefined => {
+    const settings = runner.tuiSettings
+    if (settings === undefined) return undefined
+    let doc: TuiSettingsDoc
+    try {
+      doc = settings.get()
+    } catch {
+      return undefined
+    }
+    return field === 'theme' ? normalizePersistedTheme(doc.theme) : doc.displayPreset
+  }
+
   /** The structured authoritative readback of ONE committed field. */
   type CommittedReadback =
     | { readonly kind: 'agrees' }
@@ -363,10 +366,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   ): SettingsWorkspaceCommitOutcome => {
     const readback = readCommittedField(field, expected)
     if (readback.kind === 'agrees') return { outcome: 'verified' }
-    if (readback.kind === 'unavailable') return { outcome: 'unverified', reason: readback.reason }
+    if (readback.kind === 'unavailable') {
+      // The write RETURNED SUCCESS and the authority cannot be re-read: accepted,
+      // unverified (the plan's `Commit accepted · verification unavailable`).
+      return { outcome: 'unverified', reason: readback.reason }
+    }
+    // The write returned success and the authority READABLY disagrees: the value is
+    // not stored, so this is a failure — never "verification unavailable", which
+    // would claim the readback could not be performed.
     return {
-      outcome: 'unverified',
-      reason: `the authoritative document reads ${readback.actual === undefined || readback.actual === '' ? 'no value' : readback.actual}`,
+      outcome: 'not-saved',
+      reason: `the write reported success, but the authoritative document reads ${readback.actual === undefined || readback.actual === '' ? 'no value' : readback.actual}`,
     }
   }
 
@@ -376,22 +386,32 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * describe, reporting a failure of that read as an error even though the write
    * committed — and the Direct backend's failure is a real conflict. The authority is
    * therefore re-read (the Remote adapter re-reads it on the failed RPC itself):
-   *  - a current authority that still carries the previous value REFUTES the write
-   *    (`not-saved`),
-   *  - a current authority that already carries the requested value proves only that
-   *    the value is in place — an external writer may have set it before this request
-   *    was refused — so neither acceptance nor refusal is attributed to THIS commit
+   *  - a current authority still carrying the value this request started from (the
+   *    BASE) REFUTES it (`not-saved`),
+   *  - a current authority carrying a THIRD value (neither the base nor the requested
+   *    one) shows that someone else wrote in between, so this request's outcome cannot
+   *    be attributed (`indeterminate`),
+   *  - a current authority already carrying the requested value proves only that the
+   *    value is in place — an external writer may have set it before this request was
+   *    refused — so neither acceptance nor refusal is attributed to THIS commit
    *    (`indeterminate`), and the same holds when the authority cannot be read.
    * Never a `Saved`, and never an acceptance/refusal claim the Client cannot support.
    */
   const classifyRejectedWrite = (
     field: SettingsWorkspaceWritableField,
     expected: string,
+    base: string | undefined,
     failureReason: string,
     prefix: string,
   ): SettingsWorkspaceCommitOutcome => {
     const readback = readCommittedField(field, expected)
-    if (readback.kind === 'differs') return { outcome: 'not-saved', reason: `${prefix}${failureReason}` }
+    if (readback.kind === 'differs') {
+      if (readback.actual === base) return { outcome: 'not-saved', reason: `${prefix}${failureReason}` }
+      return {
+        outcome: 'indeterminate',
+        reason: `${prefix}${failureReason}; the authority no longer reads the value this request started from either, so its outcome cannot be attributed`,
+      }
+    }
     if (readback.kind === 'agrees') {
       return {
         outcome: 'indeterminate',
@@ -440,6 +460,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return { outcome: 'not-saved', reason: `the display preset "${value}" is not available in this build` }
     }
     const settings = runner.tuiSettings
+    // The value this request starts from: only an authority still carrying IT refutes
+    // the write; a third value means someone else wrote in between.
+    const base = persistedValueOf('display-preset')
     // Runtime apply through the ONE shared DisplayState owner. `unchanged` still
     // continues to persistence: the runtime being on the preset says nothing
     // about the stored preference.
@@ -465,6 +488,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return classifyRejectedWrite(
         'display-preset',
         value,
+        base,
         safeErrorMessage(error),
         'the display preset is applied locally, but storing it failed: ',
       )
@@ -474,6 +498,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   const commitTheme = async (value: string): Promise<SettingsWorkspaceCommitOutcome> => {
     const settings = runner.tuiSettings
+    // See commitDisplayPreset: the base value decides whether a rejection can be
+    // attributed to THIS request.
+    const base = persistedValueOf('theme')
     if (settings === undefined) {
       return { outcome: 'not-saved', reason: 'no authoritative TUI settings document is available in this deployment' }
     }
@@ -497,11 +524,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       // For `auto`, starting the detection IS the apply. Drop the plugin-theme
       // record FIRST: the unload fallback of a theme the user has left must never
       // force dark and stop the terminal tracking over the stored `auto`.
-      latestThemeChoice = value
+      app.noteThemeSelection(value)
       app.clearActivePluginTheme()
       app.trackTerminalTheme(true)
       detach('theme autodetect', () => app.autoDetectTheme({
-        shouldApply: () => latestThemeChoice === 'auto',
+        shouldApply: () => app.themeFollowsTerminal(),
       }))
     } else {
       try {
@@ -530,7 +557,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         return { outcome: 'not-saved', reason: `the palette could not be applied: ${safeErrorMessage(error)}` }
       }
       // The runtime really changed: only now does this choice own the query guard.
-      latestThemeChoice = value
+      app.noteThemeSelection(value)
     }
     try {
       await serializeTuiSettingsMutation(settings, async () => {
@@ -539,7 +566,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     } catch (error) {
       // The plan's failure wording is `Not saved · <the actual failure>`; a theme is a
       // Host-persisted preference with no separate local fact to name.
-      return classifyRejectedWrite('theme', value, safeErrorMessage(error), '')
+      return classifyRejectedWrite('theme', value, base, safeErrorMessage(error), '')
     }
     return verifyCommittedField('theme', value)
   }
@@ -1158,6 +1185,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                     ), { notify: true })
                   }
                   lastThemeChoice = qualified
+                  // The runtime owner's shared intent: a boot/reload detection or a live
+                  // scheme report must not colour over this choice either.
+                  app.noteThemeSelection(qualified)
                   revert(themeDisplayNameOf(qualified, runner.extensions?.themes))
                 }
                 // FAILURE only: restore the PREVIOUS choice's friendly

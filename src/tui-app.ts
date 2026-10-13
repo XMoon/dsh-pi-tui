@@ -20877,6 +20877,28 @@ export class TuiApp {
     return requestClose
   }
 
+  /**
+   * The latest DELIBERATE theme selection — `auto` or an explicit selectable value.
+   * It answers exactly ONE question: may a pending terminal detection or a live scheme
+   * report still colour the surface? It is never a persistence truth, and the runtime
+   * owner keeps it because the persisted document lags a just-confirmed choice whose
+   * write is still in flight. Every SELECTION site records it (the boot restore, the
+   * legacy `/settings` theme row, the Settings workspace, the reload re-apply and the
+   * advanced host-state `setTheme`); DERIVED applies never do (a detection's own answer,
+   * a scheme report, the plugin-unload fallback).
+   */
+  private themeIntent: string | undefined
+
+  /** Record one deliberate theme selection (see {@link themeFollowsTerminal}). */
+  noteThemeSelection(value: string): void {
+    this.themeIntent = value
+  }
+
+  /** Whether the latest deliberate selection still follows the terminal (`auto`). */
+  themeFollowsTerminal(): boolean {
+    return this.themeIntent === 'auto'
+  }
+
   /** Push the runtime facts of an open Settings workspace back through its pull
    *  projection: the Detail's `Runtime` row is the LIVE fact, so it must follow every
    *  runtime change — including one the workspace's own pending commit applied before
@@ -21028,6 +21050,10 @@ export class TuiApp {
     // issued: after a Main↔Fullscreen switch its result is about a screen the
     // user is no longer looking at, so it must not colour the new one.
     if (this.activeScreen !== screen) return
+    // A newer DELIBERATE selection owns the surface: the runtime owner's intent
+    // outranks this answer whatever guard the caller passed, because the persisted
+    // document can still read `auto` while an explicit choice's write is in flight.
+    if (!this.themeFollowsTerminal()) return
     const guard = this.autoDetectGuard
     const apply = (): boolean => guard === undefined || guard()
     const rgb = background

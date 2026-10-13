@@ -1091,6 +1091,20 @@ export class SettingsWorkspacePanel implements Component {
   rereadFacts(): void {
     if (this.disposed) return
     this.snapshot = this.source.readSnapshot()
+    // A live candidate source can change UNDER an open choice (a contribution
+    // unloading re-numbers the rows). The chosen candidate is an IDENTITY, so the
+    // phase is re-anchored on its VALUE: the highlight and the confirm keep naming the
+    // same candidate, and a candidate whose source is gone drops the choice instead of
+    // painting a confirm that can no longer dispatch it.
+    const phase = this.editPhase
+    if (phase.kind === 'choosing') {
+      const options = this.snapshot.rows.find(row => row.edit?.field === phase.field)?.edit?.options ?? []
+      const index = options.findIndex(option => option.value === phase.candidate)
+      if (index < 0) this.editPhase = { kind: 'browsing' }
+      else if (index !== phase.index) {
+        this.editPhase = { kind: 'choosing', field: phase.field, candidate: phase.candidate, index }
+      }
+    }
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -1361,7 +1375,15 @@ export class SettingsWorkspacePanel implements Component {
     const edit = this.selectedRow()?.edit
     if (phase.kind !== 'choosing' || edit === undefined || edit.field !== phase.field) return
     const option = edit.options.find(candidate => candidate.value === phase.candidate)
-    if (option === undefined) return
+    if (option === undefined) {
+      // The source vanished between the paint and the confirm: report it instead of
+      // returning silently (a painted button that does nothing is a false affordance).
+      this.settle(phase.field, phase.candidate, {
+        outcome: 'not-saved',
+        reason: 'the selected source is no longer available',
+      })
+      return
+    }
     if (!option.available) {
       this.settle(phase.field, phase.candidate, { outcome: 'not-saved', reason: 'the selected source is no longer available' })
       return

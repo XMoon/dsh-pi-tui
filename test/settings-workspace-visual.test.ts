@@ -1789,7 +1789,7 @@ test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and
   h.dispose()
 })
 
-test('B-11 a write the authority did not really accept is Commit accepted · verification unavailable, never Verified', async () => {
+test('B-11 a write the authority readably disagrees with is Not saved, never Verified and never "verification unavailable"', async () => {
   // The document call RESOLVES (the Host accepted the request) but the stored
   // value never becomes the requested one — the one shape where "the write
   // returned" must not be reported as saved.
@@ -1813,7 +1813,10 @@ test('B-11 a write the authority did not really accept is Commit accepted · ver
 
   assert.equal(h.replacements(), 1)
   assert.equal(h.doc.theme, 'dark', 'the document really still holds the old value')
-  assert.match(h.view(), /Commit accepted · verification unavailable · the authoritative document reads dark/)
+  // The write RETURNED SUCCESS and the authority READABLY disagrees: the value is not
+  // stored, so it is a failure — "verification unavailable" would claim the readback
+  // could not be performed, which is false here.
+  assert.match(h.view(), /Not saved · the write reported success, but the authoritative document reads dark/)
   assert.ok(!h.view().includes('Verified'), 'an unconfirmed value is never Verified')
   assert.match(h.view(), /\[Retry save\]/, 'and the row offers the explicit retry')
   h.dispose()
@@ -2283,5 +2286,60 @@ test('B-24 a refused write whose value an external writer already set is neither
   assert.doesNotMatch(frame, /Not saved · (settings|the)/, 'and it is not presented as a refusal either')
   assert.match(frame, /already reads light/, 'the reachable fact (the authority matches) is reported')
   assert.ok(h.view().includes('[Retry save]'), 'a retry stays available')
+  h.dispose()
+})
+
+test('B-25 a contribution unloading under an open choice re-anchors the highlight on the chosen candidate', async () => {
+  const themes = new ThemeRegistry()
+  themes.register({ id: 'aaa', name: 'Alpha', palette: darkColors }, 'acme-owner', 'acme')
+  themes.register({ id: 'zzz', name: 'Zeta', palette: darkColors }, 'acme-owner', 'acme')
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const zetaRow = rowOf(h, 'Zeta')
+  press(h, zetaRow, cellIndexOf(h, zetaRow, 'Zeta'))
+  release(h, zetaRow, cellIndexOf(h, zetaRow, 'Zeta'))
+  await settle(h)
+  assert.ok(h.view().includes('> Zeta'), 'Zeta is highlighted')
+
+  // Alpha (which precedes Zeta in the list) unloads: every later candidate re-numbers,
+  // and the runtime owner refreshes the open workspace's facts.
+  themes.dispose('aaa')
+  h.app.clearActivePluginTheme()
+  await settle(h)
+
+  const frame = h.view()
+  assert.ok(frame.includes('> Zeta'), `the highlight still names the chosen candidate:\n${frame}`)
+  assert.ok(!frame.includes('Alpha'), 'and the unloaded candidate is gone from the list')
+  const confirm = rowOf(h, '[Confirm]')
+  press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+  await settle(h)
+  assert.equal(h.doc.theme, 'plugin:acme/zzz',
+    'the CONFIRM dispatches the candidate the user still sees highlighted')
+  assert.match(h.view(), /Status\s+Verified/)
+  h.dispose()
+})
+
+test('B-26 a choice whose candidate source vanished is dropped instead of offering a dead confirm', async () => {
+  const themes = new ThemeRegistry()
+  const handle = themes.register({ id: 'gone', name: 'Gone', palette: darkColors }, 'acme-owner', 'acme')
+  themes.register({ id: 'stay', name: 'Stay', palette: darkColors }, 'acme-owner', 'acme')
+  const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const goneRow = rowOf(h, 'Gone')
+  press(h, goneRow, cellIndexOf(h, goneRow, 'Gone'))
+  release(h, goneRow, cellIndexOf(h, goneRow, 'Gone'))
+  await settle(h)
+  assert.ok(h.view().includes('> Gone'))
+
+  handle.dispose()
+  h.app.clearActivePluginTheme()
+  await settle(h)
+
+  assert.ok(!h.view().includes('[Confirm]'), `the dead choice is retired:\n${h.view()}`)
+  assert.match(h.view(), /SETTINGS · Appearance \/ Configured theme/, 'and the browse detail is shown again')
+  assert.equal(h.replacements(), 0, 'nothing was written for the vanished candidate')
   h.dispose()
 })
