@@ -214,10 +214,7 @@ test('A0 fullscreen seat preflight: the Preview drag copies the exact original s
     `the seat must keep the keyboard after a pointer gesture:\n${view(h.vt)}`)
 })
 
-test('A0 fullscreen seat preflight: the pressed result identity survives an async repaint', async () => {
-  // press A → the search commits a DIFFERENT row into the same painted cells →
-  // release must not transfer the selection (the hit map is last-painted
-  // geometry and the pressed ID is the identity).
+test('A0 fullscreen seat preflight: a release after a resize never accepts (last-painted geometry fence)', async () => {
   const h = startApp([row('result A', 1, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
   const rowA = rowOf(h.vt, 'result A')
@@ -233,6 +230,38 @@ test('A0 fullscreen seat preflight: the pressed result identity survives an asyn
   await h.vt.waitForRender()
   await flush(2)
   assert.equal(h.app.getDraft(), '', 'a release across a resize must never accept')
+  assert.ok(rowOf(h.vt, 'Input history') >= 0, 'the seat stays open (no action fired)')
+})
+
+test('A0 fullscreen seat preflight: a result press resolves by ID, and a page that moved under it never transfers the selection', async () => {
+  // press A → an async search replaces the page so the PRESSED CELL now holds B
+  // (A moved to another row and stays selected by its stable id) → release+click
+  // must not move the selection to B, and must not accept anything.
+  const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a'), row('extra prompt', 2, '/work/a', 'id-x')])
+  await openFullscreenHistory(h)
+  const pressedRow = rowOf(h.vt, 'alpha prompt')
+  assert.ok(pressedRow >= 0, `alpha must paint:\n${view(h.vt)}`)
+  press(h.vt, pressedRow, 4)
+  await h.vt.waitForRender()
+  assert.ok(rawView(h.vt).some(line => line.includes('›') && line.includes('alpha prompt')),
+    'the press selects the pressed result')
+  // The page is REPLACED: BETA takes the pressed cells, alpha moves below it.
+  h.rows.length = 0
+  h.rows.push(row('BETA prompt', 9, '/work/a', 'id-b'), row('alpha prompt', 1, '/work/a', 'id-a'))
+  await research(h)
+  const betaRow = rowOf(h.vt, 'BETA prompt')
+  const alphaRow = rowOf(h.vt, 'alpha prompt')
+  assert.ok(betaRow >= 0 && alphaRow >= 0 && alphaRow > betaRow,
+    `the replacement page must paint BETA above alpha:\n${view(h.vt)}`)
+  const marker = (): string => rawView(h.vt).find(line => line.includes('›')) ?? ''
+  assert.ok(marker().includes('alpha prompt'), 'the stable id keeps the pressed result selected')
+  // release + the synthesized click land on the SAME painted cell, now BETA.
+  release(h.vt, betaRow, 4)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(marker().includes('alpha prompt'),
+    `the click must not transfer the selection to whatever moved into the pressed cell:\n${view(h.vt)}`)
+  assert.equal(h.app.getDraft(), '', 'a result click never accepts')
 })
 
 test('A0 negative: the regular main screen has NO application mouse (no SGR enable, no pointer actions)', async () => {

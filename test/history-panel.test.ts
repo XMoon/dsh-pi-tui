@@ -683,3 +683,137 @@ test('H3A-09: a Preview drag that leaves the painted region never extends the se
   assert.deepEqual(copied, ['abc\ndef'],
     'the selection is bounded by the last real Preview point, never the list underneath')
 })
+
+test('currentness: a stale subject never acts, never publishes and retires through the host close path', async () => {
+  const source = new FakeSource()
+  source.manual = true
+  let current = true
+  const { panel, accepted, closed } = makePanel(source, {
+    pointerEnabled: () => true,
+    tenantIsCurrent: () => current,
+  })
+  panel.start() // search #1 stays pending
+  current = false // the captured session moved while it is in flight
+  source.resolveNext([row('previous session row', 1, '/a', 'previous')])
+  await flushMicrotasks()
+  assert.equal(panel.selected(), undefined, 'a previous-subject page is never published')
+  assert.equal(closed(), 1, 'the stale seat retires through the ONE host close path')
+})
+
+test('currentness: the pointer and acceptance entries refuse a stale subject', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/a', 'id-a')]
+  let current = true
+  const { panel, accepted, copied, closed } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    tenantIsCurrent: () => current,
+  })
+  panel.start()
+  await settle()
+  const painted = plain(panel.render(100))
+  const height = painted.length
+  const contentRow = painted.findIndex(line => line.includes('Preview ')) + 1
+  const event = (type: 'press' | 'release', x: number, y: number): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+    type, button: 'left', x, y, screenX: x, screenY: y, width: 100, height,
+    shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(panel.canAccept(), true, 'the live subject may accept')
+  current = false
+  assert.equal(panel.canAccept(), false, 'a stale subject may not accept')
+  panel.handleInput('\r')
+  assert.equal(accepted(), undefined, 'a stale Enter is inert')
+  panel.handleInput('\x1bc') // Alt+C
+  assert.deepEqual(copied, [], 'a stale Copy All copies nothing')
+  assert.equal(panel.handleMouse(event('press', 4, contentRow)), undefined,
+    'the pointer entry refuses a stale subject')
+  assert.equal(closed(), 0, 'refusing an action never closes the panel by itself')
+})
+
+test('pointer: a release outside the painted rows ends the gesture instead of leaving a stale anchor', async () => {
+  const source = new FakeSource()
+  source.rows = [row('abc\ndef', 1, '/a', 'p')]
+  const copied: string[] = []
+  const { panel } = makePanel(source, {
+    geometry: seatGeometry(100, 30, 2),
+    pointerEnabled: () => true,
+    onCopy: (text) => copied.push(text),
+  })
+  panel.start()
+  await settle()
+  const painted = plain(panel.render(100))
+  const height = painted.length
+  const contentRow = painted.findIndex(line => line.includes('Preview ')) + 1
+  const event = (
+    type: 'press' | 'drag' | 'release',
+    x: number,
+    y: number,
+  ): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+    type, button: 'left', x, y, screenX: x, screenY: y, width: 100, height,
+    shift: false, alt: false, ctrl: false,
+  })
+  panel.handleMouse(event('press', 0, contentRow))
+  panel.handleMouse(event('drag', 2, contentRow + 1))
+  // The release lands OUTSIDE the painted rows: it must still end the gesture.
+  panel.handleMouse(event('release', 2, height + 5))
+  assert.deepEqual(copied, ['abc\ndef'], 'the out-of-frame release copies the last valid range')
+  // A motion-only drag can no longer extend the finished gesture…
+  copied.length = 0
+  panel.handleMouse(event('drag', 3, contentRow))
+  assert.deepEqual(copied, [], 'a motion-only drag after the release copies nothing')
+  // …and a later release cannot resurrect it either.
+  panel.handleMouse(event('release', 3, contentRow))
+  assert.deepEqual(copied, [], 'a later release of the finished gesture copies nothing')
+  // …and the next REAL press+drag still works (row 0 col 0 → row 1 col 0).
+  panel.handleMouse(event('press', 0, contentRow))
+  panel.handleMouse(event('drag', 0, contentRow + 1))
+  panel.handleMouse(event('release', 0, contentRow + 1))
+  assert.deepEqual(copied, ['abc\nd'], 'a fresh gesture still copies its own range')
+})
+
+test('pointer: a repaint-free page replacement neither transfers the selection nor moves it on a press', async () => {
+  const source = new FakeSource()
+  source.manual = true
+  const { panel } = makePanel(source, { pointerEnabled: () => true })
+  panel.start()
+  source.resolveNext([row('alpha prompt', 2, '/a', 'id-a'), row('extra prompt', 1, '/a', 'id-x')])
+  await flushMicrotasks()
+  const painted = plain(panel.render(100))
+  const pressedRow = painted.findIndex(line => line.includes('alpha prompt'))
+  const height = painted.length
+  assert.ok(pressedRow >= 0, `alpha must paint:\n${painted.join('\n')}`)
+  const event = (type: 'press' | 'click', x: number, y: number): import('@xmoon76/pi-tui').TuiMouseEvent => ({
+    type, button: 'left', x, y, screenX: x, screenY: y, width: 100, height,
+    shift: false, alt: false, ctrl: false,
+  })
+  panel.handleMouse(event('press', 4, pressedRow))
+  assert.equal(panel.selected()?.id, 'id-a', 'the press selects the pressed ID')
+
+  // The page is replaced WITHOUT a repaint: the painted cell now holds BETA and
+  // the hit map still names alpha.
+  panel.handleInput('x')
+  await settle()
+  source.resolveNext([row('BETA prompt', 9, '/a', 'id-b'), row('alpha prompt', 2, '/a', 'id-a')])
+  await flushMicrotasks()
+  assert.equal(panel.selected()?.id, 'id-a', 'the stable ID survives the replacement')
+  // The synthesized click resolves against the LAST PAINTED cell, which still
+  // names alpha… but the CURRENT page moved BETA there, so the click must not
+  // select BETA.
+  panel.handleMouse(event('click', 4, pressedRow))
+  assert.equal(panel.selected()?.id, 'id-a', 'a click never selects whatever the current page has at the pressed cell')
+
+  // A press on a cell whose painted ID no longer exists is REJECTED outright:
+  // paint the page that still contains alpha, then let a commit DROP alpha
+  // without repainting.
+  const frame = plain(panel.render(100))
+  const staleRow = frame.findIndex(line => line.includes('alpha prompt'))
+  assert.ok(staleRow >= 0, `the frame must still show alpha:\n${frame.join('\n')}`)
+  panel.handleInput('x')
+  await settle()
+  source.resolveNext([row('BETA prompt', 9, '/a', 'id-b')])
+  await flushMicrotasks()
+  assert.equal(panel.selected()?.id, 'id-b', 'the commit itself moved the selection to the surviving page')
+  assert.equal(panel.handleMouse(event('press', 4, staleRow)), undefined,
+    'a press on a row whose id no longer exists is rejected')
+  assert.equal(panel.selected()?.id, 'id-b', 'the rejected press never re-selects from the stale hit map')
+})

@@ -2151,11 +2151,23 @@ the seat shows the History surface.
   cursor, input mode and pending paste content exactly as they were; those two
   keys are consumed by History while it is the active seat tenant, so closing it
   can never interrupt the agent or quit the TUI.
+- **Currentness at every ACTING entry.** The host's `isCurrent()` (same panel +
+  same optional-seat record + unchanged surface generation + the live session
+  identity still equal to the one captured at open) is injected into the panel as
+  `tenantIsCurrent` and evaluated at the pointer entry (the fork dispatches mouse
+  events outside the Host key ladder, so nothing else would notice a session
+  change first), at the acceptance/copy eligibility checks and at the async search
+  commit — a page that was in flight for a previous session is never published and
+  retires the seat through the same close path Esc uses. An IDLE stale seat is
+  still retired by the host's next revalidation entry; treating the session-switch
+  publication itself as a revalidation entry is deliberately NOT done here (it
+  would extend the Phase-3A revalidation seam and let UI teardown failure propagate
+  into the session commit).
 - **Still later.** B3-B owns the full production Question/Approval FIFO
-  PARK/restore, session-replacement generation/ABA protection across async
-  queries and acceptance, and the L6 integration closure. B3-A ships the basic
-  park/restore, the live-subject `isCurrent()` fence and the refusal path; it is
-  not Gate-3B closure.
+  PARK/restore, the switch-time retirement/authoritative session generation and
+  ABA protection across async queries and acceptance, and the L6 integration
+  closure. B3-A ships the basic park/restore, the live-subject `isCurrent()` fence
+  at every acting entry and the refusal path; it is not Gate-3B closure.
 
 ## Task Browser Host-text terminal-safety boundary
 

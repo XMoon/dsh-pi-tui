@@ -250,6 +250,17 @@ export interface HistoryPanelOptions {
   initialQuery?: string
   /** Whether the pointer capability is live (Transcript Fullscreen only). */
   pointerEnabled?: () => boolean
+  /**
+   * Whether this panel's CAPTURED subject is still current (the host's tenant
+   * `isCurrent()`: the same panel is still the live History tenant, the surface
+   * generation is unchanged and the live session identity still equals the one
+   * captured at open). Evaluated at every ACTING entry — a pointer event, an
+   * acceptance/copy eligibility check and an async search commit — because the
+   * fork dispatches pointer events without passing the Host key ladder, so
+   * nothing else would notice a session change before the next revalidation
+   * entry retires this tenant. Defaults to `true` (a caller with no subject).
+   */
+  tenantIsCurrent?: () => boolean
   /** Start in the F2-expanded presentation (default normal). */
   expanded?: boolean
 }
@@ -378,6 +389,7 @@ export class HistoryPanel implements Component, Focusable {
   private readonly onCopy: ((text: string) => void) | undefined
   private readonly geometry: HistorySeatGeometry
   private readonly pointerEnabled: () => boolean
+  private readonly tenantIsCurrent: () => boolean
   private readonly debounceMs: number
   private expanded: boolean
   private _focused = false
@@ -413,6 +425,7 @@ export class HistoryPanel implements Component, Focusable {
       chromeRows: () => 0,
     }
     this.pointerEnabled = options.pointerEnabled ?? (() => false)
+    this.tenantIsCurrent = options.tenantIsCurrent ?? (() => true)
     this.expanded = options.expanded ?? false
     this.debounceMs = options.debounceMs ?? HISTORY_SEARCH_DEBOUNCE_MS
     this.input = new Input()
@@ -482,6 +495,7 @@ export class HistoryPanel implements Component, Focusable {
    */
   canAccept(): boolean {
     if (this.disposed || this.state.loading || this.state.error !== undefined) return false
+    if (!this.tenantIsCurrent()) return false
     if (!this.plan(this.lastWidth()).acceptEnabled) return false
     const selected = this.selected()
     if (selected === undefined) return false
@@ -551,13 +565,41 @@ export class HistoryPanel implements Component, Focusable {
    * pointer.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    if (this.disposed || !this.pointerEnabled()) return undefined
+    // The pointer path never passes the Host key ladder, so THIS is the entry
+    // that must guard the live tenant identity (the captured session subject):
+    // a click must never act on another session's page, and the fork keeps
+    // dispatching to the component until the next revalidation retires it.
+    if (this.disposed || !this.pointerEnabled() || !this.tenantIsCurrent()) return undefined
     const frame = this.frame
     // Last-painted geometry only: a resize that has not been repainted (or a
     // frame from another root) must never dispatch against stale coordinates.
     if (frame === undefined || event.width !== frame.width || event.height !== frame.height) return undefined
 
     if (event.type === 'wheel') return this.handleWheel(event, frame)
+
+    // A DRAG release is resolved BEFORE the hit lookup: a release that lands
+    // outside the painted rows must still END the gesture, or a stale preview
+    // anchor would stay live for a later motion-only drag to extend.
+    if (event.type === 'release') {
+      const gesture = this.gesture
+      // Any other gesture is resolved by the `click` the fork synthesizes right
+      // after this release for an unmoved press, and THAT handler re-proves the
+      // pressed action/identity.
+      if (gesture?.kind !== 'preview') return undefined
+      this.gesture = undefined
+      // Capture the payload SYNCHRONOUSLY from the range the gesture selected:
+      // the async clipboard settlement downstream never recomputes it. The
+      // highlight SURVIVES the release (a new press or a selection change clears
+      // it), exactly like the Job Command page.
+      const range = this.previewSelectionRange()
+      this.onResultsChanged?.()
+      if (range === undefined) return { handled: true }
+      const content = this.selected()?.content ?? ''
+      const text = content.slice(range.start, range.end)
+      if (text === '') return { handled: true }
+      this.onCopy?.(text)
+      return { handled: true, render: true }
+    }
 
     const hit = frame.hits[event.y]
     if (hit === undefined) return undefined
@@ -611,28 +653,6 @@ export class HistoryPanel implements Component, Focusable {
       this.previewFocus = { row: hit.row, col: Math.max(0, event.x) }
       this.onResultsChanged?.()
       return { handled: true, capture: true, render: true }
-    }
-
-    if (event.type === 'release') {
-      const gesture = this.gesture
-      // A NON-drag gesture is resolved by the `click` the fork synthesizes right
-      // after this release for an unmoved press, and THAT handler re-proves the
-      // pressed action/identity. (A moved release leaves the gesture behind,
-      // where the next press overwrites it.)
-      if (gesture?.kind !== 'preview') return undefined
-      this.gesture = undefined
-      // Capture the payload SYNCHRONOUSLY from the range the gesture selected:
-      // the async clipboard settlement downstream never recomputes it. The
-      // highlight SURVIVES the release (a new press or a selection change clears
-      // it), exactly like the Job Command page.
-      const range = this.previewSelectionRange()
-      this.onResultsChanged?.()
-      if (range === undefined) return { handled: true }
-      const content = this.selected()?.content ?? ''
-      const text = content.slice(range.start, range.end)
-      if (text === '') return { handled: true }
-      this.onCopy?.(text)
-      return { handled: true, render: true }
     }
 
     if (event.type === 'click') {
@@ -1145,10 +1165,25 @@ export class HistoryPanel implements Component, Focusable {
   /** Copy All may run while a query is still settling (it copies the row the
    *  user can see), but never for an unpainted or stale selection. */
   private canAcceptCopy(): boolean {
-    if (this.disposed || this.state.error !== undefined) return false
+    if (this.disposed || this.state.error !== undefined || !this.tenantIsCurrent()) return false
     const selected = this.selected()
     if (selected === undefined) return false
     return this.frame?.paintedResultIds.has(selected.id) === true
+  }
+
+  /**
+   * Retire this panel because its captured subject is no longer current. The
+   * page in flight (or already painted) belongs to a previous session, so it is
+   * neither published nor acted on; the teardown rides the host's ONE close path
+   * (the same one Esc uses). An IDLE stale seat is still retired by the host's
+   * next revalidation entry — interpreting the session-switch publication itself
+   * as a revalidation entry, and the authoritative switch generation / no-ABA
+   * coupling, stay in B3-B.
+   */
+  private retireStale(): void {
+    this.state.loading = false
+    if (this.disposed) return
+    this.onClose()
   }
 
   private scheduleSearch(): void {
@@ -1199,6 +1234,7 @@ export class HistoryPanel implements Component, Focusable {
       // source must not paint "History unavailable" into a panel that no longer
       // owns this query.
       if (generation !== this.state.generation || controller.signal.aborted) return
+      if (!this.tenantIsCurrent()) return this.retireStale()
       this.state.loading = false
       this.state.error = 'History unavailable'
       this.state.results = []
@@ -1207,6 +1243,10 @@ export class HistoryPanel implements Component, Focusable {
       return
     }
     if (generation !== this.state.generation || controller.signal.aborted) return
+    // The result page belongs to the session captured at open: a subject that
+    // moved while this search was in flight must never publish another
+    // session's rows into the visible History.
+    if (!this.tenantIsCurrent()) return this.retireStale()
     // The stable ID survives a recompute when it is still in the new page; the
     // first valid match is the fallback.
     const previous = this.selected()?.id

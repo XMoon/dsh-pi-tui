@@ -48,6 +48,7 @@ async function makeApp(
   home: string,
   cwd = '/work/a',
   copyImpl?: (text: string) => Promise<boolean>,
+  sourceImpl?: import('../src/client/history/search.ts').HistorySearchSource,
 ) {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -71,7 +72,7 @@ async function makeApp(
         .then(result => options.onResult?.(result), error => options.onError?.(error))
     },
   }, {
-    historySearchSource: new FileHistorySearchSource({ dshHome: home }),
+    historySearchSource: sourceImpl ?? new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => cwd,
     copySelection,
   })
@@ -500,4 +501,74 @@ test('H3A-10: Esc preserves a pending paste marker in the draft byte for byte', 
   await vt.waitForRender()
   assert.equal(app.getDraft(), draft, 'the paste marker survives a History round trip')
   assert.deepEqual(submitted, [], 'cancelling never submits the expanded paste')
+})
+
+test('currentness: a copy settling while the seat is PARKED notifies nothing', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const notices: string[] = []
+  let release: ((ok: boolean) => void) | undefined
+  const deferred = new Promise<boolean>((resolve) => { release = resolve })
+  const { vt, app } = await makeApp(life, home, '/work/a', () => deferred)
+  const originalNotify = app.notify.bind(app)
+  app.notify = (text: string, kind?: 'info' | 'error'): void => {
+    notices.push(text)
+    originalNotify(text, kind)
+  }
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  vt.sendInput('\x1bc') // Alt+C: the payload is captured, the clipboard write is pending
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'park during the copy?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()), 'the Question parks (and hides) the History seat')
+  release?.(true)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.deepEqual(notices, [], 'a copy that settles while the seat is PARKED is not visible feedback')
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  await question
+  await vt.waitForRender()
+  assert.ok(panelVisible(vt.getViewport()), 'the parked seat is restored for the SAME tenant')
+})
+
+test('currentness: a session switch while a search is in flight never publishes the old session page', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  let resolveSearch: ((page: import('../src/client/history/search.ts').HistorySearchPage) => void) | undefined
+  const pending = new Promise<import('../src/client/history/search.ts').HistorySearchPage>((resolve) => {
+    resolveSearch = resolve
+  })
+  const source: import('../src/client/history/search.ts').HistorySearchSource = { search: () => pending }
+  let liveSessionId: string | undefined = 'ses_a'
+  const { VirtualTerminal } = await import('./virtual-terminal.ts')
+  const { TuiApp } = await import('../src/tui-app.ts')
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    historySearchSource: source,
+    historySearchCwd: () => '/work/a',
+    historySearchSessionId: () => liveSessionId,
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  await vt.waitForRender()
+  vt.sendInput('\x12') // Ctrl+R: the captured subject is ses_a
+  await vt.waitForRender()
+  assert.ok(panelVisible(vt.getViewport()), 'the seat is open while its search is in flight')
+  // The session is replaced BEFORE the search settles.
+  liveSessionId = 'ses_b'
+  resolveSearch?.({ results: [{ id: 'old', content: 'previous session row', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }], exhausted: true })
+  await vt.waitForRender()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await vt.waitForRender()
+  assert.ok(!strip(vt.getViewport()).includes('previous session row'),
+    'a page resolved for the previous session is never published')
+  assert.ok(!panelVisible(vt.getViewport()),
+    'the stale seat retires through the host close path instead of staying visibly stale')
+  // The lease was really released: a fresh Ctrl+R captures the NEW session.
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  assert.ok(panelVisible(vt.getViewport()), 'a fresh seat opens for the new session')
 })
