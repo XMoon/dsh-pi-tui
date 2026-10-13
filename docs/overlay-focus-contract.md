@@ -466,9 +466,11 @@ same screen are untouched.
 
 ### 10.3 Settings workspace: a second, mutually exclusive screen lease
 
-`/settings` (Phase 3B / B2-A) opens a readonly fullscreen Settings workspace
-with the same temporary physical-screen lease as the Job workspace, and the two
-leases are MUTUALLY EXCLUSIVE.
+`/settings` (Phase 3B / B2-A, extended by B2-B) opens a fullscreen Settings
+workspace with the same temporary physical-screen lease as the Job workspace, and
+the two leases are MUTUALLY EXCLUSIVE. B2-A made the whole surface a read
+projection; B2-B gave exactly two of its rows (`Configured theme`,
+`Transcript display`) a write channel and left every other row read-only.
 
 - **One lease latch for both workspaces.** `TuiApp.openSettingsWorkspace` mints a
   short-lived `TuiAltScreen` whose layout root and keyboard focus target is the
@@ -519,6 +521,28 @@ leases are MUTUALLY EXCLUSIVE.
   plain click can never put a character on the clipboard). The Action Bar
   advertises only the keys the current level and row grant actually honour: below
   the body floor it shows the Esc/back semantics alone.
+- **The L2 edit phase is a transient phase of the SAME lease (B2-B).** On the two
+  writable rows, `Enter`/`[Change…]` opens an in-pane candidate choice and
+  `Esc`/`[Cancel]` cancels it with zero writes; the choice is presentation state
+  inside the panel, never a fourth navigation level, a second screen or a second
+  focus owner. The choice heading is pinned and only the candidates scroll, the
+  candidate identity is the source-qualified value, and one candidate whose source
+  is gone is listed as unavailable and refused. At most ONE commit is in flight
+  per open: while a write is pending the edit/retry verbs are not painted and no
+  second confirm can be started (no unbounded queue, no background watcher), and
+  `Esc` still steps back or closes. A settlement is fenced twice — the app's
+  `settingsWorkspace === record` check and the panel's own request identity — so a
+  commit that lands after the user left the workspace, or after a retry superseded
+  it, can never repaint, notify or address a replacement workspace. Closing does
+  NOT cancel an already dispatched Host write: it still completes under its runner
+  owner and its real failure stays diagnosable.
+- **Write currentness is explicit, never inferred from the UI (B2-B).** A commit
+  only counts as `Verified` on a completed `ConfigPort.tuiSettings` mutation plus
+  an authoritative re-read that agrees with a `configReadiness() === 'ready'`
+  backend. A non-ready backend refuses the theme commit before it applies
+  anything; a display commit may apply the Client-local runtime fact and then
+  reports that it could not be stored. The Detail names the runtime and the
+  persisted fact separately, and the panel keeps no second truth store.
 - **The Detail projection is ambiguity-free.** Terminal sequences and unknown
   controls are stripped at the display boundary, but CR/LF/TAB render as visible
   `\n`/`\r`/`\t`, other controls as `\xNN`, and a literal backslash as `\\` — two
@@ -535,9 +559,13 @@ leases are MUTUALLY EXCLUSIVE.
   failed legacy open reports the real error on the restored surface and never
   resurrects the closed workspace.
 - **Read projection, not a second store.** The panel holds no ConfigPort and no
-  subscription: the `/settings` command assembles a detached readonly snapshot at
-  open and at the explicit `R` refresh, and the panel renders it. Copy captures the
-  row's exact source value synchronously and the app's settlement re-proves THIS
+  subscription: the `/settings` command assembles a detached snapshot at open and
+  at the explicit `R` refresh, and the panel renders it. Its only write verb hands
+  ONE explicit `{ field, value }` request to the command-owned channel, which runs
+  it on the existing serialized whole-document path and re-reads the authority; the
+  panel keeps just the transient choice/pending/settled presentation and drops any
+  settlement that does not match its live request identity. Copy captures the row's
+  exact source value synchronously and the app's settlement re-proves THIS
   workspace record before it may notify, so a late clipboard result can neither
   repaint nor address a replacement workspace.
 

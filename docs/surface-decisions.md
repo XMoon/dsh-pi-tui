@@ -1953,12 +1953,13 @@ No Job fact is invented: the chrome renders only the fields
 the SAME `chromeText()` control-sequence boundary BEFORE the theme styling is
 applied, exactly as the B1-C section above records.
 
-## The Settings workspace is a read-only fullscreen projection (B2-A)
+## The Settings workspace: a three-level projection whose Theme and Display rows are editable (B2-A → B2-B)
 
-`/settings` now opens a dedicated fullscreen Settings workspace instead of a
-72×28 `SettingsList` overlay. The workspace is a read projection: category /
-row / detail navigation over a detached snapshot, with no configuration write
-of any kind.
+`/settings` opens a dedicated fullscreen Settings workspace instead of a
+72×28 `SettingsList` overlay. The workspace is a read projection of category /
+row / detail navigation over a detached snapshot; since B2-B, exactly TWO of its
+rows (`Configured theme`, `Transcript display`) also own a real write channel,
+and nothing else does.
 
 - **Post-B2-A navigation decision: three levels, not focus owners.** The
   workspace always has exactly three levels — L0 `categories`, L1 `rows`, L2
@@ -1988,36 +1989,87 @@ of any kind.
   a fabricated default. The theme row's `value` is the source-qualified
   configured identity (`plugin:…`/`file:…`) and its summary is the friendly
   display name — the raw identity is what `C` copies. The header is a pure level
-  breadcrumb (`Categories` / `<Category> · Rows` / `<Category> / <Row>`) with a
-  read-only marker; it paints no interactive cell.
-- **Browse never writes.** Rows carry no `Apply`/`Save`/draft, and the Detail
-  states that it is a read-only preview edited through `Other settings`.
-  `R` re-reads the same authorities without creating a polling subscription or
-  a shadow store.
+  breadcrumb (`Categories` / `<Category> · Rows` / `<Category> / <Row>`) plus an
+  `N editable rows` badge at 76+ columns; it paints no interactive cell.
+- **Browse never writes.** Navigation, `R` (re-read the same authorities, no
+  subscription and no shadow store) and the `C` copy verb never touch the
+  configuration document. A row without a write channel says so
+  (`read-only here · Other settings edits this row`) and paints no edit verb.
+- **The L2 edit phase is transient, not a fourth level.** On the two writable
+  rows, `Enter` (or the painted `[Change…]`) opens an in-pane choice: `↑`/`↓`/
+  `Pg`/`Home`/`End` move a candidate, `Enter`/`[Confirm]` confirms it, `Esc`/
+  `[Cancel]` cancels with ZERO writes. Only an explicit confirm dispatches, and a
+  candidate whose source is gone (an unloaded `plugin:` theme) is listed as
+  `unavailable` and refused at confirm and at retry. The choice heading is pinned
+  so the field being changed stays named and the candidates alone scroll; the
+  candidate IDENTITY is the source-qualified value, never the label. One commit at
+  a time: while a write is pending the edit verbs are not painted, and the panel
+  holds exactly one request identity, so a superseded or post-close settlement can
+  never repaint.
+- **Runtime and persisted are two facts, always drawn apart.** A writable row's
+  Detail names the live runtime fact (`Runtime` for the theme palette —
+  `app.currentTheme()`/`app.activePluginTheme()`, never the configured value) and
+  the stored preference (`Persisted`, or `Value` where the row's primary value IS
+  the persisted one). The commit status is field-scoped and shown only on the row
+  that owns the phase: `Saving…`, `Verified · the authoritative read agrees`,
+  `Not saved · <real reason>` or `Commit accepted · verification
+  unavailable · <reason>`. `Verified` requires a completed mutation, a
+  `configReadiness() === 'ready'` re-read and a matching authoritative value
+  (theme after canonical normalization, display preset exact); a write that
+  returned but could not be re-read is never called saved.
+- **The write path is the existing one.** The commit runs through
+  `serializeTuiSettingsMutation` over `ConfigPort.tuiSettings`, re-reads the
+  document inside the queued task, preserves the raw USER `footerCustomItems`
+  (fail-closed when unavailable) and changes exactly one field. The Display preset
+  applies through the SAME `TuiApp` DisplayState owner `/display` and `/focus`
+  use and then persists ONCE: the runner's own `setDisplayPreset` (apply-first
+  plus a detached best-effort write) is deliberately NOT used, because it would
+  dispatch a second write. `/display`, `/focus`, `/footer` and the legacy editor
+  keep their existing semantics.
+- **A non-ready backend never fakes a save.** A theme commit is refused before
+  anything is applied when `configReadiness() !== 'ready'`; a display commit may
+  still apply the Client-local runtime fact and then reports exactly that
+  (`applied locally, but the configuration is stale so it could not be stored`).
+  A refused write leaves the runtime ahead of the document and says so instead of
+  silently rolling the applied palette back.
+- **The theme `auto` apply is the terminal query.** Choosing `auto` persists and
+  verifies FIRST, then starts the one OSC 11 detection with a guard that reads the
+  committed document, so a later explicit choice can never be overridden by a late
+  answer. As before, the detection is issued for the screen that owned the
+  terminal: leaving the workspace before it settles drops the result (the stored
+  `auto` preference remains and the next scheme report or the next boot applies
+  it).
 - **Navigation never loses identity.** Selection is the stable row/category id,
   and width changes only re-project the layout: the level, the category and the
   row survive a resize in both directions, and the list rebases to keep the
-  selected row visible instead of scrolling the whole screen.
+  selected row (or the highlighted candidate) visible instead of scrolling the
+  whole screen.
 - **Mouse follows the last painted frame.** A click selects the clicked item and
   takes ITS level's focus (a category click never advances into the rows, and a
   row click never advances into the detail — only `Enter` does); the painted
-  `Copy value`/legacy button acts on the item it is painted for regardless of
-  the keyboard level, and a click is refused unless the release re-proves the
-  press-time kind, id, painted row, cell range, state version, level and
-  category. Wheel events scroll only the pane under the pointer.
+  `Copy value`/`[Change…]`/`[Retry save]`/`[Confirm]`/candidate/legacy cell acts
+  on the item it is painted for regardless of the keyboard level, and a click is
+  refused unless the release re-proves the press-time kind, id, painted row, cell
+  range, state version, level and category. A button that does not fit the pane
+  WHOLE is not painted and publishes no hit target, and wheel events scroll only
+  the pane under the pointer (the candidate list while choosing).
 - **The legacy complete editor stays reachable.** The permanently visible
   `Other settings` category holds one row, `Open existing settings…`. Activating
   it retires the workspace (restoring the surface it paused) and only then opens
-  the pre-B2-A `SettingsList`, so Theme, the Plugin Manager submenu,
-  permission/session rows, extension settings and every existing write path are
-  unchanged; `TuiApp.openSettings()` and its other callers keep their exact
-  semantics.
+  the pre-B2-A `SettingsList`, so Icon style, Thinking detail, the Plugin Manager
+  submenu, permission/session rows, extension settings and every existing write
+  path are unchanged; `TuiApp.openSettings()` and its other callers keep their
+  exact semantics.
 - **The workspace is a physical screen lease** (§10.3 of
   `overlay-focus-contract.md`), mutually exclusive with the Job workspace and
-  pre-empted by Question/Approval/Save.
-- **B2-B remains.** Real Theme/Display writes, Host commit and authoritative
-  reread, and the pending/failed/committed field states are the next slice on
-  the SAME page/row/detail ids; B2-A must not be read as B2 completion.
+  pre-empted by Question/Approval/Save. A dispatched commit survives the close
+  under its runner owner, but its settlement is fenced by the screen record and
+  the panel's request identity: it never repaints, notifies or addresses a
+  replacement workspace.
+- **Still read-only / still later.** `Icon style` and `Thinking detail` remain
+  readable rows in this slice (their full editors stay behind `Other settings`);
+  the remaining Settings migration, B3 History and B4 Task Quick are later
+  slices, and closing B2-B on these two rows is not Gate-3B closure.
 
 ## Task Browser Host-text terminal-safety boundary
 

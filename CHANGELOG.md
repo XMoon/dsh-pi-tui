@@ -9,19 +9,26 @@
 
 ### 变更
 
-- `/settings` 改为打开独立的全屏设置工作区（只读预览）：宽屏三栏（分类 / 设置行 /
-  详情）、中屏按当前层显示两栏（`分类 + 设置行` 或 `设置行 + 详情`）、窄屏单栏，三栏 /
-  两栏 / 单栏只是同一套 `分类 → 设置行 → 详情` 三层的投影。所有宽度上 `Enter` 进入下一
-  级、`Esc`（`Backspace` 同义）逐级返回，只有最外层 `Esc` 才关闭工作区；`Tab` 与
-  `←`/`→` 不承担导航。底部操作栏始终固定在最后一行，并可用键盘与鼠标完成选择、滚动与
-  复制。工作区展示 Appearance / Display 的真实读值：主题的
-  source-qualified 原始值与友好名称、Icon style、Transcript display 的运行时当前值与
-  上次读到的持久偏好、Thinking detail 的当前运行态，并在每个条目上标明配置来源 Scope
-  与 backend 就绪状态（`Ready` / `Last-known` / `Unavailable` / `Read error`）；`R`
-  重新读取，`C` 只复制所选行的原始值，成功/失败提示显示在工作区自己的提示行上。浏览
-  不会写入任何配置。旧的完整设置编辑器仍完整可用：`Other settings` →
-  `Open existing settings…` 先关闭工作区并恢复原界面，再打开原有编辑器，
-  Theme、Plugin Manager、键位、权限与扩展设置的写入路径不变。
+- `/settings` 改为打开独立的全屏设置工作区，其中「Configured theme」与
+  「Transcript display」两行现在可以真正修改。宽屏三栏（分类 / 设置行 / 详情）、中屏按
+  当前层显示两栏、窄屏单栏，只是同一套 `分类 → 设置行 → 详情` 三层的投影；所有宽度上
+  `Enter` 进入下一级、`Esc`（`Backspace` 同义）逐级返回，只有最外层 `Esc` 才关闭，`Tab`
+  与 `←`/`→` 不承担导航。工作区展示 Appearance / Display 的真实读值，并标明配置来源
+  Scope 与 backend 就绪状态（`Ready` / `Last-known` / `Unavailable` / `Read error`）；
+  `R` 重新读取，`C` 只复制所选行的原始值，浏览与选择本身不写入任何配置。这两行的详情里
+  `Enter`（或点击 `[Change…]`）进入候选选择：`↑↓`/`Pg`/`Home`/`End` 移动候选，`Enter`
+  或 `[Confirm]` 明确确认，`Esc`/`[Cancel]` 取消且零写入；只有真正绘制出来的按钮与候选
+  行可点，窄屏与短屏仍可滚动、选中并确认。确认后用既有的串行整文档写入路径落盘，并在
+  成功后从权威来源重读目标字段：详情分别显示运行态（`Runtime`）与持久偏好
+  （`Persisted`），提交状态明确显示 `Saving…` / `Verified` / `Not saved · 原因` /
+  `Commit accepted · verification unavailable`，只有写入完成、后端 `ready` 且权威回读
+  一致才显示 Verified。后端不 ready 时主题不会被应用或写入；显示预设可能已在本机生效，
+  此时会明确说明只是本机生效、未能保存，绝不假报保存成功。插件主题在确认时再次按
+  source-qualified 身份校验，已卸载的插件主题标为 unavailable 并拒绝确认，不会被重定向
+  到同名的自定义文件。Icon style 与 Thinking detail 仍是只读行（底部按钮行说明需到
+  `Other settings` 编辑），旧的完整设置编辑器仍完整可用：`Other settings` →
+  `Open existing settings…` 先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin
+  Manager、键位、权限与扩展设置的写入路径不变。
 - 任务中心里的 Job 详情改为独立的全屏工作区：Job 状态、进度、输出缺口、观察错误
   与终态、以及保留输出分区呈现，不再拼成一块文本；底部固定显示 `Esc back` 与
   （仅在有意义时）Stop，并标注保留输出只是预览、不是完整历史。`Esc` 回到原任务
