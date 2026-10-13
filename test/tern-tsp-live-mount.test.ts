@@ -695,6 +695,168 @@ test('PR4-0: non-key SDK events reach no business action while no modal seat is 
   }
 })
 
+// ── A-13 (F3-002): a client protocol rejection is DIAGNOSED, nothing else ───
+//
+// The client answers a refused protocol operation with `error` (`msg` required;
+// `sf`/`s`/`op`/`sheet`/`id` optional). The SDK neither interprets nor consumes it
+// (`Surface.dispatch` has no `error` branch), so without an application branch it is
+// silently dropped — the confirmed diagnostic gap. These cases go through the REAL
+// SDK connect + `mountTspRenderer` + the real wire (`harnessFreeInput`), so the SDK's
+// own routing decides which events reach the iterator.
+
+interface Diagnostic {
+  readonly message: string
+  readonly fields: Record<string, unknown> | undefined
+}
+
+/** Mount the renderer with the diagnostics sinks observed, plus the business counters. */
+async function mountDiagnosed(tern: ScriptedTern) {
+  const diagnostics: Diagnostic[] = []
+  const business = { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 }
+  const fatals: unknown[] = []
+  const renderer = mountTspRenderer(await openSession(tern), {
+    requestExit: () => { business.exits += 1 },
+    onFatal: error => { fatals.push(error) },
+    logError: (message, fields) => { diagnostics.push({ message, fields }) },
+  })
+  renderer.bindInput({
+    exit: () => { business.exits += 1 },
+    cancel: () => { business.cancel += 1 },
+    submit: () => { business.submit += 1 },
+    steer: () => { business.steer += 1 },
+    noteUserInput: () => { business.noteUserInput += 1 },
+    listContinuedQuestions: () => [],
+    reopenContinuedQuestion: () => false,
+  })
+  return { renderer, diagnostics, business, fatals }
+}
+
+/** The `focus` ops sent so far — the side-effect witness for "an error changes nothing". */
+function focusOps(tern: ScriptedTern): string[] {
+  return tern.frames.flatMap(frame => frame.ops.filter(op => op[0] === 'focus').map(op => String(op[1])))
+}
+
+test('A-13a: a local-surface protocol error is diagnosed exactly once and changes nothing else', async () => {
+  const tern = new ScriptedTern()
+  const { renderer, diagnostics, business, fatals } = await mountDiagnosed(tern)
+  try {
+    await settle()
+    const framesBefore = tern.frames.length
+    const opsBefore = focusOps(tern)
+
+    harnessFreeInput(tern, { ev: 'error', sf: 's1', s: 5, op: 5, msg: 'unknown id layer.modal-1.answer' })
+    await settle()
+
+    assert.equal(diagnostics.length, 1, 'ONE protocol rejection produces exactly ONE diagnostic')
+    assert.equal(diagnostics[0]?.message, 'tsp renderer: client rejected protocol operation')
+    assert.deepEqual(diagnostics[0]?.fields, { sf: 's1', s: 5, op: 5, msg: 'unknown id layer.modal-1.answer' },
+      'the diagnostic carries the exact structured fields the client sent')
+    assert.equal(tern.frames.length, framesBefore, 'an error is never a reason to render')
+    assert.deepEqual(focusOps(tern), opsBefore, 'an error never re-asserts focus')
+    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 },
+      'the business handlers never see a protocol error')
+    assert.deepEqual(fatals, [], 'a refused operation is not a fatal renderer failure')
+    assert.equal(renderer.composer.getDraft(), '', 'the composer draft is untouched')
+  } finally {
+    await renderer.dispose()
+    assert.ok(tern.closeBodies.length >= 1, 'the session still closed and released the tty')
+  }
+})
+
+test('A-13b: optional `sf`/`s`/`op` are never fabricated, and a foreign surface is not attributed', async () => {
+  const tern = new ScriptedTern()
+  const { renderer, diagnostics, business } = await mountDiagnosed(tern)
+  try {
+    await settle()
+    // Session-level: `msg` alone is a legal ErrorEvent. It MUST be recorded and MUST NOT
+    // gain an invented `sf`/`s`/`op`.
+    harnessFreeInput(tern, { ev: 'error', msg: 'session level refusal' })
+    await settle()
+    assert.equal(diagnostics.length, 1, 'a message-only refusal is still diagnosed')
+    assert.deepEqual(diagnostics[0]?.fields, { msg: 'session level refusal' },
+      'the diagnostic carries ONLY what the client sent (no fabricated sf/s/op)')
+
+    // Another surface's error is NOT this renderer's to attribute.
+    harnessFreeInput(tern, { ev: 'error', sf: 's2', s: 3, op: 1, msg: 'a foreign refusal' })
+    await settle()
+    assert.equal(diagnostics.length, 1, 'a foreign surface error is not attributed to this renderer')
+    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
+  } finally {
+    await renderer.dispose()
+  }
+})
+
+test('A-13c: an error that ALSO carries an optional `id` is still an error, never a business route', async () => {
+  const tern = new ScriptedTern()
+  const { renderer, diagnostics, business } = await mountDiagnosed(tern)
+  try {
+    await settle()
+    const framesBefore = tern.frames.length
+    const opsBefore = focusOps(tern)
+    // The pinned SDK type allows `id` on an ErrorEvent. Routing must NOT depend on it:
+    // this must take the error branch, not the node-id keyed presenter route.
+    harnessFreeInput(tern, { ev: 'error', sf: 's1', id: 'layer.preset-1-rev-1', s: 9, op: 0, msg: 'unknown id dock.composer' })
+    await settle()
+    assert.equal(diagnostics.length, 1, 'an error with an `id` is diagnosed exactly once')
+    assert.deepEqual(diagnostics[0]?.fields, { sf: 's1', s: 9, op: 0, msg: 'unknown id dock.composer' },
+      'the optional `id` is NOT logged (the diagnostic contract takes sf/s/op/msg)')
+    assert.equal(tern.frames.length, framesBefore, 'the `id` did NOT open a presenter path that renders')
+    assert.deepEqual(focusOps(tern), opsBefore, 'and it did not move focus')
+    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
+  } finally {
+    await renderer.dispose()
+  }
+})
+
+test('A-13d: a protocol error during an open modal is diagnosed without settling it or re-asserting focus', async () => {
+  const tern = new ScriptedTern()
+  const { renderer, diagnostics, business, fatals } = await mountDiagnosed(tern)
+  try {
+    await settle()
+    let settled = false
+    void renderer.interaction
+      .askQuestions([{ id: 'a13-q', question: 'still open?' }], undefined, undefined, false)
+      .then(() => { settled = true }, () => { settled = true })
+    await settle()
+    const framesWithModal = tern.frames.length
+    const opsBefore = focusOps(tern)
+
+    harnessFreeInput(tern, { ev: 'error', sf: 's1', s: 6, op: 0, msg: 'unknown id no-such-node' })
+    await settle()
+
+    assert.equal(diagnostics.length, 1, 'the modal seat does not swallow the diagnosis')
+    assert.equal(settled, false, 'an error never settles the modal')
+    assert.equal(tern.frames.length, framesWithModal, 'an error never repaints under a modal')
+    assert.deepEqual(focusOps(tern), opsBefore, 'an error never re-asserts the modal focus')
+    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
+    assert.deepEqual(fatals, [])
+    renderer.interaction.withdrawPending()
+    await settle()
+  } finally {
+    await renderer.dispose()
+  }
+})
+
+test('A-13e: the pre-existing event routes are unchanged and emit no error diagnostic', async () => {
+  const tern = new ScriptedTern()
+  const { renderer, diagnostics, business } = await mountDiagnosed(tern)
+  try {
+    await settle()
+    const before = tern.frames.length
+    // A legal `resize` for THIS surface still reaches the model-picker resize path...
+    harnessFreeInput(tern, { ev: 'resize', sf: 's1', cols: 47, cell: { w: 8, h: 16 }, visible: true })
+    await settle()
+    // ...and the composer's own `focus` claim is still routed as before.
+    harnessFreeInput(tern, { ev: 'focus', sf: 's1', id: 'dock.composer' })
+    await settle()
+    assert.deepEqual(diagnostics, [], 'no legal event is ever reported as a protocol error')
+    assert.deepEqual(business, { submit: 0, steer: 0, cancel: 0, noteUserInput: 0, exits: 0 })
+    assert.ok(tern.frames.length >= before, 'the legal routes still run')
+  } finally {
+    await renderer.dispose()
+  }
+})
+
 // ── A-12 (F7): a failed mount closes the already-connected SDK session ─────
 
 test('A-12: a rejected mount closes the connected SDK session once (no leaked tty owner)', async () => {
