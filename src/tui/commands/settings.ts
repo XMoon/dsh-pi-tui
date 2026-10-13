@@ -441,14 +441,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const builtin = value === 'auto' || value === 'dark' || value === 'light'
     // VALUE-addressed health tracking (the unified theme protocol).
     const themeRef = builtin ? undefined : captureExtensionHealthRef?.('theme', value)
-    // SYNCHRONOUS latest choice, before any await: the terminal detection's guard
-    // must observe this new intent even while the persistence of a previous choice
-    // is still in flight (a late OSC answer may never colour over it).
-    latestThemeChoice = value
+    // The SYNCHRONOUS latest choice is recorded only by a choice that really took
+    // effect at runtime, always BEFORE the first await: the terminal detection's
+    // guard must observe this new intent even while the persistence of a previous
+    // choice is still in flight (a late OSC answer may never colour over it), and a
+    // FAILED candidate must never steal the intent of a still-pending `auto` (the
+    // legacy path keeps its own choice at the previous value on a failed apply).
     if (value === 'auto') {
       // For `auto`, starting the detection IS the apply. Drop the plugin-theme
       // record FIRST: the unload fallback of a theme the user has left must never
       // force dark and stop the terminal tracking over the stored `auto`.
+      latestThemeChoice = value
       app.clearActivePluginTheme()
       app.trackTerminalTheme(true)
       detach('theme autodetect', () => app.autoDetectTheme({
@@ -480,6 +483,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         if (themeRef !== undefined) recordExtensionError?.(themeRef, error)
         return { outcome: 'not-saved', reason: `the palette could not be applied: ${safeErrorMessage(error)}` }
       }
+      // The runtime really changed: only now does this choice own the query guard.
+      latestThemeChoice = value
     }
     try {
       await serializeTuiSettingsMutation(settings, async () => {

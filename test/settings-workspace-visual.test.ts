@@ -2079,3 +2079,58 @@ test('B-19 a dispatched write that fails after the workspace closed still leaves
   assert.ok(!h.view().includes('Not saved'), 'and it never repaints the surface the user left')
   h.dispose()
 })
+
+test('B-20 a FAILED candidate never steals the intent of a pending auto query', async () => {
+  const saved = {
+    NO_COLOR: process.env.NO_COLOR,
+    FORCE_COLOR: process.env.FORCE_COLOR,
+    CI: process.env.CI,
+    COLORFGBG: process.env.COLORFGBG,
+  }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+  const lightReply = '\x1b]11;rgb:ffff/ffff/ffff\x1b\\'
+  try {
+    const themes = new ThemeRegistry()
+    // A live contribution whose palette cannot be applied: the registry does not
+    // runtime-validate a palette, so the apply really throws.
+    themes.register({ id: 'broken', name: 'Broken', palette: { text: 42 } as never }, 'acme-owner', 'acme')
+    const brokenValue = themePickerRows(themes).find(row => row.displayName === 'Broken')?.value
+    assert.ok(brokenValue !== undefined)
+    const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes })
+    await openDetail(h, 'theme')
+    // Choose `auto` first: its query is now pending and owns the guard.
+    await key(h, '\r')
+    await key(h, '\x1b[A') // dark -> auto
+    await key(h, '\r')
+    await settle(h)
+    assert.equal(h.doc.theme, 'auto', 'the auto preference committed and its query is in flight')
+
+    // Now confirm the BROKEN palette: the apply fails, the Host is never written...
+    await key(h, '\r')
+    const broken = rowOf(h, 'Broken')
+    press(h, broken, cellIndexOf(h, broken, 'Broken'))
+    release(h, broken, cellIndexOf(h, broken, 'Broken'))
+    await settle(h)
+    const confirm = rowOf(h, '[Confirm]')
+    press(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+    release(h, confirm, cellIndexOf(h, confirm, '[Confirm]'))
+    await settle(h)
+    assert.match(h.view(), /Not saved · the palette could not be applied/)
+    assert.equal(h.doc.theme, 'auto', 'and the stored preference is untouched')
+    assert.equal(h.app.currentTheme(), 'dark', 'the runtime kept the previous palette')
+
+    // ...so the pending auto query still owns the surface and its answer applies.
+    h.vt.sendInput(lightReply)
+    await settle(h)
+    assert.equal(h.app.currentTheme(), 'light', 'the failed candidate must not have cancelled the auto intent')
+    h.dispose()
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
