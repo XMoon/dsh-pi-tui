@@ -297,13 +297,25 @@ neutral/narrow/halfwidth. Measured classes (`get-east-asian-width`
 | `●` U+25CF, `·` U+00B7, `•` U+2022, `←` U+2190, `↗` U+2197 | **ambiguous** | CJK hazard |
 | `─` U+2500, `│` U+2502 | **ambiguous** | CJK hazard |
 
-**Grandfathered, accepted limitation:** the full-width rule glyph `─` and the
-` · ` separator are *already* used across the chrome, and the `─` rule is drawn
-on nearly every fullscreen frame — so a `cjk-ambiguous-width` terminal is
-already outside the supported contract for this chrome. v1 therefore does not
-mass-migrate them, and does not pretend that swapping one ambiguous separator
-for an ASCII one fixes the frame. The forward-looking rule is narrower and
-checkable:
+**Grandfathered, accepted limitation:** several ambiguous glyphs are *already*
+used across the chrome, and the `─` rule is drawn on nearly every fullscreen
+frame — so a `cjk-ambiguous-width` terminal is already outside the supported
+contract for this chrome. v1 therefore does not mass-migrate them, and does not
+pretend that swapping one ambiguous separator for an ASCII one fixes the frame.
+Measured, still in use and *not* introduced by v1:
+
+| Glyph | Where it is already painted |
+|---|---|
+| `─` U+2500 | every rule, the editor's top/bottom border, history's stacked divider |
+| ` · ` U+00B7 | the fact/hint separator across the chrome (D4 makes this the only separator) |
+| `↗` U+2197 | the Job `↗ Command` affordance |
+| `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
+| `◆` U+25C6 | the footer configurator's move-mode marker |
+| `▏` U+258F | the footer configurator's text-edit cursor |
+| `⇧` U+21E7 | the task browser's `Tab/⇧Tab` hint |
+| `●` `○` `◐` `×` | per-status glyphs (§11.4) — `● RUNNING` is the one D5 removes |
+
+The forward-looking rule is narrower and checkable:
 
 **Do not add a new ambiguous-glyph role, and do not put an ambiguous glyph in a
 new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` cursor
@@ -636,7 +648,9 @@ is next touched for another reason** (never by a mass search/replace):
 | picker hint lines | all-lowercase key names (`'↑↓ navigate · enter select · esc close'`) instead of §4.1's `Enter select · Esc close` | next picker hint edit |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
 | task browser / history | `│` column split for a master/detail pair (`task-panel.ts:907`, `history-panel.ts:621`) | next change to that panel |
-| task quick panel, plugin-manager | already follow the ` · ` hint separator; only their cursor/status inks deviate | next change to that bar |
+| task quick panel, plugin-manager | already follow the ` · ` hint separator, but their hints capitalise bare keys (`S stop`) and the task browser writes `Tab/⇧Tab` with an EAW-ambiguous arrow | next change to that bar |
+| footer configurator help lines | capitalised verbs (`'↑↓ Select · Enter Open · S Save · Esc Close'`) where §4.1/§7.1 want lowercase verbs | next configurator change |
+| picker / overlay titles | the picker header is bold `textMuted` (`groupHeader`) and the history, output-viewer and approval titles carry no ink at all, where role 1 is bold `textStrong` | next change to that overlay |
 | keybindings UI | `Saving…` painted `accent` | next keybindings UI change |
 | history panel | paints **no** colour token at all (title, cursor, tabs, hints are plain) | next history-panel change |
 | editor seat borders | `warning` for plan mode, `accent` for a subagent viewer seat (`tui-app.ts:12850`, `:13093`) | next editor-seat change |
@@ -646,7 +660,7 @@ is next touched for another reason** (never by a mass search/replace):
 | task browser / task quick panel | per-status glyph set `?`/`◐`/`×`/`○`/`●` (`task-panel.ts:110-118`) where D5 allows only the shared `∙` + a word; `○` (U+25CB) and `●` are also EAW-ambiguous | next change to that panel |
 | viewer subject bar | `● running` / `○ inactive` (`viewer-subject-bar.ts:88-90`) — same per-status glyph debt, and both glyphs are EAW-ambiguous | next subject-bar change |
 | failed generic tool | the result text stays unpainted/`textDim`; only the `[error]` pill carries the colour | next tool-card change |
-| chrome-wide ` · ` and `─` | EAW-ambiguous; accepted limitation (§4.3) | only if CJK-width terminals become a supported target |
+| chrome-wide ambiguous glyphs | ` · `, `─`, `↗`, `▼`/`▶`, `◆`, `▏`, `⇧`, `×`, `○`, `◐`, `●`; measured list in §4.3 | only if CJK-width terminals become a supported target (D5 already removed the Job status `●`) |
 
 ## 12. Surface archetypes
 
