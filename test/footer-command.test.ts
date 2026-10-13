@@ -29,6 +29,7 @@ import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -499,6 +500,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await (settingsCommand.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await navigateToLegacySettings(vt)
   assert.equal(saveCallbacks.length, 2)
   assert.ok(settingsChange !== undefined)
   const displayRow = settingsItems?.find(item => item.id === 'display-preset')
@@ -1032,6 +1034,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   // rows and wires the persist-first footer branch into onChange).
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   // The FIRST row is the footer Status line (default): Enter cycles it to
   // compact → the handler runs the persist-first branch → the WRITE
   // throws → applyFooterSettings must NEVER run.
@@ -1114,6 +1117,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   // Walk to the footer row: SettingsList rows cycle their value on Enter
   // (firing onChange) and ↓ moves to the next row. The footer row is not
   // necessarily the first row (theme/expand/thinking precede it), so keep

@@ -299,6 +299,16 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。
 
+`/settings` 打开一个真正的全屏工作区：宽屏三栏（分类 / 设置行 / 详情）、中屏两栏、
+窄屏单栏逐级下钻（`Enter` 进入下一级、`Esc` 逐级返回，底部操作栏始终固定在最后一行）。
+它只读地展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好
+名称、Icon style、Transcript display 的运行时当前值与上次读到的持久偏好、Thinking
+detail 的当前运行态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、
+`C` 复制所选行的原始值，成功/失败提示显示在工作区自己的提示行上。浏览不会写入任何
+配置（真正写入留给 B2-B）。旧的完整设置编辑器仍然可用：`Other settings` →
+`Open existing settings…` 会先关闭工作区并恢复原界面，再打开原有编辑器，
+Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
+
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
 保留状态/交互标记);切换立即生效并持久化。

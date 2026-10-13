@@ -144,6 +144,11 @@ import { renderDiffLines, renderDiffView } from './tui/components/transcript/dif
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
 import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
+import {
+  SettingsWorkspacePanel,
+  settingsWorkspaceInitialFocus,
+  type SettingsWorkspaceSource,
+} from './tui/panels/settings-workspace-panel.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
@@ -1529,6 +1534,46 @@ interface JobWorkspaceRecord {
   readonly close: () => void
 }
 
+/**
+ * The opening options of ONE Settings workspace (Phase 3B / B2-A). The
+ * `/settings` command owns the readonly read projection; the app owns only the
+ * temporary physical screen lease over it. `onOpenLegacy` is the compatibility
+ * bridge: it is invoked AFTER this workspace has retired and the surface it
+ * paused is restored, so the existing SettingsList mounts on the real return
+ * surface instead of stacking under a second physical owner.
+ */
+export interface SettingsWorkspaceOpenOptions {
+  readonly onOpenLegacy: () => void
+  /** Fired once when the workspace is torn down by ANY path. */
+  readonly onClose?: () => void
+}
+
+/** The returned control of an open Settings workspace, fenced by THIS instance:
+ *  a stale handle can never close a newer workspace. */
+export interface SettingsWorkspaceHandle {
+  /** Leave the Settings workspace and restore the surface that opened it. */
+  close(): void
+}
+
+/**
+ * The ONE short-lived Settings workspace screen lease (Phase 3B / B2-A). Like
+ * the Job workspace it renders in a temporary alt screen while the surface that
+ * opened it — object tree, focus, draft and scroll state — is only STOPPED, and
+ * it is MUTUALLY EXCLUSIVE with the Job lease: at most one workspace owns the
+ * terminal at any time.
+ */
+interface SettingsWorkspaceRecord {
+  readonly token: object
+  readonly screen: TuiAltScreen
+  readonly panel: SettingsWorkspacePanel
+  readonly returnScreen: TuiMainScreen | TuiAltScreen
+  readonly returnFocus: Component | null
+  /** Latch + release this instance's screen and panel exactly once. */
+  readonly finalizeOnce: () => void
+  /** The ONE close path: finalize, restore the return surface, then notify. */
+  readonly close: () => void
+}
+
 /** Live control of an open task browser (rows carry status/startedAt). */
 export interface TaskBrowserHandle {
   /** Close the browser without a selection. */
@@ -2813,18 +2858,26 @@ export class TuiApp {
    */
   private jobWorkspace: JobWorkspaceRecord | undefined
   /**
-   * Nesting depth of the windows that refuse a NEW Job workspace screen lease
-   * even though the surface is not disposed. Two kinds of window push it: a
-   * stop/suspend transition (the surface is between that stop and its paired
-   * start, and a lease opened by a synchronous callback would outlive the stop),
-   * and a blocking owner's (Question/Approval/Save) own commit window (it
-   * abandons a workspace FIRST, and a lease opened by a callback during that
-   * abandonment would coexist with the blocking owner — the workspace itself
-   * refuses to lease while a blocking modal is active). A DEPTH, not a latch, so
-   * an inner window (a stop raised inside an `$EDITOR` suspend) cannot release an
-   * outer one. It never claims the physical owner; it only withholds NEW leases.
+   * The ONE current Settings workspace lease (Phase 3B / B2-A), or undefined.
+   * It is MUTUALLY EXCLUSIVE with `jobWorkspace`: the two share one screen-lease
+   * freeze latch and one `activeScreen` derivation, so no two physical owners
+   * can ever coexist.
    */
-  private jobLeaseFreezeDepth = 0
+  private settingsWorkspace: SettingsWorkspaceRecord | undefined
+  /**
+   * Nesting depth of the windows that refuse a NEW workspace screen lease
+   * (Job OR Settings) even though the surface is not disposed. Two kinds of
+   * window push it: a stop/suspend transition (the surface is between that stop
+   * and its paired start, and a lease opened by a synchronous callback would
+   * outlive the stop), and a blocking owner's (Question/Approval/Save) own
+   * commit window (it abandons a workspace FIRST, and a lease opened by a
+   * callback during that abandonment would coexist with the blocking owner — a
+   * workspace itself refuses to lease while a blocking modal is active). A
+   * DEPTH, not a latch, so an inner window (a stop raised inside an `$EDITOR`
+   * suspend) cannot release an outer one. It never claims the physical owner; it
+   * only withholds NEW leases.
+   */
+  private workspaceLeaseFreezeDepth = 0
   /** The fullscreen mouse-wheel step (transcript lines per wheel event).
    * A Client runtime preference: the fork's `wheelScrollLines` is a
    * constructor-time alt-screen option, so this value feeds the NEXT
@@ -4183,14 +4236,15 @@ export class TuiApp {
    * the round-trip (they die only with dispose()).
    */
   private suspendForExternalEditor(): void {
-    // A Job workspace leases its OWN terminal screen: $EDITOR must never take
-    // the PTY over while the Job screen is still the physical owner. Leave the
-    // workspace first (the SAME close path Esc uses, restoring the surface the
-    // user was in), then suspend that surface. The lease admission is frozen for
-    // the WHOLE suspend window, so a callback it runs cannot mint a screen that
-    // would outlive the suspend.
-    this.jobLeaseFreezeDepth += 1
+    // A workspace (Job OR Settings) leases its OWN terminal screen: $EDITOR
+    // must never take the PTY over while that screen is still the physical
+    // owner. Leave the workspace first (the SAME close path Esc uses, restoring
+    // the surface the user was in), then suspend that surface. The lease
+    // admission is frozen for the WHOLE suspend window, so a callback it runs
+    // cannot mint a screen that would outlive the suspend.
+    this.workspaceLeaseFreezeDepth += 1
     this.jobWorkspace?.close()
+    this.settingsWorkspace?.close()
     this.keybindings.cancelLeader()
     this.clearExitConfirmation()
     this.lastEscapeAt = undefined
@@ -4222,7 +4276,7 @@ export class TuiApp {
    */
   private resumeFromExternalEditor(): void {
     // The paired suspend's lease freeze ends here: the surface presents again.
-    this.jobLeaseFreezeDepth -= 1
+    this.workspaceLeaseFreezeDepth -= 1
     if (this.fullscreen !== undefined) {
       this.fullscreen.start()
       this.fullscreen.requestRender(true)
@@ -4247,7 +4301,7 @@ export class TuiApp {
     // workspace close below cannot mint a screen that would outlive the stop. The
     // latch is cleared by the LAST step of the batch, so a throwing sibling can
     // never leave the surface permanently unable to lease.
-    this.jobLeaseFreezeDepth += 1
+    this.workspaceLeaseFreezeDepth += 1
     // From here on this TuiApp no longer owns the terminal for presentation:
     // a status arriving while stopped must only fold the desired state.
     this.leaveTerminalPresentation()
@@ -4258,17 +4312,18 @@ export class TuiApp {
     const schemeDisposers = this.schemeDisposers
     this.schemeDisposers = []
     runSyncDisposalSteps('tui stop', [
-      // The stop boundary is a terminal-ownership boundary: a leased Job
-      // workspace screen is released FIRST (through the same close path Esc
-      // uses), so every screen stopped below is the only remaining physical
-      // owner and no Job screen keeps a terminal input handler alive. It is an
-      // INDEPENDENT step like every other one here: a throwing workspace close
-      // (a throwing observer release / owner notification) must never truncate
-      // the terminal release, the modal cancellations or the scheme cleanup. A
-      // close that synchronously restores the return surface only re-asserts
-      // presentation, which the `leaveTerminalPresentation` closing step below
-      // releases again.
+      // The stop boundary is a terminal-ownership boundary: a leased
+      // workspace screen (Job OR Settings) is released FIRST (through the same
+      // close path Esc uses), so every screen stopped below is the only
+      // remaining physical owner and no workspace screen keeps a terminal input
+      // handler alive. It is an INDEPENDENT step like every other one here: a
+      // throwing workspace close (a throwing observer release / owner
+      // notification) must never truncate the terminal release, the modal
+      // cancellations or the scheme cleanup. A close that synchronously restores
+      // the return surface only re-asserts presentation, which the
+      // `leaveTerminalPresentation` closing step below releases again.
       () => this.jobWorkspace?.close(),
+      () => this.settingsWorkspace?.close(),
       () => this.clearNotify(),
       // Issue #8: the exit-confirmation timer dies with the surface — a stopped
       // TUI must never fire a stale disarm into a dead footer.
@@ -4304,7 +4359,7 @@ export class TuiApp {
       () => this.leaveTerminalPresentation(),
       // The transition is over (the batch attempted every sibling even when one
       // threw): a later start()/round-trip may lease a workspace again.
-      () => { this.jobLeaseFreezeDepth -= 1 },
+      () => { this.workspaceLeaseFreezeDepth -= 1 },
     ])
   }
 
@@ -4712,13 +4767,14 @@ export class TuiApp {
     this.optionalSeat = undefined
     if (optionalSeat !== undefined) optionalSeat.finalized = true
     runSyncDisposalSteps('tui dispose', [
-      // Phase 3B / B1-A: the leased Job workspace screen is released FIRST —
-      // through the SAME close path Esc uses, so its observer notification (the
-      // opener's releaseOnce) still runs exactly once, its temporary alt screen
-      // never keeps a terminal input handler into the dying surface, and the
-      // overlay teardown below never meets a foreign physical owner. `disposed`
-      // is already latched, so the close deliberately skips the screen restore.
+      // Phase 3B / B1-A / B2-A: the leased workspace screen (Job OR Settings) is
+      // released FIRST — through the SAME close path Esc uses, so its owner
+      // notification still runs exactly once, its temporary alt screen never
+      // keeps a terminal input handler into the dying surface, and the overlay
+      // teardown below never meets a foreign physical owner. `disposed` is
+      // already latched, so the close deliberately skips the screen restore.
       () => this.jobWorkspace?.close(),
+      () => this.settingsWorkspace?.close(),
       // The optional tenant is released FIRST (its identity is already gone):
       // no later settlement, projection or focus path in this batch may touch
       // it, and no stale surface callback can survive the teardown.
@@ -5236,6 +5292,17 @@ export class TuiApp {
       }
       this.clearExitConfirmation()
       this.jobWorkspace.panel.handleInput(data)
+      return { consume: true }
+    }
+    // Phase 3B / B2-A: a leased Settings workspace screen owns ordinary input.
+    // The panel is READ-ONLY and Esc is its ONE lifecycle key; every other key
+    // either navigates/scrolls/refreshes/copies or is inert. Consuming here (the
+    // blocking owners above already had their chance, and the three blocking
+    // entries abandon this workspace before it could swallow a key they need)
+    // keeps input out of the hidden editor, transcript and host actions.
+    if (this.settingsWorkspace !== undefined) {
+      this.clearExitConfirmation()
+      this.settingsWorkspace.panel.handleInput(data)
       return { consume: true }
     }
     // The subagent viewer input policy is MODE-AWARE:
@@ -6161,13 +6228,15 @@ export class TuiApp {
 
   /**
    * The screen currently rendering: the temporary Job workspace screen while
-   * one is leased, else the alt screen in fullscreen mode, else the main
-   * screen. Every render request, terminal query and overlay mount routes
-   * through this accessor so regular, fullscreen and Job-workspace modes always
-   * target the ACTIVE screen (M0 naming; previously overlayHost).
+   * one is leased, else the temporary Settings workspace screen, else the alt
+   * screen in fullscreen mode, else the main screen. The two workspaces are
+   * mutually exclusive, so this single derivation can never be ambiguous. Every
+   * render request, terminal query and overlay mount routes through this
+   * accessor so regular, fullscreen and workspace modes always target the
+   * ACTIVE screen (M0 naming; previously overlayHost).
    */
   private get activeScreen(): TuiMainScreen | TuiAltScreen {
-    return this.jobWorkspace?.screen ?? this.fullscreen ?? this.tui
+    return this.jobWorkspace?.screen ?? this.settingsWorkspace?.screen ?? this.fullscreen ?? this.tui
   }
 
   /**
@@ -6835,13 +6904,14 @@ export class TuiApp {
    */
   setFullscreen(enabled: boolean): void {
     if (this.disposed) return
-    // A leased Job workspace owns the physical screen: a display-mode switch
-    // now would detach the PAUSED return surface (killing its broker graph, its
-    // Task Browser overlay and the transcript object this workspace promises to
-    // restore) and would rewrite the user's persisted preference. The request is
-    // simply not applied while the workspace is leased — the preference value
-    // itself is untouched and takes effect after the user leaves the Job.
-    if (this.jobWorkspace !== undefined) return
+    // A leased workspace (Job OR Settings) owns the physical screen: a
+    // display-mode switch now would detach the PAUSED return surface (killing
+    // its broker graph, its Task Browser overlay and the transcript object this
+    // workspace promises to restore) and would rewrite the user's persisted
+    // preference. The request is simply not applied while a workspace is leased
+    // — the preference value itself is untouched and takes effect after the user
+    // leaves it.
+    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) return
     // Fullscreen transitions change the focused screen and disarm transient
     // keyboard confirmation state.
     this.clearExitConfirmation()
@@ -12637,6 +12707,13 @@ export class TuiApp {
   /** Drop all per-message expansion overrides (session-scoped state: a
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
+    // A session switch is a terminal-ownership boundary: a leased workspace
+    // screen (Job OR Settings) is retired FIRST, through the same close path Esc
+    // uses, so it can never keep consuming input or hold a pointer/copy lease
+    // across the switch. The Job lease is normally released by its Task Runtime
+    // owner; this is the ONE session-scoped choke point the hydration seam calls,
+    // so both leases are released here.
+    this.closeLeasedWorkspaces('session switch')
     this.clearFocusLiveHeightState()
     this.expandedOverride.clear()
     // The temporary search presentation is session-scoped too: a switched-in
@@ -20170,10 +20247,11 @@ export class TuiApp {
     // A lifecycle transition (stop/suspend) or a blocking owner's commit window
     // owns the surface right now: a lease opened here would outlive the stop or
     // coexist with the blocking owner, so it is refused.
-    if (this.jobLeaseFreezeDepth > 0) {
+    if (this.workspaceLeaseFreezeDepth > 0) {
       throw new Error('cannot lease a Job workspace screen while the surface is completing a transition')
     }
     if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
+    if (this.settingsWorkspace !== undefined) throw new Error('a Settings workspace screen is already leased')
     // A blocking owner outranks the Job view: refuse the lease and leave the
     // current keyboard owner untouched (the opener releases its observation).
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
@@ -20319,7 +20397,7 @@ export class TuiApp {
           // the release above may have leased a newer workspace or legitimately
           // swapped the surface, and a stale workspace never overwrites it.
           if (!this.disposed && this.jobWorkspace === undefined && this.activeScreen === returnScreen) {
-            this.resumeJobReturnSurface(returnScreen, returnFocus)
+            this.resumeReturnSurface(returnScreen, returnFocus)
           }
         },
         () => { options.onClose?.() },
@@ -20363,7 +20441,7 @@ export class TuiApp {
         () => { if (!alreadyClosed) panel.dispose() },
         () => {
           if (!alreadyClosed && !this.disposed && this.jobWorkspace === undefined && this.activeScreen === returnScreen) {
-            this.resumeJobReturnSurface(returnScreen, returnFocus)
+            this.resumeReturnSurface(returnScreen, returnFocus)
           }
         },
       ])
@@ -20380,13 +20458,217 @@ export class TuiApp {
   }
 
   /**
-   * Re-enter the surface a Job workspace paused: start the SAME screen object
+   * Open the fullscreen Settings workspace (Phase 3B / B2-A): a temporary
+   * `TuiAltScreen` whose layout root AND keyboard focus target is the
+   * `SettingsWorkspacePanel`. The screen that opened it (the regular surface or
+   * the transcript alt screen) is only STOPPED with `preserveScreen` — its
+   * object tree, focus, draft and scroll state survive the round trip, nothing
+   * is disposed or rebuilt, and `TuiApp.fullscreen` (the USER's transcript
+   * display mode) is never touched, so no `onFullscreenChange` is emitted.
+   *
+   * The lease is committed to `this.settingsWorkspace` BEFORE the physical
+   * switch, so every render request, input route and re-entrant closer observes
+   * the same current owner. It is MUTUALLY EXCLUSIVE with the Job lease: at most
+   * ONE workspace screen owns the terminal, and a blocking Question/Approval/Save
+   * owner refuses the lease entirely.
+   * @param source - the readonly read projection of the `/settings` command.
+   * @param options - the legacy-settings bridge and the teardown notification.
+   * @returns the instance-fenced handle of THIS workspace.
+   */
+  openSettingsWorkspace(
+    source: SettingsWorkspaceSource,
+    options: SettingsWorkspaceOpenOptions,
+  ): SettingsWorkspaceHandle {
+    if (this.disposed) throw new Error('cannot lease a Settings workspace screen on a disposed surface')
+    // A lifecycle transition (stop/suspend) or a blocking owner's commit window
+    // owns the surface right now: a lease opened here would outlive the stop or
+    // coexist with the blocking owner, so it is refused.
+    if (this.workspaceLeaseFreezeDepth > 0) {
+      throw new Error('cannot lease a Settings workspace screen while the surface is completing a transition')
+    }
+    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+      throw new Error('a workspace screen is already leased')
+    }
+    // A blocking owner outranks the Settings workspace: refuse the lease and
+    // leave the current keyboard owner untouched.
+    if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
+      throw new Error('a blocking modal owns the surface')
+    }
+    const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
+    const returnFocus = returnScreen.getFocusedComponent()
+    const token: object = {}
+    let record: SettingsWorkspaceRecord
+    const panel = new SettingsWorkspacePanel(source, {
+      rows: () => this.terminal.rows,
+      requestRender: () => this.requestRender(),
+      notice: () => this.currentNotice(),
+      onClose: () => record.close(),
+      onOpenLegacy: () => openLegacy(),
+      // The clipboard capability stays the SAME Client-local `copySelection` the
+      // rest of the surface already uses; the settlement re-proves THIS workspace
+      // record before it may notify, so a stale copy that lands after the user
+      // left Settings can never repaint or address a replacement surface.
+      onCopy: (text) => {
+        const copy = this.copySelection
+        const runner = this.events.runOwned
+        if (copy === undefined || runner === undefined || finalized || this.settingsWorkspace !== record) {
+          if (this.settingsWorkspace === record) this.notify('Copy failed', 'error')
+          return
+        }
+        runner('settings copy', () => copy(text), {
+          onResult: (ok) => {
+            if (this.disposed || this.settingsWorkspace !== record) return
+            // `true` only proves the strategy EMITTED the bytes (OSC52 has no
+            // clipboard ACK), so the wording never claims the system clipboard
+            // received them.
+            this.notify(ok ? 'Copy sent' : 'Copy failed', ok ? 'info' : 'error')
+          },
+          onError: () => {
+            if (this.disposed || this.settingsWorkspace !== record) return
+            this.notify('Copy failed', 'error')
+          },
+        })
+      },
+    }, settingsWorkspaceInitialFocus(this.terminal.columns))
+    const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
+      deferViewportListener: true,
+      copySelection: this.copySelection,
+      wheelScrollLines: this.wheelScrollLines,
+      // The header's category arrows, the row cells and the Detail's Copy button
+      // are plain painted cells (no mouse-handling component), so their same-cell
+      // press/click arrives here and the panel re-proves the press-time painted
+      // identity before acting.
+      onCellPress: (x, y) => panel.onCellPress(x, y),
+      onCellClick: (x, y) => panel.onCellClick(x, y),
+    })
+    screen.setLayoutRoot(panel)
+    // The workspace defines its OWN copy verb (the painted `Copy value` button /
+    // `C` in the Detail view): the fork's native copy-on-select would otherwise
+    // put a click's character onto the clipboard on a plain click (and a rapid
+    // double-click could clobber the button's payload). B2-A has no drag-copy
+    // contract, so the native path is suspended for this screen.
+    screen.setCopyOnSelect(false)
+    screen.addInputListener((data) => this.routeInput(data))
+    screen.installViewportListener()
+    screen.addInputListener((data) => this.protocolSinkFence(data))
+
+    let finalized = false
+    /** The instance latch + detach: idempotent and non-throwing, committed
+     *  BEFORE any callback of this workspace, so a re-entrant closer can never
+     *  act twice and a stale record can never be treated as the owner. */
+    const finalizeOnce = (): void => {
+      if (finalized) return
+      finalized = true
+      if (this.settingsWorkspace === record) this.settingsWorkspace = undefined
+    }
+    const close = (): void => {
+      if (finalized) return
+      // ONE ordered non-truncating batch: the latch first, then the screen and
+      // panel release, the return-surface restore and the exactly-once owner
+      // notification — a throwing sibling never strands another obligation. The
+      // restore runs BEFORE the notification, so a synchronously opened legacy
+      // editor observes (and may legitimately mount on) the restored surface.
+      runSyncDisposalSteps('settings workspace close', [
+        finalizeOnce,
+        () => screen.stop(),
+        () => panel.dispose(),
+        () => {
+          // Restore ONLY while no newer physical owner exists: a callback during
+          // the release above may have leased a newer workspace or legitimately
+          // swapped the surface, and a stale workspace never overwrites it.
+          if (!this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
+            this.resumeReturnSurface(returnScreen, returnFocus)
+          }
+        },
+        () => { options.onClose?.() },
+      ])
+    }
+    /** The compatibility bridge: retire THIS workspace and restore the surface it
+     *  paused BEFORE the existing settings editor can mount — the legacy
+     *  `app.openSettings()` call may synchronously re-enter, so the lease must
+     *  already be gone. A failed open restores the main surface with a real error
+     *  and never resurrects the closed workspace. */
+    const openLegacy = (): void => {
+      if (finalized) return
+      close()
+      // `close()` runs the owner notification (and any screen-focus callback)
+      // synchronously: a NEWER owner may have taken the surface — a workspace
+      // lease, a blocking Question/Approval/Save, or a different physical
+      // screen. The legacy editor must never mount on top of any of them, and a
+      // disposed surface must not mount one at all.
+      if (this.disposed) return
+      if (
+        this.jobWorkspace !== undefined ||
+        this.settingsWorkspace !== undefined ||
+        this.activeQuestions !== undefined ||
+        this.approvals.isActive() ||
+        this.activeSaveLocation !== undefined ||
+        this.activeScreen !== returnScreen
+      ) {
+        this.notify('could not open the settings editor: the surface changed', 'error')
+        return
+      }
+      try {
+        options.onOpenLegacy()
+      } catch (error) {
+        if (!this.disposed) {
+          this.notify(`could not open the settings editor: ${safeErrorMessage(error)}`, 'error')
+        }
+      }
+    }
+    /** A synchronous callback during ANY physical step of the open sequence may
+     *  close or replace THIS workspace. The stale opener must then abandon its
+     *  own sequence (the catch below rethrows) instead of starting a screen for
+     *  a record that is already gone. */
+    const assertStillOpening = (): void => {
+      if (finalized) throw new Error('the Settings workspace was superseded while it was opening')
+    }
+    record = { token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
+    this.settingsWorkspace = record
+    try {
+      this.leaveTerminalPresentation()
+      assertStillOpening()
+      returnScreen.stop({ preserveScreen: true })
+      assertStillOpening()
+      screen.start()
+      assertStillOpening()
+      // Mode 2031 is per screen: the freshly started screen syncs the CURRENT
+      // tracking choice now that it owns the terminal.
+      screen.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
+      // The stopped screen cleared the physical progress indicator; re-assert
+      // the desired state on the new owner and let it hear scheme reports.
+      this.enterTerminalPresentation()
+      assertStillOpening()
+      this.refreshSchemeRegistrations()
+      screen.setFocus(panel)
+    } catch (error) {
+      // A failed mount must never leave half a surface: latch/detach THIS record,
+      // release its screen and panel, restore the surface that opened it, and
+      // rethrow the real failure. A re-entrant closer that already handled this
+      // record left `finalized` set, so every step below is skipped.
+      const alreadyClosed = finalized
+      runSyncDisposalStepsWithPrimary('settings workspace open unwind', error, [
+        finalizeOnce,
+        () => { if (!alreadyClosed) screen.stop() },
+        () => { if (!alreadyClosed) panel.dispose() },
+        () => {
+          if (!alreadyClosed && !this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
+            this.resumeReturnSurface(returnScreen, returnFocus)
+          }
+        },
+      ])
+    }
+    return { close: () => close() }
+  }
+
+  /**
+   * Re-enter the surface a workspace paused: start the SAME screen object
    * (`preserveScreen` kept its renderer identity), re-assert terminal
    * presentation and the scheme fan-out, and repaint from row 0. Focus is only
    * re-assigned when the paused screen has NO focused component left — its own
    * focus survived the pause, and the workspace never forces the editor back.
    */
-  private resumeJobReturnSurface(screen: TuiMainScreen | TuiAltScreen, returnFocus: Component | null): void {
+  private resumeReturnSurface(screen: TuiMainScreen | TuiAltScreen, returnFocus: Component | null): void {
     screen.start()
     if (screen === this.tui) {
       // The alt screen's stop disabled focus reporting (?1004l rides the
@@ -20406,26 +20688,45 @@ export class TuiApp {
   }
 
   /**
-   * Abandon a leased Job workspace because a BLOCKING owner (Question/Approval/
-   * Save Location) is arriving. NEW workspace leases are refused across the whole
-   * abandonment, so a synchronous callback it runs can never lease a workspace
-   * that would then coexist with the blocking owner (the workspace itself refuses
-   * to lease while a blocking modal is active). The abandonment failure is
-   * REPORTED through the failure channel instead of propagating: the blocking
-   * owner's own commit is an independent obligation and must never be stranded by
-   * a throwing close (a failing screen stop, panel release or owner
-   * notification). A no-op when nothing is leased.
+   * Abandon a leased workspace (Job OR Settings) because a BLOCKING owner
+   * (Question/Approval/Save Location) is arriving. NEW workspace leases are
+   * refused across the whole abandonment, so a synchronous callback it runs can
+   * never lease a workspace that would then coexist with the blocking owner (a
+   * workspace itself refuses to lease while a blocking modal is active). The
+   * abandonment failure is REPORTED through the failure channel instead of
+   * propagating: the blocking owner's own commit is an independent obligation
+   * and must never be stranded by a throwing close (a failing screen stop, panel
+   * release or owner notification). A no-op when nothing is leased.
    */
   private abandonWorkspaceForBlockingOwner(): void {
-    if (this.jobWorkspace === undefined) return
-    const freezeDepthBefore = this.jobLeaseFreezeDepth
-    this.jobLeaseFreezeDepth = freezeDepthBefore + 1
+    this.closeLeasedWorkspaces('blocking owner')
+  }
+
+  /**
+   * Release EVERY leased workspace screen (Job OR Settings) through its own
+   * close path under ONE lease-freeze window: a synchronous callback the close
+   * runs can never lease a replacement that would then coexist with whatever
+   * caused the release. Each failure is reported through the failure channel
+   * instead of propagating, so one throwing close can never strand its sibling.
+   * A no-op when nothing is leased.
+   */
+  private closeLeasedWorkspaces(context: string): void {
+    if (this.jobWorkspace === undefined && this.settingsWorkspace === undefined) return
+    const freezeDepthBefore = this.workspaceLeaseFreezeDepth
+    this.workspaceLeaseFreezeDepth = freezeDepthBefore + 1
     try {
-      this.jobWorkspace.close()
-    } catch (error) {
-      this.routeTerminalSettlementFailure('job workspace abandonment', error)
+      try {
+        this.jobWorkspace?.close()
+      } catch (error) {
+        this.routeTerminalSettlementFailure(`job workspace abandonment (${context})`, error)
+      }
+      try {
+        this.settingsWorkspace?.close()
+      } catch (error) {
+        this.routeTerminalSettlementFailure(`settings workspace abandonment (${context})`, error)
+      }
     } finally {
-      this.jobLeaseFreezeDepth = freezeDepthBefore
+      this.workspaceLeaseFreezeDepth = freezeDepthBefore
     }
   }
 
@@ -20717,9 +21018,10 @@ export class TuiApp {
     this.schemeDisposers = []
     const screens: Array<TuiMainScreen | TuiAltScreen> = [this.tui]
     if (this.fullscreen !== undefined) screens.push(this.fullscreen)
-    // A Job workspace screen owns the terminal just like the transcript alt
-    // screen: scheme reports arrive THERE while it is leased.
+    // A Job or Settings workspace screen owns the terminal just like the
+    // transcript alt screen: scheme reports arrive THERE while it is leased.
     if (this.jobWorkspace !== undefined) screens.push(this.jobWorkspace.screen)
+    if (this.settingsWorkspace !== undefined) screens.push(this.settingsWorkspace.screen)
     for (const screen of screens) {
       this.schemeDisposers.push(screen.onTerminalColorSchemeChange((scheme) => {
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)

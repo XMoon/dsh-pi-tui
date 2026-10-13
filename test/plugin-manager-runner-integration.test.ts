@@ -23,6 +23,7 @@ import {
   settle,
 } from './support/runner-harness.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -142,6 +143,7 @@ test('the real /settings → Plugins Manage… row hosts the same panel and Back
   const { vt, harness } = await mountPluginRunner(t)
   invokeCommand(harness, 'settings')
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   // Filter the settings list down to the Plugins row, then activate it.
   for (const character of 'plugins') vt.sendInput(character)
   await vt.waitForRender()
@@ -166,22 +168,22 @@ test('the real /settings → Plugins Manage… row hosts the same panel and Back
 })
 
 test('an external Settings parent teardown releases the Manager owner so a later /plugins still opens', async (t) => {
-  const { vt, harness } = await mountPluginRunner(t)
+  const { vt, harness, app } = await mountPluginRunner(t)
   invokeCommand(harness, 'settings')
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   for (const character of 'plugins') vt.sendInput(character)
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.match(plain(vt.getViewport()), /Plugin Manager/, 'the Settings entry hosts the shared panel')
 
-  // External parent teardown: re-open Settings, which replaces the parent
-  // overlay WITHOUT a user Back (the submenu's own close path never runs).
-  invokeCommand(harness, 'settings')
+  // External parent teardown through a real fullscreen screen swap: the whole
+  // legacy Settings overlay (and its hosted submenu) is hidden WITHOUT a user
+  // Back, so the submenu's own close path never runs.
+  app.setFullscreen(true)
   await vt.waitForRender()
   assert.doesNotMatch(plain(vt.getViewport()), /Plugin Manager/, 'the external teardown hides the hosted panel')
-  vt.sendInput('\x1b')
-  await vt.waitForRender()
 
   // The owner was released with the parent: the direct entry opens normally
   // (no phantom active host) and closes cleanly.

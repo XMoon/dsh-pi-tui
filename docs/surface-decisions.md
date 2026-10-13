@@ -1953,6 +1953,51 @@ No Job fact is invented: the chrome renders only the fields
 the SAME `chromeText()` control-sequence boundary BEFORE the theme styling is
 applied, exactly as the B1-C section above records.
 
+## The Settings workspace is a read-only fullscreen projection (B2-A)
+
+`/settings` now opens a dedicated fullscreen Settings workspace instead of a
+72×28 `SettingsList` overlay. The workspace is a read projection: category /
+row / detail navigation over a detached snapshot, with no configuration write
+of any kind.
+
+- **Responsive three / two / one projection.** `>=150` columns render the
+  three-column `Categories | Settings | Details` layout; `96..149` render the
+  two-column `Settings | Details` layout with the category switch in the header
+  (keyboard `←`/`→` and painted mouse arrows); `<96` renders a single-column
+  `categories → rows → detail` drill-down. The single width breakpoint table is
+  the panel's own freeze, not a project-wide rule.
+- **The pilot rows are real read facts.** Appearance shows `Configured theme`
+  and `Icon style`; Display shows `Transcript display` (the LIVE
+  `runner.displayPreset()`, with the persisted `.displayPreset` named as a
+  separate last-read fact) and `Thinking detail` (the live
+  `app.isThinkingExpanded()`). Every row states its Scope and freshness; a
+  missing document is `unavailable` and a `get()` throw is a `read-error`, never
+  a fabricated default. The theme row's `value` is the source-qualified
+  configured identity (`plugin:…`/`file:…`) and its summary is the friendly
+  display name — the raw identity is what `C` copies.
+- **Browse never writes.** Rows carry no `Apply`/`Save`/draft, and the Detail
+  states that it is a read-only preview edited through `Other settings`.
+  `R` re-reads the same authorities without creating a polling subscription or
+  a shadow store.
+- **Navigation never loses identity.** Selection is the stable row/category id,
+  and width changes only re-project the layout: a wide detail stays the narrow
+  detail, a wide category focus stays the narrow categories level, and the list
+  rebases to keep the selected row visible instead of scrolling the whole
+  screen.
+- **The legacy complete editor stays reachable.** The permanently visible
+  `Other settings` category holds one row, `Open existing settings…`. Activating
+  it retires the workspace (restoring the surface it paused) and only then opens
+  the pre-B2-A `SettingsList`, so Theme, the Plugin Manager submenu,
+  permission/session rows, extension settings and every existing write path are
+  unchanged; `TuiApp.openSettings()` and its other callers keep their exact
+  semantics.
+- **The workspace is a physical screen lease** (§10.3 of
+  `overlay-focus-contract.md`), mutually exclusive with the Job workspace and
+  pre-empted by Question/Approval/Save.
+- **B2-B remains.** Real Theme/Display writes, Host commit and authoritative
+  reread, and the pending/failed/committed field states are the next slice on
+  the SAME page/row/detail ids; B2-A must not be read as B2 completion.
+
 ## Task Browser Host-text terminal-safety boundary
 
 A Task Center row is a projection of arbitrary Host/external text: the official

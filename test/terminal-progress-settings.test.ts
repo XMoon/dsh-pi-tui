@@ -30,6 +30,7 @@ import {
   type TerminalProgressMode,
 } from '../src/domain/terminal-progress/settings.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -199,6 +200,7 @@ function setupSettings(options: { terminalProgress?: string; failWrite?: boolean
       signal: new AbortController().signal,
     })
     await vt.flush()
+    await navigateToLegacySettings(vt)
   }
   const view = async (): Promise<string> => {
     await vt.waitForRender()

@@ -32,6 +32,7 @@ import { DirectModelSelectionOwner } from '../src/runtime/direct/model-selection
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -303,6 +304,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   vt.sendInput('Working directory')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
@@ -313,6 +315,7 @@ test('/settings working-directory row follows the live session cwd', async () =>
   await vt.waitForRender()
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   vt.sendInput('Working directory')
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
@@ -1330,6 +1333,7 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   vt.sendInput('\x1b[B') // → Theme row (approval is first; the doc starts dark)
   await vt.waitForRender()
   vt.sendInput('\r') // open the Theme submenu
@@ -1404,6 +1408,7 @@ test('/settings nested Theme submenu responds to fullscreen mouse clicks (mouse 
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   // Click the outer Theme row (approval is first; the doc starts dark).
   let viewport = vt.getViewport()
   const themeRow = viewport.findIndex(line => line.includes('Theme'))
@@ -1462,6 +1467,7 @@ test('/settings theme write aborts when USER custom storage is unavailable', asy
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   vt.sendInput('\x1b[B') // → Theme row (approval is first; the doc starts dark)
   await vt.waitForRender()
   vt.sendInput('\r') // open the Theme submenu
@@ -1521,6 +1527,7 @@ test('/settings theme STALE pick through the REAL handler rolls the row and the 
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   vt.sendInput('\x1b[B') // → Theme row (starts at auto)
   await vt.waitForRender()
   vt.sendInput('\r') // open the Theme submenu — rows FROZEN here
@@ -1585,6 +1592,7 @@ test('/settings theme autodetect applies only while auto stays the latest choice
   assert.ok(settingsDef?.handler !== undefined, 'settings handler missing')
   ;(settingsDef!.handler as () => unknown)()
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   vt.sendInput('\x1b[B') // → the Theme row (the panel opens at auto)
   await vt.waitForRender()
   // The theme row opens an in-place SUBMENU (the /model pattern — the row
