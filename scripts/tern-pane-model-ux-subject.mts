@@ -1,20 +1,26 @@
 /**
- * The subject of the `/model` real-pane flow: the PRODUCTION `TspModelPicker`
- * mounted over one official SDK inline surface, with a scripted directory and its
- * own record of everything that really arrived.
+ * The subject of the `/model` real-pane acceptance lane (list-first revision).
+ *
+ * It mounts the PRODUCTION `TspModelPicker` over one official SDK inline surface
+ * with a scripted directory, and records on `events.jsonl` everything that really
+ * arrived: the client capability set, every resize (with the client's own `cols`
+ * and `cell`), every key, every raw row/action event, every native scroll the
+ * presenter asked for, and the full picker/overlay props of every rendered frame.
+ * The flow reads that record back as its positive control.
  *
  * Launched by `tern-pane-model-ux.mjs` through `harness.launch`, so it follows the
  * subject contract: read the run directory from `TERN_PANE_DIR`, record what
- * happened there (the flow reads it back as its positive control), and exit on F10.
+ * happened there, and exit on F10.
  *
- * It renders ONLY the picker layer — no harness chrome — so the client's own
- * element boxes are the production ones. Press `1` / `2` / `3` to switch the
- * scripted directory: `1` is a model whose wide column fits (the full details
- * card), `2` is a model whose column cannot (the bounded `Open model & effort ›`
- * card), and `3` is a model with long identity/description facts for the Reader.
- * Press `e` / `l` to make the command's read owner report a FAILED read / start a
- * re-read on the open panel: the panel's phase is renderer-local, so these two
- * controls are what let the real-pane lane drive the Reader through a phase.
+ * Its own controls (never picker input):
+ *   1  the NORMAL catalogue: current != default, one model with 3 efforts, one
+ *      model without any effort metadata, and a third row that is neither
+ *   2  one model advertising 8 widest-glyph effort labels
+ *   3  the long-identity / long-description Reader model
+ *   4  a PARTIAL catalogue whose one provider read failed (the retry row is real)
+ *   e  report a FAILED read on the open panel (the Reader's phase control)
+ *   l  start a re-read (loading) on the open panel
+ *   s  re-open the panel SESSIONLESS (`Choose default model`, never a fake current)
  *
  * Usage: node --import tsx/esm scripts/tern-pane-model-ux-subject.mts
  * @module scripts/tern-pane-model-ux-subject
@@ -28,100 +34,155 @@ const note = (value: unknown): void => {
   appendFileSync(`${dir}/events.jsonl`, `${JSON.stringify(value)}\n`)
 }
 
-/** One advertised model; `efforts` absent means "no reasoning metadata". */
-const model = (
-  id: string,
-  name: string,
-  efforts?: readonly string[],
-  description?: string,
-): Record<string, unknown> => ({
-  id,
-  name,
-  ...(description === undefined ? {} : { description }),
-  ...(efforts === undefined ? {} : { reasoning: { efforts: efforts.map((e) => ({ id: e, name: e })) } }),
-})
+/* --------------------------------------------------------------- fixtures */
 
-/** A one-provider directory with a live-Session-shaped configured selection. */
-const directory = (provider: string, providerName: string, models: readonly Record<string, unknown>[]): Record<string, unknown> => ({
-  current: { provider, model: 'm', reasoningEffort: 'e1' },
+/** Fixture `1`: the normal catalogue. `current` and `default` are DIFFERENT rows;
+ *  `Alpha Model` advertises three efforts (so the Overview carries four
+ *  candidates including the synthetic provider default), `Beta Model` and
+ *  `Alpha Second` advertise none. */
+const NORMAL = {
+  current: { provider: 'alpha', model: 'm-alpha', reasoningEffort: 'medium' },
   directory: {
-    default: { provider, model: 'm', reasoningEffort: 'e1' },
-    routableProviders: [provider],
-    groups: [{ id: provider, name: providerName, models }],
+    default: { provider: 'beta', model: 'm-beta' },
+    routableProviders: ['alpha', 'beta'],
+    groups: [
+      {
+        id: 'alpha',
+        name: 'Alpha Provider',
+        models: [
+          {
+            id: 'm-alpha',
+            name: 'Alpha Model',
+            description: 'The current model.',
+            reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' }] },
+          },
+          { id: 'm-alpha2', name: 'Alpha Second' },
+        ],
+      },
+      { id: 'beta', name: 'Beta Provider', models: [{ id: 'm-beta', name: 'Beta Model' }] },
+    ],
     failures: [],
   },
-})
+}
 
-/** Two models, short label: the wide column fits the whole card + every effort. */
-const FULL = directory('shortp', 'shortp', [
-  model('m', 'Budget Model', ['e1', 'e2', 'e3']),
-  model('m2', 'Second Model', ['e1', 'e2', 'e3']),
-])
-/** Widest-glyph labels: the column cannot fit, so it becomes the Overview entry. */
-const BOUNDED = directory('openrouter', 'openrouter', [
-  model('m', 'Budget Model', Array.from({ length: 8 }, (_, i) => `W${i}`.padEnd(34, 'W'))),
-])
-/**
- * Long identity + description: the Reader must carry the COMPLETE values (an
- * unbroken 180-glyph ID, CJK, an emoji and forty explicit paragraphs) so the flow
- * can prove the client wraps them itself and can scroll to the very last line.
- */
-const LONG = `${'Long description '.repeat(4)}\r\n中文描述：${'完整可读'.repeat(4)} 🚀\n${Array.from({ length: 40 }, (_, i) => `paragraph ${i}: ${'word '.repeat(20)}end-${i}`).join('\n')}`
-/** The failed read's message: LF, CRLF and an explicit BLANK line, so the pane can
- *  prove the client renders every break instead of collapsing the value. */
-const FAILED = 'catalog is unreachable\r\nsecond line\r\n\r\nfourth line'
-const READER = {
-  current: { provider: 'longp', model: 'm', reasoningEffort: 'e2' },
+/** Fixture `2`: eight widest-glyph effort labels on ONE model. */
+const WIDE_EFFORTS = Array.from({ length: 8 }, (_, i) => ({ id: `w${i + 1}`, name: `Effort ${i + 1} ${'W'.repeat(24)}` }))
+const WIDE = {
+  current: { provider: 'wide', model: 'm-wide', reasoningEffort: 'w1' },
   directory: {
-    default: { provider: 'longp', model: 'm', reasoningEffort: 'e3' },
+    default: { provider: 'wide', model: 'm-wide' },
+    routableProviders: ['wide'],
+    groups: [{ id: 'wide', name: 'Wide Provider', models: [{ id: 'm-wide', name: 'Wide Model', reasoning: { efforts: WIDE_EFFORTS } }] }],
+    failures: [],
+  },
+}
+
+/** Fixture `3`: the long identity + long description Reader model. The model name
+ *  stays short (the client's overlay head is single-line) while the model ID is a
+ *  180-glyph unbroken token and the description carries CRLF, LF, a blank line,
+ *  CJK, an emoji and forty paragraphs. */
+const LONG_ID = `provider/${'W'.repeat(180)}/very-high`
+const LONG_DESCRIPTION = `${'Long description '.repeat(4)}\r\n中文描述：${'完整可读'.repeat(4)} 🚀\n\n${Array.from({ length: 40 }, (_, i) => `paragraph ${i}: ${'word '.repeat(20)}end-${i}`).join('\n')}`
+const READER = {
+  current: { provider: 'longp', model: LONG_ID, reasoningEffort: 'e2' },
+  directory: {
+    default: { provider: 'longp', model: LONG_ID, reasoningEffort: 'e3' },
     routableProviders: ['longp'],
     groups: [{
       id: 'longp',
       name: 'A very long advertised provider name',
-      models: [model(`provider/${'W'.repeat(180)}/very-high`, 'Long Model', ['e1', 'e2', 'e3'], LONG)],
+      models: [{
+        id: LONG_ID,
+        name: 'Long Model',
+        description: LONG_DESCRIPTION,
+        reasoning: { efforts: [{ id: 'e1', name: 'E one' }, { id: 'e2', name: 'E two' }, { id: 'e3', name: 'E three' }] },
+      }],
     }],
     failures: [],
   },
-} as Record<string, unknown>
+}
 
-/** The picker's own props at render time, so the flow can assert the real bar,
- *  the layout it really asked for, and the page it really painted. */
-const propsOf = (layer: Node): {
-  title: unknown
-  actions: unknown
-  size: unknown
-  preview: unknown
-  selected: unknown
-  rows: unknown
-} => {
-  let found: Node | undefined
+/** Fixture `4`: one provider read failed. The catalogue still has a usable model
+ *  and must carry the `Unavailable providers` group with the ONE read-only retry
+ *  row. */
+const PARTIAL = {
+  current: { provider: 'alpha', model: 'm-alpha' },
+  directory: {
+    default: { provider: 'alpha', model: 'm-alpha' },
+    routableProviders: ['alpha'],
+    groups: [{ id: 'alpha', name: 'Alpha Provider', models: [{ id: 'm-alpha', name: 'Alpha Model' }] }],
+    failures: [{ id: 'broken', name: 'Broken Provider', message: 'read failed' }],
+  },
+}
+
+/** The failed read's message: LF, CRLF and an explicit BLANK line, so the Reader
+ *  can prove the client renders every break instead of collapsing the value. */
+const FAILED = 'catalog is unreachable\r\nsecond line\r\n\r\nfourth line'
+
+/* ------------------------------------------------------------- describe() */
+
+/**
+ * The frame the presenter REALLY built, reduced to what the flow asserts: the
+ * page kind, the picker's own props (title/subtitle/size/preview/order/items/
+ * actions), the overlay head, the raw prop-key set (so "no scopes column" is a
+ * statement about the wire, not about pixels) and the summary `kv` items.
+ */
+const describe = (layer: Node) => {
+  let pickerNode: Node | undefined
+  let overlayNode: Node | undefined
+  let kvNode: Node | undefined
   const visit = (node: Node | undefined): void => {
-    if (node === undefined || found !== undefined) return
-    if (node.kind === 'picker') {
-      found = node
-      return
-    }
+    if (node === undefined) return
+    if (node.kind === 'picker' && pickerNode === undefined) pickerNode = node
+    if (node.kind === 'overlay' && overlayNode === undefined) overlayNode = node
+    if (node.kind === 'kv' && kvNode === undefined) kvNode = node
     for (const child of node.children) visit(child)
   }
   visit(layer)
-  const items = found?.props['items']
+  const props = pickerNode?.props
+  const title = props?.['title']
+  const page = overlayNode !== undefined
+    ? 'details'
+    : pickerNode === undefined
+      ? 'none'
+      : String(title).startsWith('Model overview') ? 'overview' : 'models'
   return {
-    title: found?.props['title'],
-    actions: found?.props['actions'],
-    size: found?.props['size'],
-    preview: found?.props['preview'],
-    selected: found?.props['selected'],
-    // The MAIN LIST row ids, in wire order: the flow can then tell a candidate
-    // row from a summary row without guessing at rendered text.
-    rows: Array.isArray(items)
-      ? items.map((item) => (item !== null && typeof item === 'object' ? (item as { id?: unknown }).id : undefined))
+    page,
+    head: overlayNode?.props['head'],
+    title,
+    subtitle: props?.['subtitle'],
+    size: props?.['size'],
+    preview: props?.['preview'],
+    layout: props?.['layout'],
+    focus: props?.['focus'],
+    selected: props?.['selected'],
+    current: props?.['current'],
+    total: props?.['total'],
+    query: props?.['query'],
+    placeholder: props?.['placeholder'],
+    propKeys: props === undefined ? undefined : Object.keys(props).sort(),
+    actions: Array.isArray(props?.['actions'])
+      ? (props['actions'] as readonly Record<string, unknown>[]).map((action) => ({
+        id: action.id, label: action.label, primary: action.primary === true, disabled: action.disabled === true, end: action.end === true,
+      }))
       : undefined,
+    order: props?.['order'],
+    columns: props?.['columns'],
+    items: Array.isArray(props?.['items'])
+      ? (props['items'] as readonly Record<string, unknown>[]).map((item) => ({
+        id: item.id, label: item.label, detail: item.detail, title: item.title, mark: item.mark, badges: item.badges, disabled: item.disabled, dot: item.dot, facts: item.facts,
+      }))
+      : undefined,
+    summary: kvNode === undefined ? undefined : kvNode.props['items'],
   }
 }
+
+/* ------------------------------------------------------------- the panel */
 
 const session = await connect({ app: 'tern-pane-model-ux', timeout: 2000 })
 if (session === null) throw new Error('this subject must run inside a real Tern pane')
 const surface = session.open({ mode: 'inline', title: 'model-ux' })
+note({ caps: session.caps })
 
 let picker!: TspModelPicker
 let frames = 0
@@ -129,7 +190,7 @@ const draw = (): void => {
   const layer = picker.renderLayer()
   surface.render({ layer })
   frames += 1
-  note({ frame: { n: frames, ...propsOf(layer) } })
+  note({ frame: { n: frames, ...describe(layer) } })
 }
 picker = new TspModelPicker({
   render: draw,
@@ -143,8 +204,8 @@ picker = new TspModelPicker({
   },
 })
 
-const handle = picker.presentation.open({
-  subject: { sessionless: false },
+const openPanel = (sessionless: boolean) => picker.presentation.open({
+  subject: { sessionless },
   isCurrent: () => true,
   retry: () => note({ retry: true }),
   apply: async (selection) => {
@@ -160,12 +221,14 @@ const handle = picker.presentation.open({
   },
 })
 
+let handle = openPanel(false)
+
 const useFixture = (fixture: Record<string, unknown>, label: string): void => {
   handle.setDirectory(fixture)
   note({ fixture: label })
   draw()
 }
-useFixture(FULL, 'full')
+useFixture(NORMAL, 'normal')
 note({ ready: true })
 
 try {
@@ -174,19 +237,25 @@ try {
       const key: Key = input.key
       if (key.name === 'f10') break
       // The subject's own phase controls, so the real-pane lane can exercise the
-      // Reader through a failed/running read instead of leaving that to the
-      // headless suite: `e` reports a failed read, `l` starts a re-read.
+      // open panel through a failed/running read.
       if (key.text === 'e' || key.text === 'l') {
         if (key.text === 'e') handle.setLoadError(FAILED)
         else handle.setLoading()
         note({ control: key.text === 'e' ? 'load-error' : 'loading' })
         continue
       }
+      // The panel-lifecycle control: a SESSIONLESS subject (never a live one).
+      if (key.text === 's') {
+        handle = openPanel(true)
+        useFixture(NORMAL, 'sessionless')
+        continue
+      }
       // The fixture switch is the subject's own control, not picker input.
-      if (key.text === '1' || key.text === '2' || key.text === '3') {
-        if (key.text === '1') useFixture(FULL, 'full')
-        else if (key.text === '2') useFixture(BOUNDED, 'bounded')
-        else useFixture(READER, 'reader')
+      if (key.text === '1' || key.text === '2' || key.text === '3' || key.text === '4') {
+        if (key.text === '1') useFixture(NORMAL, 'normal')
+        else if (key.text === '2') useFixture(WIDE, 'wide-efforts')
+        else if (key.text === '3') useFixture(READER, 'reader')
+        else useFixture(PARTIAL, 'partial')
         note({ key: key.text })
         continue
       }

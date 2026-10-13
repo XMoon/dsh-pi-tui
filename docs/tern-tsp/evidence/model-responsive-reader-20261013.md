@@ -12,6 +12,31 @@ valid for what they measured and are NOT rewritten. Read this document for
 anything about the layout threshold, the Overview's priority, and the read-only
 Reader.
 
+> **Superseded in part.** The three-column shell this revision shipped — the
+> `1040px` side-preview threshold, the provider scope column, and the wide Model
+> Details card with its bounded `Open model & effort ›` form — was replaced by the
+> **list-first** catalogue, which is ONE picker at every pane width with an
+> explicit write in its footer.
+>
+> What stays valid HERE is the CLIENT calibration in §2 (where the client really
+> paints the SIDE preview, and what it does with `pv-side` below its own
+> breakpoint) and the Reader measurements in §3.
+>
+> What is HISTORY ONLY and must never be read as the current presenter: the
+> "Decision" paragraph of §2 (its `SIDE_PREVIEW_MIN_PANE_PX` /
+> `nativeSidePreview` rule), the file-by-file list of §4, the acceptance matrix of
+> §5 and the per-area summary of §6 all describe the retired `lg` +
+> `preview: 'side'` shell, its provider scope column, its `detail-card`/`effort`
+> zones and the `detailsReturn` field, none of which exist any more; the Reader
+> rows there also say it returned to the model list, because the probe drove the
+> then-current wide-card path. Under the list-first contract
+> the catalogue is a single `md`/`lg` picker with no scopes and no side column, and
+> the Reader's ONLY origin and return is the model's Overview.
+>
+> The CURRENT contract is [Model selection](../model-selection.md) and the
+> replacement evidence is
+> [the list-first visual evidence](./model-list-first-visual-20261013.md).
+
 ## 1. Environment and method
 
 | Item | Value |
@@ -74,7 +99,8 @@ Two facts decide the revision:
 
 > The rows below are measurements of the CLIENT, not of the shipped presenter.
 
-**Decision.** The presenter reconstructs the pane width as `cols * cell.w` and
+**Decision (HISTORY — superseded by the list-first contract, see the banner).** The
+presenter reconstructs the pane width as `cols * cell.w` and
 requires the measured `1040px` (`SIDE_PREVIEW_MIN_PANE_PX` in
 `src/tui/tsp/model-picker-state.ts`). The reconstruction UNDER-estimates the pane
 by the client's own chrome (1040px → 129 × 8 = 1032px), so the boundary pane
@@ -102,7 +128,7 @@ The capability questions and their measured answers:
 | Does `ui.text` wrap at the REAL layout width? | Yes: a `wrap: 'char'` value node carries the complete unbroken 180-glyph identifier and renders it as three lines with no ellipsis; `wrap: 'word'` preserves prose and explicit newlines (a blank line must be rendered as the client shows it) |
 | Is the overlay body a real scroll container? | Yes — but only when addressed by the id the SDK really assigned. `Surface.scroll('reader-body', …)` and a hand-built dotted path both failed with the client's `unknown id …`; the ids are `layer.<key>` (the region root id is the region name, and the col that becomes the region root contributes only its children), so the presenter resolves the body's id from the very `View` it renders |
 | Does the app-owned keyboard really move the client's viewport? | Yes: `Down` and `End` each emitted one SDK `scroll` op for the body node the presenter built — its id is frame-scoped, `layer.model-details-reader-<serial>-rev-<rev>.model-details-body-<serial>-rev-<rev>` — and the client's own value node moved from `y=326` to `y=-568` (its height is 1312px); `Home` returned it to `y=326`, and real line keys parked it in between |
-| Does the visible `Back` row work, and does `Esc` agree? | Yes: a real pointer click on the row returned to the model list, and `Esc` returned to the page the Reader was entered from (`detailsReturn`); both are the same `back` intent. The row is the FIRST row of the scrollable body and travels with the content, so after scrolling to a long value's tail, `Home` (or `Esc`) is the way back — measured, and documented in the contract rather than papered over |
+| Does the visible `Back` row work, and does `Esc` agree? | Yes: a real pointer click on the row returned to the page the Reader was entered from, and `Esc` resolved the same `back` intent. The row is the FIRST row of the scrollable body and travels with the content, so after scrolling to a long value's tail, `Home` (or `Esc`) is the way back — measured, and documented in the contract rather than papered over. **SUPERSEDED DETAIL:** this revision's probe drove the THEN-CURRENT wide-card path, so its "returned to the model list" reading and the `detailsReturn` field it names describe THAT flow; the list-first contract lets the Overview's details entry be the Reader's only origin, so the row and `Esc` both return to that Overview |
 | Can a forged write reach the page? | No: the Reader paints no picker, so there is no action bar to address; `apply` was refused, the page did not change, and the frame did not even re-render |
 
 **Honest limitations of the lane itself**, all measured rather than assumed:
@@ -145,6 +171,10 @@ The capability questions and their measured answers:
    (measured line count) and preserves the complete value.
 
 ## 4. What changed
+
+> HISTORY ONLY: this file-by-file list names the retired three-column helpers (see
+> the banner). The current owner modules and their rules are
+> [Model selection](../model-selection.md).
 
 | File | Change |
 |---|---|

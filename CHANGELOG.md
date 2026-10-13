@@ -109,44 +109,29 @@
 - 性能统计改由 TUI 自有的 Host `piTuiPerformance` 投影提供：Direct 与 Remote
   同源，重连与本地分页不再影响数值；主会话与查看中的子会话各自显示自己 Session
   的数值。某个范围没有合格样本时不再显示 `0 tok/s`，而是省略该数值。
-- TSP 实验渲染器的 `/model` 改成「选模型 → 看该模型 → 显式提交」的三级任务流。
-  宽屏（`cols >= 120`）仍是「Provider 作用域 + 模型列表 + 模型细节栏」三栏：细节卡片
-  标题带 `›` 并绑定了卡片自身的点击目标，`Tab` 聚焦该卡后按 `Enter` 打开只读的完整
-  详情页；栏内 Reasoning Effort 单选项点一下只改本地草稿。侧栏放不下整份内容时，
-  同一张卡改成 `Open model & effort ›` 入口，`Tab` 聚焦后按 `Enter` 打开该模型自己
-  的**概览**页；普通分屏/窄屏也一样——模型列表本身不含写入按钮，`Enter`（或选中该行）
-  进入该行模型的概览，概览用
-  原生主列表列出完整身份、`View full model details ›` 入口和全部 Effort 候选，
-  身份续行可逐行阅读，静态行按 `Enter` 无动作，Effort 行只改草稿，最后只有明确命名
-  的 `Switch`（会话）或 `Save default`（无会话）提交一次。底部按钮按页封顶：模型列表是
-  `Cancel` + `Retry`（仅有 Provider 读取失败时）+ 那一个写入动作；**概览页只有
-  `Back` + `Switch`/`Save default`，只读详情页只有 `Back`** —— 这两页不再显示
-  `Cancel`，退回模型列表即可取消（`Esc`/遮罩手势本身的关闭能力仍然保留，只是不再占用
-  页脚按钮）。详情页永不写入，
-  在详情页或窄屏模型列表上伪造提交会被直接拒绝。原先的 `More actions` 页、
-  `Action: …` 条、`Operation` 说明块、strip 与 `Confirm` 模糊动词全部移除。写入仍是
-  同一次业务提交，读取仍只有同一个 owner。
-  本次已在真实 Tern 面板(0.8.2)上复验:点击细节卡片的
-  **标题与正文文本行**都能打开只读详情页;模型行首次点击发 `select`、
-  再次点击/双击发 `activate`,宽屏列表只移动高亮且不写;400×600 与 1280×800 下页脚
-  按钮完整落在 bar 内,400×600 概览显示 `Back`/`Switch`、紧凑列表只显示 `Cancel`,
-  点击 `Switch` 恰好写入一次。仍未验证:400px 下限与宽屏在 +25%/+50% 放大字体下的
-  表现(沿用既有 Owner 接受限制),以及滚轮/IME/主题/Remote 路径;细节见
-  `docs/tern-tsp/model-selection.md` 的真机验证与未验证清单。
-- TSP 实验渲染器的 `/model` 修正两处实际可见的体验问题。**宽屏判定改为实测**：只有窗口
-  真的宽到原生客户端把预览栏放在列表旁边时才使用宽屏三栏（实测约 1040px 起；此前的
-  `cols >= 120` 约合 960px，客户端会把预览画到列表下方，Effort 候选落在可见区域之外），
-  普通分屏与窄屏一律走紧凑模型列表 → 该模型的概览。**概览改为先 Effort**：首屏是模型短名
-  与 Reasoning Effort 的全部候选，`View full model details ›` 以及 Provider/ID/Current/
-  Default 的单行摘要排在其后，长值不会再生成成串续行把 Effort 挤出首屏。**完整详情改为原生
-  Reader**：只读页不再是预拆成单行片段的 Picker 行，而是一个原生 `overlay`，每个字段一个
-  完整值、由客户端按真实宽度换行（无空格的 provider/model/effort 与模型 ID 按字符换行、
-  描述按词换行并保留空行），`PageUp`/`PageDown`、`Home`/`End`、`↑`/`↓` 由应用驱动原生滚动
-  读到结尾，只有可见的 `Back` 行与 `Esc` 返回原页面；该页没有任何提交入口，伪造提交被直接
-  拒绝。这一行 `Back` 永远可用：重读进行中或读取失败时它（以及同一个意图的 `Esc` 和该页的
-  滚动键）仍会回到来源页并保留页面上下文，只有已准入的写入仍独占面板。已在真实 Tern 面板（0.8.3）复验：1020/1040/1050px 的预览模式分界、分屏概览的
-  Effort 首屏、Reader 的完整值、键盘滚动与返回均通过；细节见
-  `docs/tern-tsp/evidence/model-responsive-reader-20261013.md`。
+- TSP 实验渲染器的 `/model` 改为**统一的 list-first 模型目录**，任何窗宽都是同一个原生
+  Picker：宽屏的 Provider 侧栏、右侧细节栏与 `Open model & effort ›` 折叠入口全部移除。
+  目录每行一个 (provider, model)：模型名为主信息、Provider 缩写标记、真实的
+  `current`/`Default` 徽标、当前 Reasoning Effort 草稿与完整模型 ID，分组为
+  `Current / Default` 置顶、其余按 Provider，
+  宽屏在列表下方显示只读的 `Provider / Draft effort / Selection` 摘要。显式命名的
+  `Switch`（会话）或 `Save default`（无会话）**在任何窗宽都出现在页脚**并且只提交一次，
+  整模型切换因此不再需要进二级页；点击行只移动高亮，点击已高亮的行（或按 `Enter`）进入
+  该模型的**概览**——概览首屏依次是该模型自身的身份行、全部 Reasoning Effort 候选
+  （`●`/`○`，没有候选时明确写 `Not available`）与 `View full model details ›` 入口，选择候选只改本地草稿。只读的完整
+  详情页是原生 Reader，事实分为 Identity / Configuration / Description 三组：每个值都是
+  一个完整字符串、由客户端按真实宽度换行（无空格的标识符按字符换行、描述按词换行并保留
+  空行），`↑`/`↓`、`PageUp`/`PageDown`、`Home`/`End` 驱动原生滚动读到结尾，只有可见的
+  `Back` 行或 `Esc` 返回来源页（滚到尾部时该行已滚出视口，此时 `Esc` 是唯一的返回方式）。
+  该页没有任何提交入口，伪造提交会被拒绝。部分 Provider 读取失败时，失败项归入列表末尾的
+  `Unavailable providers` 分组并附一条只读的 `Retry failed providers` 行，页脚因此始终只有
+  两个按钮。原先的 `More actions` 页、`Action: …` 条、`Operation` 说明块、Provider 作用域列、
+  `Confirm` 模糊动词以及「窄屏列表不含写入」的旧规则全部移除；写入仍是同一次业务提交，
+  读取仍只有同一个 owner。已在真实 Tern 面板（0.8.3）复验：各支持尺寸下 presenter 自身的
+  布局声明与客户端真实的预览模式类一致、400px 下限页脚的两个按钮完整落在 bar 内、点击恰好
+  写入一次，Reader 的完整值、键盘滚动与返回均通过。仍未验证：400px 下限与宽屏在
+  +25%/+50% 放大字体下的表现（沿用既有 Owner 接受限制）、滚轮/触控板滚动、IME、主题与
+  Remote 路径；细节见 `docs/tern-tsp/model-selection.md` 的真机验证与未验证清单。
 
 - 全屏 Settings 工作区改用与家族统一的视觉语言:标题变成 `Settings · <层级路径>`
   (身份词用粗体、路径用弱色,不再把 `SETTINGS` 画成蓝色品牌词),诊断行的状态词改为
@@ -189,10 +174,6 @@
 
 ### 修复
 
-- TSP 实验渲染器的 `/model`：点击左列 `All models` 或某个 Provider 现在真的会
-  过滤模型列表（Provider 选择走 Tern 原生的 `action(scope)` 事件通道，不再被
-  当成模型行选择而忽略），模型行、Effort 行与 Provider 选择互不混淆，任何一次
-  点击都不会写模型。
 - 新建或切换 Session（`/new`、`/resume`、`/fork`）后，同名 Skill 的斜杠命令不再
   消失：命令表刷新时不再把 TUI 自己注册的兼容镜像当成真正的 Host 命令，因此
   Skill 在补全里持续可见、`/名称 参数` 仍可按 Skill 执行；真正同名的 Host 命令

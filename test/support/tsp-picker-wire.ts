@@ -155,10 +155,12 @@ export async function waitForPicker(
 /**
  * The read-only Reader's mounted `overlay` (the `details` page), or `undefined`
  * while the page is a picker. The page REPLACES the picker, so a mounted picker
- * and a mounted Reader can never both describe the same layer.
+ * and a mounted Reader can never both describe the same layer. It is found by the
+ * key it was built from (the overlay's own head is the MODEL NAME, so the page is
+ * never identified by a caption it may not carry).
  */
 export function readerNode(pane: TspPane, prefix = MODEL_LAYER_PREFIX): WireNode | undefined {
-  return layerNodes(pane, prefix).find((node) => node.k === 'overlay' && node.p.head === 'Full model details')
+  return layerNodes(pane, prefix).find((node) => node.k === 'overlay' && node.id.includes('model-details-reader'))
 }
 
 /** The Reader's scrollable body: the node the presenter addresses with the SDK's

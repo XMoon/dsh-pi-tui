@@ -885,10 +885,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     display,
     get modelPresentation() {
       // The native B2 Model layer needs the picker surface itself, the native
-      // radio Rows of the effort selector, and the detail Cards. A pane that
-      // advertises fewer kinds is refused BEFORE the handler (fail closed) —
-      // the same set the real headless pane reports (see the evidence index).
-      return ['picker', 'row', 'card'].every(kind => session.caps.kinds.includes(kind))
+      // Row of the Reader's Back control and the read-only Reader's overlay —
+      // the three kinds its render paths really construct. A pane that
+      // advertises fewer kinds is refused BEFORE the handler (fail closed);
+      // the list-first revision retired the detail Cards, so this is the exact
+      // set the presenter uses (see the evidence index).
+      return ['picker', 'row', 'overlay'].every(kind => session.caps.kinds.includes(kind))
         ? modelPresentation
         : undefined
     },
