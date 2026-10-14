@@ -1639,9 +1639,11 @@ drops such a reserved binding rather than promising a key the workspace
 consumes.
 
 `Tab` is reserved the same way, for the workspace's own page toggle: the owner
-matches it BEFORE the Find check (a Find remapped onto `Tab` can never shadow the
-page switch the bar advertises), the Find hint filters it out exactly like
-Home/End, and the toggle stays inactive while a Find owns the ordinary keys. `/`
+matches it BEFORE the Find check — **unconditionally, in every search state** — so
+a Find remapped onto `Tab` can never shadow the page switch the bar advertises
+nor reach `openFind()` (in NAVIGATE that would flip the search back to EDIT). The
+Find hint filters it out exactly like Home/End, only the inactive state performs
+the switch, and while a Find owns the ordinary keys `Tab` is a consumed no-op. `/`
 remains the always-available Job-local Find entry, so no remap can strand the
 search.
 

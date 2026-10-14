@@ -1412,6 +1412,7 @@ test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
   await openFirstJob(vt, harness)
+  const bar = (): string => rawView(vt).at(-1) ?? ''
   harness.observation.latest()!.emit({ label: 'pnpm build --watch', text: 'line 001\nline 002' })
   await vt.waitForRender()
   assert.match(view(vt), /Ctrl\+F find/, 'the default direct binding is advertised')
@@ -1437,5 +1438,51 @@ test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page
   vt.sendInput('/')
   await vt.waitForRender()
   assert.match(view(vt), /Find Output:/, '`/` still opens the Output Find')
+
+  // ── NAVIGATE: the reserved key is consumed there too, it never re-enters EDIT ──
+  // A Find binding remapped onto `Tab` used to reach `openFind()` in this state and
+  // flip the search back to EDIT. The discriminator is the SEARCH ROW itself: in EDIT
+  // a printable key is query text, in NAVIGATE it is inert.
+  const searchRow = (): string => rawView(vt).find(line => line.includes('Find Output:')) ?? ''
+  vt.sendInput('line')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.match(bar(), /Follow paused · End resume/, 'Enter left the Output Find in NAVIGATE')
+  const navigateRow = searchRow()
+  assert.ok(navigateRow !== '', 'the Output search row is still painted in NAVIGATE')
+
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.match(bar(), /Esc back/, 'Tab did NOT switch the page out of a NAVIGATE Find')
+  assert.ok(!/Esc output/.test(view(vt)), 'the Command page was never entered')
+  assert.match(bar(), /Follow paused · End resume/, 'Tab did NOT re-enter EDIT')
+  vt.sendInput('z')
+  await vt.waitForRender()
+  assert.equal(searchRow(), navigateRow, 'a printable key is still inert: the search is still NAVIGATE, not EDIT')
+
+  // The same from the Command page's own Find.
+  vt.sendInput('\x1b') // ONE Esc leaves the NAVIGATE search; a second would close the workspace
+  await vt.waitForRender()
+  assert.match(bar(), /Esc back/, 'one Esc left only the search, the workspace is still up')
+  vt.sendInput('\t') // now inactive: the reserved toggle switches the page
+  await vt.waitForRender()
+  assert.match(view(vt), /Esc output/, 'Tab switched to the Command page')
+  vt.sendInput('/')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Command:/, 'the Job-local `/` opens the Command Find')
+  const commandRow = (): string => rawView(vt).find(line => line.includes('Find Command:')) ?? ''
+  vt.sendInput('cmd')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  const commandNavigateRow = commandRow()
+  assert.ok(commandNavigateRow !== '', 'the Command search row is painted in NAVIGATE')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.match(view(vt), /Esc output/, 'Tab did NOT switch the page out of the Command NAVIGATE Find')
+  vt.sendInput('z')
+  await vt.waitForRender()
+  assert.equal(commandRow(), commandNavigateRow, 'the Command Find is still NAVIGATE, not EDIT')
   app.stop()
 })
