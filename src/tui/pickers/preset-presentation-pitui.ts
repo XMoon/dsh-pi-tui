@@ -4,13 +4,16 @@
  *  PiTui keeps its own UX unchanged: the roster overlay opens only once the
  *  rows are known (a running read shows nothing new — the original path read
  *  the roster before opening), Enter on a row applies it in ONE step, and the
- *  overlay offers neither Retry, Details nor a Set-default action. The rows,
- *  their description fields and their wording are the original ones.
+ *  overlay offers neither Retry, Details nor a Set-default action. The rows and
+ *  their description fields are the original ones; the current-state mark is
+ *  the design language's `[current]` chip in the row value slot (§4.5/§12.2,
+ *  rollout PR5b).
  * @module tui/pickers/preset-presentation-pitui
  */
 import type { PresetPresentation, PresetPickerRoster } from '../../app/command/preset-presentation.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { TuiApp } from '../../tui-app.ts'
+import { color } from '../theme/runtime.ts'
 import { isBuiltInPresetRow, presetDisplayText } from './preset-display.ts'
 
 export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
@@ -46,11 +49,26 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
                 description: [
                   display.description,
                   isBuiltInPresetRow(preset) ? 'system' : 'user',
-                  preset.id === input.defaultId ? 'default' : undefined,
-                  preset.id === input.currentId ? '← current' : undefined,
                   preset.broken,
                 ].filter(Boolean).join(' · '),
-                currentValue: '',
+                // §4.5/§12.2: the row state is the `[current]` state chip in
+                // the row's value slot — the SAME position the /settings theme
+                // picker uses — never a word inside the description (which is
+                // also painted only while the row is selected). The chip is
+                // PRE-PAINTED `textMuted` (the `status.ts:110` precedent)
+                // because `settingsListTheme().value` paints `selected ?
+                // primary : textDim`; it is the slot's only span, so nothing
+                // after a nested reset can lose its ink.
+                // §4.5/§12.2: TWO states are TWO chips (`[current] [default]`), never
+                // one joined pair — both are state, not prose, so both leave the
+                // description. Each span is pre-painted (the `status.ts:110` precedent),
+                // the ` · ` joiner included: a nested span's reset ends the outer ink for
+                // everything after it, so an unpainted joiner would fall back to the
+                // terminal's default colour between the two chips.
+                currentValue: [
+                  preset.id === input.currentId ? color.textMuted('[current]') : '',
+                  preset.id === input.defaultId ? color.textMuted('[default]') : '',
+                ].filter(chip => chip !== '').join(color.textDim(' · ')),
                 // The values entry makes SettingsList.activateItem fire
                 // onChange on Enter/Space (rows without values or a submenu
                 // are inert) — one key confirms the switch while the selected

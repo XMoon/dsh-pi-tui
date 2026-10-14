@@ -262,6 +262,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the key that really acted was `Shift+C` while the bar wrote `C`), matching the
   Settings workspace and the `Copy All [C]` / `Copy value [C]` badges exactly.
 
+- The "current value" state in the `/settings` Theme submenu and the `/preset` picker
+  is the `[current]` state chip instead of the literal `← current`: both pickers use
+  ONE position (the row's value slot), and its ink is pinned to the weakest token in
+  BOTH selection states. The preset's `default` state moved out of the description too
+  and sits beside it as a `[default]` chip — two states are two chips, with the joiner
+  carrying its own ink as well.
+
 - The pickers (the `/model` overlay and its family) now speak the same visual
   language as the workspaces: the selection cursor is `>` in `primary` — asked from
   `selectListTheme.selectedPrefix` instead of being inlined, and no longer the

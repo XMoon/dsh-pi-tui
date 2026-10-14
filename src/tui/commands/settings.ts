@@ -739,7 +739,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // `auto` (and wrongly apply over a just-selected explicit theme).
         // The choice is the SOURCE-QUALIFIED IDENTITY (normalized — a legacy
         // `custom:X` doc value becomes `file:X`), never a display label: the
-        // submenu's `← current` marker compares this identity against the
+        // submenu's `[current]` state chip compares this identity against the
         // live row values (the review's P3 — the current-state identity must
         // not be a display string a dynamic same-named source can mimic).
         let lastThemeChoice = normalizePersistedTheme(theme)
@@ -882,7 +882,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               // is the FRIENDLY DISPLAY, purely presentational after the
               // updateValue rewrite, and a display-label comparison would
               // let a same-named row from ANOTHER source steal the
-              // `← current` marker — the review's P3). A re-open after a
+              // `[current]` state chip — the review's P3). A re-open after a
               // successful pick sees the committed identity; a FAILED pick
               // keeps the previous one.
               currentValue: themeDisplayName,

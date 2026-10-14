@@ -62,7 +62,7 @@ const GRANDFATHERED_AMBIGUOUS: ReadonlyArray<readonly [glyph: string, where: str
   ['─', 'every rule and the editor border'],
   ['·', 'the fact/hint separator'],
   ['↗', 'the Job command affordance'],
-  ['←', 'the `← current` marks being retired plus the question flow chrome hints'],
+  ['←', 'the question flow chrome hints (the `← current` marks were retired by PR5)'],
   ['▼', 'the hardcoded sub-call/workflow disclosure'],
   ['▶', 'the hardcoded sub-call/workflow disclosure'],
   ['◆', 'the footer configurator move-mode marker'],

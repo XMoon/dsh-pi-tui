@@ -29,7 +29,7 @@
  */
 
 import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { settingsListTheme } from '../theme/runtime.ts'
+import { color, settingsListTheme } from '../theme/runtime.ts'
 import type { ThemeRegistry } from '../../extension/internal/theme-registry.ts'
 import { themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
@@ -64,7 +64,7 @@ export function themeDisplayName(value: string | undefined, themes: ThemeRegistr
  *
  * `currentSelection` is the CURRENT SELECTION's SOURCE-QUALIFIED IDENTITY
  * (the /settings handler's synchronous `lastThemeChoice` — normalized
- * here). The `← current` marker compares ROW VALUES, never display
+ * here). The `[current]` state chip compares ROW VALUES, never display
  * labels: theme sources are dynamic, so a same-labeled row from a
  * DIFFERENT source (a file `Solarized.json` created while a plugin theme
  * `Solarized` is selected) must never steal the marker — the review's
@@ -115,8 +115,13 @@ export class ThemeSubmenu implements RowBudgetAware, Focusable {
             : 'Built-in palette',
         // The marker is a VALUE comparison against the live selection
         // identity — never a display-label comparison (a same-labeled row
-        // from another source cannot steal it).
-        currentValue: row.value === current ? '← current' : '',
+        // from another source cannot steal it). §4.5/§12.2: the state chip
+        // is `textMuted` and is NEVER recoloured by the row's selection,
+        // while `settingsListTheme().value` paints `selected ? primary :
+        // textDim` — so the chip is PRE-PAINTED here (the `status.ts:110`
+        // precedent): the nested span wins for its own cells, and the chip
+        // is the slot's only span, so nothing after a reset can lose ink.
+        currentValue: row.value === current ? color.textMuted('[current]') : '',
         values: ['✓'],
       })),
       Math.min(8, Math.max(3, rows.length)),

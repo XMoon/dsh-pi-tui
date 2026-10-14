@@ -174,6 +174,11 @@
   一并让位(原有行为)。复制当前页原文的键改为裸 `c`(原先实际生效的是 `Shift+C`,而动作栏
   写的是 `C`),与设置工作区、以及 `Copy All [C]` / `Copy value [C]` 两个 badge 完全一致。
 
+- `/settings` 的 Theme 子菜单与 `/preset` 选择器里的「当前值」标记,由字面 `← current` 改为
+  `[current]` 状态 chip:两个 picker 统一到行的 value 槽,ink 固定为最弱色(选中与未选中两态
+  都一样);preset 的 `default` 也一并从描述里移出、成为旁边的 `[default]` chip(两个状态
+  就是两个 chip,连接符也自带 ink)。
+
 - `/model` 等选择器(覆盖层)改用与工作区一致的视觉词汇:选择游标从无色粗体的 `→ ` 改为
   `>` 的 `primary`(并且现在真的从 `selectListTheme.selectedPrefix` 取,不再内联硬编码);
   底部提示行改为键名大写、动词小写、`Esc` 置尾(`↑↓ model · Enter effort/select · Esc close`);

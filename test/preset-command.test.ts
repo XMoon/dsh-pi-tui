@@ -42,7 +42,42 @@ import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
+import { currentPalette } from '../src/tui/theme/runtime.ts'
 
+
+/** The plain (ANSI-stripped) viewport of one VT frame. */
+const plainViewport = (vt: VirtualTerminal): string[] => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+
+/** The row inside an overlay Frame's borders (trimmed), so the SettingsList
+ *  cursor marker is observable. */
+const frameContent = (line: string): string => {
+  const start = line.indexOf('│')
+  const end = line.lastIndexOf('│')
+  return start >= 0 && end > start ? line.slice(start + 1, end).trim() : line.trim()
+}
+
+/** Whether the row carries the SettingsList cursor marker. */
+const isCursorRow = (vt: VirtualTerminal, row: number): boolean =>
+  frameContent(plainViewport(vt)[row] ?? '').startsWith('>')
+
+/** The viewport row of the first painted occurrence of `needle`. */
+function rowOfText(vt: VirtualTerminal, needle: string): number {
+  const row = plainViewport(vt).findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the painted frame must contain ${JSON.stringify(needle)}:\n${plainViewport(vt).join('\n')}`)
+  return row
+}
+
+/** The terminal-CELL column of the first painted occurrence of `needle`. */
+function cellIndexOfText(vt: VirtualTerminal, row: number, needle: string): number {
+  const plain = plainViewport(vt)[row] ?? ''
+  const index = plain.indexOf(needle)
+  assert.ok(index >= 0, `row ${row} must contain ${JSON.stringify(needle)}:\n${plain}`)
+  return visibleWidth(plain.slice(0, index))
+}
+
+const hexToRgb = (hex: string): number =>
+  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
@@ -225,7 +260,7 @@ function stubRunner(options: {
   /** Defaults to a pass-through capture (the test themes use id === name). */
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
   /** The runner's displayed/current Session preset read (`/preset status`, the
-   *  picker's "← current" mark). Absent = undefined (no live subject). */
+   *  picker's "[current]" state chip). Absent = undefined (no live subject). */
   currentPreset?: () => string | undefined
   /** Replace the preset catalog sub-domain with a scripted port (the /preset
    *  handler's only business authority). Used by the command-settlement
@@ -803,6 +838,32 @@ test('/preset on a blank session opens the roster (Host blank authority, not the
   assert.equal(result.kind, 'success')
   const view = await t.view()
   assert.ok(view.includes('Standard mode (standard)'), `a blank session must offer the roster:\n${view}`)
+  t.app.stop()
+})
+
+test('PR5b: the preset picker [current] chip keeps textMuted on BOTH the selected and the unselected row (real overlay frame)', async () => {
+  // §4.5/§12.2 + rollout PR5b requirement 4: the chip lives in the vendored
+  // SettingsList value slot, whose own paint is `selected ? primary : textDim`
+  // — so the cell colour is asserted in the REAL painted frame in both states,
+  // never from the rendered string.
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true, currentPreset: () => 'standard' })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  // The `standard` row is both the deployment default and the current Session
+  // preset, and the picker opens on it: the first frame is the SELECTED state.
+  const selectedRow = rowOfText(t.vt, '[current]')
+  assert.ok(isCursorRow(t.vt, selectedRow), `the first frame must have the cursor ON the [current] row:\n${plainViewport(t.vt).join('\n')}`)
+  assert.equal(t.vt.getCellFgRgb(selectedRow, cellIndexOfText(t.vt, selectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip is textMuted on the SELECTED row (not primary):\n${plainViewport(t.vt).join('\n')}`)
+  // Move the cursor off the current row: the UNSELECTED state must keep the
+  // SAME ink (not textDim).
+  t.vt.sendInput('\x1b[B')
+  await t.view()
+  const unselectedRow = rowOfText(t.vt, '[current]')
+  assert.ok(!isCursorRow(t.vt, unselectedRow), `the second frame must have the cursor OFF the [current] row:\n${plainViewport(t.vt).join('\n')}`)
+  assert.equal(t.vt.getCellFgRgb(unselectedRow, cellIndexOfText(t.vt, unselectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip is textMuted on the UNSELECTED row (not textDim):\n${plainViewport(t.vt).join('\n')}`)
   t.app.stop()
 })
 
@@ -1441,7 +1502,7 @@ async function settlePresetThroughOuterOwner(
   const commandId = 'cmd-preset-exec'
   const selects: unknown[] = []
   // The authoritative displayed/current preset baseline the command reads
-  // (`/preset status`, the picker's "← current" mark). It must never become the
+  // (`/preset status`, the picker's "[current]" state chip). It must never become the
   // requested alternate on a refused or indeterminate switch.
   const displayed = { preset: 'standard' as string | undefined }
   const t = setup({
