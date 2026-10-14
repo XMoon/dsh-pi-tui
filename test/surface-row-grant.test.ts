@@ -71,8 +71,13 @@ function paintedFrame(vt: VirtualTerminal, anchor: string): { contentRows: numbe
  * borders must START with the cursor marker (a title row may contain a `›`
  * in its own text, and a row composited over a base-screen line must not
  * contribute text). */
+/** The text inside a bordered row (the frame's own cells, trimmed). */
+function rowContent(line: string): string {
+  return line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
+}
+
 function selectedRowText(vt: VirtualTerminal): string {
-  const content = (line: string): string => line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
+  const content = (line: string): string => rowContent(line)
   const line = vt.getViewport().map(stripAnsi).find(row => row.includes('│') && content(row).startsWith('›'))
   assert.ok(line !== undefined, `no selected row painted:\n${viewportText(vt)}`)
   return content(line)
@@ -473,7 +478,11 @@ test('C-T10: the outer settings list keeps its own filter and navigation (baseli
   const h = setup({ columns: 120, rows: 40 })
   await openLegacySettingsPanel(h.invoke, h.vt)
   const marked = (): string => {
-    const line = h.vt.getViewport().map(stripAnsi).find(row => row.includes('›') && row.includes('│'))
+    // A LIST row, not the search prompt (which trims to a bare `>`) and not the
+    // detail's title row (the same `> <label>` shape, painted earlier): every settings
+    // row carries its value after the padded label column.
+    const line = h.vt.getViewport().map(stripAnsi)
+      .find(row => row.includes('│') && rowContent(row).startsWith('> ') && /\S {2,}\S/.test(rowContent(row)))
     assert.ok(line !== undefined, `no selected settings row painted:\n${viewportText(h.vt)}`)
     return line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
   }

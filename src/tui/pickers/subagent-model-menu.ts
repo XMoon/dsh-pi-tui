@@ -267,7 +267,7 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
       enableSearch: true,
       showHint: true,
       header: 'Subagent allowed models',
-      hint: '↑↓ move · enter toggle · esc back',
+      hint: '↑↓ move · Enter toggle · Esc back',
       noMatchText: '  Loading models…',
       descriptionMode: 'selected-below',
     })

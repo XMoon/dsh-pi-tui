@@ -22,6 +22,7 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import { singlePhysicalLine } from '../presentation/lines.ts'
+import { color } from '../theme/runtime.ts'
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32
 const PRIMARY_COLUMN_GAP = 2
@@ -384,9 +385,20 @@ export class SearchablePicker implements Component, Focusable {
     }
 
     if (this.options.header !== undefined) {
-      const countSuffix = this.searchEnabled ? `  ${this.filteredItems.length}/${this.items.length}` : ''
-      const headerText = truncateToWidth(`${singlePhysicalLine(this.options.header)}${countSuffix}`, width, '')
-      push((this.theme.groupHeader ?? this.theme.description)(headerText), { kind: 'inert' }, ROW_PRIORITY.header)
+      // §12.2: role 1 identity (bold `textStrong`) on the left and role 12
+      // count (`textMuted`) right-aligned on the SAME row — never a title
+      // suffix. The count drops whole when the row cannot hold it beside the
+      // title (§8 step 6).
+      const titleText = singlePhysicalLine(this.options.header)
+      const countText = this.searchEnabled ? `${this.filteredItems.length}/${this.items.length}` : ''
+      const countWidth = visibleWidth(countText)
+      if (countWidth === 0 || countWidth + 2 > width) {
+        push(color.textStrong(truncateToWidth(titleText, width, '')), { kind: 'inert' }, ROW_PRIORITY.header)
+      } else {
+        const lead = color.textStrong(truncateToWidth(titleText, width - countWidth - 1, ''))
+        const gap = Math.max(1, width - visibleWidth(lead) - countWidth)
+        push(lead + ' '.repeat(gap) + color.textMuted(countText), { kind: 'inert' }, ROW_PRIORITY.header)
+      }
       push('', { kind: 'inert' }, ROW_PRIORITY.spacer)
     }
 
@@ -525,9 +537,18 @@ export class SearchablePicker implements Component, Focusable {
       if (groupKey !== lastGroup) {
         if (groupKey !== '') {
           const count = groupCounts.get(groupKey) ?? 0
-          const label = item.group ?? groupKey
-          const headerText = truncateToWidth(`  ${singlePhysicalLine(label)} · ${count}`, width, '')
-          lines.push((this.theme.groupHeader ?? this.theme.description)(headerText))
+          // §12.2 role 5: the label is `textDim`, its count `textMuted`, joined
+          // by ` · ` and never bold — painted as two spans so the count keeps its
+          // own ink (the Job/Settings split-span technique).
+          const label = `  ${singlePhysicalLine(item.group ?? groupKey)}`
+          const suffix = ` · ${count}`
+          const suffixWidth = visibleWidth(suffix)
+          const paintLabel = this.theme.groupHeader ?? this.theme.description
+          if (suffixWidth >= width) {
+            lines.push(paintLabel(truncateToWidth(label, width, '')))
+          } else {
+            lines.push(paintLabel(truncateToWidth(label, width - suffixWidth, '')) + color.textMuted(suffix))
+          }
           hits.push({ kind: 'inert' })
           priorities.push(ROW_PRIORITY.groupHeader)
         }
@@ -544,7 +565,7 @@ export class SearchablePicker implements Component, Focusable {
       // `badgeLayoutText`, so a caller that cycles the visible badge keeps the
       // physical row count stable.
       if (this.shouldWrapBadge(item, width)) {
-        const prefix = isSelected ? '→ ' : '  '
+        const prefix = isSelected ? this.theme.selectedPrefix('> ') : '  '
         const prefixWidth = visibleWidth(prefix)
         const label = truncateToWidth(this.getDisplayValue(item), Math.max(1, width - prefixWidth), '')
         lines.push(isSelected ? this.theme.selectedText(`${prefix}${label}`) : `${prefix}${label}`)
@@ -805,8 +826,8 @@ export class SearchablePicker implements Component, Focusable {
     // projected before truncation (same single-row contract as the rest
     // of the chrome).
     const hint = singlePhysicalLine(this.options.hint ?? (this.searchEnabled
-      ? 'type to filter · ↑↓ navigate · enter select · esc close'
-      : '↑↓ navigate · enter select · esc close'))
+      ? 'Type to filter · ↑↓ navigate · Enter select · Esc close'
+      : '↑↓ navigate · Enter select · Esc close'))
     lines.push('')
     hits.push({ kind: 'inert' })
     priorities.push(ROW_PRIORITY.spacer)
@@ -822,7 +843,7 @@ export class SearchablePicker implements Component, Focusable {
     descriptionSingleLine: string | undefined,
     primaryColumnWidth: number,
   ): string {
-    const prefix = isSelected ? '→ ' : '  '
+    const prefix = isSelected ? this.theme.selectedPrefix('> ') : '  '
     const prefixWidth = visibleWidth(prefix)
 
     // selected-below (command-palette detail) and any row carrying a badge

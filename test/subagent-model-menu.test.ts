@@ -180,8 +180,12 @@ const ESC = '\x1b'
 const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 const labelRow = (menu: SubagentModelAllowlistPicker, width: number, label: string): number =>
   menu.render(width).map(strip).findIndex(line => line.includes(label))
-const selectedLine = (menu: SubagentModelAllowlistPicker, width: number): string | undefined =>
-  menu.render(width).map(strip).find(line => line.startsWith('→ '))
+const selectedLine = (menu: SubagentModelAllowlistPicker, width: number): string | undefined => {
+  // The search Input's prompt is also `> ` and is painted first; the list
+  // cursor is the next `> ` row after it.
+  const rows = menu.render(width).map(strip).filter(line => line.startsWith('> '))
+  return rows[1] ?? rows[0]
+}
 
 test('allowlistSummary and lastRouteWhileEnabled are pure', () => {
   assert.equal(allowlistSummary([]), '0 routes')

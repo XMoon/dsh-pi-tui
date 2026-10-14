@@ -100,11 +100,13 @@ export const color = {
  * Editor's autocomplete theme slot). */
 export const selectListTheme: SearchablePickerTheme = {
   selectedPrefix: (text: string) => color.primary(text),
-  selectedText: (text: string) => chalk.bold(text),
+  selectedText: (text: string) => chalk.bold.hex(currentPalette.textStrong)(text),
   description: (text: string) => color.textDim(text),
   scrollInfo: (text: string) => color.textMuted(text),
   noMatch: (text: string) => color.textMuted(text),
-  groupHeader: (text: string) => chalk.bold.hex(currentPalette.textMuted)(text),
+  // Role 5: the group label is `textDim`, never bold. Its ` · count` suffix is
+  // painted `textMuted` at the call site (the picker's split-span).
+  groupHeader: (text: string) => color.textDim(text),
 }
 
 /**
@@ -138,7 +140,7 @@ export function settingsListTheme(): SettingsListTheme {
     label: (text: string, selected: boolean) => selected ? chalk.bold.hex(currentPalette.textStrong)(text) : color.text(text),
     value: (text: string, selected: boolean) => selected ? color.primary(text) : color.textDim(text),
     description: (text: string) => color.textDim(text),
-    cursor: color.primary('›'),
+    cursor: color.primary('> '),
     hint: (text: string) => color.textMuted(text),
   }
 }

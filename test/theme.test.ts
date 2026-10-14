@@ -168,6 +168,10 @@ test('settingsListTheme is constructed per open and follows the live palette', (
   setTheme('dark')
   const darkCursor = settingsListTheme().cursor
   assert.ok(darkCursor.includes('38;2;79;168;255'), `dark cursor must use the dark primary (#4FA8FF): ${darkCursor}`)
+  // §4.6/D3: the glyph is `>` (EAW narrow), not the ambiguous `›`, and the slot is
+  // TWO cells because the vendored list paints two spaces on an unselected row
+  // (`settings-list.ts:339`) — a one-cell cursor would shift the selected label left.
+  assert.equal(darkCursor.replace(/\x1b\[[0-9;]*m/gu, ''), '> ', `the cursor glyph must be \`> \`: ${JSON.stringify(darkCursor)}`)
   setTheme('light')
   const lightCursor = settingsListTheme().cursor
   assert.ok(lightCursor.includes('38;2;21;101;192'), `light cursor must use the light primary (#1565C0): ${lightCursor}`)

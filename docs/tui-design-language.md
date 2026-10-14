@@ -197,9 +197,9 @@ Corrections this table makes to the current code:
   (`settingsListTheme.cursor = color.primary('›')`,
   `selectListTheme.selectedPrefix = color.primary`,
   `selectListTheme.selectedText = chalk.bold`); roles 6+8 adopt that split.
-  The Host `SearchablePicker` does *not*: it hardcodes `'→ '` wrapped in
-  `selectedText` (`searchable-picker.ts:547,825`), so its cursor is bold with no
-  colour and uses an EAW-ambiguous glyph — recorded as debt in §11.4.
+  The Host `SearchablePicker` consumes the same split through
+  `selectListTheme.selectedPrefix` and paints `> ` with it, so its cursor is
+  `primary` and width-safe (PR5).
 - **`borderFocus` is not an ordinary-focus colour.** It is the attention /
   approval colour (palette comment: "approval panel"; the reference study found
   Kimi's token of the same name carries the same comment). Ordinary focus and
@@ -424,10 +424,13 @@ Rules:
   selected row's emphasis applies to the label/value, not to the state chip. On a
   vendored list that offers only a single `value` slot painted `selected ?
   primary : textDim` (`SettingsListTheme.value`), pre-paint the chip at the call
-  site with `color.textMuted(...)` — the nested style wins and the outer slot
-  paint is restored afterwards. That is the existing pattern in
-  `src/tui/commands/status.ts:110`, and **the vendored fork is never modified for
-  it**.
+  site with `color.textMuted(...)`: the nested span wins for the chip's own cells.
+  Anything AFTER a nested span falls back to the terminal's default ink — **ANSI
+  cannot resume a style** — so **every span that must keep an ink of its own is
+  pre-painted too** (measured in the real `/model` frame: the selected row's badge
+  kept ` · effort ‹high›` in the default colour until that token was painted its own
+  role-4 ink). That is the pattern in `src/tui/commands/status.ts:110`, and **the
+  vendored fork is never modified for it**.
 - **A chip never introduces bold on its own; it may inherit the carrying row's
   weight.** Ink and weight are separate contracts: the INK is never inherited (a
   chip must not take the row's selection colour, `primary` / `textDim`), while
@@ -465,8 +468,8 @@ current value (candidates)  Solarized  [current]    state chip, textMuted
    (`settingsListTheme.cursor = color.primary('›')`,
    `selectListTheme.selectedPrefix = color.primary`,
    `selectListTheme.selectedText = chalk.bold`), so the workspaces converge on
-   the existing theme device instead of keeping their own. The Host
-   `SearchablePicker` still hardcodes a bold `'→ '` (§11.4).
+   the existing theme device instead of keeping their own — the Host
+   `SearchablePicker` included, which asks that slot for its `> ` cursor.
 3. **Selection ≠ current.** The keyboard cursor and the authoritative current
    value are different facts and get different markers. The current value is the
    **state chip `[current]`** (§4.5) in `textMuted` — always that ink, never
@@ -714,7 +717,7 @@ Use these; do not build a parallel owner.
 | Colours, bold/dim/italic | `src/tui/theme/runtime.ts` (`color`, `hexPaint`) | the only ink source |
 | Palette vocabulary, built-ins | `src/domain/display/theme.ts` | no new token in v1 |
 | Job status → colour | `taskStatusColor()` (`runtime.ts:116-128`) | extend the *wording* map next to it; do not fork the colour map |
-| Picker / settings-list / editor / markdown palettes | `selectListTheme`, `settingsListTheme()`, `editorTheme`, `markdownTheme` | restyle through these, never by re-painting their components. Note one exception: `SearchablePicker` hardcodes its `'→ '` cursor inline (`searchable-picker.ts:547,825`) instead of asking the theme, so a picker-cursor change touches that file (§11.4) |
+| Picker / settings-list / editor / markdown palettes | `selectListTheme`, `settingsListTheme()`, `editorTheme`, `markdownTheme` | restyle through these, never by re-painting their components. `SearchablePicker` reads its cursor through the same slot (PR5) |
 | Semantic structural icons | `src/tui/icons.ts` (`iconFor`, `iconPrefix`, `iconLead`) + `src/domain/display/icons.ts` | chrome punctuation (cursor/brackets/rule) is **not** an icon and does not enter the registry |
 | Overlay shells | `src/tui/components/frame.ts` (`Frame`, `FocusForwardingFrame`, `ResponsiveOverlayFrame`) | overlays keep the rounded frame; fullscreen workspaces never use it |
 | Single physical row safety | `src/tui/presentation/lines.ts` (`sanitizedPhysicalLine`, `escapedPhysicalLine`) | every chrome string passes through it |
@@ -824,15 +827,9 @@ is next touched for another reason** (never by a mass search/replace):
 |---|---|---|
 | plugin-manager panel | selection marker `▸ ` in `accent` (`plugin-manager/panel.ts:280`) | next plugin-manager change |
 | footer configurator | cursor `›` in `primary` (`footer/configurator.ts:940`) | next configurator change |
-| legacy settings list | `settingsListTheme.cursor = '›'` (`runtime.ts:141`) | next settings-list restyle |
-| `SearchablePicker` | hardcoded `'→ '` cursor in bold, not `primary`, and `→` is EAW-ambiguous (`searchable-picker.ts:547,825`); `selectListTheme.selectedPrefix` is unused by it | next picker change |
-| picker hint lines | all-lowercase key names (`'↑↓ navigate · enter select · esc close'`) instead of §4.1's `Enter select · Esc close` | next picker hint edit |
-| picker title row | the count is a title suffix (`Models  3/8`) instead of role 12 right-aligned, and the title carries no ink of its own (D9/D10) | next picker change |
-| picker group headers | bold `textMuted` where role 5 is `textDim` for the label and `textMuted` for its count (D9) | next picker change |
-| picker failure placeholder | `Model catalog unavailable: …` is painted `noMatch` (`textMuted`) instead of `error` for the failure word (D11) | next picker change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
-| `/model` current/default badges | the badge slot is right, but its `current` / `default` are bare words (`model-picker.ts:335-343`) where every row state is a chip (§4.5) — they become `[current] [default]` inside the same slot | next model-picker change |
-| theme menu / preset picker | the mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`) and, in the preset picker, a word inside the description rather than a chip. Both route through the vendored `SettingsListTheme.value` slot, which paints `selected ? primary : textDim` — so the chip must be pre-painted `color.textMuted(...)` at the call site (`status.ts:110` precedent) and the slot's own paint must NOT be changed, and the fork must NOT be touched | next picker change |
+| keybindings UI list / action editor | its own list hardcodes the cursor `›` in `primary` with a ONE-cell gutter (`keybindings/ui/list.ts:101,115`, `ui/action-editor.ts:61`) where §4.3/D3 want `>` (U+203A is EAW-ambiguous) and the family gutter is two cells; its footer hints read `<Key>: <verb>` (`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: back`) instead of §7.1's `<Key> <verb>` | next keybindings-UI change |
+| theme menu / preset picker (PR5b) | the mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`) and, in the preset picker, a word inside the description rather than a chip. Both route through the vendored `SettingsListTheme.value` slot, which paints `selected ? primary : textDim` — so the chip must be pre-painted `color.textMuted(...)` at the call site (`status.ts:110` precedent) and the slot's own paint must NOT be changed, and the fork must NOT be touched | next picker change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |

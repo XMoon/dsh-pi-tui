@@ -166,7 +166,7 @@ test('L6 PR5 §3.4: the Remote /preset picker reads blankness + current from the
   // line (the overlay is width-constrained): the selected row `›` and the
   // `← current` marker land on ADJACENT lines of the same panel.
   const lines = fixture.vt.getViewport().join('\n').split('\n').map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
-  const selectedRow = lines.findIndex(line => line.includes('›') && line.includes('m3-4-pr2-preset'))
+  const selectedRow = lines.findIndex(line => line.includes('> ') && line.includes('m3-4-pr2-preset'))
   assert.ok(selectedRow !== -1, 'the recorded preset is the picker\'s selected row')
   const context = lines.slice(selectedRow, selectedRow + 4).join('\n')
   assert.ok(context.includes('← current'),
