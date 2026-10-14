@@ -729,15 +729,12 @@ the screen around the box is the ordinary one.
 ↑0 ↓0  t0/s0
 ⋮
                         ╭──────────────────────────────────────────────────────────────────────╮
-                        │ Models                                                           3/3 │
+                        │ Models                                                           1/1 │
                         │                                                                      │
                         │ >                                                                    │
                         │                                                                      │
-                        │   OpenAI · 2                                                         │
-                        │ > Sol                          [current] · [default] · effort ‹High› │
-                        │   Pro                                                                │
-                        │   Anthropic · 1                                                      │
-                        │   Opus                                                  effort ‹Low› │
+                        │   P1 · 1                                                             │
+                        │ > Sol                          [current] [default] · effort ‹Medium› │
                         │                                                                      │
                         │   ↑↓ model · Enter effort/select · Esc close                         │
                         ╰──────────────────────────────────────────────────────────────────────╯
@@ -854,16 +851,15 @@ device keeps its row:
 ❯
 ────────────────────────────────────────────────────────────────────────────────
                                                                             full
-↑0 ↓╭──────────────────────────────────────────────────────────────────────╮
-    │ Models                                                           3/3 │
+↑0 ↓0  t0/s0
+
+    ╭──────────────────────────────────────────────────────────────────────╮
+    │ Models                                                           1/1 │
     │                                                                      │
     │ >                                                                    │
     │                                                                      │
-    │   OpenAI · 2                                                         │
-    │ > Sol                          [current] · [default] · effort ‹High› │
-    │   Pro                                                                │
-    │   Anthropic · 1                                                      │
-    │   Opus                                                  effort ‹Low› │
+    │   P1 · 1                                                             │
+    │ > Sol                          [current] [default] · effort ‹Medium› │
     │                                                                      │
     │   ↑↓ model · Enter effort/select · Esc close                         │
     ╰──────────────────────────────────────────────────────────────────────╯
