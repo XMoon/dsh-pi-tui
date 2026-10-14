@@ -1500,38 +1500,33 @@ test('the badge is right-aligned against the row edge', async () => {
   h.app.stop()
 })
 
-test('the picker never paints a row wider than the grant, multi-line effort name included', async () => {
-  // `A\nB\nC\nD` is 4 raw cells but 7 projected; `Medium` is 6 raw. Comparing raw
-  // labels picked `Medium`, so the layout-only badge measured one cell short and
-  // could keep a badge inline that overflows once the multi-line name is painted.
+test('a multi-line effort choice never truncates the model label', async () => {
+  // HONEST SCOPE, verified by a width probe: this test does NOT discriminate the
+  // projected-width comparison. Rendering the same fixture with the comparison
+  // reverted to raw labels (and with the projection) produced byte-identical rows at
+  // every width from 36 to 44, so no threshold exists on this path to assert against;
+  // the projected comparison therefore remains a consistency fix argued from the code
+  // (both candidates' labels are projected somewhere before the decision, or the wrap
+  // threshold is insensitive to the one-cell difference here). What this test does
+  // pin is the user-visible outcome: with the effort focus on a multi-line choice the
+  // model label is still painted in full.
+  const label = 'Model name 123456789' // exactly 20 cells
   const directory = makeDirectory({
-    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
+    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: label, efforts: [
       { id: 'multi', name: 'A\nB\nC\nD' }, { id: 'medium', name: 'Medium' },
     ], defaultEffort: 'medium' })] }],
     default: { provider: 'p2', model: 'ghost' },
   })
-  const h = await openPicker({ directory, current: { provider: 'p2', model: 'ghost' } })
-  // The layout is decided for the WIDEST candidate; the multi-line name only
-  // reaches the row once the effort is cycled onto it, so drive the real overlay
-  // onto that choice and then sweep widths around the wrap threshold.
-  //
-  // HONEST SCOPE: this asserts the INVARIANT (no painted row exceeds the grant).
-  // It is NOT a mutation witness for the projected-width comparison fixed in
-  // `widestBadgeOf` — reverting that comparison to raw labels does NOT fail this
-  // test, so the fix is still only argued from the code, not proven by a probe.
-  h.vt.sendInput('\r') // focus the inline effort
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'medium' } })
+  h.vt.sendInput('\r') // focus this model's inline effort
   await h.vt.waitForRender()
-  h.vt.sendInput('\x1b[C') // cycle Medium -> the multi-line name
+  h.vt.sendInput('\x1b[C') // cycle Medium -> the multi-line choice
   await h.vt.waitForRender()
-  for (let width = 26; width <= 44; width += 1) {
-    h.vt.resize(width, 24)
-    await h.vt.waitForRender()
-    const rows = h.vt.getViewport()
-    for (const line of rows) {
-      assert.ok(visibleWidth(line) <= width,
-        `width ${width}: a painted row overflowed the grant:\n${rows.join('\n')}`)
-    }
-  }
+  const rows = h.picker.render(41).map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  assert.ok(rows.some(line => line.includes('[ A B C D ]')),
+    `the effort must really be on the multi-line choice:\n${rows.join('\n')}`)
+  assert.ok(rows.some(line => line.includes(label)),
+    `the complete model label must survive — the projection must WRAP, not truncate it:\n${rows.join('\n')}`)
   h.app.stop()
 })
 

@@ -1007,6 +1007,35 @@ test('X061: two long same-prefix preset names stay distinguishable at 44 columns
   t.app.stop()
 })
 
+test('PR5b: a 19-22 character preset id stays whole in the 44-column label (PR #309 review)', async () => {
+  // The ` (id)` suffix must never be traded away while it fits: with only 0-3
+  // cells left for the friendly name a 4-cell floor made the composed label exceed
+  // the 25-cell column and the renderer clipped the ID's own tail. Each of these
+  // ids is the row's own name too, so the label must still end on the whole id.
+  for (const length of [19, 20, 22]) {
+    const id = 'x'.repeat(length)
+    const t = setup({
+      agent: fakeAgent('s1', []),
+      sessionBlank: true,
+      currentPreset: () => id,
+      rows: [{ id }],
+      width: 44,
+      height: 20,
+    })
+    const result = await t.run('') as { kind: string }
+    assert.equal(result.kind, 'success')
+    await t.view()
+    const rows = plainViewport(t.vt)
+    // The LABEL row itself must carry the whole id: the description also holds it,
+    // so a view-wide search would pass even when the label clipped it.
+    const labelRow = rows.find(line => line.includes('[current]'))
+    assert.ok(labelRow !== undefined && labelRow.includes(id),
+      `a ${length}-character id must stay whole in the LABEL:\n${rows.join('\n')}`)
+    t.app.stop()
+    t.app.dispose()
+  }
+})
+
 test('/preset <id> with a started session refuses with the locked text', async () => {
   // The Host outcome is scripted explicitly (agent-preset/locked); the double
   // must NOT re-implement the Host blank state machine (§0.11).
