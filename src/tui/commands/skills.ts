@@ -23,30 +23,46 @@ import type {
   TuiCommandRunner,
 } from '../../commands.ts'
 
-/** The label column's budget for one skill row (`SettingsList` caps it at 36
- *  cells). The vendored renderer clips a label keeping the HEAD, so two long
- *  skill names sharing a prefix would paint identically while Enter still runs
- *  different ids: keep the name's TAIL here instead, and let the SELECTED row
- *  carry the full name in its description. Display only — the row `id` and its
- *  `values` (the write path) are untouched. */
+/** The label the /skill picker paints for one skill name (display only — the
+ *  row `id` and its `values`, i.e. the write path, are untouched).
+ *
+ *  The vendored list clips a label to the label column keeping its HEAD, and
+ *  that column is 34 cells at the 44-column floor the design language supports
+ *  (`SettingsList` child width 40 minus its fixed 6 cells). Keeping only the
+ *  head makes two names that share a prefix paint identically; keeping only the
+ *  tail makes two names that share a suffix paint identically. So a long name
+ *  keeps BOTH ends around one `…`, which is why this is not a plain
+ *  `truncateToWidth`. The selected row carries the complete name in its
+ *  description, so the abbreviation only has to make the row distinguishable.
+ *  Iteration is by CODE POINT (`Array.from`), so a name with astral characters
+ *  (emoji) is measured per character, never per UTF-16 surrogate half. */
 function skillLabel(name: string): string {
-  // 34 = the effective label column at the 44-column floor the design language
-  // supports (`SettingsList` child width 40 minus its fixed `6` cells; the
-  // `min(36, longest label)` cap does not bind there). A wider budget would let
-  // the renderer clip the tail a SECOND time at that size and the rows would
-  // collide again.
   const limit = 34
   if (visibleWidth(name) <= limit) return name
-  let tail = ''
-  let used = 1 // the ellipsis cell
-  for (let index = name.length - 1; index >= 0; index -= 1) {
-    const char = name[index]!
+  const chars = Array.from(name)
+  // One cell is the ellipsis; the rest is split between the two ends, the head
+  // taking the extra cell so an odd budget stays deterministic.
+  const cells = limit - 1
+  const headCells = Math.ceil(cells / 2)
+  const tailCells = cells - headCells
+  let head = ''
+  let used = 0
+  for (const char of chars) {
     const width = visibleWidth(char)
-    if (used + width > limit) break
+    if (used + width > headCells) break
+    head += char
+    used += width
+  }
+  let tail = ''
+  used = 0
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    const char = chars[index]!
+    const width = visibleWidth(char)
+    if (used + width > tailCells) break
     tail = char + tail
     used += width
   }
-  return `…${tail}`
+  return `${head}\u2026${tail}`
 }
 
 /** The runner operations the static skill commands consume. */
