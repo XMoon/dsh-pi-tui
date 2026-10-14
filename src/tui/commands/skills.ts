@@ -9,7 +9,6 @@
 
 import { SettingsList } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture, TuiApp } from '../../tui-app.ts'
-import { abbreviateName } from '../pickers/name-label.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { HumanSkillCatalog } from '../../domain/catalog/skill.ts'
@@ -100,13 +99,13 @@ export function registerSkillCommand(deps: SkillsCommandDeps): void {
         app.openSettings(
           catalog.skills.map(skill => ({
             id: skill.name,
-            // The vendored list clips a label to its column keeping the HEAD
-            // (`…` at the end), so two long skill names that share a prefix
-            // would paint identically while Enter still runs different ids.
-            // Keep the TAIL inside the column instead, and let the SELECTED
-            // row carry the full name in its description (below) — the row's
-            // identity (id/values) is untouched by either.
-            label: abbreviateName(skill.name, 34),
+            // The LABEL stays the complete name: the vendored list's search
+            // filters on `item.label` only, so abbreviating it would make a
+            // keyword from the middle of a long name unfindable. The list's own
+            // column clip handles display, and the SELECTED row's description
+            // (below) carries the complete name, so the row still identifies
+            // itself before Enter. `id`/`values` are untouched.
+            label: skill.name,
             description: skill.description === '' ? skill.name : `${skill.name} — ${skill.description}`,
             currentValue: '',
             values: ['✓'],
