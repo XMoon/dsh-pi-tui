@@ -620,23 +620,32 @@ class JobInspectorHeader implements Component {
     if (view.gapBefore) facts.push(color.textDim('Earlier output evicted'))
     if (view.observationError !== undefined) facts.push(color.error(`Error: ${chromeText(view.observationError)}`))
     const separator = color.textDim(' · ')
-    // The fact group keeps its reserved HALF (plan §2.1: an unbounded progress can
-    // never make an independent marker fact unreachable), but a fact that does not
-    // fit that HALF is dropped WHOLE instead of being cut mid-word (design
-    // language §4.2/§8); only a lone remaining fact truncates.
-    const budget = Math.max(0, Math.floor(width / 2))
-    const fitting: string[] = []
-    for (const fact of facts) {
-      if (fitting.length > 0 && visibleWidth([...fitting, fact].join(color.textDim('   '))) > budget) break
-      fitting.push(fact)
+    /** ONE rule for BOTH groups, inside that group's own reserved budget: keep the
+     *  complete higher-priority facts while they fit, drop a fact WHOLE when it does
+     *  not, and allow only a LONE remaining fact to truncate (design language §4.2/§8
+     *  — a half-stated fact is worse than an absent one, and a mid-word cut is never a
+     *  disclosure). */
+    const keepWhole = (group: readonly string[], room: number): string => {
+      const kept: string[] = []
+      for (const fact of group) {
+        if (kept.length > 0 && visibleWidth([...kept, fact].join(separator)) > room) break
+        kept.push(fact)
+      }
+      const text = kept.join(separator)
+      // Nothing but the first fact fits: it is the group's higher-priority truth, so
+      // it truncates rather than disappearing (`Progress:`/`Error:` may be long).
+      return kept.length === 1 && visibleWidth(text) > room ? truncateToWidth(text, room, '…', false) : text
     }
-    const factText = fitting.join(color.textDim('   '))
-    if (meta.length === 0) return fitting.length === 0 ? '' : truncateToWidth(factText, width, '…', false)
-    const factRows = fitting.length === 0 ? 0 : Math.min(visibleWidth(factText), budget)
+    // The fact group keeps its reserved HALF (plan §2.1: an unbounded progress can
+    // never make an independent marker fact unreachable).
+    const budget = Math.max(0, Math.floor(width / 2))
+    const factText = keepWhole(facts, budget)
+    if (meta.length === 0) return factText === '' ? '' : truncateToWidth(factText, width, '…', false)
+    const factRows = factText === '' ? 0 : Math.min(visibleWidth(factText), budget)
     const metaRoom = factRows === 0 ? width : Math.max(0, width - factRows - 3)
-    const metaText = truncateToWidth(meta.join(separator), metaRoom, '…', false)
+    const metaText = keepWhole(meta, metaRoom)
     if (factRows === 0) return metaText
-    return `${metaText}${separator}${truncateToWidth(factText, factRows, '…', false)}`
+    return `${metaText}${separator}${factText}`
   }
 
   /** The summary row of the CURRENT page: the Output page's Command/Label
@@ -776,10 +785,10 @@ interface JobCommandStatusFacts {
 }
 
 /**
- * The pinned bottom Action Bar: `Esc`, the effective `tasks.stop` hint (only
- * while Stop is live), the strict follow truth, `[GAP]`, the retained/full
- * disclosure, the CURRENT viewport position and the effective Find hint, plus
- * the Job-local read-only `V command` / `C copy` verbs and a pure `PgUp/PgDn`
+ * The pinned bottom Action Bar: `Esc` LAST, the effective `tasks.stop` primary key
+ * (only while Stop is live), the strict follow truth, `[GAP]`, the retained/full
+ * disclosure, the CURRENT viewport position and the effective Find key, plus the
+ * Job-local read-only `Tab` page toggle / `c` copy verbs and a pure `PgUp/PgDn`
  * browsing hint. Whole segments yield in priority order — never an over-wide
  * row, and the disclosure survives whenever the row can carry it. Every segment
  * is gated on the LIVE frame: the Command page advertises no Stop and no Follow,
@@ -1315,6 +1324,17 @@ export class JobInspectorPanel extends VStack {
       this.intents.requestRender()
       return
     }
+    // `Tab` is a RESERVED Job key too (the workspace's own page toggle, the same
+    // way Home/End are reserved): the owner handles it FIRST so a Find binding
+    // remapped onto `Tab` can never shadow the toggle the bar advertises, and the
+    // Find hint drops such a binding (tui-app's `findHint` filters it). The toggle
+    // stays inactive while a Find owns the ordinary keys — in EDIT the branch above
+    // returned, and NAVIGATE falls through to its own block below.
+    if (matchesKey(data, JOB_LOCAL_KEYS.switchPage) && search.mode === 'inactive') {
+      if (command) this.showOutput()
+      else this.openCommand()
+      return
+    }
     // `/` is the Job-local alias and the effective Find binding is scoped to the
     // Job: both open EDIT on the CURRENT reading page and never reach the
     // Transcript search.
@@ -1382,12 +1402,8 @@ export class JobInspectorPanel extends VStack {
       return
     }
     if (command) {
-      // Command is a pure reading page: the ONLY ordinary verbs are the original
-      // Copy All and the page toggle back to Output.
-      if (matchesKey(data, JOB_LOCAL_KEYS.switchPage)) {
-        this.showOutput()
-        return
-      }
+      // Command is a pure reading page: the ONLY ordinary verb here is the original
+      // Copy All (the page toggle is reserved and handled above).
       if (matchesKey(data, JOB_LOCAL_KEYS.copy)) this.copyCommandAll()
       return
     }
@@ -1395,15 +1411,6 @@ export class JobInspectorPanel extends VStack {
     // `tasks.stop` branch runs BEFORE the B1-C read-only verbs).
     if (componentKeymap.matches(data, 'tasks.stop') && this.intents.canStop()) {
       this.intents.onStop()
-      return
-    }
-    // `Tab` switches the page in BOTH directions: on the Output page it opens the
-    // shell Command page, and the same physical key is what the Command page's own
-    // branch uses to come back. Reachability is exactly the advertisement's gate —
-    // a Find in NAVIGATE returns above and in EDIT owns the keys, so the toggle can
-    // never strand a search.
-    if (matchesKey(data, JOB_LOCAL_KEYS.switchPage)) {
-      this.openCommand()
       return
     }
     if (matchesKey(data, JOB_LOCAL_KEYS.copy)) this.copyOutput()

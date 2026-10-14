@@ -292,7 +292,7 @@ import { componentKeymap } from './tui/keybindings/component-keymap.ts'
 import { parseUserKeybindings } from './tui/keybindings/config.ts'
 import { deriveKeybindingContext } from './tui/keybindings/context.ts'
 import { APP_KEYBINDINGS, VIEWER_BLOCKED_PARENT_ACTIONS } from './tui/keybindings/definitions.ts'
-import { formatKeyId, formatLeaderSequence } from './tui/keybindings/hints.ts'
+import { JOB_LOCAL_KEYS, formatKeyId, formatLeaderSequence } from './tui/keybindings/hints.ts'
 import type { LeaderStateMachine } from './tui/keybindings/leader.ts'
 import { applyHomeEndKeyMode, homeEndKeysModeOf } from './tui/keybindings/home-end-mode.ts'
 import { HostKeybindingManager, normalizedKeyToKeyId } from './tui/keybindings/manager.ts'
@@ -20454,13 +20454,14 @@ export class TuiApp {
       },
       // One action advertises ONE key (design language §7.1): the keymap's primary
       // effective binding. The Job reserves the physical Home/End viewport keys
-      // (plan §5.1), so a Find binding remapped onto one of them can never open the
-      // Job Find and must never be advertised as if it could — the next live
-      // binding, then a leader sequence, takes its place. `/` stays the
-      // always-available Job-local alias, advertised when nothing is left to name.
+      // (plan §5.1) AND `Tab` (the workspace's own page toggle), so a Find binding
+      // remapped onto one of them can never act in the Job and must never be
+      // advertised as if it could — the next live binding, then a leader sequence,
+      // takes its place. `/` stays the always-available Job-local alias, advertised
+      // when nothing is left to name.
       findHint: () => {
         const direct = this.keybindings.keysFor('app.transcript.search')
-          .filter(key => key !== 'home' && key !== 'end')
+          .filter(key => key !== 'home' && key !== 'end' && key !== JOB_LOCAL_KEYS.switchPage)
         const first = direct[0]
         if (first !== undefined) return formatKeyId(first)
         const leader = this.keybindings.leaderKeysFor('app.transcript.search')[0]

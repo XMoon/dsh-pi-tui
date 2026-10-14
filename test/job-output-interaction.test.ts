@@ -1399,3 +1399,43 @@ test('B-13 the strict follow/search work over the production observer push, and 
   assert.equal(harness.observation.records.length, 1, 'no reconnect opens a second observation')
   app.stop()
 })
+
+// ── B-08c: the reserved Tab page toggle outranks a Find remap onto it ───────
+
+test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page toggle or be advertised', async () => {
+  // `Tab` is reserved for the workspace's own page toggle exactly like Home/End: the
+  // owner matches it BEFORE the Find check, and the Find hint drops such a binding. A
+  // user remap onto `Tab` must therefore change NEITHER what the key does NOR what the
+  // bar promises — the failure mode this pins is "Tab find" and "Tab switch" both
+  // advertised while `Tab` really opened the Find.
+  const { vt, app } = startApp({}, {}, 120, 40)
+  const harness = attachTasks(app, { jobIds: ['job-a'] })
+  await flush()
+  await openFirstJob(vt, harness)
+  harness.observation.latest()!.emit({ label: 'pnpm build --watch', text: 'line 001\nline 002' })
+  await vt.waitForRender()
+  assert.match(view(vt), /Ctrl\+F find/, 'the default direct binding is advertised')
+
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
+    bindings: { 'app.transcript.search': 'tab' },
+  }))
+  await vt.waitForRender()
+
+  assert.match(view(vt), /Tab switch/, 'the page toggle is advertised')
+  assert.ok(!/Tab find/.test(view(vt)), 'a Find remapped onto the reserved Tab is never advertised')
+  assert.match(view(vt), /\/ find/, '`/` is the only live Find entry left to name')
+
+  // …and it cannot shadow the toggle: `Tab` really switches the page, BOTH ways.
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.match(view(vt), /Esc output/, 'Tab opened the Command page')
+  vt.sendInput('\t')
+  await vt.waitForRender()
+  assert.match(view(vt), /Esc back/, 'Tab returned to the Output page')
+
+  // The search stays reachable through the Job-local alias.
+  vt.sendInput('/')
+  await vt.waitForRender()
+  assert.match(view(vt), /Find Output:/, '`/` still opens the Output Find')
+  app.stop()
+})

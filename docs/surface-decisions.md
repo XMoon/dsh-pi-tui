@@ -1627,7 +1627,7 @@ wheel notch, a scrollbar drag, or landing a search hit — pauses it, and `End` 
 the ONLY key that resumes it. Reaching the last row by hand, a content shrink, a
 viewport growth (terminal resize or a chrome row appearing/disappearing), a newer
 snapshot and leaving the search all leave the intent paused, so the Action Bar's
-`Follow ON` / `Follow PAUSED · End resume` text is the user's truth rather than a
+`Follow on` / `Follow paused · End resume` text is the user's truth rather than a
 `scrollTop` coincidence. `Ctrl+Home`/`Ctrl+End` stay pure browsing aliases (they
 pause), and `End` is honoured even after the Job settled: it means "show the
 newest retained tail", never a claim that new Job output appeared. The physical
@@ -1637,6 +1637,13 @@ gets End as the only follow re-arm (and Home as the preview top), while `/` —
 never reserved — remains the Job-local Find entry; the Action Bar's Find hint
 drops such a reserved binding rather than promising a key the workspace
 consumes.
+
+`Tab` is reserved the same way, for the workspace's own page toggle: the owner
+matches it BEFORE the Find check (a Find remapped onto `Tab` can never shadow the
+page switch the bar advertises), the Find hint filters it out exactly like
+Home/End, and the toggle stays inactive while a Find owns the ordinary keys. `/`
+remains the always-available Job-local Find entry, so no remap can strand the
+search.
 
 `Ctrl+F` (or whatever the live keymap really resolves `app.transcript.search`
 to, leader sequences included) and the non-configurable `/` alias open a Find
@@ -1837,9 +1844,9 @@ stays inert. The release must re-prove the SAME action, the SAME page, the SAME
 Command source identity AND the same relative row/cell range the press named, so a
 repaint between press and release — another Job, a re-flowed header row, a
 narrowed button — can never fire a ghost open or a copy of different bytes. Both verbs also
-have their fixed Job-local keyboard fallbacks (`v` on Output, `C` on either
+have their fixed Job-local keyboard fallbacks (`Tab` for the page, `c` on either
 page), so nothing is mouse-only. The keyboard and the pointer are separate
-intents: while a Command Find owns the ordinary keys a plain `C` types into the
+intents: while a Command Find owns the ordinary keys a plain `c` types into the
 query (or stays inert in result navigation) and neither state advertises a
 keyboard Copy, yet the still-painted `Copy All [C]` remains clickable — one click
 copies only the official original label, and it never touches the query, the
@@ -1879,9 +1886,10 @@ body, the optional reading-facts row, the transient notice row, and the pinned
 bottom Action Bar. `planChrome()` above remains the ONE budget; no component
 computes its own `terminal.rows` share.
 
-- **Status title** (from two rows): the fixed `JOB` label, the Job id and kind,
-  then the status dot plus the UPPERCASE status text in `taskStatusColor` and the
-  independent `[GAP]`/`[ERROR]`/`[SETTLED]` markers (warning/error/dim). The
+- **Status title** (from two rows): the fixed `Job` label, the Job id and kind,
+  then the ONE shared `‣` marker plus the Title Case status word in
+  `taskStatusColor` and the independent `[GAP]`/`[ERROR]`/`[SETTLED]` markers
+  (warning/error/muted). The
   status and its markers are laid out FIRST, so a long identity truncates itself
   and can never push the status out of its row, and the markers stay readable
   without colour.
@@ -1904,16 +1912,18 @@ computes its own `terminal.rows` share.
   marker, so clicking it changes nothing.
 - **Body**: the same B1-B/B1-C renderers on the terminal's own background — never
   a second card, frame, `$` prefix or injected colour that could reach a payload.
-- **Reading facts** (wide and tall frames only): one themed rule row carrying the
-  page's own disclosure (`Retained preview · not full history` / `Full command`)
-  and the real `rows a-b/N` position of THIS retained preview. Where the frame
+- **Reading facts** (wide and tall frames only): ONE unflanked status row carrying
+  the page's own disclosure (`Retained preview · not full history` / `Full command`)
+  on the left and the real `rows a-b/N` position of THIS retained preview on the
+  right. Where the frame
   grants no such row, the pinned Action Bar keeps the bounded disclosure instead:
   one fact is never advertised twice in the same frame, and neither form ever
   claims a complete history.
-- **Action Bar**: pinned last and painted with the theme's dim token —
-  `Esc back`/`Esc output`, the legal `tasks.stop` hint, the strict `Follow ON`/
-  `Follow PAUSED` truth, `[GAP]`, the effective Find hint, the Job-local `v`/`C`
-  verbs and a pure `PgUp/PgDn` browsing hint, each yielding in the B1-B priority
+- **Action Bar**: pinned last and painted with the theme's muted token —
+  `Esc back`/`Esc output` (last), the legal `tasks.stop` primary hint, the strict
+  `Follow on`/`Follow paused` truth, `[GAP]`, the effective Find key, the Job-local
+  `Tab` page toggle and `c` copy verbs and a pure `PgUp/PgDn` browsing hint, each
+  yielding in the B1-B priority
   order. Every entry is gated on the LIVE frame: the Find hint appears only while
   the frame can host a SearchRow and the query is not being edited, the page hint
   only while a body row is really painted and the query does not own the ordinary
@@ -1947,7 +1957,7 @@ keep no target, and a row the frame had to truncate keeps only the label cells i
 really painted: the ellipsis `truncateToWidth` substitutes is inert, so a frame
 too narrow for the label can never be triggered through its own overflow marker. The `open-output` action added for the Output tab
 routes to the existing `showOutput()`, so a tab click is the SAME page switch as
-`Esc`/`v` (Search exit, selection cancel, native copy-on-select restore and the
+`Esc`/`Tab` (Search exit, selection cancel, native copy-on-select restore and the
 repaint included) and never a display-only body swap.
 
 No Job fact is invented: the chrome renders only the fields
