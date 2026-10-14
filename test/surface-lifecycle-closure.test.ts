@@ -1419,7 +1419,7 @@ test('B2A-13 a Question preempts the Settings workspace; a blocking owner refuse
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), false, 'the workspace is abandoned BEFORE the question claims the seat')
   assert.ok(view(vt).includes('proceed?'), `the question is the physical owner:\n${view(vt)}`)
-  assert.ok(!view(vt).includes('SETTINGS ·'), 'no Settings chrome may survive behind the question')
+  assert.ok(!view(vt).includes('Settings ·'), 'no Settings chrome may survive behind the question')
 
   // A new lease while the blocking owner owns the surface is refused outright.
   assert.throws(
@@ -1675,12 +1675,12 @@ test('B2A-21 closing a workspace hands the terminal over without flushing its ow
   capturing = true
   app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
   await vt.waitForRender()
-  assert.ok(captured().includes('SETTINGS'), 'control: the live Settings document is what writes the mark')
+  assert.ok(captured().includes('Settings'), 'control: the live Settings document is what writes the mark')
   writes.length = 0
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(settingsScreenOpen(app), false)
-  assert.ok(!captured().includes('SETTINGS'), `the departing Settings document must not be flushed:\n${captured()}`)
+  assert.ok(!captured().includes('Settings'), `the departing Settings document must not be flushed:\n${captured()}`)
 
   // ── Job: the same hand-over from the browser's own detail lease ───────────
   const harness = attachTasks(app, { jobIds: ['job-a'] })

@@ -182,6 +182,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   themes and the Remote path — see the real-pane and not-verified sections of
   `docs/tern-tsp/model-selection.md`.
 
+- The fullscreen Settings workspace now speaks the same visual language as the
+  rest of the TUI: the header reads `Settings · <trail>` (a bold identity word and
+  a dim trail instead of a blue `SETTINGS` brand word), the diagnostic line's
+  status word is Title Case with a semantic colour (`Ready` / `Stale` /
+  `Unavailable`), pane focus uses the same bracketed bold-blue device as the Job
+  tabs, and the column titles read `Categories (3)` / `Rows (2)` / `Details`.
+  Detail values no longer fall back to the terminal's default foreground: the
+  primary value takes one ink and secondary facts a weaker one, while the commit
+  status word (`Verified` / `Not saved` / `Outcome unknown` / `Saving…`) carries
+  its own semantic colour — a refused write no longer looks like a successful one.
+  The current value is marked with a `[current]` state chip, and a row with two
+  states paints two chips. Detail actions read `Change…`, `Retry save`,
+  `Copy value [C]`, `Confirm` and `Cancel` instead of bracketed verbs, and the
+  pinned action bar joins hints with ` · `, keeps `Esc` last and drops whole
+  segments by priority instead of cutting a hint mid-word.
+
 ### Fixed
 
 - The experimental TSP renderer's `/model`: clicking `All models` or a Provider
