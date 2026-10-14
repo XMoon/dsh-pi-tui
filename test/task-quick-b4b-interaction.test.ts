@@ -75,7 +75,7 @@ async function startQuick(options: {
   roster?: TaskBrowserJobInput[]
   /** A controller-side reopen spy for the Question witnesses (S8). */
   reopenResult?: boolean
-} = {}): Harness {
+} = {}): Promise<Harness> {
   const columns = options.cols ?? 120
   const terminalRows = options.rows ?? 40
   const vt = new VirtualTerminal(columns, terminalRows)
