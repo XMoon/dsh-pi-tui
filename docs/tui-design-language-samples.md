@@ -17,9 +17,9 @@
 > frame block says which it is, and the label is derived from whether the capture
 > really exists.
 >
-> A real-terminal review of the implemented Settings frames is still an Owner
-> acceptance item (`NOT_RUN` here): this document is the VirtualTerminal
-> evidence, not the human one.
+> This document is VirtualTerminal evidence, not the human one: the real-
+> terminal passes, and what each of them did and did not cover, are recorded in
+> §7.
 
 ## 1. Method (how the BEFORE frames were produced)
 
@@ -770,21 +770,25 @@ the refusal ink is covered by the `VirtualTerminal` cell read-back in
 `test/settings-workspace-visual.test.ts`), CJK/wide-glyph terminals, and any
 terminal other than this one. Those stay `NOT_RUN`, not PASS.
 
-### 7.1 The Job workspace side is NOT_RUN for this revision
+### 7.1 The Job workspace side was accepted on a real terminal by the Owner
 
-Opening the Job workspace needs a LIVE Host job: it is reached from the Task
-Browser, and a sessionless TUI has no jobs. The agent turn started for this
-check produced no job inside the observation window, and the Client-local `!`
-shell does not register one. Recipe for the Owner, on a profile with a real
-session that ran a `bash` tool call: open `/tasks`, press Enter on the job row,
+The Job workspace is only reachable from the Task Browser, which lists Host
+jobs, so a sessionless TUI cannot show it. The Owner ran the recipe below on a
+profile with a live Host job and accepted the result; the Job PR merged on that
+basis. Nothing in this document is claimed as real-terminal evidence for that
+surface without that run.
+
+Recipe, for any future change to the Job chrome: on a profile with a real
+session that ran a `bash` tool call, open `/tasks`, press Enter on the job row,
 then check `Job · <id> · <kind>`, the `‣ Running` / `‣ Failed` status, the
 UNFLANKED reading-facts row (disclosure left, `rows a-b/N` right), the bar
-(`s stop · Follow on · Ctrl+F find · … · Esc back`) and the affordance yield
+(`s stop · Follow on · Ctrl+F find · c copy output · Tab switch · PgUp/PgDn ·
+Esc back`), `Tab` switching both ways, and the affordance yield at 44 columns.
 
-What that leaves covered: the Job frames' text and per-cell ink in this
+What remains machine-covered: the Job frames' text and per-cell ink in this
 document come from the `VirtualTerminal` cell read-back, and the SHARED chrome
 the Job bar reuses (rules budget, glyph widths, ` · ` joins, `Esc` last, a
-`textMuted` bar) was verified on a real terminal in the Settings PR.
+`textMuted` bar) was verified on a real terminal in the Settings pass.
 
 ## 8. Re-verification recipe
 

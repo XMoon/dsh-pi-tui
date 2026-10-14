@@ -29,6 +29,7 @@ import { visibleWidth } from '@xmoon76/pi-tui'
 import { eastAsianWidthType } from 'get-east-asian-width'
 import { ALL_ICON_SEMANTICS, type IconStyle } from '../src/domain/display/icons.ts'
 import { iconFor } from '../src/tui/icons.ts'
+import { assertBodyFloor, assertOneActiveDevice, type PaintedFrame } from './support/design-language-frames.ts'
 
 /** The EAW classes that are safe under CJK-width terminals (same set the icon
  *  registry gate uses). */
@@ -154,4 +155,69 @@ test('the grandfathered ambiguous list is stable', () => {
     'the grandfathered list changed: update docs/tui-design-language.md §4.3 in the same PR')
   assert.ok(!CANONICAL_CHROME_GLYPHS.some(([, glyph]) => GRANDFATHERED_AMBIGUOUS.some(([other]) => other === glyph)),
     'a glyph cannot be both canonical (must be safe) and grandfathered (may be ambiguous)')
+})
+
+// ── §11.3.2 frame-helper controls (pure synthetic rows, no harness) ─────────
+//
+// The matrix tests call these two helpers on REAL painted frames; these controls
+// pin the helpers' own proof scope so a future "simplification" cannot turn them
+// back into a shape classifier or an index-only check and stay green.
+
+/** The ink the synthetic frames paint the active device with. */
+const PRIMARY = 0x11_22_33
+const WARNING = 0x44_55_66
+
+/** A synthetic frame whose `readColor` is an explicit `row:col` → ink map. */
+function syntheticFrame(rows: readonly string[], colors: ReadonlyMap<string, number>): PaintedFrame {
+  return {
+    rows,
+    readColor: (row, col) => colors.get(`${row}:${col}`),
+    primaryRgb: PRIMARY,
+  }
+}
+
+test('assertOneActiveDevice counts only the declared chrome label, never a primary key badge or a body bracket', () => {
+  for (const affordance of ['Copy All [Enter]', 'Copy All [Ctrl+F]']) {
+    const rows = [
+      '[Output]  Command ─────',
+      affordance,
+      '[Error] host bracket text',
+    ]
+    const badgeAt = rows[1]!.indexOf('[')
+    const colors = new Map<string, number>([
+      ['0:0', PRIMARY],           // the active `[Output]` device
+      [`1:${badgeAt}`, PRIMARY],  // the key badge is legitimately primary inside the affordance (§7.1)
+      ['2:0', WARNING],           // Host body text carries its own colour
+    ])
+    const device = assertOneActiveDevice(syntheticFrame(rows, colors), {
+      rows: [0, 1],               // chrome rows only: the body row is NOT scanned
+      labelPrefixes: ['[Output]', '[Command]'],
+    })
+    assert.deepEqual(device, ['[Output]'],
+      `the affordance ${JSON.stringify(affordance)} must not become a second active device`)
+  }
+})
+
+test('assertOneActiveDevice rejects a second DECLARED chrome device painted primary', () => {
+  const rows = ['[Output]  [Command] ─────', '↑↓ select · Esc close']
+  const commandAt = rows[0]!.indexOf('[Command]')
+  const colors = new Map<string, number>([['0:0', PRIMARY], [`0:${commandAt}`, PRIMARY]])
+  assert.throws(
+    () => assertOneActiveDevice(syntheticFrame(rows, colors), { rows: [0], labelPrefixes: ['[Output]', '[Command]'] }),
+    /at most ONE chrome active device/,
+    'two declared chrome labels painted primary must fail the invariant',
+  )
+})
+
+test('assertBodyFloor requires real body content, not just in-range indexes', () => {
+  const isSettingsBody = (line: string): boolean => /^> \S/.test(line)
+  const blank = ['Settings · Categories', '', '↑↓ select · Enter open · Esc close']
+  assert.throws(
+    () => assertBodyFloor(blank, [1], isSettingsBody, 'Settings synthetic'),
+    /must carry real body content/,
+    'an in-range, above-the-bar row with no real content must fail the body floor',
+  )
+  // Positive control: the SAME shape with real content passes.
+  const real = ['Settings · Categories', '> Appearance', '↑↓ select · Enter open · Esc close']
+  assertBodyFloor(real, [1], isSettingsBody, 'Settings synthetic')
 })
