@@ -23,19 +23,24 @@ import {
 /** The read/write lifecycle of the panel. `pending` is an ADMITTED write. */
 export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
 
-/** The visible page: the model catalogue, one model's Overview, or its read-only
- *  Full details. The Overview is the model's OWN page, never a global menu. */
-export type ModelPickerPage = 'models' | 'overview' | 'details'
+/**
+ * The visible page: the model catalogue (the working page, with the Reasoning
+ * Effort strip and the ONE write) or the model's read-only Full details. There is no
+ * intermediate page: a row activation opens the details DIRECTLY, and the effort is
+ * edited in the catalogue's own strip, so no second-level effort menu exists.
+ */
+export type ModelPickerPage = 'models' | 'details'
 
 /**
  * K2: the logical regions Tab moves between. `models` is the CURRENT page's
  * native main list — the catalogue on the `models` page, the model's own rows on
- * the Overview — and `primary-action` is the picker's action bar, the ONE region
- * that can commit the write. The list-first shell paints exactly these two at
- * every pane width; the read-only Reader is not a picker and has no second
- * region at all.
+ * the Overview — `strip` is the catalogue's own Reasoning Effort editor (the
+ * native Picker `strip` between the list and the action bar, painted only while the
+ * highlighted model advertises efforts), and `primary-action` is the action bar,
+ * the ONE region that can commit the write. The read-only Reader is not a picker
+ * and has no second region at all.
  */
-export type ModelPickerZone = 'models' | 'primary-action'
+export type ModelPickerZone = 'models' | 'strip' | 'primary-action'
 
 export interface ModelPickerPanel {
   /** The presenter serial: an event bound to another panel can never act here. */
@@ -65,13 +70,6 @@ export interface ModelPickerPanel {
   directory: ModelPickerDirectory | undefined
   rows: readonly ModelPickerModelRow[]
   failures: readonly ModelPickerFailureRow[]
-  /**
-   * The Overview page's presentation cursor: an index into the MAIN LIST rows
-   * (the effort section, its candidates and the details entry). It is the ROW the
-   * keyboard/pointer is on and is never itself a business candidate: only
-   * activating an effort row changes that model's draft.
-   */
-  overviewCursor: number
   /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
   efforts: Map<string, string>
 }
@@ -187,7 +185,8 @@ export interface ModelPickerFact {
 /** The compact one-token value of a configured selection (`provider/model/
  *  effort`), used where the configured facts are read as single values. */
 const factValue = (selection: { provider: string; model: string; reasoningEffort?: string }): string =>
-  `${selection.provider}/${selection.model}${selection.reasoningEffort === undefined ? '' : `/${selection.reasoningEffort}`}`
+  [selection.provider, selection.model, ...(selection.reasoningEffort === undefined ? [] : [selection.reasoningEffort])]
+    .join(' · ')
 
 /**
  * The configured-selection facts: `Current` only for a live Session (never for a
@@ -212,7 +211,7 @@ export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFa
  * The bar is rendered in every phase, but an admitted write (`pending`) and a
  * running (re-)read (`loading`) refuse every key except Esc — plus the search box
  * on the catalogue — so no action there can be activated from the keyboard. The
- * `▸` cue is a promise about Enter and `focusedAction`'s fallback is a statement
+ * `[Enter]` badge is a promise about Enter and `focusedAction`'s fallback is a statement
  * about which action Enter runs, so BOTH are meaningful only where this holds:
  * everywhere else the bar must read as having no keyboard focus instead of
  * marking `Cancel` and then swallowing the Enter that cue announced.
@@ -220,6 +219,46 @@ export function configuredFacts(panel: ModelPickerPanel): readonly ModelPickerFa
 export function actionKeyboardLive(panel: ModelPickerPanel): boolean {
   return panel.phase === 'ready' || panel.phase === 'error'
 }
+
+/* ------------------------------------------------------------------- strip */
+
+/**
+ * Whether the catalogue paints its Reasoning Effort strip: the page must be the
+ * catalogue, a model must be highlighted, and that model must advertise at least
+ * one candidate. A model without effort metadata therefore shows NO strip row at
+ * all (never an empty or invented one).
+ */
+export function stripOffered(panel: ModelPickerPanel): boolean {
+  return panel.page === 'models' && modelChoices(highlightedModel(panel)).length > 0
+}
+
+/**
+ * The strip's items: one native button per advertised candidate of the HIGHLIGHTED
+ * model, in the directory's own order, with the local DRAFT marked `on`. The item
+ * id is the candidate's own wire id ({@link effortItemId}), so a strip click and an
+ * Overview candidate click are the same value on the same namespace and both route
+ * to the one draft writer.
+ */
+/** One button of the catalogue's Reasoning Effort strip. */
+export interface ModelPickerStripItem {
+  readonly id: string
+  readonly label: string
+  /** The LOCAL draft is this candidate (the client's own "selected" item style). */
+  readonly on?: boolean
+}
+
+export function stripItems(panel: ModelPickerPanel): readonly ModelPickerStripItem[] {
+  const row = highlightedModel(panel)
+  const draft = draftedEffort(panel, row)
+  return modelChoices(row).map((choice) => ({
+    id: effortItemId(choice.value),
+    label: choice.label,
+    ...(choice.value === draft ? { on: true } : {}),
+  }))
+}
+
+/** The strip's own head. It names what the buttons below it do. */
+export const STRIP_LABEL = 'Reasoning Effort'
 
 /* ------------------------------------------------------------- page caption */
 
@@ -233,10 +272,7 @@ export function actionKeyboardLive(panel: ModelPickerPanel): boolean {
  * the page can never describe a different model than the rows below it.
  */
 export function pickerTitle(panel: ModelPickerPanel): string {
-  if (panel.page === 'models') {
-    return panel.request.subject.sessionless ? 'Choose default model' : 'Switch model'
-  }
-  return 'Model overview'
+  return panel.request.subject.sessionless ? 'Choose default model' : 'Switch model'
 }
 
 /**
@@ -253,7 +289,16 @@ export function pickerTitle(panel: ModelPickerPanel): string {
  * every key but `Esc`, and a phase that refuses Enter must not promise it.
  */
 export function pickerSubtitle(panel: ModelPickerPanel): string {
-  if (panel.page === 'models') return panel.phase === 'ready' ? 'Enter: effort & details' : ''
+  if (panel.page === 'models') {
+    if (panel.phase !== 'ready') return ''
+    // The ONE hint is the design language's `<Key> <object>` form and it names the
+    // zone `Tab` reaches NEXT — exactly the ring `tabZone` walks: the catalogue's
+    // effort strip, the action bar, and then the model list again. It is a promise
+    // about the KEYBOARD, so it is painted only while the phase really admits keys.
+    if (panel.zone === 'strip') return 'Tab actions'
+    if (panel.zone === 'primary-action') return 'Tab list'
+    return stripOffered(panel) ? 'Tab effort' : 'Tab actions'
+  }
   const row = highlightedModel(panel)
   if (row === undefined) return ''
   return [row.providerName, ...(row.isCurrent ? ['current'] : []), ...(row.isDefault ? ['Default'] : [])].join(' · ')
@@ -264,92 +309,17 @@ export function readerHead(panel: ModelPickerPanel): string {
   return highlightedModel(panel)?.modelName ?? 'Full model details'
 }
 
-/* ------------------------------------------------------------ overview page */
-
-/**
- * The wire id of the Overview's own model-identity row. The page's TITLE cannot
- * carry the identity on a narrow pane (the client ellipsizes a caption and paints
- * no subtitle at 400/560px — measured), and the Overview is where the effort is
- * chosen and the write is committed, so the model the page describes must be
- * visible as a ROW at every width. It is deliberately not an effort candidate id,
- * so the identity row and a candidate can never be confused.
- */
-export const OVERVIEW_MODEL_ID = 'overview-model'
-
-/** The wire id of the Overview's effort section head — the row that names what
- *  the candidates below it are. It is deliberately not an effort candidate id,
- *  so the section label and a candidate can never be confused; it routes
- *  nowhere, and activating it only moves the row cursor. */
-export const OVERVIEW_EFFORT_ID = 'overview-effort'
-
-/** The wire id of the Overview's single operation row (the read-only Full
- *  details entry). It is deliberately not an effort candidate id, so the two
- *  row kinds can never be confused. */
-export const OVERVIEW_DETAILS_ID = 'overview-details'
-
-/**
- * The Overview page's MAIN LIST rows, in the frozen priority order:
- *
- *  1. the model's OWN identity row — the name with its provider, and the complete
- *     model id as the row's `title`. It is first because the page's title cannot
- *     carry it on a narrow pane (a caption is ellipsized and 400/560px panes paint
- *     no subtitle at all, both measured), and a user choosing an effort and
- *     committing the write must be able to see WHICH model they are configuring at
- *     every width;
- *  2. the `Reasoning effort` section, carrying every advertised candidate (or the
- *     explicit `Not available` statement when the model advertises none) — the
- *     page's first-class operation, reachable at EVERY pane width;
- *  3. the single `View full model details ›` operation row.
- *
- * The configured Current/Default facts stay out of the list: the subtitle carries
- * that state where it fits and the COMPLETE values live in the read-only Reader. A
- * wall of inert fact rows would push the effort candidates off the first screen,
- * which is exactly what the page exists to show.
- */
-export function overviewItems(panel: ModelPickerPanel): PickerItem[] {
-  const row = highlightedModel(panel)
-  if (row === undefined) return []
-  const draft = draftedEffort(panel, row)
-  const choices = modelChoices(row)
-  return [
-    { id: OVERVIEW_MODEL_ID, label: row.modelName, title: row.modelId },
-    {
-      id: OVERVIEW_EFFORT_ID,
-      label: 'Reasoning effort',
-      ...(choices.length === 0 ? { detail: 'Not available' } : {}),
-    },
-    ...choices.map((choice) => ({
-      id: effortItemId(choice.value),
-      label: choice.label,
-      mark: { text: choice.value === draft ? '●' : '○' },
-    })),
-    { id: OVERVIEW_DETAILS_ID, label: 'View full model details ›' },
-  ]
-}
-
-/** The Overview cursor, clamped to the rows the page currently offers. */
-export function overviewCursorIndex(panel: ModelPickerPanel): number {
-  const count = overviewItems(panel).length
-  return Math.min(Math.max(panel.overviewCursor, 0), Math.max(0, count - 1))
-}
-
-/** The row the Overview's native list has selected: the REAL row at the cursor,
- *  never a fixed draft item, so the keyboard can read every row it offers. */
-export function overviewSelected(panel: ModelPickerPanel): string | undefined {
-  return overviewItems(panel)[overviewCursorIndex(panel)]?.id
-}
-
 /* --------------------------------------------------------------- action bar */
 
 /**
  * Whether the CURRENT page carries the explicit write action. The catalogue and
- * the Overview both offer it — the catalogue on the model the user highlighted
- * with its already-seeded draft, the Overview on the model it describes — so the
- * ONE write is an explicitly labelled action at EVERY pane width. The read-only
- * Reader paints no action bar at all.
+ * the catalogue offers it on the model the user highlighted, with its
+ * already-seeded (or strip-drafted) effort — so the ONE write is an explicitly
+ * labelled action at EVERY pane width. The read-only Reader paints no action bar at
+ * all.
  */
 export function applyOffered(panel: ModelPickerPanel): boolean {
-  return panel.page === 'models' || panel.page === 'overview'
+  return panel.page === 'models'
 }
 
 /** The short, explicit label of the one write: what it really does. */
@@ -404,11 +374,9 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
     actions.push({ id: 'retry', label: 'Retry', primary: true })
     return actions
   }
-  // A content page's own `Back` is offered only while the phase really admits it:
-  // a running (re-)read and an admitted write refuse every page operation, so
-  // those phases render the way out (`Close`) and the disabled write instead of a
-  // clickable `Back` that no key and no click could run.
-  if (panel.page === 'overview' && panel.phase === 'ready') actions.push({ id: 'back', label: 'Back' })
+  // Every page operation below belongs to the catalogue: a running (re-)read and an
+  // admitted write refuse them, so those phases render the way out (`Close`) and the
+  // disabled write instead of a clickable entry no key and no click could run.
   if (applyOffered(panel)) actions.push(primaryAction(panel))
   return actions
 }
@@ -419,7 +387,7 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
  *  Enter and shows no cue: when the Primary cannot act — a read that failed, a
  *  catalogue with no selectable model, a search with no match — focus falls back
  *  to an action that CAN act (`Cancel` is always enabled), instead of parking the
- *  keyboard on a dead entry that no `▸` marks and Enter does nothing with. */
+ *  keyboard on a dead entry that no `[Enter]` badge marks and Enter does nothing with. */
 export function focusedAction(panel: ModelPickerPanel): PickerAction {
   const actions = pickerActions(panel)
   const enabled = (action: PickerAction): boolean => action.disabled !== true
@@ -508,41 +476,11 @@ export function detailReaderGroups(
   ]
 }
 
-/* ----------------------------------------------------- selected-model summary */
-
-/** One read-only fact of the catalogue's selected-model summary. */
-export interface ModelPickerSummaryFact {
-  readonly label: string
-  readonly value: string
-}
-
-/**
- * The compact read-only facts of the HIGHLIGHTED model, for the catalogue's
- * summary under the list: the provider, its drafted effort and its configured
- * state. Only real facts are returned — a model that advertises no effort gets no
- * effort entry — and the summary is never a place where a required operation
- * lives.
- */
-export function summaryFacts(
-  panel: ModelPickerPanel,
-  row: ModelPickerModelRow,
-): readonly ModelPickerSummaryFact[] {
-  const draft = draftedEffort(panel, row)
-  const draftLabel = modelChoices(row).find((choice) => choice.value === draft)?.label
-  const state = [...(row.isCurrent ? ['current'] : []), ...(row.isDefault ? ['default'] : [])].join(' · ')
-  return [
-    { label: 'Provider', value: row.providerName },
-    ...(draftLabel === undefined ? [] : [{ label: 'Draft effort', value: draftLabel }]),
-    ...(state === '' ? [] : [{ label: 'Selection', value: state }]),
-  ]
-}
-
 /* ------------------------------------------------------------ layout budget */
 
 /**
  * The RECONSTRUCTED pane width, in CSS px, at and above which the catalogue asks
- * for its `lg` sheet and paints the compact selected-model summary below the list
- * (`preview: 'below'`).
+ * for its `lg` SHEET (below it the same catalogue uses `md`).
  *
  * MEASURED against the real client (Gate V1 of the Model Visual UX plan): with
  * `preview: 'below'` requested, an `888px` pane (900x400) really paints the
@@ -558,16 +496,16 @@ export function summaryFacts(
  * Only `SessionCaps.cols`/`cell` describe geometry (the SDK reports no sheet box
  * and no pane height), so the pane width is RECONSTRUCTED as `cols * cell.w`.
  */
-export const SUMMARY_MIN_PANE_PX = 900
+export const LARGE_SHEET_MIN_PANE_PX = 900
 
 /**
- * Whether the current pane gets the `lg` catalogue sheet and the compact summary.
- * This is the ONE layout threshold of the `/model` presenter: it decides how much
- * INFORMATIONAL chrome the catalogue paints, and nothing about what can be
- * written, reached or read.
+ * Whether the current pane gets the catalogue's `lg` sheet form. This is the ONE
+ * layout threshold of the `/model` presenter, and it decides DENSITY only: the
+ * same rows, the same strip, the same ONE write and the same pages are offered on
+ * both sides of it.
  */
 export function wideCatalog(cols: number, cellWidth: number): boolean {
-  return cols * cellWidth >= SUMMARY_MIN_PANE_PX
+  return cols * cellWidth >= LARGE_SHEET_MIN_PANE_PX
 }
 
 /* ------------------------------------------------------------ draft payload */

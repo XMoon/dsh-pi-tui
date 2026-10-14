@@ -114,6 +114,18 @@ export interface TspPane {
   key(sequence: string): void
   /** Send one pane event through the SDK's event channel. */
   event(value: unknown): void
+  /**
+   * Credit-stall control: while held, a drawn frame is RECORDED but NOT acked, so
+   * the SDK's frame credits run out and its next Views are coalesced into the
+   * single pending View instead of being sent. `releaseAcks()` then ack the held
+   * frames in order, which is what makes the SDK flush its pending View (and any
+   * queued operations behind it). This is the only way a headless test can observe
+   * the SDK's credit/queue boundary.
+   */
+  holdAcks(): void
+  releaseAcks(): void
+  /** The frames drawn so far whose ack is still held. */
+  unackedFrames(): readonly TspWireFrame[]
   restore(): void
 }
 
@@ -136,6 +148,8 @@ export function installTspPane(options: {
   let heldReply: (() => void) | undefined
   const closeBodies: string[] = []
   const frameList: TspWireFrame[] = []
+  const unacked: TspWireFrame[] = []
+  let acksHeld = false
   let frames = 0
   // The native-kind sets are the pane's own advertised set, exactly like the
   // real client: the Model layer needs its picker, the Reader's Back row and the
@@ -181,10 +195,13 @@ export function installTspPane(options: {
       frames += 1
       const frame = JSON.parse(match[1]!) as WireFrame
       frameList.push(frame)
-      // A real pane acks every frame it drew (credit flow control).
-      setTimeout(() => input.type(
-        `\u001b_tsp;e;${JSON.stringify({ ev: 'ack', sf: frame.sf, s: frame.s })}\u001b\\`,
-      ), 0)
+      // A real pane acks every frame it drew (credit flow control) — unless the
+      // test is deliberately holding the acks to stall the credit.
+      const ack = (): void => {
+        input.type(`\u001b_tsp;e;${JSON.stringify({ ev: 'ack', sf: frame.sf, s: frame.s })}\u001b\\`)
+      }
+      if (acksHeld) unacked.push(frame)
+      else setTimeout(ack, 0)
     }
   }
 
@@ -216,6 +233,16 @@ export function installTspPane(options: {
     frames: () => frameList,
     key: sequence => { input.type(sequence) },
     event: value => { input.type(`\u001b_tsp;e;${JSON.stringify(value)}\u001b\\`) },
+    holdAcks: () => { acksHeld = true },
+    releaseAcks: () => {
+      acksHeld = false
+      for (const frame of unacked.splice(0, unacked.length)) {
+        setTimeout(() => input.type(
+          `\u001b_tsp;e;${JSON.stringify({ ev: 'ack', sf: frame.sf, s: frame.s })}\u001b\\`,
+        ), 0)
+      }
+    },
+    unackedFrames: () => [...unacked],
     restore: () => {
       for (const [name, value] of previousEnv) {
         if (value === undefined) delete process.env[name]

@@ -82,13 +82,15 @@
 - TSP 实验渲染器的 `/model` 改为**统一的 list-first 模型目录**，任何窗宽都是同一个原生
   Picker：宽屏的 Provider 侧栏、右侧细节栏与 `Open model & effort ›` 折叠入口全部移除。
   目录每行一个 (provider, model)：模型名为主信息、Provider 缩写标记、真实的
-  `current`/`Default` 徽标、当前 Reasoning Effort 草稿与完整模型 ID，分组为
-  `Current / Default` 置顶、其余按 Provider，
-  宽屏在列表下方显示只读的 `Provider / Draft effort / Selection` 摘要。显式命名的
+  `current`/`Default` 徽标与完整模型 ID，分组为 `Current / Default` 置顶、其余按 Provider。
+  列表下方是目录**自带的 Reasoning Effort 操作条**（原生 Picker `strip`）：被高亮模型声明的
+  每个候选一个按钮，当前草稿那个标记为选中——于是高频操作（选模型 → 定 effort → 确认）
+  全在同一页完成。点击按钮、或按 `Tab` 把键盘移到操作条后用方向键，都只改该模型的本地草稿；
+  没有 effort 元数据的模型则完全不显示这一条。显式命名的
   `Switch`（会话）或 `Save default`（无会话）**在任何窗宽都出现在页脚**并且只提交一次，
-  整模型切换因此不再需要进二级页；点击行只移动高亮，点击已高亮的行（或按 `Enter`）进入
-  该模型的**概览**——概览首屏依次是该模型自身的身份行、全部 Reasoning Effort 候选
-  （`●`/`○`，没有候选时明确写 `Not available`）与 `View full model details ›` 入口，选择候选只改本地草稿。只读的完整
+  整模型切换因此不再需要进二级页；点击行只移动高亮，点击已高亮的行（或按 `Enter`）**直接**
+  打开该模型的只读完整详情页——中间不再有概览页，也不再有二级 effort 菜单。目录不再请求
+  预览区（客户端会为它固定预留一块版面，而原先放在那里的只读摘要只有一行）。只读的完整
   详情页是原生 Reader，事实分为 Identity / Configuration / Description 三组：每个值都是
   一个完整字符串、由客户端按真实宽度换行（无空格的标识符按字符换行、描述按词换行并保留
   空行），`↑`/`↓`、`PageUp`/`PageDown`、`Home`/`End` 驱动原生滚动读到结尾，只有可见的

@@ -126,18 +126,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every window width: the wide provider sidebar, the side details column and the
   bounded `Open model & effort ›` card are gone. The catalogue is a single native
   picker whose rows carry the model name, a short Provider mark, the real
-  `current`/`Default` badges, the drafted Reasoning Effort and the complete model
-  id, grouped as
-  `Current / Default` first and then by Provider, with a read-only
-  `Provider / Draft effort / Selection` summary under the list on a wide window.
-  The explicitly named `Switch` (live session) or `Save default` (sessionless)
-  commits ONCE and is offered in the footer at EVERY width, so switching the whole
-  model needs no second page; a row click only moves the highlight, and clicking
-  the highlighted row (or `Enter`) opens that model's **Overview**, whose first
-  screen is the model's own identity row, every advertised Reasoning Effort
-  candidate (`●`/`○`, or `Not available`) and the `View full model details ›`
-  entry — choosing a candidate
-  changes only the local draft. The read-only Full details page is a native Reader
+  `current`/`Default` badges and the complete model id, grouped as
+  `Current / Default` first and then by Provider. Below the list the catalogue
+  paints its OWN **Reasoning Effort strip**: one button per candidate the
+  highlighted model advertises, with the model's current draft marked — so the
+  frequent task (choose the model, set its effort, confirm) happens on ONE page. A
+  strip click, or putting the keyboard on the strip with `Tab` and using its arrow
+  keys, changes only that model's local draft, and a model that advertises no
+  effort shows no strip at all. The explicitly named `Switch` (live session) or
+  `Save default` (sessionless) commits ONCE from the footer at EVERY width, so
+  switching the whole model needs no second page; a row click only moves the
+  highlight, and clicking the highlighted row (or `Enter`) opens that model's
+  read-only **Full details** page directly: there is no intermediate page and no
+  second-level effort menu. The catalogue asks for no preview region any more (the
+  client reserves a fixed share of the sheet for one and the read-only summary that
+  used to live there was a single line). The read-only Full details page is a native Reader
   whose facts are grouped into Identity / Configuration / Description: each value
   is ONE complete string wrapped by the client at the real width (an unbroken
   identifier by character, a description by word with its blank lines preserved),

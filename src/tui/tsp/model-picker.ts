@@ -22,7 +22,6 @@ import { PROVIDER_DEFAULT, projectModelDirectory } from '../pickers/model-direct
 import { actionIntent, keyIntent, rowIntent, type ModelPickerIntent } from './model-picker-intents.ts'
 import {
   FAILURE_RETRY_ID,
-  OVERVIEW_DETAILS_ID,
   applyOffered,
   draftedEffort,
   effortValue,
@@ -30,11 +29,10 @@ import {
   highlightedModel,
   modelChoices,
   modelRowId,
-  overviewCursorIndex,
-  overviewItems,
   seedDrafts,
   selectionOf,
   stepActionFocus,
+  stripOffered,
   visibleModels,
   wideCatalog,
   type ModelPickerPanel,
@@ -110,7 +108,6 @@ export class TspModelPicker {
       directory: undefined,
       rows: [],
       failures: [],
-      overviewCursor: 0,
       efforts: new Map(),
     }
     this.panel = panel
@@ -216,9 +213,13 @@ export class TspModelPicker {
     if (row === undefined) {
       panel.page = 'models'
       if (panel.zone !== 'primary-action') panel.zone = 'models'
-      panel.overviewCursor = 0
       return
     }
+    // The strip exists only while the CATALOGUE really paints it for a model that
+    // advertises candidates: a page change, a re-read that dropped the model's
+    // effort metadata, or a highlight that moved to such a model must never leave
+    // the keyboard on a region that is not on screen.
+    if (panel.zone === 'strip' && !stripOffered(panel)) panel.zone = 'models'
   }
 
   /** A modal seat took the layer: the next committed frame invalidates every
@@ -275,9 +276,9 @@ export class TspModelPicker {
     // WRITE still owns the panel: nothing navigates or scrolls under it.
     if (panel.page === 'details' && panel.phase !== 'pending') {
       if (intent.kind === 'back') {
-        // The Overview's own details entry is the Reader's ONLY origin, so its
-        // `Back` (and the `Esc` that is the same intent) returns there.
-        panel.page = 'overview'
+        // A catalogue row activation is the Reader's ONLY origin, so its `Back`
+        // (and the `Esc` that is the same intent) returns to the catalogue.
+        panel.page = 'models'
         panel.zone = 'models'
         this.change(panel)
         return
@@ -325,78 +326,21 @@ export class TspModelPicker {
       return
     }
     switch (intent.kind) {
-      case 'back': {
-        // Back and Esc are the same intent for a content page: the Overview
-        // returns to the catalogue. (The read-only Reader's own Back was already
-        // handled above, where it is exempt from the phase gates; reaching this
-        // case with `page === 'details'` would mean an admitted write, which the
-        // gate above has already refused.)
-        if (panel.page === 'overview') {
-          panel.page = 'models'
-          panel.zone = 'models'
-          this.change(panel)
-          return
-        }
-        return
-      }
-      case 'open-overview': {
-        // Only the catalogue opens an Overview, and the row it names must be a
-        // REAL visible row: the selection is committed atomically with the page
-        // change, so the page can never describe the previously highlighted
-        // model.
+      case 'open-details': {
+        // A catalogue row activation (`activate`, a double click, or `Enter`) opens
+        // that model's read-only Full details DIRECTLY: there is no intermediate
+        // page. The row it names must be a REAL visible one — the selection is
+        // committed atomically with the page change, so the Reader can never
+        // describe the previously highlighted model.
         if (panel.page !== 'models') return
         if (intent.rowId !== undefined) {
           if (!visibleModels(panel).some((row) => modelRowId(row) === intent.rowId)) return
           panel.selected = intent.rowId
         }
         if (highlightedModel(panel) === undefined) return
-        panel.page = 'overview'
+        panel.page = 'details'
         panel.zone = 'models'
-        panel.overviewCursor = 0
         this.change(panel)
-        return
-      }
-      case 'overview-cursor': {
-        // The Overview's cursor is a ROW position over the page's real rows
-        // (the effort section, its candidates and the details entry). Moving it
-        // changes no draft and never writes.
-        if (panel.page !== 'overview') return
-        const count = overviewItems(panel).length
-        if (count === 0) return
-        panel.overviewCursor = (overviewCursorIndex(panel) + intent.delta + count) % count
-        this.change(panel)
-        return
-      }
-      case 'overview-select': {
-        // A pointer row activation is validated against the page's REAL rows and
-        // then acts by ROW ID, never by the previous cursor. The section head only
-        // moves the cursor; an effort row drafts (and only a value the model
-        // really advertises); the details row opens the read-only page.
-        if (panel.page !== 'overview') return
-        const index = overviewItems(panel).findIndex((row) => row.id === intent.item)
-        if (index < 0) return
-        panel.overviewCursor = index
-        if (intent.item === OVERVIEW_DETAILS_ID) {
-          panel.page = 'details'
-          panel.zone = 'models'
-        } else {
-          const value = effortValue(intent.item)
-          const row = highlightedModel(panel)
-          if (value !== undefined && row !== undefined
-            && modelChoices(row).some((choice) => choice.value === value)) {
-            panel.efforts.set(modelRowId(row), value)
-          }
-        }
-        this.change(panel)
-        return
-      }
-      case 'activate-overview': {
-        // Enter acts on the row the cursor is REALLY on — the same admission the
-        // pointer uses, so the two can never resolve different rows.
-        if (panel.page !== 'overview') return
-        const item = overviewItems(panel)[overviewCursorIndex(panel)]?.id
-        if (item === undefined) return
-        this.act(panel, panel.revision, { kind: 'overview-select', item })
         return
       }
       case 'retry':
@@ -423,6 +367,18 @@ export class TspModelPicker {
           || (intent.rowId === FAILURE_RETRY_ID && panel.failures.length > 0)
         if (!known) return
         panel.selected = intent.rowId
+        this.change(panel)
+        return
+      }
+      case 'browse-effort': {
+        // The catalogue's strip: a candidate only ever moves the LOCAL draft of the
+        // model it belongs to, and acting on the strip makes it the keyboard zone as
+        // well, so the visible state and the K2 zone can never disagree.
+        const row = highlightedModel(panel)
+        if (row === undefined) return
+        if (!modelChoices(row).some((choice) => choice.value === intent.value)) return
+        panel.efforts.set(modelRowId(row), intent.value)
+        if (panel.page === 'models' && stripOffered(panel)) panel.zone = 'strip'
         this.change(panel)
         return
       }
@@ -516,7 +472,7 @@ export class TspModelPicker {
       return true
     }
     if (event.ev !== 'action') return false
-    const intent = actionIntent(target.panel, event.act)
+    const intent = actionIntent(target.panel, event.act, event.value)
     if (intent !== undefined) this.act(target.panel, target.revision, intent)
     return true
   }

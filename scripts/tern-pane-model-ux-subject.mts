@@ -72,7 +72,13 @@ const WIDE = {
   directory: {
     default: { provider: 'wide', model: 'm-wide' },
     routableProviders: ['wide'],
-    groups: [{ id: 'wide', name: 'Wide Provider', models: [{ id: 'm-wide', name: 'Wide Model', reasoning: { efforts: WIDE_EFFORTS } }] }],
+    groups: [{ id: 'wide', name: 'Wide Provider', models: [{
+      id: 'm-wide',
+      name: 'Wide Model',
+      // A concrete default effort keeps the strip exactly the EIGHT widest-glyph
+      // labels (no synthetic provider-default item), which is the Owner's edge.
+      reasoning: { efforts: WIDE_EFFORTS, defaultEffort: 'w1' },
+    }] }],
     failures: [],
   },
 }
@@ -141,11 +147,9 @@ const describe = (layer: Node) => {
   visit(layer)
   const props = pickerNode?.props
   const title = props?.['title']
-  const page = overlayNode !== undefined
-    ? 'details'
-    : pickerNode === undefined
-      ? 'none'
-      : String(title).startsWith('Model overview') ? 'overview' : 'models'
+  // TWO pages only: the catalogue or the read-only Reader. There is no
+  // intermediate page, so a picker frame is always the catalogue.
+  const page = overlayNode !== undefined ? 'details' : pickerNode === undefined ? 'none' : 'models'
   return {
     page,
     head: overlayNode?.props['head'],
@@ -161,6 +165,9 @@ const describe = (layer: Node) => {
     query: props?.['query'],
     placeholder: props?.['placeholder'],
     propKeys: props === undefined ? undefined : Object.keys(props).sort(),
+    // The catalogue's ONE Reasoning Effort editor (present only while the
+    // highlighted model advertises candidates).
+    strip: props?.['strip'],
     actions: Array.isArray(props?.['actions'])
       ? (props['actions'] as readonly Record<string, unknown>[]).map((action) => ({
         id: action.id, label: action.label, primary: action.primary === true, disabled: action.disabled === true, end: action.end === true,
@@ -264,7 +271,7 @@ try {
       continue
     }
     const event = input.event as TspEvent
-    note({ event: { ev: event.ev, id: 'id' in event ? event.id : undefined, item: 'item' in event ? event.item : undefined, act: 'act' in event ? event.act : undefined } })
+    note({ event: { ev: event.ev, id: 'id' in event ? event.id : undefined, item: 'item' in event ? event.item : undefined, act: 'act' in event ? event.act : undefined, value: 'value' in event ? event.value : undefined } })
     if (event.ev === 'resize' && typeof event.cols === 'number') {
       note({ resize: { cols: event.cols, cell: event.cell ?? null } })
       picker.resize(event.cols, event.cell?.w ?? session.caps.cell.w)
