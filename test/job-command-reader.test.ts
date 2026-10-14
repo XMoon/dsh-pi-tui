@@ -50,6 +50,22 @@ async function flush(rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
+/** Paint until the predicate holds (bounded): a UI transition whose last step is
+ *  a requestRender-scheduled frame (a reveal, a chrome re-measure) needs one
+ *  more committed frame than a single `waitForRender()` is guaranteed to span. */
+async function paintedWhen(
+  vt: VirtualTerminal,
+  predicate: (painted: string) => boolean,
+  rounds = 12,
+): Promise<string> {
+  let painted = view(vt)
+  for (let index = 0; index < rounds && !predicate(painted); index += 1) {
+    await vt.waitForRender()
+    painted = view(vt)
+  }
+  return painted
+}
+
 // ── pure layer: the original UTF-16 offset mapping ─────────────────────────
 
 /** `label.slice(range)` for one gesture between two document points. */
@@ -1263,8 +1279,22 @@ test('C-06 a >10,000-character / 1,200-line Command scrolls locally and keeps ON
   await harness.vt.waitForRender()
   await flush(2)
   await openCommand(harness)
+  // The page toggle's first frame measures the chrome BEFORE the layout
+  // commits the real viewport (X054), so the bar's position fact starts at the
+  // transitional `rows 0-0/N` and the onFramePainted re-converge repaints it
+  // one throttled frame (~16ms) later. Wait for that committed frame instead of
+  // asserting inside the window a single waitForRender() does not cover.
+  const converged = await paintedWhen(harness.vt, painted => /rows 1-\d+\/1200/.test(painted))
   const barRow = bodyRow(harness.vt, 'Esc output')
-  assert.match(rawView(harness.vt)[barRow]!, /rows 1-\d+\/1200/, 'the position fact counts all 1,200 visual rows')
+  assert.match(
+    rawView(harness.vt)[barRow]!,
+    /rows 1-\d+\/1200/,
+    'the position fact counts all 1,200 visual rows',
+  )
+  assert.ok(
+    /rows 1-\d+\/1200/.test(converged),
+    'the viewport-converged frame really painted the 1,200-row position',
+  )
   const headerBefore = rawView(harness.vt)[0]
   const commandTop = firstRowMatching(harness.vt, /^line-\d{4}/)
   assert.notEqual(commandTop, '', 'the Command body paints rows')
