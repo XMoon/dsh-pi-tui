@@ -137,11 +137,14 @@ needs the external Tern CLI).
 The final run of this revision is `temp/tern-model-ux-lane-v2-a23`, taken on the
 frozen tree; the run records the sha256 of the four production modules it rendered
 (`model-picker-view.ts f8e640c326bf`, `model-picker-state.ts fea2feabc809`,
-`model-picker-intents.ts a9d009a8e5f3`, `model-picker.ts cd2ab573e365`). The only
-edits that landed after it are comments and changelog wording, so its visual evidence
-is INHERITED for the current revision under the repository's rule that a comment-only
-delta does not invalidate a green lane — it is not a byte-for-byte match with the
-source as it stands today; its `visual-acceptance.md` carries the per-pane table, the
+`model-picker-intents.ts a9d009a8e5f3`, `model-picker.ts cd2ab573e365`). Every edit that
+landed after it leaves the lane's INPUTS alone: `src/tui/tsp/**`'s PRODUCTION behaviour
+is unchanged (later commits only add comments there), and the rest is test coverage
+(a rejected or throwing write's notice tone), contract, milestone, evidence and
+changelog wording. The run's visual evidence is therefore INHERITED under the
+repository's rule that a comment-only delta does not invalidate a green lane — its
+recorded hashes are NOT the current source's hashes; its `visual-acceptance.md` carries
+the per-pane table, the
 seven-label review of every capture and that provenance record. Every earlier
 iteration is kept beside its own screenshots, and two of them are why the assertions
 read the way they do: the short `900x400` pane is asserted through the contract's
