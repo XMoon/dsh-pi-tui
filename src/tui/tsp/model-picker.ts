@@ -310,7 +310,17 @@ export class TspModelPicker {
       if (intent.kind === 'zone') {
         panel.zone = intent.zone
         this.change(panel)
+        return
       }
+      // `Esc`'s ladder still applies in a failed read: the ONE query operation this phase
+      // admits is the CLEAR that `Esc` performs, so the key is never swallowed (a filter typed
+      // while the read ran survives the failure and must be clearable). Opening the search box
+      // for arbitrary edits is NOT part of it — an ordinary key never reaches the query case
+      // below in this phase.
+      if (intent.kind !== 'query' || intent.query !== '') return
+      panel.query = ''
+      panel.cursor = 0
+      this.change(panel)
       return
     }
     switch (intent.kind) {

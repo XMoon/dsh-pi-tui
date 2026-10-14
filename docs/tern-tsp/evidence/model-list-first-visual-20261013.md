@@ -145,16 +145,18 @@ on the real client:
   list (asserted by the hint and by the next `↓` moving the ROW, not the draft);
 - leaving the Reader and entering it again gives the second reading its OWN scroll-container
   id, and that reading's own `End` addresses that id;
-- a read that fails as a WHOLE leaves ONE `Retry` — the bar's — with no retry ROW beside it and
-  the failed providers still on screen as read-only context;
+- a read that fails as a WHOLE leaves ONE `Retry` — the bar's — with no retry ROW beside it, the
+  failed providers still on screen as read-only context, and the "Unavailable providers" group
+  count and the catalogue total both following that row's absence;
 - `Esc` with a typed filter CLEARS that filter and leaves the panel open (asserted from the
-  strip and from the list), and a second `Esc` then closes it;
+  strip, from the list and from a FAILED read), and a second `Esc` then closes it while an
+  ordinary key still cannot edit the search box in that phase;
 - a SEARCH with no matches empties the list and the client paints NO empty copy at all (the wire
   still carries the picker's `empty` prop): the "no model is advertised" sentence is therefore
   not reachable from a filtered list on this client, and the lane records the measurement so a
   future client that starts painting one flips it.
 
-The run is `temp/tern-model-ux-lane-v2-a40`; its `visual-acceptance.md` carries the per-pane
+The run is `temp/tern-model-ux-lane-v2-a41`; its `visual-acceptance.md` carries the per-pane
 table, the seven-label review of every capture and the provenance record. Earlier runs are
 kept beside their own screenshots as HISTORY — their hashes describe the source of their own
 moment and are never quoted as evidence for this one. Two of them are why the assertions read

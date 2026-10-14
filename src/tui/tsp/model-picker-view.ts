@@ -116,7 +116,11 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
     for (const row of rows) order.push(modelRowId(row))
   }
   if (panel.failures.length > 0) {
-    order.push({ group: UNAVAILABLE_GROUP_ID, label: UNAVAILABLE_GROUP_LABEL, count: panel.failures.length + 1 })
+    // The group counts the rows it really carries: the failed providers, plus the retry row
+    // only while that row is part of the page (`retryRowOffered`, the same predicate the row
+    // set, the router and the admission read).
+    const count = panel.failures.length + (retryRowOffered(panel) ? 1 : 0)
+    order.push({ group: UNAVAILABLE_GROUP_ID, label: UNAVAILABLE_GROUP_LABEL, count })
     for (const failure of panel.failures) order.push(failureRowId(failure.providerId))
     if (retryRowOffered(panel)) order.push(FAILURE_RETRY_ID)
   }
@@ -151,10 +155,10 @@ function modelItems(panel: ModelPickerPanel): PickerItem[] {
   return items
 }
 
-/** How many rows the catalogue really lists (it appends the failure rows and the
- *  one Retry row to the models). */
+/** How many rows the catalogue really lists: the models, the failed providers, and the ONE
+ *  retry row while it is part of the page (`retryRowOffered`). */
 function catalogueTotal(panel: ModelPickerPanel): number {
-  return panel.rows.length + panel.failures.length + (panel.failures.length === 0 ? 0 : 1)
+  return panel.rows.length + panel.failures.length + (retryRowOffered(panel) ? 1 : 0)
 }
 
 /**

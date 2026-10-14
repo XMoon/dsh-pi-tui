@@ -601,16 +601,18 @@ retry row's read-only re-read by pointer AND from the keyboard cursor, the fact 
 a row activation opens the read-only Reader DIRECTLY (there is no intermediate page,
 and the two-page set is asserted), the read-only Reader (its grouped
 Identity/Configuration/Description structure, its complete values and `wrap`
-kinds, its frame-scoped Back/body ids, the SDK `scroll` ops its own keys emit for
+kinds, its PER-READING Back/body ids, the SDK `scroll` ops its own keys emit for
 the body node it really built — with the negative control that the same keys emit
 none away from the Reader — and its origin-preserving return), the K2 two-zone
 walk with the strip between the list and the bar and Enter refused outside the
 Primary Action, the page-by-page action bar
-(including the failed read's `Cancel` + `Retry`), `Esc` returning to the zone/page
-it came from, a resize that keeps the panel, the page and every draft at every width
+(including the failed read's `Cancel` + `Retry`, and the fact that the failed providers stay
+as read-only context while the list's retry ROW is gone), `Esc`'s ladder (a typed filter is
+cleared first, from the strip and from a failed read alike, and only then does the panel
+close; an ordinary key still cannot edit the search box in a failed read), a resize that
+keeps the panel, the page and every draft at every width
 (and the sheet form unchanged by it), a loading panel
-that keeps the search editable and closes
-on `Esc`, the pending/refusal/indeterminate settlements (a refusal keeps the page
+that keeps the search editable, the pending/refusal/indeterminate settlements (a refusal keeps the page
 it happened on), the read-error Retry through the original read owner, the
 Current/Default facts of a live versus sessionless subject, long unbroken/CJK/
 emoji descriptions as ONE complete Reader value, effort candidate sets of 0, 1

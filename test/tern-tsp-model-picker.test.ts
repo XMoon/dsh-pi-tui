@@ -1515,6 +1515,56 @@ test('native Model: a fully failed read leaves ONE Retry, and it is the bar’s'
   m.handle.close()
 })
 
+test('native Model: Esc clears the filter in a FAILED read too, and never reopens the search box', async (t) => {
+  // The reviewer's production path: a read that RUNS keeps the search editable, so a filter can
+  // be typed before it fails; the failure keeps that filter on screen, and `Esc` must still be
+  // the ladder's clear rather than a swallowed key. What it must NOT do is re-open the search
+  // box: in this phase an ordinary character is refused.
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  m.handle.setLoading()
+  await waitUntil('the read runs', () => props(pane).state === 'loading')
+  pane.key('a')
+  pane.key('b')
+  pane.key('c')
+  await waitUntil('the filter is typed while the read runs', () => props(pane).query === 'abc')
+  m.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the read failed with the filter kept',
+    () => props(pane).state === 'error' && props(pane).query === 'abc')
+  pane.key('\u001b')
+  await waitUntil('Esc cleared the filter in the failed read', () => props(pane).query === '')
+  assert.equal(picker(pane) !== undefined, true, 'and the panel is still open')
+  // An ordinary key is still refused here: the phase admits the CLEAR, not the editor.
+  pane.key('x')
+  await settle(30)
+  assert.equal(props(pane).query, '', 'a failed read admits no search editing')
+  // Nothing left to clear, so the next Esc closes.
+  pane.key('\u001b')
+  await waitUntil('the second Esc closes the failed panel', () => picker(pane) === undefined)
+  assert.equal(m.writes.length, 0, 'and no key on that path ever wrote')
+})
+
+test('native Model: the failure group count and the total follow the retry row', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  const unavailable = (): Record<string, unknown> | undefined =>
+    ((props(pane).order ?? []) as Array<Record<string, unknown> | string>)
+      .find((entry) => typeof entry === 'object' && entry !== null
+        && (entry as { label?: string }).label === 'Unavailable providers') as Record<string, unknown> | undefined
+  // The fixture has two models and one failed provider: while the catalogue is ready the group
+  // counts its provider AND the retry row, and the total counts everything the list carries.
+  assert.equal(unavailable()?.count, 2, 'ready: the failed provider + the retry row')
+  assert.equal(props(pane).total, 4, 'ready: two models + one failure + the retry row')
+  m.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the whole read failed', () => props(pane).state === 'error')
+  assert.equal(unavailable()?.count, 1, 'error: the retry row is gone, so the group counts one row')
+  assert.equal(props(pane).total, 3, 'error: and the total follows it')
+  assert.equal(rowIds(pane).includes(FAILURE_RETRY_ID), false, 'no retry row in the list either')
+  m.handle.close()
+})
+
 test('native Model: every visible action is keyboard reachable and never a no-op', async (t) => {
   const clean: ModelPickerDirectory = {
     current: undefined,
