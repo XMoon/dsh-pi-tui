@@ -49,9 +49,11 @@ row and the `Esc` that shares its intent return there.
 
 ### The catalogue (one list-first picker at every width)
 
-**One node identity per panel, and that is a defect fix.** The picker, its layer and the
-Reader keep ONE node key for as long as the panel lives (`model-<serial>`); the frame
-revision never reaches a long-lived key. MEASURED on the real client with a 42-model
+**One node identity per panel, and that is a defect fix.** The picker and its layer keep
+ONE node key for as long as the panel lives (`model-<serial>`); the Reader's body and its
+`Back` row keep ONE key **per reading** (the panel serial plus that reading's epoch, so
+re-entering the Reader takes a new one). The frame revision never reaches a long-lived key.
+MEASURED on the real client with a 42-model
 catalogue: a key that changes per frame makes the SDK diff `del(oldPicker) + add(newPicker)`,
 so the client REMOUNTS the list — and a freshly mounted list brings its selected row into
 view, which moved the whole viewport under a click (the click on a row four rows above the
