@@ -426,6 +426,10 @@ export default async function (h) {
   h.check('one REAL click on a different strip item emits exactly one strip action and moves on',
     highClicked && stripClicks.length === 1 && stripClicks[0].act === 'strip'
     && highWire !== undefined && String(stripClicks[0].value) === String(highWire.id)
+    // The id really names the MODEL it was built for as well as the candidate value, and the
+    // client hands it back verbatim: that is what lets admission refuse a delayed click from
+    // the model the strip showed before the selection moved.
+    && String(highWire.id) === `effort:${JSON.stringify(['alpha', 'm-alpha'])}\u0000high`
     && stripClicks[0].item === undefined
     && onChips(h, snap).length === 1 && h.descendantsText(onChips(h, snap)[0]).includes('High')
     && applies(h).length === writesBefore,
@@ -602,6 +606,9 @@ export default async function (h) {
     && h.classNodes(snap, 'sf-t-error').some((node) => h.descendantsText(node).includes('catalog is unreachable')),
     `wire=${JSON.stringify(lastFrame(h)?.notice)} clientErrorInk=${h.classNodes(snap, 'sf-t-error').map((node) => h.descendantsText(node)).join(' | ')}`)
   h.measure('the client normalizes whitespace in its node dump', JSON.stringify(String(notice?.text)))
+  // This reading's scroll container, as its own keys addressed it: the second reading must
+  // NOT reuse it.
+  const firstReadingBody = scrolls(h).at(-1)?.id
   await h.key('Escape', 900)
   h.check('Esc returns the Reader to the catalogue (its ONE origin)',
     lastFrame(h)?.page === 'models', JSON.stringify(lastFrame(h)?.page))
@@ -613,6 +620,23 @@ export default async function (h) {
   const backClicked = backRow === undefined ? false : await h.click(snap.chains, backRow)
   h.check('the Reader\'s visible Back row returns to the catalogue as well',
     reopened && backClicked && lastFrame(h)?.page === 'models', `reopened=${reopened} clicked=${backClicked}`)
+  // A NEW reading must NOT reuse the closed one's identity: its ids carry the panel serial
+  // AND the reading's epoch, so a `scroll` op queued by the Reader that was left behind can
+  // never address this one's container.
+  await toCatalogue(h)
+  const secondOpened = await enterReader(h)
+  snap = h.snapshot()
+  const secondBack = h.classNodes(snap, 'sf-row').find((node) => h.descendantsText(node) === 'Back')?.id
+  const opsBefore = scrolls(h).length
+  await h.key('End', 700)
+  const secondScroll = scrolls(h).at(-1)
+  h.check('a NEW reading takes a NEW identity, and its own keys scroll ITS container',
+    secondOpened && scrolls(h).length > opsBefore && secondScroll !== undefined
+    && typeof secondScroll.id === 'string' && secondScroll.id !== firstReadingBody
+    && secondScroll.id.startsWith('layer.') && secondScroll.id.includes('model-details-body'),
+    `first body=${JSON.stringify(firstReadingBody)} second body=${JSON.stringify(secondScroll?.id)} back=${JSON.stringify(secondBack)}`)
+  h.measure('the Reader reading identities', JSON.stringify({ firstBody: firstReadingBody, secondBack, secondScroll: secondScroll?.id }))
+  void secondBack
 
   // --------------------------------- claim 7: partial failure keeps its ONE retry row
   await h.key('4', 900)
@@ -649,6 +673,54 @@ export default async function (h) {
     && actionLabels(frame).includes('Save default') && actionIds(frame) === 'close,apply'
     && !h.classNodes(snap, 'pk-badge').some((node) => String(node.text) === 'current'),
     `${JSON.stringify(frame?.title)} :: ${actionIds(frame)} :: ${actionLabels(frame)}`)
+
+  // ---------------- a row click reclaims the keyboard from the strip ----------------
+  // The reviewer's transition gap: with the keyboard in the strip (a user clicked a candidate
+  // there), a MOUSE click on another model must hand the keys back to the list — otherwise the
+  // next ↑/↓ keeps drafting the PREVIOUS model's effort while the highlight silently sits on
+  // the clicked one.
+  {
+    // Fixture 5: BOTH models advertise the same candidates — the case that tells the zone
+    // reclaim apart from `normalize()`'s "the strip is gone" reset.
+    await h.key('5', 900)
+    // Leave the Reader if an earlier section left it open; in the catalogue Esc would CLOSE
+    // the panel, so the page is checked first.
+    if (lastFrame(h)?.page !== 'models') await h.key('Escape', 800)
+    await h.sleep(300)
+    // A KNOWN state. Fixture 5 keeps the previous selection (beta), so clicking Alpha's row is
+    // a plain `select`; clicking an ALREADY highlighted row would ACTIVATE and open the Reader
+    // instead, which is exactly the confusion this check must not have.
+    const alphaRow = modelRows(h, h.snapshot()).find((node) => h.descendantsText(node).includes('Alpha Model'))
+    const alphaClicked = alphaRow === undefined ? false : await h.click(h.snapshot().chains, alphaRow)
+    await h.sleep(400)
+    h.check('the twin catalogue is drivable: a real click highlights Alpha as a plain SELECT',
+      alphaClicked && lastFrame(h)?.page === 'models' && lastFrame(h)?.selected === JSON.stringify(['alpha', 'm-alpha']),
+      `clicked=${alphaClicked} page=${JSON.stringify(lastFrame(h)?.page)} selected=${JSON.stringify(lastFrame(h)?.selected)}`)
+    const chip = chipWithText(h, h.snapshot(), 'High')
+    const chipClicked = chip === undefined ? false : await h.click(h.snapshot().chains, chip)
+    await h.sleep(400)
+    h.check('clicking a candidate puts the keyboard on the STRIP',
+      chipClicked && lastFrame(h)?.focus === 'strip' && lastFrame(h)?.page === 'models',
+      `clicked=${chipClicked} focus=${JSON.stringify(lastFrame(h)?.focus)} subtitle=${JSON.stringify(lastFrame(h)?.subtitle)}`)
+    // Beta is NOT the highlighted model now, so this real click is a `select` too.
+    const betaRow = modelRows(h, h.snapshot()).find((node) => h.descendantsText(node).includes('Beta Model'))
+    const rowClicked = betaRow === undefined ? false : await h.click(h.snapshot().chains, betaRow)
+    await h.sleep(400)
+    h.check('a MOUSE click on another EFFORT-bearing model hands the keys back to the list',
+      rowClicked && lastFrame(h)?.page === 'models' && lastFrame(h)?.selected === JSON.stringify(['beta', 'm-beta'])
+      && lastFrame(h)?.focus === 'list' && lastFrame(h)?.subtitle === 'Tab effort',
+      `focus=${JSON.stringify(lastFrame(h)?.focus)} subtitle=${JSON.stringify(lastFrame(h)?.subtitle)} selected=${JSON.stringify(lastFrame(h)?.selected)}`)
+    const selBefore = lastFrame(h)?.selected
+    await h.key('Down', 500)
+    // The decisive pair: the ROW cursor moved (so the keys are the list's), and the strip now
+    // shows the NEWLY highlighted model's own draft — not the previous model's, which is what
+    // a still-strip zone would have edited.
+    const onAfter = String((lastFrame(h)?.strip?.items ?? []).find((item) => item.on === true)?.id ?? '')
+    h.check("and the next ↓ walks the LIST, not the previous model's draft",
+      lastFrame(h)?.page === 'models' && lastFrame(h)?.selected !== selBefore
+      && onAfter.includes(`effort:${String(lastFrame(h)?.selected)}\u0000`),
+      `selected=${JSON.stringify(lastFrame(h)?.selected)} was=${JSON.stringify(selBefore)} on=${JSON.stringify(onAfter)}`)
+  }
 
   // ------------------ the node identity a REAL click must not change (in place) ------
   // The reported defect: a click on a model lower in the list moved the whole viewport,

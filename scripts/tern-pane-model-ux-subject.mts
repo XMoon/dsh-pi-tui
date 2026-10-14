@@ -251,6 +251,39 @@ const findPickerId = (layer: Node): string | undefined => {
   return found
 }
 
+/** Fixture `5`: TWO models that advertise the SAME candidates. It is what the reviewer's
+ *  keyboard-zone case needs: a candidate click puts the keys on the strip, a MOUSE click then
+ *  selects the OTHER effort-bearing model, and the keys must follow the click back to the list
+ *  (with a value-only strip id the second click could also be drafted into by the first). */
+const TWIN: Record<string, unknown> = {
+  current: { provider: 'alpha', model: 'm-alpha', reasoningEffort: 'medium' },
+  directory: {
+    default: { provider: 'beta', model: 'm-beta' },
+    routableProviders: ['alpha', 'beta'],
+    groups: [
+      {
+        id: 'alpha',
+        name: 'Alpha Provider',
+        models: [{
+          id: 'm-alpha',
+          name: 'Alpha Model',
+          reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] },
+        }],
+      },
+      {
+        id: 'beta',
+        name: 'Beta Provider',
+        models: [{
+          id: 'm-beta',
+          name: 'Beta Model',
+          reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] },
+        }],
+      },
+    ],
+    failures: [],
+  },
+}
+
 /* ------------------------------------------------------------- the panel */
 
 const session = await connect({ app: 'tern-pane-model-ux', timeout: 2000 })
@@ -344,11 +377,12 @@ try {
         continue
       }
       // The fixture switch is the subject's own control, not picker input.
-      if (key.text === '1' || key.text === '2' || key.text === '3' || key.text === '4') {
+      if (key.text === '1' || key.text === '2' || key.text === '3' || key.text === '4' || key.text === '5') {
         if (key.text === '1') useFixture(NORMAL, 'normal')
         else if (key.text === '2') useFixture(WIDE, 'wide-efforts')
         else if (key.text === '3') useFixture(READER, 'reader')
-        else useFixture(PARTIAL, 'partial')
+        else if (key.text === '4') useFixture(PARTIAL, 'partial')
+        else useFixture(TWIN, 'twin-efforts')
         note({ key: key.text })
         continue
       }
