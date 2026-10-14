@@ -30,6 +30,7 @@
 
 import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color, settingsListTheme } from '../theme/runtime.ts'
+import { abbreviateName } from './name-label.ts'
 import type { ThemeRegistry } from '../../extension/internal/theme-registry.ts'
 import { themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
@@ -107,12 +108,16 @@ export class ThemeSubmenu implements RowBudgetAware, Focusable {
       rows.map(row => ({
         // The row id IS the identity — no display round-trip anywhere.
         id: row.value,
-        label: row.displayName,
-        description: row.value.startsWith('plugin:')
+        // 25 = the label column at the 44-column floor (40 child width minus the
+        // one 9-cell state chip this list reserves minus the 6 fixed cells). The
+        // SELECTED row's description leads with the complete display name, so two
+        // long same-prefix theme names cannot paint one indistinguishable pair.
+        label: abbreviateName(row.displayName, 25),
+        description: `${row.displayName} · ${row.value.startsWith('plugin:')
           ? 'Extension-registered theme'
           : row.value.startsWith('file:')
             ? 'Custom theme file'
-            : 'Built-in palette',
+            : 'Built-in palette'}`,
         // The marker is a VALUE comparison against the live selection
         // identity — never a display-label comparison (a same-labeled row
         // from another source cannot steal it). §4.5/§12.2: the state chip

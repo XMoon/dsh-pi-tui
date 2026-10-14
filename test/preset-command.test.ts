@@ -964,7 +964,8 @@ test('PR5b/X061: a wide → narrow → wide resize restores both chips and keeps
   t.vt.resize(48, 20)
   await t.view()
   view = plainViewport(t.vt)
-  const targetRow = view.findIndex(line => line.includes('a-very-long-custom'))
+  // The label is the shared head…tail abbreviation now, so match its head only.
+  const targetRow = view.findIndex(line => line.includes('a-very-long'))
   assert.ok(targetRow >= 0, `the long-name row must be painted:\n${view.join('\n')}`)
   const leftBorder = view[targetRow]!.indexOf('│')
   assert.ok(leftBorder >= 0, `frame left border missing:\n${view.join('\n')}`)

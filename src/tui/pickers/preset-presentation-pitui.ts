@@ -12,6 +12,7 @@
  */
 import type { PresetPresentation, PresetPickerRoster } from '../../app/command/preset-presentation.ts'
 import type { SettingValuePart } from '@xmoon76/pi-tui'
+import { abbreviateName } from './name-label.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import { color } from '../theme/runtime.ts'
@@ -69,8 +70,13 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
               }
               return {
                 id: preset.id,
-                label: `${display.name} (${preset.id})`,
+                // 25 = the label column at the 44-column floor for a row that
+                // reserves one 9-cell state chip (40 - 9 - 6). The selected row's
+                // description leads with the COMPLETE `name (id)` identity, so a
+                // pair of long same-prefix names can never be indistinguishable.
+                label: abbreviateName(`${display.name} (${preset.id})`, 25),
                 description: [
+                  `${display.name} (${preset.id})`,
                   display.description,
                   isBuiltInPresetRow(preset) ? 'system' : 'user',
                   preset.broken,
