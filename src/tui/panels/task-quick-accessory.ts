@@ -298,29 +298,36 @@ export class TaskQuickAccessory implements Component {
    *
    * The whole painted band owns the wheel (identity row included): while the
    * pointer is over the accessory the transcript underneath never scrolls, and a
-   * wheel at a window boundary is consumed WITHOUT repainting rather than falling
-   * through.
+   * wheel at a window boundary — or one dispatched against a frame that is stale
+   * because a resize has not been repainted yet — is consumed WITHOUT repainting
+   * (`render: false`) rather than falling through.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (event.type !== 'wheel' || event.wheelDelta === undefined || event.wheelDelta === 0) return undefined
     const painted = this.painted
     if (painted === undefined) return undefined
-    // Last-painted geometry is authoritative: a resize (or a screen swap) that
-    // has not been repainted yet must never resolve against a stale box. The
-    // event's own dimensions come from the SAME stale layout cache the frame was
-    // painted into, so the LIVE terminal geometry recorded at paint time is the
-    // check that can actually fail on a resize.
-    if (event.width !== painted.width || event.height !== painted.height) return undefined
-    if (this.geometry.columns() !== painted.terminalColumns || this.geometry.rows() !== painted.terminalRows) return undefined
-    const localY = event.y
-    if (localY < 0 || localY >= painted.height) return undefined
+    // Outside the painted band the transcript legitimately owns the wheel.
+    if (event.y < 0 || event.y >= painted.height) return undefined
+    // IN the band the accessory owns the gesture, even when the frame it was
+    // dispatched against is stale: the alt screen routes an UNHANDLED wheel to the
+    // primary viewport, so merely refusing would scroll the transcript under a
+    // pointer that is still on the window. Nothing visible changes, so no repaint
+    // is requested. Last-painted geometry stays authoritative: the event's own box
+    // comes from the SAME stale layout cache the frame was painted into, which is
+    // why the LIVE terminal geometry recorded at paint time is the check that can
+    // actually fail on a resize.
+    if (event.width !== painted.width || event.height !== painted.height) return { handled: true, render: false }
+    if (this.geometry.columns() !== painted.terminalColumns || this.geometry.rows() !== painted.terminalRows) {
+      return { handled: true, render: false }
+    }
     const step = event.wheelDelta < 0 ? -1 : 1
     const next = Math.min(Math.max(0, this.start + step), Math.max(0, this.items.length - painted.itemRows))
-    if (next === this.start) return { handled: true }
+    if (next === this.start) return { handled: true, render: false }
     this.start = next
     this.firstVisibleId = this.items[next]?.value
-    // The painted frame is stale until the repaint this result requests.
-    this.painted = undefined
+    // The painted CONTENT is stale until the repaint this result requests, but the
+    // painted GEOMETRY stays the frame the pointer is on: a further wheel arriving
+    // before that repaint is still in-band and must not fall through.
     return { handled: true, render: true }
   }
 
