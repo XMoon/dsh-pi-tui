@@ -1088,3 +1088,35 @@ test('C-19 Tab switches Output <-> Command in BOTH directions and v is inert', a
   assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Output bar is still the painted one')
   assert.ok(!/Esc output/.test(view(harness.vt)), 'the Command page was never entered by `v`')
 })
+
+// ── B-18: BOTH metadata groups drop a fact WHOLE before truncating ─────────
+
+test('B-18 the metadata row drops a long Detail whole and truncates only a lone fact', async () => {
+  const harness = startApp(100, 40)
+  await openFirstJob(harness)
+  harness.observation.latest()!.emit({
+    label: 'pnpm build',
+    progress: '3/8 checks',
+    detail: `building ${'d'.repeat(160)}`,
+    text: numberedLines(1, 20),
+  })
+  await settle(harness.vt)
+  await harness.vt.waitForRender()
+  assert.match(view(harness.vt), /Progress: 3\/8 checks/,
+    'the higher-priority progress fact is kept whole')
+  assert.ok(!/Detail:/.test(view(harness.vt)),
+    `a Detail that cannot fit whole is DROPPED, never cut mid-word:\n${view(harness.vt)}`)
+
+  // A LONE fact is the exception the rule allows: with nothing else to keep it
+  // truncates rather than disappearing, and the ellipsis is the only partial text a
+  // chrome row may ever show.
+  harness.observation.latest()!.emit({
+    label: 'pnpm build',
+    detail: `building ${'d'.repeat(160)}`,
+    text: numberedLines(1, 20),
+  })
+  await settle(harness.vt)
+  await harness.vt.waitForRender()
+  assert.ok(!/Progress:/.test(view(harness.vt)), 'the progress fact is gone with the newer snapshot')
+  assert.match(view(harness.vt), /^Detail: .*…$/m, 'a lone Detail truncates with the ellipsis')
+})
