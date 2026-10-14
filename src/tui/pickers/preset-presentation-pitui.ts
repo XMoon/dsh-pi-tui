@@ -29,10 +29,16 @@ import { isBuiltInPresetRow, presetDisplayText } from './preset-display.ts'
 function presetLabelOf(name: string, id: string): string {
   const limit = 25
   const suffix = ` (${id})`
-  if (visibleWidth(suffix) <= limit) {
-    return `${abbreviateName(name, Math.max(4, limit - visibleWidth(suffix)))}${suffix}`
-  }
-  return abbreviateName(id, limit)
+  const suffixWidth = visibleWidth(suffix)
+  // The ID is what the user types, so the suffix is never traded away while it
+  // fits — and the name budget is the TRUE remainder: a floor of its own (the
+  // 4-cell minimum this used to clamp to) made the composed label exceed the
+  // column whenever 0-3 cells were left, and the renderer then clipped the ID's
+  // own tail. With no cells left the suffix IS the label.
+  if (suffixWidth > limit) return abbreviateName(id, limit)
+  const remaining = limit - suffixWidth
+  if (remaining === 0) return suffix
+  return `${abbreviateName(name, remaining)}${suffix}`
 }
 
 export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
