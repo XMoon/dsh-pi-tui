@@ -2681,6 +2681,15 @@ entries, and their routing/wordings are unchanged.
   geometry. The public widget zones keep their placement, their own budget and
   their lifecycle: the accessory never borrows a row from them, from the editor,
   from the footer or from the transcript floor.
+- **One projection, never a dataset view.** A Workflow phase/run opens the modal
+  Task Browser with a child-id dataset scope; the resident window is not that
+  view, so it projects from the SAME commit's GLOBAL rows (the coordinator hands
+  both to the surface), and opening a scoped browser never narrows or hides the
+  session's other active Jobs and Subagents.
+- **Nesting without a new glyph.** A nested Subagent row is painted with
+  indentation derived from its durable depth; the modal panel's `├─ ` connector
+  (U+2500 is East-Asian-Width ambiguous) is deliberately NOT carried into this new
+  surface.
 - **Window anchoring.** The durable anchor is the first visible row's stable
   `value`; a status update never moves the window, an inserted/removed row
   rebases onto the surviving anchored row, and a vanished anchor falls back to
@@ -2693,11 +2702,15 @@ entries, and their routing/wordings are unchanged.
   untouched), so the wheel over the window is deliberately NOT reachable there —
   it is recorded as such rather than emulated. Inside Transcript Fullscreen the
   alt screen's EXISTING component dispatch delivers the wheel to the accessory,
-  which resolves it only against its LAST PAINTED frame (width, height, the
-  painted task-row band), moves its own window by one row, consumes nothing at a
-  window boundary, requests no focus and acknowledges nothing. Press/release/
-  click are refused: the accessory cannot open, stop or acknowledge anything in
-  B4-A.
+  which resolves it only against its LAST PAINTED frame — the painted box AND the
+  live terminal geometry recorded at paint time, so a resize that has not been
+  repainted yet is refused even though the event itself still carries the stale
+  layout's box dimensions — moves its own window by one row, requests no focus and
+  acknowledges nothing. The whole painted band owns the wheel: while the pointer
+  is on the window the transcript underneath never scrolls, and a wheel at a
+  window boundary is consumed without repainting instead of falling through.
+  Press/release/click are refused: the accessory cannot open, stop or acknowledge
+  anything in B4-A.
 - **Session currentness.** A session-generation reset clears the window together
   with the badge/summary/roster mirrors, and every publish inherits the
   coordinator's session key + request-epoch fence: a late catalog commit of a

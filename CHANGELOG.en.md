@@ -23,10 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `showing x-y/N` (N is the number of rows that can actually be scrolled to).
   Passive painting, refresh, wheel and resize never change failure
   acknowledgement (`!N`) or a Question's answer state. Inside Transcript
-  Fullscreen the wheel scrolls only the window under the pointer — no keyboard
-  focus, no draft/transcript movement; the ordinary main screen stays a
-  keyboard-only surface (native terminal selection and scrollback are untouched),
-  and tasks remain reachable through the existing `↓` / `/tasks` Task Center.
+  Fullscreen the wheel scrolls only the window under the pointer: while the
+  pointer is on the window (including at its first/last row) the transcript
+  behind it never scrolls, and the wheel takes no keyboard focus and leaves the
+  draft alone; the ordinary main screen stays a keyboard-only surface (native
+  terminal selection and scrollback are untouched), and tasks remain reachable
+  through the existing `↓` / `/tasks` Task Center.
 
 - `Ctrl+R` history now declares its own boundary: one `─` above the identity row
   and one below the action bar (against the footer), so the seat is visibly

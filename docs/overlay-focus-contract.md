@@ -967,9 +967,14 @@ between the two owners:
   application already has a pointer: the alt screen's existing component
   dispatch inside Transcript Fullscreen. The regular main screen keeps its
   accepted keyboard-only contract (no mouse mode, no dispatch — see §11 and the
-  H3A-16 negative). A resolved wheel moves only the accessory's own window and
-  is resolved against the LAST PAINTED frame; it never focuses, never opens and
-  never acknowledges a failure.
+  H3A-16 negative). A resolved wheel moves only the accessory's own window and is
+  resolved against the LAST PAINTED frame — the painted box plus the live terminal
+  geometry recorded at paint time, because the fork builds an event's box
+  dimensions from the same last painted layout and a resize therefore cannot be
+  detected from the event alone. The accessory's whole painted band owns the
+  wheel: a boundary wheel is consumed without repainting instead of falling
+  through to the transcript, and the wheel never focuses, opens or acknowledges
+  anything.
 - **Data and currentness.** The rows are published by the surface Task Runtime
   through a private `TuiApp` sink on every row/attention commit; the accessory
   keeps no catalog, no timer and no subscription, and a session-generation reset

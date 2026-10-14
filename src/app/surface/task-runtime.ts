@@ -401,6 +401,13 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   let refreshAgents: () => void = () => {}
   let refreshAgentRuntimeOnly: () => void = () => {}
   let taskBrowserRows: TaskBrowserRow[] = []
+  /**
+   * The GLOBAL projection of the last row commit, before the open browser's
+   * dataset scope filtered it. The resident below-editor window is NOT a dataset
+   * view: it must keep showing the whole session (Jobs included) while a
+   * Workflow-scoped Task Browser is open, so it projects from HERE.
+   */
+  let taskBrowserGlobalRows: TaskBrowserRow[] = []
   let taskRuntime: TaskBrowserRuntime | undefined
   let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
   let quickTaskState: TaskBrowserViewState | undefined
@@ -555,19 +562,24 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
    * Publish the passive Quick accessory window (B4-A). The accessory is
    * PiTui-only chrome exactly like the roster badge and the summary: a renderer
    * without a Task Center (read-only TSP) skips the commit instead of mounting a
-   * fake projection. The rows are re-projected from the runtime's committed row
-   * facts + the controller's detached attention model on every call — this sink
-   * is NEVER a second catalog, and it never acknowledges a failure.
+   * fake projection. The rows are re-projected from the runtime's committed GLOBAL
+   * row facts + the controller's detached attention model on every call — this sink
+   * is NEVER a second catalog, never a dataset view, and it never acknowledges a
+   * failure.
    */
   const publishQuickProjection = (): void => {
     if (options.isCleanedUp()) return
     if (!options.display().supportsTaskCenter) return
-    options.mounted().setQuickTaskItems(quickTaskProjection(taskBrowserRows, options.attention.rows()))
+    options.mounted().setQuickTaskItems(quickTaskProjection(taskBrowserGlobalRows, options.attention.rows()))
   }
 
-  const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string): void => {
+  const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string, globalRows?: readonly TaskBrowserRow[]): void => {
     if (options.isCleanedUp()) return
     taskBrowserRows = [...rows]
+    // The open browser's rows may be dataset-SCOPED (a Workflow phase/run); the
+    // resident window is not that view, so it projects from the SAME commit's
+    // global rows and never from a narrower dataset.
+    if (globalRows !== undefined) taskBrowserGlobalRows = [...globalRows]
     // The passive below-editor accessory projects from THIS commit whether or
     // not a modal browser is open (B4-A): an unopened browser is not a reason
     // to leave the live task window stale.
@@ -1270,7 +1282,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           // with a stale status (the subagents path commits through
           // TaskBrowserRuntime) and the below-editor window goes stale.
           if (taskRuntime === undefined) {
+            // No coordinator means no dataset scope either: the jobs-only
+            // projection IS the global one.
             taskBrowserRows = buildTaskRows(snapshots, [])
+            taskBrowserGlobalRows = taskBrowserRows
             publishQuickProjection()
             if (activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
               activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
@@ -1438,6 +1453,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         () => { if (options.display().supportsTaskCenter) options.mounted().setTasks([]) },
         () => { if (options.display().supportsTaskCenter) options.mounted().setAgents([]) },
         () => { taskBrowserRows = [] },
+        () => { taskBrowserGlobalRows = [] },
         // The passive below-editor window is session-scoped state like the
         // badge/summary mirrors: the new session must never paint the old
         // session's tasks. No acknowledgement is ever issued here.
