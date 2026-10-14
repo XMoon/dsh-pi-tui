@@ -7,8 +7,9 @@
  * @module @xmoon76/dsh-pi-tui/tui/commands/skills
  */
 
-import { SettingsList, visibleWidth } from '@xmoon76/pi-tui'
+import { SettingsList } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture, TuiApp } from '../../tui-app.ts'
+import { abbreviateName } from '../pickers/name-label.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { HumanSkillCatalog } from '../../domain/catalog/skill.ts'
@@ -22,48 +23,6 @@ import type {
   SubmitDelivery,
   TuiCommandRunner,
 } from '../../commands.ts'
-
-/** The label the /skill picker paints for one skill name (display only — the
- *  row `id` and its `values`, i.e. the write path, are untouched).
- *
- *  The vendored list clips a label to the label column keeping its HEAD, and
- *  that column is 34 cells at the 44-column floor the design language supports
- *  (`SettingsList` child width 40 minus its fixed 6 cells). Keeping only the
- *  head makes two names that share a prefix paint identically; keeping only the
- *  tail makes two names that share a suffix paint identically. So a long name
- *  keeps BOTH ends around one `…`, which is why this is not a plain
- *  `truncateToWidth`. The selected row carries the complete name in its
- *  description, so the abbreviation only has to make the row distinguishable.
- *  Iteration is by CODE POINT (`Array.from`), so a name with astral characters
- *  (emoji) is measured per character, never per UTF-16 surrogate half. */
-function skillLabel(name: string): string {
-  const limit = 34
-  if (visibleWidth(name) <= limit) return name
-  const chars = Array.from(name)
-  // One cell is the ellipsis; the rest is split between the two ends, the head
-  // taking the extra cell so an odd budget stays deterministic.
-  const cells = limit - 1
-  const headCells = Math.ceil(cells / 2)
-  const tailCells = cells - headCells
-  let head = ''
-  let used = 0
-  for (const char of chars) {
-    const width = visibleWidth(char)
-    if (used + width > headCells) break
-    head += char
-    used += width
-  }
-  let tail = ''
-  used = 0
-  for (let index = chars.length - 1; index >= 0; index -= 1) {
-    const char = chars[index]!
-    const width = visibleWidth(char)
-    if (used + width > tailCells) break
-    tail = char + tail
-    used += width
-  }
-  return `${head}\u2026${tail}`
-}
 
 /** The runner operations the static skill commands consume. */
 type SkillsCommandRunner = Pick<
@@ -147,7 +106,7 @@ export function registerSkillCommand(deps: SkillsCommandDeps): void {
             // Keep the TAIL inside the column instead, and let the SELECTED
             // row carry the full name in its description (below) — the row's
             // identity (id/values) is untouched by either.
-            label: skillLabel(skill.name),
+            label: abbreviateName(skill.name, 34),
             description: skill.description === '' ? skill.name : `${skill.name} — ${skill.description}`,
             currentValue: '',
             values: ['✓'],
